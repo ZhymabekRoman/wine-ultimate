@@ -2542,6 +2542,16 @@ static HRESULT WINAPI element_panel_get_Children( void *iface, void **out )
     return S_OK;
 }
 
+static HRESULT WINAPI element_get_RequestedTheme( void *iface, int *theme )
+{
+    if (theme) *theme = 0;
+    return S_OK;
+}
+static HRESULT WINAPI element_put_RequestedTheme( void *iface, int theme )
+{
+    return S_OK;
+}
+
 static const void *grid_vtbl[256] =
 {
     [0] = element_QueryInterface,
@@ -2575,7 +2585,7 @@ static const void *grid_vtbl[256] =
     [44] = wv2_probe24, [45] = wv2_probe25, [46] = wv2_probe26, [47] = wv2_probe27,
     [48] = wv2_probe28, [49] = wv2_probe29, [50] = wv2_probe30, [51] = wv2_probe31,
     [52] = wv2_probe32, [53] = wv2_probe33, [54] = wv2_probe34, [55] = wv2_probe35,
-    [56] = wv2_probe36, [57] = wv2_probe37, [58] = wv2_probe38, [59] = wv2_probe39,
+    [56] = wv2_probe36, [57] = element_get_RequestedTheme, [58] = element_put_RequestedTheme, [59] = wv2_probe39,
     [60] = wv2_probe40, [61] = element_add_Loaded, [62] = element_remove_Loaded, [63] = wv2_probe43,
     [64] = wv2_probe44, [65] = wv2_probe45, [66] = wv2_probe46, [67] = wv2_probe47,
     [68] = wv2_probe48, [69] = wv2_probe49, [70] = wv2_probe50, [71] = wv2_probe51,
@@ -2906,6 +2916,32 @@ static HRESULT xaml_async_action_create( IAsyncAction **out )
     return S_OK;
 }
 
+enum cwv2_pending_kind
+{
+    CWV2_OP_SETTING_BOOL,
+    CWV2_OP_SETTING_UA,
+    CWV2_OP_ADD_HOST_OBJECT,
+    CWV2_OP_ADD_SCRIPT,
+    CWV2_OP_ADD_WRS_FILTER,
+    CWV2_OP_ADD_EVENT,
+    CWV2_OP_ADD_EVENT2,
+    CWV2_OP_ADD_EVENT11,
+    CWV2_OP_DEVTOOLS,
+};
+
+struct cwv2_pending_op
+{
+    struct cwv2_pending_op *next;
+    enum cwv2_pending_kind kind;
+    int arg_int;
+    BOOL arg_bool;
+    WCHAR *str1;
+    WCHAR *str2;
+    void *obj;
+    const void **avtbl;
+    const GUID *aiid;
+};
+
 struct core_webview2
 {
     IInspectable IInspectable_iface;
@@ -2923,7 +2959,29 @@ struct core_webview2
     void *loader_core13;       /* COM ICoreWebView2_13* */
     void *tracker_source;      /* webview2loader webview object */
     struct xaml_element *owner;
+    struct cwv2_pending_op *pending_head;
+    struct cwv2_pending_op *pending_tail;
 };
+
+static void cwv2_queue_op( struct core_webview2 *impl, enum cwv2_pending_kind kind,
+        int arg_int, BOOL arg_bool, const WCHAR *s1, const WCHAR *s2,
+        void *obj, const void **avtbl, const GUID *aiid )
+{
+    struct cwv2_pending_op *op;
+    if (!impl || !(op = calloc( 1, sizeof(*op) ))) return;
+    op->kind = kind;
+    op->arg_int = arg_int;
+    op->arg_bool = arg_bool;
+    if (s1) op->str1 = wcsdup( s1 );
+    if (s2) op->str2 = wcsdup( s2 );
+    op->obj = obj;
+    if (obj) ((IUnknown *)obj)->lpVtbl->AddRef( (IUnknown *)obj );
+    op->avtbl = avtbl;
+    op->aiid = aiid;
+    if (impl->pending_tail) impl->pending_tail->next = op;
+    else impl->pending_head = op;
+    impl->pending_tail = op;
+}
 
 static const GUID IID_ICoreWebView2_com =
     { 0x76eceacb, 0x0462, 0x4d94, { 0xac, 0x83, 0x42, 0x3a, 0x67, 0x93, 0x77, 0x5e } };
@@ -2998,6 +3056,7 @@ struct cwv2_settings
     LONG ref;
     void *loader_settings;   /* COM ICoreWebView2Settings* */
     void *loader_settings2;  /* COM ICoreWebView2Settings2* */
+    struct core_webview2 *owner;
 };
 
 static inline struct cwv2_settings *impl_from_settings( void *iface )
@@ -3128,6 +3187,8 @@ static HRESULT settings_put_bool( struct cwv2_settings *impl, int com_slot, bool
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             return fn( impl->loader_settings, !!val );
     }
+    if (impl->owner)
+        cwv2_queue_op( impl->owner, CWV2_OP_SETTING_BOOL, com_slot, !!val, NULL, NULL, NULL, NULL, NULL );
     return S_OK;
 }
 
@@ -3182,6 +3243,8 @@ static HRESULT WINAPI cwv2_settings2_put_UserAgent( void *iface, HSTRING ua )
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             return fn( impl->loader_settings2, s );
     }
+    if (impl->owner)
+        cwv2_queue_op( impl->owner, CWV2_OP_SETTING_UA, 0, FALSE, s, NULL, NULL, NULL, NULL );
     return S_OK;
 }
 
@@ -3439,19 +3502,28 @@ static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
     s->ISettings2_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_settings2_vtbl );
     s->ISettings_stub_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_settings_stub_vtbl );
     s->ref = 1;
+    s->owner = impl;
 
     if (impl->loader_core && impl->real_loader && *(void ***)impl->loader_core)
     {
         HRESULT (WINAPI *fn)( void *, void ** ) = (*(void ***)impl->loader_core)[3];
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
         {
-            HRESULT hr = fn( impl->loader_core, &com_settings );
-            if (SUCCEEDED( hr ) && com_settings)
+            __TRY
             {
-                s->loader_settings = com_settings;
-                ((IUnknown *)com_settings)->lpVtbl->QueryInterface( com_settings,
-                        &IID_ICoreWebView2Settings2_com, &s->loader_settings2 );
+                HRESULT hr = fn( impl->loader_core, &com_settings );
+                if (SUCCEEDED( hr ) && com_settings)
+                {
+                    s->loader_settings = com_settings;
+                    ((IUnknown *)com_settings)->lpVtbl->QueryInterface( com_settings,
+                            &IID_ICoreWebView2Settings2_com, &s->loader_settings2 );
+                }
             }
+            __EXCEPT_PAGE_FAULT
+            {
+                ERR( "cwv2_get_Settings: loader_core->get_Settings faulted\n" );
+            }
+            __ENDTRY;
         }
     }
 
@@ -4000,11 +4072,27 @@ static HRESULT WINAPI profile_QueryInterface( void *iface, REFIID iid, void **ob
 {
     struct cwv2_profile *impl = impl_from_profile( iface );
     *obj = NULL;
-    (void)iid;
-    /* Answer every IID with self: the app QIs Profile_2 for AddBrowserExtension. */
+    if (!iid) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
+        IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ))
+        return E_NOINTERFACE;
+    /* Answer WebView2 Profile IIDs + IUnknown/IInspectable/IAgileObject with self. */
     *obj = &impl->IInspectable_iface;
     IInspectable_AddRef( *obj );
     return S_OK;
+}
+static HRESULT WINAPI profile_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI profile_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Microsoft.Web.WebView2.Core.CoreWebView2Profile", 47, name );
 }
 static ULONG WINAPI profile_AddRef( void *iface )
 {
@@ -4051,12 +4139,12 @@ static const void *cwv2_profile_vtbl[256] =
     [0] = profile_QueryInterface,
     [1] = profile_AddRef,
     [2] = profile_Release,
-    [3] = cwv2_GetIids,
-    [4] = cwv2_GetRuntimeClassName,
+    [3] = profile_GetIids,
+    [4] = profile_GetRuntimeClassName,
     [5] = cwv2_GetTrustLevel,
     [6 ... 255] = profile_generic_slot,
-    [6] = profile_ClearBrowsingDataAllAsync,
-    [8] = profile_AddBrowserExtension,   /* WinRT class: 6 BrowserExtensions, 7 DefaultBackgroundColor, 8 AddBrowserExtension */
+    [7] = profile_ClearBrowsingDataAllAsync,
+    [8] = profile_AddBrowserExtension,   /* WinRT class: 6 BrowserExtensions, 7 DefaultBackgroundColor/ClearBrowsingDataAsync, 8 AddBrowserExtension */
 };
 
 static void *cwv2_get_com_iface( struct core_webview2 *impl, void **cached, const GUID *iid )
@@ -4185,6 +4273,7 @@ static HRESULT WINAPI cwv2_AddScriptToExecuteOnDocumentCreatedAsync( void *iface
             return S_OK;
         }
     }
+    cwv2_queue_op( impl, CWV2_OP_ADD_SCRIPT, 0, FALSE, s, NULL, NULL, NULL, NULL );
     return cwv2_asyncop_create( NULL, op );
 }
 
@@ -4286,6 +4375,7 @@ static HRESULT WINAPI cwv2_CallDevToolsProtocolMethodAsync( void *iface, HSTRING
             return S_OK;
         }
     }
+    cwv2_queue_op( impl, CWV2_OP_DEVTOOLS, 0, FALSE, m, p, NULL, NULL, NULL );
     return cwv2_asyncop_create( NULL, op );
 }
 
@@ -4344,6 +4434,7 @@ static HRESULT WINAPI cwv2_AddHostObjectToScript( void *iface, HSTRING name, IIn
             return hr;
         }
     }
+    cwv2_queue_op( impl, CWV2_OP_ADD_HOST_OBJECT, 0, FALSE, s, NULL, raw_object, NULL, NULL );
     return S_OK;
 }
 
@@ -4379,6 +4470,7 @@ static HRESULT WINAPI cwv2_AddWebResourceRequestedFilter( void *iface, HSTRING u
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             return fn( impl->loader_core, s, resource_ctx );
     }
+    cwv2_queue_op( impl, CWV2_OP_ADD_WRS_FILTER, resource_ctx, FALSE, s, NULL, NULL, NULL, NULL );
     return S_OK;
 }
 
@@ -4685,6 +4777,12 @@ static HRESULT cwv2_forward_add_event( struct core_webview2 *impl, void *com_obj
             evbridge_Release( b );
             return hr;
         }
+    }
+    if (!com_obj && winrt_handler)
+    {
+        enum cwv2_pending_kind ekind = (com_slot == 61 || com_slot == 64) ? CWV2_OP_ADD_EVENT2 :
+                                       (com_slot == 100) ? CWV2_OP_ADD_EVENT11 : CWV2_OP_ADD_EVENT;
+        cwv2_queue_op( impl, ekind, com_slot, FALSE, NULL, NULL, winrt_handler, args_vtbl, args_iid );
     }
     return S_OK;
 }
@@ -6112,6 +6210,128 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             if (core && !h->impl->loader_core)
             {
                 h->impl->loader_core = core;
+                if (h->impl->core_webview2)
+                {
+                    struct core_webview2 *cwv = impl_from_cwv2( h->impl->core_webview2 );
+                    void *ls = NULL, *ls2 = NULL;
+                    struct cwv2_pending_op *op, *next;
+                    int replayed = 0;
+
+                    cwv->loader_core = core;
+                    cwv->real_loader = h->impl->real_loader;
+                    for (op = cwv->pending_head; op; op = next)
+                    {
+                        next = op->next;
+                        switch (op->kind)
+                        {
+                        case CWV2_OP_SETTING_BOOL:
+                        case CWV2_OP_SETTING_UA:
+                            if (!ls && *(void ***)core)
+                            {
+                                HRESULT (WINAPI *get_set)( void *, void ** ) = (*(void ***)core)[3];
+                                if (get_set && (ULONG_PTR)get_set < (ULONG_PTR)0x7ffc00000000)
+                                {
+                                    __TRY
+                                    {
+                                        if (SUCCEEDED( get_set( core, &ls ) ) && ls)
+                                            ((IUnknown *)ls)->lpVtbl->QueryInterface( ls, &IID_ICoreWebView2Settings2_com, &ls2 );
+                                    }
+                                    __EXCEPT_PAGE_FAULT
+                                    {
+                                        ERR( "cwv2_replay: core->get_Settings faulted\n" );
+                                        ls = NULL;
+                                    }
+                                    __ENDTRY;
+                                }
+                            }
+                            if (op->kind == CWV2_OP_SETTING_BOOL && ls && *(void ***)ls)
+                            {
+                                HRESULT (WINAPI *fn)( void *, BOOL ) = (*(void ***)ls)[op->arg_int];
+                                if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000) fn( ls, op->arg_bool );
+                            }
+                            else if (op->kind == CWV2_OP_SETTING_UA && ls2 && *(void ***)ls2)
+                            {
+                                HRESULT (WINAPI *fn)( void *, LPCWSTR ) = (*(void ***)ls2)[22];
+                                if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000) fn( ls2, op->str1 ? op->str1 : L"" );
+                            }
+                            break;
+                        case CWV2_OP_ADD_HOST_OBJECT:
+                            if (cwv->real_loader)
+                            {
+                                HRESULT (WINAPI *fn)( void *, LPCWSTR, VARIANT * ) = wv2_slot_fn( core, TRUE, 49, -1 );
+                                if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+                                {
+                                    VARIANT v;
+                                    IDispatch *disp = NULL;
+                                    HRESULT hr_h;
+                                    memset( &v, 0, sizeof(v) );
+                                    if (op->obj && SUCCEEDED( ((IUnknown *)op->obj)->lpVtbl->QueryInterface( op->obj, &IID_IDispatch, (void **)&disp ) ) && disp)
+                                    {
+                                        V_VT( &v ) = VT_DISPATCH;
+                                        V_DISPATCH( &v ) = disp;
+                                    }
+                                    else
+                                    {
+                                        V_VT( &v ) = VT_UNKNOWN;
+                                        V_UNKNOWN( &v ) = (IUnknown *)op->obj;
+                                        if (op->obj) ((IUnknown *)op->obj)->lpVtbl->AddRef( (IUnknown *)op->obj );
+                                    }
+                                    hr_h = fn( core, op->str1 ? op->str1 : L"", &v );
+                                    if (V_UNKNOWN( &v )) ((IUnknown *)V_UNKNOWN( &v ))->lpVtbl->Release( V_UNKNOWN( &v ) );
+                                    ERR( "cwv2_replay AddHostObjectToScript(%s) -> %#lx\n", debugstr_w( op->str1 ), hr_h );
+                                }
+                            }
+                            break;
+                        case CWV2_OP_ADD_SCRIPT:
+                            if (cwv->real_loader)
+                            {
+                                HRESULT (WINAPI *fn)( void *, LPCWSTR, void * ) = wv2_slot_fn( core, TRUE, 27, -1 );
+                                if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+                                    fn( core, op->str1 ? op->str1 : L"", NULL );
+                            }
+                            break;
+                        case CWV2_OP_ADD_WRS_FILTER:
+                            if (cwv->real_loader)
+                            {
+                                HRESULT (WINAPI *fn)( void *, LPCWSTR, int ) = wv2_slot_fn( core, TRUE, 57, -1 );
+                                if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+                                    fn( core, op->str1 ? op->str1 : L"", op->arg_int );
+                            }
+                            break;
+                        case CWV2_OP_ADD_EVENT:
+                        case CWV2_OP_ADD_EVENT2:
+                        case CWV2_OP_ADD_EVENT11:
+                        {
+                            void *com_obj = core;
+                            EventRegistrationToken dummy_tok;
+                            if (op->kind == CWV2_OP_ADD_EVENT2)
+                                com_obj = cwv2_get_com_iface( cwv, &cwv->loader_core2, &IID_ICoreWebView2_2_com );
+                            else if (op->kind == CWV2_OP_ADD_EVENT11)
+                                com_obj = cwv2_get_com_iface( cwv, &cwv->loader_core11, &IID_ICoreWebView2_11_com );
+                            if (com_obj)
+                                cwv2_forward_add_event( cwv, com_obj, op->arg_int, op->obj, &dummy_tok, op->avtbl, op->aiid );
+                            break;
+                        }
+                        case CWV2_OP_DEVTOOLS:
+                            if (cwv->real_loader)
+                            {
+                                HRESULT (WINAPI *fn)( void *, LPCWSTR, LPCWSTR, void * ) = wv2_slot_fn( core, TRUE, 36, -1 );
+                                if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+                                    fn( core, op->str1 ? op->str1 : L"", op->str2 ? op->str2 : L"{}", NULL );
+                            }
+                            break;
+                        }
+                        if (op->obj) ((IUnknown *)op->obj)->lpVtbl->Release( (IUnknown *)op->obj );
+                        free( op->str1 );
+                        free( op->str2 );
+                        free( op );
+                        replayed++;
+                    }
+                    cwv->pending_head = cwv->pending_tail = NULL;
+                    if (ls2) ((IUnknown *)ls2)->lpVtbl->Release( (IUnknown *)ls2 );
+                    if (ls) ((IUnknown *)ls)->lpVtbl->Release( (IUnknown *)ls );
+                    ERR( "wv2_ctrl_handler_Invoke: replayed %d queued core_webview2 ops\n", replayed );
+                }
                 wv2_navigate_once( h->impl );
                 trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
             }
