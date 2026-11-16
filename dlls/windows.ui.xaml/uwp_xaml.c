@@ -13426,6 +13426,7 @@ void uwp_invoke_button( struct uwp_element *btn )
     }
 
     /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
+    if (xaml_get_app_profile()->vm_slot79)
     {
         int code = uwp_resolve_button_calc_code( btn );
         if (code >= 0)
@@ -15250,7 +15251,10 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         wcscmp( buf, L"Windows.UI.Xaml.ResourceDictionary" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.SizeHelper" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Data.PropertyChangedEventArgs" ) != 0 &&
-        wcscmp( buf, L"Windows.UI.Xaml.Data.CollectionViewSource" ) != 0)
+        wcscmp( buf, L"Windows.UI.Xaml.Data.CollectionViewSource" ) != 0 &&
+        wcscmp( buf, L"Windows.UI.Xaml.PropertyPath" ) != 0 &&
+        wcscmp( buf, L"Microsoft.UI.Xaml.PropertyPath" ) != 0 &&
+        wcscmp( buf, L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider" ) != 0)
     {
         AcquireSRWLockExclusive( &g_dyn_factories_lock );
         for (i = 0; i < g_dyn_factory_cnt; i++)

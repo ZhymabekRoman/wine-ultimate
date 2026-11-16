@@ -819,7 +819,7 @@ static ULONG WINAPI meta_provider_Release( void *iface ) { return 1; }
 static HRESULT WINAPI meta_provider_GetIids( void *iface, ULONG *count, IID **iids )
 { if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
 static HRESULT WINAPI meta_provider_GetRuntimeClassName( void *iface, HSTRING *name )
-{ return WindowsCreateString( L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider", 61, name ); }
+{ return WindowsCreateString( L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider", 63, name ); }
 static HRESULT WINAPI meta_provider_GetTrustLevel( void *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
 static HRESULT WINAPI meta_provider_GetXamlType( void *iface, void *type_name, void **out )
