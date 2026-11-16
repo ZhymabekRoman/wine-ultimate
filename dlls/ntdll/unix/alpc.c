@@ -1817,6 +1817,67 @@ NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
     }
 }
 
+#ifdef __x86_64__
+NTSTATUS __attribute__((ms_abi)) fast_leaf_NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
+                                                                   void *buffer, ULONG length,
+                                                                   ULONG_PTR _p5, ULONG_PTR _p6,
+                                                                   ULONG_PTR _p7, ULONG_PTR _p8,
+                                                                   ULONG_PTR _p9, ULONG_PTR _p10,
+                                                                   ULONG *ret_length )
+{
+    struct alpc_shm *shm;
+    struct alpc_shm_port *sp;
+    uint64_t p_gen = 0;
+    int tries;
+
+    if (class != 0) return STATUS_FAST_LEAF_FALLBACK;
+    if (length < sizeof(ALPC_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
+    if (!port_handle) return STATUS_INVALID_HANDLE;
+    if ((ULONG_PTR)buffer < 0x10000 || (ret_length && (ULONG_PTR)ret_length < 0x10000))
+        return STATUS_FAST_LEAF_FALLBACK;
+
+    shm = __atomic_load_n( &alpc_shm, __ATOMIC_ACQUIRE );
+    if (!shm) return STATUS_FAST_LEAF_FALLBACK;
+
+    sp = alpc_shm_lookup_port( shm, port_handle, &p_gen );
+    if (!sp) return STATUS_FAST_LEAF_FALLBACK;
+
+    for (tries = 0; tries < 64; tries++)
+    {
+        uint32_t s1 = __atomic_load_n( &sp->seq, __ATOMIC_ACQUIRE );
+        uint32_t active, flags_val, seq_no;
+        uint64_t gen_val, ctx_val;
+        uint32_t s2;
+
+        if (s1 & 1) continue;
+        active    = sp->active;
+        gen_val   = sp->gen;
+        flags_val = sp->flags;
+        seq_no    = sp->sequence_no;
+        ctx_val   = sp->port_context;
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        s2 = __atomic_load_n( &sp->seq, __ATOMIC_ACQUIRE );
+        if (s1 != s2) continue;
+        if (active && gen_val == p_gen)
+        {
+            ALPC_BASIC_INFORMATION info;
+            void *d = buffer;
+            const void *s = &info;
+            size_t n = sizeof(info);
+
+            info.Flags       = flags_val;
+            info.SequenceNo  = seq_no;
+            info.PortContext = (void *)(ULONG_PTR)ctx_val;
+            __asm__ volatile( "rep movsb" : "+D"(d), "+S"(s), "+c"(n) : : "memory" );
+            if (ret_length) *ret_length = sizeof(info);
+            return STATUS_SUCCESS;
+        }
+        break;
+    }
+    return STATUS_FAST_LEAF_FALLBACK;
+}
+#endif
+
 
 /******************************************************************************
  *           NtAlpcSetInformation  (NTDLL.@)

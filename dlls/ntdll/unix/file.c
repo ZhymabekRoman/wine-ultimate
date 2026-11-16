@@ -50,6 +50,9 @@
 #ifdef HAVE_SYS_SYSCALL_H
 # include <sys/syscall.h>
 #endif
+#ifdef __linux__
+# include <dlfcn.h>
+#endif
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/ioctl.h>
@@ -4422,11 +4425,19 @@ void wine_path_cache_dump_stats(void)
 
 /* ELF destructors of ntdll.so do not run on every Wine exit path; atexit handlers do. */
 static uint64_t path_cache_gfi_calls;
+#if defined(__x86_64__) && defined(__linux__)
+typedef int (*vdso_clock_gettime_t)( clockid_t, struct timespec * );
+static vdso_clock_gettime_t p_vdso_clock_gettime;
+#endif
 
 
 __attribute__((constructor)) static void path_cache_stats_init(void)
 {
     static BOOL done;
+#if defined(__x86_64__) && defined(__linux__)
+    if (!p_vdso_clock_gettime)
+        p_vdso_clock_gettime = dlsym( RTLD_DEFAULT, "clock_gettime" );
+#endif
     if (!done && getenv( "WINE_PATH_CACHE_STATS" )) { done = TRUE; atexit( path_cache_dump_stats ); }
 }
 
@@ -6400,6 +6411,151 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
     free( base_name.Buffer );
     return status;
 }
+
+#ifdef __x86_64__
+static inline __attribute__((always_inline)) uint64_t fast_leaf_timestamp_ns(void)
+{
+    struct timespec ts;
+#ifdef __linux__
+    vdso_clock_gettime_t fn = __atomic_load_n( &p_vdso_clock_gettime, __ATOMIC_RELAXED );
+    if (fn)
+    {
+        int ret;
+        __asm__ volatile( "call *%3"
+                          : "=a"(ret)
+                          : "D"(CLOCK_MONOTONIC_COARSE), "S"(&ts), "r"(fn)
+                          : "rcx", "rdx", "r8", "r9", "r10", "r11", "memory" );
+        if (ret == 0)
+            return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    }
+#endif
+    return 0;
+}
+
+static inline __attribute__((always_inline)) BOOL fast_leaf_path_cache_lookup_stat( const OBJECT_ATTRIBUTES *attr, struct stat *st, ULONG *attributes )
+{
+    const UNICODE_STRING *obj_name;
+    const WCHAR *name;
+    unsigned int lenW, hash, probe, i;
+    uint32_t cur_gen, cur_stat_gen;
+
+    if (__atomic_load_n( &vfs_cache_disabled, __ATOMIC_RELAXED ) != 0) return FALSE;
+    if ((ULONG_PTR)attr < 0x10000) return FALSE;
+    if (!(obj_name = attr->ObjectName) || (ULONG_PTR)obj_name < 0x10000) return FALSE;
+    if (!(name = obj_name->Buffer) || (ULONG_PTR)name < 0x10000) return FALSE;
+
+    lenW = obj_name->Length / sizeof(WCHAR);
+    if (!lenW || lenW >= MAX_PATH) return FALSE;
+
+    /* Bail on non-ASCII (avoids RtlDowncaseUnicodeChar) or ':' in last component (streams) */
+    hash = 0x811c9dc5;
+    for (i = 0; i < lenW; i++)
+    {
+        WCHAR c = name[i];
+        if (c >= 0x80) return FALSE;
+        if (c == ':' && i >= 6) return FALSE;
+        if (c - 'A' < 26) c += 32;
+        hash ^= (uint32_t)(c & 0xff);
+        hash *= 0x01000193;
+        hash ^= (uint32_t)(c >> 8);
+        hash *= 0x01000193;
+    }
+    hash ^= (uint32_t)lenW;
+    hash *= 0x01000193;
+    hash ^= (uint32_t)(uintptr_t)attr->RootDirectory;
+    hash *= 0x01000193;
+    hash ^= 0x5a5a5a5a;
+    hash *= 0x01000193;
+
+    cur_gen = __atomic_load_n( &path_cache_generation, __ATOMIC_ACQUIRE );
+    cur_stat_gen = __atomic_load_n( &path_cache_stat_generation, __ATOMIC_ACQUIRE );
+
+    for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
+    {
+        unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
+        struct path_cache_entry *entry = &path_cache[slot];
+        uint32_t seq1, seq2;
+        uint64_t now;
+
+        seq1 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        if (!seq1 || (seq1 & 1)) continue;
+
+        if (entry->hash != hash || entry->name_len != lenW ||
+            entry->root_dir != attr->RootDirectory || !entry->open_reparse)
+            continue;
+
+        if (__atomic_load_n( &entry->generation, __ATOMIC_RELAXED ) != cur_gen) continue;
+        if (entry->is_negative || entry->status != STATUS_SUCCESS) continue;
+        if (__atomic_load_n( &entry->stat_gen, __ATOMIC_ACQUIRE ) != cur_stat_gen) continue;
+
+        for (i = 0; i < lenW; i++)
+        {
+            WCHAR a = entry->nt_name[i];
+            WCHAR b = name[i];
+            if (a >= 0x80) break;
+            if (a - 'A' < 26) a += 32;
+            if (b - 'A' < 26) b += 32;
+            if (a != b) break;
+        }
+        if (i != lenW) continue;
+
+        *st = entry->st;
+        *attributes = entry->attributes;
+        if (__atomic_load_n( &entry->stat_gen, __ATOMIC_ACQUIRE ) != cur_stat_gen) continue;
+
+        seq2 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        if (seq1 != seq2) continue;
+
+        now = fast_leaf_timestamp_ns() / 100;
+        if (!now || (now - entry->verified_ts) >= PATH_CACHE_LEASE_TICKS) continue;
+
+        __atomic_fetch_add( &path_cache_attr_direct_hits, 1, __ATOMIC_RELAXED );
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
+                                                                     FILE_NETWORK_OPEN_INFORMATION *info )
+{
+    ULONG attributes;
+    struct stat st;
+
+    if ((ULONG_PTR)info < 0x10000) return STATUS_FAST_LEAF_FALLBACK;
+    if (!fast_leaf_path_cache_lookup_stat( attr, &st, &attributes ))
+        return STATUS_FAST_LEAF_FALLBACK;
+    get_file_times( &st, &info->LastWriteTime, &info->ChangeTime,
+                    &info->LastAccessTime, &info->CreationTime );
+    info->FileAttributes = attributes;
+    if (S_ISDIR(st.st_mode))
+    {
+        info->AllocationSize.QuadPart = 0;
+        info->EndOfFile.QuadPart      = 0;
+    }
+    else
+    {
+        info->AllocationSize.QuadPart = (ULONGLONG)st.st_blocks * 512;
+        info->EndOfFile.QuadPart      = st.st_size;
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr,
+                                                                 FILE_BASIC_INFORMATION *info )
+{
+    ULONG attributes;
+    struct stat st;
+
+    if ((ULONG_PTR)info < 0x10000) return STATUS_FAST_LEAF_FALLBACK;
+    if (!fast_leaf_path_cache_lookup_stat( attr, &st, &attributes ))
+        return STATUS_FAST_LEAF_FALLBACK;
+    get_file_times( &st, &info->LastWriteTime, &info->ChangeTime,
+                    &info->LastAccessTime, &info->CreationTime );
+    info->FileAttributes = attributes;
+    return STATUS_SUCCESS;
+}
+#endif
 
 
 /******************************************************************************

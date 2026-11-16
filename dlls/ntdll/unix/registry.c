@@ -860,6 +860,172 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
     return ret;
 }
 
+#ifdef __x86_64__
+static inline void reg_fast_memcpy( void *dst, const void *src, size_t n )
+{
+    void *d = dst;
+    const void *s = src;
+    __asm__ volatile( "rep movsb" : "+D"(d), "+S"(s), "+c"(n) : : "memory" );
+}
+
+NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
+                                                            KEY_VALUE_INFORMATION_CLASS info_class,
+                                                            void *info, ULONG_PTR _p5, ULONG_PTR _p6,
+                                                            ULONG_PTR _p7, ULONG_PTR _p8,
+                                                            ULONG_PTR _p9, ULONG_PTR _p10,
+                                                            DWORD length, DWORD *result_len )
+{
+    const struct reg_shm *shm;
+    uint32_t can_query = 0;
+    uint64_t key_id, epoch, h;
+    uint32_t bucket, i;
+    UCHAR *data_ptr;
+    unsigned int fixed_size, min_size;
+
+    if ((ULONG_PTR)name < 0x10000 || (ULONG_PTR)result_len < 0x10000)
+        return STATUS_FAST_LEAF_FALLBACK;
+    if (length && (ULONG_PTR)info < 0x10000)
+        return STATUS_FAST_LEAF_FALLBACK;
+    if (name->Length > MAX_VALUE_LENGTH) return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (name->Length > REG_SHM_VAL_MAX_NAME) return STATUS_FAST_LEAF_FALLBACK;
+    if (name->Length && (ULONG_PTR)name->Buffer < 0x10000) return STATUS_FAST_LEAF_FALLBACK;
+
+    switch (info_class)
+    {
+    case KeyValueBasicInformation:
+        min_size = FIELD_OFFSET(KEY_VALUE_BASIC_INFORMATION, Name);
+        fixed_size = min_size + name->Length;
+        data_ptr = NULL;
+        break;
+    case KeyValueFullInformation:
+        min_size = FIELD_OFFSET(KEY_VALUE_FULL_INFORMATION, Name);
+        fixed_size = min_size + name->Length;
+        data_ptr = (UCHAR *)((KEY_VALUE_FULL_INFORMATION *)info)->Name + name->Length;
+        break;
+    case KeyValuePartialInformation:
+        min_size = fixed_size = FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data);
+        data_ptr = ((KEY_VALUE_PARTIAL_INFORMATION *)info)->Data;
+        break;
+    case KeyValuePartialInformationAlign64:
+        min_size = fixed_size = FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION_ALIGN64, Data);
+        data_ptr = ((KEY_VALUE_PARTIAL_INFORMATION_ALIGN64 *)info)->Data;
+        break;
+    default:
+        return STATUS_FAST_LEAF_FALLBACK;
+    }
+
+    shm = __atomic_load_n( &reg_shm, __ATOMIC_ACQUIRE );
+    if (!shm) return STATUS_FAST_LEAF_FALLBACK;
+
+    key_id = reg_shm_lookup_handle( shm, handle, &can_query );
+    if (!key_id || !can_query) return STATUS_FAST_LEAF_FALLBACK;
+
+    epoch = __atomic_load_n( &shm->val_epoch, __ATOMIC_ACQUIRE );
+    h = reg_shm_hash_name_icase( key_id, name->Buffer, name->Length );
+    bucket = (uint32_t)(h & (REG_SHM_VAL_BUCKETS - 1)) * REG_SHM_VAL_WAYS;
+
+    for (i = 0; i < REG_SHM_VAL_WAYS; i++)
+    {
+        const struct reg_shm_val_slot *slot = &shm->val_table[bucket + i];
+        int tries;
+        for (tries = 0; tries < 4; tries++)
+        {
+            uint32_t s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+            uint32_t sstatus, stype, snamelen, sdatalen, s2;
+            uint64_t skey_id, sepoch;
+            WCHAR sname[REG_SHM_VAL_MAX_NAME / sizeof(WCHAR)];
+            BYTE sdata[REG_SHM_VAL_MAX_DATA];
+
+            if (s1 & 1) continue;
+            sstatus = slot->status;
+            skey_id = slot->key_id;
+            sepoch = slot->epoch;
+            stype = slot->type;
+            snamelen = slot->name_len;
+            sdatalen = slot->data_len;
+            if (snamelen > REG_SHM_VAL_MAX_NAME) break;
+            if (snamelen) reg_fast_memcpy( sname, slot->name, snamelen );
+            if (sstatus == STATUS_SUCCESS && sdatalen && info_class != KeyValueBasicInformation && length > fixed_size)
+                reg_fast_memcpy( sdata, slot->data, min( sdatalen, REG_SHM_VAL_MAX_DATA ) );
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
+            s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
+            if (s1 != s2) continue;
+
+            if (sepoch == epoch && skey_id == key_id && snamelen == name->Length &&
+                (!snamelen || reg_shm_eq_icase( sname, name->Buffer, snamelen )))
+            {
+                if (sstatus == STATUS_OBJECT_NAME_NOT_FOUND)
+                {
+                    if (info_class == KeyValueBasicInformation && min_size < length)
+                        reg_fast_memcpy( ((KEY_VALUE_BASIC_INFORMATION *)info)->Name, name->Buffer, min( length - min_size, name->Length ) );
+                    else if (info_class == KeyValueFullInformation && min_size < length)
+                        reg_fast_memcpy( ((KEY_VALUE_FULL_INFORMATION *)info)->Name, name->Buffer, min( length - min_size, name->Length ) );
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+                if (sstatus == STATUS_SUCCESS &&
+                    (info_class == KeyValueBasicInformation || length <= fixed_size || sdatalen <= REG_SHM_VAL_MAX_DATA))
+                {
+                    switch (info_class)
+                    {
+                    case KeyValueBasicInformation:
+                    {
+                        KEY_VALUE_BASIC_INFORMATION keyinfo;
+                        keyinfo.TitleIndex = 0;
+                        keyinfo.Type       = stype;
+                        keyinfo.NameLength = name->Length;
+                        reg_fast_memcpy( info, &keyinfo, min( length, min_size ) );
+                        if (min_size < length)
+                            reg_fast_memcpy( ((KEY_VALUE_BASIC_INFORMATION *)info)->Name, name->Buffer, min( length - min_size, name->Length ) );
+                        break;
+                    }
+                    case KeyValueFullInformation:
+                    {
+                        KEY_VALUE_FULL_INFORMATION keyinfo;
+                        keyinfo.TitleIndex = 0;
+                        keyinfo.Type       = stype;
+                        keyinfo.DataOffset = min_size + name->Length;
+                        keyinfo.DataLength = sdatalen;
+                        keyinfo.NameLength = name->Length;
+                        reg_fast_memcpy( info, &keyinfo, min( length, min_size ) );
+                        if (min_size < length)
+                            reg_fast_memcpy( ((KEY_VALUE_FULL_INFORMATION *)info)->Name, name->Buffer, min( length - min_size, name->Length ) );
+                        break;
+                    }
+                    case KeyValuePartialInformation:
+                    {
+                        KEY_VALUE_PARTIAL_INFORMATION keyinfo;
+                        keyinfo.TitleIndex = 0;
+                        keyinfo.Type       = stype;
+                        keyinfo.DataLength = sdatalen;
+                        reg_fast_memcpy( info, &keyinfo, min( length, min_size ) );
+                        break;
+                    }
+                    case KeyValuePartialInformationAlign64:
+                    {
+                        KEY_VALUE_PARTIAL_INFORMATION_ALIGN64 keyinfo;
+                        keyinfo.Type       = stype;
+                        keyinfo.DataLength = sdatalen;
+                        reg_fast_memcpy( info, &keyinfo, min( length, min_size ) );
+                        break;
+                    }
+                    default:
+                        break;
+                    }
+                    *result_len = fixed_size + (info_class == KeyValueBasicInformation ? 0 : sdatalen);
+                    if (length < min_size) return STATUS_BUFFER_TOO_SMALL;
+                    if (length > fixed_size && data_ptr && sdatalen)
+                        reg_fast_memcpy( data_ptr, sdata, min( length - fixed_size, sdatalen ) );
+                    if (length < *result_len) return STATUS_BUFFER_OVERFLOW;
+                    return STATUS_SUCCESS;
+                }
+            }
+            break;
+        }
+    }
+    return STATUS_FAST_LEAF_FALLBACK;
+}
+#endif
+
 
 /******************************************************************************
  *              NtQueryMultipleValueKey  (NTDLL.@)

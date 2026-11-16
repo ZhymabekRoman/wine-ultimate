@@ -355,6 +355,26 @@ extern SYSTEM_SERVICE_TABLE KeServiceDescriptorTable[4];
 extern void __wine_syscall_dispatcher(void);
 extern void __wine_syscall_dispatcher_return(void);
 extern void __wine_unix_call_dispatcher(void);
+#ifdef __x86_64__
+#define STATUS_FAST_LEAF_FALLBACK 0x7fffffff
+#define FAST_LEAF_TABLE_SIZE 512
+extern NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
+                                                                   KEY_VALUE_INFORMATION_CLASS info_class,
+                                                                   void *info, ULONG_PTR _p5, ULONG_PTR _p6,
+                                                                   ULONG_PTR _p7, ULONG_PTR _p8,
+                                                                   ULONG_PTR _p9, ULONG_PTR _p10,
+                                                                   DWORD length, DWORD *result_len );
+extern NTSTATUS __attribute__((ms_abi)) fast_leaf_NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
+                                                                          void *buffer, ULONG length,
+                                                                          ULONG_PTR _p5, ULONG_PTR _p6,
+                                                                          ULONG_PTR _p7, ULONG_PTR _p8,
+                                                                          ULONG_PTR _p9, ULONG_PTR _p10,
+                                                                          ULONG *ret_length );
+extern NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr,
+                                                                         FILE_BASIC_INFORMATION *info );
+extern NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
+                                                                             FILE_NETWORK_OPEN_INFORMATION *info );
+#endif
 extern NTSTATUS signal_set_full_context( CONTEXT *context );
 extern NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size );
 extern NTSTATUS set_thread_wow64_context( HANDLE handle, const void *ctx, ULONG size );

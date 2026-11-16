@@ -552,6 +552,49 @@ extern void __wine_syscall_dispatcher_instrumentation(void);
 static void *instrumentation_callback;
 static pthread_mutex_t instrumentation_callback_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+C_ASSERT( FAST_LEAF_TABLE_SIZE == 512 );
+C_ASSERT( STATUS_FAST_LEAF_FALLBACK == 0x7fffffff );
+void *fast_leaf_ntdll[FAST_LEAF_TABLE_SIZE];
+
+static int (*p_sched_yield)(void);
+
+static NTSTATUS __attribute__((ms_abi)) fast_leaf_NtYieldExecution(void)
+{
+    int ret;
+    __asm__ volatile( "call *%1"
+                      : "=a"(ret)
+                      : "r"(p_sched_yield)
+                      : "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory" );
+    return STATUS_SUCCESS;
+}
+
+static void init_fast_leaf_table(void)
+{
+    const ULONG_PTR *funcs = KeServiceDescriptorTable[0].ServiceTable;
+    ULONG_PTR limit = KeServiceDescriptorTable[0].ServiceLimit;
+    ULONG_PTR i;
+
+    if (getenv( "WINE_DISABLE_FAST_LEAF" )) return;
+    if (!funcs) return;
+#ifdef HAVE_SCHED_YIELD
+    p_sched_yield = dlsym( RTLD_DEFAULT, "sched_yield" );
+#endif
+    if (limit > FAST_LEAF_TABLE_SIZE) limit = FAST_LEAF_TABLE_SIZE;
+    for (i = 0; i < limit; i++)
+    {
+        if (funcs[i] == (ULONG_PTR)NtYieldExecution && p_sched_yield)
+            fast_leaf_ntdll[i] = fast_leaf_NtYieldExecution;
+        else if (funcs[i] == (ULONG_PTR)NtQueryValueKey)
+            fast_leaf_ntdll[i] = fast_leaf_NtQueryValueKey;
+        else if (funcs[i] == (ULONG_PTR)NtAlpcQueryInformation)
+            fast_leaf_ntdll[i] = fast_leaf_NtAlpcQueryInformation;
+        else if (funcs[i] == (ULONG_PTR)NtQueryAttributesFile)
+            fast_leaf_ntdll[i] = fast_leaf_NtQueryAttributesFile;
+        else if (funcs[i] == (ULONG_PTR)NtQueryFullAttributesFile)
+            fast_leaf_ntdll[i] = fast_leaf_NtQueryFullAttributesFile;
+    }
+}
+
 void set_process_instrumentation_callback( void *callback )
 {
     void *ptr = (char *)user_shared_data + page_size;
@@ -3468,6 +3511,7 @@ void signal_init_process( TEB *teb )
     ptr = (char *)user_shared_data + page_size;
     anon_mmap_fixed( ptr, page_size, PROT_READ | PROT_WRITE, 0 );
     *(void **)ptr = __wine_syscall_dispatcher;
+    init_fast_leaf_table();
 
     __asm__( "movw %%cs,%0" : "=m" (cs64_sel) );
     __asm__( "movw %%ss,%0" : "=m" (ds64_sel) );
@@ -3664,6 +3708,36 @@ __ASM_GLOBAL_FUNC( signal_start_thread,
 __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_gs_load") ":\n\t"
                    "movq %gs:0x378,%rcx\n\t"       /* thread_data->syscall_frame */
+                   "testl $1,%gs:0x380\n\t"        /* thread_data->syscall_trace */
+                   "jnz " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_slow") "\n\t"
+                   "cmpl $512,%eax\n\t"
+                   "jae " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_slow") "\n\t"
+                   "movl %eax,%eax\n\t"
+                   "leaq " __ASM_NAME("fast_leaf_ntdll") "(%rip),%r11\n\t"
+                   "movq (%r11,%rax,8),%r11\n\t"
+                   "testq %r11,%r11\n\t"
+                   "jz " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_slow") "\n\t"
+                   "movl %eax,0xb0(%rcx)\n\t"      /* frame->syscall_id */
+                   "movq %r10,0x40(%rcx)\n\t"      /* frame->r10 (1st arg) */
+                   "movq %rdx,0x18(%rcx)\n\t"      /* frame->rdx (2nd arg) */
+                   "movq %r8,0x30(%rcx)\n\t"       /* frame->r8  (3rd arg) */
+                   "movq %r9,0x38(%rcx)\n\t"       /* frame->r9  (4th arg) */
+                   "movq %r10,%rcx\n\t"            /* Win64 1st arg */
+                   "subq $0x20,%rsp\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset 0x20\n\t")
+                   "callq *%r11\n\t"
+                   "addq $0x20,%rsp\n\t"
+                   __ASM_CFI(".cfi_adjust_cfa_offset -0x20\n\t")
+                   "cmpl $0x7fffffff,%eax\n\t"
+                   "je 1f\n\t"
+                   "ret\n"
+                   "1:\tmovq %gs:0x378,%rcx\n\t"
+                   "movl 0xb0(%rcx),%eax\n\t"
+                   "movq 0x40(%rcx),%r10\n\t"
+                   "movq 0x18(%rcx),%rdx\n\t"
+                   "movq 0x30(%rcx),%r8\n\t"
+                   "movq 0x38(%rcx),%r9\n"
+                   __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_slow") ":\n\t"
                    "popq 0x70(%rcx)\n\t"           /* frame->rip */
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI_REG_IS_AT2(rip, rcx, 0xf0,0x00)
