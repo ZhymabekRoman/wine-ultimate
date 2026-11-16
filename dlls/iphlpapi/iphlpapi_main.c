@@ -57,6 +57,97 @@ static const NPI_MODULEID *ip_module_id( USHORT family )
     return NULL;
 }
 
+#define IPHLPAPI_CACHE_TTL_MS 2000
+#define AA_CACHE_SLOTS        8
+#define BEST_IF_CACHE_SLOTS   32
+
+static volatile LONG iphlpapi_cache_gen = 0;
+
+static void iphlpapi_cache_invalidate( void )
+{
+    InterlockedIncrement( &iphlpapi_cache_gen );
+}
+
+static inline void *reloc_ptr( void *p, ULONG_PTR delta )
+{
+    return p ? (void *)((ULONG_PTR)p + delta) : NULL;
+}
+
+struct aa_cache_entry
+{
+    BOOL valid;
+    ULONG family;
+    ULONG flags;
+    ULONG needed;
+    ULONG_PTR base_addr;
+    BYTE *blob;
+    ULONGLONG expire_tick;
+    LONG gen;
+};
+
+static SRWLOCK aa_cache_lock = SRWLOCK_INIT;
+static struct aa_cache_entry aa_cache[AA_CACHE_SLOTS];
+
+struct ai_cache_entry
+{
+    BOOL valid;
+    ULONG needed;
+    ULONG_PTR base_addr;
+    BYTE *blob;
+    ULONGLONG expire_tick;
+    LONG gen;
+};
+
+static SRWLOCK ai_cache_lock = SRWLOCK_INIT;
+static struct ai_cache_entry ai_cache;
+
+struct best_if_cache_entry
+{
+    BOOL valid;
+    ADDRESS_FAMILY family;
+    ULONG scope_id;
+    BYTE addr[16];
+    DWORD best_index;
+    ULONGLONG expire_tick;
+    LONG gen;
+};
+
+static SRWLOCK best_if_cache_lock = SRWLOCK_INIT;
+static struct best_if_cache_entry best_if_cache[BEST_IF_CACHE_SLOTS];
+
+struct fwd_cache_entry
+{
+    BOOL valid;
+    ULONG needed;
+    BYTE *blob;
+    ULONGLONG expire_tick;
+    LONG gen;
+};
+
+static SRWLOCK fwd_cache_lock = SRWLOCK_INIT;
+static struct fwd_cache_entry fwd_cache[2];
+
+BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, void *reserved )
+{
+    ULONG i;
+
+    switch (reason)
+    {
+    case DLL_PROCESS_ATTACH:
+        DisableThreadLibraryCalls( hinst );
+        break;
+    case DLL_PROCESS_DETACH:
+        if (reserved) break;
+        for (i = 0; i < AA_CACHE_SLOTS; i++)
+            HeapFree( GetProcessHeap(), 0, aa_cache[i].blob );
+        HeapFree( GetProcessHeap(), 0, ai_cache.blob );
+        for (i = 0; i < 2; i++)
+            HeapFree( GetProcessHeap(), 0, fwd_cache[i].blob );
+        break;
+    }
+    return TRUE;
+}
+
 DWORD WINAPI ConvertGuidToStringA( const GUID *guid, char *str, DWORD len )
 {
     if (len < CHARS_IN_GUID) return ERROR_INSUFFICIENT_BUFFER;
@@ -114,6 +205,7 @@ static void if_counted_string_copy( WCHAR *dst, unsigned int len, IF_COUNTED_STR
 DWORD WINAPI AddIPAddress(IPAddr Address, IPMask IpMask, DWORD IfIndex, PULONG NTEContext, PULONG NTEInstance)
 {
   FIXME(":stub\n");
+  iphlpapi_cache_invalidate();
   return ERROR_NOT_SUPPORTED;
 }
 
@@ -136,6 +228,7 @@ BOOL WINAPI CancelIPChangeNotify(LPOVERLAPPED overlapped)
 
     TRACE("overlapped %p.\n", overlapped);
 
+    iphlpapi_cache_invalidate();
     if ((err = NsiCancelChangeNotification( overlapped ))) SetLastError( err );
     return !err;
 }
@@ -585,6 +678,20 @@ static void ip_addr_string_init( IP_ADDR_STRING *s, const IN_ADDR *addr, const I
     s->Context = ctxt;
 }
 
+static void adapters_info_relocate( IP_ADAPTER_INFO *info, ULONG_PTR delta )
+{
+    IP_ADAPTER_INFO *cur;
+    IP_ADDR_STRING *addr;
+
+    if (!delta) return;
+    for (cur = info; cur; cur = cur->Next)
+    {
+        cur->Next = reloc_ptr( cur->Next, delta );
+        for (addr = &cur->IpAddressList; addr->Next; addr = addr->Next)
+            addr->Next = reloc_ptr( addr->Next, delta );
+    }
+}
+
 /******************************************************************
  *    GetAdaptersInfo (IPHLPAPI.@)
  *
@@ -606,10 +713,36 @@ DWORD WINAPI GetAdaptersInfo( IP_ADAPTER_INFO *info, ULONG *size )
     struct nsi_ipv4_forward_key *fwd_keys = NULL;
     SOCKADDR_INET *wins_servers = NULL;
     IP_ADDR_STRING *extra_ip_addrs, *cursor;
+    IP_ADAPTER_INFO *dst;
+    BYTE *blob = NULL;
     IN_ADDR gw, mask;
+    ULONGLONG now;
+    LONG gen;
 
     TRACE( "info %p, size %p\n", info, size );
     if (!size) return ERROR_INVALID_PARAMETER;
+
+    now = GetTickCount64();
+    gen = InterlockedCompareExchange( &iphlpapi_cache_gen, 0, 0 );
+    AcquireSRWLockShared( &ai_cache_lock );
+    if (ai_cache.valid && ai_cache.gen == gen && now < ai_cache.expire_tick)
+    {
+        needed = ai_cache.needed;
+        if (!info || *size < needed)
+        {
+            *size = needed;
+            ReleaseSRWLockShared( &ai_cache_lock );
+            return ERROR_BUFFER_OVERFLOW;
+        }
+        memcpy( info, ai_cache.blob, needed );
+        {
+            ULONG_PTR delta = (ULONG_PTR)info - ai_cache.base_addr;
+            ReleaseSRWLockShared( &ai_cache_lock );
+            adapters_info_relocate( info, delta );
+        }
+        return ERROR_SUCCESS;
+    }
+    ReleaseSRWLockShared( &ai_cache_lock );
 
     err = NsiAllocateAndGetTable( 1, &NPI_MS_NDIS_MODULEID, NSI_NDIS_IFINFO_TABLE,
                                   (void **)&if_keys, sizeof(*if_keys), (void **)&if_rw, sizeof(*if_rw),
@@ -637,45 +770,47 @@ DWORD WINAPI GetAdaptersInfo( IP_ADAPTER_INFO *info, ULONG *size )
        unicast addresses require a separate IP_ADDR_STRING. */
 
     needed = if_num * sizeof(*info) + uni_count * sizeof(IP_ADDR_STRING);
-    if (!info || *size < needed)
-    {
-        *size = needed;
-        err = ERROR_BUFFER_OVERFLOW;
-        goto err;
-    }
 
     err = NsiAllocateAndGetTable( 1, &NPI_MS_IPV4_MODULEID, NSI_IP_FORWARD_TABLE,
                                   (void **)&fwd_keys, sizeof(*fwd_keys), NULL, 0,
                                   NULL, 0, NULL, 0, &fwd_count, 0 );
     if (err) goto err;
 
+    blob = HeapAlloc( GetProcessHeap(), 0, needed );
+    if (!blob)
+    {
+        err = ERROR_NOT_ENOUGH_MEMORY;
+        goto err;
+    }
+
     wins_server_count = get_wins_servers( &wins_servers );
 
-    extra_ip_addrs = (IP_ADDR_STRING *)(info + if_num);
+    dst = (IP_ADAPTER_INFO *)blob;
+    extra_ip_addrs = (IP_ADDR_STRING *)(dst + if_num);
     for (i = 0; i < if_count; i++)
     {
         if (if_stat[i].type == IF_TYPE_SOFTWARE_LOOPBACK) continue;
 
-        info->Next = info + 1;
-        info->ComboIndex = 0;
-        ConvertGuidToStringA( &if_stat[i].if_guid, info->AdapterName, sizeof(info->AdapterName) );
+        dst->Next = dst + 1;
+        dst->ComboIndex = 0;
+        ConvertGuidToStringA( &if_stat[i].if_guid, dst->AdapterName, sizeof(dst->AdapterName) );
         len = WideCharToMultiByte( CP_ACP, 0, if_stat[i].descr.String, if_stat[i].descr.Length / sizeof(WCHAR),
-                                   info->Description, sizeof(info->Description) - 1, NULL, NULL );
-        info->Description[len] = '\0';
-        info->AddressLength = if_rw[i].phys_addr.Length;
-        if (info->AddressLength > sizeof(info->Address)) info->AddressLength = 0;
-        memcpy( info->Address, if_rw[i].phys_addr.Address, info->AddressLength );
-        memset( info->Address + info->AddressLength, 0, sizeof(info->Address) - info->AddressLength );
-        info->Index = if_stat[i].if_index;
-        info->Type = if_stat[i].type;
-        info->DhcpEnabled = TRUE; /* FIXME */
-        info->CurrentIpAddress = NULL;
+                                   dst->Description, sizeof(dst->Description) - 1, NULL, NULL );
+        dst->Description[len] = '\0';
+        dst->AddressLength = if_rw[i].phys_addr.Length;
+        if (dst->AddressLength > sizeof(dst->Address)) dst->AddressLength = 0;
+        memcpy( dst->Address, if_rw[i].phys_addr.Address, dst->AddressLength );
+        memset( dst->Address + dst->AddressLength, 0, sizeof(dst->Address) - dst->AddressLength );
+        dst->Index = if_stat[i].if_index;
+        dst->Type = if_stat[i].type;
+        dst->DhcpEnabled = TRUE; /* FIXME */
+        dst->CurrentIpAddress = NULL;
 
         cursor = NULL;
         for (uni = 0; uni < uni_count; uni++)
         {
             if (uni_keys[uni].luid.Value != if_keys[i].Value) continue;
-            if (!cursor) cursor = &info->IpAddressList;
+            if (!cursor) cursor = &dst->IpAddressList;
             else
             {
                 cursor->Next = extra_ip_addrs++;
@@ -687,7 +822,7 @@ DWORD WINAPI GetAdaptersInfo( IP_ADAPTER_INFO *info, ULONG *size )
         if (!cursor)
         {
             mask.s_addr = INADDR_ANY;
-            ip_addr_string_init( &info->IpAddressList, &mask, &mask, 0 );
+            ip_addr_string_init( &dst->IpAddressList, &mask, &mask, 0 );
         }
 
         gw.s_addr = INADDR_ANY;
@@ -702,27 +837,50 @@ DWORD WINAPI GetAdaptersInfo( IP_ADAPTER_INFO *info, ULONG *size )
                 break;
             }
         }
-        ip_addr_string_init( &info->GatewayList, &gw, &mask, 0 );
+        ip_addr_string_init( &dst->GatewayList, &gw, &mask, 0 );
 
-        ip_addr_string_init( &info->DhcpServer, NULL, NULL, 0 );
+        ip_addr_string_init( &dst->DhcpServer, NULL, NULL, 0 );
 
-        info->HaveWins = !!wins_server_count;
-        ip_addr_string_init( &info->PrimaryWinsServer, NULL, NULL, 0 );
-        ip_addr_string_init( &info->SecondaryWinsServer, NULL, NULL, 0 );
-        if (info->HaveWins)
+        dst->HaveWins = !!wins_server_count;
+        ip_addr_string_init( &dst->PrimaryWinsServer, NULL, NULL, 0 );
+        ip_addr_string_init( &dst->SecondaryWinsServer, NULL, NULL, 0 );
+        if (dst->HaveWins)
         {
             mask.s_addr = INADDR_NONE;
-            ip_addr_string_init( &info->PrimaryWinsServer, &wins_servers[0].Ipv4.sin_addr, &mask, 0 );
+            ip_addr_string_init( &dst->PrimaryWinsServer, &wins_servers[0].Ipv4.sin_addr, &mask, 0 );
             if (wins_server_count > 1)
-                ip_addr_string_init( &info->SecondaryWinsServer, &wins_servers[1].Ipv4.sin_addr, &mask, 0 );
+                ip_addr_string_init( &dst->SecondaryWinsServer, &wins_servers[1].Ipv4.sin_addr, &mask, 0 );
         }
 
-        info->LeaseObtained = 0;
-        info->LeaseExpires = 0;
+        dst->LeaseObtained = 0;
+        dst->LeaseExpires = 0;
 
-        info++;
+        dst++;
     }
-    info[-1].Next = NULL;
+    dst[-1].Next = NULL;
+
+    now = GetTickCount64();
+    AcquireSRWLockExclusive( &ai_cache_lock );
+    HeapFree( GetProcessHeap(), 0, ai_cache.blob );
+    ai_cache.valid = TRUE;
+    ai_cache.needed = needed;
+    ai_cache.base_addr = (ULONG_PTR)blob;
+    ai_cache.blob = blob;
+    ai_cache.expire_tick = now + IPHLPAPI_CACHE_TTL_MS;
+    ai_cache.gen = gen;
+
+    if (!info || *size < needed)
+    {
+        *size = needed;
+        err = ERROR_BUFFER_OVERFLOW;
+    }
+    else
+    {
+        memcpy( info, blob, needed );
+        adapters_info_relocate( info, (ULONG_PTR)info - (ULONG_PTR)blob );
+        err = ERROR_SUCCESS;
+    }
+    ReleaseSRWLockExclusive( &ai_cache_lock );
 
 err:
     free( wins_servers );
@@ -1326,20 +1484,145 @@ err:
     return err;
 }
 
+static void adapters_addresses_relocate( IP_ADAPTER_ADDRESSES *aa, ULONG_PTR delta )
+{
+    IP_ADAPTER_ADDRESSES *cur;
+
+    if (!delta) return;
+
+    for (cur = aa; cur; cur = cur->Next)
+    {
+        IP_ADAPTER_UNICAST_ADDRESS *uni;
+        IP_ADAPTER_DNS_SERVER_ADDRESS *dns;
+        IP_ADAPTER_GATEWAY_ADDRESS *gw;
+        IP_ADAPTER_PREFIX *prefix;
+
+        cur->Next = reloc_ptr( cur->Next, delta );
+        cur->AdapterName = reloc_ptr( cur->AdapterName, delta );
+        cur->Description = reloc_ptr( cur->Description, delta );
+        cur->DnsSuffix = reloc_ptr( cur->DnsSuffix, delta );
+        cur->FriendlyName = reloc_ptr( cur->FriendlyName, delta );
+        cur->FirstAnycastAddress = reloc_ptr( cur->FirstAnycastAddress, delta );
+        cur->FirstMulticastAddress = reloc_ptr( cur->FirstMulticastAddress, delta );
+        cur->FirstWinsServerAddress = reloc_ptr( cur->FirstWinsServerAddress, delta );
+        cur->FirstDnsSuffix = reloc_ptr( cur->FirstDnsSuffix, delta );
+
+        cur->FirstUnicastAddress = reloc_ptr( cur->FirstUnicastAddress, delta );
+        for (uni = cur->FirstUnicastAddress; uni; uni = uni->Next)
+        {
+            uni->Next = reloc_ptr( uni->Next, delta );
+            uni->Address.lpSockaddr = reloc_ptr( uni->Address.lpSockaddr, delta );
+        }
+
+        cur->FirstDnsServerAddress = reloc_ptr( cur->FirstDnsServerAddress, delta );
+        for (dns = cur->FirstDnsServerAddress; dns; dns = dns->Next)
+        {
+            dns->Next = reloc_ptr( dns->Next, delta );
+            dns->Address.lpSockaddr = reloc_ptr( dns->Address.lpSockaddr, delta );
+        }
+
+        cur->FirstGatewayAddress = reloc_ptr( cur->FirstGatewayAddress, delta );
+        for (gw = cur->FirstGatewayAddress; gw; gw = gw->Next)
+        {
+            gw->Next = reloc_ptr( gw->Next, delta );
+            gw->Address.lpSockaddr = reloc_ptr( gw->Address.lpSockaddr, delta );
+        }
+
+        cur->FirstPrefix = reloc_ptr( cur->FirstPrefix, delta );
+        for (prefix = cur->FirstPrefix; prefix; prefix = prefix->Next)
+        {
+            prefix->Next = reloc_ptr( prefix->Next, delta );
+            prefix->Address.lpSockaddr = reloc_ptr( prefix->Address.lpSockaddr, delta );
+        }
+    }
+}
+
 ULONG WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses( ULONG family, ULONG flags, void *reserved,
                                                      IP_ADAPTER_ADDRESSES *aa, ULONG *size )
 {
     IP_ADAPTER_ADDRESSES *info, **sorted;
     DWORD err, needed, count;
+    ULONGLONG now;
+    ULONG i, victim;
+    LONG gen;
+    BYTE *blob;
 
     TRACE( "(%ld, %08lx, %p, %p, %p)\n", family, flags, reserved, aa, size );
 
     if (!size) return ERROR_INVALID_PARAMETER;
 
+    now = GetTickCount64();
+    gen = InterlockedCompareExchange( &iphlpapi_cache_gen, 0, 0 );
+    AcquireSRWLockShared( &aa_cache_lock );
+    for (i = 0; i < AA_CACHE_SLOTS; i++)
+    {
+        if (aa_cache[i].valid && aa_cache[i].gen == gen &&
+            aa_cache[i].family == family && aa_cache[i].flags == flags &&
+            now < aa_cache[i].expire_tick)
+        {
+            needed = aa_cache[i].needed;
+            if (!aa || *size < needed)
+            {
+                *size = needed;
+                ReleaseSRWLockShared( &aa_cache_lock );
+                return ERROR_BUFFER_OVERFLOW;
+            }
+            memcpy( aa, aa_cache[i].blob, needed );
+            {
+                ULONG_PTR delta = (ULONG_PTR)aa - aa_cache[i].base_addr;
+                ReleaseSRWLockShared( &aa_cache_lock );
+                adapters_addresses_relocate( aa, delta );
+            }
+            return ERROR_SUCCESS;
+        }
+    }
+    ReleaseSRWLockShared( &aa_cache_lock );
+
     err = adapters_addresses_alloc( family, flags, &info, &count );
     if (err) return err;
 
     needed = adapters_addresses_size( info );
+    if (!(sorted = adapters_addresses_sort( info, count )))
+    {
+        adapters_addresses_free( info );
+        return ERROR_OUTOFMEMORY;
+    }
+
+    blob = HeapAlloc( GetProcessHeap(), 0, needed );
+    if (!blob)
+    {
+        free( sorted );
+        adapters_addresses_free( info );
+        return ERROR_OUTOFMEMORY;
+    }
+    adapters_addresses_copy( (IP_ADAPTER_ADDRESSES *)blob, sorted, count );
+    free( sorted );
+    adapters_addresses_free( info );
+
+    now = GetTickCount64();
+    AcquireSRWLockExclusive( &aa_cache_lock );
+    victim = 0;
+    for (i = 0; i < AA_CACHE_SLOTS; i++)
+    {
+        if (!aa_cache[i].valid || aa_cache[i].gen != gen || now >= aa_cache[i].expire_tick ||
+            (aa_cache[i].family == family && aa_cache[i].flags == flags))
+        {
+            victim = i;
+            break;
+        }
+        if (aa_cache[i].expire_tick < aa_cache[victim].expire_tick)
+            victim = i;
+    }
+    HeapFree( GetProcessHeap(), 0, aa_cache[victim].blob );
+    aa_cache[victim].valid = TRUE;
+    aa_cache[victim].family = family;
+    aa_cache[victim].flags = flags;
+    aa_cache[victim].needed = needed;
+    aa_cache[victim].base_addr = (ULONG_PTR)blob;
+    aa_cache[victim].blob = blob;
+    aa_cache[victim].expire_tick = now + IPHLPAPI_CACHE_TTL_MS;
+    aa_cache[victim].gen = gen;
+
     if (!aa || *size < needed)
     {
         *size = needed;
@@ -1347,15 +1630,11 @@ ULONG WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses( ULONG family, ULONG flags, 
     }
     else
     {
-        if (!(sorted = adapters_addresses_sort( info, count ))) err = ERROR_OUTOFMEMORY;
-        else
-        {
-            adapters_addresses_copy( aa, sorted, count );
-            free( sorted );
-        }
+        memcpy( aa, blob, needed );
+        adapters_addresses_relocate( aa, (ULONG_PTR)aa - (ULONG_PTR)blob );
+        err = ERROR_SUCCESS;
     }
-
-    adapters_addresses_free( info );
+    ReleaseSRWLockExclusive( &aa_cache_lock );
     return err;
 }
 
@@ -1399,19 +1678,83 @@ DWORD WINAPI GetBestInterfaceEx( struct sockaddr *dst, DWORD *best_index )
     SOCKADDR_INET best_address;
     SOCKADDR_INET dst_address;
     MIB_IPFORWARD_ROW2 row;
+    BYTE addr_key[16];
+    ULONG scope_id = 0;
+    ULONGLONG now;
+    LONG gen;
     DWORD ret;
+    ULONG i, victim;
 
     TRACE( "dst %p, best_index %p\n", dst, best_index );
 
     if (!dst || !best_index) return ERROR_INVALID_PARAMETER;
     if (dst->sa_family != AF_INET && dst->sa_family != AF_INET6) return ERROR_INVALID_PARAMETER;
 
+    memset( addr_key, 0, sizeof(addr_key) );
+    if (dst->sa_family == AF_INET6)
+    {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)dst;
+        memcpy( addr_key, &sin6->sin6_addr, 16 );
+        scope_id = sin6->sin6_scope_id;
+    }
+    else
+    {
+        const struct sockaddr_in *sin4 = (const struct sockaddr_in *)dst;
+        memcpy( addr_key, &sin4->sin_addr, 4 );
+    }
+
+    now = GetTickCount64();
+    gen = InterlockedCompareExchange( &iphlpapi_cache_gen, 0, 0 );
+    AcquireSRWLockShared( &best_if_cache_lock );
+    for (i = 0; i < BEST_IF_CACHE_SLOTS; i++)
+    {
+        if (best_if_cache[i].valid && best_if_cache[i].gen == gen &&
+            best_if_cache[i].family == dst->sa_family &&
+            best_if_cache[i].scope_id == scope_id &&
+            now < best_if_cache[i].expire_tick &&
+            !memcmp( best_if_cache[i].addr, addr_key, 16 ))
+        {
+            *best_index = best_if_cache[i].best_index;
+            ReleaseSRWLockShared( &best_if_cache_lock );
+            return ERROR_SUCCESS;
+        }
+    }
+    ReleaseSRWLockShared( &best_if_cache_lock );
+
     dst_address.si_family = dst->sa_family;
     if (dst->sa_family == AF_INET6) dst_address.Ipv6 = *(struct sockaddr_in6 *)dst;
     else dst_address.Ipv4 = *(struct sockaddr_in *)dst;
 
     ret = GetBestRoute2( NULL, 0, NULL, &dst_address, 0, &row, &best_address );
-    if (!ret) *best_index = row.InterfaceIndex;
+    if (!ret)
+    {
+        *best_index = row.InterfaceIndex;
+        now = GetTickCount64();
+        AcquireSRWLockExclusive( &best_if_cache_lock );
+        victim = 0;
+        for (i = 0; i < BEST_IF_CACHE_SLOTS; i++)
+        {
+            if (!best_if_cache[i].valid || best_if_cache[i].gen != gen ||
+                now >= best_if_cache[i].expire_tick ||
+                (best_if_cache[i].family == dst->sa_family &&
+                 best_if_cache[i].scope_id == scope_id &&
+                 !memcmp( best_if_cache[i].addr, addr_key, 16 )))
+            {
+                victim = i;
+                break;
+            }
+            if (best_if_cache[i].expire_tick < best_if_cache[victim].expire_tick)
+                victim = i;
+        }
+        best_if_cache[victim].valid = TRUE;
+        best_if_cache[victim].family = dst->sa_family;
+        best_if_cache[victim].scope_id = scope_id;
+        memcpy( best_if_cache[victim].addr, addr_key, 16 );
+        best_if_cache[victim].best_index = row.InterfaceIndex;
+        best_if_cache[victim].expire_tick = now + IPHLPAPI_CACHE_TTL_MS;
+        best_if_cache[victim].gen = gen;
+        ReleaseSRWLockExclusive( &best_if_cache_lock );
+    }
 
     TRACE( "returning %ld\n", ret );
     return ret;
@@ -2118,9 +2461,32 @@ DWORD WINAPI GetIpForwardTable( MIB_IPFORWARDTABLE *table, ULONG *size, BOOL sor
     struct nsi_ipv4_forward_dynamic *dyn;
     struct nsi_ip_forward_static *stat;
     struct nsi_ipv4_unicast_key *uni_keys = NULL;
+    MIB_IPFORWARDTABLE *dst;
+    BYTE *blob;
+    ULONGLONG now;
+    LONG gen;
+    ULONG idx = !!sort;
 
     TRACE( "table %p, size %p, sort %d\n", table, size, sort );
     if (!size) return ERROR_INVALID_PARAMETER;
+
+    now = GetTickCount64();
+    gen = InterlockedCompareExchange( &iphlpapi_cache_gen, 0, 0 );
+    AcquireSRWLockShared( &fwd_cache_lock );
+    if (fwd_cache[idx].valid && fwd_cache[idx].gen == gen && now < fwd_cache[idx].expire_tick)
+    {
+        needed = fwd_cache[idx].needed;
+        if (!table || *size < needed)
+        {
+            *size = needed;
+            ReleaseSRWLockShared( &fwd_cache_lock );
+            return ERROR_INSUFFICIENT_BUFFER;
+        }
+        memcpy( table, fwd_cache[idx].blob, needed );
+        ReleaseSRWLockShared( &fwd_cache_lock );
+        return ERROR_SUCCESS;
+    }
+    ReleaseSRWLockShared( &fwd_cache_lock );
 
     err = NsiAllocateAndGetTable( 1, &NPI_MS_IPV4_MODULEID, NSI_IP_FORWARD_TABLE, (void **)&keys, sizeof(*keys),
                                   (void **)&rw, sizeof(*rw), (void **)&dyn, sizeof(*dyn),
@@ -2129,21 +2495,22 @@ DWORD WINAPI GetIpForwardTable( MIB_IPFORWARDTABLE *table, ULONG *size, BOOL sor
 
     needed = FIELD_OFFSET( MIB_IPFORWARDTABLE, table[count] );
 
-    if (!table || *size < needed)
-    {
-        *size = needed;
-        err = ERROR_INSUFFICIENT_BUFFER;
-        goto err;
-    }
-
     err = NsiAllocateAndGetTable( 1, &NPI_MS_IPV4_MODULEID, NSI_IP_UNICAST_TABLE, (void **)&uni_keys, sizeof(*uni_keys),
                                   NULL, 0, NULL, 0, NULL, 0, &uni_count, 0 );
     if (err) goto err;
 
-    table->dwNumEntries = count;
+    blob = HeapAlloc( GetProcessHeap(), 0, needed );
+    if (!blob)
+    {
+        err = ERROR_NOT_ENOUGH_MEMORY;
+        goto err;
+    }
+
+    dst = (MIB_IPFORWARDTABLE *)blob;
+    dst->dwNumEntries = count;
     for (i = 0; i < count; i++)
     {
-        MIB_IPFORWARDROW *row = table->table + i;
+        MIB_IPFORWARDROW *row = dst->table + i;
 
         row->dwForwardDest = keys[i].prefix.s_addr;
         ConvertLengthToIpv4Mask( keys[i].prefix_len, &row->dwForwardMask );
@@ -2172,7 +2539,29 @@ DWORD WINAPI GetIpForwardTable( MIB_IPFORWARDTABLE *table, ULONG *size, BOOL sor
         row->dwForwardMetric5 = 0;
     }
 
-    if (sort) qsort( table->table, count, sizeof(MIB_IPFORWARDROW), ipforward_row_cmp );
+    if (sort) qsort( dst->table, count, sizeof(MIB_IPFORWARDROW), ipforward_row_cmp );
+
+    now = GetTickCount64();
+    AcquireSRWLockExclusive( &fwd_cache_lock );
+    HeapFree( GetProcessHeap(), 0, fwd_cache[idx].blob );
+    fwd_cache[idx].valid = TRUE;
+    fwd_cache[idx].needed = needed;
+    fwd_cache[idx].blob = blob;
+    fwd_cache[idx].expire_tick = now + IPHLPAPI_CACHE_TTL_MS;
+    fwd_cache[idx].gen = gen;
+
+    if (!table || *size < needed)
+    {
+        *size = needed;
+        err = ERROR_INSUFFICIENT_BUFFER;
+    }
+    else
+    {
+        memcpy( table, blob, needed );
+        err = ERROR_SUCCESS;
+    }
+    ReleaseSRWLockExclusive( &fwd_cache_lock );
+
 err:
     NsiFreeTable( uni_keys, NULL, NULL, NULL );
     NsiFreeTable( keys, rw, dyn, stat );
@@ -3956,6 +4345,7 @@ DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
 {
     TRACE("Handle %p, overlapped %p.\n", Handle, overlapped);
 
+    iphlpapi_cache_invalidate();
     return NsiRequestChangeNotification(0, &NPI_MS_IPV4_MODULEID, NSI_IP_UNICAST_TABLE, overlapped, Handle);
 }
 
@@ -3968,6 +4358,7 @@ DWORD WINAPI NotifyIpInterfaceChange(ADDRESS_FAMILY family, PIPINTERFACE_CHANGE_
 {
     FIXME("(family %d, callback %p, context %p, init_notify %d, handle %p): stub\n",
           family, callback, context, init_notify, handle);
+    iphlpapi_cache_invalidate();
     if (handle) *handle = NULL;
     return NO_ERROR;
 }
@@ -3980,6 +4371,7 @@ DWORD WINAPI NotifyRouteChange2(ADDRESS_FAMILY family, PIPFORWARD_CHANGE_CALLBAC
 {
     FIXME("(family %d, callback %p, context %p, init_notify %d, handle %p): stub\n",
         family, callback, context, init_notify, handle);
+    iphlpapi_cache_invalidate();
     if (handle) *handle = NULL;
     return NO_ERROR;
 }
@@ -4004,6 +4396,7 @@ DWORD WINAPI NotifyRouteChange2(ADDRESS_FAMILY family, PIPFORWARD_CHANGE_CALLBAC
 DWORD WINAPI NotifyRouteChange(PHANDLE Handle, LPOVERLAPPED overlapped)
 {
   FIXME("(Handle %p, overlapped %p): stub\n", Handle, overlapped);
+  iphlpapi_cache_invalidate();
   return ERROR_NOT_SUPPORTED;
 }
 
@@ -4016,6 +4409,7 @@ DWORD WINAPI NotifyUnicastIpAddressChange(ADDRESS_FAMILY family, PUNICAST_IPADDR
 {
     FIXME("(family %d, callback %p, context %p, init_notify %d, handle %p): semi-stub\n",
           family, callback, context, init_notify, handle);
+    iphlpapi_cache_invalidate();
     if (handle) *handle = NULL;
 
     if (init_notify)
