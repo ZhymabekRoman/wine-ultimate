@@ -23,10 +23,14 @@
 
 #include "config.h"
 
+#include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -114,7 +118,303 @@ struct completion
     struct list         queue;
     struct list         wait_queue;
     unsigned int        depth;
+    unsigned int        wait_count;
+    int                 shm_idx;
+    int                 has_sync_waiter;
 };
+
+#define IOCP_SHM_MAGIC          0x494f4350u /* 'IOCP' */
+#define IOCP_SHM_VERSION        1u
+#define IOCP_SHM_MAX_PORTS      256u
+#define IOCP_SHM_RING_SLOTS     256u
+#define IOCP_SHM_HANDLE_BUCKETS 1024u
+#define IOCP_SHM_HANDLE_WAYS    4u
+#define IOCP_SHM_HANDLE_SLOTS   (IOCP_SHM_HANDLE_BUCKETS * IOCP_SHM_HANDLE_WAYS)
+#define IOCP_SHM_SPIN_LIMIT     10000
+
+struct iocp_shm_msg
+{
+    uint64_t ckey;
+    uint64_t cvalue;
+    uint64_t info;
+    uint32_t status;
+    uint32_t pad;
+};
+
+struct iocp_shm_port
+{
+    uint32_t seq;
+    uint32_t allocated;
+    uint64_t gen;
+
+    uint32_t lock;
+    uint32_t ring_disabled;
+    uint32_t waiting_threads;
+    uint32_t has_waiters;
+    uint32_t server_depth;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t ring_count;
+
+    struct iocp_shm_msg ring[IOCP_SHM_RING_SLOTS];
+};
+
+struct iocp_shm_handle
+{
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t handle;
+    uint32_t port_idx;
+    uint64_t port_gen;
+    uint32_t access;
+    uint32_t pad;
+};
+
+struct iocp_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    struct iocp_shm_port   ports[IOCP_SHM_MAX_PORTS];
+    struct iocp_shm_handle handles[IOCP_SHM_HANDLE_SLOTS];
+};
+
+static struct iocp_shm *iocp_shm = NULL;
+static int iocp_shm_inited = 0;
+
+static inline uint32_t iocp_shm_hash_handle( uint32_t pid, uint32_t handle )
+{
+    uint64_t x = ((uint64_t)pid << 32) | handle;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return (uint32_t)x;
+}
+
+static inline int iocp_shm_spin_lock( uint32_t *lock )
+{
+    int i;
+    for (i = 0; i < IOCP_SHM_SPIN_LIMIT; i++)
+    {
+        if (__atomic_exchange_n( lock, 1, __ATOMIC_ACQUIRE ) == 0)
+            return 1;
+        while (__atomic_load_n( lock, __ATOMIC_RELAXED ))
+        {
+#if defined(__i386__) || defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    return 0;
+}
+
+static inline void iocp_shm_spin_unlock( uint32_t *lock )
+{
+    __atomic_store_n( lock, 0, __ATOMIC_RELEASE );
+}
+
+static void init_iocp_shm(void)
+{
+    int fd;
+    void *ptr;
+    uint32_t i;
+
+    if (iocp_shm_inited) return;
+    iocp_shm_inited = 1;
+    if (server_dir_fd == -1) return;
+
+    fd = openat( server_dir_fd, "iocp_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
+    if (fd == -1) return;
+    if (ftruncate( fd, sizeof(struct iocp_shm) ) == -1)
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct iocp_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+
+    iocp_shm = ptr;
+    memset( iocp_shm, 0, sizeof(*iocp_shm) );
+    for (i = 0; i < IOCP_SHM_HANDLE_SLOTS; i++)
+        iocp_shm->handles[i].port_idx = UINT32_MAX;
+    iocp_shm->version = IOCP_SHM_VERSION;
+    __atomic_store_n( &iocp_shm->magic, IOCP_SHM_MAGIC, __ATOMIC_RELEASE );
+}
+
+static void iocp_shm_sync_state( struct completion *completion )
+{
+    struct iocp_shm_port *sp;
+
+    if (!iocp_shm || !completion || completion->shm_idx < 0 ||
+        (uint32_t)completion->shm_idx >= IOCP_SHM_MAX_PORTS)
+        return;
+
+    sp = &iocp_shm->ports[completion->shm_idx];
+    __atomic_store_n( &sp->waiting_threads, completion->wait_count, __ATOMIC_RELEASE );
+    __atomic_store_n( &sp->has_waiters, completion->has_sync_waiter ? 1u : 0u, __ATOMIC_RELEASE );
+    __atomic_store_n( &sp->server_depth, completion->depth, __ATOMIC_RELEASE );
+}
+
+static void iocp_shm_alloc_slot( struct completion *completion )
+{
+    static uint32_t next_hint = 0;
+    uint32_t i;
+
+    if (!iocp_shm || completion->shm_idx >= 0) return;
+
+    for (i = 0; i < IOCP_SHM_MAX_PORTS; i++)
+    {
+        uint32_t idx = (next_hint + i) % IOCP_SHM_MAX_PORTS;
+        struct iocp_shm_port *sp = &iocp_shm->ports[idx];
+        if (!sp->allocated)
+        {
+            uint32_t s = sp->seq;
+            next_hint = (idx + 1) % IOCP_SHM_MAX_PORTS;
+            __atomic_store_n( &sp->seq, s + 1, __ATOMIC_RELEASE );
+            sp->gen++;
+            sp->allocated       = 1;
+            sp->lock            = 0;
+            sp->ring_disabled   = 0;
+            sp->waiting_threads = 0;
+            sp->has_waiters     = 0;
+            sp->server_depth    = 0;
+            sp->head            = 0;
+            sp->tail            = 0;
+            sp->ring_count      = 0;
+            __atomic_store_n( &sp->seq, s + 2, __ATOMIC_RELEASE );
+            completion->shm_idx = (int)idx;
+            iocp_shm_sync_state( completion );
+            return;
+        }
+    }
+}
+
+static void iocp_shm_free_slot( struct completion *completion )
+{
+    struct iocp_shm_port *sp;
+    uint32_t s;
+
+    if (!iocp_shm || completion->shm_idx < 0 ||
+        (uint32_t)completion->shm_idx >= IOCP_SHM_MAX_PORTS)
+        return;
+
+    sp = &iocp_shm->ports[completion->shm_idx];
+    iocp_shm_spin_lock( &sp->lock );
+    s = sp->seq;
+    __atomic_store_n( &sp->seq, s + 1, __ATOMIC_RELEASE );
+    sp->allocated       = 0;
+    sp->ring_disabled   = 1;
+    sp->gen++;
+    sp->waiting_threads = 0;
+    sp->has_waiters     = 0;
+    sp->server_depth    = 0;
+    sp->head            = 0;
+    sp->tail            = 0;
+    sp->ring_count      = 0;
+    __atomic_store_n( &sp->seq, s + 2, __ATOMIC_RELEASE );
+    iocp_shm_spin_unlock( &sp->lock );
+    completion->shm_idx = -1;
+}
+
+static void iocp_shm_register_handle( struct process *process, obj_handle_t handle,
+                                      struct completion *completion, unsigned int access )
+{
+    uint32_t pid, hval, h, base, way;
+    struct iocp_shm_handle *slot = NULL;
+    uint32_t s;
+
+    if (!iocp_shm || !process || !handle || completion->shm_idx < 0) return;
+    pid  = get_process_id( process );
+    hval = (uint32_t)handle;
+    h    = iocp_shm_hash_handle( pid, hval );
+    base = (h % IOCP_SHM_HANDLE_BUCKETS) * IOCP_SHM_HANDLE_WAYS;
+
+    for (way = 0; way < IOCP_SHM_HANDLE_WAYS; way++)
+    {
+        struct iocp_shm_handle *cand = &iocp_shm->handles[base + way];
+        if (cand->port_idx != UINT32_MAX && cand->pid == pid && cand->handle == hval)
+        {
+            slot = cand;
+            break;
+        }
+        if (!slot && cand->port_idx == UINT32_MAX)
+            slot = cand;
+    }
+    if (!slot) slot = &iocp_shm->handles[base + ((h >> 16) & (IOCP_SHM_HANDLE_WAYS - 1))];
+
+    s = slot->seq;
+    __atomic_store_n( &slot->seq, s + 1, __ATOMIC_RELEASE );
+    slot->pid      = pid;
+    slot->handle   = hval;
+    slot->port_idx = (uint32_t)completion->shm_idx;
+    slot->port_gen = iocp_shm->ports[completion->shm_idx].gen;
+    slot->access   = access;
+    __atomic_store_n( &slot->seq, s + 2, __ATOMIC_RELEASE );
+}
+
+static void iocp_shm_unregister_handle( struct process *process, obj_handle_t handle )
+{
+    uint32_t pid, hval, h, base, way;
+
+    if (!iocp_shm || !process || !handle) return;
+    pid  = get_process_id( process );
+    hval = (uint32_t)handle;
+    h    = iocp_shm_hash_handle( pid, hval );
+    base = (h % IOCP_SHM_HANDLE_BUCKETS) * IOCP_SHM_HANDLE_WAYS;
+
+    for (way = 0; way < IOCP_SHM_HANDLE_WAYS; way++)
+    {
+        struct iocp_shm_handle *cand = &iocp_shm->handles[base + way];
+        if (cand->port_idx != UINT32_MAX && cand->pid == pid && cand->handle == hval)
+        {
+            uint32_t s = cand->seq;
+            __atomic_store_n( &cand->seq, s + 1, __ATOMIC_RELEASE );
+            cand->pid      = 0;
+            cand->handle   = 0;
+            cand->port_idx = UINT32_MAX;
+            cand->port_gen = 0;
+            cand->access   = 0;
+            __atomic_store_n( &cand->seq, s + 2, __ATOMIC_RELEASE );
+        }
+    }
+}
+
+static void iocp_shm_flush_to_queue( struct completion *completion )
+{
+    struct iocp_shm_port *sp;
+
+    if (!iocp_shm || !completion || completion->shm_idx < 0 ||
+        (uint32_t)completion->shm_idx >= IOCP_SHM_MAX_PORTS)
+        return;
+
+    sp = &iocp_shm->ports[completion->shm_idx];
+    if (!__atomic_load_n( &sp->ring_count, __ATOMIC_ACQUIRE )) return;
+
+    if (!iocp_shm_spin_lock( &sp->lock ))
+    {
+        sp->ring_disabled = 1;
+        return;
+    }
+
+    while (sp->ring_count > 0)
+    {
+        struct iocp_shm_msg *smsg = &sp->ring[sp->head % IOCP_SHM_RING_SLOTS];
+        struct comp_msg *cmsg = mem_alloc( sizeof(*cmsg) );
+        if (!cmsg) break;
+        cmsg->ckey        = smsg->ckey;
+        cmsg->cvalue      = smsg->cvalue;
+        cmsg->information = smsg->info;
+        cmsg->status      = smsg->status;
+        list_add_tail( &completion->queue, &cmsg->queue_entry );
+        completion->depth++;
+        sp->head = (sp->head + 1) % IOCP_SHM_RING_SLOTS;
+        sp->ring_count--;
+    }
+    __atomic_store_n( &sp->server_depth, completion->depth, __ATOMIC_RELEASE );
+    iocp_shm_spin_unlock( &sp->lock );
+}
 
 static void completion_wait_dump( struct object*, int );
 static int completion_wait_signaled( struct object *obj, struct wait_queue_entry *entry );
@@ -153,8 +453,11 @@ static int completion_wait_close_handle( struct object *obj, struct process *pro
 
     if (wait->completion)
     {
+        struct completion *comp = wait->completion;
         list_remove( &wait->wait_queue_entry );
         wait->completion = NULL;
+        if (comp->wait_count) comp->wait_count--;
+        iocp_shm_sync_state( comp );
     }
     wait->handle = 0;
     if (wait->thread && wait->thread->completion_wait == wait)
@@ -168,8 +471,11 @@ static void completion_wait_destroy( struct object *obj )
 
     if (wait->completion)
     {
+        struct completion *comp = wait->completion;
         list_remove( &wait->wait_queue_entry );
         wait->completion = NULL;
+        if (comp->wait_count) comp->wait_count--;
+        iocp_shm_sync_state( comp );
     }
     free( wait->msg );
 }
@@ -208,6 +514,7 @@ static void completion_wait_satisfied( struct object *obj, struct wait_queue_ent
     msg = LIST_ENTRY( msg_entry, struct comp_msg, queue_entry );
     --wait->completion->depth;
     list_remove( &msg->queue_entry );
+    iocp_shm_sync_state( wait->completion );
     if (wait->msg) free( wait->msg );
     wait->msg = msg;
 }
@@ -258,6 +565,8 @@ static void completion_destroy( struct object *obj)
         wait->completion = NULL;
         list_remove( &wait->wait_queue_entry );
     }
+    completion->wait_count = 0;
+    iocp_shm_free_slot( completion );
 
     if (completion->sync) release_object( completion->sync );
 }
@@ -274,6 +583,10 @@ static struct object *completion_get_sync( struct object *obj )
 {
     struct completion *completion = (struct completion *)obj;
     assert( obj->ops == &completion_ops );
+    iocp_shm_flush_to_queue( completion );
+    completion->has_sync_waiter = 1;
+    if (!list_empty( &completion->queue )) signal_sync( completion->sync );
+    iocp_shm_sync_state( completion );
     return grab_object( completion->sync );
 }
 
@@ -322,6 +635,7 @@ static int completion_close_handle( struct object *obj, struct process *process,
     struct completion_wait *wait, *wait_next;
     struct list waiting;
 
+    iocp_shm_unregister_handle( process, handle );
     if (completion->obj.handle_count != 1) return 1;
 
     /* cleanup_thread_completion() below releases the object, and the wake can tear the
@@ -333,6 +647,7 @@ static int completion_close_handle( struct object *obj, struct process *process,
         if (!wait->completion) continue;
         wait->completion = NULL;
         list_remove( &wait->wait_queue_entry );
+        if (completion->wait_count) completion->wait_count--;
         if (!wait->msg)
         {
             wake_up( &wait->obj, 0 );
@@ -340,6 +655,7 @@ static int completion_close_handle( struct object *obj, struct process *process,
         }
     }
     release_waiters_snapshot( &waiting );
+    iocp_shm_sync_state( completion );
     signal_sync( completion->sync );
     return 1;
 }
@@ -354,8 +670,11 @@ void cleanup_thread_completion( struct thread *thread )
     thread->completion_wait = NULL;
     if (wait->completion)
     {
+        struct completion *comp = wait->completion;
         list_remove( &wait->wait_queue_entry );
         wait->completion = NULL;
+        if (comp->wait_count) comp->wait_count--;
+        iocp_shm_sync_state( comp );
     }
     if ((handle = wait->handle))
     {
@@ -398,12 +717,17 @@ static struct completion *create_completion( struct object *root, const struct u
             list_init( &completion->queue );
             list_init( &completion->wait_queue );
             completion->depth = 0;
+            completion->wait_count = 0;
+            completion->shm_idx = -1;
+            completion->has_sync_waiter = 0;
 
             if (!(completion->sync = create_internal_sync( 1, 0 )))
             {
                 release_object( completion );
                 return NULL;
             }
+            init_iocp_shm();
+            iocp_shm_alloc_slot( completion );
         }
     }
 
@@ -418,10 +742,13 @@ struct completion *get_completion_obj( struct process *process, obj_handle_t han
 void add_completion( struct completion *completion, apc_param_t ckey, apc_param_t cvalue,
                      unsigned int status, apc_param_t information )
 {
-    struct comp_msg *msg = mem_alloc( sizeof( *msg ) );
+    struct comp_msg *msg;
     struct completion_wait *wait, *wait_next;
     struct list waiting;
 
+    iocp_shm_flush_to_queue( completion );
+
+    msg = mem_alloc( sizeof( *msg ) );
     if (!msg)
         return;
 
@@ -442,6 +769,7 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
             {
                 list_remove( &wait->wait_queue_entry );
                 wait->completion = NULL;
+                if (completion->wait_count) completion->wait_count--;
             }
             list_remove( &wait->snapshot_entry );
             wait->snapshotted = 0;
@@ -451,6 +779,7 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
     }
     release_waiters_snapshot( &waiting );
     if (!list_empty( &completion->queue )) signal_sync( completion->sync );
+    iocp_shm_sync_state( completion );
 }
 
 /* create a completion */
@@ -471,6 +800,9 @@ DECL_HANDLER(create_completion)
         else
             reply->handle = alloc_handle_no_access_check( current->process, completion,
                                                           req->access, objattr->attributes );
+        if (reply->handle)
+            iocp_shm_register_handle( current->process, reply->handle, completion,
+                                      default_map_access( &completion->obj, req->access ) );
         release_object( completion );
     }
 
@@ -484,6 +816,16 @@ DECL_HANDLER(open_completion)
 
     reply->handle = open_object( current->process, req->rootdir, req->access,
                                  &completion_ops, &name, req->attributes );
+    if (reply->handle)
+    {
+        struct completion *completion = get_completion_obj( current->process, reply->handle, 0 );
+        if (completion)
+        {
+            iocp_shm_register_handle( current->process, reply->handle, completion,
+                                      default_map_access( &completion->obj, req->access ) );
+            release_object( completion );
+        }
+    }
 }
 
 
@@ -516,21 +858,30 @@ DECL_HANDLER(remove_completion)
 
     if (!completion) return;
 
+    iocp_shm_flush_to_queue( completion );
     entry = list_head( &completion->queue );
     if (req->alertable && !list_empty( &current->user_apc )
         && !(entry && current->completion_wait && current->completion_wait->completion == completion))
     {
         set_error( STATUS_USER_APC );
+        iocp_shm_sync_state( completion );
         release_object( completion );
         return;
     }
     if (current->completion_wait)
     {
+        struct completion *old_comp = current->completion_wait->completion;
         list_remove( &current->completion_wait->wait_queue_entry );
         current->completion_wait->completion = NULL;
+        if (old_comp)
+        {
+            if (old_comp->wait_count) old_comp->wait_count--;
+            if (old_comp != completion) iocp_shm_sync_state( old_comp );
+        }
     }
     else if (!(current->completion_wait = create_completion_wait( current )))
     {
+        iocp_shm_sync_state( completion );
         release_object( completion );
         return;
     }
@@ -538,6 +889,7 @@ DECL_HANDLER(remove_completion)
     {
         current->completion_wait->completion = completion;
         list_add_head( &completion->wait_queue, &current->completion_wait->wait_queue_entry );
+        completion->wait_count++;
         reply->wait_handle = current->completion_wait->handle;
         /* A packet consumed through the wake path (completion_wait_satisfied
          * handing the message to the thread, get_thread_completion taking it)
@@ -568,6 +920,7 @@ DECL_HANDLER(remove_completion)
         if (list_empty( &completion->queue )) reset_sync( completion->sync );
     }
 
+    iocp_shm_sync_state( completion );
     release_object( completion );
 }
 
@@ -598,7 +951,9 @@ DECL_HANDLER(query_completion)
 
     if (!completion) return;
 
+    iocp_shm_flush_to_queue( completion );
     reply->depth = completion->depth;
+    iocp_shm_sync_state( completion );
 
     release_object( completion );
 }

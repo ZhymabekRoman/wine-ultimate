@@ -56,6 +56,27 @@ struct wine_uring
 
 static pthread_key_t wine_uring_tls_key;
 static pthread_once_t wine_uring_tls_once = PTHREAD_ONCE_INIT;
+static __thread struct wine_uring t_uring;
+
+static void wine_uring_atfork_child(void)
+{
+    if (t_uring.inited)
+    {
+        if (t_uring.sq_ptr && t_uring.sq_ptr != MAP_FAILED)
+            munmap(t_uring.sq_ptr, t_uring.sq_size);
+        if (t_uring.cq_ptr && t_uring.cq_ptr != MAP_FAILED && t_uring.cq_ptr != t_uring.sq_ptr)
+            munmap(t_uring.cq_ptr, t_uring.cq_size);
+        if (t_uring.sqes && t_uring.sqes != MAP_FAILED)
+            munmap(t_uring.sqes, t_uring.sqes_size);
+        if (t_uring.ring_fd >= 0)
+            close(t_uring.ring_fd);
+    }
+    t_uring.ring_fd = -1;
+    t_uring.inited = 0;
+    t_uring.sq_ptr = NULL;
+    t_uring.cq_ptr = NULL;
+    t_uring.sqes = NULL;
+}
 
 static void wine_uring_tls_destroy(void *arg)
 {
@@ -79,6 +100,7 @@ static void wine_uring_tls_destroy(void *arg)
 static void wine_uring_tls_init_key(void)
 {
     pthread_key_create(&wine_uring_tls_key, wine_uring_tls_destroy);
+    pthread_atfork(NULL, NULL, wine_uring_atfork_child);
 }
 
 static inline int wine_uring_is_enabled(void)
@@ -156,14 +178,13 @@ static inline int wine_uring_init(struct wine_uring *ring, unsigned int entries)
 
 static inline struct wine_uring *wine_uring_get_thread_ring(void)
 {
-    static __thread struct wine_uring thread_ring;
-    if (thread_ring.failed) return NULL;
-    if (!thread_ring.inited)
+    if (t_uring.failed) return NULL;
+    if (!t_uring.inited)
     {
-        if (wine_uring_init(&thread_ring, 32) < 0)
+        if (wine_uring_init(&t_uring, 32) < 0)
             return NULL;
     }
-    return &thread_ring;
+    return &t_uring;
 }
 
 /* Submit a single SQE and wait for its CQE. Returns >= 0 on success, or -1 with
