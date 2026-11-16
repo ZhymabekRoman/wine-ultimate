@@ -21,11 +21,15 @@
 #include "config.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -299,8 +303,155 @@ struct alpc_port
     unsigned int        client_tid;
     struct list         conn_entry;  /* client side: entry in listen_port->connections */
     struct list         list_entry;  /* entry in alpc_port_list */
+    int                 shm_idx;     /* index in alpc_shm->ports[], or -1 */
+    int                 has_wcp;     /* 1 if a WaitCompletionPacket is bound */
 
 };
+
+#define ALPC_SHM_MAGIC          0x414c5053u /* 'ALPS' */
+#define ALPC_SHM_VERSION        1u
+#define ALPC_SHM_MAX_PORTS      512u
+#define ALPC_SHM_HANDLE_BUCKETS 1024u
+#define ALPC_SHM_HANDLE_WAYS    4u
+#define ALPC_SHM_HANDLE_SLOTS   (ALPC_SHM_HANDLE_BUCKETS * ALPC_SHM_HANDLE_WAYS)
+#define ALPC_SHM_RING_SLOTS     16u
+#define ALPC_SHM_SLOT_MAX_DATA  512u
+#define ALPC_SHM_SPIN_LIMIT     10000
+
+struct alpc_shm_msg
+{
+    uint32_t user_size;
+    uint32_t msg_id;
+    uint32_t client_pid;
+    uint32_t client_tid;
+    uint64_t port_context;
+    uint64_t msg_context;
+    uint32_t sequence;
+    uint32_t callback_id;
+    uint32_t attr_flags;
+    uint32_t pad;
+    uint8_t  data[ALPC_SHM_SLOT_MAX_DATA];
+};
+
+struct alpc_shm_port
+{
+    uint32_t seq;
+    uint32_t active;
+    uint64_t gen;
+
+    uint32_t flags;
+    uint32_t sequence_no;
+    uint64_t port_context;
+
+    uint32_t ring_lock;
+    uint32_t ring_disabled;
+    uint32_t is_server;
+    uint32_t max_msg_len;
+
+    uint32_t peer_idx;
+    uint64_t peer_gen;
+
+    uint32_t server_queue_count;
+    uint32_t has_waiters;
+    uint32_t has_wcp;
+    uint32_t pair_idx;
+    uint32_t listen_idx;
+    uint32_t pad0;
+
+    uint32_t ring_head;
+    uint32_t ring_tail;
+    uint32_t ring_count;
+    uint32_t pad1;
+    struct alpc_shm_msg ring[ALPC_SHM_RING_SLOTS];
+};
+
+struct alpc_shm_handle
+{
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t handle;
+    uint32_t port_idx;
+    uint64_t port_gen;
+};
+
+struct alpc_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    struct alpc_shm_port   ports[ALPC_SHM_MAX_PORTS];
+    struct alpc_shm_handle handles[ALPC_SHM_HANDLE_SLOTS];
+};
+
+static struct alpc_shm *alpc_shm = NULL;
+static int alpc_shm_inited = 0;
+
+static inline uint32_t alpc_shm_hash_handle( uint32_t pid, uint32_t handle )
+{
+    uint64_t x = ((uint64_t)pid << 32) | handle;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return (uint32_t)x;
+}
+
+static inline int alpc_shm_spin_lock( uint32_t *lock )
+{
+    int i;
+    for (i = 0; i < ALPC_SHM_SPIN_LIMIT; i++)
+    {
+        if (__atomic_exchange_n( lock, 1, __ATOMIC_ACQUIRE ) == 0)
+            return 1;
+        while (__atomic_load_n( lock, __ATOMIC_RELAXED ))
+        {
+#if defined(__i386__) || defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    return 0;
+}
+
+static inline void alpc_shm_spin_unlock( uint32_t *lock )
+{
+    __atomic_store_n( lock, 0, __ATOMIC_RELEASE );
+}
+
+static void init_alpc_shm(void)
+{
+    int fd;
+    void *ptr;
+    uint32_t i;
+
+    if (alpc_shm_inited) return;
+    alpc_shm_inited = 1;
+    if (server_dir_fd == -1) return;
+
+    fd = openat( server_dir_fd, "alpc_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
+    if (fd == -1) return;
+    if (ftruncate( fd, sizeof(struct alpc_shm) ) == -1)
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct alpc_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+
+    alpc_shm = ptr;
+    memset( alpc_shm, 0, sizeof(*alpc_shm) );
+    for (i = 0; i < ALPC_SHM_MAX_PORTS; i++)
+    {
+        alpc_shm->ports[i].peer_idx   = UINT32_MAX;
+        alpc_shm->ports[i].pair_idx   = UINT32_MAX;
+        alpc_shm->ports[i].listen_idx = UINT32_MAX;
+    }
+    for (i = 0; i < ALPC_SHM_HANDLE_SLOTS; i++)
+        alpc_shm->handles[i].port_idx = UINT32_MAX;
+    alpc_shm->version = ALPC_SHM_VERSION;
+    __atomic_store_n( &alpc_shm->magic, ALPC_SHM_MAGIC, __ATOMIC_RELEASE );
+}
 
 /* every live port; a wake completion packet binds, at association time, to
  * the port on which the associating thread is queued receiving, so the
@@ -354,8 +505,10 @@ static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port
 
 static void alpc_port_dump( struct object *obj, int verbose );
 static struct fd *alpc_port_get_fd( struct object *obj );
+static int alpc_port_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
 static void alpc_port_destroy( struct object *obj );
 static unsigned int alpc_port_map_access( struct object *obj, unsigned int access );
+static struct alpc_port *alpc_port_pair( struct alpc_port *port );
 
 static const struct object_ops alpc_port_ops =
 {
@@ -378,9 +531,276 @@ static const struct object_ops alpc_port_ops =
     default_unlink_name,       /* unlink_name */
     no_open_file,              /* open_file */
     no_kernel_obj_list,        /* get_kernel_obj_list */
-    no_close_handle,           /* close_handle */
+    alpc_port_close_handle,    /* close_handle */
     alpc_port_destroy,         /* destroy */
 };
+
+static void alpc_shm_sync_port( struct alpc_port *port )
+{
+    struct alpc_shm_port *sp;
+    struct alpc_port *pair, *listen = NULL;
+    uint32_t s;
+
+    if (!alpc_shm || port->shm_idx < 0 || (uint32_t)port->shm_idx >= ALPC_SHM_MAX_PORTS)
+        return;
+
+    sp = &alpc_shm->ports[port->shm_idx];
+    pair = alpc_port_pair( port );
+    if (!port->is_server && !port->listen_port && port->peer && port->peer->listen_port)
+        listen = port->peer->listen_port;
+
+    s = sp->seq;
+    __atomic_store_n( &sp->seq, s + 1, __ATOMIC_RELEASE );
+    sp->active       = 1;
+    sp->flags        = port->flags;
+    sp->sequence_no  = port->sequence_no;
+    sp->port_context = port->port_context;
+    sp->is_server    = port->is_server ? 1 : 0;
+    sp->max_msg_len  = port->is_server ? port->max_msg_len :
+                       (port->listen_port ? port->listen_port->max_msg_len : 0);
+    if (port->peer && port->peer->shm_idx >= 0)
+    {
+        sp->peer_idx = (uint32_t)port->peer->shm_idx;
+        sp->peer_gen = alpc_shm->ports[port->peer->shm_idx].gen;
+    }
+    else
+    {
+        sp->peer_idx = UINT32_MAX;
+        sp->peer_gen = 0;
+    }
+    sp->pair_idx   = (pair && pair->shm_idx >= 0) ? (uint32_t)pair->shm_idx : UINT32_MAX;
+    sp->listen_idx = (listen && listen->shm_idx >= 0) ? (uint32_t)listen->shm_idx : UINT32_MAX;
+    sp->server_queue_count = list_count( &port->msg_queue );
+    {
+        struct async *waiter = find_pending_alpc_async( &port->read_q, 0 );
+        if (waiter)
+        {
+            sp->has_waiters = 1;
+            release_object( waiter );
+        }
+        else sp->has_waiters = 0;
+    }
+    sp->has_wcp     = port->has_wcp ? 1 : 0;
+    __atomic_store_n( &sp->seq, s + 2, __ATOMIC_RELEASE );
+}
+
+static void alpc_shm_alloc_slot( struct alpc_port *port )
+{
+    static uint32_t next_hint = 0;
+    uint32_t i;
+
+    init_alpc_shm();
+    if (!alpc_shm) return;
+    if (port->shm_idx >= 0)
+    {
+        alpc_shm_sync_port( port );
+        return;
+    }
+
+    for (i = 0; i < ALPC_SHM_MAX_PORTS; i++)
+    {
+        uint32_t idx = (next_hint + i) % ALPC_SHM_MAX_PORTS;
+        struct alpc_shm_port *sp = &alpc_shm->ports[idx];
+        if (!sp->active)
+        {
+            uint32_t s = sp->seq;
+            next_hint = (idx + 1) % ALPC_SHM_MAX_PORTS;
+            __atomic_store_n( &sp->seq, s + 1, __ATOMIC_RELEASE );
+            sp->gen++;
+            sp->active        = 1;
+            sp->ring_lock     = 0;
+            sp->ring_disabled = 0;
+            sp->ring_head     = 0;
+            sp->ring_tail     = 0;
+            sp->ring_count    = 0;
+            __atomic_store_n( &sp->seq, s + 2, __ATOMIC_RELEASE );
+            port->shm_idx = (int)idx;
+            alpc_shm_sync_port( port );
+            return;
+        }
+    }
+}
+
+static void alpc_shm_free_slot( struct alpc_port *port )
+{
+    struct alpc_shm_port *sp;
+    uint32_t s;
+
+    if (!alpc_shm || port->shm_idx < 0 || (uint32_t)port->shm_idx >= ALPC_SHM_MAX_PORTS)
+        return;
+
+    sp = &alpc_shm->ports[port->shm_idx];
+    alpc_shm_spin_lock( &sp->ring_lock );
+    s = sp->seq;
+    __atomic_store_n( &sp->seq, s + 1, __ATOMIC_RELEASE );
+    sp->active        = 0;
+    sp->ring_disabled = 1;
+    sp->gen++;
+    sp->peer_idx      = UINT32_MAX;
+    sp->peer_gen      = 0;
+    sp->pair_idx      = UINT32_MAX;
+    sp->listen_idx    = UINT32_MAX;
+    sp->ring_head     = 0;
+    sp->ring_tail     = 0;
+    sp->ring_count    = 0;
+    __atomic_store_n( &sp->seq, s + 2, __ATOMIC_RELEASE );
+    alpc_shm_spin_unlock( &sp->ring_lock );
+    port->shm_idx = -1;
+}
+
+static void alpc_shm_register_handle( struct process *process, obj_handle_t handle, struct alpc_port *port )
+{
+    uint32_t pid, hval, h, base, way;
+    struct alpc_shm_handle *slot = NULL;
+    uint32_t s;
+
+    if (!alpc_shm || !process || !handle || port->shm_idx < 0) return;
+    pid  = get_process_id( process );
+    hval = (uint32_t)handle;
+    h    = alpc_shm_hash_handle( pid, hval );
+    base = (h % ALPC_SHM_HANDLE_BUCKETS) * ALPC_SHM_HANDLE_WAYS;
+
+    for (way = 0; way < ALPC_SHM_HANDLE_WAYS; way++)
+    {
+        struct alpc_shm_handle *cand = &alpc_shm->handles[base + way];
+        if (cand->port_idx != UINT32_MAX && cand->pid == pid && cand->handle == hval)
+        {
+            slot = cand;
+            break;
+        }
+        if (!slot && cand->port_idx == UINT32_MAX)
+            slot = cand;
+    }
+    if (!slot) slot = &alpc_shm->handles[base + ((h >> 16) & (ALPC_SHM_HANDLE_WAYS - 1))];
+
+    s = slot->seq;
+    __atomic_store_n( &slot->seq, s + 1, __ATOMIC_RELEASE );
+    slot->pid      = pid;
+    slot->handle   = hval;
+    slot->port_idx = (uint32_t)port->shm_idx;
+    slot->port_gen = alpc_shm->ports[port->shm_idx].gen;
+    __atomic_store_n( &slot->seq, s + 2, __ATOMIC_RELEASE );
+}
+
+static void alpc_shm_unregister_handle( struct process *process, obj_handle_t handle )
+{
+    uint32_t pid, hval, h, base, way;
+
+    if (!alpc_shm || !process || !handle) return;
+    pid  = get_process_id( process );
+    hval = (uint32_t)handle;
+    h    = alpc_shm_hash_handle( pid, hval );
+    base = (h % ALPC_SHM_HANDLE_BUCKETS) * ALPC_SHM_HANDLE_WAYS;
+
+    for (way = 0; way < ALPC_SHM_HANDLE_WAYS; way++)
+    {
+        struct alpc_shm_handle *cand = &alpc_shm->handles[base + way];
+        if (cand->port_idx != UINT32_MAX && cand->pid == pid && cand->handle == hval)
+        {
+            uint32_t s = cand->seq;
+            __atomic_store_n( &cand->seq, s + 1, __ATOMIC_RELEASE );
+            cand->pid      = 0;
+            cand->handle   = 0;
+            cand->port_idx = UINT32_MAX;
+            cand->port_gen = 0;
+            __atomic_store_n( &cand->seq, s + 2, __ATOMIC_RELEASE );
+        }
+    }
+}
+
+static int alpc_port_close_handle( struct object *obj, struct process *process, obj_handle_t handle )
+{
+    alpc_shm_unregister_handle( process, handle );
+    return 1;
+}
+
+static void alpc_shm_flush_single( struct alpc_port *port )
+{
+    struct alpc_shm_port *sp;
+    uint32_t s;
+
+    if (!alpc_shm || !port || port->shm_idx < 0 || (uint32_t)port->shm_idx >= ALPC_SHM_MAX_PORTS)
+        return;
+
+    sp = &alpc_shm->ports[port->shm_idx];
+    if (!__atomic_load_n( &sp->ring_count, __ATOMIC_ACQUIRE ))
+    {
+        if (port->sequence_no != sp->sequence_no)
+            port->sequence_no = sp->sequence_no;
+        return;
+    }
+
+    if (!alpc_shm_spin_lock( &sp->ring_lock ))
+    {
+        sp->ring_disabled = 1;
+        return;
+    }
+
+    while (sp->ring_count > 0)
+    {
+        struct alpc_shm_msg *sm = &sp->ring[sp->ring_head];
+        data_size_t blob_size = sizeof(struct alpc_wire_hdr) + sm->user_size;
+        struct alpc_message *msg = malloc( sizeof(*msg) + blob_size );
+        if (msg)
+        {
+            struct alpc_wire_hdr *hdr = (struct alpc_wire_hdr *)(msg + 1);
+            memset( msg, 0, sizeof(*msg) );
+            msg->is_connect = 0;
+            msg->msg_id     = sm->msg_id;
+            msg->data_size  = blob_size;
+
+            memset( hdr, 0, sizeof(*hdr) );
+            hdr->magic        = ALPC_WIRE_MAGIC;
+            hdr->type         = 1;
+            hdr->msg_id       = sm->msg_id;
+            hdr->client_pid   = sm->client_pid;
+            hdr->client_tid   = sm->client_tid;
+            hdr->user_size    = sm->user_size;
+            hdr->port_context = sm->port_context;
+            hdr->attr_flags   = sm->attr_flags;
+            hdr->msg_context  = sm->msg_context;
+            hdr->sequence     = sm->sequence;
+            hdr->callback_id  = sm->callback_id;
+            if (sm->user_size)
+                memcpy( hdr + 1, sm->data, sm->user_size );
+            list_add_tail( &port->msg_queue, &msg->entry );
+        }
+        sp->ring_head = (sp->ring_head + 1) % ALPC_SHM_RING_SLOTS;
+        sp->ring_count--;
+    }
+
+    s = sp->seq;
+    __atomic_store_n( &sp->seq, s + 1, __ATOMIC_RELEASE );
+    port->sequence_no = sp->sequence_no;
+    sp->server_queue_count = list_count( &port->msg_queue );
+    __atomic_store_n( &sp->seq, s + 2, __ATOMIC_RELEASE );
+
+    if (!port->is_server && !port->listen_port && port->peer && port->peer->listen_port &&
+        port->peer->listen_port->shm_idx >= 0)
+    {
+        struct alpc_port *lp = port->peer->listen_port;
+        lp->sequence_no = alpc_shm->ports[lp->shm_idx].sequence_no;
+    }
+
+    alpc_shm_spin_unlock( &sp->ring_lock );
+}
+
+static void alpc_shm_flush_port( struct alpc_port *port )
+{
+    struct alpc_port *pair;
+    if (!alpc_shm || !port) return;
+    alpc_shm_flush_single( port );
+    pair = alpc_port_pair( port );
+    if (pair) alpc_shm_flush_single( pair );
+    if (port->is_server)
+    {
+        struct alpc_port *conn;
+        LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+            if (conn->peer) alpc_shm_flush_single( conn->peer );
+        if (port->shm_idx >= 0)
+            port->sequence_no = alpc_shm->ports[port->shm_idx].sequence_no;
+    }
+}
 
 static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos );
 static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos );
@@ -470,6 +890,7 @@ static void alpc_port_destroy( struct object *obj )
 
     if (!port->fd) return; /* creation was aborted before full init */
 
+    alpc_shm_free_slot( port );
     list_remove( &port->list_entry );
     async_wake_up( &port->read_q, STATUS_HANDLES_CLOSED );
     free_async_queue( &port->read_q );
@@ -544,8 +965,10 @@ static void alpc_port_destroy( struct object *obj )
                     free( o );
                 }
             }
-            if (port->peer->peer == port) port->peer->peer = NULL;
+            struct alpc_port *peer = port->peer;
+            if (peer->peer == port) peer->peer = NULL;
             port->peer = NULL;
+            alpc_shm_sync_port( peer );
         }
         /* client side: unlink from the listening port's connection list
          * (safe even when not linked: conn_entry is list_init'd) */
@@ -766,6 +1189,11 @@ static void wake_connection_waits( struct alpc_port *port )
         p = ports[i];
         signal_wait_completion_packets( &p->obj );
         fire_wait_completion_packets( &p->obj );
+        if (p->has_wcp)
+        {
+            p->has_wcp = 0;
+            alpc_shm_sync_port( p );
+        }
     }
 }
 
@@ -830,20 +1258,30 @@ static void deliver_alpc_queue( struct alpc_port *port, struct alpc_port *queue 
 static void reselect_alpc_port( struct alpc_port *port )
 {
     deliver_alpc_queue( port, port );
-    if (alpc_port_pair( port )) deliver_alpc_queue( port, alpc_port_pair( port ) );
+    if (alpc_port_pair( port ))
+    {
+        deliver_alpc_queue( port, alpc_port_pair( port ) );
+        alpc_shm_sync_port( alpc_port_pair( port ) );
+    }
     if (port->is_server)
     {
         struct alpc_port *conn;
         LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-            if (conn->peer) deliver_alpc_queue( port, conn->peer );
+            if (conn->peer)
+            {
+                deliver_alpc_queue( port, conn->peer );
+                alpc_shm_sync_port( conn->peer );
+            }
     }
     update_alpc_readiness( port );
+    alpc_shm_sync_port( port );
 }
 
 static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos )
 {
     struct alpc_port *port = get_fd_user( fd );
 
+    alpc_shm_flush_port( port );
     /* A receive on an empty queue is armed and parks (STATUS_PENDING):
      * NtAlpcSendWaitReceivePort with no Timeout blocks, with a real Timeout
      * expires as STATUS_TIMEOUT, and with a zero Timeout polls — the
@@ -853,6 +1291,7 @@ static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos )
      * connection port immediately and poisoned the armed-receive model. */
     queue_async( &port->read_q, async );
     reselect_alpc_port( port );
+    alpc_shm_sync_port( port );
     set_error( STATUS_PENDING );
 }
 
@@ -1000,6 +1439,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
                  (msg_type == ALPC_LPC_REPLY || reply_stamped), hex );
     }
 #endif
+    alpc_shm_flush_single( peer );
     WV2IO( "P pid=%04x ->=%04x seq=%u len=%u r=%d\n", sender_pid,
            peer->process ? peer->process->id : 0, peer->sequence_no + 1, user_size,
            (msg_type == ALPC_LPC_REPLY || reply_stamped) ? 1 : 0 );
@@ -1014,6 +1454,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
         peer->peer->listen_port->sequence_no++;
         wake_up( &peer->peer->listen_port->obj, 0 );
         reselect_alpc_port( peer->peer->listen_port );
+        alpc_shm_sync_port( peer->peer->listen_port );
     }
     /* readiness of any handle of a connection is readiness of all of them: the
      * client keys its wake completion packets to the handle it arms the receive
@@ -1035,6 +1476,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
      * (delivered messages cleared it in reselect_alpc_port); a message on a
      * reserve port is readiness of its connection handle too */
     update_alpc_readiness( peer );
+    alpc_shm_sync_port( peer );
 
     return 1;
 }
@@ -1604,7 +2046,11 @@ struct object *find_thread_alpc_receive_port( struct thread *thread )
     LIST_FOR_EACH_ENTRY( port, &alpc_port_list, struct alpc_port, list_entry )
     {
         if (async_queue_has_thread( &port->read_q, thread ))
+        {
+            port->has_wcp = 1;
+            alpc_shm_sync_port( port );
             return grab_object( &port->obj );
+        }
     }
 
     /* with no receive in flight the wake is armed for the conversation this
@@ -1618,7 +2064,13 @@ struct object *find_thread_alpc_receive_port( struct thread *thread )
             port->client_pid == get_process_id( current->process ))
             candidate = port; /* creation order: the newest wins */
     }
-    return candidate ? grab_object( &candidate->obj ) : NULL;
+    if (candidate)
+    {
+        candidate->has_wcp = 1;
+        alpc_shm_sync_port( candidate );
+        return grab_object( &candidate->obj );
+    }
+    return NULL;
 }
 
 /* Wake every ALPC receive parked on a process's ports.
@@ -1667,6 +2119,8 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     list_init( &port->pending_conns );
     list_init( &port->connections );
     list_init( &port->conn_entry );
+    port->shm_idx = -1;
+    port->has_wcp = 0;
 
     port->fd = alloc_pseudo_fd( &alpc_fd_ops, &port->obj, opts );
     if (!port->fd)
@@ -1676,6 +2130,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     }
     set_fd_signaled( port->fd, 0 );
     list_add_tail( &alpc_port_list, &port->list_entry );
+    alpc_shm_alloc_slot( port );
     return port;
 }
 
@@ -1788,6 +2243,8 @@ DECL_HANDLER(create_alpc_port)
         list_init( &port->pending_conns );
         list_init( &port->connections );
         list_init( &port->conn_entry );
+        port->shm_idx = -1;
+        port->has_wcp = 0;
         port->fd = alloc_pseudo_fd( &alpc_fd_ops, &port->obj, FILE_SYNCHRONOUS_IO_NONALERT );
         if (!port->fd)
         {
@@ -1796,9 +2253,11 @@ DECL_HANDLER(create_alpc_port)
         }
         set_fd_signaled( port->fd, 0 );
         list_add_tail( &alpc_port_list, &port->list_entry );
+        alpc_shm_alloc_slot( port );
     }
 
     reply->handle = alloc_handle( current->process, port, req->access, objattr->attributes );
+    if (reply->handle) alpc_shm_register_handle( current->process, reply->handle, port );
     release_object( port );
 }
 
@@ -1888,6 +2347,7 @@ DECL_HANDLER(connect_alpc_port)
         release_object( server_port );
         return;
     }
+    alpc_shm_register_handle( current->process, reply->handle, client_port );
 
     /* Queue connect notification to server port */
     list_add_tail( &server_port->pending_conns, &pc->entry );
@@ -2007,6 +2467,8 @@ static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port
     found->client_port->port_context = port_context;
     /* track the connection on the listening port for reply routing */
     list_add_tail( &server_port->connections, &found->client_port->conn_entry );
+    alpc_shm_sync_port( server_conn_port );
+    alpc_shm_sync_port( found->client_port );
 
     /* the slurped connect request stays outstanding on the listening port
      * until the server commits the connect exchange with its zero-payload
@@ -2144,6 +2606,7 @@ DECL_HANDLER(accept_alpc_connection)
     {
         reply->handle = alloc_handle( current->process, server_conn_port,
                                       GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );
+        if (reply->handle) alpc_shm_register_handle( current->process, reply->handle, server_conn_port );
         fprintf( stderr, "ACCEPT_ALPC_CONN: pid=%04x tid=%04x handle=%x server_conn=%p peer=%p context=%lx\n",
                  current->process->id, current->id, reply->handle, server_conn_port, server_conn_port->peer, (unsigned long)req->port_context );
         WV2IO( "A pid=%04x conn=%04x ctx=%lx\n", current->process->id,
@@ -2190,6 +2653,8 @@ DECL_HANDLER(wire_alpc_reverse_port)
 
     update_alpc_readiness( conn );
     update_alpc_readiness( rev );
+    alpc_shm_sync_port( conn );
+    alpc_shm_sync_port( rev );
 
     release_object( conn );
     release_object( rev );
@@ -2282,6 +2747,8 @@ DECL_HANDLER(alpc_query_port)
                                                                  0, &alpc_port_ops );
     if (!port) return;
 
+    alpc_shm_flush_port( port );
+    alpc_shm_register_handle( current->process, req->handle, port );
     reply->flags       = port->flags;
     reply->sequence_no = port->sequence_no;
     reply->port_context = port->port_context;
@@ -2297,16 +2764,19 @@ DECL_HANDLER(disconnect_alpc_port)
 
     if (!port->is_server && port->peer)
     {
-        async_wake_up( &port->peer->read_q, STATUS_PIPE_DISCONNECTED );
-        alpc_gate_clear( port->peer, STATUS_PIPE_DISCONNECTED );
+        struct alpc_port *peer = port->peer;
+        async_wake_up( &peer->read_q, STATUS_PIPE_DISCONNECTED );
+        alpc_gate_clear( peer, STATUS_PIPE_DISCONNECTED );
         alpc_gate_clear( port, STATUS_PIPE_DISCONNECTED );
-        if (port->peer->peer == port)
+        if (peer->peer == port)
         {
-            release_object( port->peer->peer ); /* release client's ref to server */
-            port->peer->peer = NULL;
+            release_object( peer->peer ); /* release client's ref to server */
+            peer->peer = NULL;
         }
-        release_object( port->peer );
+        release_object( peer );
         port->peer = NULL;
+        alpc_shm_sync_port( peer );
+        alpc_shm_sync_port( port );
     }
 
     release_object( port );

@@ -23,8 +23,15 @@
 #pragma makedep unix
 #endif
 
+#include <fcntl.h>
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -33,6 +40,198 @@
 #include "unix_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(alpc);
+
+#define ALPC_SHM_MAGIC          0x414c5053u /* 'ALPS' */
+#define ALPC_SHM_VERSION        1u
+#define ALPC_SHM_MAX_PORTS      512u
+#define ALPC_SHM_HANDLE_BUCKETS 1024u
+#define ALPC_SHM_HANDLE_WAYS    4u
+#define ALPC_SHM_HANDLE_SLOTS   (ALPC_SHM_HANDLE_BUCKETS * ALPC_SHM_HANDLE_WAYS)
+#define ALPC_SHM_RING_SLOTS     16u
+#define ALPC_SHM_SLOT_MAX_DATA  512u
+#define ALPC_SHM_SPIN_LIMIT     10000
+
+struct alpc_shm_msg
+{
+    uint32_t user_size;
+    uint32_t msg_id;
+    uint32_t client_pid;
+    uint32_t client_tid;
+    uint64_t port_context;
+    uint64_t msg_context;
+    uint32_t sequence;
+    uint32_t callback_id;
+    uint32_t attr_flags;
+    uint32_t pad;
+    uint8_t  data[ALPC_SHM_SLOT_MAX_DATA];
+};
+
+struct alpc_shm_port
+{
+    uint32_t seq;
+    uint32_t active;
+    uint64_t gen;
+
+    uint32_t flags;
+    uint32_t sequence_no;
+    uint64_t port_context;
+
+    uint32_t ring_lock;
+    uint32_t ring_disabled;
+    uint32_t is_server;
+    uint32_t max_msg_len;
+
+    uint32_t peer_idx;
+    uint64_t peer_gen;
+
+    uint32_t server_queue_count;
+    uint32_t has_waiters;
+    uint32_t has_wcp;
+    uint32_t pair_idx;
+    uint32_t listen_idx;
+    uint32_t pad0;
+
+    uint32_t ring_head;
+    uint32_t ring_tail;
+    uint32_t ring_count;
+    uint32_t pad1;
+    struct alpc_shm_msg ring[ALPC_SHM_RING_SLOTS];
+};
+
+struct alpc_shm_handle
+{
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t handle;
+    uint32_t port_idx;
+    uint64_t port_gen;
+};
+
+struct alpc_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    struct alpc_shm_port   ports[ALPC_SHM_MAX_PORTS];
+    struct alpc_shm_handle handles[ALPC_SHM_HANDLE_SLOTS];
+};
+
+static struct alpc_shm *alpc_shm = NULL;
+static pthread_once_t alpc_shm_once = PTHREAD_ONCE_INIT;
+
+static void init_alpc_shm(void)
+{
+    struct stat st;
+    char path[1024];
+    int fd;
+    struct alpc_shm *ptr;
+
+    if (!config_dir || stat( config_dir, &st ) == -1) return;
+#ifdef __ANDROID__
+    snprintf( path, sizeof(path), "%s/.wineserver/server-%llx-%llx/alpc_shm",
+              config_dir, (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#else
+    snprintf( path, sizeof(path), "/tmp/.wine-%u/server-%llx-%llx/alpc_shm",
+              getuid(), (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#endif
+    fd = open( path, O_RDWR | O_CLOEXEC );
+    if (fd == -1) return;
+    if (fstat( fd, &st ) == -1 || st.st_size < (off_t)sizeof(struct alpc_shm))
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct alpc_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+    if (__atomic_load_n( &ptr->magic, __ATOMIC_ACQUIRE ) != ALPC_SHM_MAGIC ||
+        ptr->version != ALPC_SHM_VERSION)
+    {
+        munmap( ptr, sizeof(struct alpc_shm) );
+        return;
+    }
+    __atomic_store_n( &alpc_shm, ptr, __ATOMIC_RELEASE );
+}
+
+static inline struct alpc_shm *get_alpc_shm(void)
+{
+    struct alpc_shm *shm = __atomic_load_n( &alpc_shm, __ATOMIC_ACQUIRE );
+    if (!shm)
+    {
+        pthread_once( &alpc_shm_once, init_alpc_shm );
+        shm = __atomic_load_n( &alpc_shm, __ATOMIC_ACQUIRE );
+    }
+    return shm;
+}
+
+static inline uint32_t alpc_shm_hash_handle( uint32_t pid, uint32_t handle )
+{
+    uint64_t x = ((uint64_t)pid << 32) | handle;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return (uint32_t)x;
+}
+
+static inline int alpc_shm_spin_lock( uint32_t *lock )
+{
+    int i;
+    for (i = 0; i < ALPC_SHM_SPIN_LIMIT; i++)
+    {
+        if (__atomic_exchange_n( lock, 1, __ATOMIC_ACQUIRE ) == 0)
+            return 1;
+        while (__atomic_load_n( lock, __ATOMIC_RELAXED ))
+        {
+#if defined(__i386__) || defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    return 0;
+}
+
+static inline void alpc_shm_spin_unlock( uint32_t *lock )
+{
+    __atomic_store_n( lock, 0, __ATOMIC_RELEASE );
+}
+
+static inline struct alpc_shm_port *alpc_shm_lookup_port( struct alpc_shm *shm, HANDLE port_handle, uint64_t *gen_out )
+{
+    uint32_t pid = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
+    uint32_t hval = (uint32_t)wine_server_obj_handle( port_handle );
+    uint32_t base = (alpc_shm_hash_handle( pid, hval ) % ALPC_SHM_HANDLE_BUCKETS) * ALPC_SHM_HANDLE_WAYS;
+    uint32_t way;
+
+    for (way = 0; way < ALPC_SHM_HANDLE_WAYS; way++)
+    {
+        struct alpc_shm_handle *h = &shm->handles[base + way];
+        int tries;
+        for (tries = 0; tries < 64; tries++)
+        {
+            uint32_t s1 = __atomic_load_n( &h->seq, __ATOMIC_ACQUIRE );
+            uint32_t h_pid, h_handle, p_idx;
+            uint64_t p_gen;
+            uint32_t s2;
+
+            if (s1 & 1) continue;
+            h_pid    = h->pid;
+            h_handle = h->handle;
+            p_idx    = h->port_idx;
+            p_gen    = h->port_gen;
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
+            s2 = __atomic_load_n( &h->seq, __ATOMIC_ACQUIRE );
+            if (s1 != s2) continue;
+            if (p_idx < ALPC_SHM_MAX_PORTS && h_pid == pid && h_handle == hval)
+            {
+                *gen_out = p_gen;
+                return &shm->ports[p_idx];
+            }
+            break;
+        }
+    }
+    return NULL;
+}
 
 /* ALPC message types.  The user-visible PORT_MESSAGE u2.s2.Type carries the
  * classic LPC message-type values (LPCRequest 1, LPCReply 2, LPCDatagram 3,
@@ -874,16 +1073,128 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     ALPC_EVENT *recv_event;
     IO_STATUS_BLOCK io = { { STATUS_PENDING } };
     data_size_t recv_size = recv_buffer_size ? (data_size_t)*recv_buffer_size : 0;
+    struct alpc_shm *shm = get_alpc_shm();
+    int fast_sent = 0;
 
     TRACE( "(%p, %#x, %p, %p, %p, %p, %p, %p)\n",
            port_handle, (unsigned int)flags, send_msg, send_msg_attr,
            recv_msg, recv_buffer_size, recv_msg_attr, timeout );
 
+    /* --- Tier 2 Fast-Path: Datagram Send --- */
+    if (shm && send_msg && !(flags & ~ALPC_MSGFLG_RELEASE_MESSAGE) &&
+        (send_msg->Type & ~0x8000) == LPC_DATAGRAM &&
+        send_msg->TotalLength >= sizeof(ALPC_PORT_MESSAGE) &&
+        send_msg->TotalLength <= ALPC_SHM_SLOT_MAX_DATA &&
+        (!send_msg_attr ||
+         (!(send_msg_attr->ValidAttributes & ~ALPC_MESSAGE_CONTEXT_ATTRIBUTE) &&
+          !(send_msg_attr->AllocatedAttributes & ALPC_MESSAGE_EVENT_ATTRIBUTE))))
+    {
+        uint64_t src_gen = 0;
+        struct alpc_shm_port *src_sp = alpc_shm_lookup_port( shm, port_handle, &src_gen );
+        if (src_sp)
+        {
+            uint32_t s1 = __atomic_load_n( &src_sp->seq, __ATOMIC_ACQUIRE );
+            uint32_t active = src_sp->active, is_srv = src_sp->is_server, max_len = src_sp->max_msg_len;
+            uint32_t dst_idx = src_sp->peer_idx;
+            uint64_t sgen = src_sp->gen, dst_gen = src_sp->peer_gen;
+            uint32_t rdis = src_sp->ring_disabled;
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
+            if (!(s1 & 1) && s1 == __atomic_load_n( &src_sp->seq, __ATOMIC_ACQUIRE ) &&
+                active && sgen == src_gen && !is_srv && !rdis &&
+                dst_idx < ALPC_SHM_MAX_PORTS &&
+                (!max_len || (send_msg->TotalLength <= max_len && send_msg->DataLength <= max_len)) &&
+                send_msg->DataLength <= 65536)
+            {
+                struct alpc_shm_port *dst_sp = &shm->ports[dst_idx];
+                if (alpc_shm_spin_lock( &dst_sp->ring_lock ))
+                {
+                    uint32_t pair_idx = dst_sp->pair_idx;
+                    uint32_t listen_idx = dst_sp->listen_idx;
+                    int ok = dst_sp->active && dst_sp->gen == dst_gen && !dst_sp->is_server &&
+                             !dst_sp->ring_disabled && dst_sp->has_waiters == 0 && dst_sp->has_wcp == 0 &&
+                             dst_sp->ring_count < ALPC_SHM_RING_SLOTS;
+                    if (ok && pair_idx < ALPC_SHM_MAX_PORTS)
+                    {
+                        struct alpc_shm_port *pp = &shm->ports[pair_idx];
+                        if (pp->has_waiters || pp->has_wcp) ok = 0;
+                    }
+                    if (ok && listen_idx < ALPC_SHM_MAX_PORTS)
+                    {
+                        struct alpc_shm_port *lp = &shm->ports[listen_idx];
+                        if (lp->has_waiters || lp->has_wcp) ok = 0;
+                    }
+                    if (ok)
+                    {
+                        struct alpc_shm_msg *sm = &dst_sp->ring[dst_sp->ring_tail];
+                        uint32_t ds;
+                        send_msg->MessageId = 0;
+                        sm->user_size    = send_msg->TotalLength;
+                        sm->msg_id       = 0;
+                        sm->client_pid   = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
+                        sm->client_tid   = HandleToULong( NtCurrentTeb()->ClientId.UniqueThread );
+                        sm->port_context = dst_sp->port_context;
+                        if (send_msg_attr && (send_msg_attr->ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
+                        {
+                            ALPC_CONTEXT_ATTR *ctx = get_message_attribute( send_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+                            if (ctx)
+                            {
+                                sm->attr_flags  = ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+                                sm->msg_context = (uint64_t)(ULONG_PTR)ctx->MessageContext;
+                                sm->sequence    = ctx->Sequence;
+                                sm->callback_id = ctx->CallbackId;
+                            }
+                            else
+                            {
+                                sm->attr_flags = 0;
+                                sm->msg_context = 0;
+                                sm->sequence = 0;
+                                sm->callback_id = 0;
+                            }
+                        }
+                        else
+                        {
+                            sm->attr_flags  = 0;
+                            sm->msg_context = 0;
+                            sm->sequence    = 0;
+                            sm->callback_id = 0;
+                        }
+                        memcpy( sm->data, send_msg, send_msg->TotalLength );
+                        if (sm->user_size >= 80 &&
+                            *(const unsigned short *)sm->data + 40 == (unsigned short)sm->user_size &&
+                            *(const unsigned short *)(sm->data + 2) == (unsigned short)sm->user_size)
+                        {
+                            *(unsigned short *)(sm->data + 0x40) = 0;
+                            *(unsigned short *)(sm->data + 0x42) = 1;
+                            *(unsigned int *)(sm->data + 0x48)   = sm->user_size - 80;
+                        }
+                        dst_sp->ring_tail = (dst_sp->ring_tail + 1) % ALPC_SHM_RING_SLOTS;
+                        dst_sp->ring_count++;
+                        ds = dst_sp->seq;
+                        __atomic_store_n( &dst_sp->seq, ds + 1, __ATOMIC_RELEASE );
+                        dst_sp->sequence_no++;
+                        __atomic_store_n( &dst_sp->seq, ds + 2, __ATOMIC_RELEASE );
+                        if (listen_idx < ALPC_SHM_MAX_PORTS)
+                        {
+                            struct alpc_shm_port *lp = &shm->ports[listen_idx];
+                            uint32_t ls = __atomic_load_n( &lp->seq, __ATOMIC_RELAXED );
+                            __atomic_store_n( &lp->seq, ls + 1, __ATOMIC_RELEASE );
+                            __atomic_add_fetch( &lp->sequence_no, 1, __ATOMIC_RELAXED );
+                            __atomic_store_n( &lp->seq, ls + 2, __ATOMIC_RELEASE );
+                        }
+                        fast_sent = 1;
+                    }
+                    alpc_shm_spin_unlock( &dst_sp->ring_lock );
+                }
+            }
+        }
+        if (fast_sent && !recv_msg) return STATUS_SUCCESS;
+    }
+
     /* --- Send phase --- */
     /* ALPC_MSGFLG_REPLY_WAIT_ONLY sends nothing: it only waits for the reply
      * of the request named by the message context, so the send leg is
      * skipped and the receive arms for that request's id. */
-    if (send_msg && !(flags & ALPC_MSGFLG_REPLY_WAIT_ONLY))
+    if (!fast_sent && send_msg && !(flags & ALPC_MSGFLG_REPLY_WAIT_ONLY))
     {
         data_size_t send_size = send_msg->TotalLength;
         struct alpc_msg_attr_hdr attr_hdr;
@@ -1052,6 +1363,66 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         recv_size = dummy_size;
     }
     else if (!recv_msg) return STATUS_SUCCESS;
+
+    /* --- Tier 2 Fast-Path: Non-blocking / Queued Ring Receive --- */
+    if (shm && !(flags & ALPC_MSGFLG_REPLY_WAIT_ONLY) && (!send_msg || fast_sent) &&
+        (!recv_msg_attr || !(recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_EVENT_ATTRIBUTE)))
+    {
+        uint64_t r_gen = 0;
+        struct alpc_shm_port *sp = alpc_shm_lookup_port( shm, port_handle, &r_gen );
+        if (sp && sp->active && sp->gen == r_gen && !sp->is_server && !sp->ring_disabled &&
+            sp->server_queue_count == 0 &&
+            (sp->pair_idx == UINT32_MAX || shm->ports[sp->pair_idx].server_queue_count == 0))
+        {
+            if (alpc_shm_spin_lock( &sp->ring_lock ))
+            {
+                if (sp->active && sp->gen == r_gen && !sp->ring_disabled && sp->server_queue_count == 0)
+                {
+                    if (sp->ring_count > 0)
+                    {
+                        struct alpc_shm_msg *sm = &sp->ring[sp->ring_head];
+                        if (recv_size < sm->user_size)
+                        {
+                            data_size_t needed = sm->user_size;
+                            alpc_shm_spin_unlock( &sp->ring_lock );
+                            if (recv_buffer_size) *recv_buffer_size = needed;
+                            return STATUS_BUFFER_TOO_SMALL;
+                        }
+                        memcpy( recv_msg, sm->data, sm->user_size );
+                        recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)sm->client_pid;
+                        recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)sm->client_tid;
+                        if (recv_buffer_size) *recv_buffer_size = sm->user_size;
+                        if (recv_msg_attr && (recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
+                        {
+                            ALPC_CONTEXT_ATTR *ctx = get_message_attribute( recv_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+                            if (ctx)
+                            {
+                                ctx->PortContext    = (void *)(ULONG_PTR)sm->port_context;
+                                ctx->MessageContext = (void *)(ULONG_PTR)sm->msg_context;
+                                ctx->Sequence       = sm->sequence;
+                                ctx->MessageId      = sm->msg_id;
+                                ctx->CallbackId     = sm->callback_id;
+                                recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+                            }
+                        }
+                        sp->ring_head = (sp->ring_head + 1) % ALPC_SHM_RING_SLOTS;
+                        sp->ring_count--;
+                        alpc_shm_spin_unlock( &sp->ring_lock );
+                        return STATUS_SUCCESS;
+                    }
+                    else if (timeout && !timeout->QuadPart && sp->peer_idx < ALPC_SHM_MAX_PORTS &&
+                             (sp->pair_idx == UINT32_MAX ||
+                              (shm->ports[sp->pair_idx].ring_count == 0 &&
+                               shm->ports[sp->pair_idx].server_queue_count == 0)))
+                    {
+                        alpc_shm_spin_unlock( &sp->ring_lock );
+                        return STATUS_UNSUCCESSFUL;
+                    }
+                }
+                alpc_shm_spin_unlock( &sp->ring_lock );
+            }
+        }
+    }
 
     /* --- Receive phase --- */
     if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
@@ -1381,6 +1752,43 @@ NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
         else if (!port_handle) st = STATUS_INVALID_HANDLE;
         else
         {
+            struct alpc_shm *shm = get_alpc_shm();
+            if (shm)
+            {
+                uint64_t p_gen = 0;
+                struct alpc_shm_port *sp = alpc_shm_lookup_port( shm, port_handle, &p_gen );
+                if (sp)
+                {
+                    int tries;
+                    for (tries = 0; tries < 64; tries++)
+                    {
+                        uint32_t s1 = __atomic_load_n( &sp->seq, __ATOMIC_ACQUIRE );
+                        uint32_t active, flags_val, seq_no;
+                        uint64_t gen_val, ctx_val;
+                        uint32_t s2;
+
+                        if (s1 & 1) continue;
+                        active    = sp->active;
+                        gen_val   = sp->gen;
+                        flags_val = sp->flags;
+                        seq_no    = sp->sequence_no;
+                        ctx_val   = sp->port_context;
+                        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+                        s2 = __atomic_load_n( &sp->seq, __ATOMIC_ACQUIRE );
+                        if (s1 != s2) continue;
+                        if (active && gen_val == p_gen)
+                        {
+                            info.Flags       = flags_val;
+                            info.SequenceNo  = seq_no;
+                            info.PortContext = (void *)(ULONG_PTR)ctx_val;
+                            memcpy( buffer, &info, sizeof(info) );
+                            if (ret_length) *ret_length = sizeof(info);
+                            return STATUS_SUCCESS;
+                        }
+                        break;
+                    }
+                }
+            }
             SERVER_START_REQ( alpc_query_port )
             {
                 req->handle = wine_server_obj_handle( port_handle );
