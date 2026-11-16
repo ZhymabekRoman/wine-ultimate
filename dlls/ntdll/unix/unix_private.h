@@ -446,6 +446,10 @@ extern void flight_recorder_dump( const char *path );
 
 extern void close_inproc_sync( HANDLE handle );
 extern void invalidate_type_cache( HANDLE handle );
+extern BOOL is_local_sync_handle( HANDLE handle );
+extern NTSTATUS close_local_sync_handle( HANDLE handle );
+extern NTSTATUS promote_local_sync_handle( HANDLE handle, HANDLE *real_handle );
+extern NTSTATUS retire_local_sync_handle( HANDLE handle, HANDLE *real_handle );
 
 extern BOOL iocp_shm_try_push( HANDLE iocp_port, ULONG_PTR key, ULONG_PTR value,
                                NTSTATUS status, ULONG_PTR count );

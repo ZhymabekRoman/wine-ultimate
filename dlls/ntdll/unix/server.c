@@ -302,8 +302,135 @@ unsigned int server_call_unlocked( void *req_ptr )
  */
 unsigned int CDECL wine_server_call( void *req_ptr )
 {
+    struct __server_request_info *req = req_ptr;
     sigset_t old_set;
     unsigned int ret;
+
+    switch (req->u.req.request_header.req)
+    {
+    case REQ_get_object_info:
+    case REQ_get_object_name:
+    case REQ_get_object_type:
+    case REQ_set_handle_info:
+    case REQ_set_object_permanence:
+    case REQ_get_handle_fd:
+    case REQ_set_fd_completion_mode:
+    case REQ_get_file_info:
+    {
+        HANDLE h = wine_server_ptr_handle( req->u.req.get_object_info_request.handle );
+        if (is_local_sync_handle( h ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( h, &real ))) return ret;
+            req->u.req.get_object_info_request.handle = wine_server_obj_handle( real );
+        }
+        break;
+    }
+    case REQ_read:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.read_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.read_request.async.event ), &real ))) return ret;
+            req->u.req.read_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_write:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.write_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.write_request.async.event ), &real ))) return ret;
+            req->u.req.write_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_ioctl:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.ioctl_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.ioctl_request.async.event ), &real ))) return ret;
+            req->u.req.ioctl_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_flush:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.flush_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.flush_request.async.event ), &real ))) return ret;
+            req->u.req.flush_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_register_async:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.register_async_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.register_async_request.async.event ), &real ))) return ret;
+            req->u.req.register_async_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_recv_socket:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.recv_socket_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.recv_socket_request.async.event ), &real ))) return ret;
+            req->u.req.recv_socket_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_send_socket:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.send_socket_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.send_socket_request.async.event ), &real ))) return ret;
+            req->u.req.send_socket_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_read_directory_changes:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.read_directory_changes_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.read_directory_changes_request.async.event ), &real ))) return ret;
+            req->u.req.read_directory_changes_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_get_volume_info:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.get_volume_info_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.get_volume_info_request.async.event ), &real ))) return ret;
+            req->u.req.get_volume_info_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_socket_get_events:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.socket_get_events_request.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.socket_get_events_request.event ), &real ))) return ret;
+            req->u.req.socket_get_events_request.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_set_registry_notification:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.set_registry_notification_request.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.set_registry_notification_request.event ), &real ))) return ret;
+            req->u.req.set_registry_notification_request.event = wine_server_obj_handle( real );
+        }
+        break;
+    case REQ_recv_alpc_port:
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.recv_alpc_port_request.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.recv_alpc_port_request.event ), &real ))) return ret;
+            req->u.req.recv_alpc_port_request.event = wine_server_obj_handle( real );
+        }
+        if (is_local_sync_handle( wine_server_ptr_handle( req->u.req.recv_alpc_port_request.async.event ) ))
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( wine_server_ptr_handle( req->u.req.recv_alpc_port_request.async.event ), &real ))) return ret;
+            req->u.req.recv_alpc_port_request.async.event = wine_server_obj_handle( real );
+        }
+        break;
+    default:
+        break;
+    }
 
     pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
     ret = server_call_unlocked( req_ptr );
@@ -1186,6 +1313,13 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
     *needs_close = 0;
     wanted_access &= FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA;
 
+    if (is_local_sync_handle( handle ))
+    {
+        HANDLE real;
+        if ((ret = promote_local_sync_handle( handle, &real ))) return ret;
+        handle = real;
+    }
+
     ret = get_cached_fd( handle, &fd, type, &access, options );
     if (ret != STATUS_INVALID_HANDLE) goto done;
 
@@ -1897,6 +2031,22 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
 
     if (dest) *dest = 0;
 
+    if (source_process == NtCurrentProcess() && is_local_sync_handle( source ))
+    {
+        HANDLE real_source;
+
+        if (options & DUPLICATE_CLOSE_SOURCE)
+        {
+            if ((ret = retire_local_sync_handle( source, &real_source ))) return ret;
+            invalidate_type_cache( source );
+        }
+        else
+        {
+            if ((ret = promote_local_sync_handle( source, &real_source ))) return ret;
+        }
+        source = real_source;
+    }
+
     if ((options & DUPLICATE_CLOSE_SOURCE) && source_process != NtCurrentProcess())
     {
         union apc_call call;
@@ -2207,6 +2357,19 @@ NTSTATUS WINAPI NtCompareObjects( HANDLE first, HANDLE second )
     unsigned int status;
     struct obj_shm_handle_slot e1, e2;
 
+    if (is_local_sync_handle( first ))
+    {
+        HANDLE real_first;
+        if ((status = promote_local_sync_handle( first, &real_first ))) return status;
+        first = real_first;
+    }
+    if (is_local_sync_handle( second ))
+    {
+        HANDLE real_second;
+        if ((status = promote_local_sync_handle( second, &real_second ))) return status;
+        second = real_second;
+    }
+
     if (obj_shm_lookup_handle( first, &e1 ) && obj_shm_lookup_handle( second, &e2 ))
         return (e1.obj_ptr == e2.obj_ptr) ? STATUS_SUCCESS : STATUS_NOT_SAME_OBJECT;
 
@@ -2244,6 +2407,12 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
 
     if (HandleToLong( handle ) >= ~5 && HandleToLong( handle ) <= ~0)
         return STATUS_SUCCESS;
+
+    if (is_local_sync_handle( handle ))
+    {
+        invalidate_type_cache( handle );
+        return close_local_sync_handle( handle );
+    }
 
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */

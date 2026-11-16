@@ -143,6 +143,11 @@ static inline int futex_wake_one( const LONG *addr )
     return syscall( __NR_futex, addr, FUTEX_WAKE_PRIVATE, 1, NULL, 0, 0 );
 }
 
+static inline int futex_wake_n( const LONG *addr, int count )
+{
+    return syscall( __NR_futex, addr, FUTEX_WAKE_PRIVATE, count, NULL, 0, 0 );
+}
+
 #elif defined(__APPLE__)
 
 #define USE_FUTEX
@@ -1041,6 +1046,593 @@ done:
 }
 
 
+#ifdef __linux__
+
+#define LOCAL_SYNC_HANDLE_TAG   0x40000000u
+#define LOCAL_SYNC_BLOCK_BITS   9
+#define LOCAL_SYNC_BLOCK_SIZE   (1u << LOCAL_SYNC_BLOCK_BITS)
+#define LOCAL_SYNC_MAX_BLOCKS   32u
+#define LOCAL_SYNC_MAX_SLOTS    (LOCAL_SYNC_BLOCK_SIZE * LOCAL_SYNC_MAX_BLOCKS) /* 16384 */
+#define LOCAL_SYNC_INVALID_IDX  0xffffffffu
+
+enum local_sync_type
+{
+    LOCAL_SYNC_FREE = 0,
+    LOCAL_SYNC_EVENT_MANUAL,
+    LOCAL_SYNC_EVENT_AUTO,
+    LOCAL_SYNC_SEMAPHORE,
+};
+
+struct local_sync_slot
+{
+    LONG lock;
+    LONG refcount;
+    LONG state;
+    LONG waiters;
+    LONG pulse_credits;
+    LONG max_count;
+    LONG promoting;
+    LONG active_mutators;
+    unsigned short type;
+    unsigned short gen;
+    ACCESS_MASK access;
+    uint32_t next_free;
+    HANDLE promoted_handle;
+} __attribute__((aligned(64)));
+
+static struct local_sync_slot local_sync_block0[LOCAL_SYNC_BLOCK_SIZE];
+static struct local_sync_slot *local_sync_blocks[LOCAL_SYNC_MAX_BLOCKS] = { local_sync_block0 };
+static uint64_t local_sync_free_head = LOCAL_SYNC_INVALID_IDX;
+static uint32_t local_sync_next_idx = 0;
+static LONG local_sync_alloc_lock = 0;
+
+static inline void local_sync_spin_lock( LONG *lock )
+{
+    while (__atomic_exchange_n( lock, 1, __ATOMIC_ACQUIRE ))
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#endif
+    }
+}
+
+static inline void local_sync_spin_unlock( LONG *lock )
+{
+    __atomic_store_n( lock, 0, __ATOMIC_RELEASE );
+}
+
+BOOL is_local_sync_handle( HANDLE handle )
+{
+    ULONG_PTR v = (ULONG_PTR)handle;
+    return (v & ~(ULONG_PTR)0x3fffffffULL) == LOCAL_SYNC_HANDLE_TAG;
+}
+
+static inline HANDLE make_local_sync_handle( uint32_t idx, unsigned short gen )
+{
+    return (HANDLE)(ULONG_PTR)(LOCAL_SYNC_HANDLE_TAG | (((uint32_t)(gen & 0x3fffu)) << 16) | (idx << 2));
+}
+
+static inline struct local_sync_slot *local_sync_slot_ptr( uint32_t idx )
+{
+    uint32_t block = idx >> LOCAL_SYNC_BLOCK_BITS;
+    struct local_sync_slot *ptr;
+
+    if (block >= LOCAL_SYNC_MAX_BLOCKS) return NULL;
+    ptr = __atomic_load_n( &local_sync_blocks[block], __ATOMIC_ACQUIRE );
+    if (!ptr) return NULL;
+    return &ptr[idx & (LOCAL_SYNC_BLOCK_SIZE - 1)];
+}
+
+static uint32_t local_sync_alloc_slot( struct local_sync_slot **slot_out )
+{
+    uint64_t old = __atomic_load_n( &local_sync_free_head, __ATOMIC_ACQUIRE );
+    uint32_t idx, block;
+    struct local_sync_slot *ptr;
+
+    for (;;)
+    {
+        uint64_t next;
+        idx = (uint32_t)old;
+        if (idx == LOCAL_SYNC_INVALID_IDX) break;
+        ptr = local_sync_slot_ptr( idx );
+        next = ((old + (1ULL << 32)) & ~0xffffffffULL) | ptr->next_free;
+        if (__atomic_compare_exchange_n( &local_sync_free_head, &old, next, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+        {
+            *slot_out = ptr;
+            return idx;
+        }
+    }
+
+    idx = __atomic_fetch_add( &local_sync_next_idx, 1, __ATOMIC_RELAXED );
+    if (idx >= LOCAL_SYNC_MAX_SLOTS)
+    {
+        __atomic_store_n( &local_sync_next_idx, LOCAL_SYNC_MAX_SLOTS, __ATOMIC_RELAXED );
+        return LOCAL_SYNC_INVALID_IDX;
+    }
+
+    block = idx >> LOCAL_SYNC_BLOCK_BITS;
+    ptr = __atomic_load_n( &local_sync_blocks[block], __ATOMIC_ACQUIRE );
+    if (!ptr)
+    {
+        local_sync_spin_lock( &local_sync_alloc_lock );
+        ptr = local_sync_blocks[block];
+        if (!ptr)
+        {
+            ptr = mmap( NULL, LOCAL_SYNC_BLOCK_SIZE * sizeof(struct local_sync_slot),
+                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 );
+            if (ptr == MAP_FAILED) ptr = NULL;
+            else __atomic_store_n( &local_sync_blocks[block], ptr, __ATOMIC_RELEASE );
+        }
+        local_sync_spin_unlock( &local_sync_alloc_lock );
+        if (!ptr) return LOCAL_SYNC_INVALID_IDX;
+    }
+
+    *slot_out = &ptr[idx & (LOCAL_SYNC_BLOCK_SIZE - 1)];
+    return idx;
+}
+
+static void local_sync_free_slot( struct local_sync_slot *slot, uint32_t idx )
+{
+    uint64_t old = __atomic_load_n( &local_sync_free_head, __ATOMIC_RELAXED );
+    for (;;)
+    {
+        uint64_t next;
+        slot->next_free = (uint32_t)old;
+        next = ((old + (1ULL << 32)) & ~0xffffffffULL) | idx;
+        if (__atomic_compare_exchange_n( &local_sync_free_head, &old, next, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED ))
+            break;
+    }
+}
+
+static inline struct local_sync_slot *acquire_local_sync_slot( HANDLE handle, uint32_t *idx_out )
+{
+    ULONG_PTR v = (ULONG_PTR)handle;
+    uint32_t idx = (v >> 2) & 0x3fffu;
+    unsigned short gen = (v >> 16) & 0x3fffu;
+    struct local_sync_slot *slot = local_sync_slot_ptr( idx );
+    LONG r;
+
+    if (!slot) return NULL;
+    r = __atomic_load_n( &slot->refcount, __ATOMIC_ACQUIRE );
+    while (r > 0)
+    {
+        if (__atomic_compare_exchange_n( &slot->refcount, &r, r + 1, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+        {
+            if (__atomic_load_n( &slot->type, __ATOMIC_ACQUIRE ) == LOCAL_SYNC_FREE || slot->gen != gen)
+            {
+                if (__atomic_sub_fetch( &slot->refcount, 1, __ATOMIC_RELEASE ) == 0)
+                {
+                    __atomic_thread_fence( __ATOMIC_ACQUIRE );
+                    local_sync_free_slot( slot, idx );
+                }
+                return NULL;
+            }
+            *idx_out = idx;
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+static inline void release_local_sync_slot( struct local_sync_slot *slot, uint32_t idx )
+{
+    if (__atomic_sub_fetch( &slot->refcount, 1, __ATOMIC_RELEASE ) == 0)
+    {
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        local_sync_free_slot( slot, idx );
+    }
+}
+
+static inline BOOL is_local_sync_eligible( const OBJECT_ATTRIBUTES *attr )
+{
+    if (!attr) return TRUE;
+    if (attr->Length != sizeof(*attr)) return FALSE;
+    if (attr->RootDirectory || attr->ObjectName || attr->SecurityDescriptor || attr->SecurityQualityOfService)
+        return FALSE;
+    if (attr->Attributes & ~(ULONG)(OBJ_CASE_INSENSITIVE | OBJ_OPENIF))
+        return FALSE;
+    return TRUE;
+}
+
+static inline BOOL normalize_event_access( ACCESS_MASK access, ACCESS_MASK *out )
+{
+    if (access & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE)) return FALSE;
+    if (access & (GENERIC_ALL | MAXIMUM_ALLOWED))
+        access = (access & ~(GENERIC_ALL | MAXIMUM_ALLOWED)) | EVENT_ALL_ACCESS;
+    *out = access;
+    return TRUE;
+}
+
+static inline BOOL normalize_semaphore_access( ACCESS_MASK access, ACCESS_MASK *out )
+{
+    if (access & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE)) return FALSE;
+    if (access & (GENERIC_ALL | MAXIMUM_ALLOWED))
+        access = (access & ~(GENERIC_ALL | MAXIMUM_ALLOWED)) | SEMAPHORE_ALL_ACCESS;
+    *out = access;
+    return TRUE;
+}
+
+static NTSTATUS promote_slot_locked( struct local_sync_slot *slot, HANDLE *real_handle )
+{
+    HANDLE real = NULL;
+    unsigned int ret = STATUS_SUCCESS;
+
+    if (slot->promoted_handle)
+    {
+        *real_handle = slot->promoted_handle;
+        return STATUS_SUCCESS;
+    }
+
+    __atomic_store_n( &slot->promoting, 1, __ATOMIC_SEQ_CST );
+    while (__atomic_load_n( &slot->active_mutators, __ATOMIC_ACQUIRE ) > 0)
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#endif
+    }
+
+    if (slot->type == LOCAL_SYNC_EVENT_MANUAL || slot->type == LOCAL_SYNC_EVENT_AUTO)
+    {
+        BOOLEAN state = (__atomic_load_n( &slot->state, __ATOMIC_ACQUIRE ) & 1) != 0;
+        SERVER_START_REQ( create_event )
+        {
+            req->access        = slot->access;
+            req->manual_reset  = (slot->type == LOCAL_SYNC_EVENT_MANUAL);
+            req->initial_state = state;
+            ret = wine_server_call( req );
+            real = wine_server_ptr_handle( reply->handle );
+        }
+        SERVER_END_REQ;
+    }
+    else if (slot->type == LOCAL_SYNC_SEMAPHORE)
+    {
+        LONG cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        SERVER_START_REQ( create_semaphore )
+        {
+            req->access  = slot->access;
+            req->initial = cur;
+            req->max     = slot->max_count;
+            ret = wine_server_call( req );
+            real = wine_server_ptr_handle( reply->handle );
+        }
+        SERVER_END_REQ;
+    }
+    else
+    {
+        ret = STATUS_INVALID_HANDLE;
+    }
+
+    if (!ret)
+    {
+        __atomic_store_n( &slot->promoted_handle, real, __ATOMIC_RELEASE );
+        if (__atomic_load_n( &slot->waiters, __ATOMIC_SEQ_CST ) > 0)
+            futex_wake_n( &slot->state, INT_MAX );
+        *real_handle = real;
+    }
+    else
+    {
+        __atomic_store_n( &slot->promoting, 0, __ATOMIC_RELEASE );
+    }
+    return ret;
+}
+
+NTSTATUS promote_local_sync_handle( HANDLE handle, HANDLE *real_handle )
+{
+    uint32_t idx;
+    struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+    unsigned short gen = ((ULONG_PTR)handle >> 16) & 0x3fffu;
+    NTSTATUS ret;
+
+    if (!slot) return STATUS_INVALID_HANDLE;
+
+    if ((*real_handle = __atomic_load_n( &slot->promoted_handle, __ATOMIC_ACQUIRE )))
+    {
+        release_local_sync_slot( slot, idx );
+        return STATUS_SUCCESS;
+    }
+
+    local_sync_spin_lock( &slot->lock );
+    if (slot->type == LOCAL_SYNC_FREE || slot->gen != gen)
+        ret = STATUS_INVALID_HANDLE;
+    else
+        ret = promote_slot_locked( slot, real_handle );
+    local_sync_spin_unlock( &slot->lock );
+
+    release_local_sync_slot( slot, idx );
+    return ret;
+}
+
+NTSTATUS close_local_sync_handle( HANDLE handle )
+{
+    uint32_t idx;
+    struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+    unsigned short gen = ((ULONG_PTR)handle >> 16) & 0x3fffu;
+    HANDLE promoted = NULL;
+    NTSTATUS ret = STATUS_SUCCESS;
+
+    if (!slot) return STATUS_INVALID_HANDLE;
+
+    local_sync_spin_lock( &slot->lock );
+    if (slot->type == LOCAL_SYNC_FREE || slot->gen != gen)
+    {
+        local_sync_spin_unlock( &slot->lock );
+        release_local_sync_slot( slot, idx );
+        return STATUS_INVALID_HANDLE;
+    }
+    promoted = slot->promoted_handle;
+    slot->promoted_handle = NULL;
+    __atomic_store_n( &slot->type, LOCAL_SYNC_FREE, __ATOMIC_RELEASE );
+    slot->gen = (slot->gen + 1) & 0x3fffu;
+    local_sync_spin_unlock( &slot->lock );
+
+    /* Drop creation ref (1) and acquire_local_sync_slot ref (1). */
+    __atomic_sub_fetch( &slot->refcount, 1, __ATOMIC_RELEASE );
+    release_local_sync_slot( slot, idx );
+
+    if (promoted) ret = NtClose( promoted );
+    return ret;
+}
+
+NTSTATUS retire_local_sync_handle( HANDLE handle, HANDLE *real_handle )
+{
+    uint32_t idx;
+    struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+    unsigned short gen = ((ULONG_PTR)handle >> 16) & 0x3fffu;
+    NTSTATUS ret;
+
+    if (!slot) return STATUS_INVALID_HANDLE;
+
+    local_sync_spin_lock( &slot->lock );
+    if (slot->type == LOCAL_SYNC_FREE || slot->gen != gen)
+    {
+        local_sync_spin_unlock( &slot->lock );
+        release_local_sync_slot( slot, idx );
+        return STATUS_INVALID_HANDLE;
+    }
+    ret = promote_slot_locked( slot, real_handle );
+    if (!ret)
+    {
+        slot->promoted_handle = NULL;
+        __atomic_store_n( &slot->type, LOCAL_SYNC_FREE, __ATOMIC_RELEASE );
+        slot->gen = (slot->gen + 1) & 0x3fffu;
+    }
+    local_sync_spin_unlock( &slot->lock );
+
+    if (!ret) __atomic_sub_fetch( &slot->refcount, 1, __ATOMIC_RELEASE );
+    release_local_sync_slot( slot, idx );
+    return ret;
+}
+
+static NTSTATUS local_sync_wait( HANDLE handle, const LARGE_INTEGER *timeout )
+{
+    uint32_t idx;
+    struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+    HANDLE promoted;
+    unsigned short type;
+    struct timespec deadline;
+    clockid_t clk = CLOCK_MONOTONIC;
+    BOOL has_deadline = FALSE;
+    NTSTATUS ret = STATUS_SUCCESS;
+
+    if (!slot) return STATUS_INVALID_HANDLE;
+
+    if (!(slot->access & SYNCHRONIZE))
+    {
+        release_local_sync_slot( slot, idx );
+        return STATUS_ACCESS_DENIED;
+    }
+
+    if ((promoted = __atomic_load_n( &slot->promoted_handle, __ATOMIC_ACQUIRE )))
+    {
+        release_local_sync_slot( slot, idx );
+        return NtWaitForSingleObject( promoted, FALSE, timeout );
+    }
+
+    type = slot->type;
+
+    /* Fast-path uncontended acquire */
+    if (type == LOCAL_SYNC_EVENT_MANUAL)
+    {
+        if (__atomic_load_n( &slot->state, __ATOMIC_ACQUIRE ) & 1)
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_SUCCESS;
+        }
+    }
+    else if (type == LOCAL_SYNC_EVENT_AUTO)
+    {
+        LONG cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        while (cur & 1)
+        {
+            if (__atomic_compare_exchange_n( &slot->state, &cur, cur & ~1L, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+            {
+                release_local_sync_slot( slot, idx );
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+    else if (type == LOCAL_SYNC_SEMAPHORE)
+    {
+        LONG cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        while (cur > 0)
+        {
+            if (__atomic_compare_exchange_n( &slot->state, &cur, cur - 1, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+            {
+                release_local_sync_slot( slot, idx );
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+
+    if (timeout && timeout->QuadPart == 0)
+    {
+        release_local_sync_slot( slot, idx );
+        return STATUS_TIMEOUT;
+    }
+
+    if (timeout && timeout->QuadPart != TIMEOUT_INFINITE)
+    {
+        has_deadline = TRUE;
+        if (timeout->QuadPart < 0)
+        {
+            ULONGLONG ns = (ULONGLONG)(-timeout->QuadPart) * 100ULL;
+            clk = CLOCK_MONOTONIC;
+            clock_gettime( clk, &deadline );
+            deadline.tv_sec += ns / NSECPERSEC;
+            deadline.tv_nsec += ns % NSECPERSEC;
+            if (deadline.tv_nsec >= NSECPERSEC)
+            {
+                deadline.tv_sec++;
+                deadline.tv_nsec -= NSECPERSEC;
+            }
+        }
+        else
+        {
+            LONGLONG unix_100ns = timeout->QuadPart - (LONGLONG)SECS_1601_TO_1970 * TICKSPERSEC;
+            clk = CLOCK_REALTIME;
+            if (unix_100ns <= 0)
+            {
+                release_local_sync_slot( slot, idx );
+                return STATUS_TIMEOUT;
+            }
+            deadline.tv_sec = unix_100ns / TICKSPERSEC;
+            deadline.tv_nsec = (unix_100ns % TICKSPERSEC) * 100;
+        }
+    }
+
+    for (;;)
+    {
+        LONG cur;
+        struct timespec rem, *pts = NULL;
+
+        if ((promoted = __atomic_load_n( &slot->promoted_handle, __ATOMIC_ACQUIRE )))
+        {
+            release_local_sync_slot( slot, idx );
+            if (has_deadline && timeout->QuadPart < 0)
+            {
+                struct timespec now;
+                LARGE_INTEGER rem_li;
+                clock_gettime( clk, &now );
+                if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
+                    rem_li.QuadPart = 0;
+                else
+                    rem_li.QuadPart = -((LONGLONG)(deadline.tv_sec - now.tv_sec) * TICKSPERSEC +
+                                        (deadline.tv_nsec - now.tv_nsec) / 100);
+                return NtWaitForSingleObject( promoted, FALSE, &rem_li );
+            }
+            return NtWaitForSingleObject( promoted, FALSE, timeout );
+        }
+
+        if (type == LOCAL_SYNC_EVENT_MANUAL)
+        {
+            cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+            if (cur & 1) { ret = STATUS_SUCCESS; break; }
+        }
+        else if (type == LOCAL_SYNC_EVENT_AUTO)
+        {
+            cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+            if ((cur & 1) && __atomic_compare_exchange_n( &slot->state, &cur, cur & ~1L, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED ))
+            {
+                ret = STATUS_SUCCESS;
+                break;
+            }
+            if (cur & 1) continue;
+        }
+        else /* LOCAL_SYNC_SEMAPHORE */
+        {
+            cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+            if (cur > 0 && __atomic_compare_exchange_n( &slot->state, &cur, cur - 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED ))
+            {
+                ret = STATUS_SUCCESS;
+                break;
+            }
+            if (cur > 0) continue;
+        }
+
+        if (has_deadline)
+        {
+            struct timespec now;
+            clock_gettime( clk, &now );
+            if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
+            {
+                ret = STATUS_TIMEOUT;
+                break;
+            }
+            rem.tv_sec = deadline.tv_sec - now.tv_sec;
+            rem.tv_nsec = deadline.tv_nsec - now.tv_nsec;
+            if (rem.tv_nsec < 0)
+            {
+                rem.tv_sec--;
+                rem.tv_nsec += NSECPERSEC;
+            }
+            pts = &rem;
+        }
+
+        __atomic_add_fetch( &slot->waiters, 1, __ATOMIC_SEQ_CST );
+        cur = __atomic_load_n( &slot->state, __ATOMIC_SEQ_CST );
+        if (__atomic_load_n( &slot->promoted_handle, __ATOMIC_ACQUIRE ) ||
+            (type != LOCAL_SYNC_SEMAPHORE && (cur & 1)) ||
+            (type == LOCAL_SYNC_SEMAPHORE && cur > 0))
+        {
+            __atomic_sub_fetch( &slot->waiters, 1, __ATOMIC_SEQ_CST );
+            continue;
+        }
+
+        {
+            int f_ret = futex_wait( &slot->state, cur, pts );
+            int f_err = errno;
+            __atomic_sub_fetch( &slot->waiters, 1, __ATOMIC_SEQ_CST );
+
+            if (__atomic_load_n( &slot->promoted_handle, __ATOMIC_ACQUIRE ))
+                continue;
+
+            if (f_ret == 0 && type != LOCAL_SYNC_SEMAPHORE)
+            {
+                LONG new_cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+                if (new_cur != cur && !(new_cur & 1))
+                {
+                    if (type == LOCAL_SYNC_EVENT_MANUAL)
+                    {
+                        ret = STATUS_SUCCESS;
+                        break;
+                    }
+                    else
+                    {
+                        LONG pc = __atomic_load_n( &slot->pulse_credits, __ATOMIC_ACQUIRE );
+                        while (pc > 0)
+                        {
+                            if (__atomic_compare_exchange_n( &slot->pulse_credits, &pc, pc - 1, 1,
+                                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+                            {
+                                release_local_sync_slot( slot, idx );
+                                return STATUS_SUCCESS;
+                            }
+                        }
+                    }
+                }
+            }
+            if (f_ret < 0 && f_err == ETIMEDOUT)
+            {
+                ret = STATUS_TIMEOUT;
+                break;
+            }
+        }
+    }
+
+    release_local_sync_slot( slot, idx );
+    return ret;
+}
+
+#else
+
+BOOL is_local_sync_handle( HANDLE handle ) { return FALSE; }
+NTSTATUS close_local_sync_handle( HANDLE handle ) { return STATUS_INVALID_HANDLE; }
+NTSTATUS promote_local_sync_handle( HANDLE handle, HANDLE *real_handle ) { return STATUS_INVALID_HANDLE; }
+NTSTATUS retire_local_sync_handle( HANDLE handle, HANDLE *real_handle ) { return STATUS_INVALID_HANDLE; }
+
+#endif /* __linux__ */
+
+
 /******************************************************************************
  *              NtCreateSemaphore (NTDLL.@)
  */
@@ -1056,6 +1648,34 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
 
     *handle = 0;
     if (max <= 0 || initial < 0 || initial > max) return STATUS_INVALID_PARAMETER;
+
+#ifdef __linux__
+    {
+        ACCESS_MASK norm_access;
+        if (is_local_sync_eligible( attr ) && normalize_semaphore_access( access, &norm_access ))
+        {
+            struct local_sync_slot *slot;
+            uint32_t idx = local_sync_alloc_slot( &slot );
+            if (idx != LOCAL_SYNC_INVALID_IDX)
+            {
+                slot->lock = 0;
+                slot->state = initial;
+                slot->waiters = 0;
+                slot->pulse_credits = 0;
+                slot->max_count = max;
+                slot->promoting = 0;
+                slot->active_mutators = 0;
+                slot->access = norm_access;
+                slot->promoted_handle = NULL;
+                __atomic_store_n( &slot->type, LOCAL_SYNC_SEMAPHORE, __ATOMIC_RELEASE );
+                __atomic_store_n( &slot->refcount, 1, __ATOMIC_RELEASE );
+                *handle = make_local_sync_handle( idx, slot->gen );
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+#endif
+
     if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_semaphore )
@@ -1120,6 +1740,37 @@ NTSTATUS WINAPI NtQuerySemaphore( HANDLE handle, SEMAPHORE_INFORMATION_CLASS cla
 
     if (len != sizeof(SEMAPHORE_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
 
+#ifdef __linux__
+    if (is_local_sync_handle( handle ))
+    {
+        uint32_t idx;
+        struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+        HANDLE promoted;
+
+        if (!slot) return STATUS_INVALID_HANDLE;
+        if ((promoted = __atomic_load_n( &slot->promoted_handle, __ATOMIC_ACQUIRE )))
+        {
+            release_local_sync_slot( slot, idx );
+            return NtQuerySemaphore( promoted, class, info, len, ret_len );
+        }
+        if (slot->type != LOCAL_SYNC_SEMAPHORE)
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        if (!(slot->access & SEMAPHORE_QUERY_STATE))
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_ACCESS_DENIED;
+        }
+        out->CurrentCount = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        out->MaximumCount = slot->max_count;
+        release_local_sync_slot( slot, idx );
+        if (ret_len) *ret_len = sizeof(SEMAPHORE_BASIC_INFORMATION);
+        return STATUS_SUCCESS;
+    }
+#endif
+
     if ((ret = inproc_query_semaphore( handle, out )) != STATUS_NOT_IMPLEMENTED)
     {
         if (!ret && ret_len) *ret_len = sizeof(SEMAPHORE_BASIC_INFORMATION);
@@ -1149,6 +1800,61 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous 
     unsigned int ret;
 
     TRACE( "handle %p, count %u, prev_count %p\n", handle, count, previous );
+
+#ifdef __linux__
+    if (is_local_sync_handle( handle ))
+    {
+        uint32_t idx;
+        struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+        HANDLE promoted;
+        LONG cur;
+
+        if (!slot) return STATUS_INVALID_HANDLE;
+        if (slot->type != LOCAL_SYNC_SEMAPHORE)
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        if (!(slot->access & SEMAPHORE_MODIFY_STATE))
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_ACCESS_DENIED;
+        }
+
+        __atomic_add_fetch( &slot->active_mutators, 1, __ATOMIC_SEQ_CST );
+        if (__atomic_load_n( &slot->promoting, __ATOMIC_SEQ_CST ))
+        {
+            __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+            local_sync_spin_lock( &slot->lock );
+            promoted = slot->promoted_handle;
+            local_sync_spin_unlock( &slot->lock );
+            release_local_sync_slot( slot, idx );
+            if (promoted) return NtReleaseSemaphore( promoted, count, previous );
+            return STATUS_INVALID_HANDLE;
+        }
+
+        cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        for (;;)
+        {
+            uint64_t sum = (uint64_t)(ULONG)cur + (uint64_t)count;
+            if (sum > (uint64_t)slot->max_count)
+            {
+                __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+                release_local_sync_slot( slot, idx );
+                return STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+            }
+            if (__atomic_compare_exchange_n( &slot->state, &cur, (LONG)sum, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE ))
+                break;
+        }
+        __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+
+        if (previous) *previous = cur;
+        if (count > 0 && __atomic_load_n( &slot->waiters, __ATOMIC_SEQ_CST ) > 0)
+            futex_wake_n( &slot->state, count > (ULONG)INT_MAX ? INT_MAX : (int)count );
+        release_local_sync_slot( slot, idx );
+        return STATUS_SUCCESS;
+    }
+#endif
 
     if ((ret = inproc_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
         return ret;
@@ -1182,6 +1888,34 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
 
     *handle = 0;
     if (type != NotificationEvent && type != SynchronizationEvent) return STATUS_INVALID_PARAMETER;
+
+#ifdef __linux__
+    {
+        ACCESS_MASK norm_access;
+        if (is_local_sync_eligible( attr ) && normalize_event_access( access, &norm_access ))
+        {
+            struct local_sync_slot *slot;
+            uint32_t idx = local_sync_alloc_slot( &slot );
+            if (idx != LOCAL_SYNC_INVALID_IDX)
+            {
+                slot->lock = 0;
+                slot->state = state ? 1 : 0;
+                slot->waiters = 0;
+                slot->pulse_credits = 0;
+                slot->max_count = 0;
+                slot->promoting = 0;
+                slot->active_mutators = 0;
+                slot->access = norm_access;
+                slot->promoted_handle = NULL;
+                __atomic_store_n( &slot->type, (type == NotificationEvent) ? LOCAL_SYNC_EVENT_MANUAL : LOCAL_SYNC_EVENT_AUTO, __ATOMIC_RELEASE );
+                __atomic_store_n( &slot->refcount, 1, __ATOMIC_RELEASE );
+                *handle = make_local_sync_handle( idx, slot->gen );
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+#endif
+
     if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_event )
@@ -1238,6 +1972,54 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
 
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
+#ifdef __linux__
+    if (is_local_sync_handle( handle ))
+    {
+        uint32_t idx;
+        struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+        HANDLE promoted;
+        LONG cur;
+
+        if (!slot) return STATUS_INVALID_HANDLE;
+        if (slot->type != LOCAL_SYNC_EVENT_MANUAL && slot->type != LOCAL_SYNC_EVENT_AUTO)
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        if (!(slot->access & EVENT_MODIFY_STATE))
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_ACCESS_DENIED;
+        }
+
+        __atomic_add_fetch( &slot->active_mutators, 1, __ATOMIC_SEQ_CST );
+        if (__atomic_load_n( &slot->promoting, __ATOMIC_SEQ_CST ))
+        {
+            __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+            local_sync_spin_lock( &slot->lock );
+            promoted = slot->promoted_handle;
+            local_sync_spin_unlock( &slot->lock );
+            release_local_sync_slot( slot, idx );
+            if (promoted) return NtSetEvent( promoted, prev_state );
+            return STATUS_INVALID_HANDLE;
+        }
+
+        cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        while (!(cur & 1))
+        {
+            if (__atomic_compare_exchange_n( &slot->state, &cur, cur | 1L, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE ))
+                break;
+        }
+        __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+
+        if (prev_state) *prev_state = cur & 1;
+        if (!(cur & 1) && __atomic_load_n( &slot->waiters, __ATOMIC_SEQ_CST ) > 0)
+            futex_wake_n( &slot->state, (slot->type == LOCAL_SYNC_EVENT_MANUAL) ? INT_MAX : 1 );
+        release_local_sync_slot( slot, idx );
+        return STATUS_SUCCESS;
+    }
+#endif
+
     if (!get_inproc_sync( handle, INPROC_SYNC_EVENT, 0, &stack, &sync ))
     {
         has_wait_packet = sync->has_wait_packet;
@@ -1279,6 +2061,52 @@ NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
 
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
+#ifdef __linux__
+    if (is_local_sync_handle( handle ))
+    {
+        uint32_t idx;
+        struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+        HANDLE promoted;
+        LONG cur;
+
+        if (!slot) return STATUS_INVALID_HANDLE;
+        if (slot->type != LOCAL_SYNC_EVENT_MANUAL && slot->type != LOCAL_SYNC_EVENT_AUTO)
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        if (!(slot->access & EVENT_MODIFY_STATE))
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_ACCESS_DENIED;
+        }
+
+        __atomic_add_fetch( &slot->active_mutators, 1, __ATOMIC_SEQ_CST );
+        if (__atomic_load_n( &slot->promoting, __ATOMIC_SEQ_CST ))
+        {
+            __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+            local_sync_spin_lock( &slot->lock );
+            promoted = slot->promoted_handle;
+            local_sync_spin_unlock( &slot->lock );
+            release_local_sync_slot( slot, idx );
+            if (promoted) return NtResetEvent( promoted, prev_state );
+            return STATUS_INVALID_HANDLE;
+        }
+
+        cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        while (cur & 1)
+        {
+            if (__atomic_compare_exchange_n( &slot->state, &cur, cur & ~1L, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE ))
+                break;
+        }
+        __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+
+        if (prev_state) *prev_state = cur & 1;
+        release_local_sync_slot( slot, idx );
+        return STATUS_SUCCESS;
+    }
+#endif
+
     if ((ret = inproc_reset_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
         return ret;
 
@@ -1313,6 +2141,59 @@ NTSTATUS WINAPI NtPulseEvent( HANDLE handle, LONG *prev_state )
 
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
+#ifdef __linux__
+    if (is_local_sync_handle( handle ))
+    {
+        uint32_t idx;
+        struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+        HANDLE promoted;
+        LONG cur, waiters;
+
+        if (!slot) return STATUS_INVALID_HANDLE;
+        if (slot->type != LOCAL_SYNC_EVENT_MANUAL && slot->type != LOCAL_SYNC_EVENT_AUTO)
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        if (!(slot->access & EVENT_MODIFY_STATE))
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_ACCESS_DENIED;
+        }
+
+        __atomic_add_fetch( &slot->active_mutators, 1, __ATOMIC_SEQ_CST );
+        if (__atomic_load_n( &slot->promoting, __ATOMIC_SEQ_CST ))
+        {
+            __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+            local_sync_spin_lock( &slot->lock );
+            promoted = slot->promoted_handle;
+            local_sync_spin_unlock( &slot->lock );
+            release_local_sync_slot( slot, idx );
+            if (promoted) return NtPulseEvent( promoted, prev_state );
+            return STATUS_INVALID_HANDLE;
+        }
+
+        waiters = __atomic_load_n( &slot->waiters, __ATOMIC_SEQ_CST );
+        if (waiters > 0 && slot->type == LOCAL_SYNC_EVENT_AUTO)
+            __atomic_add_fetch( &slot->pulse_credits, 1, __ATOMIC_SEQ_CST );
+
+        cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
+        for (;;)
+        {
+            LONG next = (waiters > 0) ? ((cur & ~1L) + 2) : (cur & ~1L);
+            if (__atomic_compare_exchange_n( &slot->state, &cur, next, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE ))
+                break;
+        }
+        __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
+
+        if (prev_state) *prev_state = cur & 1;
+        if (waiters > 0)
+            futex_wake_n( &slot->state, (slot->type == LOCAL_SYNC_EVENT_MANUAL) ? INT_MAX : 1 );
+        release_local_sync_slot( slot, idx );
+        return STATUS_SUCCESS;
+    }
+#endif
+
     if ((ret = inproc_pulse_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
         return ret;
 
@@ -1346,6 +2227,37 @@ NTSTATUS WINAPI NtQueryEvent( HANDLE handle, EVENT_INFORMATION_CLASS class,
     }
 
     if (len != sizeof(EVENT_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
+
+#ifdef __linux__
+    if (is_local_sync_handle( handle ))
+    {
+        uint32_t idx;
+        struct local_sync_slot *slot = acquire_local_sync_slot( handle, &idx );
+        HANDLE promoted;
+
+        if (!slot) return STATUS_INVALID_HANDLE;
+        if ((promoted = __atomic_load_n( &slot->promoted_handle, __ATOMIC_ACQUIRE )))
+        {
+            release_local_sync_slot( slot, idx );
+            return NtQueryEvent( promoted, class, info, len, ret_len );
+        }
+        if (slot->type != LOCAL_SYNC_EVENT_MANUAL && slot->type != LOCAL_SYNC_EVENT_AUTO)
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        if (!(slot->access & EVENT_QUERY_STATE))
+        {
+            release_local_sync_slot( slot, idx );
+            return STATUS_ACCESS_DENIED;
+        }
+        out->EventType = (slot->type == LOCAL_SYNC_EVENT_MANUAL) ? NotificationEvent : SynchronizationEvent;
+        out->EventState = (__atomic_load_n( &slot->state, __ATOMIC_ACQUIRE ) & 1) != 0;
+        release_local_sync_slot( slot, idx );
+        if (ret_len) *ret_len = sizeof(EVENT_BASIC_INFORMATION);
+        return STATUS_SUCCESS;
+    }
+#endif
 
     if ((ret = inproc_query_event( handle, out )) != STATUS_NOT_IMPLEMENTED)
     {
@@ -2441,6 +3353,7 @@ NTSTATUS WINAPI NtQueryTimer( HANDLE handle, TIMER_INFORMATION_CLASS class,
 NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WAIT_TYPE type,
                                           BOOLEAN alertable, const LARGE_INTEGER *timeout )
 {
+    HANDLE real_handles[MAXIMUM_WAIT_OBJECTS];
     union select_op select_op;
     UINT i, flags = SELECT_INTERRUPTIBLE;
     unsigned int ret;
@@ -2477,6 +3390,35 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
         }
     }
 
+#ifdef __linux__
+    if (count == 1 && !alertable && is_local_sync_handle( handles[0] ))
+    {
+        ret = local_sync_wait( handles[0], timeout );
+        TRACE( "-> %#x\n", ret );
+        return ret;
+    }
+    {
+        BOOL has_local = FALSE;
+        for (i = 0; i < count; i++)
+        {
+            if (is_local_sync_handle( handles[i] ))
+            {
+                if (!has_local)
+                {
+                    memcpy( real_handles, handles, count * sizeof(HANDLE) );
+                    has_local = TRUE;
+                }
+                if ((ret = promote_local_sync_handle( handles[i], &real_handles[i] )))
+                {
+                    TRACE( "-> %#x\n", ret );
+                    return ret;
+                }
+            }
+        }
+        if (has_local) handles = real_handles;
+    }
+#endif
+
     if ((ret = inproc_wait( count, handles, type, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
@@ -2511,6 +3453,24 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
             wine_uring_drain_for_event( handle, timeout );
     }
 
+#ifdef __linux__
+    if (is_local_sync_handle( handle ))
+    {
+        if (!alertable)
+        {
+            ret = local_sync_wait( handle, timeout );
+            TRACE( "-> %#x\n", ret );
+            return ret;
+        }
+        else
+        {
+            HANDLE real;
+            if ((ret = promote_local_sync_handle( handle, &real ))) return ret;
+            handle = real;
+        }
+    }
+#endif
+
     if ((ret = inproc_wait( 1, &handle, WaitAny, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
@@ -2540,6 +3500,21 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
     TRACE( "signal %p, wait %p, alertable %u, timeout %s\n", signal, wait, alertable, debugstr_timeout(timeout) );
 
     if (!signal) return STATUS_INVALID_HANDLE;
+
+#ifdef __linux__
+    if (is_local_sync_handle( signal ))
+    {
+        HANDLE real;
+        if ((ret = promote_local_sync_handle( signal, &real ))) return ret;
+        signal = real;
+    }
+    if (is_local_sync_handle( wait ))
+    {
+        HANDLE real;
+        if ((ret = promote_local_sync_handle( wait, &real ))) return ret;
+        wait = real;
+    }
+#endif
 
     if ((ret = inproc_signal_and_wait( signal, wait, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
         return ret;
@@ -3654,6 +4629,15 @@ NTSTATUS WINAPI NtAssociateWaitCompletionPacket( HANDLE handle, HANDLE completio
 
     TRACE( "(%p, %p, %p, %p, %p, %x, %lx, %d)\n", handle, completion_handle, target_handle,
            key_context, apc_context, (int)io_status, (unsigned long)io_status_info, wake_up_app );
+
+#ifdef __linux__
+    if (is_local_sync_handle( target_handle ))
+    {
+        HANDLE real;
+        if ((status = promote_local_sync_handle( target_handle, &real ))) return status;
+        target_handle = real;
+    }
+#endif
 
     if (!get_inproc_sync( target_handle, INPROC_SYNC_UNKNOWN, 0, &stack, &sync ))
     {
