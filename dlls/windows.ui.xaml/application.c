@@ -3212,7 +3212,7 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (!is_uwp_xaml_app() &&
+    if (!is_uwp_xaml_app() && !impl->outer &&
         (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
          IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP )))
     {
@@ -6854,30 +6854,36 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                     else if (wcsstr(elem_name, L"WebView") || wcsstr(elem_name, L"webview"))
                                                         class_name = xaml_get_app_profile()->webview2_template
                                                                      ? xaml_get_app_profile()->webview2_template
-                                                                     : L"Windows.UI.Xaml.Controls.WebView2";
+                                                                     : (is_winui_conn ? L"Microsoft.UI.Xaml.Controls.WebView2" : L"Windows.UI.Xaml.Controls.WebView2");
                                                     else if (wcsstr(elem_name, L"Image") || wcsstr(elem_name, L"image"))
-                                                        class_name = L"Windows.UI.Xaml.Controls.Image";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Image" : L"Windows.UI.Xaml.Controls.Image";
                                                     else if (wcsstr(elem_name, L"Canvas") || wcsstr(elem_name, L"canvas"))
-                                                        class_name = L"Windows.UI.Xaml.Controls.Canvas";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Canvas" : L"Windows.UI.Xaml.Controls.Canvas";
+                                                    else if (wcsstr(elem_name, L"BrowserNavigationErrorScreen"))
+                                                        class_name = L"WhatsApp.BrowserNavigationErrorScreenView";
                                                     else if (wcsstr(elem_name, L"ErrorScreen"))
-                                                        class_name = L"Windows.UI.Xaml.Controls.Grid";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Grid" : L"Windows.UI.Xaml.Controls.Grid";
                                                     else if (wcsstr(elem_name, L"Backdrop") || wcsstr(elem_name, L"Rectangle"))
-                                                        class_name = L"Windows.UI.Xaml.Shapes.Rectangle";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Shapes.Rectangle" : L"Windows.UI.Xaml.Shapes.Rectangle";
                                                     else if (wcsstr(elem_name, L"Cactus") || wcsstr(elem_name, L"Viewbox") || wcsstr(elem_name, L"viewbox"))
-                                                        class_name = L"Windows.UI.Xaml.Controls.Viewbox";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Viewbox" : L"Windows.UI.Xaml.Controls.Viewbox";
                                                     else if (wcsstr(elem_name, L"Title") || wcsstr(elem_name, L"Message") || wcsstr(elem_name, L"Text"))
-                                                        class_name = L"Windows.UI.Xaml.Controls.TextBlock";
-                                                    else if (wcsstr(elem_name, L"Border"))
-                                                        class_name = L"Windows.UI.Xaml.Controls.Border";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.TextBlock" : L"Windows.UI.Xaml.Controls.TextBlock";
+                                                    else if (wcsstr(elem_name, L"ViewContainer") || wcsstr(elem_name, L"Border"))
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Border" : L"Windows.UI.Xaml.Controls.Border";
                                                     else if (wcsstr(elem_name, L"Template") || wcsstr(elem_name, L"Layout"))
-                                                        class_name = L"Windows.UI.Xaml.DataTemplate";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.DataTemplate" : L"Windows.UI.Xaml.DataTemplate";
+                                                    else if (wcsstr(elem_name, L"ButtonsPanel"))
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Grid" : L"Windows.UI.Xaml.Controls.Grid";
                                                     else if (wcsstr(elem_name, L"Panel") || wcsstr(elem_name, L"Stack"))
-                                                        class_name = L"Windows.UI.Xaml.Controls.StackPanel";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.StackPanel" : L"Windows.UI.Xaml.Controls.StackPanel";
                                                     else
-                                                        class_name = L"Windows.UI.Xaml.Controls.Grid";
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Grid" : L"Windows.UI.Xaml.Controls.Grid";
                                                     TRACE("XBF connect conn_id %lu, elem_name %s, class_name %s\n",
                                                           (unsigned long)conn_id, debugstr_w(elem_name), debugstr_w(class_name));
-                                                    if (FAILED(xaml_create_instance_from_provider(class_name, &target)) || !target)
+                                                    if (!wcsncmp(class_name, L"Windows.UI.Xaml.", 16) || !wcsncmp(class_name, L"Microsoft.UI.Xaml.", 18))
+                                                        element_create_typed(class_name, &target);
+                                                    else if (FAILED(xaml_create_instance_from_provider(class_name, &target)) || !target)
                                                         element_create_typed(class_name, &target);
                                                     if (target)
                                                     {

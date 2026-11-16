@@ -2022,13 +2022,19 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IPanel ))
+    {
+        *out = &impl->IPanel_iface;
+        element_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IGrid ) ||
         IsEqualGUID( iid, &IID_IGrid_WinUI ) ||
         IsEqualGUID( iid, &IID_IGrid_WinUI2 ) ||
         IsEqualGUID( iid, &IID_IGrid_v1 ) ||
         IsEqualGUID( iid, &IID_IView_IV1 ) ||
         IsEqualGUID( iid, &IID_IView_IV2 ) ||
-        IsEqualGUID( iid, &IID_IPanel ) ||
         IsEqualGUID( iid, &IID_ICanvas ) ||
         IsEqualGUID( iid, &IID_IStackPanel ) ||
         IsEqualGUID( iid, &IID_IContentControl ) ||
@@ -2527,7 +2533,7 @@ static HRESULT WINAPI element_grid_get_ColumnDefinitions_abi3( void *iface, void
 
 static HRESULT WINAPI element_panel_get_Children( void *iface, void **out )
 {
-    struct xaml_element *impl = impl_from_element( iface );
+    struct xaml_element *impl = impl_from_IPanel( iface );
     TRACE( "element_panel_get_Children iface %p, out %p\n", iface, out );
     if (!out) return E_POINTER;
     if (!impl->children) collection_create( (void **)&impl->children );
@@ -2570,7 +2576,7 @@ static const void *grid_vtbl[256] =
     [48] = wv2_probe28, [49] = wv2_probe29, [50] = wv2_probe30, [51] = wv2_probe31,
     [52] = wv2_probe32, [53] = wv2_probe33, [54] = wv2_probe34, [55] = wv2_probe35,
     [56] = wv2_probe36, [57] = wv2_probe37, [58] = wv2_probe38, [59] = wv2_probe39,
-    [60] = wv2_probe40, [61] = wv2_probe41, [62] = wv2_probe42, [63] = wv2_probe43,
+    [60] = wv2_probe40, [61] = element_add_Loaded, [62] = element_remove_Loaded, [63] = wv2_probe43,
     [64] = wv2_probe44, [65] = wv2_probe45, [66] = wv2_probe46, [67] = wv2_probe47,
     [68] = wv2_probe48, [69] = wv2_probe49, [70] = wv2_probe50, [71] = wv2_probe51,
     [72] = wv2_probe52,
@@ -2590,14 +2596,14 @@ static const void *grid_vtbl[256] =
 
 static const void *panel_vtbl[256] =
 {
-    [0] = element_QueryInterface,
-    [1] = element_AddRef,
-    [2] = element_Release,
+    [0] = element_panel_QueryInterface,
+    [1] = element_panel_AddRef,
+    [2] = element_panel_Release,
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [6] = xaml_ConnectFromTrackerSource,
+    [6] = element_panel_get_Children,
     [7] = xaml_AddRefFromTrackerSource,
     [8] = xaml_ReleaseFromTrackerSource,
     [9] = element_panel_get_Children,
@@ -3653,11 +3659,11 @@ static HRESULT WINAPI cwv2_Navigate( void *iface, HSTRING uri )
     if (impl->source_uri) WindowsDeleteString( impl->source_uri );
     impl->source_uri = NULL;
     if (uri) WindowsDuplicateString( uri, &impl->source_uri );
-    if (impl->owner) impl->owner->navigated = TRUE;
     if (impl->loader_core)
     {
         const WCHAR *s = uri ? WindowsGetStringRawBuffer( uri, NULL ) : L"";
         HRESULT hr2 = wv2_call_navigate( impl->loader_core, impl->real_loader, 5, 6, s );
+        if (impl->owner) impl->owner->navigated = TRUE;
         ERR( "cwv2_Navigate: loader forward hr %#lx\n", hr2 );
         return hr2;
     }
@@ -4024,6 +4030,12 @@ static HRESULT WINAPI profile_AddBrowserExtension( void *iface, HSTRING path, vo
     if (handler) h->lpVtbl->Invoke( h, S_OK, ext );
     return S_OK;
 }
+static HRESULT WINAPI profile_ClearBrowsingDataAllAsync( void *iface, void **op )
+{
+    ERR( "profile_ClearBrowsingDataAllAsync iface %p, op %p\n", iface, op );
+    return xaml_async_action_create( (IAsyncAction **)op );
+}
+
 /* the returned extension object answers .Id with the Zoom extension id */
 static HRESULT WINAPI profile_generic_slot( void *iface, ... )
 {
@@ -4043,6 +4055,7 @@ static const void *cwv2_profile_vtbl[256] =
     [4] = cwv2_GetRuntimeClassName,
     [5] = cwv2_GetTrustLevel,
     [6 ... 255] = profile_generic_slot,
+    [6] = profile_ClearBrowsingDataAllAsync,
     [8] = profile_AddBrowserExtension,   /* WinRT class: 6 BrowserExtensions, 7 DefaultBackgroundColor, 8 AddBrowserExtension */
 };
 
@@ -5835,17 +5848,8 @@ static void wv2_navigate_once( struct xaml_element *impl )
     }
     if (!url || !*url)
     {
-        if (is_whatsapp_app())
-        {
-            /* Safe fallback while EnsureMainWindowInitialized() stalls before StartNavigation(). */
-            url = L"https://web.whatsapp.com/";
-            ERR( "wv2_navigate_once: no WebView2.Source URI set, using WhatsApp fallback %s\n", debugstr_w( url ) );
-        }
-        else
-        {
-            ERR( "wv2_navigate_once: no WebView2.Source URI set, deferring navigation\n" );
-            return;
-        }
+        ERR( "wv2_navigate_once: no WebView2.Source URI set, deferring navigation\n" );
+        return;
     }
     impl->navigated = TRUE;
     {
@@ -6975,16 +6979,17 @@ static const void *wv2_vtbl[256] =
     [4] = element_wv2_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = element_GetTrustLevel,              /* 5: GetTrustLevel */
     [6 ... 255] = element_generic_slot,
-    [6] = xaml_ConnectFromTrackerSource,
-    [7] = xaml_AddRefFromTrackerSource,
-    [8] = xaml_ReleaseFromTrackerSource,
-    [9] = wv2_get_CoreWebView2,               /* 9: get_CoreWebView2 (body = old + 3) */
-    [10] = wv2_EnsureCoreWebView2Async,       /* 10: EnsureCoreWebView2Async */
-    [12] = wv2_get_Source,                    /* 12: get_Source (tracked +3) */
-    [13] = wv2_put_Source,                    /* 13: put_Source (tracked +3) */
+    [6] = wv2_get_CoreWebView2,               /* 6: get_CoreWebView2 */
+    [7] = wv2_EnsureCoreWebView2Async,        /* 7: EnsureCoreWebView2Async */
+    [9] = wv2_get_Source,                     /* 9: get_Source */
+    [10] = wv2_put_Source,                    /* 10: put_Source */
+    [12] = wv2_get_Source,                    /* 12: get_Source (legacy alias) */
+    [13] = wv2_put_Source,                    /* 13: put_Source (legacy alias) */
     [20] = wv2_get_CoreWebView2,              /* 20: get_CoreWebView2 (alias) */
     [27] = wv2_add_CoreWebView2Initialized,
     [28] = wv2_remove_CoreWebView2Initialized,
+    [30] = wv2_add_CoreWebView2Initialized,   /* 30: add_CoreWebView2Initialized */
+    [31] = wv2_remove_CoreWebView2Initialized,/* 31: remove_CoreWebView2Initialized */
     [33] = wv2_add_CoreWebView2Initialized,
     [34] = wv2_remove_CoreWebView2Initialized,
     [75] = element_add_Loaded,
@@ -7000,7 +7005,7 @@ static const void *wv22_vtbl[256] =
     [4] = element_wv22_GetRuntimeClassName,   /* 4: GetRuntimeClassName */
     [5] = element_GetTrustLevel,              /* 5: GetTrustLevel */
     [6 ... 255] = element_generic_slot,
-    [6] = wv2_probe0,   [7] = wv2_probe1,   [8] = wv2_probe2,   [9] = wv2_probe3,
+    [6] = wv22_EnsureCoreWebView2Async,   [7] = wv22_EnsureCoreWebView2AsyncWithOptions,   [8] = wv2_probe2,   [9] = wv2_probe3,
     [10] = element_grid_get_RowDefinitions_abi3,  /* IV1 c3c01020 slot10 = RowDefinitions(this, HSTRING, vec**) */
     [11] = wv2_probe5,  [12] = wv2_probe6,  [13] = wv2_probe7,
     [14] = wv2_probe8,  [15] = wv2_probe9,  [16] = wv2_probe10, [17] = wv2_probe11,
