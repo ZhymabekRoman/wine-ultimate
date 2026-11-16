@@ -107,6 +107,7 @@ struct visual_collection;
 struct compositor
 {
     struct ICompositor ICompositor_iface;
+    struct IInspectable ICompositor5_iface;
     struct ICompositorInterop ICompositorInterop_iface;
     struct ICompositorDesktopInterop ICompositorDesktopInterop_iface;
     struct IClosable IClosable_iface;
@@ -125,6 +126,7 @@ enum animation_kind
     ANIM_VECTOR3_KEY,
     ANIM_VECTOR4_KEY,
     ANIM_QUATERNION_KEY,
+    ANIM_PATH_KEY,
 };
 
 struct keyframe_animation
@@ -137,6 +139,11 @@ struct keyframe_animation
     struct IVector3KeyFrameAnimation IVector3KeyFrameAnimation_iface;
     struct IVector4KeyFrameAnimation IVector4KeyFrameAnimation_iface;
     struct IQuaternionKeyFrameAnimation IQuaternionKeyFrameAnimation_iface;
+    struct IInspectable IPathKeyFrameAnimation_iface;
+    struct IInspectable IKeyFrameAnimation_iface;
+    struct IInspectable IKeyFrameAnimation2_iface;
+    struct IInspectable IKeyFrameAnimation3_iface;
+    struct IInspectable IKeyFrameAnimation6_iface;
     struct ICompositionObject ICompositionObject_iface;
     struct IClosable IClosable_iface;
     LONG ref;
@@ -308,15 +315,18 @@ struct visual
     struct IVisual IVisual_iface;
     struct IContainerVisual IContainerVisual_iface;
     struct ISpriteVisual ISpriteVisual_iface;
+    struct IInspectable IShapeVisual_iface;
     struct ICompositionObject ICompositionObject_iface;
     struct IClosable IClosable_iface;
     LONG ref;
     struct compositor *compositor;
     struct prop_set *properties;
     struct visual_collection *children;
+    void *shapes;
     struct visual *parent;
     struct ICompositionBrush *brush;
     BOOL is_sprite;
+    BOOL is_shape;
     Vector2 anchor_point;
     enum CompositionBackfaceVisibility backface_visibility;
     enum CompositionBorderMode border_mode;
@@ -354,6 +364,8 @@ HRESULT compositor_ensure_device( struct compositor *impl );
 struct prop_set *prop_set_create( struct compositor *compositor );
 struct visual *container_visual_create( struct compositor *compositor );
 struct visual *sprite_visual_create( struct compositor *compositor );
+struct visual *shape_visual_create( struct compositor *compositor );
+struct comp5_stub *comp5_stub_create_public( const WCHAR *name );
 struct keyframe_animation *keyframe_animation_create( struct compositor *compositor, enum animation_kind kind );
 struct expression_animation *expression_animation_create( struct compositor *compositor, HSTRING expression );
 struct easing_function *cubic_bezier_easing_create( struct compositor *compositor, Vector2 point1, Vector2 point2 );

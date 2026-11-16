@@ -23,6 +23,9 @@
 WINE_DEFAULT_DEBUG_CHANNEL(composition);
 
 
+static const GUID IID_IShapeVisual_local =
+    { 0xb47ce2f7, 0x9a88, 0x42c4, { 0x9e, 0x87, 0x2e, 0x50, 0x0c, 0xa8, 0x68, 0x8c } };
+
 static inline struct visual *impl_from_IVisual( struct IVisual *iface )
 {
     return CONTAINING_RECORD( iface, struct visual, IVisual_iface );
@@ -79,6 +82,12 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
             return E_NOINTERFACE;
         }
         *out = &impl->ISpriteVisual_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IShapeVisual_local ))
+    {
+        *out = &impl->IShapeVisual_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -576,7 +585,56 @@ static HRESULT WINAPI sprite_visual_put_Brush( struct ISpriteVisual *iface,
     return S_OK;
 }
 
-static struct visual *visual_create( struct compositor *compositor, BOOL is_sprite )
+static inline struct visual *impl_from_IShapeVisual( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct visual, IShapeVisual_iface );
+}
+static HRESULT WINAPI shape_visual_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return visual_QueryInterface( &impl_from_IShapeVisual( iface )->IVisual_iface, iid, out );
+}
+static ULONG WINAPI shape_visual_AddRef( void *iface )
+{
+    return visual_AddRef( &impl_from_IShapeVisual( iface )->IVisual_iface );
+}
+static ULONG WINAPI shape_visual_Release( void *iface )
+{
+    return visual_Release( &impl_from_IShapeVisual( iface )->IVisual_iface );
+}
+static HRESULT WINAPI shape_visual_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return visual_GetIids( &impl_from_IShapeVisual( iface )->IVisual_iface, c, i );
+}
+static HRESULT WINAPI shape_visual_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.Composition.ShapeVisual", 35, n );
+}
+static HRESULT WINAPI shape_visual_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return visual_GetTrustLevel( &impl_from_IShapeVisual( iface )->IVisual_iface, l );
+}
+static HRESULT WINAPI shape_visual_get_Shapes( void *iface, void **value )
+{
+    struct visual *impl = impl_from_IShapeVisual( iface );
+    if (!value) return E_POINTER;
+    if (!impl->shapes)
+        impl->shapes = comp5_stub_create_public( L"Windows.UI.Composition.CompositionShapeCollection" );
+    *value = impl->shapes;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
+    return S_OK;
+}
+static const void *shape_visual_vtbl[] =
+{
+    shape_visual_QueryInterface,
+    shape_visual_AddRef,
+    shape_visual_Release,
+    shape_visual_GetIids,
+    shape_visual_GetRuntimeClassName,
+    shape_visual_GetTrustLevel,
+    shape_visual_get_Shapes,
+};
+
+static struct visual *visual_create( struct compositor *compositor, BOOL is_sprite, BOOL is_shape )
 {
     struct visual *impl;
 
@@ -584,11 +642,13 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
     impl->IVisual_iface.lpVtbl = &visual_vtbl;
     impl->IContainerVisual_iface.lpVtbl = &container_visual_vtbl;
     impl->ISpriteVisual_iface.lpVtbl = &sprite_visual_vtbl;
+    impl->IShapeVisual_iface.lpVtbl = (const struct IInspectableVtbl *)shape_visual_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &visual_object_vtbl;
     impl->IClosable_iface.lpVtbl = &visual_closable_vtbl;
     impl->ref = 1;
     impl->compositor = compositor;
     impl->is_sprite = is_sprite;
+    impl->is_shape = is_shape;
     impl->is_visible = TRUE;
     impl->opacity = 1.0f;
     impl->scale.X = impl->scale.Y = impl->scale.Z = 1.0f;
@@ -616,12 +676,17 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
 
 struct visual *container_visual_create( struct compositor *compositor )
 {
-    return visual_create( compositor, FALSE );
+    return visual_create( compositor, FALSE, FALSE );
 }
 
 struct visual *sprite_visual_create( struct compositor *compositor )
 {
-    return visual_create( compositor, TRUE );
+    return visual_create( compositor, TRUE, FALSE );
+}
+
+struct visual *shape_visual_create( struct compositor *compositor )
+{
+    return visual_create( compositor, FALSE, TRUE );
 }
 
 /* VisualCollection */

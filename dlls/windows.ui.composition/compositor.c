@@ -68,6 +68,9 @@ HRESULT compositor_ensure_device( struct compositor *impl )
     return hr;
 }
 
+static const GUID IID_ICompositor5_local =
+    { 0x48ea31ad, 0x7fcd, 0x4076, { 0xa7, 0x9c, 0x90, 0xcc, 0x4b, 0x85, 0x2c, 0x9b } };
+
 static inline struct compositor *impl_from_ICompositor( struct ICompositor *iface )
 {
     return CONTAINING_RECORD( iface, struct compositor, ICompositor_iface );
@@ -85,6 +88,12 @@ static HRESULT WINAPI compositor_QueryInterface( struct ICompositor *iface, REFI
         || IsEqualGUID( iid, &IID_ICompositor ))
     {
         *out = &impl->ICompositor_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositor5_local ))
+    {
+        *out = &impl->ICompositor5_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -669,12 +678,244 @@ static const struct IClosableVtbl compositor_closable_vtbl =
     compositor_closable_Close,
 };
 
+/*
+ * Generic lightweight WinRT stub object for ICompositor5 shape/geometry/visual factories.
+ */
+struct comp5_stub
+{
+    const void *vtbl;
+    LONG ref;
+    const WCHAR *class_name;
+    void *prop1;
+    void *prop2;
+    void *prop3;
+    float f1, f2, f3, f4;
+};
+
+static const GUID IID_IReferenceTracker_local =
+    { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+
+static HRESULT WINAPI comp5_stub_QI( void *iface, REFIID iid, void **out )
+{
+    struct comp5_stub *obj = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_local ) || IsEqualGUID( iid, &IID_IMarshal ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IClosable ) ||
+        IsEqualGUID( iid, &IID_ICompositionObject ))
+    {
+        *out = iface;
+        InterlockedIncrement( &obj->ref );
+        return S_OK;
+    }
+    /* Composition shapes, geometries, and visual stubs expose IInspectable + stubbed property slots */
+    TRACE( "comp5_stub(%s) QI %s -> returning self\n", debugstr_w(obj->class_name), debugstr_guid(iid) );
+    *out = iface;
+    InterlockedIncrement( &obj->ref );
+    return S_OK;
+}
+static ULONG WINAPI comp5_stub_AddRef( void *iface ) { return InterlockedIncrement( &((struct comp5_stub *)iface)->ref ); }
+static ULONG WINAPI comp5_stub_Release( void *iface )
+{
+    struct comp5_stub *obj = iface;
+    ULONG r = InterlockedDecrement( &obj->ref );
+    if (!r) free( obj );
+    return r;
+}
+static HRESULT WINAPI comp5_stub_GetIids( void *iface, ULONG *cnt, IID **iids )
+{
+    if (cnt) *cnt = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI comp5_stub_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    struct comp5_stub *obj = iface;
+    return WindowsCreateString( obj->class_name, lstrlenW( obj->class_name ), name );
+}
+static HRESULT WINAPI comp5_stub_GetTrustLevel( void *iface, TrustLevel *lvl )
+{
+    if (lvl) *lvl = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI comp5_stub_noop( void *iface, void *a1, void *a2, void *a3 )
+{
+    return S_OK;
+}
+static HRESULT comp5_stub_create( const WCHAR *name, void **out );
+
+static HRESULT WINAPI comp5_stub_get_child( void *iface, void **out )
+{
+    struct comp5_stub *obj = iface;
+    if (!out) return E_POINTER;
+    TRACE( "comp5_stub(%s) get_child -> creating child stub\n", debugstr_w(obj->class_name) );
+    if (!obj->prop1)
+        comp5_stub_create( L"Windows.UI.Composition.CompositionShapeCollection", &obj->prop1 );
+    *out = obj->prop1;
+    if (*out) InterlockedIncrement( &((struct comp5_stub *)*out)->ref );
+    return S_OK;
+}
+static HRESULT WINAPI comp5_stub_get_zero( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static const void *comp5_stub_vtbl[] =
+{
+    comp5_stub_QI, comp5_stub_AddRef, comp5_stub_Release,
+    comp5_stub_GetIids, comp5_stub_GetRuntimeClassName, comp5_stub_GetTrustLevel,
+    comp5_stub_get_child, comp5_stub_noop, comp5_stub_noop, comp5_stub_noop,
+    comp5_stub_noop, comp5_stub_noop, comp5_stub_noop, comp5_stub_noop,
+    comp5_stub_noop, comp5_stub_noop, comp5_stub_noop, comp5_stub_noop,
+    comp5_stub_noop, comp5_stub_noop, comp5_stub_noop, comp5_stub_noop,
+    comp5_stub_noop, comp5_stub_noop, comp5_stub_noop, comp5_stub_noop,
+    comp5_stub_get_zero,
+};
+
+static HRESULT comp5_stub_create( const WCHAR *name, void **out )
+{
+    struct comp5_stub *obj;
+    if (!out) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->vtbl = comp5_stub_vtbl;
+    obj->ref = 1;
+    obj->class_name = name;
+    *out = obj;
+    return S_OK;
+}
+
+struct comp5_stub *comp5_stub_create_public( const WCHAR *name )
+{
+    void *out = NULL;
+    comp5_stub_create( name, &out );
+    return (struct comp5_stub *)out;
+}
+
+static inline struct compositor *impl_from_ICompositor5( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct compositor, ICompositor5_iface );
+}
+static HRESULT WINAPI compositor5_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return compositor_QueryInterface( &impl_from_ICompositor5(iface)->ICompositor_iface, iid, out );
+}
+static ULONG WINAPI compositor5_AddRef( void *iface )
+{
+    return compositor_AddRef( &impl_from_ICompositor5(iface)->ICompositor_iface );
+}
+static ULONG WINAPI compositor5_Release( void *iface )
+{
+    return compositor_Release( &impl_from_ICompositor5(iface)->ICompositor_iface );
+}
+static HRESULT WINAPI compositor5_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return compositor_GetIids( &impl_from_ICompositor5(iface)->ICompositor_iface, c, i );
+}
+static HRESULT WINAPI compositor5_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return compositor_GetRuntimeClassName( &impl_from_ICompositor5(iface)->ICompositor_iface, n );
+}
+static HRESULT WINAPI compositor5_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return compositor_GetTrustLevel( &impl_from_ICompositor5(iface)->ICompositor_iface, l );
+}
+static HRESULT WINAPI compositor5_get_Comment( void *iface, HSTRING *val ) { return WindowsCreateString( L"", 0, val ); }
+static HRESULT WINAPI compositor5_put_Comment( void *iface, HSTRING val ) { return S_OK; }
+static HRESULT WINAPI compositor5_get_GlobalPlaybackRate( void *iface, FLOAT *val ) { if (val) *val = 1.0f; return S_OK; }
+static HRESULT WINAPI compositor5_put_GlobalPlaybackRate( void *iface, FLOAT val ) { return S_OK; }
+static HRESULT WINAPI compositor5_CreateAnimationController( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.AnimationController", res ); }
+static HRESULT WINAPI compositor5_CreateBounceScalarAnimation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.BounceScalarNaturalMotionAnimation", res ); }
+static HRESULT WINAPI compositor5_CreateBounceVector2Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.BounceVector2NaturalMotionAnimation", res ); }
+static HRESULT WINAPI compositor5_CreateBounceVector3Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.BounceVector3NaturalMotionAnimation", res ); }
+static HRESULT WINAPI compositor5_CreateContainerShape( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionContainerShape", res ); }
+static HRESULT WINAPI compositor5_CreateEllipseGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionEllipseGeometry", res ); }
+static HRESULT WINAPI compositor5_CreateGeometricClip( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionGeometricClip", res ); }
+static HRESULT WINAPI compositor5_CreateLineGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionLineGeometry", res ); }
+static HRESULT WINAPI compositor5_CreatePathGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionPathGeometry", res ); }
+static HRESULT WINAPI compositor5_CreatePathGeometryWithPath( void *iface, void *path, void **res )
+{
+    TRACE( "iface %p, path %p, res %p\n", iface, path, res );
+    return comp5_stub_create( L"Windows.UI.Composition.CompositionPathGeometry", res );
+}
+static HRESULT WINAPI compositor5_CreatePathKeyFrameAnimation( void *iface, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor5( iface );
+    struct keyframe_animation *anim;
+    TRACE( "iface %p, res %p\n", iface, res );
+    if (!res) return E_POINTER;
+    if (!(anim = keyframe_animation_create( impl, ANIM_PATH_KEY ))) return E_OUTOFMEMORY;
+    *res = &anim->ICompositionAnimation_iface;
+    return S_OK;
+}
+static HRESULT WINAPI compositor5_CreateRectangleGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionRectangleGeometry", res ); }
+static HRESULT WINAPI compositor5_CreateRoundedRectangleGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionRoundedRectangleGeometry", res ); }
+static HRESULT WINAPI compositor5_CreateShapeVisual( void *iface, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor5( iface );
+    struct visual *visual;
+    TRACE( "iface %p, res %p\n", iface, res );
+    if (!res) return E_POINTER;
+    if (!(visual = shape_visual_create( impl ))) return E_OUTOFMEMORY;
+    *res = &visual->IVisual_iface;
+    return S_OK;
+}
+static HRESULT WINAPI compositor5_CreateSpringScalarAnimation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.SpringScalarNaturalMotionAnimation", res ); }
+static HRESULT WINAPI compositor5_CreateSpringVector2Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.SpringVector2NaturalMotionAnimation", res ); }
+static HRESULT WINAPI compositor5_CreateSpringVector3Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.SpringVector3NaturalMotionAnimation", res ); }
+static HRESULT WINAPI compositor5_CreateSpriteShape( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionSpriteShape", res ); }
+static HRESULT WINAPI compositor5_CreateSpriteShapeWithGeometry( void *iface, void *geom, void **res )
+{
+    TRACE( "iface %p, geom %p, res %p\n", iface, geom, res );
+    return comp5_stub_create( L"Windows.UI.Composition.CompositionSpriteShape", res );
+}
+static HRESULT WINAPI compositor5_CreateViewBox( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionViewBox", res ); }
+static HRESULT WINAPI compositor5_RequestCommitAsync( void *iface, void **res ) { return E_NOTIMPL; }
+
+static const void *compositor5_vtbl[] =
+{
+    compositor5_QueryInterface,
+    compositor5_AddRef,
+    compositor5_Release,
+    compositor5_GetIids,
+    compositor5_GetRuntimeClassName,
+    compositor5_GetTrustLevel,
+    compositor5_get_Comment,
+    compositor5_put_Comment,
+    compositor5_get_GlobalPlaybackRate,
+    compositor5_put_GlobalPlaybackRate,
+    compositor5_CreateAnimationController,
+    compositor5_CreateBounceScalarAnimation,
+    compositor5_CreateBounceVector2Animation,
+    compositor5_CreateBounceVector3Animation,
+    compositor5_CreateContainerShape,
+    compositor5_CreateEllipseGeometry,
+    compositor5_CreateLineGeometry,
+    compositor5_CreatePathGeometryWithPath,
+    compositor5_CreatePathKeyFrameAnimation,
+    compositor5_CreatePathGeometry,
+    compositor5_CreateRectangleGeometry,
+    compositor5_CreateSpriteShape,
+    compositor5_CreateShapeVisual,
+    compositor5_CreateRoundedRectangleGeometry,
+    compositor5_CreateSpringScalarAnimation,
+    compositor5_CreateSpringVector2Animation,
+    compositor5_CreateSpringVector3Animation,
+    compositor5_CreateSpriteShapeWithGeometry,
+    compositor5_CreateViewBox,
+    compositor5_RequestCommitAsync,
+};
+
 struct compositor *compositor_create( void )
 {
     struct compositor *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ICompositor_iface.lpVtbl = &compositor_vtbl;
+    impl->ICompositor5_iface.lpVtbl = (const struct IInspectableVtbl *)compositor5_vtbl;
     impl->ICompositorInterop_iface.lpVtbl = &cinterop_vtbl;
     impl->ICompositorDesktopInterop_iface.lpVtbl = &cdesktop_vtbl;
     impl->IClosable_iface.lpVtbl = &compositor_closable_vtbl;

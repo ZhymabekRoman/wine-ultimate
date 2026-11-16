@@ -165,6 +165,24 @@ static void comp_release_refs( struct compositor *compositor, struct prop_set *p
  * Keyframe animations.
  */
 
+static const GUID IID_IKeyFrameAnimation_local =
+    { 0x126e7f22, 0x3ae9, 0x4540, { 0x9a, 0x8a, 0xde, 0xae, 0x8a, 0x4a, 0x4a, 0x84 } };
+static const GUID IID_IKeyFrameAnimation2_local =
+    { 0x369b603e, 0xa80f, 0x4948, { 0x93, 0xe3, 0xed, 0x23, 0xfb, 0x38, 0xc6, 0xcb } };
+static const GUID IID_IKeyFrameAnimation3_local =
+    { 0xd51e030d, 0x7da4, 0x4bd7, { 0xbc, 0x2d, 0xf4, 0x51, 0x75, 0x29, 0xf4, 0x3a } };
+static const GUID IID_IKeyFrameAnimation4_local =
+    { 0x464c4c2c, 0x1caa, 0x4061, { 0x9b, 0x40, 0xe1, 0x3f, 0xde, 0x15, 0x03, 0xca } };
+static const GUID IID_IKeyFrameAnimation5_local =
+    { 0x770137be, 0x76bc, 0x4e23, { 0xbf, 0xed, 0xfe, 0x9c, 0xc2, 0x0f, 0x6e, 0xc9 } };
+static const GUID IID_IKeyFrameAnimation6_local =
+    { 0xf4b488bb, 0x2940, 0x4ec0, { 0xa4, 0x1a, 0xeb, 0x6d, 0x80, 0x1a, 0x2f, 0x18 } };
+static const GUID IID_IKeyFrameAnimation7_local =
+    { 0x845bf0b4, 0xd8de, 0x462f, { 0x87, 0x53, 0xc8, 0x0d, 0x43, 0xc6, 0xff, 0x5a } };
+
+static const GUID IID_IPathKeyFrameAnimation_local =
+    { 0x9d0d18c9, 0x1576, 0x4b3f, { 0xbe, 0x60, 0x1d, 0x50, 0x31, 0xf5, 0xe7, 0x1b } };
+
 static inline struct keyframe_animation *impl_from_ICompositionAnimation( struct ICompositionAnimation *iface )
 {
     return CONTAINING_RECORD( iface, struct keyframe_animation, ICompositionAnimation_iface );
@@ -180,6 +198,7 @@ static const GUID *keyframe_kind_iid( enum animation_kind kind )
         case ANIM_VECTOR3_KEY: return &IID_IVector3KeyFrameAnimation;
         case ANIM_VECTOR4_KEY: return &IID_IVector4KeyFrameAnimation;
         case ANIM_QUATERNION_KEY: return &IID_IQuaternionKeyFrameAnimation;
+        case ANIM_PATH_KEY: return &IID_IPathKeyFrameAnimation_local;
     }
     return NULL;
 }
@@ -194,6 +213,7 @@ static void *keyframe_kind_iface( struct keyframe_animation *impl, enum animatio
         case ANIM_VECTOR3_KEY: return &impl->IVector3KeyFrameAnimation_iface;
         case ANIM_VECTOR4_KEY: return &impl->IVector4KeyFrameAnimation_iface;
         case ANIM_QUATERNION_KEY: return &impl->IQuaternionKeyFrameAnimation_iface;
+        case ANIM_PATH_KEY: return &impl->IPathKeyFrameAnimation_iface;
     }
     return NULL;
 }
@@ -208,6 +228,7 @@ static const WCHAR *keyframe_kind_class_name( enum animation_kind kind )
         case ANIM_VECTOR3_KEY: return RuntimeClass_Windows_UI_Composition_Vector3KeyFrameAnimation;
         case ANIM_VECTOR4_KEY: return RuntimeClass_Windows_UI_Composition_Vector4KeyFrameAnimation;
         case ANIM_QUATERNION_KEY: return RuntimeClass_Windows_UI_Composition_QuaternionKeyFrameAnimation;
+        case ANIM_PATH_KEY: return L"Windows.UI.Composition.PathKeyFrameAnimation";
     }
     return NULL;
 }
@@ -215,8 +236,11 @@ static const WCHAR *keyframe_kind_class_name( enum animation_kind kind )
 static HRESULT WINAPI keyframe_QueryInterface( struct ICompositionAnimation *iface, REFIID iid, void **out )
 {
     struct keyframe_animation *impl = impl_from_ICompositionAnimation( iface );
+    const GUID *kind_iid;
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
 
     if (IsEqualGUID( iid, &IID_IUnknown )
         || IsEqualGUID( iid, &IID_IInspectable )
@@ -233,7 +257,35 @@ static HRESULT WINAPI keyframe_QueryInterface( struct ICompositionAnimation *ifa
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    if (IsEqualGUID( iid, keyframe_kind_iid( impl->kind ) ))
+    if (IsEqualGUID( iid, &IID_IKeyFrameAnimation_local )
+        || IsEqualGUID( iid, &IID_IKeyFrameAnimation4_local ))
+    {
+        *out = &impl->IKeyFrameAnimation_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IKeyFrameAnimation2_local ))
+    {
+        *out = &impl->IKeyFrameAnimation2_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IKeyFrameAnimation3_local ))
+    {
+        *out = &impl->IKeyFrameAnimation3_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IKeyFrameAnimation5_local )
+        || IsEqualGUID( iid, &IID_IKeyFrameAnimation6_local )
+        || IsEqualGUID( iid, &IID_IKeyFrameAnimation7_local ))
+    {
+        *out = &impl->IKeyFrameAnimation6_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    kind_iid = keyframe_kind_iid( impl->kind );
+    if (kind_iid && IsEqualGUID( iid, kind_iid ))
     {
         *out = keyframe_kind_iface( impl, impl->kind );
         IInspectable_AddRef( (IInspectable *)*out );
@@ -519,6 +571,198 @@ static const struct IColorKeyFrameAnimationVtbl colorkey_vtbl =
     colorkey_InsertKeyFrameWithEasingFunction,
 };
 
+static inline struct keyframe_animation *impl_from_pathkey( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct keyframe_animation, IPathKeyFrameAnimation_iface );
+}
+static HRESULT WINAPI pathkey_QueryInterface( void *iface, REFIID iid, void **out ) { return keyframe_QueryInterface( &impl_from_pathkey(iface)->ICompositionAnimation_iface, iid, out ); }
+static ULONG WINAPI pathkey_AddRef( void *iface ) { return keyframe_AddRef( &impl_from_pathkey(iface)->ICompositionAnimation_iface ); }
+static ULONG WINAPI pathkey_Release( void *iface ) { return keyframe_Release( &impl_from_pathkey(iface)->ICompositionAnimation_iface ); }
+static HRESULT WINAPI pathkey_GetIids( void *iface, ULONG *c, IID **i ) { return keyframe_GetIids( &impl_from_pathkey(iface)->ICompositionAnimation_iface, c, i ); }
+static HRESULT WINAPI pathkey_GetRuntimeClassName( void *iface, HSTRING *n ) { return keyframe_GetRuntimeClassName( &impl_from_pathkey(iface)->ICompositionAnimation_iface, n ); }
+static HRESULT WINAPI pathkey_GetTrustLevel( void *iface, TrustLevel *l ) { return keyframe_GetTrustLevel( &impl_from_pathkey(iface)->ICompositionAnimation_iface, l ); }
+
+static HRESULT WINAPI pathkey_InsertKeyFrame( void *iface, FLOAT key, void *path )
+{
+    TRACE( "iface %p, key %g, path %p stub!\n", iface, key, path );
+    return S_OK;
+}
+static HRESULT WINAPI pathkey_InsertKeyFrameWithEasingFunction( void *iface, FLOAT key, void *path, void *easing )
+{
+    TRACE( "iface %p, key %g, path %p, easing %p stub!\n", iface, key, path, easing );
+    return S_OK;
+}
+
+static const void *pathkey_vtbl[] =
+{
+    pathkey_QueryInterface,
+    pathkey_AddRef,
+    pathkey_Release,
+    pathkey_GetIids,
+    pathkey_GetRuntimeClassName,
+    pathkey_GetTrustLevel,
+    pathkey_InsertKeyFrame,
+    pathkey_InsertKeyFrameWithEasingFunction,
+};
+
+static inline struct keyframe_animation *impl_from_kfa( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct keyframe_animation, IKeyFrameAnimation_iface );
+}
+static HRESULT WINAPI kfa_QueryInterface( void *iface, REFIID iid, void **out ) { return keyframe_QueryInterface( &impl_from_kfa(iface)->ICompositionAnimation_iface, iid, out ); }
+static ULONG WINAPI kfa_AddRef( void *iface ) { return keyframe_AddRef( &impl_from_kfa(iface)->ICompositionAnimation_iface ); }
+static ULONG WINAPI kfa_Release( void *iface ) { return keyframe_Release( &impl_from_kfa(iface)->ICompositionAnimation_iface ); }
+static HRESULT WINAPI kfa_GetIids( void *iface, ULONG *c, IID **i ) { return keyframe_GetIids( &impl_from_kfa(iface)->ICompositionAnimation_iface, c, i ); }
+static HRESULT WINAPI kfa_GetRuntimeClassName( void *iface, HSTRING *n ) { return keyframe_GetRuntimeClassName( &impl_from_kfa(iface)->ICompositionAnimation_iface, n ); }
+static HRESULT WINAPI kfa_GetTrustLevel( void *iface, TrustLevel *l ) { return keyframe_GetTrustLevel( &impl_from_kfa(iface)->ICompositionAnimation_iface, l ); }
+
+static HRESULT WINAPI kfa_get_DelayTime( void *iface, struct TimeSpan *value )
+{
+    struct keyframe_animation *impl = impl_from_kfa( iface );
+    if (value) *value = impl->delay;
+    return S_OK;
+}
+static HRESULT WINAPI kfa_put_DelayTime( void *iface, struct TimeSpan value )
+{
+    struct keyframe_animation *impl = impl_from_kfa( iface );
+    impl->delay = value;
+    return S_OK;
+}
+static HRESULT WINAPI kfa_get_Duration( void *iface, struct TimeSpan *value )
+{
+    struct keyframe_animation *impl = impl_from_kfa( iface );
+    if (value) *value = impl->duration;
+    return S_OK;
+}
+static HRESULT WINAPI kfa_put_Duration( void *iface, struct TimeSpan value )
+{
+    struct keyframe_animation *impl = impl_from_kfa( iface );
+    TRACE( "iface %p, duration %I64d\n", iface, value.Duration );
+    impl->duration = value;
+    return S_OK;
+}
+static HRESULT WINAPI kfa_get_IterationBehavior( void *iface, UINT32 *value ) { if (value) *value = 0; return S_OK; }
+static HRESULT WINAPI kfa_put_IterationBehavior( void *iface, UINT32 value ) { TRACE( "iface %p, val %u\n", iface, value ); return S_OK; }
+static HRESULT WINAPI kfa_get_IterationCount( void *iface, INT32 *value )
+{
+    struct keyframe_animation *impl = impl_from_kfa( iface );
+    if (value) *value = impl->iteration_count;
+    return S_OK;
+}
+static HRESULT WINAPI kfa_put_IterationCount( void *iface, INT32 value )
+{
+    struct keyframe_animation *impl = impl_from_kfa( iface );
+    impl->iteration_count = value;
+    return S_OK;
+}
+static HRESULT WINAPI kfa_get_KeyFrameCount( void *iface, INT32 *value ) { if (value) *value = 0; return S_OK; }
+static HRESULT WINAPI kfa_InsertExpressionKeyFrame( void *iface, FLOAT key, HSTRING value ) { return S_OK; }
+static HRESULT WINAPI kfa_InsertExpressionKeyFrameWithEasingFunction( void *iface, FLOAT key, HSTRING value, void *easing ) { return S_OK; }
+static HRESULT WINAPI kfa_get_StopBehavior( void *iface, UINT32 *value ) { if (value) *value = 0; return S_OK; }
+static HRESULT WINAPI kfa_put_StopBehavior( void *iface, UINT32 value ) { return S_OK; }
+
+static const void *kfa_vtbl[] =
+{
+    kfa_QueryInterface,
+    kfa_AddRef,
+    kfa_Release,
+    kfa_GetIids,
+    kfa_GetRuntimeClassName,
+    kfa_GetTrustLevel,
+    kfa_get_DelayTime,
+    kfa_put_DelayTime,
+    kfa_get_Duration,
+    kfa_put_Duration,
+    kfa_get_IterationBehavior,
+    kfa_put_IterationBehavior,
+    kfa_get_IterationCount,
+    kfa_put_IterationCount,
+    kfa_get_KeyFrameCount,
+    kfa_InsertExpressionKeyFrame,
+    kfa_InsertExpressionKeyFrameWithEasingFunction,
+    kfa_get_StopBehavior,
+    kfa_put_StopBehavior,
+};
+
+static inline struct keyframe_animation *impl_from_kfa2( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct keyframe_animation, IKeyFrameAnimation2_iface );
+}
+static HRESULT WINAPI kfa2_QueryInterface( void *iface, REFIID iid, void **out ) { return keyframe_QueryInterface( &impl_from_kfa2(iface)->ICompositionAnimation_iface, iid, out ); }
+static ULONG WINAPI kfa2_AddRef( void *iface ) { return keyframe_AddRef( &impl_from_kfa2(iface)->ICompositionAnimation_iface ); }
+static ULONG WINAPI kfa2_Release( void *iface ) { return keyframe_Release( &impl_from_kfa2(iface)->ICompositionAnimation_iface ); }
+static HRESULT WINAPI kfa2_GetIids( void *iface, ULONG *c, IID **i ) { return keyframe_GetIids( &impl_from_kfa2(iface)->ICompositionAnimation_iface, c, i ); }
+static HRESULT WINAPI kfa2_GetRuntimeClassName( void *iface, HSTRING *n ) { return keyframe_GetRuntimeClassName( &impl_from_kfa2(iface)->ICompositionAnimation_iface, n ); }
+static HRESULT WINAPI kfa2_GetTrustLevel( void *iface, TrustLevel *l ) { return keyframe_GetTrustLevel( &impl_from_kfa2(iface)->ICompositionAnimation_iface, l ); }
+static HRESULT WINAPI kfa2_get_Direction( void *iface, UINT32 *value ) { TRACE( "iface %p\n", iface ); if (value) *value = 0; return S_OK; }
+static HRESULT WINAPI kfa2_put_Direction( void *iface, UINT32 value ) { TRACE( "iface %p, val %u\n", iface, value ); return S_OK; }
+static HRESULT WINAPI kfa2_slot8( void *iface, void *a ) { TRACE( "iface %p, a %p\n", iface, a ); return S_OK; }
+static HRESULT WINAPI kfa2_slot9( void *iface, void *a ) { TRACE( "iface %p, a %p\n", iface, a ); return S_OK; }
+static const void *kfa2_vtbl[] =
+{
+    kfa2_QueryInterface,
+    kfa2_AddRef,
+    kfa2_Release,
+    kfa2_GetIids,
+    kfa2_GetRuntimeClassName,
+    kfa2_GetTrustLevel,
+    kfa2_get_Direction,
+    kfa2_put_Direction,
+    kfa2_slot8,
+    kfa2_slot9,
+};
+
+static inline struct keyframe_animation *impl_from_kfa3( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct keyframe_animation, IKeyFrameAnimation3_iface );
+}
+static HRESULT WINAPI kfa3_QueryInterface( void *iface, REFIID iid, void **out ) { return keyframe_QueryInterface( &impl_from_kfa3(iface)->ICompositionAnimation_iface, iid, out ); }
+static ULONG WINAPI kfa3_AddRef( void *iface ) { return keyframe_AddRef( &impl_from_kfa3(iface)->ICompositionAnimation_iface ); }
+static ULONG WINAPI kfa3_Release( void *iface ) { return keyframe_Release( &impl_from_kfa3(iface)->ICompositionAnimation_iface ); }
+static HRESULT WINAPI kfa3_GetIids( void *iface, ULONG *c, IID **i ) { return keyframe_GetIids( &impl_from_kfa3(iface)->ICompositionAnimation_iface, c, i ); }
+static HRESULT WINAPI kfa3_GetRuntimeClassName( void *iface, HSTRING *n ) { return keyframe_GetRuntimeClassName( &impl_from_kfa3(iface)->ICompositionAnimation_iface, n ); }
+static HRESULT WINAPI kfa3_GetTrustLevel( void *iface, TrustLevel *l ) { return keyframe_GetTrustLevel( &impl_from_kfa3(iface)->ICompositionAnimation_iface, l ); }
+static HRESULT WINAPI kfa3_get_DelayBehavior( void *iface, UINT32 *value ) { if (value) *value = 0; return S_OK; }
+static HRESULT WINAPI kfa3_put_DelayBehavior( void *iface, UINT32 value ) { return S_OK; }
+static const void *kfa3_vtbl[] =
+{
+    kfa3_QueryInterface,
+    kfa3_AddRef,
+    kfa3_Release,
+    kfa3_GetIids,
+    kfa3_GetRuntimeClassName,
+    kfa3_GetTrustLevel,
+    kfa3_get_DelayBehavior,
+    kfa3_put_DelayBehavior,
+};
+
+static inline struct keyframe_animation *impl_from_kfa6( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct keyframe_animation, IKeyFrameAnimation6_iface );
+}
+static HRESULT WINAPI kfa6_QueryInterface( void *iface, REFIID iid, void **out ) { return keyframe_QueryInterface( &impl_from_kfa6(iface)->ICompositionAnimation_iface, iid, out ); }
+static ULONG WINAPI kfa6_AddRef( void *iface ) { return keyframe_AddRef( &impl_from_kfa6(iface)->ICompositionAnimation_iface ); }
+static ULONG WINAPI kfa6_Release( void *iface ) { return keyframe_Release( &impl_from_kfa6(iface)->ICompositionAnimation_iface ); }
+static HRESULT WINAPI kfa6_GetIids( void *iface, ULONG *c, IID **i ) { return keyframe_GetIids( &impl_from_kfa6(iface)->ICompositionAnimation_iface, c, i ); }
+static HRESULT WINAPI kfa6_GetRuntimeClassName( void *iface, HSTRING *n ) { return keyframe_GetRuntimeClassName( &impl_from_kfa6(iface)->ICompositionAnimation_iface, n ); }
+static HRESULT WINAPI kfa6_GetTrustLevel( void *iface, TrustLevel *l ) { return keyframe_GetTrustLevel( &impl_from_kfa6(iface)->ICompositionAnimation_iface, l ); }
+static HRESULT WINAPI kfa6_stub( void *iface, void *a1, void *a2 ) { TRACE( "iface %p, a1 %p, a2 %p\n", iface, a1, a2 ); return S_OK; }
+static const void *kfa6_vtbl[] =
+{
+    kfa6_QueryInterface,
+    kfa6_AddRef,
+    kfa6_Release,
+    kfa6_GetIids,
+    kfa6_GetRuntimeClassName,
+    kfa6_GetTrustLevel,
+    kfa6_stub,
+    kfa6_stub,
+    kfa6_stub,
+    kfa6_stub,
+    kfa6_stub,
+    kfa6_stub,
+};
+
 DEFINE_INHERITED_PROLOGUE( keyframe_object, ICompositionObject, struct keyframe_animation,
         ICompositionAnimation_iface )
 COMP_OBJECT_IMPL( keyframe_object, struct keyframe_animation )
@@ -566,6 +810,11 @@ struct keyframe_animation *keyframe_animation_create( struct compositor *composi
     impl->IVector3KeyFrameAnimation_iface.lpVtbl = &vector3key_vtbl;
     impl->IVector4KeyFrameAnimation_iface.lpVtbl = &vector4key_vtbl;
     impl->IQuaternionKeyFrameAnimation_iface.lpVtbl = &quatkey_vtbl;
+    impl->IPathKeyFrameAnimation_iface.lpVtbl = (const struct IInspectableVtbl *)pathkey_vtbl;
+    impl->IKeyFrameAnimation_iface.lpVtbl = (const struct IInspectableVtbl *)kfa_vtbl;
+    impl->IKeyFrameAnimation2_iface.lpVtbl = (const struct IInspectableVtbl *)kfa2_vtbl;
+    impl->IKeyFrameAnimation3_iface.lpVtbl = (const struct IInspectableVtbl *)kfa3_vtbl;
+    impl->IKeyFrameAnimation6_iface.lpVtbl = (const struct IInspectableVtbl *)kfa6_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &keyframe_object_vtbl;
     impl->IClosable_iface.lpVtbl = &keyframe_closable_vtbl;
     impl->ref = 1;
