@@ -67,6 +67,13 @@ Window root_window;
 BOOL usexvidmode = TRUE;
 BOOL usexrandr = TRUE;
 BOOL usexcomposite = TRUE;
+BOOL usexpresent = TRUE;
+void (*pXPresentPixmap)( Display *dpy, Window window, Pixmap pixmap, unsigned int serial,
+                         XID valid, XID update, int x_off, int y_off,
+                         XID target_crtc, XID wait_fence, XID idle_fence,
+                         unsigned int options, unsigned long long target_msc,
+                         unsigned long long divisor, unsigned long long remainder,
+                         void *notifies, int nnotifies );
 BOOL use_egl = TRUE;
 BOOL use_take_focus = TRUE;
 BOOL use_primary_selection = FALSE;
@@ -566,6 +573,47 @@ sym_not_found:
 }
 #endif /* defined(SONAME_LIBXCOMPOSITE) */
 
+static void X11DRV_XPresent_Init(void)
+{
+    Bool (*pXPresentQueryExtension)( Display *, int *, int *, int * );
+    int (*pXPresentQueryVersion)( Display *, int *, int * );
+    void *xpresent_handle;
+    int major_op, event_base, error_base;
+    int major = 0, minor = 0;
+
+    if (!usexpresent) return;
+    if (!(xpresent_handle = dlopen( "libXpresent.so.1", RTLD_NOW )))
+    {
+        TRACE( "Unable to open libXpresent.so.1, XPresent disabled\n" );
+        usexpresent = FALSE;
+        return;
+    }
+
+    pXPresentQueryExtension = dlsym( xpresent_handle, "XPresentQueryExtension" );
+    pXPresentQueryVersion = dlsym( xpresent_handle, "XPresentQueryVersion" );
+    pXPresentPixmap = dlsym( xpresent_handle, "XPresentPixmap" );
+    if (!pXPresentQueryExtension || !pXPresentQueryVersion || !pXPresentPixmap)
+    {
+        TRACE( "Unable to load XPresent symbols, XPresent disabled\n" );
+        dlclose( xpresent_handle );
+        pXPresentPixmap = NULL;
+        usexpresent = FALSE;
+        return;
+    }
+
+    if (!pXPresentQueryExtension( gdi_display, &major_op, &event_base, &error_base ) ||
+        !pXPresentQueryVersion( gdi_display, &major, &minor ) || major < 1)
+    {
+        TRACE( "XPresent extension unavailable, disabled\n" );
+        dlclose( xpresent_handle );
+        pXPresentPixmap = NULL;
+        usexpresent = FALSE;
+        return;
+    }
+
+    TRACE( "XPresent %d.%d initialized (opcode %d, event_base %d)\n", major, minor, major_op, event_base );
+}
+
 static void init_visuals( Display *display, int screen )
 {
     int count;
@@ -672,6 +720,7 @@ NTSTATUS __wine_unix_lib_init(void)
 #ifdef SONAME_LIBXCOMPOSITE
     X11DRV_XComposite_Init();
 #endif
+    X11DRV_XPresent_Init();
     x11drv_xinput2_load();
 
     x11drv_init_keyboard( gdi_display );

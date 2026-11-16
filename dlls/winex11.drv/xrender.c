@@ -2256,7 +2256,104 @@ static const struct gdi_dc_funcs xrender_funcs =
     GDI_PRIORITY_GRAPHICS_DRV + 10      /* priority */
 };
 
+BOOL x11drv_xrender_present_pixmap( Pixmap src, int src_depth, int src_w, int src_h,
+                                    Window dst, int dst_depth, const RECT *dst_rect, HRGN region )
+{
+    int dst_w = dst_rect->right - dst_rect->left;
+    int dst_h = dst_rect->bottom - dst_rect->top;
+    XRenderPictFormat *src_fmt = NULL, *dst_fmt = NULL;
+    XRenderPictureAttributes pa;
+    Picture src_pict, dst_pict;
+
+    if (!xrender_handle || dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
+        return FALSE;
+
+    if (src_depth == 32)
+        src_fmt = pict_formats[WXR_FORMAT_X8R8G8B8] ? pict_formats[WXR_FORMAT_X8R8G8B8] : pict_formats[WXR_FORMAT_A8R8G8B8];
+    else if (src_depth == default_visual.depth)
+        src_fmt = pict_formats[WXR_FORMAT_ROOT];
+
+    if (dst_depth == default_visual.depth)
+        dst_fmt = pict_formats[WXR_FORMAT_ROOT];
+    else if (dst_depth == 32)
+        dst_fmt = pict_formats[WXR_FORMAT_A8R8G8B8];
+
+    if (!src_fmt || !dst_fmt) return FALSE;
+
+    pa.subwindow_mode = IncludeInferiors;
+    src_pict = pXRenderCreatePicture( gdi_display, src, src_fmt, CPSubwindowMode, &pa );
+    dst_pict = pXRenderCreatePicture( gdi_display, dst, dst_fmt, CPSubwindowMode, &pa );
+    if (!src_pict || !dst_pict)
+    {
+        if (src_pict) pXRenderFreePicture( gdi_display, src_pict );
+        if (dst_pict) pXRenderFreePicture( gdi_display, dst_pict );
+        return FALSE;
+    }
+
+    if (src_w != dst_w || src_h != dst_h)
+    {
+#ifdef HAVE_XRENDERSETPICTURETRANSFORM
+        XTransform xform = {{{
+            XDoubleToFixed( (double)src_w / dst_w ), 0, 0 }, {
+            0, XDoubleToFixed( (double)src_h / dst_h ), 0 }, {
+            0, 0, XDoubleToFixed( 1.0 )
+        }}};
+        if (!pXRenderSetPictureTransform)
+        {
+            pXRenderFreePicture( gdi_display, src_pict );
+            pXRenderFreePicture( gdi_display, dst_pict );
+            return FALSE;
+        }
+        pXRenderSetPictureTransform( gdi_display, src_pict, &xform );
+        pXRenderSetPictureFilter( gdi_display, src_pict, FilterBilinear, NULL, 0 );
+#else
+        pXRenderFreePicture( gdi_display, src_pict );
+        pXRenderFreePicture( gdi_display, dst_pict );
+        return FALSE;
+#endif
+    }
+
+    if (region)
+    {
+        DWORD size = NtGdiGetRegionData( region, 0, NULL );
+        RGNDATA *data = size ? malloc( size ) : NULL;
+        if (data && NtGdiGetRegionData( region, size, data ))
+        {
+            RECT *rects = (RECT *)data->Buffer;
+            DWORD count = data->rdh.nCount;
+            XRectangle *xrects = count ? malloc( count * sizeof(*xrects) ) : NULL;
+            if (xrects)
+            {
+                DWORD i;
+                for (i = 0; i < count; i++)
+                {
+                    xrects[i].x = rects[i].left;
+                    xrects[i].y = rects[i].top;
+                    xrects[i].width = rects[i].right - rects[i].left;
+                    xrects[i].height = rects[i].bottom - rects[i].top;
+                }
+                pXRenderSetPictureClipRectangles( gdi_display, dst_pict, dst_rect->left, dst_rect->top, xrects, count );
+                free( xrects );
+            }
+        }
+        free( data );
+    }
+
+    pXRenderComposite( gdi_display, PictOpSrc, src_pict, None, dst_pict,
+                       0, 0, 0, 0, dst_rect->left, dst_rect->top, dst_w, dst_h );
+
+    pXRenderFreePicture( gdi_display, src_pict );
+    pXRenderFreePicture( gdi_display, dst_pict );
+    return TRUE;
+}
+
 #else /* SONAME_LIBXRENDER */
+
+BOOL x11drv_xrender_present_pixmap( Pixmap src, int src_depth, int src_w, int src_h,
+                                    Window dst, int dst_depth, const RECT *dst_rect, HRGN region )
+{
+    return FALSE;
+}
 
 const struct gdi_dc_funcs *X11DRV_XRender_Init(void)
 {

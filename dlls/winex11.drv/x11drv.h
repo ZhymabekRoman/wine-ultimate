@@ -471,6 +471,15 @@ extern BOOL use_primary_selection;
 extern BOOL use_system_cursors;
 extern BOOL grab_fullscreen;
 extern BOOL usexcomposite;
+extern BOOL usexpresent;
+extern void (*pXPresentPixmap)( Display *dpy, Window window, Pixmap pixmap, unsigned int serial,
+                                XID valid, XID update, int x_off, int y_off,
+                                XID target_crtc, XID wait_fence, XID idle_fence,
+                                unsigned int options, unsigned long long target_msc,
+                                unsigned long long divisor, unsigned long long remainder,
+                                void *notifies, int nnotifies );
+extern BOOL x11drv_xrender_present_pixmap( Pixmap src, int src_depth, int src_w, int src_h,
+                                           Window dst, int dst_depth, const RECT *dst_rect, HRGN region );
 extern BOOL managed_mode;
 extern BOOL private_color_map;
 extern int primary_monitor;

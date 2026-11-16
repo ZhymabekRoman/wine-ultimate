@@ -276,6 +276,11 @@ struct x11drv_client_surface
 
     HDC hdc_src;
     HDC hdc_dst;
+
+    int depth;
+    Window dst_window;
+    int dst_depth;
+    unsigned int present_serial;
 };
 
 static struct x11drv_client_surface *impl_from_client_surface( struct client_surface *client )
@@ -454,6 +459,69 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
 
     if (get_dc_drawable( surface->hdc_dst, &rect ) != window || !EqualRect( &rect, &rect_dst ))
         set_dc_drawable( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
+
+#ifdef SONAME_LIBXCOMPOSITE
+    if (usexcomposite && pXCompositeNameWindowPixmap && window)
+    {
+        int dst_w = rect_dst.right - rect_dst.left;
+        int dst_h = rect_dst.bottom - rect_dst.top;
+        int src_w = surface->rect.right;
+        int src_h = surface->rect.bottom;
+
+        if (dst_w > 0 && dst_h > 0 && src_w > 0 && src_h > 0)
+        {
+            BOOL clipped = FALSE;
+            Pixmap pixmap;
+
+            if (region)
+            {
+                RECT rgn_box;
+                INT rgn_type = NtGdiGetRgnBox( region, &rgn_box );
+                if (rgn_type == NULLREGION) goto done;
+                if (rgn_type != SIMPLEREGION ||
+                    rgn_box.left > 0 || rgn_box.top > 0 ||
+                    rgn_box.right < dst_w || rgn_box.bottom < dst_h)
+                    clipped = TRUE;
+            }
+
+            if (surface->dst_window != window)
+            {
+                XWindowAttributes attr;
+                if (XGetWindowAttributes( gdi_display, window, &attr ))
+                {
+                    surface->dst_window = window;
+                    surface->dst_depth = attr.depth;
+                }
+            }
+
+            if (surface->dst_window == window && (pixmap = pXCompositeNameWindowPixmap( gdi_display, surface->window )))
+            {
+                if (usexpresent && pXPresentPixmap && !clipped &&
+                    dst_w == src_w && dst_h == src_h &&
+                    surface->depth == surface->dst_depth)
+                {
+                    pXPresentPixmap( gdi_display, window, pixmap, ++surface->present_serial,
+                                     None, None, rect_dst.left, rect_dst.top,
+                                     None, None, None, 1 /* PresentOptionAsync */,
+                                     0, 0, 0, NULL, 0 );
+                    XFreePixmap( gdi_display, pixmap );
+                    XFlush( gdi_display );
+                    goto done;
+                }
+                if (x11drv_xrender_present_pixmap( pixmap, surface->depth, src_w, src_h,
+                                                   window, surface->dst_depth, &rect_dst,
+                                                   clipped ? region : NULL ))
+                {
+                    XFreePixmap( gdi_display, pixmap );
+                    XFlush( gdi_display );
+                    goto done;
+                }
+                XFreePixmap( gdi_display, pixmap );
+            }
+        }
+    }
+#endif
+
     if (region) NtGdiExtSelectClipRgn( surface->hdc_dst, region, RGN_COPY );
 
     NtGdiStretchBlt( surface->hdc_dst, 0, 0, rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top,
@@ -491,6 +559,7 @@ Window x11drv_client_surface_create( HWND hwnd, int format, struct client_surfac
 
     if (!(surface = client_surface_create( sizeof(*surface), &x11drv_client_surface_funcs, hwnd ))) goto failed;
     surface->colormap = colormap;
+    surface->depth = visual.depth;
 
     if (!get_surface_rect( hwnd, &surface->rect, NtUserGetDpiForWindow( hwnd ) )) goto failed;
     if (!(surface->window = create_client_window( hwnd, surface->rect, &visual, colormap ))) goto failed;

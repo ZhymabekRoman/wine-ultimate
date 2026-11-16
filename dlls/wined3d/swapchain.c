@@ -684,8 +684,15 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
 
         if (swapchain->device->context_count > 1)
         {
-            WARN_(d3d_perf)("Multiple contexts, calling glFinish() to enforce ordering.\n");
-            gl_info->gl_ops.gl.p_glFinish();
+            if (context->d3d_info->fences)
+            {
+                gl_info->gl_ops.gl.p_glFlush();
+            }
+            else
+            {
+                WARN_(d3d_perf)("Multiple contexts, calling glFinish() to enforce ordering.\n");
+                gl_info->gl_ops.gl.p_glFinish();
+            }
         }
 
         /* call wglSwapBuffers through the gl table to avoid confusing the Steam overlay */

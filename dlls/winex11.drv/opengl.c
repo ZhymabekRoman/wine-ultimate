@@ -1212,7 +1212,11 @@ static void x11drv_surface_flush( struct opengl_drawable *base, UINT flags )
 
     if (InterlockedCompareExchange( &base->client->offscreen, 0, 0 ))
     {
-        if (!(flags & GL_FLUSH_FINISHED)) funcs->p_glFinish();
+        if (!(flags & GL_FLUSH_FINISHED))
+        {
+            if (usexpresent && usexcomposite) funcs->p_glFlush();
+            else funcs->p_glFinish();
+        }
         XFlush( gdi_display );
     }
 
@@ -1485,7 +1489,11 @@ static void x11drv_egl_surface_flush( struct opengl_drawable *base, UINT flags )
 
     if (InterlockedCompareExchange( &base->client->offscreen, 0, 0 ))
     {
-        if (!(flags & GL_FLUSH_FINISHED)) funcs->p_glFinish();
+        if (!(flags & GL_FLUSH_FINISHED))
+        {
+            if (usexpresent && usexcomposite) funcs->p_glFlush();
+            else funcs->p_glFinish();
+        }
         XFlush( gdi_display );
     }
 
