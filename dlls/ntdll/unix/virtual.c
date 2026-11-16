@@ -317,7 +317,9 @@ static void kernel_writewatch_init(void)
     if (uffd_fd == -1) return;
 
     uffdio_api.api = UFFD_API;
-    uffdio_api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED;
+    /* UFFD_FEATURE_WP_ASYNC implies UFFD_FEATURE_WP_UNPOPULATED on the kernel;
+     * requesting both is redundant, ask for the async feature only. */
+    uffdio_api.features = UFFD_FEATURE_WP_ASYNC;
     if (ioctl( uffd_fd, UFFDIO_API, &uffdio_api ) || uffdio_api.api != UFFD_API)
     {
         close( uffd_fd );
@@ -345,6 +347,9 @@ static void kernel_writewatch_reset( void *start, SIZE_T len )
     arg.start = (UINT_PTR)start;
     arg.end = arg.start + len;
     arg.flags = PM_SCAN_WP_MATCHING;
+#ifdef PM_SCAN_CHECK_WPASYNC
+    arg.flags |= PM_SCAN_CHECK_WPASYNC;
+#endif
     arg.category_mask = PAGE_IS_WRITTEN;
     arg.return_mask = PAGE_IS_WRITTEN;
     if (ioctl( pagemap_fd, PAGEMAP_SCAN, &arg ) < 0)
@@ -361,8 +366,10 @@ static void kernel_writewatch_register_range( struct file_view *view, void *base
     size = ROUND_SIZE( base, size, host_page_mask );
     base = (char *)ROUND_ADDR( base, host_page_mask );
 
-    /* Transparent huge pages will result in larger areas reported as dirty. */
-    madvise( base, size, MADV_NOHUGEPAGE );
+    /* Transparent huge pages will result in larger areas reported as dirty.
+     * THP only forms on ranges of at least one huge page, so skip the madvise
+     * syscall for the many small write-watch allocations that can never page up. */
+    if (size >= 2 * 1024 * 1024) madvise( base, size, MADV_NOHUGEPAGE );
 
     uffdio_register.range.start = (UINT_PTR)base;
     uffdio_register.range.len = size;
@@ -389,7 +396,7 @@ static void kernel_writewatch_register_range( struct file_view *view, void *base
 static void kernel_get_write_watches( void *base, SIZE_T size, void **buffer, ULONG_PTR *count, BOOL reset )
 {
     struct pm_scan_arg arg = { 0 };
-    struct page_region rgns[256];
+    struct page_region rgns[512];
     SIZE_T buffer_len = *count;
     char *addr, *next_addr;
     int rgn_count, i;
@@ -405,6 +412,9 @@ static void kernel_get_write_watches( void *base, SIZE_T size, void **buffer, UL
     arg.vec = (ULONG_PTR)rgns;
     arg.vec_len = ARRAY_SIZE(rgns);
     if (reset) arg.flags |= PM_SCAN_WP_MATCHING;
+#ifdef PM_SCAN_CHECK_WPASYNC
+    arg.flags |= PM_SCAN_CHECK_WPASYNC;
+#endif
     arg.category_mask = PAGE_IS_WRITTEN;
     arg.return_mask = PAGE_IS_WRITTEN;
 
