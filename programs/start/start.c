@@ -589,13 +589,7 @@ int __cdecl wmain (int argc, WCHAR *argv[])
                     }
 
                     commandline = malloc(len * sizeof(WCHAR));
-                    /* quote the parameters too: they carry the app path, which
-                     * may contain spaces (e.g. .../Program Files/.../App.exe) */
-                    if (opts.sei.lpParameters && opts.sei.lpParameters[0] &&
-                        opts.sei.lpParameters[0] != L'"')
-                        swprintf(commandline, len, L"\"%s\" \"%s\"", opts.sei.lpFile, opts.sei.lpParameters);
-                    else
-                        swprintf(commandline, len, L"\"%s\" %s", opts.sei.lpFile, opts.sei.lpParameters);
+                    swprintf(commandline, len, L"\"%s\" %s", opts.sei.lpFile, opts.sei.lpParameters);
 
                     si.StartupInfo.wShowWindow = opts.sei.nShow;
                     si.StartupInfo.dwFlags |= STARTF_USESHOWWINDOW;
