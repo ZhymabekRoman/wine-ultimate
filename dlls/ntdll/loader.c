@@ -1596,10 +1596,6 @@ static NTSTATUS fixup_imports( WINE_MODREF *wm, LPCWSTR load_path )
             add_module_dependency_after( wm->ldr.DdagNode, imp->ldr.DdagNode, dep_after );
     }
     if (wm->ldr.ActivationContext) RtlDeactivateActivationContext( 0, cookie );
-#ifdef __x86_64__
-    if (status == STATUS_SUCCESS && is_module_eligible_for_inline_patch( wm->ldr.BaseDllName.Buffer, wm->ldr.DllBase ))
-        patch_module_call_sites( wm->ldr.DllBase, wm->ldr.SizeOfImage );
-#endif
     return status;
 }
 

@@ -10,7 +10,6 @@
  */
 
 #include <stdarg.h>
-#include <stdint.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -492,100 +491,6 @@ __ASM_GLOBAL_FUNC( fast_RtlEqualUnicodeString,
                    "7:\n\t"
                    "jmp RtlEqualUnicodeString" )
 
-/* SRWLock fast paths matching struct srw_lock in dlls/ntdll/sync.c:
- *   offset 0 (low 16 bits):  short exclusive_waiters (bit 0 = held exclusive, bits 1..15 = waiter count)
- *   offset 2 (high 16 bits): unsigned short owners
- * Combined as a 32-bit LONG at (%rcx):
- *   0x00000000 = unlocked
- *   0x00010001 = held exclusive, 0 waiters
- *   0xNNNN0000 = held shared by NNNN owners, 0 exclusive waiters
- */
-extern void WINAPI fast_RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock );
-__ASM_GLOBAL_FUNC( fast_RtlAcquireSRWLockExclusive,
-                   ".p2align 4, 0x90\n\t"
-                   "xorl %eax,%eax\n\t"
-                   "movl $0x00010001,%edx\n\t"
-                   "lock cmpxchgl %edx,(%rcx)\n\t"
-                   "jnz 1f\n\t"
-                   "ret\n\t"
-                   "1:\n\t"
-                   "jmp RtlAcquireSRWLockExclusive" )
-
-extern BOOLEAN WINAPI fast_RtlTryAcquireSRWLockExclusive( RTL_SRWLOCK *lock );
-__ASM_GLOBAL_FUNC( fast_RtlTryAcquireSRWLockExclusive,
-                   ".p2align 4, 0x90\n\t"
-                   "xorl %eax,%eax\n\t"
-                   "movl $0x00010001,%edx\n\t"
-                   "lock cmpxchgl %edx,(%rcx)\n\t"
-                   "jnz 1f\n\t"
-                   "movl $1,%eax\n\t"
-                   "ret\n\t"
-                   "1:\n\t"
-                   "jmp RtlTryAcquireSRWLockExclusive" )
-
-extern void WINAPI fast_RtlReleaseSRWLockExclusive( RTL_SRWLOCK *lock );
-__ASM_GLOBAL_FUNC( fast_RtlReleaseSRWLockExclusive,
-                   ".p2align 4, 0x90\n\t"
-                   "movl $0x00010001,%eax\n\t"
-                   "xorl %edx,%edx\n\t"
-                   "lock cmpxchgl %edx,(%rcx)\n\t"
-                   "jnz 1f\n\t"
-                   "jmp RtlWakeAddressAll\n\t"
-                   "1:\n\t"
-                   "jmp RtlReleaseSRWLockExclusive" )
-
-extern void WINAPI fast_RtlAcquireSRWLockShared( RTL_SRWLOCK *lock );
-__ASM_GLOBAL_FUNC( fast_RtlAcquireSRWLockShared,
-                   ".p2align 4, 0x90\n\t"
-                   "movl (%rcx),%eax\n\t"
-                   "testw %ax,%ax\n\t"
-                   "jnz 1f\n\t"
-                   "cmpl $0xffff0000,%eax\n\t"
-                   "jae 1f\n\t"
-                   "leal 0x10000(%rax),%edx\n\t"
-                   "lock cmpxchgl %edx,(%rcx)\n\t"
-                   "jnz 1f\n\t"
-                   "ret\n\t"
-                   "1:\n\t"
-                   "jmp RtlAcquireSRWLockShared" )
-
-extern BOOLEAN WINAPI fast_RtlTryAcquireSRWLockShared( RTL_SRWLOCK *lock );
-__ASM_GLOBAL_FUNC( fast_RtlTryAcquireSRWLockShared,
-                   ".p2align 4, 0x90\n\t"
-                   "movl (%rcx),%eax\n\t"
-                   "testw %ax,%ax\n\t"
-                   "jnz 1f\n\t"
-                   "cmpl $0xffff0000,%eax\n\t"
-                   "jae 1f\n\t"
-                   "leal 0x10000(%rax),%edx\n\t"
-                   "lock cmpxchgl %edx,(%rcx)\n\t"
-                   "jnz 1f\n\t"
-                   "movl $1,%eax\n\t"
-                   "ret\n\t"
-                   "1:\n\t"
-                   "jmp RtlTryAcquireSRWLockShared" )
-
-extern void WINAPI fast_RtlReleaseSRWLockShared( RTL_SRWLOCK *lock );
-__ASM_GLOBAL_FUNC( fast_RtlReleaseSRWLockShared,
-                   ".p2align 4, 0x90\n\t"
-                   "movl $0x00010000,%eax\n\t"
-                   "xorl %edx,%edx\n\t"
-                   "lock cmpxchgl %edx,(%rcx)\n\t"
-                   "jnz 1f\n\t"
-                   "ret\n\t"
-                   "1:\n\t"
-                   "jmp RtlReleaseSRWLockShared" )
-
-extern PVOID WINAPI fast_EncodePointer( PVOID ptr );
-__ASM_GLOBAL_FUNC( fast_EncodePointer,
-                   ".p2align 4, 0x90\n\t"
-                   "jmp RtlEncodePointer" )
-
-extern PVOID WINAPI fast_DecodePointer( PVOID ptr );
-__ASM_GLOBAL_FUNC( fast_DecodePointer,
-                   ".p2align 4, 0x90\n\t"
-                   "jmp RtlDecodePointer" )
-
 static inline DWORD fnv1a_32( const char *str )
 {
     DWORD hash = 2166136261u;
@@ -657,22 +562,6 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0x3a2f5799u: if (!strcmp(func_name, "GetVersion")) return (ULONG_PTR)fast_GetVersion; break;
     case 0x647a8efau: if (!strcmp(func_name, "GetActiveProcessorCount")) return (ULONG_PTR)fast_GetActiveProcessorCount; break;
     case 0x8af4c873u: if (!strcmp(func_name, "RtlEqualUnicodeString")) return (ULONG_PTR)fast_RtlEqualUnicodeString; break;
-    case 0xda2f90e4u: if (!strcmp(func_name, "AcquireSRWLockExclusive")) return (ULONG_PTR)fast_RtlAcquireSRWLockExclusive; break;
-    case 0x7875e76cu: if (!strcmp(func_name, "RtlAcquireSRWLockExclusive")) return (ULONG_PTR)fast_RtlAcquireSRWLockExclusive; break;
-    case 0xcff2b985u: if (!strcmp(func_name, "TryAcquireSRWLockExclusive")) return (ULONG_PTR)fast_RtlTryAcquireSRWLockExclusive; break;
-    case 0x5b8ae7edu: if (!strcmp(func_name, "RtlTryAcquireSRWLockExclusive")) return (ULONG_PTR)fast_RtlTryAcquireSRWLockExclusive; break;
-    case 0x5c87aa4du: if (!strcmp(func_name, "ReleaseSRWLockExclusive")) return (ULONG_PTR)fast_RtlReleaseSRWLockExclusive; break;
-    case 0x38ecb9d5u: if (!strcmp(func_name, "RtlReleaseSRWLockExclusive")) return (ULONG_PTR)fast_RtlReleaseSRWLockExclusive; break;
-    case 0x84885029u: if (!strcmp(func_name, "AcquireSRWLockShared")) return (ULONG_PTR)fast_RtlAcquireSRWLockShared; break;
-    case 0x597c45c1u: if (!strcmp(func_name, "RtlAcquireSRWLockShared")) return (ULONG_PTR)fast_RtlAcquireSRWLockShared; break;
-    case 0xe99fa9eeu: if (!strcmp(func_name, "TryAcquireSRWLockShared")) return (ULONG_PTR)fast_RtlTryAcquireSRWLockShared; break;
-    case 0xb6e7b846u: if (!strcmp(func_name, "RtlTryAcquireSRWLockShared")) return (ULONG_PTR)fast_RtlTryAcquireSRWLockShared; break;
-    case 0x4f0e1426u: if (!strcmp(func_name, "ReleaseSRWLockShared")) return (ULONG_PTR)fast_RtlReleaseSRWLockShared; break;
-    case 0x2da46ddeu: if (!strcmp(func_name, "RtlReleaseSRWLockShared")) return (ULONG_PTR)fast_RtlReleaseSRWLockShared; break;
-    case 0x83ff1254u: if (!strcmp(func_name, "EncodePointer")) return (ULONG_PTR)fast_EncodePointer; break;
-    case 0x982524fcu: if (!strcmp(func_name, "RtlEncodePointer")) return (ULONG_PTR)fast_EncodePointer; break;
-    case 0x91125e9cu: if (!strcmp(func_name, "DecodePointer")) return (ULONG_PTR)fast_DecodePointer; break;
-    case 0x5206e494u: if (!strcmp(func_name, "RtlDecodePointer")) return (ULONG_PTR)fast_DecodePointer; break;
     }
 
     return 0;
@@ -690,169 +579,9 @@ BOOL is_module_eligible_for_inline_patch( const WCHAR *module_name, void *base )
     return TRUE;
 }
 
-static BOOL is_fast_trampoline_addr( ULONG_PTR addr )
-{
-    static const ULONG_PTR tramps[] = {
-        (ULONG_PTR)fast_GetCurrentThreadId,
-        (ULONG_PTR)fast_GetCurrentProcessId,
-        (ULONG_PTR)fast_GetLastError,
-        (ULONG_PTR)fast_SetLastError,
-        (ULONG_PTR)fast_GetProcessHeap,
-        (ULONG_PTR)fast_NtCurrentTeb,
-        (ULONG_PTR)fast_GetCurrentProcess,
-        (ULONG_PTR)fast_GetCurrentThread,
-        (ULONG_PTR)fast_GetTickCount,
-        (ULONG_PTR)fast_GetTickCount64,
-        (ULONG_PTR)fast_GetSystemTimeAsFileTime,
-        (ULONG_PTR)fast_GetSystemTimePreciseAsFileTime,
-        (ULONG_PTR)fast_QueryPerformanceCounter,
-        (ULONG_PTR)fast_QueryPerformanceFrequency,
-        (ULONG_PTR)fast_TlsGetValue,
-        (ULONG_PTR)fast_TlsSetValue,
-        (ULONG_PTR)fast_EnterCriticalSection,
-        (ULONG_PTR)fast_LeaveCriticalSection,
-        (ULONG_PTR)fast_RtlRunOnceExecuteOnce,
-        (ULONG_PTR)fast_IsProcessorFeaturePresent,
-        (ULONG_PTR)fast_RtlInitUnicodeString,
-        (ULONG_PTR)fast_GetVersion,
-        (ULONG_PTR)fast_GetActiveProcessorCount,
-        (ULONG_PTR)fast_RtlEqualUnicodeString,
-        (ULONG_PTR)fast_RtlAcquireSRWLockExclusive,
-        (ULONG_PTR)fast_RtlTryAcquireSRWLockExclusive,
-        (ULONG_PTR)fast_RtlReleaseSRWLockExclusive,
-        (ULONG_PTR)fast_RtlAcquireSRWLockShared,
-        (ULONG_PTR)fast_RtlTryAcquireSRWLockShared,
-        (ULONG_PTR)fast_RtlReleaseSRWLockShared,
-        (ULONG_PTR)fast_EncodePointer,
-        (ULONG_PTR)fast_DecodePointer,
-    };
-    static ULONG_PTR min_tramp = 0, max_tramp = 0;
-    SIZE_T i;
-
-    if (!min_tramp)
-    {
-        ULONG_PTR lo = tramps[0], hi = tramps[0];
-        for (i = 1; i < ARRAY_SIZE(tramps); i++)
-        {
-            if (tramps[i] < lo) lo = tramps[i];
-            if (tramps[i] > hi) hi = tramps[i];
-        }
-        min_tramp = lo;
-        max_tramp = hi;
-    }
-
-    if (addr < min_tramp || addr > max_tramp) return FALSE;
-
-    for (i = 0; i < ARRAY_SIZE(tramps); i++)
-        if (tramps[i] == addr) return TRUE;
-    return FALSE;
-}
-
-struct iat_range
-{
-    ULONG_PTR start;
-    ULONG_PTR end;
-};
-
-static BOOL is_in_iat_ranges( ULONG_PTR slot, const struct iat_range *ranges, unsigned int count )
-{
-    unsigned int i;
-    if (slot & 7) return FALSE;
-    for (i = 0; i < count; i++)
-        if (slot >= ranges[i].start && slot < ranges[i].end)
-            return TRUE;
-    return FALSE;
-}
-
 void patch_module_call_sites( void *module_base, SIZE_T image_size )
 {
-    const IMAGE_NT_HEADERS *nt;
-    const IMAGE_IMPORT_DESCRIPTOR *imports;
-    const IMAGE_SECTION_HEADER *sec;
-    struct iat_range ranges[128];
-    unsigned int num_ranges = 0;
-    DWORD imp_size = 0;
-    WORD i;
-
-    if (!is_fast_trampoline_enabled() || !module_base || !image_size) return;
-
-    nt = RtlImageNtHeader( module_base );
-    if (!nt || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) return;
-
-    imports = RtlImageDirectoryEntryToData( module_base, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &imp_size );
-    if (!imports) return;
-
-    while (imports[num_ranges].Name && imports[num_ranges].FirstThunk && num_ranges < ARRAY_SIZE(ranges))
-    {
-        const IMAGE_THUNK_DATA *thunk = (const IMAGE_THUNK_DATA *)((const BYTE *)module_base + imports[num_ranges].FirstThunk);
-        ULONG_PTR start = (ULONG_PTR)thunk;
-        while ((ULONG_PTR)thunk - (ULONG_PTR)module_base + sizeof(*thunk) <= image_size && thunk->u1.Function)
-            thunk++;
-        ranges[num_ranges].start = start;
-        ranges[num_ranges].end = (ULONG_PTR)thunk;
-        num_ranges++;
-    }
-    if (!num_ranges) return;
-
-    sec = IMAGE_FIRST_SECTION( nt );
-    for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++)
-    {
-        BYTE *sec_start;
-        SIZE_T sec_size, pos;
-        void *prot_base = NULL;
-        SIZE_T prot_size = 0;
-        ULONG old_prot = 0;
-        BOOL writable = FALSE;
-
-        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
-        if (sec->VirtualAddress >= image_size) continue;
-
-        sec_size = sec->Misc.VirtualSize;
-        if (sec_size > image_size - sec->VirtualAddress)
-            sec_size = image_size - sec->VirtualAddress;
-        if (sec_size < 6) continue;
-
-        sec_start = (BYTE *)module_base + sec->VirtualAddress;
-        for (pos = 0; pos <= sec_size - 6; pos++)
-        {
-            INT32 disp;
-            ULONG_PTR slot, target;
-            INT64 rel;
-
-            if (sec_start[pos] != 0xFF || sec_start[pos + 1] != 0x15) continue;
-
-            disp = *(const INT32 *)(sec_start + pos + 2);
-            slot = (ULONG_PTR)(sec_start + pos + 6) + (INT64)disp;
-            if (!is_in_iat_ranges( slot, ranges, num_ranges )) continue;
-
-            target = *(const ULONG_PTR *)slot;
-            if (!is_fast_trampoline_addr( target )) continue;
-
-            rel = (INT64)target - (INT64)(ULONG_PTR)(sec_start + pos + 6);
-            if (rel < INT32_MIN || rel > INT32_MAX) continue;
-
-            if (!writable)
-            {
-                prot_base = sec_start;
-                prot_size = sec_size;
-                if (NtProtectVirtualMemory( NtCurrentProcess(), &prot_base, &prot_size,
-                                            PAGE_EXECUTE_READWRITE, &old_prot ))
-                    break;
-                writable = TRUE;
-            }
-
-            sec_start[pos] = 0x90;
-            sec_start[pos + 1] = 0xE8;
-            *(INT32 *)(sec_start + pos + 2) = (INT32)rel;
-            pos += 5;
-        }
-
-        if (writable)
-        {
-            NtProtectVirtualMemory( NtCurrentProcess(), &prot_base, &prot_size, old_prot, &old_prot );
-            NtFlushInstructionCache( NtCurrentProcess(), sec_start, sec_size );
-        }
-    }
+    /* Heuristic call site scanner can be expanded here */
 }
 
 #endif /* __x86_64__ */

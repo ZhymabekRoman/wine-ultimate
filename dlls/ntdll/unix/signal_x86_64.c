@@ -3699,18 +3699,31 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    /* Legends of Runeterra hooks the first system call return instruction, and
                     * depends on us returning to it. Adjust the return address accordingly. */
                    "subq $0xb,0x70(%rcx)\n\t"
+                   "cmpb $0,0x7ffe0285\n\t"        /* user_shared_data->ProcessorFeatures[PF_XSAVE_ENABLED] */
+                   "jz 2f\n\t"
+                   "movl 0x7ffe03d8,%eax\n\t"      /* user_shared_data->XState.EnabledFeatures */
+                   "xorl %edx,%edx\n\t"
+                   "andl $7,%eax\n\t"
+                   "xorq %rbp,%rbp\n\t"
+                   "movq %rbp,0x2c0(%rcx)\n\t"
+                   "movq %rbp,0x2c8(%rcx)\n\t"
+                   "movq %rbp,0x2d0(%rcx)\n\t"
+                   "testl $2,0x7ffe03ec\n\t"       /* user_shared_data->XState.CompactionEnabled */
+                   "jz 1f\n\t"
+                   "movq %rbp,0x2d8(%rcx)\n\t"
+                   "movq %rbp,0x2e0(%rcx)\n\t"
+                   "movq %rbp,0x2e8(%rcx)\n\t"
+                   "movq %rbp,0x2f0(%rcx)\n\t"
+                   "movq %rbp,0x2f8(%rcx)\n\t"
+                   /* The xsavec instruction is not supported by
+                    * binutils < 2.25. */
+                   ".byte 0x48, 0x0f, 0xc7, 0xa1, 0xc0, 0x00, 0x00, 0x00\n\t" /* xsavec64 0xc0(%rcx) */
                    "stmxcsr 0xd8(%rcx)\n\t"        /* frame->xsave.MxCsr */
-                   "movdqa %xmm6,0x1c0(%rcx)\n\t"
-                   "movdqa %xmm7,0x1d0(%rcx)\n\t"
-                   "movdqa %xmm8,0x1e0(%rcx)\n\t"
-                   "movdqa %xmm9,0x1f0(%rcx)\n\t"
-                   "movdqa %xmm10,0x200(%rcx)\n\t"
-                   "movdqa %xmm11,0x210(%rcx)\n\t"
-                   "movdqa %xmm12,0x220(%rcx)\n\t"
-                   "movdqa %xmm13,0x230(%rcx)\n\t"
-                   "movdqa %xmm14,0x240(%rcx)\n\t"
-                   "movdqa %xmm15,0x250(%rcx)\n\t"
-                   "leaq 0x98(%rcx),%rbp\n\t"
+                   "jmp 3f\n"
+                   "1:\txsave64 0xc0(%rcx)\n\t"
+                   "jmp 3f\n"
+                   "2:\tfxsave64 0xc0(%rcx)\n"
+                   "3:\tleaq 0x98(%rcx),%rbp\n\t"
                    __ASM_CFI_CFA_IS_AT1(rbp, 0x70)
                    __ASM_CFI_REG_IS_AT1(rip, rbp, 0x58)
                    __ASM_CFI_REG_IS_AT2(rbx, rbp, 0xf0, 0x7e)
