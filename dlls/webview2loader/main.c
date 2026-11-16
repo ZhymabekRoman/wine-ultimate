@@ -487,16 +487,139 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentOptions( LPCWSTR language, void *opt
     return p( language, options );
 }
 
+struct default_env_options
+{
+    const void **vtbl;
+    LONG ref;
+    WCHAR args[128];
+};
+
+static void *loader_cotaskmem_alloc( SIZE_T sz )
+{
+    static LPVOID (WINAPI *p_alloc)( SIZE_T );
+    if (!p_alloc)
+    {
+        HMODULE ole = GetModuleHandleW( L"ole32.dll" );
+        if (!ole) ole = LoadLibraryW( L"ole32.dll" );
+        if (ole) p_alloc = (void *)GetProcAddress( ole, "CoTaskMemAlloc" );
+    }
+    return p_alloc ? p_alloc( sz ) : HeapAlloc( GetProcessHeap(), 0, sz );
+}
+
+static HRESULT WINAPI def_opts_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IUnknown_local =
+        { 0x00000000, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    static const GUID IID_ICoreWebView2EnvironmentOptions_g =
+        { 0x2fde08a8, 0x1e9a, 0x4766, { 0x8c, 0x05, 0x95, 0xa9, 0xce, 0xb9, 0xd1, 0xc5 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown_local ) || IsEqualGUID( iid, &IID_ICoreWebView2EnvironmentOptions_g ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct default_env_options *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI def_opts_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct default_env_options *)iface)->ref );
+}
+static ULONG WINAPI def_opts_Release( void *iface )
+{
+    struct default_env_options *o = iface;
+    LONG r = InterlockedDecrement( &o->ref );
+    if (!r)
+    {
+        HeapFree( GetProcessHeap(), 0, (void *)o->vtbl );
+        HeapFree( GetProcessHeap(), 0, o );
+    }
+    return r;
+}
+static HRESULT WINAPI def_opts_get_AdditionalBrowserArguments( void *iface, LPWSTR *val )
+{
+    struct default_env_options *o = iface;
+    size_t sz;
+    if (!val) return E_POINTER;
+    sz = (lstrlenW( o->args ) + 1) * sizeof(WCHAR);
+    *val = loader_cotaskmem_alloc( sz );
+    if (!*val) return E_OUTOFMEMORY;
+    memcpy( *val, o->args, sz );
+    return S_OK;
+}
+static HRESULT WINAPI def_opts_put_AdditionalBrowserArguments( void *iface, LPCWSTR val ) { return S_OK; }
+static HRESULT WINAPI def_opts_get_Language( void *iface, LPWSTR *val )
+{
+    if (!val) return E_POINTER;
+    *val = loader_cotaskmem_alloc( sizeof(L"en-US") );
+    if (*val) memcpy( *val, L"en-US", sizeof(L"en-US") );
+    return *val ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT WINAPI def_opts_put_Language( void *iface, LPCWSTR val ) { return S_OK; }
+static HRESULT WINAPI def_opts_get_TargetCompatibleBrowserVersion( void *iface, LPWSTR *val )
+{
+    static const WCHAR ver[] = L"156.0.4314.42";
+    if (!val) return E_POINTER;
+    *val = loader_cotaskmem_alloc( sizeof(ver) );
+    if (*val) memcpy( *val, ver, sizeof(ver) );
+    return *val ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT WINAPI def_opts_put_TargetCompatibleBrowserVersion( void *iface, LPCWSTR val ) { return S_OK; }
+static HRESULT WINAPI def_opts_get_AllowSSO( void *iface, BOOL *val )
+{
+    if (val) *val = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI def_opts_put_AllowSSO( void *iface, BOOL val ) { return S_OK; }
+
+static void *create_default_env_options( void )
+{
+    struct default_env_options *o;
+    const void **vt;
+    int cy = GetSystemMetrics( SM_CYSCREEN );
+    if (cy <= 0 || cy > 1024) return NULL;
+    o = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*o) );
+    vt = HeapAlloc( GetProcessHeap(), 0, 11 * sizeof(*vt) );
+    if (!o || !vt) { HeapFree( GetProcessHeap(), 0, o ); HeapFree( GetProcessHeap(), 0, vt ); return NULL; }
+    vt[0] = def_opts_QueryInterface;
+    vt[1] = def_opts_AddRef;
+    vt[2] = def_opts_Release;
+    vt[3] = def_opts_get_AdditionalBrowserArguments;
+    vt[4] = def_opts_put_AdditionalBrowserArguments;
+    vt[5] = def_opts_get_Language;
+    vt[6] = def_opts_put_Language;
+    vt[7] = def_opts_get_TargetCompatibleBrowserVersion;
+    vt[8] = def_opts_put_TargetCompatibleBrowserVersion;
+    vt[9] = def_opts_get_AllowSSO;
+    vt[10] = def_opts_put_AllowSSO;
+    o->vtbl = vt;
+    o->ref = 1;
+    lstrcpyW( o->args, L"--force-device-scale-factor=0.50" );
+    return o;
+}
+
 HRESULT WINAPI CreateCoreWebView2EnvironmentWithOptions( LPCWSTR browser_folder,
         LPCWSTR user_data_folder, void *options, void *handler )
 {
     HRESULT (WINAPI *p)( LPCWSTR, LPCWSTR, void *, void * );
     HRESULT (WINAPI *p_int)( BOOL, int, LPCWSTR, void *, void * );
+    void *def_opts = NULL;
+    HRESULT hr;
+
+    if (!options)
+    {
+        def_opts = create_default_env_options();
+        if (def_opts) options = def_opts;
+    }
     if ((p = get_eb_export( "CreateCoreWebView2EnvironmentWithOptions" )))
-        return p( browser_folder, user_data_folder, options, handler );
-    if ((p_int = get_eb_export( "CreateWebViewEnvironmentWithOptionsInternal" )))
-        return p_int( TRUE, 0, user_data_folder, options, handler );
-    return mock_create_environment( handler );
+        hr = p( browser_folder, user_data_folder, options, handler );
+    else if ((p_int = get_eb_export( "CreateWebViewEnvironmentWithOptionsInternal" )))
+        hr = p_int( TRUE, 0, user_data_folder, options, handler );
+    else
+        hr = mock_create_environment( handler );
+    if (def_opts) def_opts_Release( def_opts );
+    return hr;
 }
 
 HRESULT WINAPI GetAvailableCoreWebView2BrowserVersionString( LPCWSTR browser_folder,
