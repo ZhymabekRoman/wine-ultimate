@@ -363,7 +363,7 @@ static BOOL parse_schema( pri_index *idx )
             total += wcslen( cur->name ) + 1;
             if (cur->parent == 0xffff || cur->parent >= cnt_all) break;
             pe = &idx->entries[cur->parent];
-            if (pe->index == 0xffff) break;
+            if (pe == cur || pe->index == 0xffff || !pe->name[0]) break;
             cur = pe;
         }
         if (!(e->fullname = HeapAlloc( GetProcessHeap(), 0, total * sizeof(WCHAR) ))) return FALSE;

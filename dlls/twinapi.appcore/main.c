@@ -2125,6 +2125,8 @@ static void package_installed_location( WCHAR *buf, DWORD cch )
     buf[0] = 0;
 }
 
+static WCHAR resource_loader_scope[256];
+
 static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **context )
 {
     static const WCHAR pri_name[] = L"\\resources.pri";
@@ -2135,6 +2137,7 @@ static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **conte
     len = GetModuleFileNameW( NULL, dir, ARRAY_SIZE( dir ) );
     if (len && len < ARRAY_SIZE( dir ) && wcsrchr( dir, '\\' ))
     {
+        *wcsrchr( dir, '\\' ) = 0;
         lstrcpyW( path, dir );
         lstrcatW( path, pri_name );
         if ((cached_pri_index = pri_load( path ))) return TRUE;
@@ -2159,17 +2162,31 @@ static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **conte
 }
 
 /* Resolve a resource key against the cached index.  A bare key is tried in
- * the main map, then under the default "Resources" scope and the "Files"
- * scope (ms-resource file URIs); the scope prefix is skipped when the key
- * already carries one.  On success *value holds the string. */
+ * the main map, then under the default "Resources" scope, any named loader
+ * scope, top-level PRI scopes, and the "Files" scope (ms-resource file URIs);
+ * the scope prefix is skipped when the key already carries one.  On success
+ * *value holds the string. */
 static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
 {
     static const WCHAR *const scopes[] = { L"", L"Resources\\", L"Files\\" };
-    WCHAR full[1024], namebuf[1024];
+    WCHAR full[1024], namebuf[1024], top[256];
     WCHAR *val = NULL;
+    UINT32 t, top_count;
     SIZE_T i;
 
-    if (!cached_pri_index || !key[0]) return S_FALSE;
+    if (!cached_pri_index || !key[0]) return E_FAIL;
+    if (resource_loader_scope[0])
+    {
+        lstrcpyW( full, resource_loader_scope );
+        lstrcatW( full, L"\\" );
+        lstrcatW( full, key );
+        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        {
+            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+            pri_free_result( val, NULL );
+            return hr;
+        }
+    }
     for (i = 0; i < ARRAY_SIZE( scopes ); i++)
     {
         lstrcpyW( full, scopes[i] );
@@ -2181,7 +2198,21 @@ static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
             return hr;
         }
     }
-    return S_FALSE;
+    top_count = pri_top_count( cached_pri_index );
+    for (t = 0; t < top_count; t++)
+    {
+        if (!pri_top_name( cached_pri_index, t, top, ARRAY_SIZE( top ) ) || !top[0]) continue;
+        lstrcpyW( full, top );
+        lstrcatW( full, L"\\" );
+        lstrcatW( full, key );
+        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        {
+            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+            pri_free_result( val, NULL );
+            return hr;
+        }
+    }
+    return E_FAIL;
 }
 
 /* Windows.ApplicationModel.Resources.ResourceLoader */
@@ -2408,8 +2439,10 @@ static HRESULT WINAPI resource_loader_factory_ActivateInstance( void *iface, voi
 
 static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *iface, HSTRING name, void **loader )
 {
+    const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     ERR( "TWINAPI: CreateResourceLoaderByName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
+    if (raw && raw[0]) lstrcpynW( resource_loader_scope, raw, ARRAY_SIZE( resource_loader_scope ) );
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
 }
@@ -2430,8 +2463,10 @@ static HRESULT WINAPI resource_loader_statics2_GetForCurrentView( void *iface, v
 }
 static HRESULT WINAPI resource_loader_statics2_GetForCurrentViewWithName( void *iface, HSTRING name, void **loader )
 {
+    const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     ERR( "TWINAPI: GetForCurrentViewWithName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
+    if (raw && raw[0]) lstrcpynW( resource_loader_scope, raw, ARRAY_SIZE( resource_loader_scope ) );
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
 }
@@ -2444,8 +2479,10 @@ static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUse( void *i
 }
 static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUseWithName( void *iface, HSTRING name, void **loader )
 {
+    const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     ERR( "TWINAPI: GetForViewIndependentUseWithName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
+    if (raw && raw[0]) lstrcpynW( resource_loader_scope, raw, ARRAY_SIZE( resource_loader_scope ) );
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
 }

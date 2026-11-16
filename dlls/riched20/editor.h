@@ -268,7 +268,12 @@ void ME_CopyReObject(REOBJECT *dst, const REOBJECT *src, DWORD flags);
 void ME_DeleteReObject(struct re_object *re_object);
 void richole_release_children( struct text_services *services );
 extern const IRichEditOleVtbl re_ole_vtbl;
-extern const ITextDocument2OldVtbl text_doc2old_vtbl;
+struct text_doc2_vtbl
+{
+    ITextDocument2OldVtbl base;
+    void *ext[32];
+};
+extern const struct text_doc2_vtbl text_doc2old_vtbl;
 
 /* editor.c */
 ME_TextEditor *ME_MakeEditor(ITextHost *texthost, BOOL bEmulateVersion10);

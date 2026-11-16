@@ -51,6 +51,17 @@ static HRESULT WINAPI ITextServicesImpl_QueryInterface( IUnknown *iface, REFIID 
              IsEqualIID( iid, &IID_ITextDocument2Old )) *obj = &services->ITextDocument2Old_iface;
     else
     {
+        static const GUID IID_ITextDocument2_local =
+            { 0xc241f5e0, 0x7206, 0x11d8, { 0xa2, 0xc7, 0x00, 0xa0, 0xd1, 0xd6, 0xc6, 0xb3 } };
+        static const GUID IID_IRichEditD2D_local =
+            { 0x6bda2cdc, 0xd9b3, 0x4310, { 0x8f, 0xcb, 0x56, 0x90, 0x30, 0x8c, 0x2e, 0x7c } };
+        if (IsEqualIID( iid, &IID_ITextDocument2_local ) ||
+            IsEqualIID( iid, &IID_IRichEditD2D_local ))
+        {
+            *obj = &services->ITextDocument2Old_iface;
+            IUnknown_AddRef( (IUnknown *)*obj );
+            return S_OK;
+        }
         *obj = NULL;
         FIXME( "Unknown interface: %s\n", debugstr_guid( iid ) );
         return E_NOINTERFACE;
@@ -588,7 +599,7 @@ HRESULT create_text_services( IUnknown *outer, ITextHost *text_host, IUnknown **
     services->IUnknown_inner.lpVtbl = &textservices_inner_vtbl;
     services->ITextServices_iface.lpVtbl = &textservices_vtbl;
     services->IRichEditOle_iface.lpVtbl = &re_ole_vtbl;
-    services->ITextDocument2Old_iface.lpVtbl = &text_doc2old_vtbl;
+    services->ITextDocument2Old_iface.lpVtbl = &text_doc2old_vtbl.base;
     services->editor = ME_MakeEditor( text_host, emulate_10 );
     services->editor->richole = &services->IRichEditOle_iface;
 

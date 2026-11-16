@@ -1632,6 +1632,8 @@ static BOOL register_classes( HINSTANCE instance )
         if (!RegisterClassW( &wcW )) return FALSE;
         wcW.lpszClassName = MSFTEDIT_CLASS;
         if (!RegisterClassW( &wcW )) return FALSE;
+        wcW.lpszClassName = L"RichEditD2DPT";
+        RegisterClassW( &wcW );
     }
     else
     {
@@ -1674,6 +1676,7 @@ BOOL WINAPI DllMain( HINSTANCE instance, DWORD reason, void *reserved )
         if (reserved) break;
         UnregisterClassW( RICHEDIT_CLASS20W, 0 );
         UnregisterClassW( MSFTEDIT_CLASS, 0 );
+        UnregisterClassW( L"RichEditD2DPT", 0 );
         UnregisterClassA( RICHEDIT_CLASS20A, 0 );
         UnregisterClassA( "RichEdit50A", 0 );
         if (listbox_registered) UnregisterClassW( L"REListBox20W", 0 );

@@ -890,6 +890,7 @@ static HRESULT textrange_expand(ITextRange *range, LONG unit, LONG *delta)
     switch (unit)
     {
     case tomStory:
+    case tomParagraph:
         expand_start = 0;
         ITextRange_GetStoryLength(range, &expand_end);
         break;
@@ -4193,8 +4194,8 @@ static HRESULT WINAPI ITextDocument2Old_fnSetDefaultTabStop(ITextDocument2Old *i
 static HRESULT WINAPI ITextDocument2Old_fnNew(ITextDocument2Old *iface)
 {
     struct text_services *services = impl_from_ITextDocument2Old(iface);
-    FIXME("stub %p\n", services);
-    return E_NOTIMPL;
+    TRACE("(%p)\n", services);
+    return S_OK;
 }
 
 static HRESULT WINAPI ITextDocument2Old_fnOpen(ITextDocument2Old *iface, VARIANT *pVar,
@@ -4524,55 +4525,65 @@ static HRESULT WINAPI ITextDocument2Old_fnNotify(ITextDocument2Old *iface, LONG 
     return E_NOTIMPL;
 }
 
-const ITextDocument2OldVtbl text_doc2old_vtbl =
+static HRESULT WINAPI ITextDocument2_fnNoop(ITextDocument2Old *iface, LONG a1, LONG a2)
 {
-    ITextDocument2Old_fnQueryInterface,
-    ITextDocument2Old_fnAddRef,
-    ITextDocument2Old_fnRelease,
-    ITextDocument2Old_fnGetTypeInfoCount,
-    ITextDocument2Old_fnGetTypeInfo,
-    ITextDocument2Old_fnGetIDsOfNames,
-    ITextDocument2Old_fnInvoke,
-    ITextDocument2Old_fnGetName,
-    ITextDocument2Old_fnGetSelection,
-    ITextDocument2Old_fnGetStoryCount,
-    ITextDocument2Old_fnGetStoryRanges,
-    ITextDocument2Old_fnGetSaved,
-    ITextDocument2Old_fnSetSaved,
-    ITextDocument2Old_fnGetDefaultTabStop,
-    ITextDocument2Old_fnSetDefaultTabStop,
-    ITextDocument2Old_fnNew,
-    ITextDocument2Old_fnOpen,
-    ITextDocument2Old_fnSave,
-    ITextDocument2Old_fnFreeze,
-    ITextDocument2Old_fnUnfreeze,
-    ITextDocument2Old_fnBeginEditCollection,
-    ITextDocument2Old_fnEndEditCollection,
-    ITextDocument2Old_fnUndo,
-    ITextDocument2Old_fnRedo,
-    ITextDocument2Old_fnRange,
-    ITextDocument2Old_fnRangeFromPoint,
-    /* ITextDocument2Old methods */
-    ITextDocument2Old_fnAttachMsgFilter,
-    ITextDocument2Old_fnSetEffectColor,
-    ITextDocument2Old_fnGetEffectColor,
-    ITextDocument2Old_fnGetCaretType,
-    ITextDocument2Old_fnSetCaretType,
-    ITextDocument2Old_fnGetImmContext,
-    ITextDocument2Old_fnReleaseImmContext,
-    ITextDocument2Old_fnGetPreferredFont,
-    ITextDocument2Old_fnGetNotificationMode,
-    ITextDocument2Old_fnSetNotificationMode,
-    ITextDocument2Old_fnGetClientRect,
-    ITextDocument2Old_fnGetSelectionEx,
-    ITextDocument2Old_fnGetWindow,
-    ITextDocument2Old_fnGetFEFlags,
-    ITextDocument2Old_fnUpdateWindow,
-    ITextDocument2Old_fnCheckTextLimit,
-    ITextDocument2Old_fnIMEInProgress,
-    ITextDocument2Old_fnSysBeep,
-    ITextDocument2Old_fnUpdate,
-    ITextDocument2Old_fnNotify
+    return S_OK;
+}
+
+const struct text_doc2_vtbl text_doc2old_vtbl =
+{
+    {
+        ITextDocument2Old_fnQueryInterface,
+        ITextDocument2Old_fnAddRef,
+        ITextDocument2Old_fnRelease,
+        ITextDocument2Old_fnGetTypeInfoCount,
+        ITextDocument2Old_fnGetTypeInfo,
+        ITextDocument2Old_fnGetIDsOfNames,
+        ITextDocument2Old_fnInvoke,
+        ITextDocument2Old_fnGetName,
+        ITextDocument2Old_fnGetSelection,
+        ITextDocument2Old_fnGetStoryCount,
+        ITextDocument2Old_fnGetStoryRanges,
+        ITextDocument2Old_fnGetSaved,
+        ITextDocument2Old_fnSetSaved,
+        ITextDocument2Old_fnGetDefaultTabStop,
+        ITextDocument2Old_fnSetDefaultTabStop,
+        ITextDocument2Old_fnNew,
+        ITextDocument2Old_fnOpen,
+        ITextDocument2Old_fnSave,
+        ITextDocument2Old_fnFreeze,
+        ITextDocument2Old_fnUnfreeze,
+        ITextDocument2Old_fnBeginEditCollection,
+        ITextDocument2Old_fnEndEditCollection,
+        ITextDocument2Old_fnUndo,
+        ITextDocument2Old_fnRedo,
+        ITextDocument2Old_fnRange,
+        ITextDocument2Old_fnRangeFromPoint,
+        /* ITextDocument2Old methods */
+        ITextDocument2Old_fnAttachMsgFilter,
+        ITextDocument2Old_fnSetEffectColor,
+        ITextDocument2Old_fnGetEffectColor,
+        ITextDocument2Old_fnGetCaretType,
+        ITextDocument2Old_fnSetCaretType,
+        ITextDocument2Old_fnGetImmContext,
+        ITextDocument2Old_fnReleaseImmContext,
+        ITextDocument2Old_fnGetPreferredFont,
+        ITextDocument2Old_fnGetNotificationMode,
+        ITextDocument2Old_fnSetNotificationMode,
+        ITextDocument2Old_fnGetClientRect,
+        ITextDocument2Old_fnGetSelectionEx,
+        ITextDocument2Old_fnGetWindow,
+        ITextDocument2Old_fnGetFEFlags,
+        ITextDocument2Old_fnUpdateWindow,
+        ITextDocument2Old_fnCheckTextLimit,
+        ITextDocument2Old_fnIMEInProgress,
+        ITextDocument2Old_fnSysBeep,
+        ITextDocument2Old_fnUpdate,
+        ITextDocument2Old_fnNotify
+    },
+    {
+        [0 ... 31] = ITextDocument2_fnNoop
+    }
 };
 
 /* ITextSelection */
@@ -5488,24 +5499,27 @@ static HRESULT WINAPI ITextSelection_fnGetFlags(ITextSelection *me, LONG *flags)
 {
     struct text_selection *This = impl_from_ITextSelection(me);
 
-    FIXME("(%p)->(%p): stub\n", This, flags);
+    TRACE("(%p)->(%p)\n", This, flags);
 
     if (!This->services)
         return CO_E_RELEASED;
+    if (!flags)
+        return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *flags = 0;
+    return S_OK;
 }
 
 static HRESULT WINAPI ITextSelection_fnSetFlags(ITextSelection *me, LONG flags)
 {
     struct text_selection *This = impl_from_ITextSelection(me);
 
-    FIXME("(%p)->(%lx): stub\n", This, flags);
+    TRACE("(%p)->(%lx)\n", This, flags);
 
     if (!This->services)
         return CO_E_RELEASED;
 
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static HRESULT WINAPI ITextSelection_fnGetType(ITextSelection *me, LONG *type)
