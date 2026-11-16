@@ -48,6 +48,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(font);
 
 static HKEY wine_fonts_key;
 static HKEY wine_fonts_cache_key;
+static ULONG text_ext_cache_epoch = 1;
 HKEY hkcu_key;
 
 struct font_physdev
@@ -2375,6 +2376,7 @@ static void free_font_handle( DWORD handle )
 {
     struct font_handle_entry *entry;
 
+    __atomic_add_fetch( &text_ext_cache_epoch, 1, __ATOMIC_RELEASE );
     if ((entry = handle_entry( handle )))
     {
         entry->font = (struct gdi_font *)next_free;
@@ -5111,6 +5113,7 @@ static BOOL FONT_DeleteObject( HGDIOBJ handle )
     FONTOBJ *obj;
 
     if (!(obj = free_gdi_handle( handle ))) return FALSE;
+    __atomic_add_fetch( &text_ext_cache_epoch, 1, __ATOMIC_RELEASE );
     free( obj );
     return TRUE;
 }
@@ -5223,6 +5226,50 @@ INT WINAPI NtGdiGetTextFaceW( HDC hdc, INT count, WCHAR *name, BOOL alias_name )
 }
 
 
+#define TEXT_EXT_CACHE_SLOTS 512
+#define TEXT_EXT_CACHE_MASK  (TEXT_EXT_CACHE_SLOTS - 1)
+#define TEXT_EXT_CACHE_MAX_CHARS 128
+
+struct text_ext_cache_entry
+{
+    UINT64 seq;
+    ULONG  epoch;
+    HFONT  hfont;
+    struct gdi_font *font;
+    INT    map_mode;
+    INT    graphics_mode;
+    INT    char_extra;
+    DWORD  layout;
+    INT    break_extra;
+    INT    break_rem;
+    BOOL   vport2world_valid;
+    FLOAT  em11;
+    FLOAT  em22;
+    UINT   flags;
+    INT    count;
+    UINT32 hash;
+    SIZE   size;
+    WCHAR  text[TEXT_EXT_CACHE_MAX_CHARS];
+};
+
+static struct text_ext_cache_entry text_ext_cache[TEXT_EXT_CACHE_SLOTS];
+static pthread_mutex_t text_ext_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static inline UINT32 text_ext_hash( const WCHAR *str, INT count, HFONT hfont,
+                                    struct gdi_font *font, UINT flags )
+{
+    UINT32 h = 2166136261u;
+    INT i;
+
+    h = (h ^ (UINT32)(UINT_PTR)hfont) * 16777619u;
+    h = (h ^ (UINT32)(UINT_PTR)font) * 16777619u;
+    h = (h ^ flags) * 16777619u;
+    h = (h ^ (UINT32)count) * 16777619u;
+    for (i = 0; i < count; i++)
+        h = (h ^ str[i]) * 16777619u;
+    return h;
+}
+
 /***********************************************************************
  *           NtGdiGetTextExtentExW    (win32u.@)
  *
@@ -5236,11 +5283,63 @@ BOOL WINAPI NtGdiGetTextExtentExW( HDC hdc, const WCHAR *str, INT count, INT max
     int i;
     BOOL ret;
     INT buffer[256], *pos = dxs;
+    struct text_ext_cache_entry *cache_entry = NULL;
+    struct gdi_font *gdi_font = NULL;
+    ULONG epoch = 0;
+    UINT32 hash = 0;
+    UINT norm_flags = !!flags;
 
     if (count < 0) return FALSE;
 
     dc = get_dc_ptr(hdc);
     if (!dc) return FALSE;
+
+    if (max_ext == 0 && !nfit && !dxs && size && count > 0 && count <= TEXT_EXT_CACHE_MAX_CHARS)
+    {
+        PHYSDEV dev = norm_flags ? GET_DC_PHYSDEV( dc, pGetTextExtentExPointI )
+                                 : GET_DC_PHYSDEV( dc, pGetTextExtentExPoint );
+        if (dev->funcs == &font_driver)
+        {
+            struct font_physdev *physdev = get_font_dev( dev );
+            if ((gdi_font = physdev->font))
+            {
+                UINT64 seq1;
+                epoch = __atomic_load_n( &text_ext_cache_epoch, __ATOMIC_ACQUIRE );
+                hash = text_ext_hash( str, count, dc->hFont, gdi_font, norm_flags );
+                cache_entry = &text_ext_cache[(hash ^ (hash >> 9)) & TEXT_EXT_CACHE_MASK];
+                seq1 = __atomic_load_n( &cache_entry->seq, __ATOMIC_ACQUIRE );
+                if (!(seq1 & 1) && seq1 != 0 &&
+                    cache_entry->hash == hash &&
+                    cache_entry->epoch == epoch &&
+                    cache_entry->count == count &&
+                    cache_entry->hfont == dc->hFont &&
+                    cache_entry->font == gdi_font &&
+                    cache_entry->char_extra == dc->attr->char_extra &&
+                    cache_entry->map_mode == dc->attr->map_mode &&
+                    cache_entry->graphics_mode == dc->attr->graphics_mode &&
+                    cache_entry->layout == dc->attr->layout &&
+                    cache_entry->break_extra == dc->breakExtra &&
+                    cache_entry->break_rem == dc->breakRem &&
+                    cache_entry->vport2world_valid == dc->vport2WorldValid &&
+                    cache_entry->em11 == dc->xformVport2World.eM11 &&
+                    cache_entry->em22 == dc->xformVport2World.eM22 &&
+                    cache_entry->flags == norm_flags &&
+                    !memcmp( cache_entry->text, str, count * sizeof(WCHAR) ))
+                {
+                    SIZE cached_size = cache_entry->size;
+                    __atomic_thread_fence( __ATOMIC_ACQUIRE );
+                    if (__atomic_load_n( &cache_entry->seq, __ATOMIC_RELAXED ) == seq1)
+                    {
+                        *size = cached_size;
+                        release_dc_ptr( dc );
+                        TRACE("(%p, %s, %d) [cached] returning %dx%d\n", hdc, debugstr_wn(str,count),
+                              max_ext, size->cx, size->cy );
+                        return TRUE;
+                    }
+                }
+            }
+        }
+    }
 
     if (!dxs)
     {
@@ -5273,6 +5372,34 @@ BOOL WINAPI NtGdiGetTextExtentExW( HDC hdc, const WCHAR *str, INT count, INT max
 
         size->cx = abs( INTERNAL_XDSTOWS( dc, size->cx )) + count * dc->attr->char_extra;
         size->cy = abs( INTERNAL_YDSTOWS( dc, size->cy ));
+
+        if (cache_entry && __atomic_load_n( &text_ext_cache_epoch, __ATOMIC_RELAXED ) == epoch)
+        {
+            UINT64 seq;
+            pthread_mutex_lock( &text_ext_cache_lock );
+            seq = cache_entry->seq;
+            __atomic_store_n( &cache_entry->seq, seq + 1, __ATOMIC_RELEASE );
+            __atomic_thread_fence( __ATOMIC_RELEASE );
+            cache_entry->epoch = epoch;
+            cache_entry->hfont = dc->hFont;
+            cache_entry->font = gdi_font;
+            cache_entry->map_mode = dc->attr->map_mode;
+            cache_entry->graphics_mode = dc->attr->graphics_mode;
+            cache_entry->char_extra = dc->attr->char_extra;
+            cache_entry->layout = dc->attr->layout;
+            cache_entry->break_extra = dc->breakExtra;
+            cache_entry->break_rem = dc->breakRem;
+            cache_entry->vport2world_valid = dc->vport2WorldValid;
+            cache_entry->em11 = dc->xformVport2World.eM11;
+            cache_entry->em22 = dc->xformVport2World.eM22;
+            cache_entry->flags = norm_flags;
+            cache_entry->count = count;
+            cache_entry->hash = hash;
+            cache_entry->size = *size;
+            memcpy( cache_entry->text, str, count * sizeof(WCHAR) );
+            __atomic_store_n( &cache_entry->seq, seq + 2, __ATOMIC_RELEASE );
+            pthread_mutex_unlock( &text_ext_cache_lock );
+        }
     }
 
     if (pos != buffer && pos != dxs) free( pos );
