@@ -67,7 +67,204 @@ struct schan_context
     enum control_token control_token;
     unsigned int alert_type;
     unsigned int alert_number;
+    char *target_name;
+    DWORD enabled_protocols;
+    BOOL ticket_cached;
+    BOOL resumed_from_cache;
+    char *enc_buf;
+    SIZE_T enc_buf_cap;
+    char *dec_buf;
+    SIZE_T dec_buf_cap;
+    BYTE *pending_out;
+    ULONG pending_out_len;
 };
+
+#define SCHAN_TICKET_CACHE_SIZE 64
+#define SCHAN_TICKET_TTL_MS     (5 * 60 * 1000)
+
+struct schan_ticket_entry
+{
+    char *target;
+    DWORD enabled_protocols;
+    BYTE *data;
+    ULONG size;
+    ULONGLONG timestamp_ms;
+    ULONGLONG last_used_ms;
+};
+
+static struct schan_ticket_entry ticket_cache[SCHAN_TICKET_CACHE_SIZE];
+static SRWLOCK ticket_cache_lock = SRWLOCK_INIT;
+
+static void ascii_tolower_str(char *s)
+{
+    for (; *s; s++)
+        if (*s >= 'A' && *s <= 'Z') *s += 'a' - 'A';
+}
+
+static BOOL ticket_cache_lookup(const char *target, DWORD enabled_protocols,
+                                BYTE *stack_buf, ULONG stack_cap,
+                                BYTE **out_buf, ULONG *out_size)
+{
+    ULONGLONG now = GetTickCount64();
+    BOOL found = FALSE;
+    unsigned int i;
+
+    AcquireSRWLockShared(&ticket_cache_lock);
+    for (i = 0; i < SCHAN_TICKET_CACHE_SIZE; i++)
+    {
+        struct schan_ticket_entry *e = &ticket_cache[i];
+        if (!e->target || e->enabled_protocols != enabled_protocols) continue;
+        if (strcmp(e->target, target)) continue;
+        if (now - e->timestamp_ms >= SCHAN_TICKET_TTL_MS) break;
+
+        if (e->size <= stack_cap)
+        {
+            memcpy(stack_buf, e->data, e->size);
+            *out_buf = stack_buf;
+            *out_size = e->size;
+            found = TRUE;
+        }
+        else if ((*out_buf = malloc(e->size)))
+        {
+            memcpy(*out_buf, e->data, e->size);
+            *out_size = e->size;
+            found = TRUE;
+        }
+        if (found) e->last_used_ms = now;
+        break;
+    }
+    ReleaseSRWLockShared(&ticket_cache_lock);
+    return found;
+}
+
+static void ticket_cache_store(const char *target, DWORD enabled_protocols,
+                               const BYTE *data, ULONG size)
+{
+    ULONGLONG now = GetTickCount64();
+    unsigned int i, lru_idx = 0;
+    ULONGLONG min_used = ~0ULL;
+    int empty_idx = -1, match_idx = -1;
+    BYTE *copy;
+    char *target_copy = NULL;
+
+    if (!target || !data || !size) return;
+    if (!(copy = malloc(size))) return;
+    memcpy(copy, data, size);
+
+    AcquireSRWLockExclusive(&ticket_cache_lock);
+    for (i = 0; i < SCHAN_TICKET_CACHE_SIZE; i++)
+    {
+        struct schan_ticket_entry *e = &ticket_cache[i];
+        if (!e->target)
+        {
+            if (empty_idx == -1) empty_idx = i;
+            continue;
+        }
+        if (e->enabled_protocols == enabled_protocols && !strcmp(e->target, target))
+        {
+            match_idx = i;
+            break;
+        }
+        if (now - e->timestamp_ms >= SCHAN_TICKET_TTL_MS)
+        {
+            if (empty_idx == -1) empty_idx = i;
+        }
+        else if (e->last_used_ms < min_used)
+        {
+            min_used = e->last_used_ms;
+            lru_idx = i;
+        }
+    }
+
+    if (match_idx != -1)
+    {
+        struct schan_ticket_entry *e = &ticket_cache[match_idx];
+        free(e->data);
+        e->data = copy;
+        e->size = size;
+        e->timestamp_ms = now;
+        e->last_used_ms = now;
+        ReleaseSRWLockExclusive(&ticket_cache_lock);
+        return;
+    }
+
+    if (!(target_copy = strdup(target)))
+    {
+        ReleaseSRWLockExclusive(&ticket_cache_lock);
+        free(copy);
+        return;
+    }
+
+    i = (empty_idx != -1) ? (unsigned int)empty_idx : lru_idx;
+    free(ticket_cache[i].target);
+    free(ticket_cache[i].data);
+    ticket_cache[i].target = target_copy;
+    ticket_cache[i].enabled_protocols = enabled_protocols;
+    ticket_cache[i].data = copy;
+    ticket_cache[i].size = size;
+    ticket_cache[i].timestamp_ms = now;
+    ticket_cache[i].last_used_ms = now;
+    ReleaseSRWLockExclusive(&ticket_cache_lock);
+}
+
+static void ticket_cache_invalidate(const char *target, DWORD enabled_protocols)
+{
+    unsigned int i;
+
+    if (!target) return;
+    AcquireSRWLockExclusive(&ticket_cache_lock);
+    for (i = 0; i < SCHAN_TICKET_CACHE_SIZE; i++)
+    {
+        struct schan_ticket_entry *e = &ticket_cache[i];
+        if (e->target && e->enabled_protocols == enabled_protocols && !strcmp(e->target, target))
+        {
+            free(e->target);
+            free(e->data);
+            memset(e, 0, sizeof(*e));
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&ticket_cache_lock);
+}
+
+static void ticket_cache_clear(void)
+{
+    unsigned int i;
+
+    AcquireSRWLockExclusive(&ticket_cache_lock);
+    for (i = 0; i < SCHAN_TICKET_CACHE_SIZE; i++)
+    {
+        free(ticket_cache[i].target);
+        free(ticket_cache[i].data);
+        memset(&ticket_cache[i], 0, sizeof(ticket_cache[i]));
+    }
+    ReleaseSRWLockExclusive(&ticket_cache_lock);
+}
+
+static void cache_session_ticket(struct schan_context *ctx, BOOL require_ticket_flag)
+{
+    BYTE stack_buf[4096];
+    BYTE *buf = stack_buf;
+    ULONG size = sizeof(stack_buf);
+    struct get_session_data_params params = { ctx->session, buf, &size, require_ticket_flag };
+    NTSTATUS status;
+
+    status = GNUTLS_CALL( get_session_data, &params );
+    if (status == SEC_E_BUFFER_TOO_SMALL)
+    {
+        if (!(buf = malloc(size))) return;
+        params.buffer = buf;
+        status = GNUTLS_CALL( get_session_data, &params );
+    }
+
+    if (status == SEC_E_OK && size > 0)
+    {
+        ticket_cache_store(ctx->target_name, ctx->enabled_protocols, buf, size);
+        ctx->ticket_cached = TRUE;
+    }
+
+    if (buf != stack_buf) free(buf);
+}
 
 static struct schan_handle *schan_handle_table;
 static struct schan_handle *schan_free_handles;
@@ -961,7 +1158,31 @@ static SECURITY_STATUS establish_context(
                 struct set_session_target_params params = { ctx->session, target };
                 WideCharToMultiByte( CP_UNIXCP, 0, pszTargetName, -1, target, len, NULL, NULL );
                 GNUTLS_CALL( set_session_target, &params );
-                free( target );
+
+                if (!bIsServer)
+                {
+                    BYTE ticket_stack[4096];
+                    BYTE *ticket_buf = NULL;
+                    ULONG ticket_size = 0;
+
+                    ascii_tolower_str(target);
+                    ctx->target_name = target;
+                    ctx->enabled_protocols = cred->enabled_protocols;
+
+                    if (ticket_cache_lookup(target, cred->enabled_protocols,
+                                            ticket_stack, sizeof(ticket_stack),
+                                            &ticket_buf, &ticket_size))
+                    {
+                        struct set_session_data_params data_params = { ctx->session, ticket_buf, ticket_size };
+                        if (!GNUTLS_CALL( set_session_data, &data_params ))
+                            ctx->resumed_from_cache = TRUE;
+                        if (ticket_buf != ticket_stack) free(ticket_buf);
+                    }
+                }
+                else
+                {
+                    free( target );
+                }
             }
         }
 
@@ -1130,6 +1351,35 @@ static SECURITY_STATUS establish_context(
         if (ctx->req_ctx_attr & ISC_REQ_ALLOCATE_MEMORY) *pfContextAttr |= ISC_RET_ALLOCATED_MEMORY;
         if (ctx->req_ctx_attr & ISC_REQ_USE_SUPPLIED_CREDS) *pfContextAttr |= ISC_RET_USED_SUPPLIED_CREDS;
         if (ctx->req_ctx_attr & ISC_REQ_MANUAL_CRED_VALIDATION) *pfContextAttr |= ISC_RET_MANUAL_CRED_VALIDATION;
+    }
+
+    if (ret == SEC_E_OK && !bIsServer && ctx->resumed_from_cache && !params.control_token &&
+        output_buffer_idx != -1 && output_offset > 0 && idx != -1)
+    {
+        SecBuffer *out_b = &pOutput->pBuffers[idx];
+        ULONG total_out = out_b->cbBuffer;
+        BYTE *saved = malloc(total_out);
+        if (saved)
+        {
+            memcpy(saved, out_b->pvBuffer, total_out);
+            free(ctx->pending_out);
+            ctx->pending_out = saved;
+            ctx->pending_out_len = total_out;
+            if (alloc_buffer.pvBuffer == NULL && (fContextReq & ISC_REQ_ALLOCATE_MEMORY))
+            {
+                RtlFreeHeap(GetProcessHeap(), 0, out_b->pvBuffer);
+                out_b->pvBuffer = NULL;
+            }
+            out_b->cbBuffer = 0;
+        }
+    }
+
+    if (ret == SEC_E_OK && !bIsServer && ctx->target_name && !ctx->ticket_cached)
+        cache_session_ticket(ctx, FALSE);
+    else if (ret != SEC_E_OK && ret != SEC_I_CONTINUE_NEEDED && ctx->resumed_from_cache && ctx->target_name)
+    {
+        ticket_cache_invalidate(ctx->target_name, ctx->enabled_protocols);
+        ctx->resumed_from_cache = FALSE;
     }
 
     return ret;
@@ -1465,6 +1715,7 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
     SECURITY_STATUS status;
     SecBuffer *buffer;
     SIZE_T data_size;
+    char stack_buf[4096];
     char *data;
     int output_buffer_idx = -1;
     ULONG output_offset = 0;
@@ -1490,7 +1741,21 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
     buffer = &message->pBuffers[data_idx];
 
     data_size = buffer->cbBuffer;
-    data = malloc(data_size);
+    if (data_size <= sizeof(stack_buf))
+    {
+        data = stack_buf;
+    }
+    else
+    {
+        if (data_size > ctx->enc_buf_cap)
+        {
+            char *new_buf = realloc(ctx->enc_buf, data_size);
+            if (!new_buf) return SEC_E_INSUFFICIENT_MEMORY;
+            ctx->enc_buf = new_buf;
+            ctx->enc_buf_cap = data_size;
+        }
+        data = ctx->enc_buf;
+    }
     memcpy(data, buffer->pvBuffer, data_size);
 
     /* Use { STREAM_HEADER, DATA, STREAM_TRAILER } or { TOKEN, DATA, TOKEN } buffers. */
@@ -1526,12 +1791,20 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
     params.length = data_size;
     params.output_buffer_idx = &output_buffer_idx;
     params.output_offset = &output_offset;
+    params.prefix = ctx->pending_out;
+    params.prefix_length = ctx->pending_out_len;
     status = GNUTLS_CALL( send, &params );
 
     if (!status)
+    {
         message->pBuffers[buffer_index[output_buffer_idx]].cbBuffer = output_offset;
-
-    free(data);
+        if (ctx->pending_out)
+        {
+            free(ctx->pending_out);
+            ctx->pending_out = NULL;
+            ctx->pending_out_len = 0;
+        }
+    }
 
     TRACE("Returning %#lx.\n", status);
 
@@ -1603,6 +1876,7 @@ static SECURITY_STATUS SEC_ENTRY schan_DecryptMessage(PCtxtHandle context_handle
     struct recv_params params;
     SecBuffer *buffer;
     SIZE_T data_size;
+    char stack_buf[4096];
     char *data;
     ULONG received = 0;
     int idx;
@@ -1641,7 +1915,21 @@ static SECURITY_STATUS SEC_ENTRY schan_DecryptMessage(PCtxtHandle context_handle
     }
 
     data_size = expected_size - ctx->header_size;
-    data = malloc(data_size);
+    if (data_size <= sizeof(stack_buf))
+    {
+        data = stack_buf;
+    }
+    else
+    {
+        if (data_size > ctx->dec_buf_cap)
+        {
+            char *new_buf = realloc(ctx->dec_buf, data_size);
+            if (!new_buf) return SEC_E_INSUFFICIENT_MEMORY;
+            ctx->dec_buf = new_buf;
+            ctx->dec_buf_cap = data_size;
+        }
+        data = ctx->dec_buf;
+    }
 
     received = data_size;
 
@@ -1657,15 +1945,16 @@ static SECURITY_STATUS SEC_ENTRY schan_DecryptMessage(PCtxtHandle context_handle
 
     if (status != SEC_E_OK && status != SEC_I_RENEGOTIATE)
     {
-        free(data);
         ERR("Returning %lx\n", status);
         return status;
     }
 
+    if (!ctx->ticket_cached && ctx->target_name)
+        cache_session_ticket(ctx, TRUE);
+
     TRACE("Received %lu bytes\n", received);
 
     memcpy(buf_ptr + ctx->header_size, data, received);
-    free(data);
 
     schan_decrypt_fill_buffer(message, SECBUFFER_DATA,
         buf_ptr + ctx->header_size, received);
@@ -1698,6 +1987,10 @@ static SECURITY_STATUS SEC_ENTRY schan_DeleteSecurityContext(PCtxtHandle context
     if (ctx->cert) CertFreeCertificateContext(ctx->cert);
     params.session = ctx->session;
     GNUTLS_CALL( dispose_session, &params );
+    free(ctx->target_name);
+    free(ctx->enc_buf);
+    free(ctx->dec_buf);
+    free(ctx->pending_out);
     free(ctx);
     return SEC_E_OK;
 }
@@ -1876,6 +2169,9 @@ void SECUR32_deinitSchannelSP(void)
             struct schan_context *ctx = schan_free_handle(i, SCHAN_HANDLE_CTX);
             struct session_params params = { ctx->session };
             GNUTLS_CALL( dispose_session, &params );
+            free(ctx->target_name);
+            free(ctx->enc_buf);
+            free(ctx->dec_buf);
             free(ctx);
         }
     }
@@ -1891,5 +2187,6 @@ void SECUR32_deinitSchannelSP(void)
         }
     }
     free(schan_handle_table);
+    ticket_cache_clear();
     GNUTLS_CALL( process_detach, NULL );
 }

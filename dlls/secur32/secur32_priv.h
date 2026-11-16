@@ -187,6 +187,8 @@ struct send_params
     ULONG length;
     int *output_buffer_idx;
     ULONG *output_offset;
+    const void *prefix;
+    ULONG prefix_length;
 };
 
 struct set_application_protocols_params
@@ -215,6 +217,21 @@ struct set_dtls_timeouts_params
     unsigned int total_timeout;
 };
 
+struct get_session_data_params
+{
+    schan_session session;
+    void *buffer;
+    ULONG *size;
+    BOOL require_ticket_flag;
+};
+
+struct set_session_data_params
+{
+    schan_session session;
+    const void *buffer;
+    ULONG size;
+};
+
 enum schan_funcs
 {
     unix_process_attach,
@@ -239,6 +256,8 @@ enum schan_funcs
     unix_set_dtls_mtu,
     unix_set_session_target,
     unix_set_dtls_timeouts,
+    unix_get_session_data,
+    unix_set_session_data,
     unix_funcs_count,
 };
 

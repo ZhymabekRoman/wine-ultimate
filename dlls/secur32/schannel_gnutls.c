@@ -80,6 +80,17 @@ static int (*pgnutls_privkey_import_rsa_raw)(gnutls_privkey_t, const gnutls_datu
 /* Not present in gnutls version < 3.4.0. */
 static int (*pgnutls_privkey_export_x509)(gnutls_privkey_t, gnutls_x509_privkey_t *);
 
+/* Session ticket resumption (optional dlsym). */
+static int (*pgnutls_session_get_data2)(gnutls_session_t, gnutls_datum_t *);
+static int (*pgnutls_session_set_data)(gnutls_session_t, const void *, size_t);
+static int (*pgnutls_session_is_resumed)(gnutls_session_t);
+static unsigned (*pgnutls_session_get_flags)(gnutls_session_t);
+static gnutls_free_function *pgnutls_free_ptr;
+
+#ifndef GNUTLS_SFLAGS_SESSION_TICKET
+#define GNUTLS_SFLAGS_SESSION_TICKET (1 << 7)
+#endif
+
 static void *libgnutls_handle;
 #define MAKE_FUNCPTR(f) static typeof(f) * p##f
 MAKE_FUNCPTR(gnutls_alert_get);
@@ -657,7 +668,8 @@ static NTSTATUS schan_handshake( void *args )
         err = pgnutls_handshake(s);
         if (err == GNUTLS_E_SUCCESS)
         {
-            TRACE("Handshake completed\n");
+            TRACE("Handshake completed (resumed=%d)\n",
+                  pgnutls_session_is_resumed ? pgnutls_session_is_resumed(s) : 0);
             status = SEC_E_OK;
         }
         else if (err == GNUTLS_E_AGAIN)
@@ -1129,6 +1141,19 @@ static NTSTATUS schan_send( void *args )
 
     init_schan_buffers(&t->out, params->output);
 
+    if (params->prefix && params->prefix_length)
+    {
+        ULONG prefix_off = 0;
+        while (prefix_off < params->prefix_length)
+        {
+            ssize_t w = push_adapter((gnutls_transport_ptr_t)t,
+                                     (const char *)params->prefix + prefix_off,
+                                     params->prefix_length - prefix_off);
+            if (w <= 0) return SEC_E_INSUFFICIENT_MEMORY;
+            prefix_off += (ULONG)w;
+        }
+    }
+
     for (;;)
     {
         ret = pgnutls_record_send(s, (const char *)params->buffer + total, params->length - total);
@@ -1299,6 +1324,67 @@ static NTSTATUS schan_set_dtls_timeouts( void *args )
 
     pgnutls_dtls_set_timeouts(s, params->retrans_timeout, params->total_timeout);
     return SEC_E_OK;
+}
+
+static NTSTATUS schan_get_session_data( void *args )
+{
+    const struct get_session_data_params *params = args;
+    gnutls_session_t s = session_from_handle(params->session);
+    gnutls_datum_t datum = { NULL, 0 };
+    NTSTATUS status;
+    int ret;
+
+    if (!pgnutls_session_get_data2) return STATUS_NOT_SUPPORTED;
+    if (params->require_ticket_flag && pgnutls_session_get_flags &&
+        !(pgnutls_session_get_flags(s) & GNUTLS_SFLAGS_SESSION_TICKET))
+    {
+        return STATUS_NOT_FOUND;
+    }
+
+    ret = pgnutls_session_get_data2(s, &datum);
+    if (ret != GNUTLS_E_SUCCESS || !datum.data || !datum.size)
+    {
+        if (datum.data)
+        {
+            if (pgnutls_free_ptr && *pgnutls_free_ptr) (*pgnutls_free_ptr)(datum.data);
+            else free(datum.data);
+        }
+        return STATUS_NOT_FOUND;
+    }
+
+    if (!params->buffer || *params->size < datum.size)
+    {
+        *params->size = datum.size;
+        status = SEC_E_BUFFER_TOO_SMALL;
+    }
+    else
+    {
+        memcpy(params->buffer, datum.data, datum.size);
+        *params->size = datum.size;
+        status = SEC_E_OK;
+    }
+
+    if (pgnutls_free_ptr && *pgnutls_free_ptr) (*pgnutls_free_ptr)(datum.data);
+    else free(datum.data);
+    return status;
+}
+
+static NTSTATUS schan_set_session_data( void *args )
+{
+    const struct set_session_data_params *params = args;
+    gnutls_session_t s = session_from_handle(params->session);
+    int ret;
+
+    if (!pgnutls_session_set_data) return STATUS_NOT_SUPPORTED;
+    if (!params->buffer || !params->size) return STATUS_INVALID_PARAMETER;
+
+    ret = pgnutls_session_set_data(s, params->buffer, params->size);
+    if (ret != GNUTLS_E_SUCCESS)
+    {
+        pgnutls_perror(ret);
+        return STATUS_UNSUCCESSFUL;
+    }
+    return STATUS_SUCCESS;
 }
 
 static ULONG set_component(gnutls_datum_t *comp, BYTE *data, ULONG len, ULONG *buflen)
@@ -1567,6 +1653,11 @@ static NTSTATUS process_attach( void *args )
         WARN("gnutls_privkey_import_rsa_raw not found\n");
         pgnutls_privkey_import_rsa_raw = compat_gnutls_privkey_import_rsa_raw;
     }
+    pgnutls_session_get_data2 = dlsym(libgnutls_handle, "gnutls_session_get_data2");
+    pgnutls_session_set_data = dlsym(libgnutls_handle, "gnutls_session_set_data");
+    pgnutls_session_is_resumed = dlsym(libgnutls_handle, "gnutls_session_is_resumed");
+    pgnutls_session_get_flags = dlsym(libgnutls_handle, "gnutls_session_get_flags");
+    pgnutls_free_ptr = dlsym(libgnutls_handle, "gnutls_free");
 
     ret = pgnutls_global_init();
     if (ret != GNUTLS_E_SUCCESS)
@@ -1630,6 +1721,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     schan_set_dtls_mtu,
     schan_set_session_target,
     schan_set_dtls_timeouts,
+    schan_get_session_data,
+    schan_set_session_data,
 };
 
 C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count);
@@ -1890,6 +1983,8 @@ static NTSTATUS wow64_schan_send( void *args )
         ULONG length;
         PTR32 output_buffer_idx;
         PTR32 output_offset;
+        PTR32 prefix;
+        ULONG prefix_length;
     } const *params32 = args;
     struct send_params params =
     {
@@ -1899,6 +1994,8 @@ static NTSTATUS wow64_schan_send( void *args )
         params32->length,
         ULongToPtr(params32->output_buffer_idx),
         ULongToPtr(params32->output_offset),
+        ULongToPtr(params32->prefix),
+        params32->prefix_length,
     };
     if (params32->output)
     {
@@ -1941,6 +2038,42 @@ static NTSTATUS wow64_schan_set_session_target( void *args )
     return schan_set_session_target(&params);
 }
 
+static NTSTATUS wow64_schan_get_session_data( void *args )
+{
+    struct
+    {
+        schan_session session;
+        PTR32 buffer;
+        PTR32 size;
+        BOOL require_ticket_flag;
+    } const *params32 = args;
+    struct get_session_data_params params =
+    {
+        params32->session,
+        ULongToPtr(params32->buffer),
+        ULongToPtr(params32->size),
+        params32->require_ticket_flag,
+    };
+    return schan_get_session_data(&params);
+}
+
+static NTSTATUS wow64_schan_set_session_data( void *args )
+{
+    struct
+    {
+        schan_session session;
+        PTR32 buffer;
+        ULONG size;
+    } const *params32 = args;
+    struct set_session_data_params params =
+    {
+        params32->session,
+        ULongToPtr(params32->buffer),
+        params32->size,
+    };
+    return schan_set_session_data(&params);
+}
+
 const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
 {
     process_attach,
@@ -1965,6 +2098,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     schan_set_dtls_mtu,
     wow64_schan_set_session_target,
     schan_set_dtls_timeouts,
+    wow64_schan_get_session_data,
+    wow64_schan_set_session_data,
 };
 
 C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count);
