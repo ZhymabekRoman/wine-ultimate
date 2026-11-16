@@ -2056,9 +2056,91 @@ static void heap_thread_detach_bin_groups( struct heap *heap )
     }
 }
 
+#define MAG_NUM_CLASSES   8
+#define MAG_MAX_COUNT     32
+#define MAG_FLUSH_COUNT   16
+#define MAG_MAX_SIZE      512
+
+#define HEAP_MAG_DISALLOWED_FLAGS (HEAP_NO_SERIALIZE | HEAP_VALIDATE | HEAP_VALIDATE_ALL | \
+                                   HEAP_VALIDATE_PARAMS | HEAP_CHECKING_ENABLED | \
+                                   HEAP_TAIL_CHECKING_ENABLED | HEAP_FREE_CHECKING_ENABLED | \
+                                   HEAP_PAGE_ALLOCS | HEAP_CREATE_ENABLE_EXECUTE | \
+                                   HEAP_USER_FLAGS_MASK)
+
+struct heap_mag_entry
+{
+    struct heap_mag_entry *next;
+};
+
+struct heap_mag_bucket
+{
+    struct heap_mag_entry *head;
+    unsigned int count;
+};
+
+struct thread_heap_cache
+{
+    struct heap_mag_bucket buckets[MAG_NUM_CLASSES];
+};
+
+static inline unsigned int mag_size_to_class( SIZE_T size )
+{
+    if (size <= 128) return size ? ((unsigned int)(size - 1) >> 5) : 0;
+    if (size <= 256) return 4 + ((unsigned int)(size - 129) >> 6);
+    return 6 + ((unsigned int)(size - 257) >> 7);
+}
+
+static inline int mag_usable_to_class( SIZE_T usable )
+{
+    if (usable < 32 || usable > 528) return -1;
+    if (usable >= 256) return (usable >= 512) ? 7 : (usable >= 384) ? 6 : 5;
+    if (usable >= 128) return (usable >= 192) ? 4 : 3;
+    return (usable >= 96) ? 2 : (usable >= 64) ? 1 : 0;
+}
+
+static void heap_free_to_backend( struct heap *heap, void *ptr )
+{
+    struct block *block = (struct block *)ptr - 1;
+    ULONG heap_flags = heap->flags;
+
+    if (heap->bins && !heap_free_block_lfh( heap, heap_flags, block ))
+        return;
+
+    {
+        SIZE_T block_size = block_get_size( block ), bin = BLOCK_SIZE_BIN( block_size );
+
+        heap_lock( heap, heap_flags );
+        heap_free_block( heap, heap_flags, block );
+        heap_unlock( heap, heap_flags );
+
+        if (heap->bins) InterlockedIncrement( &heap->bins[bin].count_freed );
+    }
+}
+
+static void heap_mag_flush_bucket( struct heap *heap, struct heap_mag_bucket *bucket, unsigned int n )
+{
+    while (n-- && bucket->count)
+    {
+        struct heap_mag_entry *entry = bucket->head;
+        bucket->head = entry->next;
+        bucket->count--;
+        heap_free_to_backend( heap, entry );
+    }
+}
+
 void heap_thread_detach(void)
 {
+    struct thread_heap_cache *cache;
     struct heap *heap;
+    unsigned int i;
+
+    if ((cache = NtCurrentTeb()->ReservedForPerf))
+    {
+        NtCurrentTeb()->ReservedForPerf = NULL;
+        for (i = 0; i < MAG_NUM_CLASSES; ++i)
+            heap_mag_flush_bucket( process_heap, &cache->buckets[i], cache->buckets[i].count );
+        heap_free_to_backend( process_heap, cache );
+    }
 
     RtlEnterCriticalSection( &process_heap->cs );
 
@@ -2080,6 +2162,30 @@ void *WINAPI DECLSPEC_HOTPATCH RtlAllocateHeap( HANDLE handle, ULONG flags, SIZE
     void *ptr = NULL;
     ULONG heap_flags;
     NTSTATUS status;
+
+    if (handle == process_heap && process_heap && size <= MAG_MAX_SIZE &&
+        !(flags & ~(HEAP_ZERO_MEMORY | HEAP_NO_SERIALIZE)) &&
+        !(process_heap->flags & HEAP_MAG_DISALLOWED_FLAGS) &&
+        !process_heap->pending_free && !RUNNING_ON_VALGRIND)
+    {
+        struct thread_heap_cache *cache = NtCurrentTeb()->ReservedForPerf;
+        if (cache)
+        {
+            unsigned int cls = mag_size_to_class( size );
+            struct heap_mag_bucket *bucket = &cache->buckets[cls];
+            if (bucket->count)
+            {
+                struct heap_mag_entry *entry = bucket->head;
+                struct block *block = (struct block *)entry - 1;
+                bucket->head = entry->next;
+                bucket->count--;
+                block->tail_size = (UINT)block->block_size * BLOCK_ALIGN - sizeof(*block) - size;
+                if (flags & HEAP_ZERO_MEMORY) memset( entry, 0, ROUND_SIZE( size, sizeof(void *) - 1 ) );
+                TRACE( "handle %p, flags %#lx, size %#Ix, return %p (mag).\n", handle, flags, size, entry );
+                return entry;
+            }
+        }
+    }
 
     heap = unsafe_heap_from_handle( handle, flags, &heap_flags );
     if ((block_size = heap_get_block_size( heap, heap_flags, size )) == ~0U)
@@ -2121,6 +2227,51 @@ BOOLEAN WINAPI DECLSPEC_HOTPATCH RtlFreeHeap( HANDLE handle, ULONG flags, void *
     NTSTATUS status;
 
     if (!ptr) return TRUE;
+
+    if (handle == process_heap && process_heap &&
+        !((ULONG_PTR)ptr & (BLOCK_ALIGN - 1)) &&
+        !(flags & ~HEAP_NO_SERIALIZE) &&
+        !(process_heap->flags & HEAP_MAG_DISALLOWED_FLAGS) &&
+        !process_heap->pending_free && !RUNNING_ON_VALGRIND)
+    {
+        struct block *mag_block = (struct block *)ptr - 1;
+        if (mag_block->block_type == BLOCK_TYPE_USED &&
+            !(mag_block->block_flags & (BLOCK_FLAG_FREE | BLOCK_FLAG_LARGE | BLOCK_FLAG_USER_MASK)))
+        {
+            SIZE_T bsize = (SIZE_T)mag_block->block_size * BLOCK_ALIGN;
+            int cls = mag_usable_to_class( bsize - sizeof(*mag_block) );
+            if (cls >= 0)
+            {
+                BOOL valid_heap = (mag_block->block_flags & BLOCK_FLAG_LFH) != 0;
+                if (!valid_heap)
+                {
+                    SUBHEAP *subheap = block_get_subheap( process_heap, mag_block );
+                    valid_heap = (subheap < (SUBHEAP *)mag_block && subheap->user_value == process_heap);
+                }
+                if (valid_heap)
+                {
+                    struct thread_heap_cache *cache = NtCurrentTeb()->ReservedForPerf;
+                    if (!cache)
+                    {
+                        cache = RtlAllocateHeap( process_heap, HEAP_ZERO_MEMORY, sizeof(*cache) );
+                        if (cache) NtCurrentTeb()->ReservedForPerf = cache;
+                    }
+                    if (cache)
+                    {
+                        struct heap_mag_bucket *bucket = &cache->buckets[cls];
+                        struct heap_mag_entry *entry = ptr;
+                        if (bucket->count >= MAG_MAX_COUNT)
+                            heap_mag_flush_bucket( process_heap, bucket, MAG_FLUSH_COUNT );
+                        entry->next = bucket->head;
+                        bucket->head = entry;
+                        bucket->count++;
+                        TRACE( "handle %p, flags %#lx, ptr %p, return 1 (mag).\n", handle, flags, ptr );
+                        return TRUE;
+                    }
+                }
+            }
+        }
+    }
 
     valgrind_notify_free( ptr );
 
