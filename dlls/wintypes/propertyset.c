@@ -22,6 +22,8 @@
 
 #include <winstring.h>
 #include <objbase.h>
+#include <winternl.h>
+#include <ntstatus.h>
 #include <wine/debug.h>
 #include <wine/exception.h>
 #include <activation.h>
@@ -68,7 +70,15 @@ static const GUID IID_IResourceDictionary =
  * (the static IID globals) plus the real per-interface vtable, allocated
  * per-call with CoTaskMemAlloc (CoreCLR frees it with CoTaskMemFree). */
 struct com_interface_entry;
-struct propertyset_reg;
+
+/* Registration list for the event accessors of this face; the full layout is
+ * documented with its implementation below. */
+struct propertyset_reg
+{
+    LONG ref;
+    IUnknown *handler;
+    struct propertyset_reg *next;
+};
 
 /* Classic XAML IReferenceTracker (windows.ui.xaml.hosting.referencetracker.h).
  * CoreCLR's ComWrappers builds a composite wrapper for each RCW it creates and
@@ -380,8 +390,18 @@ static ULONG STDMETHODCALLTYPE propertyset_Release( IPropertySet *iface )
 
     if (!ref)
     {
+        struct propertyset_reg *reg = impl->regs;
+
         /* guard against re-entry if inner releases an outer iface */
         InterlockedAdd( &impl->ref, 0x10000 );
+        impl->regs = NULL;
+        while (reg)
+        {
+            struct propertyset_reg *next = reg->next;
+            if (reg->handler) IUnknown_Release( reg->handler );
+            HeapFree( GetProcessHeap(), 0, reg );
+            reg = next;
+        }
         if (impl->inner_map) IMap_HSTRING_IInspectable_Release( impl->inner_map );
         if (impl->inner_iterable) IIterable_IKeyValuePair_HSTRING_IInspectable_Release( impl->inner_iterable );
         if (impl->map_inner) IInspectable_Release( impl->map_inner );
@@ -658,6 +678,8 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetView( IPropertySet *iface, void 
     return hr;
 }
 
+static void propertyset_fire_map_changed( struct propertyset *impl, HSTRING key, enum CollectionChange status );
+
 static HRESULT STDMETHODCALLTYPE propertyset_Insert( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
@@ -666,6 +688,9 @@ static HRESULT STDMETHODCALLTYPE propertyset_Insert( IPropertySet *iface, HSTRIN
     HRESULT hr;
     TRACE( "iface %p, key %p (decoded %s), value %p, replaced %p\n", iface, key, debugstr_hstring( hkey ), value, replaced );
     hr = IMap_HSTRING_IInspectable_Insert( impl->inner_map, hkey, value, replaced );
+    if (SUCCEEDED( hr ))
+        propertyset_fire_map_changed( impl, hkey,
+                (replaced && *replaced) ? CollectionChange_ItemChanged : CollectionChange_ItemInserted );
     if (allocated) WindowsDeleteString( hkey );
     return hr;
 }
@@ -673,15 +698,21 @@ static HRESULT STDMETHODCALLTYPE propertyset_Insert( IPropertySet *iface, HSTRIN
 static HRESULT STDMETHODCALLTYPE propertyset_Remove( IPropertySet *iface, HSTRING key )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
+    HRESULT hr;
     TRACE( "iface %p, key %s\n", iface, debugstr_hstring( key ) );
-    return IMap_HSTRING_IInspectable_Remove( impl->inner_map, key );
+    hr = IMap_HSTRING_IInspectable_Remove( impl->inner_map, key );
+    if (SUCCEEDED( hr )) propertyset_fire_map_changed( impl, key, CollectionChange_ItemRemoved );
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_Clear( IPropertySet *iface )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
+    HRESULT hr;
     TRACE( "iface %p\n", iface );
-    return IMap_HSTRING_IInspectable_Clear( impl->inner_map );
+    hr = IMap_HSTRING_IInspectable_Clear( impl->inner_map );
+    if (SUCCEEDED( hr )) propertyset_fire_map_changed( impl, NULL, CollectionChange_Reset );
+    return hr;
 }
 
 /* IIterable member of IMap's own requires clause: the MCG ObservableMap
@@ -698,16 +729,48 @@ static HRESULT STDMETHODCALLTYPE propertyset_First( IPropertySet *iface,
 /* Registration list for the event accessors of this face (MapChanged on the
  * merged/observable faces, and the INCC/INPC continuation the MCG
  * ObservableMap adapter drives at slots 17-22).  Handlers are opaque
- * delegates: stored AddRef'd, never invoked (the face never mutates, so no
- * event is ever raised); the token is the registration's own address, so a
- * remove is self-validating.  Interlocked push, per the observable-map lists
- * in windows.applicationmodel.resources.core. */
-struct propertyset_reg
+ * delegates: stored AddRef'd and invoked (as MapChanged) when a mutating
+ * face (Insert/Remove/Clear) changes the map; the token is the registration's
+ * own address, so a remove is self-validating.  Refcounted, the list is
+ * mutated under propertyset_cs (see below); the interlocked push style is
+ * kept from the observable-map lists in windows.applicationmodel.resources.core. */
+
+/* One process-wide lock guards the two pieces of shared mutable state in this
+ * file that the bare interlocked ops used to patch over:
+ *   - the per-object registration push list (regs): the MapChanged fire
+ *     snapshots the list under this lock and invokes the (now refcounted)
+ *     registrations outside it, so a remove racing the fire cannot free an
+ *     in-flight registration;
+ *   - the factory's static pin slot (see factory_ActivateInstance).
+ * Initialized lazily on first use. */
+static CRITICAL_SECTION propertyset_cs;
+static RTL_RUN_ONCE propertyset_cs_once = RTL_RUN_ONCE_INIT;
+
+static DWORD WINAPI propertyset_cs_init( PRTL_RUN_ONCE once, PVOID param, PVOID *context )
 {
-    LONG ref;
-    IUnknown *handler;
-    struct propertyset_reg *next;
-};
+    RtlInitializeCriticalSection( &propertyset_cs );
+    return STATUS_SUCCESS;
+}
+
+static void propertyset_lock( void )
+{
+    RtlRunOnceExecuteOnce( &propertyset_cs_once, propertyset_cs_init, NULL, NULL );
+    EnterCriticalSection( &propertyset_cs );
+}
+
+static void propertyset_unlock( void )
+{
+    LeaveCriticalSection( &propertyset_cs );
+}
+
+static void propertyset_reg_release( struct propertyset_reg *reg )
+{
+    if (!InterlockedDecrement( &reg->ref ))
+    {
+        if (reg->handler) IUnknown_Release( reg->handler );
+        HeapFree( GetProcessHeap(), 0, reg );
+    }
+}
 
 static HRESULT propertyset_reg_add( struct propertyset *impl, IUnknown *handler, EventRegistrationToken *token )
 {
@@ -718,35 +781,169 @@ static HRESULT propertyset_reg_add( struct propertyset *impl, IUnknown *handler,
     reg->ref = 1;
     reg->handler = handler;
     if (handler) IUnknown_AddRef( handler );
-    for (;;)
-    {
-        struct propertyset_reg *head = impl->regs;
-
-        reg->next = head;
-        if (InterlockedCompareExchangePointer( (void *volatile *)&impl->regs, reg, head ) == head) break;
-    }
+    propertyset_lock();
+    reg->next = impl->regs;
+    impl->regs = reg;
+    propertyset_unlock();
     token->value = (INT64)(INT_PTR)reg;
     return S_OK;
 }
 
 static HRESULT propertyset_reg_remove( struct propertyset *impl, EventRegistrationToken token )
 {
-    struct propertyset_reg *cur, **slot = (struct propertyset_reg **)&impl->regs;
+    struct propertyset_reg *cur, **slot;
 
+    propertyset_lock();
+    slot = (struct propertyset_reg **)&impl->regs;
     while ((cur = *slot))
     {
         if ((INT64)(INT_PTR)cur == token.value)
         {
-            if (InterlockedCompareExchangePointer( (void *volatile *)slot, cur->next, cur ) == cur)
-            {
-                if (cur->handler) IUnknown_Release( cur->handler );
-                HeapFree( GetProcessHeap(), 0, cur );
-            }
+            *slot = cur->next;
+            propertyset_unlock();
+            propertyset_reg_release( cur ); /* drops the list reference */
             return S_OK;
         }
         slot = &cur->next;
     }
+    propertyset_unlock();
     return S_OK; /* remove of an unknown token: the adapter's Dispose removes twice */
+}
+
+/* IMapChangedEventArgs<HSTRING>: the event-args pair a MapChanged delegate
+ * carries. This tree's projection (windows.foundation.collections.idl) names
+ * the status accessor get_CollectionChanged; it is the winmd ChangedStatus
+ * (Inserted/Removed/Replaced), and Clear reports Reset with a NULL key.
+ * Hand-rolled vtable, the style used throughout this file; the object lives
+ * on propertyset_fire_map_changed's stack across the Invoke calls. */
+struct propertyset_changed_args
+{
+    IMapChangedEventArgs_HSTRING iface;
+    LONG ref;
+    HSTRING key;
+    enum CollectionChange status;
+};
+
+static inline struct propertyset_changed_args *changed_args_from_iface( IMapChangedEventArgs_HSTRING *iface )
+{
+    return CONTAINING_RECORD( iface, struct propertyset_changed_args, iface );
+}
+
+static HRESULT STDMETHODCALLTYPE changed_args_QueryInterface( IMapChangedEventArgs_HSTRING *iface, REFIID iid, void **out )
+{
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapChangedEventArgs_HSTRING ))
+    {
+        *out = iface;
+        IMapChangedEventArgs_HSTRING_AddRef( iface );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE changed_args_AddRef( IMapChangedEventArgs_HSTRING *iface )
+{
+    struct propertyset_changed_args *impl = changed_args_from_iface( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG STDMETHODCALLTYPE changed_args_Release( IMapChangedEventArgs_HSTRING *iface )
+{
+    struct propertyset_changed_args *impl = changed_args_from_iface( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT STDMETHODCALLTYPE changed_args_GetIids( IMapChangedEventArgs_HSTRING *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE changed_args_GetRuntimeClassName( IMapChangedEventArgs_HSTRING *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.MapChangedEventHandler`1";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( cls, ARRAY_SIZE( cls ) - 1, name );
+}
+
+static HRESULT STDMETHODCALLTYPE changed_args_GetTrustLevel( IMapChangedEventArgs_HSTRING *iface, TrustLevel *trust )
+{
+    if (trust) *trust = FullTrust;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE changed_args_get_CollectionChanged( IMapChangedEventArgs_HSTRING *iface,
+                                                                     enum CollectionChange *value )
+{
+    struct propertyset_changed_args *impl = changed_args_from_iface( iface );
+    if (!value) return E_POINTER;
+    *value = impl->status;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE changed_args_get_Key( IMapChangedEventArgs_HSTRING *iface, HSTRING *key )
+{
+    struct propertyset_changed_args *impl = changed_args_from_iface( iface );
+    if (!key) return E_POINTER;
+    *key = NULL;
+    if (!impl->key) return S_OK;
+    return WindowsDuplicateString( impl->key, key );
+}
+
+static const IMapChangedEventArgs_HSTRINGVtbl propertyset_changed_args_vtbl =
+{
+    changed_args_QueryInterface,
+    changed_args_AddRef,
+    changed_args_Release,
+    changed_args_GetIids,
+    changed_args_GetRuntimeClassName,
+    changed_args_GetTrustLevel,
+    changed_args_get_CollectionChanged,
+    changed_args_get_Key,
+};
+
+/* Raise MapChanged on every registered handler (MapChanged shares the reg list
+ * with the INCC/INPC registrations; their delegates are opaque, caller-clean
+ * stdcall, and all take (sender, args)). The list is snapshotted under the
+ * lock, each registration is pinned with a ref and invoked outside it. */
+static void propertyset_fire_map_changed( struct propertyset *impl, HSTRING key, enum CollectionChange status )
+{
+    struct propertyset_changed_args args;
+    struct propertyset_reg *reg;
+
+    propertyset_lock();
+    for (reg = impl->regs; reg; reg = reg->next) InterlockedIncrement( &reg->ref ); /* pin for the fire */
+    reg = impl->regs;
+    propertyset_unlock();
+
+    if (!reg) return;
+
+    args.iface.lpVtbl = &propertyset_changed_args_vtbl;
+    args.ref = 1;
+    args.key = key;
+    args.status = status;
+
+    while (reg)
+    {
+        struct propertyset_reg *next = reg->next;
+        if (reg->handler)
+        {
+            __TRY
+            {
+                IMapChangedEventHandler_HSTRING_IInspectable_Invoke(
+                    (IMapChangedEventHandler_HSTRING_IInspectable *)reg->handler,
+                    (IObservableMap_HSTRING_IInspectable *)&impl->IPropertySet_iface, &args.iface );
+            }
+            __EXCEPT_ALL
+            {
+            }
+            __ENDTRY;
+        }
+        propertyset_reg_release( reg );
+        reg = next;
+    }
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_add_MapChanged( IPropertySet *iface,
@@ -909,19 +1106,20 @@ static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_GetView( IObservable
 static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_Insert( IObservableMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable *value, boolean *replaced )
 {
     struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
-    return IMap_HSTRING_IInspectable_Insert( impl->inner_map, key, value, replaced );
+    /* route through the merged face so both faces raise MapChanged identically */
+    return propertyset_Insert( &impl->IPropertySet_iface, key, value, replaced );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_Remove( IObservableMap_HSTRING_IInspectable *iface, HSTRING key )
 {
     struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
-    return IMap_HSTRING_IInspectable_Remove( impl->inner_map, key );
+    return propertyset_Remove( &impl->IPropertySet_iface, key );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_Clear( IObservableMap_HSTRING_IInspectable *iface )
 {
     struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
-    return IMap_HSTRING_IInspectable_Clear( impl->inner_map );
+    return propertyset_Clear( &impl->IPropertySet_iface );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_add_MapChanged( IObservableMap_HSTRING_IInspectable *iface,
@@ -1240,11 +1438,17 @@ static const struct map_iids propertyset_map_iids =
 
 static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
-    static struct propertyset *pin[2]; /* depth-2 pin: the CoreCLR shader's
-                                        * CreateObject runs AddRef/Release pairs
-                                        * around GetIids; keep the last two
-                                        * activated instances pinned. */
-    struct propertyset *impl, *old;
+    /* Single static pin (depth-1) under propertyset_cs: CoreCLR's ComWrappers
+     * CreateObject runs an AddRef/Release pair around the GetIids probe on the
+     * just-activated instance and the caller (e.g. the CoreRT McgInterop shim)
+     * may drop its own reference immediately, so the slot keeps the most
+     * recently activated instance alive past that. The former depth-2 ring
+     * raced: two unsequenced InterlockedExchangePointer chains let a
+     * concurrent ActivateInstance evict and release an instance a caller in
+     * another CreateObject still held. One slot, published under the lock,
+     * has no eviction window; the wintypes suite is the judge. */
+    static struct propertyset *pinned;
+    struct propertyset *impl, *old = NULL;
     HRESULT hr;
 
     TRACE( "(%p, %p)\n", iface, instance );
@@ -1282,9 +1486,11 @@ static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *i
     }
     IIterable_IKeyValuePair_HSTRING_IInspectable_Release( impl->inner_iterable ); /* release outer self-reference */
 
-    InterlockedIncrement( &impl->ref );  /* depth-2 pin */
-    old = InterlockedExchangePointer( (void **)&pin[0], impl );
-    old = InterlockedExchangePointer( (void **)&pin[1], old );
+    propertyset_lock();
+    old = pinned;
+    InterlockedIncrement( &impl->ref );  /* pin */
+    pinned = impl;
+    propertyset_unlock();
     if (old) IPropertySet_Release( &old->IPropertySet_iface );
 
     *instance = (IInspectable *)&impl->IPropertySet_iface;
