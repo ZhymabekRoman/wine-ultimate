@@ -292,6 +292,9 @@ struct dwrite_textlayout
     /* Combined list of textual runs and inline objects */
     struct list effective_runs;
     USHORT recompute;
+    BOOL range_modified;
+    BOOL metrics_cached;
+    BOOL force_full_compute;
 
     DWRITE_LINE_BREAKPOINT *nominal_breakpoints;
     DWRITE_LINE_BREAKPOINT *actual_breakpoints;
@@ -3066,6 +3069,329 @@ static HRESULT layout_compute_lines(struct dwrite_textlayout *layout)
     return hr;
 }
 
+#define LAYOUT_CACHE_SIZE 256
+#define LAYOUT_CACHE_BUCKETS 512
+#define LAYOUT_CACHE_MAX_TEXT_LEN 512
+
+struct layout_cache_key
+{
+    UINT64 hash;
+    UINT32 text_len;
+    UINT32 family_len;
+    UINT32 locale_len;
+
+    DWRITE_FONT_WEIGHT weight;
+    DWRITE_FONT_STYLE style;
+    DWRITE_FONT_STRETCH stretch;
+    DWRITE_PARAGRAPH_ALIGNMENT paralign;
+    DWRITE_READING_DIRECTION readingdir;
+    DWRITE_WORD_WRAPPING wrapping;
+    BOOL last_line_wrapping;
+    DWRITE_TEXT_ALIGNMENT textalignment;
+    DWRITE_FLOW_DIRECTION flow;
+    DWRITE_VERTICAL_GLYPH_ORIENTATION vertical_orientation;
+    DWRITE_OPTICAL_ALIGNMENT optical_alignment;
+    DWRITE_LINE_SPACING_METHOD spacing_method;
+    FLOAT spacing_height;
+    FLOAT spacing_baseline;
+    FLOAT spacing_leading_before;
+    DWRITE_FONT_LINE_GAP_USAGE spacing_line_gap_usage;
+    DWRITE_AUTOMATIC_FONT_AXES automatic_axes;
+    DWRITE_TRIMMING_GRANULARITY trimming_granularity;
+    UINT32 trimming_delimiter;
+    UINT32 trimming_delimiter_count;
+    DWRITE_MEASURING_MODE measuringmode;
+
+    FLOAT fontsize;
+    FLOAT tabstop;
+    FLOAT max_width;
+    FLOAT max_height;
+    FLOAT ppdip;
+    FLOAT m11, m12, m21, m22, dx, dy;
+};
+
+struct layout_cache_entry
+{
+    struct list lru_entry;
+    struct list hash_entry;
+    struct layout_cache_key key;
+    WCHAR *text;
+    WCHAR *family_name;
+    WCHAR *locale;
+
+    DWRITE_TEXT_METRICS1 metrics;
+    DWRITE_LINE_METRICS1 *line_metrics;
+    UINT32 line_count;
+    DWRITE_OVERHANG_METRICS overhangs;
+    BOOL overhangs_valid;
+};
+
+static SRWLOCK layout_cache_lock = SRWLOCK_INIT;
+static struct layout_cache_entry layout_cache_pool[LAYOUT_CACHE_SIZE];
+static struct list layout_cache_lru = LIST_INIT(layout_cache_lru);
+static struct list layout_cache_buckets[LAYOUT_CACHE_BUCKETS];
+static unsigned int layout_cache_count = 0;
+static BOOL layout_cache_initialized = FALSE;
+
+static void layout_cache_build_key(const struct dwrite_textlayout *layout, struct layout_cache_key *key)
+{
+    UINT64 hash = 14695981039346656037ULL;
+
+    memset(key, 0, sizeof(*key));
+    key->text_len = layout->length;
+    key->family_len = layout->format.family_len;
+    key->locale_len = layout->format.locale_len;
+
+    key->weight = layout->format.weight;
+    key->style = layout->format.style;
+    key->stretch = layout->format.stretch;
+    key->paralign = layout->format.paralign;
+    key->readingdir = layout->format.readingdir;
+    key->wrapping = layout->format.wrapping;
+    key->last_line_wrapping = !!layout->format.last_line_wrapping;
+    key->textalignment = layout->format.textalignment;
+    key->flow = layout->format.flow;
+    key->vertical_orientation = layout->format.vertical_orientation;
+    key->optical_alignment = layout->format.optical_alignment;
+    key->spacing_method = layout->format.spacing.method;
+    key->spacing_height = layout->format.spacing.height;
+    key->spacing_baseline = layout->format.spacing.baseline;
+    key->spacing_leading_before = layout->format.spacing.leadingBefore;
+    key->spacing_line_gap_usage = layout->format.spacing.fontLineGapUsage;
+    key->automatic_axes = layout->format.automatic_axes;
+    key->trimming_granularity = layout->format.trimming.granularity;
+    key->trimming_delimiter = layout->format.trimming.delimiter;
+    key->trimming_delimiter_count = layout->format.trimming.delimiterCount;
+    key->measuringmode = layout->measuringmode;
+
+    key->fontsize = layout->format.fontsize;
+    key->tabstop = layout->format.tabstop;
+    key->max_width = layout->metrics.layoutWidth;
+    key->max_height = layout->metrics.layoutHeight;
+    key->ppdip = layout->ppdip;
+    key->m11 = layout->transform.m11;
+    key->m12 = layout->transform.m12;
+    key->m21 = layout->transform.m21;
+    key->m22 = layout->transform.m22;
+    key->dx = layout->transform.dx;
+    key->dy = layout->transform.dy;
+
+    hash = fnv1a_bytes(hash, (const BYTE *)key + sizeof(key->hash), sizeof(*key) - sizeof(key->hash));
+    if (key->text_len && layout->text)
+        hash = fnv1a_bytes(hash, layout->text, key->text_len * sizeof(WCHAR));
+    if (key->family_len && layout->format.family_name)
+        hash = fnv1a_bytes(hash, layout->format.family_name, key->family_len * sizeof(WCHAR));
+    if (key->locale_len && layout->format.locale)
+        hash = fnv1a_bytes(hash, layout->format.locale, key->locale_len * sizeof(WCHAR));
+    key->hash = hash;
+}
+
+static BOOL layout_is_cacheable_base(const struct dwrite_textlayout *layout)
+{
+    if (layout->range_modified)
+        return FALSE;
+    if (layout->length > LAYOUT_CACHE_MAX_TEXT_LEN)
+        return FALSE;
+    if (layout->format.trimmingsign || layout->format.fallback || layout->format.axis_values_count)
+        return FALSE;
+    if (layout->format.collection && layout->format.collection != layout->system_collection)
+        return FALSE;
+    return TRUE;
+}
+
+static struct layout_cache_entry *layout_cache_find_locked(const struct dwrite_textlayout *layout,
+        const struct layout_cache_key *key)
+{
+    struct layout_cache_entry *entry;
+    unsigned int bucket;
+
+    if (!layout_cache_initialized)
+        return NULL;
+
+    bucket = key->hash & (LAYOUT_CACHE_BUCKETS - 1);
+    LIST_FOR_EACH_ENTRY(entry, &layout_cache_buckets[bucket], struct layout_cache_entry, hash_entry)
+    {
+        if (entry->key.hash != key->hash)
+            continue;
+        if (memcmp(&entry->key, key, sizeof(*key)))
+            continue;
+        if (key->text_len && (!entry->text || memcmp(entry->text, layout->text, key->text_len * sizeof(WCHAR))))
+            continue;
+        if (key->family_len && (!entry->family_name || memcmp(entry->family_name, layout->format.family_name, key->family_len * sizeof(WCHAR))))
+            continue;
+        if (key->locale_len && (!entry->locale || memcmp(entry->locale, layout->format.locale, key->locale_len * sizeof(WCHAR))))
+            continue;
+        return entry;
+    }
+
+    return NULL;
+}
+
+static BOOL layout_cache_lookup(struct dwrite_textlayout *layout)
+{
+    struct layout_cache_entry *entry;
+    struct layout_cache_key key;
+    UINT32 i;
+
+    layout_cache_build_key(layout, &key);
+
+    AcquireSRWLockExclusive(&layout_cache_lock);
+    entry = layout_cache_find_locked(layout, &key);
+    if (!entry)
+    {
+        ReleaseSRWLockExclusive(&layout_cache_lock);
+        return FALSE;
+    }
+
+    free_layout_effective_runs(layout);
+
+    for (i = 0; i < entry->line_count; i++)
+    {
+        struct layout_line *line = calloc(1, sizeof(*line));
+        if (!line)
+        {
+            free_layout_effective_runs(layout);
+            ReleaseSRWLockExclusive(&layout_cache_lock);
+            return FALSE;
+        }
+        list_init(&line->runs);
+        line->metrics = entry->line_metrics[i];
+        list_add_tail(&layout->lines, &line->entry);
+    }
+
+    layout->metrics = entry->metrics;
+    layout->recompute &= ~RECOMPUTE_LINES;
+    if (entry->overhangs_valid)
+    {
+        layout->overhangs = entry->overhangs;
+        layout->recompute &= ~RECOMPUTE_OVERHANGS;
+    }
+    layout->metrics_cached = TRUE;
+
+    list_remove(&entry->lru_entry);
+    list_add_head(&layout_cache_lru, &entry->lru_entry);
+
+    ReleaseSRWLockExclusive(&layout_cache_lock);
+    return TRUE;
+}
+
+static void layout_cache_insert(const struct dwrite_textlayout *layout, BOOL with_overhangs)
+{
+    struct layout_cache_entry *entry;
+    struct layout_cache_key key;
+    struct layout_line *line;
+    DWRITE_LINE_METRICS1 *lm = NULL;
+    WCHAR *text_copy = NULL, *family_copy = NULL, *locale_copy = NULL;
+    UINT32 line_count = layout->metrics.lineCount;
+    unsigned int i, bucket;
+
+    layout_cache_build_key(layout, &key);
+
+    AcquireSRWLockExclusive(&layout_cache_lock);
+
+    if (!layout_cache_initialized)
+    {
+        for (i = 0; i < LAYOUT_CACHE_BUCKETS; i++)
+            list_init(&layout_cache_buckets[i]);
+        layout_cache_initialized = TRUE;
+    }
+
+    if ((entry = layout_cache_find_locked(layout, &key)))
+    {
+        if (with_overhangs && !entry->overhangs_valid)
+        {
+            entry->overhangs = layout->overhangs;
+            entry->overhangs_valid = TRUE;
+        }
+        list_remove(&entry->lru_entry);
+        list_add_head(&layout_cache_lru, &entry->lru_entry);
+        ReleaseSRWLockExclusive(&layout_cache_lock);
+        return;
+    }
+
+    if (key.text_len)
+    {
+        if (!(text_copy = malloc(key.text_len * sizeof(WCHAR))))
+            goto fail;
+        memcpy(text_copy, layout->text, key.text_len * sizeof(WCHAR));
+    }
+    if (key.family_len)
+    {
+        if (!(family_copy = malloc(key.family_len * sizeof(WCHAR))))
+            goto fail;
+        memcpy(family_copy, layout->format.family_name, key.family_len * sizeof(WCHAR));
+    }
+    if (key.locale_len)
+    {
+        if (!(locale_copy = malloc(key.locale_len * sizeof(WCHAR))))
+            goto fail;
+        memcpy(locale_copy, layout->format.locale, key.locale_len * sizeof(WCHAR));
+    }
+    if (line_count)
+    {
+        if (!(lm = malloc(line_count * sizeof(*lm))))
+            goto fail;
+        i = 0;
+        LIST_FOR_EACH_ENTRY(line, &layout->lines, struct layout_line, entry)
+        {
+            if (i >= line_count) break;
+            lm[i++] = line->metrics;
+        }
+        if (i != line_count)
+            goto fail;
+    }
+
+    if (layout_cache_count < LAYOUT_CACHE_SIZE)
+    {
+        entry = &layout_cache_pool[layout_cache_count++];
+    }
+    else
+    {
+        entry = LIST_ENTRY(list_tail(&layout_cache_lru), struct layout_cache_entry, lru_entry);
+        list_remove(&entry->lru_entry);
+        list_remove(&entry->hash_entry);
+        free(entry->text);
+        free(entry->family_name);
+        free(entry->locale);
+        free(entry->line_metrics);
+    }
+
+    entry->key = key;
+    entry->text = text_copy;
+    entry->family_name = family_copy;
+    entry->locale = locale_copy;
+    entry->metrics = layout->metrics;
+    entry->line_metrics = lm;
+    entry->line_count = line_count;
+    entry->overhangs_valid = with_overhangs;
+    if (with_overhangs)
+        entry->overhangs = layout->overhangs;
+
+    bucket = key.hash & (LAYOUT_CACHE_BUCKETS - 1);
+    list_add_head(&layout_cache_buckets[bucket], &entry->hash_entry);
+    list_add_head(&layout_cache_lru, &entry->lru_entry);
+
+    ReleaseSRWLockExclusive(&layout_cache_lock);
+    return;
+
+fail:
+    free(text_copy);
+    free(family_copy);
+    free(locale_copy);
+    free(lm);
+    ReleaseSRWLockExclusive(&layout_cache_lock);
+}
+
+static void layout_ensure_full(struct dwrite_textlayout *layout)
+{
+    if (layout->metrics_cached)
+    {
+        layout->recompute = RECOMPUTE_EVERYTHING;
+        layout->metrics_cached = FALSE;
+        layout->force_full_compute = TRUE;
+    }
+}
+
 static HRESULT layout_compute_effective_runs(struct dwrite_textlayout *layout)
 {
     BOOL is_rtl = layout->format.readingdir == DWRITE_READING_DIRECTION_RIGHT_TO_LEFT;
@@ -3074,6 +3400,9 @@ static HRESULT layout_compute_effective_runs(struct dwrite_textlayout *layout)
     HRESULT hr;
 
     if (!(layout->recompute & RECOMPUTE_LINES))
+        return S_OK;
+
+    if (!layout->force_full_compute && layout_is_cacheable_base(layout) && layout_cache_lookup(layout))
         return S_OK;
 
     free_layout_effective_runs(layout);
@@ -3123,6 +3452,10 @@ static HRESULT layout_compute_effective_runs(struct dwrite_textlayout *layout)
         layout_apply_text_alignment(layout);
 
     layout->recompute &= ~RECOMPUTE_LINES;
+    layout->metrics_cached = FALSE;
+    layout->force_full_compute = FALSE;
+    if (SUCCEEDED(hr) && layout_is_cacheable_base(layout))
+        layout_cache_insert(layout, FALSE);
     return hr;
 }
 
@@ -3670,6 +4003,8 @@ static HRESULT set_layout_range_attr(struct dwrite_textlayout *layout, enum layo
         list_add_after(&cur->entry, &right->entry);
 
         layout->recompute = RECOMPUTE_EVERYTHING;
+        layout->range_modified = TRUE;
+        layout->metrics_cached = FALSE;
         return S_OK;
     }
 
@@ -3710,6 +4045,8 @@ done:
         struct list *next, *i;
 
         layout->recompute = RECOMPUTE_EVERYTHING;
+        layout->range_modified = TRUE;
+        layout->metrics_cached = FALSE;
         i = list_head(ranges);
         while ((next = list_next(ranges, i))) {
             struct layout_range_header *next_range = LIST_ENTRY(next, struct layout_range_header, entry);
@@ -4030,7 +4367,14 @@ static HRESULT WINAPI dwritetextlayout_SetMaxWidth(IDWriteTextLayout4 *iface, FL
     layout->metrics.layoutWidth = maxWidth;
 
     if (changed)
+    {
         layout->recompute |= RECOMPUTE_LINES_AND_OVERHANGS;
+        if (layout->metrics_cached)
+        {
+            layout->recompute = RECOMPUTE_EVERYTHING;
+            layout->metrics_cached = FALSE;
+        }
+    }
     return S_OK;
 }
 
@@ -4048,7 +4392,14 @@ static HRESULT WINAPI dwritetextlayout_SetMaxHeight(IDWriteTextLayout4 *iface, F
     layout->metrics.layoutHeight = maxHeight;
 
     if (changed)
+    {
         layout->recompute |= RECOMPUTE_LINES_AND_OVERHANGS;
+        if (layout->metrics_cached)
+        {
+            layout->recompute = RECOMPUTE_EVERYTHING;
+            layout->metrics_cached = FALSE;
+        }
+    }
     return S_OK;
 }
 
@@ -4468,6 +4819,8 @@ static HRESULT WINAPI dwritetextlayout_Draw(IDWriteTextLayout4 *iface,
 
     TRACE("%p, %p, %p, %.8e, %.8e.\n", iface, context, renderer, origin_x, origin_y);
 
+    layout_ensure_full(layout);
+
     hr = layout_compute_effective_runs(layout);
     if (FAILED(hr))
         return hr;
@@ -4752,6 +5105,8 @@ static HRESULT WINAPI dwritetextlayout_GetOverhangMetrics(IDWriteTextLayout4 *if
         return S_OK;
     }
 
+    layout_ensure_full(layout);
+
     hr = layout_compute_effective_runs(layout);
     if (FAILED(hr))
         return hr;
@@ -4774,6 +5129,9 @@ static HRESULT WINAPI dwritetextlayout_GetOverhangMetrics(IDWriteTextLayout4 *if
     layout->overhangs.bottom = bbox.bottom - layout->metrics.layoutHeight;
     layout->recompute &= ~RECOMPUTE_OVERHANGS;
 
+    if (layout_is_cacheable_base(layout))
+        layout_cache_insert(layout, TRUE);
+
     *overhangs = layout->overhangs;
 
     return S_OK;
@@ -4786,6 +5144,8 @@ static HRESULT WINAPI dwritetextlayout_GetClusterMetrics(IDWriteTextLayout4 *ifa
     HRESULT hr;
 
     TRACE("%p, %p, %u, %p.\n", iface, metrics, max_count, count);
+
+    layout_ensure_full(layout);
 
     hr = layout_compute(layout);
     if (FAILED(hr))
@@ -4814,6 +5174,7 @@ static HRESULT WINAPI dwritetextlayout_DetermineMinWidth(IDWriteTextLayout4 *ifa
         goto width_done;
 
     *min_width = 0.0f;
+    layout_ensure_full(layout);
     hr = layout_compute(layout);
     if (FAILED(hr))
         return hr;
@@ -4885,6 +5246,8 @@ static HRESULT WINAPI dwritetextlayout_HitTestTextPosition(IDWriteTextLayout4 *i
     HRESULT hr;
 
     TRACE("%p, %u, %d, %p, %p, %p.\n", iface, position, is_trailinghit, point_x, point_y, metrics);
+
+    layout_ensure_full(layout);
 
     if (FAILED(hr = layout_compute_effective_runs(layout)))
         return hr;
@@ -5067,7 +5430,10 @@ static HRESULT layout_set_vertical_orientation(struct dwrite_textlayout *layout,
         return hr;
 
     if (changed)
+    {
         layout->recompute = RECOMPUTE_EVERYTHING;
+        layout->metrics_cached = FALSE;
+    }
 
     return S_OK;
 }
@@ -5153,6 +5519,7 @@ static HRESULT WINAPI dwritetextlayout3_InvalidateLayout(IDWriteTextLayout4 *ifa
     TRACE("%p.\n", iface);
 
     layout->recompute = RECOMPUTE_EVERYTHING;
+    layout->metrics_cached = FALSE;
     return S_OK;
 }
 
@@ -5171,7 +5538,12 @@ static HRESULT WINAPI dwritetextlayout3_SetLineSpacing(IDWriteTextLayout4 *iface
 
     if (changed)
     {
-        if (!(layout->recompute & RECOMPUTE_LINES))
+        if (layout->metrics_cached)
+        {
+            layout->recompute = RECOMPUTE_EVERYTHING;
+            layout->metrics_cached = FALSE;
+        }
+        else if (!(layout->recompute & RECOMPUTE_LINES))
         {
             LIST_FOR_EACH_ENTRY(line, &layout->lines, struct layout_line, entry)
             {
@@ -5398,8 +5770,12 @@ static HRESULT WINAPI dwritetextformat_layout_SetTextAlignment(IDWriteTextFormat
 
     if (changed)
     {
-        /* if layout is not ready there's nothing to align */
-        if (!(layout->recompute & RECOMPUTE_LINES))
+        if (layout->metrics_cached)
+        {
+            layout->recompute = RECOMPUTE_EVERYTHING;
+            layout->metrics_cached = FALSE;
+        }
+        else if (!(layout->recompute & RECOMPUTE_LINES))
             layout_apply_text_alignment(layout);
         layout->recompute |= RECOMPUTE_OVERHANGS;
     }
@@ -5422,8 +5798,12 @@ static HRESULT WINAPI dwritetextformat_layout_SetParagraphAlignment(IDWriteTextF
 
     if (changed)
     {
-        /* if layout is not ready there's nothing to align */
-        if (!(layout->recompute & RECOMPUTE_LINES))
+        if (layout->metrics_cached)
+        {
+            layout->recompute = RECOMPUTE_EVERYTHING;
+            layout->metrics_cached = FALSE;
+        }
+        else if (!(layout->recompute & RECOMPUTE_LINES))
             layout_apply_par_alignment(layout);
         layout->recompute |= RECOMPUTE_OVERHANGS;
     }
@@ -5444,7 +5824,14 @@ static HRESULT WINAPI dwritetextformat_layout_SetWordWrapping(IDWriteTextFormat3
         return hr;
 
     if (changed)
+    {
         layout->recompute |= RECOMPUTE_LINES_AND_OVERHANGS;
+        if (layout->metrics_cached)
+        {
+            layout->recompute = RECOMPUTE_EVERYTHING;
+            layout->metrics_cached = FALSE;
+        }
+    }
 
     return S_OK;
 }
@@ -5463,7 +5850,10 @@ static HRESULT WINAPI dwritetextformat_layout_SetReadingDirection(IDWriteTextFor
         return hr;
 
     if (changed)
+    {
         layout->recompute = RECOMPUTE_EVERYTHING;
+        layout->metrics_cached = FALSE;
+    }
 
     return S_OK;
 }
@@ -5482,7 +5872,10 @@ static HRESULT WINAPI dwritetextformat_layout_SetFlowDirection(IDWriteTextFormat
         return hr;
 
     if (changed)
+    {
         layout->recompute = RECOMPUTE_EVERYTHING;
+        layout->metrics_cached = FALSE;
+    }
 
     return S_OK;
 }
@@ -5512,7 +5905,14 @@ static HRESULT WINAPI dwritetextformat_layout_SetTrimming(IDWriteTextFormat3 *if
     hr = format_set_trimming(&layout->format, trimming, trimming_sign, &changed);
 
     if (changed)
+    {
         layout->recompute |= RECOMPUTE_LINES_AND_OVERHANGS;
+        if (layout->metrics_cached)
+        {
+            layout->recompute = RECOMPUTE_EVERYTHING;
+            layout->metrics_cached = FALSE;
+        }
+    }
 
     return hr;
 }
