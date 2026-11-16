@@ -20,6 +20,7 @@
  */
 
 #include <stdarg.h>
+#include <wctype.h>
 
 #define COBJMACROS
 
@@ -1922,29 +1923,261 @@ static HRESULT WINAPI ITextRange_fnExpand(ITextRange *me, LONG unit, LONG *delta
     return textrange_expand(me, unit, delta);
 }
 
+/* 0-based index of the paragraph containing char offset ofs */
+static LONG paragraph_index( ME_TextEditor *editor, LONG ofs )
+{
+    ME_Paragraph *para = editor_first_para( editor );
+    LONG index = 0;
+
+    while (para && para->nCharOfs > ofs && index)
+    {
+        para = para_prev( para );
+        index--;
+    }
+    while (para_next( para ) && para_next( para )->nCharOfs <= ofs)
+    {
+        para = para_next( para );
+        index++;
+    }
+    return index;
+}
+
+/* 0-based index of the word boundary at or before char offset ofs */
+static LONG word_index( ME_TextEditor *editor, LONG ofs )
+{
+    ME_Cursor cursor;
+    LONG index = 0;
+
+    cursor_from_char_ofs( editor, 0, &cursor );
+    while (ME_GetCursorOfs( &cursor ) < ofs)
+    {
+        LONG prev = ME_GetCursorOfs( &cursor );
+        if (!ME_MoveCursorWords( editor, &cursor, +1 ))
+            break;
+        if (ME_GetCursorOfs( &cursor ) <= prev)
+            break; /* no progress, guard against infinite loop */
+        index++;
+    }
+    return index;
+}
+
+static WCHAR cursor_char( ME_TextEditor *editor, ME_Cursor *cursor )
+{
+    WCHAR wch;
+    LONG ch = 0;
+
+    range_GetChar( editor, cursor, &ch );
+    wch = (WCHAR)ch;
+    return wch;
+}
+
+/* 0-based index of the sentence at or before char offset ofs.
+ * Sentences are runs of text introduced after a delimiter sequence
+ * (.!?) followed by whitespace, paragraph marks count as delimiters. */
+static LONG sentence_index( ME_TextEditor *editor, LONG ofs )
+{
+    ME_Cursor cursor;
+    LONG index = 0;
+    BOOL after_delim = FALSE;
+
+    if (ofs <= 0)
+        return 0;
+
+    ME_SetCursorToStart( editor, &cursor );
+    while (ME_GetCursorOfs( &cursor ) < ofs)
+    {
+        WCHAR ch = cursor_char( editor, &cursor );
+        if (ch == '.' || ch == '!' || ch == '?' || ch == '\r' || ch == '\n')
+            after_delim = TRUE;
+        else if (after_delim && !iswspace( ch ))
+        {
+            after_delim = FALSE;
+            index++;
+        }
+        ME_MoveCursorChars( editor, &cursor, 1, FALSE );
+    }
+    return index;
+}
+
+/* index of the given unit at the range start, matching native GetIndex:
+ * scpDocument -> 0, scpChar -> cp, scpLine -> visual line number,
+ * scpParagraph -> 0-based paragraph number, scpWord/scpSentence ->
+ * 0-based number of units preceding the insertion point */
+static HRESULT textrange_get_index( ME_TextEditor *editor, LONG start, LONG unit, LONG *index )
+{
+    switch (unit)
+    {
+    case scpDocument:
+        *index = 0;
+        break;
+    case scpChar:
+        *index = start;
+        break;
+    case scpLine:
+        *index = row_number_from_char_ofs( editor, start );
+        break;
+    case scpParagraph:
+        *index = paragraph_index( editor, start );
+        break;
+    case scpWord:
+        *index = word_index( editor, start );
+        break;
+    case scpSentence:
+        *index = sentence_index( editor, start );
+        break;
+    default:
+        FIXME("unit %ld not supported\n", unit);
+        return E_INVALIDARG;
+    }
+    return S_OK;
+}
+
+/* Move *io_pos to the start of the *io_index-th unit, clamping at the
+ * story end; *io_index receives the index actually reached. */
+static void unit_seek( ME_TextEditor *editor, LONG unit, LONG *io_index, LONG *io_pos )
+{
+    LONG index = *io_index;
+
+    switch (unit)
+    {
+    case scpDocument:
+        *io_index = 0;
+        *io_pos = 0;
+        return;
+    case scpChar:
+        *io_pos = max( 0, min( index, ME_GetTextLength( editor ) ) );
+        return;
+    case scpLine:
+    {
+        LONG len = ME_GetTextLength( editor );
+        LONG pos = 0;
+        while (index > 0 && pos < len)
+        {
+            LONG row = row_number_from_char_ofs( editor, pos );
+            LONG next = min( pos + 1, len );
+            if (row_number_from_char_ofs( editor, next ) > row)
+            {
+                index--;
+                if (!index)
+                {
+                    pos = next;
+                    break;
+                }
+            }
+            pos = next;
+        }
+        *io_index -= index;
+        *io_pos = pos;
+        return;
+    }
+    case scpParagraph:
+    {
+        ME_Paragraph *para = editor_first_para( editor );
+        while (index > 0 && para_next( para ))
+        {
+            para = para_next( para );
+            index--;
+        }
+        *io_index -= index;
+        *io_pos = para->nCharOfs;
+        return;
+    }
+    case scpWord:
+    {
+        ME_Cursor cursor;
+        ME_SetCursorToStart( editor, &cursor );
+        while (index > 0)
+        {
+            LONG prev = ME_GetCursorOfs( &cursor );
+            if (!ME_MoveCursorWords( editor, &cursor, +1 )) break;
+            if (ME_GetCursorOfs( &cursor ) <= prev) break;
+            index--;
+        }
+        *io_index -= index;
+        *io_pos = ME_GetCursorOfs( &cursor );
+        return;
+    }
+    case scpSentence:
+    {
+        ME_Cursor cursor;
+        LONG reached = 0;
+        BOOL after_delim = FALSE;
+        LONG pos = 0;
+        ME_SetCursorToStart( editor, &cursor );
+        while (pos < ME_GetTextLength( editor ))
+        {
+            WCHAR ch = cursor_char( editor, &cursor );
+            if (ch == '.' || ch == '!' || ch == '?' || ch == '\r' || ch == '\n')
+                after_delim = TRUE;
+            else if (after_delim && !iswspace( ch ))
+            {
+                after_delim = FALSE;
+                reached++;
+                if (reached >= *io_index)
+                {
+                    *io_index = reached;
+                    *io_pos = pos;
+                    return;
+                }
+            }
+            ME_MoveCursorChars( editor, &cursor, 1, FALSE );
+            pos = ME_GetCursorOfs( &cursor );
+        }
+        *io_index = reached;
+        *io_pos = pos;
+        return;
+    }
+    default:
+        *io_index = 0;
+        *io_pos = 0;
+    }
+}
+
 static HRESULT WINAPI ITextRange_fnGetIndex(ITextRange *me, LONG unit, LONG *index)
 {
     ITextRangeImpl *This = impl_from_ITextRange(me);
+    ME_TextEditor *editor;
 
-    FIXME("(%p)->(%ld %p): stub\n", This, unit, index);
+    TRACE("(%p)->(%ld %p)\n", This, unit, index);
 
     if (!This->child.reole)
         return CO_E_RELEASED;
 
-    return E_NOTIMPL;
+    if (!index)
+        return E_INVALIDARG;
+
+    editor = This->child.reole->editor;
+    return textrange_get_index( editor, This->start, unit, index );
 }
 
 static HRESULT WINAPI ITextRange_fnSetIndex(ITextRange *me, LONG unit, LONG index,
                                             LONG extend)
 {
     ITextRangeImpl *This = impl_from_ITextRange(me);
+    ME_TextEditor *editor;
+    LONG target, reached;
 
-    FIXME("(%p)->(%ld %ld %ld): stub\n", This, unit, index, extend);
+    TRACE("(%p)->(%ld %ld %ld)\n", This, unit, index, extend);
 
     if (!This->child.reole)
         return CO_E_RELEASED;
 
-    return E_NOTIMPL;
+    editor = This->child.reole->editor;
+    reached = index;
+    target = 0;
+    unit_seek( editor, unit, &reached, &target );
+
+    if (extend)
+    {
+        if (target >= This->start)
+            This->end = target;
+        else
+            This->start = target;
+    }
+    else
+        This->end = This->start = target;
+
+    return S_OK;
 }
 
 static void cp2range(ME_TextEditor *editor, LONG *cp1, LONG *cp2)
@@ -5029,26 +5262,50 @@ static HRESULT WINAPI ITextSelection_fnExpand(ITextSelection *me, LONG unit, LON
 static HRESULT WINAPI ITextSelection_fnGetIndex(ITextSelection *me, LONG unit, LONG *index)
 {
     struct text_selection *This = impl_from_ITextSelection(me);
+    LONG start, end;
+    HRESULT hr;
 
-    FIXME("(%p)->(%ld %p): stub\n", This, unit, index);
+    TRACE("(%p)->(%ld %p)\n", This, unit, index);
 
     if (!This->services)
         return CO_E_RELEASED;
 
-    return E_NOTIMPL;
+    if (!index)
+        return E_INVALIDARG;
+
+    ME_GetSelectionOfs(This->services->editor, &start, &end);
+    hr = textrange_get_index(This->services->editor, start, unit, index);
+    return hr;
 }
 
 static HRESULT WINAPI ITextSelection_fnSetIndex(ITextSelection *me, LONG unit, LONG index,
     LONG extend)
 {
     struct text_selection *This = impl_from_ITextSelection(me);
+    LONG reached, target, start, end;
 
-    FIXME("(%p)->(%ld %ld %ld): stub\n", This, unit, index, extend);
+    TRACE("(%p)->(%ld %ld %ld)\n", This, unit, index, extend);
 
     if (!This->services)
         return CO_E_RELEASED;
 
-    return E_NOTIMPL;
+    ME_GetSelectionOfs(This->services->editor, &start, &end);
+    reached = index;
+    target = 0;
+    unit_seek(This->services->editor, unit, &reached, &target);
+
+    if (extend)
+    {
+        if (target >= start)
+            end = target;
+        else
+            start = target;
+    }
+    else
+        start = end = target;
+
+    set_selection(This->services->editor, start, end);
+    return S_OK;
 }
 
 static HRESULT WINAPI ITextSelection_fnSetRange(ITextSelection *me, LONG anchor, LONG active)

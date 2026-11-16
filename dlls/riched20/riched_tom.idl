@@ -274,6 +274,13 @@ interface ITextDocument : IDispatch
 interface ITextFont;
 interface ITextPara;
 
+cpp_quote("#define scpChar      0")
+cpp_quote("#define scpWord      1")
+cpp_quote("#define scpSentence  2")
+cpp_quote("#define scpParagraph 3")
+cpp_quote("#define scpLine      4")
+cpp_quote("#define scpDocument  5")
+
 [
     uuid(8cc497c2-a1df-11ce-8098-00aa0047be5d),
     object,

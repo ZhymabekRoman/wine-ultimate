@@ -206,6 +206,16 @@ typedef enum tagTomConstants
     tomSelfIME = (int) 0x40000
 } tomConstants;
 
+typedef enum TOM_UNIT
+{
+    scpChar      = 0,
+    scpWord      = 1,
+    scpSentence  = 2,
+    scpParagraph = 3,
+    scpLine      = 4,
+    scpDocument  = 5
+} TOMUnit;
+
 interface ITextRange;
 interface ITextSelection;
 interface ITextStoryRanges;
