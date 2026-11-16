@@ -39,6 +39,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 void uwp_sync_calc_display_from_vm( void );
 void uwp_keyboard_press_char( WCHAR ch );
+BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr );
 
 struct application
 {
@@ -4645,10 +4646,13 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     }
     if (msg == WM_DEADCHAR || msg == WM_SYSCHAR)
         goto forward_msg;
-    if (msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_CHAR)
+    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP || msg == WM_CHAR)
     {
         struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
         HRESULT hr;
+        BOOL accel_handled = FALSE;
+        if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+            accel_handled = uwp_dispatch_keydown( hwnd, (UINT)wparam, lparam, NULL );
         xaml_cw_fire_key_event( cw, msg, wparam, lparam );
         hr = notify_inner_core_window_key( hwnd, msg, wparam );
         if (msg == WM_CHAR && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
@@ -4658,7 +4662,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         xaml_mark_window_dirty();
         InvalidateRect( GetAncestor( hwnd, GA_ROOT ), NULL, FALSE );
         UpdateWindow( GetAncestor( hwnd, GA_ROOT ) );
-        if (SUCCEEDED( hr ) && xaml_corewindow_prev_proc == (WNDPROC)GetClassLongPtrW( hwnd, GCLP_WNDPROC ))
+        if ((accel_handled || (msg != WM_SYSKEYDOWN && SUCCEEDED( hr ))) &&
+            xaml_corewindow_prev_proc == (WNDPROC)GetClassLongPtrW( hwnd, GCLP_WNDPROC ))
             return 0;
         goto forward_msg;
     }

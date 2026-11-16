@@ -70,6 +70,7 @@ namespace Windows.UI.Core {
     interface ICoreWindow4;
     interface ICoreWindow5;
     interface ICoreWindowEventArgs;
+    interface ICoreWindowInputProperties;
     interface ICoreWindowStatic;
     interface IIdleDispatchedHandlerArgs;
     interface IInputEnabledEventArgs;
@@ -351,6 +352,23 @@ namespace Windows.UI.Core {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(46cb65bf-0471-42ab-a948-710086f2d988)
+    ]
+    interface ICoreWindowInputProperties : IInspectable
+    {
+        [propget] HRESULT KeyboardPresent([out, retval] boolean *value);
+        [propget] HRESULT MousePresent([out, retval] boolean *value);
+        [propget] HRESULT TouchPresentation([out, retval] boolean *value);
+        [propget] HRESULT PointerPointerPromoted([out, retval] boolean *value);
+        [propput] HRESULT PointerPointerPromoted([in] boolean value);
+        [propget] HRESULT PointerPromotion([out, retval] boolean *value);
+        [propput] HRESULT PointerPromotion([in] boolean value);
+        [propget] HRESULT FirstSignature([out, retval] INT32 *value);
+        [propget] HRESULT MaxTouchPoints([out, retval] INT32 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         uuid(79b9d5f2-879e-4b89-b798-79e47598030c)
     ]
     interface ICoreWindow : IInspectable
@@ -359,10 +377,7 @@ namespace Windows.UI.Core {
         [propget] HRESULT Bounds([out, retval] Windows.Foundation.Rect *value);
         [propget] HRESULT CustomProperties([out, retval] Windows.Foundation.Collections.IPropertySet **value);
         [propget] HRESULT Dispatcher([out, retval] Windows.UI.Core.CoreDispatcher **value);
-        [propget] HRESULT FlowDirection([out, retval] Windows.UI.Core.CoreWindowFlowDirection *value);
-        [propput] HRESULT FlowDirection([in] Windows.UI.Core.CoreWindowFlowDirection value);
-        [propget] HRESULT IsInputEnabled([out, retval] boolean *value);
-        [propput] HRESULT IsInputEnabled([in] boolean value);
+        [propget] HRESULT InputProperties([out, retval] Windows.UI.Core.ICoreWindowInputProperties **value);
         [propget] HRESULT PointerCursor([out, retval] Windows.UI.Core.CoreCursor **value);
         [propput] HRESULT PointerCursor([in] Windows.UI.Core.CoreCursor *value);
         [propget] HRESULT PointerPosition([out, retval] Windows.Foundation.Point *value);
@@ -399,14 +414,18 @@ namespace Windows.UI.Core {
         [eventremove] HRESULT PointerPressed([in] EventRegistrationToken cookie);
         [eventadd] HRESULT PointerReleased([in] Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, Windows.UI.Core.PointerEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
         [eventremove] HRESULT PointerReleased([in] EventRegistrationToken cookie);
-        [eventadd] HRESULT TouchHitTesting([in] Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, Windows.UI.Core.TouchHitTestingEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
-        [eventremove] HRESULT TouchHitTesting([in] EventRegistrationToken cookie);
         [eventadd] HRESULT PointerWheelChanged([in] Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, Windows.UI.Core.PointerEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
         [eventremove] HRESULT PointerWheelChanged([in] EventRegistrationToken cookie);
         [eventadd] HRESULT SizeChanged([in] Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, Windows.UI.Core.WindowSizeChangedEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
         [eventremove] HRESULT SizeChanged([in] EventRegistrationToken cookie);
         [eventadd] HRESULT VisibilityChanged([in] Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, Windows.UI.Core.VisibilityChangedEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
         [eventremove] HRESULT VisibilityChanged([in] EventRegistrationToken cookie);
+        [eventadd] HRESULT TouchHitTesting([in] Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, Windows.UI.Core.TouchHitTestingEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
+        [eventremove] HRESULT TouchHitTesting([in] EventRegistrationToken cookie);
+        [propget] HRESULT FlowDirection([out, retval] Windows.UI.Core.CoreWindowFlowDirection *value);
+        [propput] HRESULT FlowDirection([in] Windows.UI.Core.CoreWindowFlowDirection value);
+        [propget] HRESULT IsInputEnabled([out, retval] boolean *value);
+        [propput] HRESULT IsInputEnabled([in] boolean value);
     }
 
     [

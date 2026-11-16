@@ -1630,7 +1630,7 @@ static HRESULT WINAPI core_window_remove_VisibilityChanged( ICoreWindow *iface, 
 /* ---- ICoreWindowInputProperties (minimal live face) ----
  * The real class vtbl puts this at slot 9 (after Dispatcher); apps probe it on startup
  * (KeyboardPresent gates the whole keyboard-input path), so return a live face. */
-static const IID IID___x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties =
+static const IID IID_ICoreWindowInputProperties_local =
     { 0x46cb65bf, 0x0471, 0x42ab, { 0xa9, 0x48, 0x71, 0x00, 0x86, 0xf2, 0xd9, 0x88 } };
 
 struct input_properties
@@ -1651,7 +1651,7 @@ static HRESULT WINAPI input_props_QueryInterface( __x_ABI_CWindows_CUI_CCore_CIC
     struct input_properties *impl = impl_from_ICoreWindowInputProperties( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties ))
+        IsEqualGUID( iid, &IID_ICoreWindowInputProperties_local ))
     {
         InterlockedIncrement( &impl->ref );
         *out = &impl->ICoreWindowInputProperties_iface;

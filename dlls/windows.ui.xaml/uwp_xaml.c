@@ -21,9 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <wctype.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
+#include "xbf_known_types.h"
 #include "appmodel.h"
 #include "weakreference.h"
 #include "winreg.h"
@@ -345,6 +347,10 @@ static const GUID IID_ISolidColorBrush_UWP =
     { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
 static const GUID IID_IFlyoutBase_UWP =
     { 0x723eea0b, 0xd12e, 0x430d, { 0xa9, 0xf0, 0x9b, 0xb3, 0x2b, 0xbf, 0x99, 0x13 } };
+static const GUID IID_IFlyoutBase3_UWP =
+    { 0xa89c9712, 0x48e0, 0x4240, { 0x95, 0xb9, 0x0d, 0xfd, 0x08, 0x26, 0xa8, 0xd3 } };
+static const GUID IID_IDispatcherTimer_UWP =
+    { 0xd160ce46, 0xcd22, 0x4f5f, { 0x8c, 0x97, 0x40, 0xe6, 0x1d, 0xa3, 0xe2, 0xdc } };
 static const GUID IID_IMenuFlyout_UWP =
     { 0x62081062, 0xb44a, 0x4210, { 0x91, 0xa8, 0x16, 0x75, 0x15, 0x25, 0x1a, 0x12 } };
 static const GUID IID_IMenuFlyoutItem_UWP =
@@ -383,6 +389,8 @@ static const GUID IID_IXamlType_UWP_g =
     { 0x7920eab1, 0xb2e5, 0x41ea, { 0x8d, 0x86, 0xe1, 0x0f, 0x7b, 0x37, 0x73, 0x37 } };
 static const GUID IID_ICommand_UWP =
     { 0xe5af3542, 0xca67, 0x4080, { 0x99, 0x5b, 0x70, 0x9d, 0xd1, 0x37, 0x92, 0xdf } };
+static const GUID IID_ICommand_UWP2 =
+    { 0xe5af3542, 0xca67, 0x4081, { 0x99, 0x5b, 0x70, 0x9d, 0xd1, 0x37, 0x92, 0xdf } };
 static const GUID IID_IPropertyValue_g =
     { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
 static const GUID IID_IPropertyValueStatics_g =
@@ -430,7 +438,6 @@ static const GUID IID_ITextBlock_Calc4 =
 static const GUID IID_IUIE_Extra[] =
 {
     { 0xbc2b28f1, 0x26f2, 0x4aab, { 0xb2, 0x56, 0x3b, 0x53, 0x50, 0x88, 0x1e, 0x37 } },
-    { 0x69145cd4, 0x199a, 0x4657, { 0x9e, 0x57, 0xe9, 0x9e, 0x8f, 0x13, 0x67, 0x12 } },
     { 0x8eed9bc2, 0xa58c, 0x4453, { 0xaf, 0x0f, 0xa9, 0x2e, 0xe0, 0x6d, 0x03, 0x17 } },
     { 0xcafc4968, 0x6369, 0x4249, { 0x80, 0xf9, 0x3d, 0x65, 0x63, 0x19, 0xe8, 0x11 } },
     { 0x3ab70e85, 0xd508, 0x4477, { 0xb6, 0xf8, 0x0e, 0x43, 0x57, 0x01, 0xc8, 0x36 } },
@@ -476,9 +483,8 @@ static const GUID IID_IUIE_Extra[] =
     { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } },
     { 0xa907d496, 0x46a0, 0x4cd7, { 0x8d, 0xbe, 0xf9, 0xa5, 0x81, 0xdf, 0x60, 0xb1 } },
     { 0x2d162925, 0x5966, 0x4bfa, { 0x86, 0x38, 0x4d, 0x34, 0x56, 0x89, 0xf6, 0xcf } },
-    /* WinUI 2.x / UWP Controls (TabViewItem, TeachingTip, Expander, AnimatedIcon, ProgressRing, etc.) */
+    /* WinUI 2.x / UWP Controls (TabViewItem, Expander, AnimatedIcon, ProgressRing, etc.) */
     { 0x291f3e98, 0x4f17, 0x5021, { 0x94, 0xf0, 0x6a, 0x5b, 0x30, 0x43, 0x12, 0xb6 } },
-    { 0x5b200440, 0x4fcc, 0x5fdb, { 0xb4, 0x18, 0xb5, 0x79, 0x7b, 0x08, 0x74, 0xad } },
     { 0xcd1d4ede, 0x8d39, 0x5bef, { 0xa7, 0x35, 0x9f, 0xdf, 0x60, 0x38, 0xe8, 0x6b } },
     { 0xf705dfda, 0x8196, 0x56d0, { 0x8d, 0xcf, 0x2b, 0x66, 0xc2, 0xae, 0xd7, 0x91 } },
     { 0x2670d03f, 0xe28c, 0x5652, { 0xbe, 0xe2, 0xb5, 0x21, 0x2e, 0xbd, 0xf7, 0xff } },
@@ -488,7 +494,6 @@ static const GUID IID_IUIE_Extra[] =
     { 0x00378a74, 0x790b, 0x5328, { 0x8a, 0xfa, 0x7d, 0x65, 0xe2, 0x2d, 0xa4, 0x26 } },
     { 0x103e9b13, 0x3400, 0x4a16, { 0x90, 0xb9, 0x69, 0x12, 0xbf, 0x06, 0x97, 0x4f } },
     { 0x4459a451, 0x69e8, 0x440c, { 0x98, 0x96, 0x4b, 0xb4, 0xf5, 0xf6, 0x42, 0xd1 } },
-    { 0x49841edd, 0x88e9, 0x4663, { 0xa7, 0x01, 0xcd, 0x4f, 0xd2, 0x5e, 0x39, 0x8f } },
     { 0x331d8f00, 0xc5f9, 0x46a5, { 0xb6, 0xc8, 0xed, 0xe5, 0x39, 0x30, 0x45, 0x67 } },
     { 0xe48f5a8b, 0x1dff, 0x4352, { 0xa1, 0xf4, 0xe5, 0x16, 0x51, 0x4e, 0xc8, 0x82 } },
     { 0x7df18c3c, 0x2826, 0x425e, { 0x9a, 0x94, 0x00, 0xb7, 0xf7, 0x3f, 0x37, 0x56 } },
@@ -498,8 +503,6 @@ static const GUID IID_IUIE_Extra[] =
     { 0x79fde5b4, 0xcd37, 0x491c, { 0x88, 0x45, 0xda, 0xf4, 0x72, 0xde, 0xff, 0xf6 } },
     { 0x7de5d75f, 0x4415, 0x429f, { 0xb5, 0x23, 0x69, 0x9b, 0xdb, 0x8c, 0x30, 0xdb } },
     { 0x855bc230, 0x8a11, 0x4e18, { 0xa1, 0x36, 0x4b, 0xc2, 0x1c, 0x78, 0x27, 0xb0 } },
-    { 0x92e6181e, 0x19ae, 0x465a, { 0x9b, 0x3c, 0xa7, 0x1e, 0xe9, 0xea, 0x74, 0x20 } },
-    { 0x8494f8d4, 0xead1, 0x5f01, { 0xad, 0x2e, 0xa8, 0xca, 0xd4, 0xf9, 0xdc, 0x0e } },
     { 0x9910aec7, 0x8ab5, 0x4118, { 0x9b, 0xc6, 0x09, 0xf4, 0x5a, 0x35, 0x07, 0x3d } },
     { 0x688ea9b9, 0x1e4e, 0x4596, { 0x86, 0xe3, 0x42, 0x8b, 0x27, 0x33, 0x4f, 0xaf } },
     { 0xc975905c, 0x3c36, 0x4229, { 0x81, 0x7b, 0x17, 0x8f, 0x64, 0xc0, 0xe1, 0x13 } },
@@ -510,10 +513,22 @@ static const GUID IID_IUIE_Extra[] =
     { 0x3d0813ba, 0x6890, 0x4537, { 0xbf, 0xe5, 0x79, 0x6d, 0x94, 0x58, 0xed, 0xd6 } },
     { 0x53c9f23a, 0xf25d, 0x446a, { 0x99, 0xb8, 0xc7, 0xae, 0xb8, 0x39, 0x05, 0x0f } },
     { 0x754c3266, 0x0529, 0x45e3, { 0x87, 0x48, 0xbf, 0x74, 0x7d, 0x15, 0x83, 0x57 } },
-    { 0x9727b2e3, 0xb2b6, 0x49dc, { 0x8c, 0x22, 0xe0, 0x13, 0x8b, 0x94, 0x15, 0x59 } },
-    { 0xa89c9712, 0x48e0, 0x4240, { 0x95, 0xb9, 0x0d, 0xfd, 0x08, 0x26, 0xa8, 0xd3 } },
-    { 0xad3ec0c7, 0x12bb, 0x5a73, { 0xb7, 0x8e, 0x10, 0x51, 0x92, 0xca, 0x73, 0xd6 } },
     { 0xf82b435e, 0x65b3, 0x41c6, { 0xa9, 0xe2, 0x77, 0xb6, 0x7b, 0xc4, 0xc0, 0x0c } },
+    { 0xaa87ddde, 0xe679, 0x45b2, { 0xa7, 0xc9, 0x9a, 0xed, 0xc3, 0x9d, 0xb8, 0x86 } },
+    { 0x16c724fb, 0x6c1a, 0x4852, { 0x92, 0x58, 0x08, 0xc0, 0x38, 0x36, 0x79, 0x07 } },
+    { 0xf3709e8b, 0x091a, 0x5db5, { 0xb8, 0x96, 0xff, 0x78, 0xf0, 0x19, 0x90, 0xc9 } },
+    { 0x0e1ebbd4, 0xa003, 0x4936, { 0x81, 0x75, 0xf5, 0x45, 0x7c, 0x07, 0xf0, 0xc6 } },
+    { 0xe98babe7, 0xf6ff, 0x444c, { 0x9c, 0x0d, 0x27, 0x7e, 0xaf, 0x0a, 0xd9, 0xc0 } },
+    { 0xb90ad781, 0xbfeb, 0x4451, { 0xbd, 0x47, 0x9f, 0x3a, 0x63, 0xeb, 0xd2, 0x4a } },
+    { 0xb9c0b997, 0x2820, 0x44a1, { 0xa5, 0xa8, 0x9b, 0x80, 0x1e, 0xdc, 0x26, 0x9e } },
+    { 0xb618fd7b, 0x32d0, 0x4970, { 0x9c, 0x42, 0x7c, 0x03, 0x9a, 0xc7, 0xbe, 0x78 } },
+    { 0x89839403, 0xb538, 0x49e3, { 0xa4, 0x30, 0x3a, 0xc0, 0x37, 0xdc, 0x6f, 0xe0 } },
+    { 0x35aac87a, 0x62ee, 0x4d3e, { 0xa2, 0x4c, 0x2b, 0xc8, 0x43, 0x2d, 0x68, 0xb7 } },
+    { 0x2cf95efb, 0xa7a2, 0x5d85, { 0x8e, 0xad, 0xea, 0x22, 0x2b, 0xaa, 0x3c, 0x55 } },
+    { 0xb64c2423, 0x7e56, 0x5d41, { 0x8a, 0x84, 0x1e, 0xe2, 0x8f, 0x98, 0x26, 0xa4 } },
+    { 0x4459a451, 0x69e8, 0x440c, { 0x98, 0x96, 0x4b, 0xb4, 0xf5, 0xf6, 0x42, 0xd1 } },
+    { 0x688ea9b9, 0x1e4e, 0x4596, { 0x86, 0xe3, 0x42, 0x8b, 0x27, 0x33, 0x4f, 0xaf } },
+    { 0xd4d61391, 0x39ac, 0x4950, { 0x91, 0x66, 0x36, 0x06, 0xc2, 0x64, 0x41, 0x8b } },
 };
 static const GUID IID_ITabView_WinUI =
     { 0x6aa787ab, 0x5a30, 0x5ea2, { 0xbe, 0x5b, 0xae, 0xd8, 0x68, 0x38, 0x17, 0x56 } };
@@ -523,6 +538,14 @@ static const GUID IID_IMenuBarItem_WinUI =
     { 0x9caa4261, 0x3a0c, 0x5a59, { 0x8c, 0xfe, 0x39, 0x17, 0x44, 0xc3, 0xf8, 0x15 } };
 static const GUID IID_IMenuFlyoutSubItem_UWP =
     { 0xe5386550, 0xfe2c, 0x43e2, { 0xa7, 0x3f, 0x62, 0x16, 0x8f, 0x61, 0x99, 0x73 } };
+static const GUID IID_IMenuFlyout2_Real_UWP =
+    { 0x507c7bad, 0xd9d1, 0x4c05, { 0x9d, 0x4b, 0xcd, 0xa8, 0xde, 0x9a, 0xb2, 0x42 } };
+static const GUID IID_IMenuFlyoutItem3_UWP =
+    { 0x9727b2e3, 0xb2b6, 0x49dc, { 0x8c, 0x22, 0xe0, 0x13, 0x8b, 0x94, 0x15, 0x59 } };
+static const GUID IID_IToggleMenuFlyoutItem_UWP =
+    { 0x49841edd, 0x88e9, 0x4663, { 0xa7, 0x01, 0xcd, 0x4f, 0xd2, 0x5e, 0x39, 0x8f } };
+static const GUID IID_IUIElement4_Real_UWP =
+    { 0x69145cd4, 0x199a, 0x4657, { 0x9e, 0x57, 0xe9, 0x9e, 0x8f, 0x13, 0x67, 0x12 } };
 static const GUID IID_IUIElement7_UWP =
     { 0xcafc4968, 0x6369, 0x4249, { 0x80, 0xf9, 0x3d, 0x65, 0x63, 0x19, 0xe8, 0x11 } };
 static const GUID IID_IDesktopWindowXamlSourceFactory_UWP =
@@ -557,6 +580,22 @@ static const GUID IID_IDependencyObjectCollectionFactory_UWP =
     { 0x051e79ff, 0xb3a8, 0x49ee, { 0xb5, 0xaf, 0xac, 0x8f, 0x68, 0xb6, 0x49, 0xe4 } };
 static const GUID IID_IMenuFlyoutSeparatorFactory_UWP =
     { 0xc159dcc8, 0xb437, 0x44e0, { 0xb2, 0x4b, 0x57, 0x20, 0xae, 0xa1, 0xdb, 0xac } };
+static const GUID IID_IKeyboardAccelerator_UWP =
+    { 0x92e6181e, 0x19ae, 0x465a, { 0x9b, 0x3c, 0xa7, 0x1e, 0xe9, 0xea, 0x74, 0x20 } };
+static const GUID IID_IKeyboardAcceleratorInvokedEventArgs_UWP =
+    { 0xd300a9f6, 0x2f7e, 0x4873, { 0xa5, 0x55, 0x16, 0x6e, 0x59, 0x6e, 0x1c, 0x5a } };
+static const GUID IID_IKeyboardAcceleratorFactory_UWP =
+    { 0x44d88a99, 0x4bfd, 0x4a47, { 0xa8, 0x93, 0x51, 0x5f, 0x38, 0x86, 0x23, 0xf6 } };
+static const GUID IID_IXamlUICommand_UWP =
+    { 0x8494f8d4, 0xead1, 0x5f01, { 0xad, 0x2e, 0xa8, 0xca, 0xd4, 0xf9, 0xdc, 0x0e } };
+static const GUID IID_IExecuteRequestedEventArgs_UWP =
+    { 0xe07fa734, 0xa0b6, 0x5755, { 0x9e, 0x87, 0x24, 0xf5, 0x4c, 0xca, 0x93, 0x72 } };
+static const GUID IID_ITeachingTip_WinUI =
+    { 0x5b200440, 0x4fcc, 0x5fdb, { 0xb4, 0x18, 0xb5, 0x79, 0x7b, 0x08, 0x74, 0xad } };
+static const GUID IID_IKeyRoutedEventArgs_UWP =
+    { 0xd4cd3dfe, 0x4079, 0x42e9, { 0xa3, 0x9a, 0x30, 0x95, 0xd3, 0xf0, 0x49, 0xc6 } };
+static const GUID IID_IDispatcherTimerFactory_UWP =
+    { 0xe9961e6e, 0x3626, 0x403a, { 0xaf, 0xe0, 0x04, 0x0d, 0x58, 0x16, 0x56, 0x32 } };
 
 /* ============================================================================
  * 1. PRI v2 (mrm_pri2) Container Reader
@@ -2176,6 +2215,8 @@ enum uwp_elem_kind
     UWP_KIND_PROGRESS_RING,
     UWP_KIND_RESOURCE_DICT,
     UWP_KIND_COLOR,
+    UWP_KIND_ACCELERATOR,
+    UWP_KIND_XAML_COMMAND,
 };
 
 struct uwp_dp_entry
@@ -2298,6 +2339,17 @@ struct uwp_element
     IInspectable IVectorView_iface;
     IInspectable IScrollViewer_iface;
     IInspectable IDesktopWindowXamlSourceNative_iface;
+    IInspectable IUIElement7_iface;
+    IInspectable IKeyboardAccelerator_iface;
+    IInspectable IXamlUICommand_iface;
+    IInspectable ICommand_iface;
+    IInspectable IMenuFlyoutItem_iface;
+    IInspectable IMenuFlyoutItem3_iface;
+    IInspectable IToggleMenuFlyoutItem_iface;
+    IInspectable IMenuFlyoutSubItem_iface;
+    IInspectable IMenuFlyout2_iface;
+    IInspectable IUIElement4_iface;
+    IInspectable ITeachingTip_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
 
     LONG ref;
@@ -2309,12 +2361,15 @@ struct uwp_element
     WCHAR name[64];
     WCHAR uid[64];
     WCHAR text[256];
+    WCHAR accel_text[64];
     int conn_id;
 
     struct uwp_element *parent;
     struct uwp_element *owner_component;
     IInspectable *content;       /* ContentControl/UserControl/Page/Border/ScrollViewer child */
+    IInspectable *context_flyout; /* UIElement.ContextFlyout */
     IInspectable *children_coll; /* Panel.Children */
+    IInspectable *accelerators_coll; /* UIElement.KeyboardAccelerators */
     IInspectable *row_defs_coll; /* Grid.RowDefinitions */
     IInspectable *col_defs_coll; /* Grid.ColumnDefinitions */
     IInspectable *resources_rd;  /* FrameworkElement.Resources */
@@ -2453,6 +2508,33 @@ struct uwp_element
     int adopted_faulted_ctor;
     IInspectable *provider_inst;
     void *outer_unk;
+
+    /* KeyboardAccelerator, XamlUICommand, PreviewKeyDown, TeachingTip state */
+    struct xaml_event_registry preview_keydown_reg;
+    UINT accel_key;
+    UINT accel_mods;
+    BOOL accel_enabled;
+    IInspectable *accel_scope_owner;
+    struct uwp_element *accel_target;
+    IInspectable **accel_invoked_handlers;
+    int accel_invoked_cnt;
+    int accel_invoked_cap;
+    IInspectable **exec_req_handlers;
+    int exec_req_cnt;
+    int exec_req_cap;
+    IInspectable **tip_closing_handlers;
+    int tip_closing_cnt;
+    int tip_closing_cap;
+    IInspectable **tip_closed_handlers;
+    int tip_closed_cnt;
+    int tip_closed_cap;
+    IInspectable **flyout_opening_handlers;
+    int flyout_opening_cnt;
+    int flyout_opening_cap;
+    IInspectable **flyout_closed_handlers;
+    int flyout_closed_cnt;
+    int flyout_closed_cap;
+    BOOL is_open;
 };
 
 /* Global registry of live uwp_elements so we can resolve from any interface or outer.
@@ -2474,6 +2556,144 @@ static struct uwp_element *g_navigated_page_el = NULL;
 static void uwp_invalidate_window( void );
 static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *want );
 static struct uwp_element *uwp_elem_from_any( void *ptr );
+static BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *node );
+void uwp_invoke_button( struct uwp_element *btn );
+BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr );
+static void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int screen_x, int screen_y );
+static void uwp_close_flyout_popup( BOOL fire_closed );
+static BOOL uwp_popup_is_open_for( struct uwp_element *flyout );
+static BOOL uwp_popup_handle_escape( void );
+
+struct uwp_accel_entry
+{
+    struct uwp_element *accel_el;
+    struct uwp_element *target_el;
+    struct uwp_element *page_el;
+    UINT vk;
+    UINT mods;
+    BOOL enabled;
+};
+static struct uwp_accel_entry *g_accel_entries = NULL;
+static int g_accel_cnt = 0;
+static int g_accel_cap = 0;
+
+static struct uwp_element *uwp_find_owning_page( struct uwp_element *el )
+{
+    struct uwp_element *cur = el;
+    int depth = 0;
+    while (cur && depth < 64)
+    {
+        if (cur->kind == UWP_KIND_PAGE || cur->kind == UWP_KIND_USER_CONTROL)
+            return cur;
+        if (cur->parent)
+            cur = cur->parent;
+        else if (cur->owner_component && cur->owner_component != cur)
+            cur = cur->owner_component;
+        else
+            break;
+        depth++;
+    }
+    if (el && el->owner_component) return el->owner_component;
+    return g_navigated_page_el ? g_navigated_page_el : g_last_created_page;
+}
+
+static void uwp_accel_register( struct uwp_element *accel_el, struct uwp_element *target_el,
+                                UINT vk, UINT mods, BOOL enabled )
+{
+    struct uwp_element *page_el;
+    int i;
+
+    if (!vk) return;
+    if (!target_el && accel_el) target_el = accel_el->accel_target;
+    page_el = target_el ? uwp_find_owning_page( target_el ) : (accel_el ? uwp_find_owning_page( accel_el ) : g_navigated_page_el);
+
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    if (accel_el)
+    {
+        for (i = 0; i < g_accel_cnt; i++)
+        {
+            if (g_accel_entries[i].accel_el == accel_el)
+            {
+                if (target_el) g_accel_entries[i].target_el = target_el;
+                if (page_el) g_accel_entries[i].page_el = page_el;
+                g_accel_entries[i].vk = vk;
+                g_accel_entries[i].mods = mods;
+                g_accel_entries[i].enabled = enabled;
+                TRACE( "accel_reg(update): vk=%#x mods=%#x enabled=%d target=%s (%s) page=%s (%s)\n",
+                       vk, mods, enabled,
+                       g_accel_entries[i].target_el ? debugstr_w(g_accel_entries[i].target_el->class_name) : "?",
+                       g_accel_entries[i].target_el ? debugstr_w(g_accel_entries[i].target_el->name) : "",
+                       g_accel_entries[i].page_el ? debugstr_w(g_accel_entries[i].page_el->class_name) : "?",
+                       g_accel_entries[i].page_el ? debugstr_w(g_accel_entries[i].page_el->name) : "" );
+                ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+                return;
+            }
+        }
+    }
+    else if (target_el)
+    {
+        for (i = 0; i < g_accel_cnt; i++)
+        {
+            if (!g_accel_entries[i].accel_el && g_accel_entries[i].target_el == target_el &&
+                g_accel_entries[i].vk == vk && g_accel_entries[i].mods == mods)
+            {
+                g_accel_entries[i].enabled = enabled;
+                if (page_el) g_accel_entries[i].page_el = page_el;
+                ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+                return;
+            }
+        }
+    }
+    if (xaml_vec_grow( (void **)&g_accel_entries, &g_accel_cap, g_accel_cnt + 1, sizeof(*g_accel_entries), 32 ))
+    {
+        struct uwp_accel_entry *e = &g_accel_entries[g_accel_cnt++];
+        e->accel_el = accel_el;
+        e->target_el = target_el;
+        e->page_el = page_el;
+        e->vk = vk;
+        e->mods = mods;
+        e->enabled = enabled;
+        TRACE( "accel_reg: vk=%#x mods=%#x enabled=%d target=%s (%s) page=%s (%s) total=%d\n",
+               vk, mods, enabled,
+               target_el ? debugstr_w(target_el->class_name) : "?",
+               target_el ? debugstr_w(target_el->name) : "",
+               page_el ? debugstr_w(page_el->class_name) : "?",
+               page_el ? debugstr_w(page_el->name) : "",
+               g_accel_cnt );
+    }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+}
+
+static UINT uwp_parse_vk_string( const WCHAR *s )
+{
+    if (!s || !s[0]) return 0;
+    if (!s[1])
+    {
+        WCHAR ch = towupper( s[0] );
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) return (UINT)ch;
+        if (ch == '+') return VK_OEM_PLUS;
+        if (ch == '-') return VK_OEM_MINUS;
+        if (ch == '.') return VK_OEM_PERIOD;
+        if (ch == ',') return VK_OEM_COMMA;
+    }
+    if (!wcsicmp( s, L"Insert" )) return VK_INSERT;
+    if (!wcsicmp( s, L"Delete" )) return VK_DELETE;
+    if (!wcsicmp( s, L"Escape" ) || !wcsicmp( s, L"Esc" )) return VK_ESCAPE;
+    if (!wcsicmp( s, L"Back" ) || !wcsicmp( s, L"Backspace" )) return VK_BACK;
+    if (!wcsicmp( s, L"Enter" ) || !wcsicmp( s, L"Return" )) return VK_RETURN;
+    if (!wcsicmp( s, L"Tab" )) return VK_TAB;
+    if (!wcsicmp( s, L"Space" )) return VK_SPACE;
+    if (!wcsicmp( s, L"Up" )) return VK_UP;
+    if (!wcsicmp( s, L"Down" )) return VK_DOWN;
+    if (!wcsicmp( s, L"Left" )) return VK_LEFT;
+    if (!wcsicmp( s, L"Right" )) return VK_RIGHT;
+    if ((s[0] == 'F' || s[0] == 'f') && s[1] >= '1' && s[1] <= '9')
+    {
+        int fn = _wtoi( s + 1 );
+        if (fn >= 1 && fn <= 24) return (UINT)(VK_F1 + fn - 1);
+    }
+    return 0;
+}
 
 static void uwp_set_brush_element_argb( IInspectable *br, UINT32 argb )
 {
@@ -3829,15 +4049,37 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IToggleButton_UWP ) ||
              IsEqualGUID( iid, &IID_IRadioButton_UWP ))
         *out = &impl->IToggleButton_iface;
+    else if (IsEqualGUID( iid, &IID_IToggleMenuFlyoutItem_UWP ))
+        *out = &impl->IToggleMenuFlyoutItem_iface;
     else if (IsEqualGUID( iid, &IID_IRadioButtons_WinUI ))
         *out = &impl->IStyle_iface;
     else if (IsEqualGUID( iid, &IID_IPanel_UWP ) ||
              IsEqualGUID( iid, &IID_IStackPanel_UWP ) ||
              IsEqualGUID( iid, &IID_IStackPanel_UWP2 ) ||
-             IsEqualGUID( iid, &IID_IMenuBar_WinUI ) ||
-             IsEqualGUID( iid, &IID_IMenuFlyoutSubItem_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement7_UWP ))
+             IsEqualGUID( iid, &IID_IMenuBar_WinUI ))
         *out = &impl->IPanel_iface;
+    else if (IsEqualGUID( iid, &IID_IMenuFlyoutSubItem_UWP ))
+        *out = &impl->IMenuFlyoutSubItem_iface;
+    else if (IsEqualGUID( iid, &IID_IUIElement4_Real_UWP ) ||
+             IsEqualGUID( iid, &IID_IUIElement4_UWP ))
+        *out = &impl->IUIElement4_iface;
+    else if (IsEqualGUID( iid, &IID_IUIElement7_UWP ))
+        *out = &impl->IUIElement7_iface;
+    else if (IsEqualGUID( iid, &IID_IKeyboardAccelerator_UWP ))
+        *out = &impl->IKeyboardAccelerator_iface;
+    else if (IsEqualGUID( iid, &IID_IXamlUICommand_UWP ))
+        *out = &impl->IXamlUICommand_iface;
+    else if (IsEqualGUID( iid, &IID_ICommand_UWP ) ||
+             IsEqualGUID( iid, &IID_ICommand_UWP2 ))
+        *out = &impl->ICommand_iface;
+    else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem_UWP ))
+        *out = &impl->IMenuFlyoutItem_iface;
+    else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem3_UWP ))
+        *out = &impl->IMenuFlyoutItem3_iface;
+    else if (IsEqualGUID( iid, &IID_IMenuFlyout2_Real_UWP ))
+        *out = &impl->IMenuFlyout2_iface;
+    else if (IsEqualGUID( iid, &IID_ITeachingTip_WinUI ))
+        *out = &impl->ITeachingTip_iface;
     else if (IsEqualGUID( iid, &IID_IGrid_UWP ) ||
              IsEqualGUID( iid, &IID_IGrid_UWP2 ) ||
              IsEqualGUID( iid, &IID_IGrid3_Calc ))
@@ -3857,7 +4099,6 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IScrollViewer_iface;
     else if (IsEqualGUID( iid, &IID_IUIElement2_UWP ) ||
              IsEqualGUID( iid, &IID_IUIElement3_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement4_UWP ) ||
              IsEqualGUID( iid, &IID_IUIElement5_UWP ) ||
              IsEqualGUID( iid, &IID_IUIElementOverrides_UWP ) ||
              IsEqualGUID( iid, &IID_IUIElement_Calc2 ) ||
@@ -3898,14 +4139,16 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ))
         *out = &impl->ISolidColorBrush_iface;
     else if (IsEqualGUID( iid, &IID_IFlyoutBase_UWP ) ||
+             IsEqualGUID( iid, &IID_IFlyoutBase3_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyout_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyout_UWP2 ) ||
-             IsEqualGUID( iid, &IID_IMenuFlyoutItem_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyoutItemBase_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyoutItemBase_UWP2 ) ||
              IsEqualGUID( iid, &IID_IMenuBarItem_WinUI ) ||
              IsEqualGUID( iid, &IID_ITabView_WinUI ))
         *out = &impl->IFlyout_iface;
+    else if (IsEqualGUID( iid, &IID_IDispatcherTimer_UWP ))
+        *out = &impl->IInspectable_iface;
     else if (IsEqualGUID( iid, &IID_IStateTriggerBase_UWP ) ||
              IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ) ||
              IsEqualGUID( iid, &IID_IMarkupExtension_UWP ) ||
@@ -5275,7 +5518,17 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
     if (item) IInspectable_AddRef( (IInspectable *)item );
     v->count++;
     if ((child_el = uwp_elem_from_any( item )) != NULL && v->owner)
-        child_el->parent = v->owner;
+    {
+        if (child_el->kind == UWP_KIND_ACCELERATOR || wcsstr( child_el->class_name, L"Accelerator" ))
+        {
+            child_el->accel_target = v->owner;
+            uwp_accel_register( child_el, v->owner, child_el->accel_key, child_el->accel_mods, child_el->accel_enabled );
+        }
+        else
+        {
+            child_el->parent = v->owner;
+        }
+    }
     g_layout_dirty = TRUE;
     return S_OK;
 }
@@ -5648,6 +5901,37 @@ static const void *uwp_do2_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 
+static IDependencyProperty *g_routed_event_ptr_pressed = NULL;
+
+static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *handler, boolean handled_too )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    (void)handled_too;
+    if (!impl || !handler) return S_OK;
+    if (g_routed_event_ptr_pressed && routed_event == (void *)g_routed_event_ptr_pressed)
+    {
+        void *pv = NULL;
+        void *del = handler;
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)handler, &IID_IPropertyValue_g, &pv )) && pv)
+        {
+            void *unwrapped = NULL;
+            HRESULT (WINAPI *get_val)(void *, void **) = (void *)(*(void ***)handler)[6];
+            if (get_val && SUCCEEDED(get_val( handler, &unwrapped )) && unwrapped)
+                del = unwrapped;
+            xaml_event_registry_add( &impl->ptr_pressed_reg, del, NULL );
+            if (unwrapped && unwrapped != handler) IUnknown_Release( (IUnknown *)unwrapped );
+            IUnknown_Release( (IUnknown *)pv );
+        }
+        else
+        {
+            xaml_event_registry_add( &impl->ptr_pressed_reg, del, NULL );
+        }
+        TRACE( "IUIElement::AddHandler(PointerPressed) on %s (%s) -> del %p\n",
+               debugstr_w(impl->class_name), debugstr_w(impl->name), del );
+    }
+    return S_OK;
+}
+
 static const void *uwp_ui_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -5683,6 +5967,7 @@ static const void *uwp_ui_vtbl[128] =
     [93] = uwp_ui_CapturePointer,
     [94] = uwp_ui_ReleasePointerCapture,
     [95] = uwp_ui_ReleasePointerCaptures,
+    [96] = uwp_ui_AddHandler,
 };
 
 static HRESULT WINAPI uwp_fe_get_FlowDirection( void *iface, int *dir )
@@ -5806,13 +6091,45 @@ static HRESULT WINAPI uwp_flyout_put_Text( void *iface, HSTRING val )
     return S_OK;
 }
 
-static HRESULT WINAPI uwp_flyout_slot8( void *iface, void *arg1 )
+static HRESULT WINAPI uwp_flyout_slot6( void *iface, void **out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
-    uintptr_t diff = (uintptr_t)arg1 - (uintptr_t)&impl;
-    if (diff < 0x100000 || diff > ~(uintptr_t)0x100000)
+    if (!impl) return E_NOINTERFACE;
+    /* Only MenuFlyout / MenuBar / TabView use slot 6 for get_Items; IFlyoutBase::ShowAt passes a UIElement* */
+    if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Flyout" ) ||
+        !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.CommandBarFlyout" ))
+        return S_OK;
+    return uwp_flyout_get_Items( iface, out );
+}
+
+static HRESULT WINAPI uwp_flyout_slot7( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!impl) return S_OK;
+    /* IFlyoutBase::Hide() takes no args; only MenuBarItem / MenuFlyoutSubItem use slot 7 for put_Title/put_Text */
+    if (wcsstr( impl->class_name, L"MenuBarItem" ) == NULL &&
+        wcsstr( impl->class_name, L"MenuFlyoutSubItem" ) == NULL &&
+        wcsstr( impl->class_name, L"MenuFlyoutItem" ) == NULL)
+        return S_OK;
+    return uwp_flyout_put_Text( iface, val );
+}
+
+static HRESULT WINAPI uwp_flyout_slot8( void *iface, void *arg1, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!impl) return S_OK;
+    /* IFlyoutBase::add_Opened(handler, token*) on Flyout / MenuFlyout / CommandBarFlyout */
+    if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Flyout" ) ||
+        !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.MenuFlyout" ) ||
+        !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.CommandBarFlyout" ))
+    {
+        if (tok) tok->value = 1;
+        return S_OK;
+    }
+    if (wcsstr( impl->class_name, L"MenuBarItem" ) != NULL ||
+        wcsstr( impl->class_name, L"MenuFlyoutSubItem" ) != NULL)
         return uwp_flyout_get_Items( iface, (void **)arg1 );
-    return uwp_flyout_put_Text( iface, (HSTRING)arg1 );
+    return S_OK;
 }
 
 static HRESULT WINAPI uwp_flyout_get_SelectedIndex( void *iface, int *out )
@@ -5888,6 +6205,36 @@ static HRESULT WINAPI uwp_tabview_add_SelectionChanged( void *iface, void *handl
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_flyout_add_Closed( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->flyout_closed_handlers, &impl->flyout_closed_cap,
+                       impl->flyout_closed_cnt + 1, sizeof(*impl->flyout_closed_handlers), 4 ))
+    {
+        impl->flyout_closed_handlers[impl->flyout_closed_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->flyout_closed_cnt;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_flyout_add_Opening( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->flyout_opening_handlers, &impl->flyout_opening_cap,
+                       impl->flyout_opening_cnt + 1, sizeof(*impl->flyout_opening_handlers), 4 ))
+    {
+        impl->flyout_opening_handlers[impl->flyout_opening_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->flyout_opening_cnt;
+    }
+    return S_OK;
+}
+
 static const void *uwp_flyout_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -5897,9 +6244,11 @@ static const void *uwp_flyout_vtbl[128] =
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
     [6 ... 127] = uwp_generic_noop,
-    [6] = uwp_flyout_get_Items,
-    [7] = uwp_flyout_put_Text,
+    [6] = uwp_flyout_slot6,
+    [7] = uwp_flyout_slot7,
     [8] = uwp_flyout_slot8,
+    [10] = uwp_flyout_add_Closed,
+    [12] = uwp_flyout_add_Opening,
     [34] = uwp_flyout_get_Items,
     [45] = uwp_flyout_get_SelectedIndex,
     [47] = uwp_tabview_get_SelectedItem,
@@ -6019,6 +6368,737 @@ static const void *uwp_panel_vtbl[32] =
     [6] = uwp_panel_get_Children,
 };
 
+/* --- IUIElement7, IKeyboardAccelerator, IXamlUICommand, ICommand, IMenuFlyoutItem, ITeachingTip --- */
+static HRESULT WINAPI uwp_ui7_get_KeyboardAccelerators( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return S_OK;
+    if (!impl->accelerators_coll) uwp_vec_create( impl, &impl->accelerators_coll );
+    *out = impl->accelerators_coll;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ui7_add_PreviewKeyDown( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; }
+    return xaml_event_registry_add( &impl->preview_keydown_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_ui7_remove_PreviewKeyDown( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_INVALIDARG;
+    return xaml_event_registry_remove( &impl->preview_keydown_reg, tok );
+}
+static const void *uwp_ui7_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 31] = uwp_generic_noop,
+    [6] = uwp_ui7_get_KeyboardAccelerators,
+    [11] = uwp_ui7_add_PreviewKeyDown,
+    [12] = uwp_ui7_remove_PreviewKeyDown,
+};
+
+struct uwp_key_routed_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    UINT vk;
+    boolean handled;
+    struct { UINT32 RepeatCount; UINT32 ScanCode; boolean IsExtendedKey; boolean IsMenuKeyDown; boolean WasKeyDown; boolean IsKeyReleased; } status;
+};
+static HRESULT WINAPI uwp_key_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IKeyRoutedEventArgs_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_key_routed_args *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_key_args_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_key_routed_args *)iface)->ref );
+}
+static ULONG WINAPI uwp_key_args_Release( void *iface )
+{
+    struct uwp_key_routed_args *a = (struct uwp_key_routed_args *)iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI uwp_key_args_get_Key( void *iface, UINT *out )
+{
+    struct uwp_key_routed_args *a = (struct uwp_key_routed_args *)iface;
+    if (out) *out = a->vk;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_key_args_get_KeyStatus( void *iface, void *out )
+{
+    struct uwp_key_routed_args *a = (struct uwp_key_routed_args *)iface;
+    if (out) memcpy( out, &a->status, sizeof(a->status) );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_key_args_get_Handled( void *iface, boolean *out )
+{
+    struct uwp_key_routed_args *a = (struct uwp_key_routed_args *)iface;
+    if (out) *out = a->handled;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_key_args_put_Handled( void *iface, boolean val )
+{
+    struct uwp_key_routed_args *a = (struct uwp_key_routed_args *)iface;
+    a->handled = val ? TRUE : FALSE;
+    return S_OK;
+}
+static const void *uwp_key_args_vtbl[16] =
+{
+    [0] = uwp_key_args_QI,
+    [1] = uwp_key_args_AddRef,
+    [2] = uwp_key_args_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_key_args_get_Key,
+    [7] = uwp_key_args_get_KeyStatus,
+    [8] = uwp_key_args_get_Handled,
+    [9] = uwp_key_args_put_Handled,
+    [10 ... 15] = uwp_generic_noop,
+};
+
+struct uwp_ka_invoked_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    boolean handled;
+    IInspectable *element;
+};
+static HRESULT WINAPI uwp_ka_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IKeyboardAcceleratorInvokedEventArgs_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_ka_invoked_args *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_ka_args_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_ka_invoked_args *)iface)->ref );
+}
+static ULONG WINAPI uwp_ka_args_Release( void *iface )
+{
+    struct uwp_ka_invoked_args *a = (struct uwp_ka_invoked_args *)iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r)
+    {
+        if (a->element) IInspectable_Release( a->element );
+        free( a );
+    }
+    return r;
+}
+static HRESULT WINAPI uwp_ka_args_get_Handled( void *iface, boolean *out )
+{
+    if (out) *out = ((struct uwp_ka_invoked_args *)iface)->handled;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_args_put_Handled( void *iface, boolean val )
+{
+    ((struct uwp_ka_invoked_args *)iface)->handled = val ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_args_get_Element( void *iface, void **out )
+{
+    struct uwp_ka_invoked_args *a = (struct uwp_ka_invoked_args *)iface;
+    if (!out) return E_POINTER;
+    *out = a->element;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static const void *uwp_ka_args_vtbl[16] =
+{
+    [0] = uwp_ka_args_QI,
+    [1] = uwp_ka_args_AddRef,
+    [2] = uwp_ka_args_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_ka_args_get_Handled,
+    [7] = uwp_ka_args_put_Handled,
+    [8] = uwp_ka_args_get_Element,
+    [9 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_ka_get_Key( void *iface, UINT *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->accel_key : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_put_Key( void *iface, UINT val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        impl->accel_key = val;
+        uwp_accel_register( impl, impl->accel_target, impl->accel_key, impl->accel_mods, impl->accel_enabled );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_get_Modifiers( void *iface, UINT *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->accel_mods : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_put_Modifiers( void *iface, UINT val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        impl->accel_mods = val;
+        uwp_accel_register( impl, impl->accel_target, impl->accel_key, impl->accel_mods, impl->accel_enabled );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_get_IsEnabled( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? (impl->accel_enabled ? TRUE : FALSE) : TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_put_IsEnabled( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        impl->accel_enabled = val ? TRUE : FALSE;
+        uwp_accel_register( impl, impl->accel_target, impl->accel_key, impl->accel_mods, impl->accel_enabled );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_get_ScopeOwner( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->accel_scope_owner : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_put_ScopeOwner( void *iface, void *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->accel_scope_owner) IInspectable_Release( impl->accel_scope_owner );
+    impl->accel_scope_owner = (IInspectable *)val;
+    if (impl->accel_scope_owner) IInspectable_AddRef( impl->accel_scope_owner );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ka_add_Invoked( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->accel_invoked_handlers, &impl->accel_invoked_cap,
+                       impl->accel_invoked_cnt + 1, sizeof(*impl->accel_invoked_handlers), 4 ))
+    {
+        impl->accel_invoked_handlers[impl->accel_invoked_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->accel_invoked_cnt;
+    }
+    return S_OK;
+}
+static const void *uwp_ka_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 31] = uwp_generic_noop,
+    [6] = uwp_ka_get_Key,
+    [7] = uwp_ka_put_Key,
+    [8] = uwp_ka_get_Modifiers,
+    [9] = uwp_ka_put_Modifiers,
+    [10] = uwp_ka_get_IsEnabled,
+    [11] = uwp_ka_put_IsEnabled,
+    [12] = uwp_ka_get_ScopeOwner,
+    [13] = uwp_ka_put_ScopeOwner,
+    [14] = uwp_ka_add_Invoked,
+};
+
+struct uwp_exec_req_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    IInspectable *param;
+};
+static HRESULT WINAPI uwp_exec_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IExecuteRequestedEventArgs_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_exec_req_args *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_exec_args_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_exec_req_args *)iface)->ref );
+}
+static ULONG WINAPI uwp_exec_args_Release( void *iface )
+{
+    struct uwp_exec_req_args *a = (struct uwp_exec_req_args *)iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r)
+    {
+        if (a->param) IInspectable_Release( a->param );
+        free( a );
+    }
+    return r;
+}
+static HRESULT WINAPI uwp_exec_args_get_Parameter( void *iface, void **out )
+{
+    struct uwp_exec_req_args *a = (struct uwp_exec_req_args *)iface;
+    if (!out) return E_POINTER;
+    *out = a->param;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static const void *uwp_exec_args_vtbl[16] =
+{
+    [0] = uwp_exec_args_QI,
+    [1] = uwp_exec_args_AddRef,
+    [2] = uwp_exec_args_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_exec_args_get_Parameter,
+    [7 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_xaml_cmd_add_ExecuteRequested( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->exec_req_handlers, &impl->exec_req_cap,
+                       impl->exec_req_cnt + 1, sizeof(*impl->exec_req_handlers), 4 ))
+    {
+        impl->exec_req_handlers[impl->exec_req_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->exec_req_cnt;
+    }
+    return S_OK;
+}
+static const void *uwp_xaml_cmd_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 31] = uwp_generic_noop,
+    [10] = uwp_ui7_get_KeyboardAccelerators,
+    [15] = uwp_btn_get_Command,
+    [16] = uwp_btn_put_Command,
+    [17] = uwp_xaml_cmd_add_ExecuteRequested,
+};
+
+static HRESULT WINAPI uwp_icmd_CanExecute( void *iface, void *param, boolean *out )
+{
+    if (out) *out = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_icmd_Execute( void *iface, void *param )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_exec_req_args *args;
+    IInspectable *sender;
+    int i;
+    if (!impl) return S_OK;
+    if (impl->command)
+    {
+        void *sub_cmd = NULL;
+        if ((SUCCEEDED(IInspectable_QueryInterface( impl->command, &IID_ICommand_UWP, &sub_cmd )) ||
+             SUCCEEDED(IInspectable_QueryInterface( impl->command, &IID_ICommand_UWP2, &sub_cmd ))) && sub_cmd)
+        {
+            struct command_iface *cmd = (struct command_iface *)sub_cmd;
+            if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, param );
+            IUnknown_Release( (IUnknown *)sub_cmd );
+        }
+    }
+    args = calloc( 1, sizeof(*args) );
+    if (!args) return E_OUTOFMEMORY;
+    args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_exec_args_vtbl;
+    args->ref = 1;
+    args->param = (IInspectable *)param;
+    if (args->param) IInspectable_AddRef( args->param );
+    sender = impl->outer ? impl->outer : &impl->IXamlUICommand_iface;
+    for (i = 0; i < impl->exec_req_cnt; i++)
+    {
+        if (impl->exec_req_handlers[i])
+        {
+            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->exec_req_handlers[i];
+            h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
+        }
+    }
+    uwp_exec_args_Release( &args->IInspectable_iface );
+    return S_OK;
+}
+static const void *uwp_icmd_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 15] = uwp_generic_noop,
+    [8] = uwp_icmd_CanExecute,
+    [9] = uwp_icmd_Execute,
+};
+
+static HRESULT WINAPI uwp_mfi_get_Text( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    return WindowsCreateString( impl ? impl->text : L"", impl ? wcslen(impl->text) : 0, out );
+}
+static HRESULT WINAPI uwp_mfi_put_Text( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *raw;
+    if ((ULONG_PTR)val < 0x10000) return S_OK;
+    raw = WindowsGetStringRawBuffer( val, NULL );
+    if (impl && raw) lstrcpynW( impl->text, raw, ARRAY_SIZE(impl->text) );
+    return S_OK;
+}
+static const void *uwp_mfi_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 31] = uwp_generic_noop,
+    [6] = uwp_mfi_get_Text,
+    [7] = uwp_mfi_put_Text,
+    [8] = uwp_btn_get_Command,
+    [9] = uwp_btn_put_Command,
+    [10] = uwp_btn_get_CommandParameter,
+    [11] = uwp_btn_put_CommandParameter,
+    [12] = uwp_btn_add_Click,
+};
+
+static HRESULT WINAPI uwp_mfi3_get_AccelText( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    return WindowsCreateString( impl ? impl->accel_text : L"", impl ? wcslen(impl->accel_text) : 0, out );
+}
+static HRESULT WINAPI uwp_mfi3_put_AccelText( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *raw;
+    if ((ULONG_PTR)val < 0x10000) return S_OK;
+    raw = WindowsGetStringRawBuffer( val, NULL );
+    if (impl && raw) lstrcpynW( impl->accel_text, raw, ARRAY_SIZE(impl->accel_text) );
+    return S_OK;
+}
+static const void *uwp_mfi3_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_mfi3_get_AccelText,
+    [7] = uwp_mfi3_put_AccelText,
+    [8 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_tmfi_get_IsChecked( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = (impl && impl->is_checked == 1) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tmfi_put_IsChecked( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->is_checked = val ? 1 : 0;
+    return S_OK;
+}
+static const void *uwp_tmfi_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_tmfi_get_IsChecked,
+    [7] = uwp_tmfi_put_IsChecked,
+    [8 ... 15] = uwp_generic_noop,
+};
+
+static const void *uwp_mfsi_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_panel_get_Children,
+    [7] = uwp_mfi_get_Text,
+    [8] = uwp_mfi_put_Text,
+    [9 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_ui4_get_ContextFlyout( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->context_flyout : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ui4_put_ContextFlyout( void *iface, void *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->context_flyout) IInspectable_Release( impl->context_flyout );
+    impl->context_flyout = (IInspectable *)val;
+    if (impl->context_flyout) IInspectable_AddRef( impl->context_flyout );
+    return S_OK;
+}
+static const void *uwp_ui4_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_ui4_get_ContextFlyout,
+    [7] = uwp_ui4_put_ContextFlyout,
+    [8 ... 31] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_mf2_ShowAt( void *iface, void *target, UINT64 pt_raw )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_element *target_el = uwp_elem_from_any( target );
+    float fx = 0.0f, fy = 0.0f;
+    HWND owner = NULL;
+    POINT spt;
+    UINT dpi;
+    int i;
+
+    if (!impl) return S_OK;
+    memcpy( &fx, &pt_raw, sizeof(float) );
+    memcpy( &fy, (const char *)&pt_raw + sizeof(float), sizeof(float) );
+
+    if (target_el && target_el->island_hwnd)
+        owner = GetAncestor( target_el->island_hwnd, GA_ROOT );
+    if (!owner) owner = GetActiveWindow();
+    if (!owner) owner = GetForegroundWindow();
+    if (!owner && g_island_hwnd_cnt > 0 && g_island_hwnds[0])
+        owner = GetAncestor( g_island_hwnds[0], GA_ROOT );
+
+    dpi = owner ? GetDpiForWindow( owner ) : 96;
+    if (!dpi) dpi = 96;
+    spt.x = MulDiv( (int)(fx + 0.5f), dpi, 96 );
+    spt.y = MulDiv( (int)(fy + 0.5f), dpi, 96 );
+    if (owner && IsWindow( owner ))
+        ClientToScreen( owner, &spt );
+    else
+        GetCursorPos( &spt );
+
+    TRACE( "IMenuFlyout2::ShowAt(%s, pt=%.1f,%.1f -> screen=%ld,%ld, owner=%p)\n",
+           debugstr_w(impl->class_name), fx, fy, spt.x, spt.y, owner );
+
+    for (i = 0; i < impl->flyout_opening_cnt; i++)
+    {
+        if (impl->flyout_opening_handlers[i])
+        {
+            IInspectable *sender = impl->outer ? impl->outer : &impl->IFlyout_iface;
+            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->flyout_opening_handlers[i];
+            __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
+            __EXCEPT_ALL {}
+            __ENDTRY;
+        }
+    }
+
+    uwp_show_flyout_popup( impl, owner, spt.x, spt.y );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_mf2_ShowAtWithOptions( void *iface, void *target, void *opts )
+{
+    POINT pt;
+    UINT64 raw = 0;
+    float fx, fy;
+    HWND owner = GetActiveWindow();
+    (void)opts;
+    GetCursorPos( &pt );
+    if (owner && IsWindow( owner )) ScreenToClient( owner, &pt );
+    fx = (float)pt.x;
+    fy = (float)pt.y;
+    memcpy( &raw, &fx, sizeof(float) );
+    memcpy( (char *)&raw + sizeof(float), &fy, sizeof(float) );
+    return uwp_mf2_ShowAt( iface, target, raw );
+}
+
+static const void *uwp_mf2_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_mf2_ShowAt,
+    [7] = uwp_mf2_ShowAtWithOptions,
+    [8 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_tt_get_IsOpen( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->is_open) ? TRUE : FALSE;
+    return S_OK;
+}
+static BOOL uwp_has_open_teachingtip( struct uwp_element *el )
+{
+    if (!el) return FALSE;
+    if (wcsstr( el->class_name, L"TeachingTip" ) && el->is_open) return TRUE;
+    if (el->content && uwp_has_open_teachingtip( uwp_elem_from_any( el->content ) )) return TRUE;
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+            if (uwp_has_open_teachingtip( uwp_elem_from_any( children->items[k] ) )) return TRUE;
+    }
+    return FALSE;
+}
+
+static HRESULT WINAPI uwp_tt_put_IsOpen( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    BOOL prev;
+    if (!impl) return S_OK;
+    prev = impl->is_open;
+    impl->is_open = val ? TRUE : FALSE;
+    g_layout_dirty = TRUE;
+    TRACE( "ITeachingTip::put_IsOpen on %s (%s) -> %d (prev %d)\n",
+           debugstr_w(impl->class_name), debugstr_w(impl->name), impl->is_open, prev );
+    if (impl->is_open)
+    {
+        int ii;
+        for (ii = 0; ii < g_island_hwnd_cnt; ii++)
+        {
+            HWND ih = g_island_hwnds[ii];
+            struct uwp_element *isl = ih ? (struct uwp_element *)GetWindowLongPtrW( ih, GWLP_USERDATA ) : NULL;
+            struct uwp_element *root_el = (isl && isl->content) ? uwp_elem_from_any( isl->content ) : NULL;
+            if (root_el && (root_el == impl || uwp_elem_is_descendant( root_el, impl )))
+                SetWindowPos( ih, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW );
+        }
+    }
+    if (prev && !impl->is_open)
+    {
+        IInspectable *sender = impl->outer ? impl->outer : &impl->ITeachingTip_iface;
+        int i;
+        for (i = 0; i < impl->tip_closing_cnt; i++)
+        {
+            if (impl->tip_closing_handlers[i])
+            {
+                struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closing_handlers[i];
+                h->lpVtbl->Invoke( h, sender, &g_sel_changed_args );
+            }
+        }
+        for (i = 0; i < impl->tip_closed_cnt; i++)
+        {
+            if (impl->tip_closed_handlers[i])
+            {
+                struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closed_handlers[i];
+                h->lpVtbl->Invoke( h, sender, &g_sel_changed_args );
+            }
+        }
+    }
+    uwp_invalidate_window();
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tt_add_Closing( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->tip_closing_handlers, &impl->tip_closing_cap,
+                       impl->tip_closing_cnt + 1, sizeof(*impl->tip_closing_handlers), 4 ))
+    {
+        impl->tip_closing_handlers[impl->tip_closing_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->tip_closing_cnt;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tt_add_Closed( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->tip_closed_handlers, &impl->tip_closed_cap,
+                       impl->tip_closed_cnt + 1, sizeof(*impl->tip_closed_handlers), 4 ))
+    {
+        impl->tip_closed_handlers[impl->tip_closed_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->tip_closed_cnt;
+    }
+    return S_OK;
+}
+static const void *uwp_teachingtip_vtbl[64] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 63] = uwp_generic_noop,
+    [10] = uwp_tt_get_IsOpen,
+    [11] = uwp_tt_put_IsOpen,
+    [51] = uwp_tt_add_Closing,
+    [53] = uwp_tt_add_Closed,
+};
+
 static const void *uwp_grid_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -6129,6 +7209,8 @@ static enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
     if (wcsstr( cls, L"Brush" )) return UWP_KIND_BRUSH;
     if (wcsstr( cls, L"Flyout" )) return UWP_KIND_FLYOUT;
     if (wcsstr( cls, L"Popup" )) return UWP_KIND_POPUP;
+    if (wcsstr( cls, L"Accelerator" )) return UWP_KIND_ACCELERATOR;
+    if (wcsstr( cls, L"XamlUICommand" )) return UWP_KIND_XAML_COMMAND;
     return UWP_KIND_GENERIC;
 }
 
@@ -6205,6 +7287,13 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
     }
     if (msg == WM_ERASEBKGND)
         return 1;
+    if (msg == WM_WINDOWPOSCHANGING && lp && impl && impl->content)
+    {
+        WINDOWPOS *pos = (WINDOWPOS *)lp;
+        if (!(pos->flags & SWP_NOZORDER) && pos->hwndInsertAfter == HWND_BOTTOM &&
+            uwp_has_open_teachingtip( uwp_elem_from_any( impl->content ) ))
+            pos->hwndInsertAfter = HWND_TOP;
+    }
     if (msg == WM_SIZE)
     {
         InvalidateRect( hwnd, NULL, FALSE );
@@ -6230,6 +7319,18 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
         uwp_handle_mouse_input( hwnd, msg, (short)LOWORD(lp), (short)HIWORD(lp),
                                 rc.right - rc.left, rc.bottom - rc.top, impl->content );
         return 0;
+    }
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_ESCAPE && uwp_popup_handle_escape())
+        return 0;
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && impl && impl->content)
+    {
+        struct uwp_element *root_el = uwp_elem_from_any( impl->content );
+        if (uwp_dispatch_keydown( hwnd, (UINT)wp, lp, root_el ))
+        {
+            InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return 0;
+        }
     }
     return DefWindowProcW( hwnd, msg, wp, lp );
 }
@@ -6269,9 +7370,47 @@ static HRESULT WINAPI uwp_dwxs_get_WindowHandle( void *iface, HWND *out_hwnd )
     return S_OK;
 }
 
+static BOOL uwp_is_any_island_hwnd( HWND hwnd )
+{
+    int i;
+    if (!hwnd) return FALSE;
+    for (i = 0; i < g_island_hwnd_cnt; i++)
+    {
+        if (g_island_hwnds[i] == hwnd || (g_island_hwnds[i] && IsChild( g_island_hwnds[i], hwnd )))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static HRESULT WINAPI uwp_dwxs_PreTranslateMessage( void *iface, const MSG *msg, BOOL *result )
 {
-    if (result) *result = FALSE;
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    BOOL handled = FALSE;
+
+    if (msg && (msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN) &&
+        msg->wParam == VK_ESCAPE && uwp_popup_handle_escape())
+    {
+        if (result) *result = TRUE;
+        return S_OK;
+    }
+
+    if (msg && (msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN) && impl && impl->content)
+    {
+        if (!msg->hwnd || msg->hwnd == impl->island_hwnd ||
+            (impl->island_hwnd && IsChild( impl->island_hwnd, msg->hwnd )) ||
+            !uwp_is_any_island_hwnd( msg->hwnd ))
+        {
+            struct uwp_element *root_el = uwp_elem_from_any( impl->content );
+            handled = uwp_dispatch_keydown( msg->hwnd ? msg->hwnd : impl->island_hwnd,
+                                            (UINT)msg->wParam, msg->lParam, root_el );
+            if (handled)
+            {
+                if (impl->island_hwnd) InvalidateRect( impl->island_hwnd, NULL, FALSE );
+                uwp_invalidate_window();
+            }
+        }
+    }
+    if (result) *result = handled;
     return S_OK;
 }
 
@@ -6286,6 +7425,24 @@ static const void *uwp_dwxs_native_vtbl[16] =
     [6 ... 15] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_timer_add_Tick( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    if (tok) tok->value = 1;
+    return S_OK;
+}
+
+static const void *uwp_timer_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 15] = uwp_generic_noop,
+    [9] = uwp_timer_add_Tick,
+};
+
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance )
 {
     struct uwp_element *impl;
@@ -6294,7 +7451,9 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     if (!impl) return E_OUTOFMEMORY;
 
     impl->nondelegating_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_nondelegating_vtbl;
-    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_fe_vtbl;
+    impl->IInspectable_iface.lpVtbl = (class_name && !wcscmp( class_name, L"Windows.UI.Xaml.DispatcherTimer" ))
+        ? (const struct IInspectableVtbl *)uwp_timer_vtbl
+        : (const struct IInspectableVtbl *)uwp_fe_vtbl;
     impl->IDependencyObject_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_do_vtbl;
     impl->IDependencyObject2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_do2_vtbl;
     impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ui_vtbl;
@@ -6325,10 +7484,22 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IVectorView_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_vecview_vtbl;
     impl->IScrollViewer_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_sv_vtbl;
     impl->IDesktopWindowXamlSourceNative_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dwxs_native_vtbl;
+    impl->IUIElement7_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ui7_vtbl;
+    impl->IKeyboardAccelerator_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ka_vtbl;
+    impl->IXamlUICommand_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xaml_cmd_vtbl;
+    impl->ICommand_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_icmd_vtbl;
+    impl->IMenuFlyoutItem_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mfi_vtbl;
+    impl->IMenuFlyoutItem3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mfi3_vtbl;
+    impl->IToggleMenuFlyoutItem_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tmfi_vtbl;
+    impl->IMenuFlyoutSubItem_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mfsi_vtbl;
+    impl->IMenuFlyout2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mf2_vtbl;
+    impl->IUIElement4_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ui4_vtbl;
+    impl->ITeachingTip_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_teachingtip_vtbl;
     impl->IWeakReferenceSource_iface.lpVtbl = &uwp_wrs_vtbl;
 
     impl->ref = 1;
     impl->outer = outer;
+    impl->accel_enabled = TRUE;
     lstrcpynW( impl->class_name, class_name ? class_name : L"Windows.UI.Xaml.FrameworkElement", ARRAY_SIZE(impl->class_name) );
     impl->kind = classify_uwp_class( impl->class_name );
     if (impl->kind == UWP_KIND_PAGE) g_last_created_page = impl;
@@ -6347,7 +7518,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     if (impl->kind != UWP_KIND_BRUSH && impl->kind != UWP_KIND_STYLE &&
         impl->kind != UWP_KIND_RESOURCE_DICT && impl->kind != UWP_KIND_COLOR &&
         impl->kind != UWP_KIND_ROW_DEF && impl->kind != UWP_KIND_COL_DEF &&
-        impl->kind != UWP_KIND_DEFERRED)
+        impl->kind != UWP_KIND_DEFERRED && impl->kind != UWP_KIND_ACCELERATOR &&
+        impl->kind != UWP_KIND_XAML_COMMAND)
         xaml_create_dcomp_visual( &impl->visual );
 
     register_uwp_elem( impl );
@@ -6378,10 +7550,14 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
         *instance = &impl->IColumnDefinition_iface;
     else if (impl->kind == UWP_KIND_CONTENT_CONTROL || impl->kind == UWP_KIND_USER_CONTROL || impl->kind == UWP_KIND_PAGE)
         *instance = &impl->IContentControl_iface;
-    else if (wcsstr( impl->class_name, L"Accelerator" ))
-        *instance = &impl->IStyle_iface;
+    else if (impl->kind == UWP_KIND_ACCELERATOR || wcsstr( impl->class_name, L"Accelerator" ))
+        *instance = &impl->IKeyboardAccelerator_iface;
+    else if (impl->kind == UWP_KIND_XAML_COMMAND || wcsstr( impl->class_name, L"XamlUICommand" ))
+        *instance = &impl->IXamlUICommand_iface;
     else if (wcsstr( impl->class_name, L"FlyoutItem" ))
-        *instance = &impl->IFlyout_iface;
+        *instance = &impl->IMenuFlyoutItem_iface;
+    else if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.DispatcherTimer" ))
+        *instance = &impl->IInspectable_iface;
     else
         *instance = &impl->IFrameworkElement_iface;
 
@@ -7658,6 +8834,7 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x80bf: return L"Windows.UI.Xaml.DataTemplate";
     case 0x80c2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
     case 0x80c5: return L"Windows.UI.Xaml.Media.Animation.DiscreteObjectKeyFrame";
+    case 0x80ca: return L"Windows.UI.Xaml.Media.Animation.DoubleAnimation";
     case 0x80d2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
     case 0x80d5: return L"Windows.UI.Xaml.Controls.Flyout";
     case 0x80ee: return L"Windows.UI.Xaml.Controls.MenuFlyout";
@@ -7670,6 +8847,7 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x816b: return L"Windows.UI.Xaml.Controls.Primitives.Popup";
     case 0x8173: return L"Windows.UI.Xaml.ResourceDictionary";
     case 0x8176: return L"Windows.UI.Xaml.Controls.RichTextBlock";
+    case 0x817a: return L"Windows.UI.Xaml.Media.RotateTransform";
     case 0x817c: return L"Windows.UI.Xaml.Documents.Run";
     case 0x8189: return L"Windows.UI.Xaml.Media.Animation.Storyboard";
     case 0x818c: return L"Windows.UI.Xaml.Controls.TextBlock";
@@ -7679,19 +8857,24 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x81ba: return L"Windows.UI.Xaml.Controls.Grid";
     case 0x81bf: return L"Windows.UI.Xaml.Documents.Hyperlink";
     case 0x81e1: return L"Windows.UI.Xaml.Controls.StackPanel";
+    case 0x81e3: return L"Windows.UI.Xaml.Controls.TextBox";
     case 0x81eb: return L"Windows.UI.Xaml.Controls.UserControl";
+    case 0x81f3: return L"Windows.UI.Xaml.Controls.AutoSuggestBox";
     case 0x81fd: return L"Windows.UI.Xaml.Controls.Frame";
     case 0x8209: return L"Windows.UI.Xaml.Controls.MenuFlyoutItem";
     case 0x820d: return L"Windows.UI.Xaml.Controls.Page";
     case 0x821c: return L"Windows.UI.Xaml.Controls.Button";
     case 0x8222: return L"Windows.UI.Xaml.Controls.HyperlinkButton";
     case 0x8228: return L"Windows.UI.Xaml.Controls.ScrollViewer";
+    case 0x822a: return L"Windows.UI.Xaml.Controls.ToggleMenuFlyoutItem";
+    case 0x822d: return L"Windows.UI.Xaml.Controls.AppBarButton";
     case 0x8232: return L"Windows.UI.Xaml.Controls.RadioButton";
     case 0x8234: return L"Windows.UI.Xaml.Controls.Primitives.ToggleButton";
     case 0x8242: return L"Windows.UI.Xaml.GridLength";
     case 0x82ea: return L"Windows.UI.Xaml.DeferredElement";
     case 0x82f5: return L"Windows.UI.Xaml.AdaptiveTrigger";
     case 0x8381: return L"Windows.UI.Xaml.Input.KeyboardAccelerator";
+    case 0x83c9: return L"Windows.UI.Xaml.Input.XamlUICommand";
     default:     return L"Windows.UI.Xaml.Controls.ContentControl";
     }
 }
@@ -8534,6 +9717,18 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
         case 0x8167: /* UIElement.Visibility */
             el->visibility = (int)num;
             break;
+        case 0x87d4: /* KeyboardAccelerator.Key */
+            el->accel_key = (UINT)num;
+            uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
+            break;
+        case 0x87d5: /* KeyboardAccelerator.Modifiers */
+            el->accel_mods = (UINT)num;
+            uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
+            break;
+        case 0x87d6: /* KeyboardAccelerator.IsEnabled */
+            el->accel_enabled = (num != 0.0);
+            uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
+            break;
         }
     }
     else if (ctx && pid < ctx->prop_cnt)
@@ -8542,6 +9737,18 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
         if (!wcscmp( pi->name, L"Name" ) && sval && sval[0])
         {
             lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
+        }
+        else if ((!wcscmp( pi->name, L"VirtualKeyControlChord" ) ||
+                  !wcscmp( pi->name, L"VirtualKeyAltChord" ) ||
+                  !wcscmp( pi->name, L"VirtualKeyShiftChord" ) ||
+                  !wcscmp( pi->name, L"VirtualKeyControlShiftChord" )) && sval && sval[0])
+        {
+            UINT vk = uwp_parse_vk_string( sval );
+            UINT mods = !wcscmp( pi->name, L"VirtualKeyControlChord" ) ? 1 :
+                        (!wcscmp( pi->name, L"VirtualKeyAltChord" ) ? 2 :
+                         (!wcscmp( pi->name, L"VirtualKeyShiftChord" ) ? 4 : 5));
+            if (vk)
+                uwp_accel_register( NULL, el, vk, mods, TRUE );
         }
         else if (!wcscmp( pi->name, L"ButtonId" ) && sval && sval[0])
         {
@@ -8973,7 +10180,11 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     active_rd->owner_el = el;
                 }
             }
-            else if ((ctx->rd_only || rd_tbl) && !is_rd_type)
+            else if ((ctx->rd_only || rd_tbl) && !is_rd_type &&
+                     (!ctx->connector ||
+                      tid == 0x8072 || tid == 0x8109 || tid == 0x8106 || tid == 0x8107 ||
+                      tid == 0x80c2 || tid == 0x80d2 || tid == 0x8034 || tid == 0x8071 ||
+                      tid == 0x807c || tid == 0x802c || tid == 0x8173))
             {
                 /* Lightweight mode inside ResourceDictionary XBFs: no COM/visual element needed */
                 el = NULL;
@@ -9008,7 +10219,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                         prev_head = g_all_uwp_elems_head;
                         ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
                         phr = uwp_create_instance_from_provider( cls_name, (void **)&inst );
-                        if (SUCCEEDED(phr) && inst)
+                        if (SUCCEEDED(phr) && inst && g_all_uwp_elems_head != prev_head)
                             el = uwp_elem_from_any( inst );
                         if (!el)
                         {
@@ -9425,7 +10636,20 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 }
                 else if (parent_el && last_popped.raw)
                 {
-                    if (pid == 0x835d) /* RowDefinitions */
+                    if (pid == 0x87d7 || (last_popped.el && (last_popped.el->kind == UWP_KIND_ACCELERATOR ||
+                                                             wcsstr( last_popped.el->class_name, L"Accelerator" ))))
+                    {
+                        if (!parent_el->accelerators_coll) uwp_vec_create( parent_el, &parent_el->accelerators_coll );
+                        uwp_vec_Append( parent_el->accelerators_coll, last_popped.raw );
+                        if (last_popped.el)
+                        {
+                            last_popped.el->accel_target = parent_el;
+                            uwp_accel_register( last_popped.el, parent_el,
+                                                last_popped.el->accel_key, last_popped.el->accel_mods,
+                                                last_popped.el->accel_enabled );
+                        }
+                    }
+                    else if (pid == 0x835d) /* RowDefinitions */
                     {
                         if (!parent_el->row_defs_coll) uwp_vec_create( parent_el, &parent_el->row_defs_coll );
                         uwp_vec_Append( parent_el->row_defs_coll, last_popped.raw );
@@ -9461,7 +10685,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 BOOL is_dict = (last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT);
                 struct uwp_rd_bucket *child_rd = last_popped.el ? uwp_rd_bucket_for_el( last_popped.el, FALSE ) : NULL;
 
-                if (is_dict || child_rd)
+                if (is_dict || (child_rd && (pid == 0x8194 || pid == 0x82af || pid == 0x82b1)))
                 {
                     struct uwp_rd_bucket *dest_b = (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
                         ? uwp_rd_bucket_for_el( parent_el, TRUE )
@@ -9525,9 +10749,20 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                             lstrcpynW( parent_el->text, last_popped.el->text, ARRAY_SIZE(parent_el->text) );
                     }
                     else if (last_popped.raw &&
-                             last_popped.kind != UWP_KIND_STYLE &&
-                             last_popped.kind != UWP_KIND_BRUSH &&
-                             last_popped.kind != UWP_KIND_COLOR &&
+                             (pid == 0x86f9 ||
+                              (ctx && pid < ctx->prop_cnt && !wcscmp( ctx->props[pid].name, L"ContextFlyout" ))))
+                    {
+                        if (parent_el->context_flyout) IInspectable_Release( parent_el->context_flyout );
+                        parent_el->context_flyout = last_popped.raw;
+                        IInspectable_AddRef( last_popped.raw );
+                        if (last_popped.el) last_popped.el->parent = parent_el;
+                    }
+                    else if (last_popped.raw &&
+                             last_popped.kind == UWP_RD_OBJ &&
+                             (!last_popped.el ||
+                              (last_popped.el->kind != UWP_KIND_STYLE &&
+                               last_popped.el->kind != UWP_KIND_BRUSH &&
+                               last_popped.el->kind != UWP_KIND_COLOR)) &&
                              (pid == 0x8340 || pid == 0x83e7 || pid == 0x81fa || pid == 0x8134 || pid == 0x829c ||
                               (!parent_el->content && pid != 0x8133 && pid != 0x8194 && pid != 0x8010 && pid != 0x000c)))
                     {
@@ -9554,7 +10789,22 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 WCHAR resolved[256] = {0};
                 if (uwp_pri_lookup_string( last_popped.el->text, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
                 {
-                    if (pid == 0x8340 || pid == 0x8769 || pid == 0x8320 || !target_el->text[0])
+                    const WCHAR *pname = (ctx && pid < ctx->prop_cnt) ? ctx->props[pid].name : L"";
+                    BOOL is_chord = (!wcscmp( pname, L"VirtualKeyControlChord" ) ||
+                                     !wcscmp( pname, L"VirtualKeyAltChord" ) ||
+                                     !wcscmp( pname, L"VirtualKeyShiftChord" ) ||
+                                     !wcscmp( pname, L"VirtualKeyControlShiftChord" ));
+                    BOOL is_vk = (!wcscmp( pname, L"VirtualKey" ) || is_chord);
+                    if (is_chord)
+                    {
+                        UINT vk = uwp_parse_vk_string( resolved );
+                        UINT mods = !wcscmp( pname, L"VirtualKeyControlChord" ) ? 1 :
+                                    (!wcscmp( pname, L"VirtualKeyAltChord" ) ? 2 :
+                                     (!wcscmp( pname, L"VirtualKeyShiftChord" ) ? 4 : 5));
+                        if (vk)
+                            uwp_accel_register( NULL, target_el, vk, mods, TRUE );
+                    }
+                    if (pid == 0x8340 || pid == 0x8769 || pid == 0x8320 || (!is_vk && !target_el->text[0]))
                         lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
                 }
             }
@@ -10589,7 +11839,9 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
     if (el->visibility != 0 || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
         el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_DEFERRED ||
         el->kind == UWP_KIND_RESOURCE_DICT || el->kind == UWP_KIND_COLOR ||
-        wcsstr( el->class_name, L"TeachingTip" ) || !wcscmp( el->name, L"TeachingTipTarget" ))
+        el->kind == UWP_KIND_ACCELERATOR || el->kind == UWP_KIND_XAML_COMMAND ||
+        (wcsstr( el->class_name, L"TeachingTip" ) && !el->is_open) ||
+        !wcscmp( el->name, L"TeachingTipTarget" ))
     {
         el->has_bounds = FALSE;
         return;
@@ -10778,7 +12030,9 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
             if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
-                !wcsstr( ch->class_name, L"TeachingTip" ) && wcscmp( ch->name, L"TeachingTipTarget" ) != 0)
+                ch->kind != UWP_KIND_ACCELERATOR && ch->kind != UWP_KIND_XAML_COMMAND &&
+                (!wcsstr( ch->class_name, L"TeachingTip" ) || ch->is_open) &&
+                wcscmp( ch->name, L"TeachingTipTarget" ) != 0)
                 vis_cnt++;
         }
         if (vis_cnt > 0)
@@ -10789,7 +12043,9 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 RECT crc = rc;
                 if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
-                    wcsstr( ch->class_name, L"TeachingTip" ) || !wcscmp( ch->name, L"TeachingTipTarget" )) continue;
+                    ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
+                    (wcsstr( ch->class_name, L"TeachingTip" ) && !ch->is_open) ||
+                    !wcscmp( ch->name, L"TeachingTipTarget" )) continue;
                 if (el->orientation == 1) /* Horizontal */
                 {
                     crc.left  = rc.left + (w * idx) / (int)vis_cnt;
@@ -11265,16 +12521,17 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         DeleteObject( pen );
         DeleteObject( br );
     }
-    else if (wcsstr( el->name, L"SearchBox" ))
+    else if (wcsstr( el->name, L"SearchBox" ) || wcsstr( el->class_name, L"AutoSuggestBox" ) ||
+             wcsstr( el->name, L"SuggestBox" ))
     {
         RECT rc = el->bounds;
         COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
             ? blend_argb_over( el->bg_argb, surface_bg )
             : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 42, 42, 42 ), surface_bg );
-        COLORREF sbd = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 70, 70, 70 ), surface_bg );
+        COLORREF sbd = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 90, 90, 90 ), surface_bg );
         COLORREF sfg = (el->has_fg && el->fg_alpha > 0)
             ? blend_argb_over( el->fg_argb, sbg )
-            : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 170, 170, 170 ), sbg );
+            : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 185, 185, 185 ), sbg );
         HBRUSH br = CreateSolidBrush( sbg );
         HPEN pen = CreatePen( PS_SOLID, 1, sbd );
         HFONT font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -11283,11 +12540,14 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         HGDIOBJ old_br = SelectObject( hdc, br );
         HGDIOBJ old_pen = SelectObject( hdc, pen );
         HGDIOBJ old_font = SelectObject( hdc, font );
-        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8 );
+        const WCHAR *fallback = wcsstr( el->name, L"SearchBox" )
+            ? L"\x26b2  Search apps, games, movies and more"
+            : L"Find";
+        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6 );
         SetTextColor( hdc, sfg );
         SetBkMode( hdc, TRANSPARENT );
-        rc.left += 14;
-        DrawTextW( hdc, el->text[0] ? el->text : L"\x26b2  Search apps, games, movies and more", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+        rc.left += 10;
+        DrawTextW( hdc, el->text[0] ? el->text : fallback, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
         SelectObject( hdc, old_font );
         SelectObject( hdc, old_pen );
         SelectObject( hdc, old_br );
@@ -11295,6 +12555,23 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         DeleteObject( pen );
         DeleteObject( br );
         return;
+    }
+    else if (wcsstr( el->class_name, L"TeachingTip" ) && el->is_open)
+    {
+        RECT rc = el->bounds;
+        COLORREF tbg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"SolidBackgroundFillColorTertiaryBrush", RGB( 44, 44, 44 ), surface_bg );
+        COLORREF tbd = uwp_paint_resolve_color( el, L"SurfaceStrokeColorFlyoutBrush", RGB( 82, 82, 82 ), surface_bg );
+        HBRUSH br = CreateSolidBrush( tbg );
+        HPEN pen = CreatePen( PS_SOLID, 1, tbd );
+        HGDIOBJ old_br = SelectObject( hdc, br );
+        HGDIOBJ old_pen = SelectObject( hdc, pen );
+        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8 );
+        SelectObject( hdc, old_pen );
+        SelectObject( hdc, old_br );
+        DeleteObject( pen );
+        DeleteObject( br );
     }
     else if (wcsstr( el->name, L"HeroBanner" ))
     {
@@ -11425,7 +12702,9 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                 lstrcpynW( tab_title, el->text, ARRAY_SIZE(tab_title) );
             if (tab_title[0])
             {
-                RECT pill = { trc.left + 4, trc.top + 2, min( trc.right - 28, trc.left + 180 ), trc.bottom };
+                RECT pill = { trc.left + 4, trc.top + 3, min( trc.right - 34, trc.left + 190 ), trc.bottom };
+                RECT close_rc = { pill.right - 22, pill.top + 2, pill.right - 4, pill.bottom - 2 };
+                RECT add_rc = { pill.right + 6, trc.top + 4, min( trc.right - 2, pill.right + 30 ), trc.bottom - 2 };
                 HBRUSH tbr = CreateSolidBrush( RGB( 44, 44, 44 ) );
                 HFONT font = CreateFontW( -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -11436,7 +12715,15 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                 SetTextColor( hdc, RGB( 255, 255, 255 ) );
                 SetBkMode( hdc, TRANSPARENT );
                 pill.left += 10;
-                DrawTextW( hdc, tab_title, -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+                pill.right = max( pill.left, close_rc.left - 2 );
+                DrawTextW( hdc, tab_title, -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
+                SetTextColor( hdc, RGB( 185, 185, 185 ) );
+                DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                if (add_rc.right > add_rc.left + 12)
+                {
+                    SetTextColor( hdc, RGB( 210, 210, 210 ) );
+                    DrawTextW( hdc, L"+", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                }
                 SelectObject( hdc, old_font );
                 DeleteObject( font );
             }
@@ -11668,6 +12955,15 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
                 ? blend_argb_over( el->fg_argb, surface_bg )
                 : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
+            if (wcsstr( el->class_name, L"MenuBarItem" ) &&
+                (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
+            {
+                RECT hrc = trc;
+                HBRUSH hbr = CreateSolidBrush( RGB( 54, 54, 54 ) );
+                InflateRect( &hrc, -2, -3 );
+                FillRect( hdc, &hrc, hbr );
+                DeleteObject( hbr );
+            }
             SetTextColor( hdc, tfg );
             SetBkMode( hdc, TRANSPARENT );
             InflateRect( &trc, -8, 0 );
@@ -11816,7 +13112,8 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
         if (hit) return hit;
     }
 
-    if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
+    if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
+        wcsstr( el->class_name, L"MenuBarItem" ))
     {
         if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
             return NULL;
@@ -11861,6 +13158,206 @@ void uwp_keyboard_press_char( WCHAR ch )
     if ((hit = uwp_find_button_by_text( root, buf ))) uwp_invoke_button( hit );
 }
 
+static BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *node )
+{
+    struct uwp_element *cur = node;
+    int depth = 0;
+    if (!ancestor || !node) return FALSE;
+    while (cur && depth < 64)
+    {
+        if (cur == ancestor || cur->owner_component == ancestor) return TRUE;
+        cur = cur->parent;
+        depth++;
+    }
+    return FALSE;
+}
+
+static BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_routed_args *args )
+{
+    if (!el || !args || el->visibility != 0) return FALSE;
+    if (wcsstr( el->class_name, L"TeachingTip" ) && !el->is_open) return FALSE;
+
+    {
+        void *handlers[64];
+        unsigned int hcnt = xaml_event_registry_snapshot( &el->preview_keydown_reg, handlers, ARRAY_SIZE(handlers) );
+        if (hcnt > 0)
+        {
+            IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
+            unsigned int hi;
+            for (hi = 0; hi < hcnt; hi++)
+            {
+                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
+                if (h)
+                {
+                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
+                    IUnknown_Release( (IUnknown *)handlers[hi] );
+                }
+            }
+            if (args->handled) return TRUE;
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_fire_preview_keydown_tree( ch, args ))
+            return TRUE;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el && uwp_fire_preview_keydown_tree( ch, args ))
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e )
+{
+    struct uwp_element *accel = e->accel_el;
+    struct uwp_element *target = e->target_el;
+    UINT vk = e->vk, mods = e->mods;
+    int i;
+
+    TRACE( "accelerator inv: %c%s%s%s (vk=%#x mods=%#x target=%s %s)\n",
+           ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) ? (char)vk : '?',
+           (mods & 1) ? " ctrl" : "",
+           (mods & 2) ? " alt" : "",
+           (mods & 4) ? " shift" : "",
+           vk, mods,
+           target ? debugstr_w(target->class_name) : "?",
+           target ? debugstr_w(target->name) : "" );
+
+    if (accel && accel->accel_invoked_cnt > 0)
+    {
+        struct uwp_ka_invoked_args *args = calloc( 1, sizeof(*args) );
+        if (args)
+        {
+            IInspectable *sender = accel->outer ? accel->outer : &accel->IKeyboardAccelerator_iface;
+            boolean handled = FALSE;
+            args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ka_args_vtbl;
+            args->ref = 1;
+            args->handled = FALSE;
+            if (target)
+            {
+                args->element = target->outer ? target->outer : &target->IDependencyObject_iface;
+                IInspectable_AddRef( args->element );
+            }
+            for (i = 0; i < accel->accel_invoked_cnt; i++)
+            {
+                if (accel->accel_invoked_handlers[i])
+                {
+                    struct xaml_event_handler *h = (struct xaml_event_handler *)accel->accel_invoked_handlers[i];
+                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
+                }
+            }
+            handled = args->handled;
+            uwp_ka_args_Release( &args->IInspectable_iface );
+            if (handled) return TRUE;
+        }
+    }
+
+    if (target)
+    {
+        uwp_invoke_button( target );
+        return TRUE;
+    }
+    return FALSE;
+}
+
+BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr )
+{
+    struct uwp_element *island_root = (struct uwp_element *)island_root_ptr;
+    struct uwp_element *active_page = NULL;
+    UINT mods = 0;
+    int pass, i;
+
+    (void)hwnd;
+    if (!vk || vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
+        vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU ||
+        vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT ||
+        vk == VK_LWIN || vk == VK_RWIN)
+        return FALSE;
+
+    if (GetKeyState( VK_CONTROL ) & 0x8000) mods |= 1;
+    if (GetKeyState( VK_MENU ) & 0x8000)    mods |= 2;
+    if (GetKeyState( VK_SHIFT ) & 0x8000)   mods |= 4;
+    if ((GetKeyState( VK_LWIN ) & 0x8000) || (GetKeyState( VK_RWIN ) & 0x8000)) mods |= 8;
+
+    /* 1. Route PreviewKeyDown on the target island or navigated page first */
+    {
+        struct uwp_element *pk_root = island_root ? island_root : g_navigated_page_el;
+        if (pk_root)
+        {
+            struct uwp_key_routed_args *kargs = calloc( 1, sizeof(*kargs) );
+            if (kargs)
+            {
+                BOOL pk_handled;
+                kargs->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_key_args_vtbl;
+                kargs->ref = 1;
+                kargs->vk = vk;
+                kargs->handled = FALSE;
+                kargs->status.RepeatCount = (UINT32)(lparam & 0xffff) ? (UINT32)(lparam & 0xffff) : 1;
+                kargs->status.ScanCode = ((lparam >> 16) & 0xff) ? (UINT32)((lparam >> 16) & 0xff) : 1;
+                kargs->status.IsExtendedKey = ((lparam >> 24) & 1) ? TRUE : FALSE;
+                kargs->status.IsMenuKeyDown = (mods & 2) ? TRUE : FALSE;
+                pk_handled = uwp_fire_preview_keydown_tree( pk_root, kargs );
+                uwp_key_args_Release( &kargs->IInspectable_iface );
+                if (pk_handled) return TRUE;
+            }
+        }
+    }
+
+    /* 2. Walk accelerator registry (innermost / last registered page wins) */
+    active_page = island_root ? uwp_find_owning_page( island_root )
+                              : (g_navigated_page_el ? g_navigated_page_el : g_last_created_page);
+
+    for (pass = 0; pass < 2; pass++)
+    {
+        struct uwp_accel_entry matched = {0};
+        BOOL found = FALSE;
+
+        AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+        for (i = g_accel_cnt - 1; i >= 0; i--)
+        {
+            const struct uwp_accel_entry *e = &g_accel_entries[i];
+            if (!e->enabled || e->vk != vk || e->mods != mods) continue;
+            if (e->target_el && !e->target_el->is_enabled) continue;
+            if (pass == 0)
+            {
+                if (active_page && e->page_el == active_page)
+                {
+                    matched = *e;
+                    found = TRUE;
+                    break;
+                }
+                if (island_root && e->target_el && uwp_elem_is_descendant( island_root, e->target_el ))
+                {
+                    matched = *e;
+                    found = TRUE;
+                    break;
+                }
+            }
+            else
+            {
+                matched = *e;
+                found = TRUE;
+                break;
+            }
+        }
+        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+
+        if (found)
+            return uwp_invoke_accel_entry( &matched );
+    }
+
+    return FALSE;
+}
+
 void uwp_invoke_button( struct uwp_element *btn )
 {
     int i;
@@ -11876,7 +13373,8 @@ void uwp_invoke_button( struct uwp_element *btn )
         __TRY
         {
             void *cmd_iface = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
+            if ((SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface )) ||
+                 SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP2, &cmd_iface ))) && cmd_iface)
             {
                 /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
                 struct command_iface *cmd = (struct command_iface *)cmd_iface;
@@ -12430,6 +13928,515 @@ BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, cons
 }
 
 /* ============================================================================
+ * 7c. Non-Blocking WinUI MenuFlyout / MenuBarItem Popup Window
+ * ============================================================================ */
+
+struct uwp_popup_item
+{
+    struct uwp_element *el;
+    WCHAR text[128];
+    WCHAR accel[64];
+    BOOL is_sep;
+    BOOL enabled;
+    BOOL checked;
+    BOOL has_sub;
+    int y;
+    int h;
+};
+
+struct uwp_popup_state
+{
+    HWND hwnd;
+    HWND owner_hwnd;
+    HWND parent_popup;
+    HWND child_popup;
+    struct uwp_element *flyout;
+    struct uwp_element *root_flyout;
+    int hover_idx;
+    int item_cnt;
+    struct uwp_popup_item items[64];
+};
+
+static HWND g_popup_hwnd = NULL;
+static HWND g_sub_popup_hwnd = NULL;
+static struct uwp_element *g_popup_owner_el = NULL;
+static struct uwp_element *g_last_closed_flyout = NULL;
+static DWORD g_last_closed_tick = 0;
+
+static void uwp_fire_flyout_closed( struct uwp_element *flyout )
+{
+    int i;
+    if (!flyout) return;
+    for (i = 0; i < flyout->flyout_closed_cnt; i++)
+    {
+        if (flyout->flyout_closed_handlers[i])
+        {
+            IInspectable *sender = flyout->outer ? flyout->outer : &flyout->IFlyout_iface;
+            struct xaml_event_handler *h = (struct xaml_event_handler *)flyout->flyout_closed_handlers[i];
+            __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
+            __EXCEPT_ALL {}
+            __ENDTRY;
+        }
+    }
+}
+
+static BOOL uwp_popup_is_open_for( struct uwp_element *flyout )
+{
+    return flyout && g_popup_hwnd && IsWindow( g_popup_hwnd ) && g_popup_owner_el == flyout;
+}
+
+static void uwp_close_flyout_popup( BOOL fire_closed )
+{
+    HWND sub = g_sub_popup_hwnd;
+    HWND main_p = g_popup_hwnd;
+    struct uwp_element *owner_el = g_popup_owner_el;
+
+    if (owner_el)
+    {
+        g_last_closed_flyout = owner_el;
+        g_last_closed_tick = GetTickCount();
+    }
+    g_sub_popup_hwnd = NULL;
+    g_popup_hwnd = NULL;
+    g_popup_owner_el = NULL;
+
+    if (sub && IsWindow( sub )) DestroyWindow( sub );
+    if (main_p && IsWindow( main_p )) DestroyWindow( main_p );
+    if (fire_closed && owner_el)
+        uwp_fire_flyout_closed( owner_el );
+    uwp_invalidate_window();
+}
+
+static BOOL uwp_popup_handle_escape( void )
+{
+    if (g_sub_popup_hwnd && IsWindow( g_sub_popup_hwnd ))
+    {
+        HWND sub = g_sub_popup_hwnd;
+        g_sub_popup_hwnd = NULL;
+        DestroyWindow( sub );
+        if (g_popup_hwnd && IsWindow( g_popup_hwnd ))
+            SetFocus( g_popup_hwnd );
+        return TRUE;
+    }
+    if (g_popup_hwnd && IsWindow( g_popup_hwnd ))
+    {
+        struct uwp_popup_state *st = (struct uwp_popup_state *)GetWindowLongPtrW( g_popup_hwnd, GWLP_USERDATA );
+        HWND owner = st ? st->owner_hwnd : NULL;
+        uwp_close_flyout_popup( TRUE );
+        if (owner && IsWindow( owner ))
+            SetFocus( owner );
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct uwp_element *root_flyout,
+                                              HWND owner_hwnd, HWND parent_popup, int screen_x, int screen_y );
+
+static LRESULT CALLBACK uwp_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
+{
+    struct uwp_popup_state *st = (struct uwp_popup_state *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
+
+    if (msg == WM_NCCREATE)
+    {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams );
+        return DefWindowProcW( hwnd, msg, wp, lp );
+    }
+    if (msg == WM_NCDESTROY)
+    {
+        if (st)
+        {
+            SetWindowLongPtrW( hwnd, GWLP_USERDATA, 0 );
+            free( st );
+        }
+        return DefWindowProcW( hwnd, msg, wp, lp );
+    }
+    if (msg == WM_ERASEBKGND)
+        return 1;
+    if (msg == WM_APP + 1)
+    {
+        if (IsWindow( hwnd ) && IsWindowVisible( hwnd ))
+            SetFocus( hwnd );
+        return 0;
+    }
+    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+    {
+        if (wp == VK_ESCAPE)
+        {
+            uwp_popup_handle_escape();
+            return 0;
+        }
+        if (wp == VK_DOWN && st && st->item_cnt > 0)
+        {
+            int k, next = st->hover_idx;
+            for (k = 0; k < st->item_cnt; k++)
+            {
+                next = (next + 1) % st->item_cnt;
+                if (!st->items[next].is_sep && st->items[next].enabled)
+                {
+                    st->hover_idx = next;
+                    InvalidateRect( hwnd, NULL, FALSE );
+                    break;
+                }
+            }
+            return 0;
+        }
+        if (wp == VK_UP && st && st->item_cnt > 0)
+        {
+            int k, prev = st->hover_idx < 0 ? 0 : st->hover_idx;
+            for (k = 0; k < st->item_cnt; k++)
+            {
+                prev = (prev - 1 + st->item_cnt) % st->item_cnt;
+                if (!st->items[prev].is_sep && st->items[prev].enabled)
+                {
+                    st->hover_idx = prev;
+                    InvalidateRect( hwnd, NULL, FALSE );
+                    break;
+                }
+            }
+            return 0;
+        }
+        if (wp == VK_RETURN && st && st->hover_idx >= 0 && st->hover_idx < st->item_cnt)
+        {
+            struct uwp_popup_item *it = &st->items[st->hover_idx];
+            if (!it->is_sep && it->enabled && !it->has_sub && it->el)
+            {
+                struct uwp_element *clicked_el = it->el;
+                HWND owner = st->owner_hwnd;
+                uwp_invoke_button( clicked_el );
+                uwp_close_flyout_popup( TRUE );
+                if (owner && IsWindow( owner )) SetFocus( owner );
+                return 0;
+            }
+        }
+    }
+    if (msg == WM_MOUSEMOVE && st)
+    {
+        int my = (short)HIWORD( lp );
+        int i, hit = -1;
+        for (i = 0; i < st->item_cnt; i++)
+        {
+            if (!st->items[i].is_sep && my >= st->items[i].y && my < st->items[i].y + st->items[i].h)
+            {
+                hit = i;
+                break;
+            }
+        }
+        if (hit != st->hover_idx)
+        {
+            st->hover_idx = hit;
+            InvalidateRect( hwnd, NULL, FALSE );
+            if (hit >= 0 && st->items[hit].has_sub && st->items[hit].enabled && st->items[hit].el && !st->parent_popup)
+            {
+                RECT wrc;
+                GetWindowRect( hwnd, &wrc );
+                if (g_sub_popup_hwnd && IsWindow( g_sub_popup_hwnd ))
+                {
+                    DestroyWindow( g_sub_popup_hwnd );
+                    g_sub_popup_hwnd = NULL;
+                }
+                g_sub_popup_hwnd = uwp_create_flyout_popup_internal( st->items[hit].el, st->root_flyout,
+                                                                     st->owner_hwnd, hwnd,
+                                                                     wrc.right - 2, wrc.top + st->items[hit].y );
+                st->child_popup = g_sub_popup_hwnd;
+            }
+        }
+        return 0;
+    }
+    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) && st)
+    {
+        int my = (short)HIWORD( lp );
+        int i;
+        for (i = 0; i < st->item_cnt; i++)
+        {
+            if (!st->items[i].is_sep && my >= st->items[i].y && my < st->items[i].y + st->items[i].h)
+            {
+                if (!st->items[i].enabled) return 0;
+                if (st->items[i].has_sub && st->items[i].el && !st->parent_popup)
+                {
+                    if (msg == WM_LBUTTONUP)
+                    {
+                        RECT wrc;
+                        GetWindowRect( hwnd, &wrc );
+                        if (g_sub_popup_hwnd && IsWindow( g_sub_popup_hwnd ))
+                        {
+                            DestroyWindow( g_sub_popup_hwnd );
+                            g_sub_popup_hwnd = NULL;
+                        }
+                        g_sub_popup_hwnd = uwp_create_flyout_popup_internal( st->items[i].el, st->root_flyout,
+                                                                             st->owner_hwnd, hwnd,
+                                                                             wrc.right - 2, wrc.top + st->items[i].y );
+                        st->child_popup = g_sub_popup_hwnd;
+                    }
+                    return 0;
+                }
+                if (msg == WM_LBUTTONUP && st->items[i].el)
+                {
+                    struct uwp_element *clicked_el = st->items[i].el;
+                    HWND owner = st->owner_hwnd;
+                    if (wcsstr( clicked_el->class_name, L"ToggleMenuFlyoutItem" ))
+                        clicked_el->is_checked = !clicked_el->is_checked;
+                    uwp_invoke_button( clicked_el );
+                    uwp_close_flyout_popup( TRUE );
+                    if (owner && IsWindow( owner )) SetFocus( owner );
+                }
+                return 0;
+            }
+        }
+        return 0;
+    }
+    if (msg == WM_KILLFOCUS && st)
+    {
+        HWND new_focus = (HWND)wp;
+        if (new_focus != hwnd &&
+            (!g_popup_hwnd || new_focus != g_popup_hwnd) &&
+            (!g_sub_popup_hwnd || new_focus != g_sub_popup_hwnd))
+        {
+            uwp_close_flyout_popup( TRUE );
+        }
+        return 0;
+    }
+    if (msg == WM_PAINT && st)
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint( hwnd, &ps );
+        if (hdc)
+        {
+            RECT rc;
+            HBRUSH bg_br = CreateSolidBrush( RGB( 44, 44, 44 ) );
+            HBRUSH bd_br = CreateSolidBrush( RGB( 72, 72, 72 ) );
+            HBRUSH hv_br = CreateSolidBrush( RGB( 62, 62, 62 ) );
+            HBRUSH sep_br = CreateSolidBrush( RGB( 66, 66, 66 ) );
+            HFONT font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            HGDIOBJ old_font = SelectObject( hdc, font );
+            int i;
+
+            GetClientRect( hwnd, &rc );
+            FillRect( hdc, &rc, bg_br );
+            FrameRect( hdc, &rc, bd_br );
+            SetBkMode( hdc, TRANSPARENT );
+
+            for (i = 0; i < st->item_cnt; i++)
+            {
+                const struct uwp_popup_item *it = &st->items[i];
+                if (it->is_sep)
+                {
+                    RECT src = { rc.left + 10, it->y + it->h / 2, rc.right - 10, it->y + it->h / 2 + 1 };
+                    FillRect( hdc, &src, sep_br );
+                }
+                else
+                {
+                    RECT irc = { rc.left + 4, it->y, rc.right - 4, it->y + it->h };
+                    RECT trc = { rc.left + 30, it->y, rc.right - 14, it->y + it->h };
+                    if (i == st->hover_idx && it->enabled)
+                        FillRect( hdc, &irc, hv_br );
+                    SetTextColor( hdc, it->enabled ? RGB( 245, 245, 245 ) : RGB( 125, 125, 125 ) );
+                    if (it->checked)
+                    {
+                        RECT crc = { rc.left + 8, it->y, rc.left + 28, it->y + it->h };
+                        DrawTextW( hdc, L"\x2713", -1, &crc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                    }
+                    DrawTextW( hdc, it->text, -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+                    if (it->has_sub)
+                    {
+                        RECT arc = { rc.right - 26, it->y, rc.right - 10, it->y + it->h };
+                        SetTextColor( hdc, RGB( 185, 185, 185 ) );
+                        DrawTextW( hdc, L"\x203a", -1, &arc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
+                    }
+                    else if (it->accel[0])
+                    {
+                        SetTextColor( hdc, it->enabled ? RGB( 170, 170, 170 ) : RGB( 110, 110, 110 ) );
+                        DrawTextW( hdc, it->accel, -1, &trc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
+                    }
+                }
+            }
+
+            SelectObject( hdc, old_font );
+            DeleteObject( font );
+            DeleteObject( sep_br );
+            DeleteObject( hv_br );
+            DeleteObject( bd_br );
+            DeleteObject( bg_br );
+        }
+        EndPaint( hwnd, &ps );
+        return 0;
+    }
+    return DefWindowProcW( hwnd, msg, wp, lp );
+}
+
+static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct uwp_element *root_flyout,
+                                              HWND owner_hwnd, HWND parent_popup, int screen_x, int screen_y )
+{
+    static BOOL cls_reg = FALSE;
+    struct uwp_vec_view *children;
+    struct uwp_popup_state *st;
+    unsigned int k;
+    int cur_y = 6, max_w = 220, pop_w, pop_h;
+    HDC screen_dc;
+    HFONT font = NULL;
+    HGDIOBJ old_font = NULL;
+    HWND hwnd;
+
+    if (!flyout || !flyout->children_coll) return NULL;
+    children = CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface );
+    if (!children || children->count == 0) return NULL;
+
+    if (!cls_reg)
+    {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = uwp_popup_wndproc;
+        wc.hInstance = GetModuleHandleW( NULL );
+        wc.hCursor = LoadCursorW( NULL, (LPCWSTR)IDC_ARROW );
+        wc.lpszClassName = L"WineUwpMenuFlyoutPopup";
+        RegisterClassExW( &wc );
+        cls_reg = TRUE;
+    }
+
+    st = calloc( 1, sizeof(*st) );
+    if (!st) return NULL;
+    st->flyout = flyout;
+    st->root_flyout = root_flyout ? root_flyout : flyout;
+    st->owner_hwnd = owner_hwnd;
+    st->parent_popup = parent_popup;
+    st->hover_idx = -1;
+
+    screen_dc = GetDC( NULL );
+    if (screen_dc)
+    {
+        font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+        old_font = SelectObject( screen_dc, font );
+    }
+
+    for (k = 0; k < children->count && st->item_cnt < (int)ARRAY_SIZE(st->items); k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        struct uwp_popup_item *it;
+        if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Accelerator" )) continue;
+
+        it = &st->items[st->item_cnt++];
+        it->el = ch;
+        it->y = cur_y;
+        if (wcsstr( ch->class_name, L"Separator" ))
+        {
+            it->is_sep = TRUE;
+            it->h = 9;
+            cur_y += it->h;
+        }
+        else
+        {
+            SIZE sz_t = {0}, sz_a = {0};
+            int row_w;
+            it->is_sep = FALSE;
+            it->enabled = ch->is_enabled;
+            it->checked = (ch->is_checked != 0);
+            it->has_sub = (wcsstr( ch->class_name, L"MenuFlyoutSubItem" ) != NULL);
+            lstrcpynW( it->text, ch->text, ARRAY_SIZE(it->text) );
+            lstrcpynW( it->accel, ch->accel_text, ARRAY_SIZE(it->accel) );
+            if (!it->accel[0] && ch->accelerators_coll)
+            {
+                struct uwp_vec_view *av = CONTAINING_RECORD( ch->accelerators_coll, struct uwp_vec_view, IInspectable_iface );
+                if (av->count > 0)
+                {
+                    struct uwp_element *ka = uwp_elem_from_any( av->items[0] );
+                    if (ka && ka->accel_key)
+                    {
+                        WCHAR kname[32] = {0};
+                        if (ka->accel_key >= 'A' && ka->accel_key <= 'Z')
+                        { kname[0] = (WCHAR)ka->accel_key; kname[1] = 0; }
+                        else if (ka->accel_key >= '0' && ka->accel_key <= '9')
+                        { kname[0] = (WCHAR)ka->accel_key; kname[1] = 0; }
+                        else if (ka->accel_key == VK_ADD || ka->accel_key == 0xbb)
+                            lstrcpyW( kname, L"Plus" );
+                        else if (ka->accel_key == VK_SUBTRACT || ka->accel_key == 0xbd)
+                            lstrcpyW( kname, L"Minus" );
+                        else if (ka->accel_key >= VK_F1 && ka->accel_key <= VK_F12)
+                            swprintf( kname, ARRAY_SIZE(kname), L"F%u", ka->accel_key - VK_F1 + 1 );
+                        if (kname[0])
+                        {
+                            swprintf( it->accel, ARRAY_SIZE(it->accel), L"%s%s%s%s",
+                                      (ka->accel_mods & 1) ? L"Ctrl+" : L"",
+                                      (ka->accel_mods & 4) ? L"Shift+" : L"",
+                                      (ka->accel_mods & 2) ? L"Alt+" : L"",
+                                      kname );
+                        }
+                    }
+                }
+            }
+            it->h = 28;
+            cur_y += it->h;
+            if (screen_dc)
+            {
+                if (it->text[0]) GetTextExtentPoint32W( screen_dc, it->text, wcslen(it->text), &sz_t );
+                if (it->accel[0]) GetTextExtentPoint32W( screen_dc, it->accel, wcslen(it->accel), &sz_a );
+                row_w = 36 + sz_t.cx + (sz_a.cx ? (sz_a.cx + 28) : 24) + 18;
+                if (row_w > max_w) max_w = min( 360, row_w );
+            }
+        }
+    }
+
+    if (screen_dc)
+    {
+        if (old_font) SelectObject( screen_dc, old_font );
+        if (font) DeleteObject( font );
+        ReleaseDC( NULL, screen_dc );
+    }
+
+    if (st->item_cnt == 0)
+    {
+        free( st );
+        return NULL;
+    }
+
+    pop_w = max_w;
+    pop_h = cur_y + 6;
+    {
+        RECT work = { 0, 0, 1024, 768 };
+        HMONITOR mon = owner_hwnd ? MonitorFromWindow( owner_hwnd, MONITOR_DEFAULTTONEAREST )
+                                  : MonitorFromPoint( (POINT){ screen_x, screen_y }, MONITOR_DEFAULTTONEAREST );
+        if (mon)
+        {
+            MONITORINFO mi = { sizeof(mi) };
+            if (GetMonitorInfoW( mon, &mi )) work = mi.rcWork;
+        }
+        if (screen_x + pop_w > work.right - 4) screen_x = max( work.left + 4, work.right - pop_w - 4 );
+        if (screen_y + pop_h > work.bottom - 4) screen_y = max( work.top + 4, work.bottom - pop_h - 4 );
+        if (screen_x < work.left + 4) screen_x = work.left + 4;
+        if (screen_y < work.top + 4) screen_y = work.top + 4;
+    }
+
+    hwnd = CreateWindowExW( WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                            L"WineUwpMenuFlyoutPopup", L"",
+                            WS_POPUP,
+                            screen_x, screen_y, pop_w, pop_h,
+                            owner_hwnd, NULL, GetModuleHandleW( NULL ), st );
+    if (!hwnd)
+    {
+        free( st );
+        return NULL;
+    }
+    st->hwnd = hwnd;
+    ShowWindow( hwnd, SW_SHOWNOACTIVATE );
+    InvalidateRect( hwnd, NULL, FALSE );
+    UpdateWindow( hwnd );
+    PostMessageW( hwnd, WM_APP + 1, 0, 0 );
+    return hwnd;
+}
+
+static void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int screen_x, int screen_y )
+{
+    uwp_close_flyout_popup( FALSE );
+    g_popup_owner_el = flyout;
+    g_popup_hwnd = uwp_create_flyout_popup_internal( flyout, flyout, owner_hwnd, NULL, screen_x, screen_y );
+    uwp_invalidate_window();
+}
+
+/* ============================================================================
  * 8. UWP Helper & Statics Factories (XamlBindingHelper, VisualStateManager, etc.)
  * ============================================================================ */
 
@@ -12655,7 +14662,9 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IStyleSelectorFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IStyleSelectorFactory_UWP2 ) ||
         IsEqualGUID( iid, &IID_IStateTriggerBaseFactory2_UWP ) ||
-        IsEqualGUID( iid, &IID_IDesktopWindowXamlSourceFactory_UWP ))
+        IsEqualGUID( iid, &IID_IDesktopWindowXamlSourceFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IDispatcherTimerFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IKeyboardAcceleratorFactory_UWP ))
     {
         *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
         return S_OK;
@@ -12676,6 +14685,8 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
          wcsstr( f->class_name, L"Extension" ) ||
          wcsstr( f->class_name, L"BitmapSource" ) ||
          wcsstr( f->class_name, L"Accelerator" ) ||
+         wcsstr( f->class_name, L"Command" ) ||
+         wcsstr( f->class_name, L"Timer" ) ||
          wcsstr( f->class_name, L"Collection" )))
     {
         *out = (void *)&f->IComposableFactory_iface;
@@ -12742,6 +14753,21 @@ static HRESULT WINAPI uwp_cf_dp_prop( void *iface, void **out )
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
 
+static HRESULT WINAPI uwp_cf_dp_prop_slot9( void *iface, void **out )
+{
+    struct uwp_class_factory *f = uwp_cf_from_any( iface );
+    if (f && f->class_name && !wcscmp( f->class_name, L"Windows.UI.Xaml.UIElement" ))
+    {
+        if (!out) return E_POINTER;
+        if (!g_routed_event_ptr_pressed)
+            dependency_property_create( NULL, &g_routed_event_ptr_pressed );
+        *out = g_routed_event_ptr_pressed;
+        if (*out) IUnknown_AddRef( (IUnknown *)*out );
+        return S_OK;
+    }
+    return dependency_property_create( NULL, (IDependencyProperty **)out );
+}
+
 static const void *uwp_cf_act_vtbl[16] =
 {
     [0] = uwp_cf_QI,
@@ -12779,7 +14805,7 @@ static const void *uwp_cf_statics_vtbl[64] =
     [5] = uwp_cf_GetTrustLevel,
     [6 ... 63] = uwp_generic_noop,
     [6] = uwp_cf_dp_prop,
-    [9] = uwp_cf_dp_prop,
+    [9] = uwp_cf_dp_prop_slot9,
     [12] = uwp_cf_dp_prop,
     [15] = uwp_cf_dp_prop,
     [18] = uwp_cf_dp_prop,
