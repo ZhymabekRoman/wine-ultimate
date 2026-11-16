@@ -24,6 +24,8 @@
 #include <string.h>
 
 #include "wine/debug.h"
+#include <stdio.h>
+#define UIDBG(...) fprintf(stderr, "UID " __VA_ARGS__)
 #include "appmodel.h"
 #include "roapi.h"
 
@@ -236,13 +238,17 @@ struct ICoreWindowAdapterInterop
 static const GUID IID_ICoreWindowAdapterInterop =
     { 0x7a5b6fd1, 0xcd73, 0x4b6c, { 0x9c, 0xf4, 0x2e, 0x86, 0x9e, 0xaf, 0x47, 0x0a } };
 
+struct core_window_weakref;
+
 struct core_window
 {
     ICoreWindow ICoreWindow_iface;
     ICoreWindowInterop ICoreWindowInterop_iface;
     ICoreWindowNavigation ICoreWindowNavigation_iface;
     ICoreWindowAdapterInterop ICoreWindowAdapterInterop_iface;
+    const void *IWeakReferenceSource_iface;
     IInspectable dummy_iface;
+    struct core_window_weakref *weakref;
     ICoreDispatcher *dispatcher;
     IUnknown *navigation_client;
     IUnknown *window_client_adapter;
@@ -611,15 +617,68 @@ static BOOL strict_dispatch_enabled( void )
     return cached;
 }
 
+static const GUID IID_IIdleDispatchedHandlerArgs_local =
+    { 0x98bb6a24, 0xdc1c, 0x43cb, { 0xb4, 0xed, 0xd1, 0xc0, 0xeb, 0x23, 0x91, 0xf3 } };
+
+static HRESULT WINAPI idle_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIdleDispatchedHandlerArgs_local ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI idle_args_AddRef( __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *iface ) { return 2; }
+static ULONG WINAPI idle_args_Release( __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *iface ) { return 1; }
+static HRESULT WINAPI idle_args_GetIids( __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI idle_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.UI.Core.IdleDispatchedHandlerArgs";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI idle_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI idle_args_get_IsDispatcherIdle( __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = TRUE;
+    return S_OK;
+}
+static const struct __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgsVtbl idle_args_vtbl =
+{
+    idle_args_QueryInterface,
+    idle_args_AddRef,
+    idle_args_Release,
+    idle_args_GetIids,
+    idle_args_GetRuntimeClassName,
+    idle_args_GetTrustLevel,
+    idle_args_get_IsDispatcherIdle,
+};
+static __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs idle_args_obj = { &idle_args_vtbl };
+
 /* The callback is the RunAsync/RunIdleAsync argument — an IDispatchedHandler (Invoke()) or an
  * IIdleDispatchedHandler (Invoke(e)); the idle flag stored with it tells the two faces apart. */
 static void dispatcher_invoke( void *handler, BOOL idle )
 {
+    {
+        static LONG ui_cnt;
+        LONG n = InterlockedIncrement( &ui_cnt );
+        if (n <= 400) UIDBG( "invoke#%ld tid %04x handler %p idle %d\n", (long)n, (unsigned)GetCurrentThreadId(), handler, idle );
+    }
     if (idle)
     {
         __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandler *h =
                 (__x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandler *)handler;
-        h->lpVtbl->Invoke( h, NULL );
+        h->lpVtbl->Invoke( h, &idle_args_obj );
         return;
     }
     ((__x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *)handler)->lpVtbl->Invoke(
@@ -664,6 +723,7 @@ static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDisp
     struct core_dispatcher *impl = impl_from_ICoreDispatcher( iface );
 
     TRACE( "iface %p, priority %d, agileCallback %p, asyncAction %p\n", iface, priority, agileCallback, asyncAction );
+    UIDBG( "RunAsync tid %04x prio %d cb %p\n", (unsigned)GetCurrentThreadId(), priority, (void*)agileCallback );
     if (agileCallback) dispatcher_run_or_post( impl, agileCallback, FALSE );
     if (asyncAction)
     {
@@ -836,6 +896,104 @@ static const struct ICoreWindowInteropVtbl core_window_interop_vtbl =
     core_window_interop_SetMessageHandled,
 };
 
+struct core_window_weakref
+{
+    const void **lpVtbl;
+    LONG ref;
+    struct core_window *target;
+};
+
+static const GUID IID_IWeakReference_cw =
+    { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+static const GUID IID_IWeakReferenceSource_cw =
+    { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+
+static HRESULT WINAPI cw_wr_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct core_window_weakref *wr = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IWeakReference_cw ))
+    {
+        InterlockedIncrement( &wr->ref );
+        *out = wr;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cw_wr_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct core_window_weakref *)iface)->ref );
+}
+static ULONG WINAPI cw_wr_Release( void *iface )
+{
+    struct core_window_weakref *wr = iface;
+    ULONG ref = InterlockedDecrement( &wr->ref );
+    if (!ref) free( wr );
+    return ref;
+}
+static HRESULT WINAPI cw_wr_Resolve( void *iface, REFIID iid, IInspectable **out )
+{
+    struct core_window_weakref *wr = iface;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!wr->target) return S_OK;
+    return ICoreWindow_QueryInterface( &wr->target->ICoreWindow_iface, iid, (void **)out );
+}
+static const void *cw_wr_vtbl[] =
+{
+    cw_wr_QueryInterface,
+    cw_wr_AddRef,
+    cw_wr_Release,
+    cw_wr_Resolve,
+};
+
+static inline struct core_window *impl_from_IWeakReferenceSource_cw( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_window, IWeakReferenceSource_iface );
+}
+static HRESULT WINAPI cw_wrs_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct core_window *impl = impl_from_IWeakReferenceSource_cw( iface );
+    return ICoreWindow_QueryInterface( &impl->ICoreWindow_iface, iid, out );
+}
+static ULONG WINAPI cw_wrs_AddRef( void *iface )
+{
+    struct core_window *impl = impl_from_IWeakReferenceSource_cw( iface );
+    return ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+}
+static ULONG WINAPI cw_wrs_Release( void *iface )
+{
+    struct core_window *impl = impl_from_IWeakReferenceSource_cw( iface );
+    return ICoreWindow_Release( &impl->ICoreWindow_iface );
+}
+static HRESULT WINAPI cw_wrs_GetWeakReference( void *iface, void **out )
+{
+    struct core_window *impl = impl_from_IWeakReferenceSource_cw( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl->weakref)
+    {
+        struct core_window_weakref *wr = calloc( 1, sizeof(*wr) );
+        if (!wr) return E_OUTOFMEMORY;
+        wr->lpVtbl = cw_wr_vtbl;
+        wr->ref = 1;
+        wr->target = impl;
+        impl->weakref = wr;
+    }
+    InterlockedIncrement( &impl->weakref->ref );
+    *out = impl->weakref;
+    return S_OK;
+}
+static const void *cw_wrs_vtbl[] =
+{
+    cw_wrs_QueryInterface,
+    cw_wrs_AddRef,
+    cw_wrs_Release,
+    cw_wrs_GetWeakReference,
+};
+
 static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid, void **out )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
@@ -877,6 +1035,12 @@ static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid
         *out = &impl->dummy_iface;
         return S_OK;
     }
+    else if (IsEqualGUID( iid, &IID_IWeakReferenceSource_cw ))
+    {
+        ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+        *out = &impl->IWeakReferenceSource_iface;
+        return S_OK;
+    }
     FIXME( "%s E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL; return E_NOINTERFACE;
 }
@@ -889,6 +1053,12 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
+        if (impl->weakref)
+        {
+            impl->weakref->target = NULL;
+            cw_wr_Release( impl->weakref );
+            impl->weakref = NULL;
+        }
         if (thread_core_window == impl) thread_core_window = NULL;
         if (impl->hwnd) DestroyWindow( impl->hwnd );
         if (impl->dispatcher) ICoreDispatcher_Release( impl->dispatcher );
@@ -2670,6 +2840,7 @@ static struct core_window *create_core_window( const WCHAR *title, INT x, INT y,
     impl->ICoreWindowInterop_iface.lpVtbl = &core_window_interop_vtbl;
     impl->ICoreWindowNavigation_iface.lpVtbl = &core_window_navigation_vtbl;
     impl->ICoreWindowAdapterInterop_iface.lpVtbl = &core_window_adapter_vtbl;
+    impl->IWeakReferenceSource_iface = cw_wrs_vtbl;
     impl->dummy_iface.lpVtbl = (void *)dummy_vtbl;
     impl->dispatcher = core_dispatcher_create( impl );
     impl->ref = 1;

@@ -56,6 +56,9 @@ static inline struct fontweights_statics *impl_fw_from_IActivationFactory( IActi
     return CONTAINING_RECORD( iface, struct fontweights_statics, IActivationFactory_iface );
 }
 
+static const GUID IID_IFontWeightsStatics_UWP =
+    { 0xb3b579d5, 0x1ba9, 0x48eb, { 0x9d, 0xad, 0xc0, 0x95, 0xe8, 0xc2, 0x3b, 0xa3 } };
+
 static HRESULT WINAPI fontweights_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct fontweights_statics *impl = impl_fw_from_IActivationFactory( iface );
@@ -72,7 +75,8 @@ static HRESULT WINAPI fontweights_factory_QueryInterface( IActivationFactory *if
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IFontWeightsStatics ))
+    if (IsEqualGUID( iid, &IID_IFontWeightsStatics ) ||
+        IsEqualGUID( iid, &IID_IFontWeightsStatics_UWP ))
     {
         IUnknown_AddRef( iface );
         *out = &impl->IFontWeightsStatics_iface;

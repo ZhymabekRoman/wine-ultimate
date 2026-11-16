@@ -39,6 +39,9 @@
 #define WIDL_using_Windows_System
 #include "windows.applicationmodel.h"
 
+/* appextensions.c */
+extern IActivationFactory *app_extension_catalog_factory;
+
 extern IActivationFactory *package_factory;
 extern IActivationFactory *design_mode_factory;
 extern IActivationFactory *appinfo_factory;

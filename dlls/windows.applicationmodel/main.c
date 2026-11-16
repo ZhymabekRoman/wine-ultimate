@@ -1149,7 +1149,7 @@ static HRESULT WINAPI store_async_GetResults( void *iface, void *results )
     struct store_async_op *op = iface;
     if (!results) return E_INVALIDARG;
     if (op->is_bool)
-        *(BOOL *)results = op->bool_result;
+        *(boolean *)results = op->bool_result ? 1 : 0;
     else
     {
         *(void **)results = op->result;
@@ -4435,6 +4435,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         *factory = (IActivationFactory *)&startup_task_factory;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager" ))
         *factory = user_activity_factory;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.AppExtensions.AppExtensionCatalog" ))
+        IActivationFactory_QueryInterface( app_extension_catalog_factory,
+                                           &IID_IActivationFactory, (void **)factory );
     else if (!wcsncmp( buffer, L"Windows.ApplicationModel.Calls.", 31 ))
     {
         HMODULE mod = LoadLibraryW( L"windows.applicationmodel.calls.dll" );

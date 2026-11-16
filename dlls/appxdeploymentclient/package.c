@@ -2626,6 +2626,7 @@ static HRESULT package_create( const struct package_record *rec, struct package 
 struct package_collection
 {
     IIterable_Package IIterable_Package_iface;
+    IVectorView_Package IVectorView_Package_iface;
     LONG ref;
     ULONG count;
     struct package *items[1];
@@ -2634,6 +2635,11 @@ struct package_collection
 static inline struct package_collection *impl_from_IIterable_Package( IIterable_Package *iface )
 {
     return CONTAINING_RECORD( iface, struct package_collection, IIterable_Package_iface );
+}
+
+static inline struct package_collection *impl_from_IVectorView_Package( IVectorView_Package *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_collection, IVectorView_Package_iface );
 }
 
 struct package_iterator
@@ -2760,14 +2766,26 @@ static const struct IIterator_PackageVtbl package_iterator_vtbl =
     package_iterator_GetMany,
 };
 
+static const struct IVectorView_PackageVtbl package_vectorview_vtbl;
+
 static HRESULT WINAPI package_collection_QueryInterface( IIterable_Package *iface, REFIID iid, void **out )
 {
     struct package_collection *impl = impl_from_IIterable_Package( iface );
+    static const GUID IID_IVectorView_AppListEntry =
+        { 0x6f73e9e4, 0x7065, 0x5c2e, { 0x86, 0x26, 0x60, 0x61, 0x05, 0x74, 0x9b, 0x05 } };
 
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterable_Package ))
     {
         *out = &impl->IIterable_Package_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IVectorView_Package ) ||
+        IsEqualGUID( iid, &IID_IVectorView_AppListEntry ))
+    {
+        *out = &impl->IVectorView_Package_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -2846,6 +2864,7 @@ static HRESULT package_collection_create( struct package **items, ULONG count, I
 
     if (!(impl = calloc( 1, size ))) return E_OUTOFMEMORY;
     impl->IIterable_Package_iface.lpVtbl = &package_collection_vtbl;
+    impl->IVectorView_Package_iface.lpVtbl = &package_vectorview_vtbl;
     impl->ref = 1;
     impl->count = count;
     for (ULONG i = 0; i < count; i++)
@@ -2857,61 +2876,22 @@ static HRESULT package_collection_create( struct package **items, ULONG count, I
     return S_OK;
 }
 
-/*
- * IPackage's Dependencies: a view over the resolved dependency set, built once
- * per call. The rows are the packages the registration held at that moment; the
- * view owns a reference to each, so a caller holding the view after the graph
- * was re-registered sees a stable set.
- */
-
-struct package_vectorview
-{
-    IVectorView_Package IVectorView_Package_iface;
-    LONG ref;
-    ULONG count;
-    struct package *items[1];
-};
-
-static inline struct package_vectorview *impl_from_IVectorView_Package( IVectorView_Package *iface )
-{
-    return CONTAINING_RECORD( iface, struct package_vectorview, IVectorView_Package_iface );
-}
-
 static HRESULT WINAPI package_vectorview_QueryInterface( IVectorView_Package *iface, REFIID iid, void **out )
 {
-    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
-    static const GUID IID_IVectorView_AppListEntry =
-        { 0x6f73e9e4, 0x7065, 0x5c2e, { 0x86, 0x26, 0x60, 0x61, 0x05, 0x74, 0x9b, 0x05 } };
-
-    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IVectorView_Package ) ||
-        IsEqualGUID( iid, &IID_IVectorView_AppListEntry ))
-    {
-        *out = &impl->IVectorView_Package_iface;
-        InterlockedIncrement( &impl->ref );
-        return S_OK;
-    }
-    *out = NULL;
-    return E_NOINTERFACE;
+    struct package_collection *impl = impl_from_IVectorView_Package( iface );
+    return package_collection_QueryInterface( &impl->IIterable_Package_iface, iid, out );
 }
 
 static ULONG WINAPI package_vectorview_AddRef( IVectorView_Package *iface )
 {
-    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    struct package_collection *impl = impl_from_IVectorView_Package( iface );
     return InterlockedIncrement( &impl->ref );
 }
 
 static ULONG WINAPI package_vectorview_Release( IVectorView_Package *iface )
 {
-    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
-
-    if (!ref)
-    {
-        for (ULONG i = 0; i < impl->count; i++) IPackage_Release( &impl->items[i]->IPackage_iface );
-        free( impl );
-    }
-    return ref;
+    struct package_collection *impl = impl_from_IVectorView_Package( iface );
+    return package_collection_Release( &impl->IIterable_Package_iface );
 }
 
 static HRESULT WINAPI package_vectorview_GetIids( IVectorView_Package *iface, ULONG *count, IID **iids )
@@ -2935,7 +2915,7 @@ static HRESULT WINAPI package_vectorview_GetTrustLevel( IVectorView_Package *ifa
 
 static HRESULT WINAPI package_vectorview_GetAt( IVectorView_Package *iface, UINT32 index, IPackage **item )
 {
-    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    struct package_collection *impl = impl_from_IVectorView_Package( iface );
 
     if (!item) return E_INVALIDARG;
     if (index >= impl->count) return E_BOUNDS;
@@ -2947,7 +2927,7 @@ static HRESULT WINAPI package_vectorview_GetAt( IVectorView_Package *iface, UINT
 
 static HRESULT WINAPI package_vectorview_get_Size( IVectorView_Package *iface, UINT32 *size )
 {
-    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    struct package_collection *impl = impl_from_IVectorView_Package( iface );
 
     if (!size) return E_INVALIDARG;
     *size = impl->count;
@@ -2957,7 +2937,7 @@ static HRESULT WINAPI package_vectorview_get_Size( IVectorView_Package *iface, U
 static HRESULT WINAPI package_vectorview_IndexOf( IVectorView_Package *iface, IPackage *item, UINT32 *index,
         boolean *found )
 {
-    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    struct package_collection *impl = impl_from_IVectorView_Package( iface );
     ULONG i;
 
     if (!index || !found) return E_INVALIDARG;
@@ -2973,7 +2953,7 @@ static HRESULT WINAPI package_vectorview_IndexOf( IVectorView_Package *iface, IP
 static HRESULT WINAPI package_vectorview_GetMany( IVectorView_Package *iface, UINT32 start, UINT32 capacity,
         IPackage **items, UINT32 *written )
 {
-    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    struct package_collection *impl = impl_from_IVectorView_Package( iface );
     ULONG n;
 
     if (!items || !written) return E_INVALIDARG;
@@ -3003,25 +2983,19 @@ static const struct IVectorView_PackageVtbl package_vectorview_vtbl =
     package_vectorview_GetMany,
 };
 
-/* The rows are the caller's: the view takes a reference to each and drops them
- * with its own. count 0 is the empty view, no allocation for the tail. */
 static HRESULT create_package_vectorview( struct package **items, ULONG count, IVectorView_Package **value )
 {
-    struct package_vectorview *impl;
-    SIZE_T size = offsetof( struct package_vectorview, items[count ? count : 1] );
+    IIterable_Package *iterable = NULL;
+    HRESULT hr;
 
     if (!value) return E_INVALIDARG;
-    if (!(impl = calloc( 1, size ))) return E_OUTOFMEMORY;
-    impl->IVectorView_Package_iface.lpVtbl = &package_vectorview_vtbl;
-    impl->ref = 1;
-    impl->count = count;
-    for (ULONG i = 0; i < count; i++)
+    hr = package_collection_create( items, count, &iterable );
+    if (SUCCEEDED(hr))
     {
-        impl->items[i] = items[i];
-        IPackage_AddRef( &items[i]->IPackage_iface );
+        struct package_collection *impl = impl_from_IIterable_Package( iterable );
+        *value = &impl->IVectorView_Package_iface;
     }
-    *value = &impl->IVectorView_Package_iface;
-    return S_OK;
+    return hr;
 }
 
 /* count 0 is the empty view: what a package with no recorded graph answers. */

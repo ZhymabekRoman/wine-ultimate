@@ -460,16 +460,419 @@ static HRESULT WINAPI statics_CreateWatcher( IUserStatics *iface, IInspectable *
     return E_NOTIMPL;
 }
 
+static const GUID IID_IIterable_User =
+    { 0xd1bacd1f, 0x0376, 0x5823, { 0x8c, 0x29, 0x1d, 0x45, 0xb9, 0xf4, 0xc1, 0x91 } };
+static const GUID IID_IIterator_User =
+    { 0x26d11457, 0x41cf, 0x5e4a, { 0xa5, 0xeb, 0x57, 0x2a, 0x13, 0x2a, 0x62, 0xd4 } };
+
+struct user_iter_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( void *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( void *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( void *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( void *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( void *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( void *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *get_Current)( void *iface, IUser **current );
+    HRESULT (STDMETHODCALLTYPE *get_HasCurrent)( void *iface, boolean *has_current );
+    HRESULT (STDMETHODCALLTYPE *MoveNext)( void *iface, boolean *has_current );
+    HRESULT (STDMETHODCALLTYPE *GetMany)( void *iface, UINT32 capacity, IUser **items, UINT32 *actual );
+};
+
+struct user_iterable_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( void *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( void *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( void *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( void *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( void *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( void *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *First)( void *iface, void **first );
+};
+
+struct user_find_list
+{
+    __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser op;
+    __FIVectorView_1_Windows__CSystem__CUser view;
+    IAsyncInfo info;
+    const struct user_iterable_vtbl *iterable_vtbl;
+    LONG ref;
+    __FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CSystem__CUser *handler;
+    IUser *user;
+    UINT32 count;
+};
+
+struct user_iterator
+{
+    const struct user_iter_vtbl *vtbl;
+    LONG ref;
+    struct user_find_list *list;
+    UINT32 pos;
+};
+
+static inline struct user_find_list *find_from_op( __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_find_list, op );
+}
+
+static inline struct user_find_list *find_from_view( __FIVectorView_1_Windows__CSystem__CUser *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_find_list, view );
+}
+
+static inline struct user_find_list *find_from_info( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_find_list, info );
+}
+
+static inline struct user_find_list *find_from_iterable( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_find_list, iterable_vtbl );
+}
+
+static HRESULT find_list_query( struct user_find_list *This, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser ))
+    {
+        *out = &This->op;
+    }
+    else if (IsEqualGUID( iid, &IID___FIVectorView_1_Windows__CSystem__CUser ))
+    {
+        *out = &This->view;
+    }
+    else if (IsEqualGUID( iid, &IID_IIterable_User ))
+    {
+        *out = &This->iterable_vtbl;
+    }
+    else if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &This->info;
+    }
+    else
+    {
+        FIXME( "iid %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    InterlockedIncrement( &This->ref );
+    return S_OK;
+}
+
+static void find_list_release( struct user_find_list *This )
+{
+    if (This->handler) IUnknown_Release( (IUnknown *)This->handler );
+    if (This->user) IUser_Release( This->user );
+    free( This );
+}
+
+#define USER_FIND_FWD(name, type, from) \
+static HRESULT WINAPI name##_QueryInterface( type *iface, REFIID iid, void **out ) { return find_list_query( from( iface ), iid, out ); } \
+static ULONG WINAPI name##_AddRef( type *iface ) { return InterlockedIncrement( &from( iface )->ref ); } \
+static ULONG WINAPI name##_Release( type *iface ) { struct user_find_list *This = from( iface ); ULONG ref = InterlockedDecrement( &This->ref ); \
+    if (!ref) find_list_release( This ); return ref; } \
+static HRESULT WINAPI name##_GetIids( type *iface, ULONG *count, IID **iids ) { if (count) *count = 0; if (iids) *iids = NULL; return S_OK; } \
+static HRESULT WINAPI name##_GetRuntimeClassName( type *iface, HSTRING *name ) { return WindowsCreateString( L"Windows.Foundation.IAsyncOperation", 34, name ); } \
+static HRESULT WINAPI name##_GetTrustLevel( type *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
+
+USER_FIND_FWD( find_op, __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser, find_from_op )
+USER_FIND_FWD( find_view, __FIVectorView_1_Windows__CSystem__CUser, find_from_view )
+USER_FIND_FWD( find_info, IAsyncInfo, find_from_info )
+
+static HRESULT WINAPI find_op_put_Completed( __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser *iface,
+                                             __FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CSystem__CUser *handler )
+{
+    struct user_find_list *This = find_from_op( iface );
+
+    if (This->handler) IUnknown_Release( (IUnknown *)This->handler );
+    This->handler = handler;
+    if (handler)
+    {
+        IUnknown_AddRef( (IUnknown *)handler );
+        handler->lpVtbl->Invoke( handler, iface, (AsyncStatus)1 /* Completed */ );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI find_op_get_Completed( __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser *iface,
+                                             __FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CSystem__CUser **handler )
+{
+    struct user_find_list *This = find_from_op( iface );
+
+    *handler = This->handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI find_op_GetResults( __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser *iface,
+                                          __FIVectorView_1_Windows__CSystem__CUser **results )
+{
+    struct user_find_list *This = find_from_op( iface );
+
+    TRACE( "iface %p, results %p.\n", iface, results );
+    *results = &This->view;
+    InterlockedIncrement( &This->ref );
+    return S_OK;
+}
+
+static const struct __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUserVtbl find_op_vtbl =
+{
+    find_op_QueryInterface,
+    find_op_AddRef,
+    find_op_Release,
+    find_op_GetIids,
+    find_op_GetRuntimeClassName,
+    find_op_GetTrustLevel,
+    find_op_put_Completed,
+    find_op_get_Completed,
+    find_op_GetResults,
+};
+
+static HRESULT WINAPI find_view_GetAt( __FIVectorView_1_Windows__CSystem__CUser *iface, UINT32 index, IUser **item )
+{
+    struct user_find_list *This = find_from_view( iface );
+
+    if (index >= This->count || !This->user) return E_BOUNDS;
+    *item = This->user;
+    IUser_AddRef( *item );
+    return S_OK;
+}
+
+static HRESULT WINAPI find_view_get_Size( __FIVectorView_1_Windows__CSystem__CUser *iface, UINT32 *size )
+{
+    struct user_find_list *This = find_from_view( iface );
+
+    TRACE( "iface %p, size %u.\n", iface, This->count );
+    *size = This->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI find_view_IndexOf( __FIVectorView_1_Windows__CSystem__CUser *iface, IUser *item, UINT32 *index, boolean *found )
+{
+    struct user_find_list *This = find_from_view( iface );
+
+    if (This->count && item == This->user)
+    {
+        *index = 0;
+        *found = TRUE;
+    }
+    else
+    {
+        *index = 0;
+        *found = FALSE;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI find_view_GetMany( __FIVectorView_1_Windows__CSystem__CUser *iface, UINT32 start_index,
+                                         UINT32 items_size, IUser **items, UINT32 *items_read )
+{
+    struct user_find_list *This = find_from_view( iface );
+
+    if (!items_read) return E_POINTER;
+    if (start_index < This->count && items_size > 0 && items && This->user)
+    {
+        items[0] = This->user;
+        IUser_AddRef( items[0] );
+        *items_read = 1;
+    }
+    else *items_read = 0;
+    return S_OK;
+}
+
+static const struct __FIVectorView_1_Windows__CSystem__CUserVtbl find_view_vtbl =
+{
+    find_view_QueryInterface,
+    find_view_AddRef,
+    find_view_Release,
+    find_view_GetIids,
+    find_view_GetRuntimeClassName,
+    find_view_GetTrustLevel,
+    find_view_GetAt,
+    find_view_get_Size,
+    find_view_IndexOf,
+    find_view_GetMany,
+};
+
+static HRESULT WINAPI find_info_get_Id( IAsyncInfo *iface, UINT32 *id ) { *id = 1; return S_OK; }
+static HRESULT WINAPI find_info_get_Status( IAsyncInfo *iface, AsyncStatus *status ) { *status = (AsyncStatus)1 /* Completed */; return S_OK; }
+static HRESULT WINAPI find_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *code ) { *code = S_OK; return S_OK; }
+static HRESULT WINAPI find_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
+static HRESULT WINAPI find_info_Close( IAsyncInfo *iface ) { return S_OK; }
+
+static const struct IAsyncInfoVtbl find_info_vtbl =
+{
+    find_info_QueryInterface,
+    find_info_AddRef,
+    find_info_Release,
+    find_info_GetIids,
+    find_info_GetRuntimeClassName,
+    find_info_GetTrustLevel,
+    find_info_get_Id,
+    find_info_get_Status,
+    find_info_get_ErrorCode,
+    find_info_Cancel,
+    find_info_Close,
+};
+
+static HRESULT WINAPI find_iter_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_User ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct user_iterator *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI find_iter_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct user_iterator *)iface)->ref );
+}
+
+static ULONG WINAPI find_iter_Release( void *iface )
+{
+    struct user_iterator *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        find_view_Release( &impl->list->view );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI find_iter_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI find_iter_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IIterator`1<Windows.System.User>", 63, name );
+}
+
+static HRESULT WINAPI find_iter_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI find_iter_get_Current( void *iface, IUser **current )
+{
+    struct user_iterator *impl = iface;
+    if (!current) return E_POINTER;
+    if (impl->pos >= impl->list->count || !impl->list->user) return E_BOUNDS;
+    *current = impl->list->user;
+    IUser_AddRef( *current );
+    return S_OK;
+}
+
+static HRESULT WINAPI find_iter_get_HasCurrent( void *iface, boolean *has_current )
+{
+    struct user_iterator *impl = iface;
+    if (!has_current) return E_POINTER;
+    *has_current = impl->pos < impl->list->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI find_iter_MoveNext( void *iface, boolean *has_current )
+{
+    struct user_iterator *impl = iface;
+    if (!has_current) return E_POINTER;
+    if (impl->pos < impl->list->count) impl->pos++;
+    *has_current = impl->pos < impl->list->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI find_iter_GetMany( void *iface, UINT32 capacity, IUser **items, UINT32 *actual )
+{
+    struct user_iterator *impl = iface;
+    if (!actual) return E_POINTER;
+    if (impl->pos < impl->list->count && capacity > 0 && items && impl->list->user)
+    {
+        items[0] = impl->list->user;
+        IUser_AddRef( items[0] );
+        impl->pos++;
+        *actual = 1;
+    }
+    else *actual = 0;
+    return S_OK;
+}
+
+static const struct user_iter_vtbl find_iter_vtbl =
+{
+    find_iter_QueryInterface,
+    find_iter_AddRef,
+    find_iter_Release,
+    find_iter_GetIids,
+    find_iter_GetRuntimeClassName,
+    find_iter_GetTrustLevel,
+    find_iter_get_Current,
+    find_iter_get_HasCurrent,
+    find_iter_MoveNext,
+    find_iter_GetMany,
+};
+
+USER_FIND_FWD( find_iterable, void, find_from_iterable )
+
+static HRESULT WINAPI find_iterable_First( void *iface, void **first )
+{
+    struct user_find_list *This = find_from_iterable( iface );
+    struct user_iterator *iter;
+
+    if (!first) return E_POINTER;
+    if (!(iter = calloc( 1, sizeof(*iter) ))) return E_OUTOFMEMORY;
+    iter->vtbl = &find_iter_vtbl;
+    iter->ref = 1;
+    iter->list = This;
+    InterlockedIncrement( &This->ref );
+    *first = &iter->vtbl;
+    return S_OK;
+}
+
+static const struct user_iterable_vtbl find_iterable_vtbl =
+{
+    find_iterable_QueryInterface,
+    find_iterable_AddRef,
+    find_iterable_Release,
+    find_iterable_GetIids,
+    find_iterable_GetRuntimeClassName,
+    find_iterable_GetTrustLevel,
+    find_iterable_First,
+};
+
+static HRESULT create_find_all_op( __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser **operation )
+{
+    struct user_find_list *impl;
+    HRESULT hr;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->op.lpVtbl = &find_op_vtbl;
+    impl->view.lpVtbl = &find_view_vtbl;
+    impl->info.lpVtbl = &find_info_vtbl;
+    impl->iterable_vtbl = &find_iterable_vtbl;
+    impl->ref = 1;
+    if (SUCCEEDED((hr = create_user( (void **)&impl->user )))) impl->count = 1;
+    *operation = &impl->op;
+    return S_OK;
+}
+
 static HRESULT WINAPI statics_FindAllAsync( IUserStatics *iface,
                                             __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser **operation )
 {
     TRACE( "iface %p, operation %p.\n", iface, operation );
 
     if (!operation) return E_POINTER;
-    *operation = NULL;
-
-    /* No user enumeration store in a prefix; see the header comment. */
-    return E_NOTIMPL;
+    return create_find_all_op( operation );
 }
 
 static HRESULT WINAPI statics_FindAllAsyncByType( IUserStatics *iface, UserType value,
@@ -478,9 +881,7 @@ static HRESULT WINAPI statics_FindAllAsyncByType( IUserStatics *iface, UserType 
     TRACE( "iface %p, value %u, operation %p.\n", iface, value, operation );
 
     if (!operation) return E_POINTER;
-    *operation = NULL;
-
-    return E_NOTIMPL;
+    return create_find_all_op( operation );
 }
 
 static HRESULT WINAPI statics_FindAllAsyncByTypeAndStatus( IUserStatics *iface, UserType type,
@@ -490,9 +891,7 @@ static HRESULT WINAPI statics_FindAllAsyncByTypeAndStatus( IUserStatics *iface, 
     TRACE( "iface %p, type %u, status %u, operation %p.\n", iface, type, status, operation );
 
     if (!operation) return E_POINTER;
-    *operation = NULL;
-
-    return E_NOTIMPL;
+    return create_find_all_op( operation );
 }
 
 static HRESULT WINAPI statics_GetFromId( IUserStatics *iface, HSTRING nonroamableid, IUser **result )

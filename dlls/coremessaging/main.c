@@ -22,6 +22,8 @@
 #include "dispatcherqueue.h"
 
 #include <stdarg.h>
+#include <stdio.h>
+#define DQDBG(...) fprintf(stderr, "DQW " __VA_ARGS__)
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
@@ -911,6 +913,13 @@ static void dispatcher_queue_run_next( struct dispatcher_queue *queue )
     struct dispatcher_queue_item *item = dispatcher_queue_pop( queue );
 
     if (!item) return;
+    {
+        static LONG dq_cnt;
+        LONG n = InterlockedIncrement( &dq_cnt );
+        if (n <= 400) DQDBG( "run#%ld handler %p vtbl %p slot3 %p\n", (long)n, (void *)item->handler,
+                             item->handler ? *(void **)item->handler : NULL,
+                             item->handler ? *(void **)*(void **)item->handler : NULL );
+    }
     TRACE( "dispatcher_queue_run_next: invoking handler %p\n", item->handler );
     IDispatcherQueueHandler_Invoke( item->handler );
     IDispatcherQueueHandler_Release( item->handler );
