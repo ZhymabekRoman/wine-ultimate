@@ -23,4 +23,9 @@ import "windows.system.idl";
 
 namespace Windows.System {
     runtimeclass User;
+    namespace Diagnostics.Telemetry
+    {
+        interface IPlatformTelemetryClient;
+        runtimeclass PlatformTelemetryClient;
+    }
 }

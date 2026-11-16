@@ -23,4 +23,5 @@ import "windows.system.profile.idl";
 
 namespace Windows.System.Profile {
     runtimeclass EducationSettings;
+    runtimeclass PlatformDiagnosticsAndUsageDataSettings;
 }

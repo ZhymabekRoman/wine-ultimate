@@ -1042,8 +1042,7 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
     if (FAILED(hr = ensure_mta()))
         return hr;
 
-    if (!wcscmp(raw, L"Windows.System.UserProfile.DiagnosticsSettings") ||
-        !wcscmp(raw, L"Windows.System.Profile.PlatformDiagnosticsAndUsageDataSettings"))
+    if (!wcscmp(raw, L"Windows.System.UserProfile.DiagnosticsSettings"))
     {
         TRACE("No activation factory for %s\n", debugstr_hstring(classid));
         return REGDB_E_CLASSNOTREG;

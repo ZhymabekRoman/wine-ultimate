@@ -37,7 +37,10 @@ namespace Windows.System.Profile {
     interface ISystemIdentificationInfo;
     interface ISystemIdentificationStatics;
     interface IEducationSettingsStatics;
+    typedef enum PlatformDataCollectionLevel PlatformDataCollectionLevel;
+    interface IPlatformDiagnosticsAndUsageDataSettingsStatics;
     runtimeclass AnalyticsVersionInfo;
+    runtimeclass PlatformDiagnosticsAndUsageDataSettings;
     runtimeclass AnalyticsInfo;
     runtimeclass SystemIdentification;
     runtimeclass SystemIdentificationInfo;
@@ -167,6 +170,40 @@ namespace Windows.System.Profile {
         threading(both)
     ]
     runtimeclass EducationSettings
+    {
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 2.0)]
+    enum PlatformDataCollectionLevel
+    {
+        Basic    = 0,
+        Enhanced = 1,
+        Full     = 2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 2.0),
+        exclusiveto(Windows.System.Profile.PlatformDiagnosticsAndUsageDataSettings),
+        uuid(b6e24c1b-7b1c-4b32-8c62-a66597ce723a)
+    ]
+    interface IPlatformDiagnosticsAndUsageDataSettingsStatics : IInspectable
+    {
+        [propget] HRESULT CollectionLevel([out, retval] Windows.System.Profile.PlatformDataCollectionLevel *value);
+        [eventadd] HRESULT CollectionLevelChanged([in] Windows.Foundation.EventHandler<IInspectable*> *handler,
+                                                  [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT CollectionLevelChanged([in] EventRegistrationToken token);
+        HRESULT CanCollectDiagnostics([in] Windows.System.Profile.PlatformDataCollectionLevel level,
+                                      [out, retval] boolean *result);
+        HRESULT GetCurrentData([out, retval] Windows.Foundation.Collections.IPropertySet **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 2.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.IPlatformDiagnosticsAndUsageDataSettingsStatics, Windows.Foundation.UniversalApiContract, 2.0),
+        threading(both)
+    ]
+    runtimeclass PlatformDiagnosticsAndUsageDataSettings
     {
     }
 }

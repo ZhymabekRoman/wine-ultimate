@@ -43,6 +43,10 @@ extern int  qsort_s( void *base, size_t count, size_t size,
 extern int  rand( void );
 extern void srand( unsigned int seed );
 extern int  rand_s( unsigned int *val );
+extern int  abs( int n );
+extern long labs( long n );
+extern long long llabs( long long n );
+extern long long imaxabs( long long n );
 
 NTSTATUS WINAPI wine_rand_s( unsigned int *val )
 {
@@ -69,4 +73,24 @@ int WINAPI wine_qsort_s( void *base, size_t count, size_t size,
                     int (CDECL *compar)(void *, const void *, const void *), void *context )
 {
     return qsort_s( base, count, size, compar, context );
+}
+
+int WINAPI wine_abs( int n )
+{
+    return abs( n );
+}
+
+long WINAPI wine_labs( long n )
+{
+    return labs( n );
+}
+
+long long WINAPI wine_llabs( long long n )
+{
+    return llabs( n );
+}
+
+long long WINAPI wine_imaxabs( long long n )
+{
+    return imaxabs( n );
 }

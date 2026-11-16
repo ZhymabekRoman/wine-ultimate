@@ -17,6 +17,7 @@
 #include "wine/debug.h"
 
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_Foundation_Collections
 #define WIDL_using_Windows_System_Profile
 #include "windows.foundation.h"
 #include "windows.system.profile.h"

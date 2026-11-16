@@ -25,8 +25,9 @@ WINE_DEFAULT_DEBUG_CHANNEL(webview2);
 
 struct completion_ctx
 {
-    void *handler;   /* completion handler; Invoke is vtbl slot 3 */
-    void *object;    /* object to hand to the handler */
+    void *handler;   /* completion handler; Invoke is vtbl slot 3 (B) / 6 (WinRT face) */
+    void *object;    /* args to hand to the handler */
+    void *sender;    /* TypedEventHandler sender (the environment) */
     int deref;
 };
 
@@ -45,9 +46,12 @@ struct controller
     HWND child;
     BOOL visible;
     RECT bounds;
+    void *h_frame_nav;
+    LONG token;
 };
 
 static LPWSTR dup_wstr( LPCWSTR s );
+static HRESULT WINAPI webview_stub( void *t, ... );
 
 /* ICoreWebView2 face handed out by the controller's get_CoreWebView2
  * (vtbl slot 7); Navigate is vtbl slot 3 of this object. */
@@ -57,6 +61,12 @@ struct webview
     LONG ref;
     struct controller *controller;
     LPWSTR source;
+    void *h_nav_starting;
+    void *h_dom_loaded;
+    void *h_nav_completed;
+    void *h_source_changed;
+    void *h_permission;
+    LONG token;
 };
 
 static HRESULT WINAPI webview_QueryInterface( void *t, REFIID riid, void **obj )
@@ -97,25 +107,45 @@ static BOOL CALLBACK loader_find_child_cb( HWND hwnd, LPARAM lparam )
     return TRUE;
 }
 
+/* Completion delegates are COM objects: the vtable slot 3 entry is the
+ * TypedEventHandler Invoke (sender, args). Mirrors post_completion(). */
+static void fire_handler( void *handler, void *sender, void *args )
+{
+    void **vt;
+    HRESULT (WINAPI *invoke)( void *, void *, void * );
+
+    if (!handler) return;
+    vt = *(void ***)handler;
+    invoke = (void *)vt[3];
+    invoke( handler, sender, args );
+}
+
 static HRESULT WINAPI webview_Navigate( void *t, LPCWSTR uri, void *handler )
 {
     struct webview *w = t;
 
-    TRACE( "NAVIGATE %s\n", debugstr_w( uri ) );
+    ERR( "NAVIGATE %p uri %s handler %p\n", w, debugstr_w( uri ), handler );
     CoTaskMemFree( w->source );
     w->source = dup_wstr( uri );
-    if (handler)
     {
-        void **vt = *(void ***)handler;
-        HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
-        invoke( handler, S_OK, NULL );
+        struct event_args *ea = create_event_args( uri );
+        void *args = ea ? (void *)ea : (void *)w;
+        struct controller *c = w->controller;
+        if (c && c->h_frame_nav) fire_handler( c->h_frame_nav, w, args );
+        if (w->h_nav_starting) fire_handler( w->h_nav_starting, w, args );
+        if (w->h_dom_loaded) fire_handler( w->h_dom_loaded, w, args );
+        if (w->h_nav_completed) fire_handler( w->h_nav_completed, w, args );
+        if (w->h_source_changed) fire_handler( w->h_source_changed, w, w );
     }
+    if (handler) fire_handler( handler, w, NULL );
     return S_OK;
 }
 
 static HRESULT WINAPI webview_get_Source( void *t, LPWSTR *v )
 {
     struct webview *w = t;
+    ERR( "get_Source %p out %p\n", w, v );
+    if (!v) return E_POINTER;
     *v = dup_wstr( w->source );
     return *v ? S_OK : E_OUTOFMEMORY;
 }
@@ -145,6 +175,13 @@ static HRESULT WINAPI webview_GetTrustLevel( void *t, LONG *level )
 }
 static HRESULT WINAPI webview_stub( void *t, ... )
 {
+    va_list ap;
+    void *a1;
+
+    va_start( ap, t );
+    a1 = va_arg( ap, void * );
+    va_end( ap );
+    TRACE( "stub this %p a1 %p\n", t, a1 );
     return S_OK;
 }
 static HRESULT WINAPI webview_put_Source( void *t, LPCWSTR v )
@@ -155,27 +192,523 @@ static HRESULT WINAPI webview_put_Source( void *t, LPCWSTR v )
     return S_OK;
 }
 
+/* per-slot traced stubs for the webview face (gap-hunting) */
+static HRESULT WINAPI webview_stub_0( void *t, void *a1 )
+{
+    TRACE( "webview slot 0 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_1( void *t, void *a1 )
+{
+    TRACE( "webview slot 1 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_2( void *t, void *a1 )
+{
+    TRACE( "webview slot 2 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_3( void *t, void *a1 )
+{
+    TRACE( "webview slot 3 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_4( void *t, void *a1 )
+{
+    TRACE( "webview slot 4 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_5( void *t, void *a1 )
+{
+    TRACE( "webview slot 5 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_6( void *t, void *a1 )
+{
+    TRACE( "webview slot 6 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_7( void *t, void *a1 )
+{
+    TRACE( "webview slot 7 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_8( void *t, void *a1 )
+{
+    TRACE( "webview slot 8 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_9( void *t, void *a1 )
+{
+    TRACE( "webview slot 9 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_10( void *t, void *a1 )
+{
+    TRACE( "webview slot 10 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_11( void *t, void *a1 )
+{
+    TRACE( "webview slot 11 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_12( void *t, void *a1 )
+{
+    TRACE( "webview slot 12 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_13( void *t, void *a1 )
+{
+    TRACE( "webview slot 13 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_14( void *t, void *a1 )
+{
+    TRACE( "webview slot 14 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_15( void *t, void *a1 )
+{
+    TRACE( "webview slot 15 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_16( void *t, void *a1 )
+{
+    TRACE( "webview slot 16 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_17( void *t, void *a1 )
+{
+    TRACE( "webview slot 17 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_18( void *t, void *a1 )
+{
+    TRACE( "webview slot 18 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_19( void *t, void *a1 )
+{
+    TRACE( "webview slot 19 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_20( void *t, void *a1 )
+{
+    TRACE( "webview slot 20 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_21( void *t, void *a1 )
+{
+    TRACE( "webview slot 21 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_22( void *t, void *a1 )
+{
+    TRACE( "webview slot 22 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_23( void *t, void *a1 )
+{
+    TRACE( "webview slot 23 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_24( void *t, void *a1 )
+{
+    TRACE( "webview slot 24 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_25( void *t, void *a1 )
+{
+    TRACE( "webview slot 25 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_26( void *t, void *a1 )
+{
+    TRACE( "webview slot 26 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_27( void *t, void *a1 )
+{
+    TRACE( "webview slot 27 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_28( void *t, void *a1 )
+{
+    TRACE( "webview slot 28 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_29( void *t, void *a1 )
+{
+    TRACE( "webview slot 29 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_30( void *t, void *a1 )
+{
+    TRACE( "webview slot 30 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_31( void *t, void *a1 )
+{
+    TRACE( "webview slot 31 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_32( void *t, void *a1 )
+{
+    TRACE( "webview slot 32 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_33( void *t, void *a1 )
+{
+    TRACE( "webview slot 33 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_34( void *t, void *a1 )
+{
+    TRACE( "webview slot 34 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_35( void *t, void *a1 )
+{
+    TRACE( "webview slot 35 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_36( void *t, void *a1 )
+{
+    TRACE( "webview slot 36 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_37( void *t, void *a1 )
+{
+    TRACE( "webview slot 37 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_38( void *t, void *a1 )
+{
+    TRACE( "webview slot 38 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_39( void *t, void *a1 )
+{
+    TRACE( "webview slot 39 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_40( void *t, void *a1 )
+{
+    TRACE( "webview slot 40 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_41( void *t, void *a1 )
+{
+    TRACE( "webview slot 41 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_42( void *t, void *a1 )
+{
+    TRACE( "webview slot 42 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_43( void *t, void *a1 )
+{
+    TRACE( "webview slot 43 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_44( void *t, void *a1 )
+{
+    TRACE( "webview slot 44 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_45( void *t, void *a1 )
+{
+    TRACE( "webview slot 45 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_46( void *t, void *a1 )
+{
+    TRACE( "webview slot 46 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_47( void *t, void *a1 )
+{
+    TRACE( "webview slot 47 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_48( void *t, void *a1 )
+{
+    TRACE( "webview slot 48 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_49( void *t, void *a1 )
+{
+    TRACE( "webview slot 49 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_50( void *t, void *a1 )
+{
+    TRACE( "webview slot 50 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_51( void *t, void *a1 )
+{
+    TRACE( "webview slot 51 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_52( void *t, void *a1 )
+{
+    TRACE( "webview slot 52 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_53( void *t, void *a1 )
+{
+    TRACE( "webview slot 53 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_54( void *t, void *a1 )
+{
+    TRACE( "webview slot 54 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_55( void *t, void *a1 )
+{
+    TRACE( "webview slot 55 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_56( void *t, void *a1 )
+{
+    TRACE( "webview slot 56 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_57( void *t, void *a1 )
+{
+    TRACE( "webview slot 57 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_58( void *t, void *a1 )
+{
+    TRACE( "webview slot 58 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_59( void *t, void *a1 )
+{
+    TRACE( "webview slot 59 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_60( void *t, void *a1 )
+{
+    TRACE( "webview slot 60 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_61( void *t, void *a1 )
+{
+    TRACE( "webview slot 61 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_62( void *t, void *a1 )
+{
+    TRACE( "webview slot 62 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub_63( void *t, void *a1 )
+{
+    TRACE( "webview slot 63 this %p a1 %p\n", t, a1 );
+    return S_OK;
+}
+static const void *webview_stub_table[64] = {
+    webview_stub_0,
+    webview_stub_1,
+    webview_stub_2,
+    webview_stub_3,
+    webview_stub_4,
+    webview_stub_5,
+    webview_stub_6,
+    webview_stub_7,
+    webview_stub_8,
+    webview_stub_9,
+    webview_stub_10,
+    webview_stub_11,
+    webview_stub_12,
+    webview_stub_13,
+    webview_stub_14,
+    webview_stub_15,
+    webview_stub_16,
+    webview_stub_17,
+    webview_stub_18,
+    webview_stub_19,
+    webview_stub_20,
+    webview_stub_21,
+    webview_stub_22,
+    webview_stub_23,
+    webview_stub_24,
+    webview_stub_25,
+    webview_stub_26,
+    webview_stub_27,
+    webview_stub_28,
+    webview_stub_29,
+    webview_stub_30,
+    webview_stub_31,
+    webview_stub_32,
+    webview_stub_33,
+    webview_stub_34,
+    webview_stub_35,
+    webview_stub_36,
+    webview_stub_37,
+    webview_stub_38,
+    webview_stub_39,
+    webview_stub_40,
+    webview_stub_41,
+    webview_stub_42,
+    webview_stub_43,
+    webview_stub_44,
+    webview_stub_45,
+    webview_stub_46,
+    webview_stub_47,
+    webview_stub_48,
+    webview_stub_49,
+    webview_stub_50,
+    webview_stub_51,
+    webview_stub_52,
+    webview_stub_53,
+    webview_stub_54,
+    webview_stub_55,
+    webview_stub_56,
+    webview_stub_57,
+    webview_stub_58,
+    webview_stub_59,
+    webview_stub_60,
+    webview_stub_61,
+    webview_stub_62,
+    webview_stub_63
+};
+
+#define WV_ADD(name, field) static HRESULT WINAPI name( void *t, void *handler, UINT64 *token ) \
+{ \
+    struct webview *w = t; \
+    ERR( #name " %p handler %p\n", w, handler ); \
+    w->field = handler; \
+    if (token) *token = InterlockedIncrement( &w->token ); \
+    return S_OK; \
+}
+#define WV_REM(name, field) static HRESULT WINAPI name( void *t, UINT64 token ) \
+{ \
+    struct webview *w = t; \
+    w->field = NULL; \
+    return S_OK; \
+}
+WV_ADD( webview_add_NavigationStarting, h_nav_starting )
+WV_ADD( webview_add_DOMContentLoaded, h_dom_loaded )
+WV_ADD( webview_add_NavigationCompleted, h_nav_completed )
+WV_ADD( webview_add_SourceChanged, h_source_changed )
+WV_ADD( webview_add_PermissionRequested, h_permission )
+WV_REM( webview_remove_NavigationStarting, h_nav_starting )
+WV_REM( webview_remove_DOMContentLoaded, h_dom_loaded )
+WV_REM( webview_remove_NavigationCompleted, h_nav_completed )
+WV_REM( webview_remove_SourceChanged, h_source_changed )
+WV_REM( webview_remove_PermissionRequested, h_permission )
+
+/* Shared WinRT event-args facade: OfficeHub invokes delegates with
+ * (webview, args) and reads args vtable slot 7. Dual-face layout:
+ * Win32-face body 3.. and WinRT-face body 6.. overlap (get_Uri at 3 and 6,
+ * get_IsSuccess at 3-completed/7-completed etc). */
+struct event_args
+{
+    const void **vtbl;
+    LPWSTR uri;
+};
+static HRESULT WINAPI event_args_QI( void *t, REFIID riid, void **obj )
+{
+    *obj = t;
+    return S_OK;
+}
+static HRESULT WINAPI event_args_get_Uri( void *t, LPWSTR *v )
+{
+    struct event_args *a = t;
+    if (v) *v = dup_wstr( a->uri );
+    return S_OK;
+}
+static HRESULT WINAPI event_args_get_IsSuccess( void *t, BOOL *v )
+{
+    if (v) *v = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI event_args_get_id( void *t, UINT64 *v )
+{
+    if (v) *v = 1;
+    return S_OK;
+}
+static struct event_args *create_event_args( LPCWSTR uri )
+{
+    static struct event_args *a;
+    const void **vt;
+    unsigned int i;
+
+    if (a) return a;
+    if (!(a = HeapAlloc( GetProcessHeap(), 0, sizeof(*a) ))) return NULL;
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 32 * sizeof(*vt) )))
+    {
+        HeapFree( GetProcessHeap(), 0, a );
+        return NULL;
+    }
+    for (i = 0; i < 32; i++) vt[i] = webview_stub;
+    vt[0] = event_args_QI;
+    vt[3] = event_args_get_Uri;         /* NavigationStarting.get_Uri / DOMContentLoaded.get_Uri */
+    vt[4] = event_args_get_IsSuccess;   /* get_IsUserInitiated / Completed.get_NavigationId */
+    vt[5] = event_args_get_id;
+    vt[6] = event_args_get_Uri;         /* WinRT-face get_Uri */
+    vt[7] = event_args_get_IsSuccess;   /* WinRT-face get_IsSuccess */
+    a->vtbl = vt;
+    a->uri = dup_wstr( uri ? uri : L"" );
+    return a;
+}
+
+static void fire_handler( void *handler, void *sender, void *args );
+
+static HRESULT WINAPI webview_get_DocumentTitle( void *t, LPWSTR *v )
+{
+    if (v) *v = dup_wstr( L"" );
+    return S_OK;
+}
+static HRESULT WINAPI webview_NavigateToString( void *t, LPCWSTR html )
+{
+    struct webview *w = t;
+    CoTaskMemFree( w->source );
+    w->source = dup_wstr( L"about:blank" );
+    return S_OK;
+}
+
 static struct webview *create_webview( struct controller *c )
 {
     struct webview *w = HeapAlloc( GetProcessHeap(), 0, sizeof(*w) );
     const void **vt;
     unsigned int i;
     if (!w) return NULL;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 48 * sizeof(*vt) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 64 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, w );
         return NULL;
     }
-    for (i = 0; i < 48; i++) vt[i] = webview_stub;
+    for (i = 0; i < 64; i++) vt[i] = webview_stub_table[i];
+    /* ICoreWebView2 Win32 face (WRL clients: OfficeHub, msedgewebview2). */
     vt[0] = webview_QueryInterface;
     vt[1] = webview_AddRef;
     vt[2] = webview_Release;
-    vt[3] = webview_GetIids;
-    vt[4] = webview_GetRuntimeClassName;
-    vt[5] = webview_GetTrustLevel;
+    vt[3] = webview_Navigate;
+    vt[4] = webview_NavigateToString;
+    vt[7] = webview_get_DocumentTitle;
+    vt[8] = webview_add_NavigationStarting;
+    vt[9] = webview_remove_NavigationStarting;
+    vt[12] = webview_add_NavigationCompleted;
+    vt[13] = webview_remove_NavigationCompleted;
+    vt[14] = webview_add_DOMContentLoaded;
+    vt[15] = webview_remove_DOMContentLoaded;
+    vt[16] = webview_add_SourceChanged;
+    vt[17] = webview_remove_SourceChanged;
+    vt[22] = webview_add_PermissionRequested;
+    vt[23] = webview_remove_PermissionRequested;
+    vt[24] = webview_get_Source;
+    vt[25] = webview_put_Source;
+    /* WinRT face (IInspectable prologue then the same body): keep the
+     * dual-mapped entries at their shifted positions. */
     vt[6] = webview_Navigate;
-    vt[8] = webview_get_Source;
-    vt[9] = webview_put_Source;
     w->vtbl = vt;
     w->ref = 1;
     w->controller = c;
@@ -188,10 +721,77 @@ static HRESULT WINAPI controller_get_CoreWebView2( void *t, void **value )
     struct controller *c = t;
     struct webview *w;
 
-    WARN( "GET_COREWEBVIEW2 controller %p\n", c );
+    WARN( "GET_COREWEBVIEW2 controller %p out %p\n", c, value );
     if (!(w = create_webview( c ))) return E_OUTOFMEMORY;
-    *value = w;
+    /* OfficeHub calls the WinRT-face slot with a null out pointer; the
+     * webview is then (re)fetched via a slot that does take one, so keep
+     * the object alive for that caller instead of crashing. */
+    if (value) *value = w;
+    else w->ref++;
     return S_OK;
+}
+
+/* ICoreWebView2CreateCoreWebView2ControllerCompletedEventArgs (Win32 face):
+ * the app's Invoke QIs the second argument and calls get_Controller (slot 3)
+ * / get_CoreWebView2 (slot 4) on it. Handing out the raw controller as the
+ * args (the WhatsApp smoke shape) makes OfficeHub's handler read its
+ * vtbl[3] = get_IsVisible placeholder as a controller pointer, and the next
+ * call through that QIs a null member. A real args object serves both. */
+struct create_args
+{
+    const void **vtbl;
+    struct controller *controller;
+    struct webview *webview;
+};
+
+static HRESULT WINAPI create_args_QueryInterface( void *t, REFIID riid, void **obj )
+{
+    *obj = t;
+    return S_OK;
+}
+static ULONG WINAPI create_args_AddRef( void *t ) { return 2; }
+static ULONG WINAPI create_args_Release( void *t ) { return 1; }
+static HRESULT WINAPI create_args_get_Controller( void *t, void **v )
+{
+    struct create_args *a = t;
+    *v = a->controller;
+    return S_OK;
+}
+static HRESULT WINAPI create_args_get_CoreWebView2( void *t, void **v )
+{
+    struct create_args *a = t;
+    return controller_get_CoreWebView2( a->controller, v );
+}
+
+static struct create_args *create_create_args( struct controller *c )
+{
+    struct create_args *a = HeapAlloc( GetProcessHeap(), 0, sizeof(*a) );
+    const void **vt;
+    unsigned int i;
+    if (!a) return NULL;
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 64 * sizeof(*vt) )))
+    {
+        HeapFree( GetProcessHeap(), 0, a );
+        return NULL;
+    }
+    for (i = 0; i < 64; i++) vt[i] = webview_stub_table[i];
+    /* Win32 face: get_Controller=3, get_CoreWebView2=4;
+     * WinRT face (prologue through 5): 6 and 7. */
+    vt[0] = create_args_QueryInterface;
+    vt[1] = create_args_AddRef;
+    vt[2] = create_args_Release;
+    vt[3] = create_args_get_Controller;
+    vt[4] = create_args_get_CoreWebView2;
+    vt[6] = create_args_get_Controller;
+    vt[7] = create_args_get_CoreWebView2;
+    /* Windows.Web.UI.Interop (UWP WebViewControl) projection: OfficeHub
+     * reads the controller off the completion args at slots 21/25. */
+    vt[21] = create_args_get_Controller;
+    vt[25] = create_args_get_Controller;
+    a->vtbl = vt;
+    a->controller = c;
+    a->webview = NULL;
+    return a;
 }
 
 struct environment_options
@@ -254,29 +854,41 @@ static void register_completion_class(void)
 
 /* the env handler is a struct whose first field points at the vtable;
  * the controller handler is passed as the raw vtable itself */
-static HRESULT post_completion( void *handler, void *object, int deref )
+static HRESULT post_completion( void *handler, void *sender, void *object, int deref )
 {
     struct completion_ctx *ctx;
     HWND hwnd;
 
     if (!handler) return E_POINTER;
-    ERR( "post_completion handler %p object %p deref %d slot3 %p\n", handler, object, deref,
-         *((void **)(deref ? *(void ***)handler : handler) + 3) );
-    if (!deref)
-    {
-        void **vt = handler;
-        void **t = *(void ***)handler;
-        ERR( "  handler+0 vt=%p [0]=%p [1]=%p [2]=%p [3]=%p\n", vt, t[0], t[1], t[2], t[3] );
-    }
 
     /* s310: invoke synchronously. All loader calls happen on the UI thread,
      * and the app's ShowWindow cycle overflow (unwinding the message loop
      * mid-pump) drops the posted WM_APP_COMPLETION: the env/controller chain
-     * stalls with the browser spawned and the mojo pipe never opened. */
+     * stalls with the browser spawned and the mojo pipe never opened.
+     *
+     * Handler shape depends on the client: the msedgewebview2 child hands us
+     * the raw vtable (deref 0), a UWP app's C++/WinRT callback object hands
+     * us a COM object whose first field is the vptr (deref 1 from
+     * CreateCoreWebView2EnvironmentWithOptions; OfficeHub's
+     * CreateCoreWebView2Controller handler arrives deref 0 in COM shape
+     * too). Probe slot 3 of the raw interpretation: if it is not a code
+     * pointer, take the vptr one level deeper. */
     {
         void **vt = deref ? *(void ***)handler : handler;
-        HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
-        return invoke( handler, S_OK, object );
+        void *invoke_slot;
+        HRESULT (WINAPI *invoke)( void *, void *, void * );
+        if (!deref && IsBadCodePtr( (FARPROC)vt[3] )) vt = *(void ***)handler;
+        /* Invoke lives at slot 3 of the B-shape table and at slot 6 of the
+         * WinRT-face delegate (IInspectable prologue through 5, as used by
+         * C++/WinRT apps like OfficeHub). Prefer slot 6 when it is code.
+         * TypedEventHandler::Invoke(this, sender, args): sender is the
+         * environment; the B-shape second operand is an HRESULT, and any
+         * non-null environment pointer reads as S_OK there. */
+        invoke_slot = (!deref && !IsBadCodePtr( (FARPROC)vt[6] )) ? vt[6] : vt[3];
+        invoke = (void *)invoke_slot;
+        ERR( "post_completion handler %p sender %p object %p deref %d vt %p invoke %p\n",
+             handler, sender, object, deref, vt, invoke_slot );
+        return invoke( handler, sender, object );
     }
 #if 0
     register_completion_class();
@@ -331,12 +943,14 @@ static ULONG WINAPI controller_Release( void *t ) { return 1; }
 static HRESULT WINAPI controller_get_IsVisible( void *t, BOOL *v )
 {
     struct controller *c = t;
-    *v = c->visible;
+    ERR( "ctrl get_IsVisible %p out %p\n", c, v );
+    if (v) *v = c->visible;
     return S_OK;
 }
 static HRESULT WINAPI controller_put_IsVisible( void *t, BOOL v )
 {
     struct controller *c = t;
+    ERR( "ctrl put_IsVisible %p v %d\n", c, v );
     c->visible = v;
     if (!c->child && c->parent && IsWindow( c->parent ))
         EnumChildWindows( c->parent, loader_find_child_cb, (LPARAM)&c->child );
@@ -352,27 +966,91 @@ static HRESULT WINAPI controller_put_IsVisible( void *t, BOOL v )
     return S_OK;
 }
 
+/* WinRT-face ICoreWebView2Controller tail used by OfficeHub:
+ * slot 21 get_ContainingBrowserWindow (ICoreWebView2),
+ * slot 25 add_FrameNavigationStarting (event registration with an
+ * event-token out). */
+static HRESULT WINAPI controller_get_ContainingBrowserWindow( void *t, void **value )
+{
+    struct controller *c = t;
+    struct webview *w;
+    ERR( "ctrl get_ContainingBrowserWindow %p out %p\n", c, value );
+    if (value)
+    {
+        if ((w = create_webview( c ))) *value = w;
+        else return E_OUTOFMEMORY;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI controller_add_FrameNavigationStarting( void *t, void *handler, UINT64 *token )
+{
+    struct controller *c = t;
+    ERR( "ctrl add_FrameNavigationStarting %p handler %p\n", c, handler );
+    c->h_frame_nav = handler;
+    if (token) *token = InterlockedIncrement( &c->token );
+    return S_OK;
+}
+
+static HRESULT WINAPI controller_get_Bounds( void *t, RECT *rect )
+{
+    struct controller *c = t;
+    ERR( "ctrl get_Bounds %p out %p\n", c, rect );
+    if (rect) *rect = c->bounds;
+    return S_OK;
+}
+/* RECT (16 bytes) is passed in two registers on x86_64: left/top in edx,
+ * right/bottom in r8d. */
+static HRESULT WINAPI controller_put_Bounds( void *t, LONG left, LONG top, LONG right, LONG bottom )
+{
+    struct controller *c = t;
+    c->bounds.left = left;
+    c->bounds.top = top;
+    c->bounds.right = right;
+    c->bounds.bottom = bottom;
+    ERR( "ctrl put_Bounds %p %ld,%ld %ldx%ld\n", c, left, top, right - left, bottom - top );
+    return S_OK;
+}
+
 /* Heap vtbl filled with per-slot stores (RIP-relative immediates): static
  * .rdata vtbl arrays go stale because the shared pages are relocated once,
- * by whichever process (app or msedgewebview2 child) maps them first. */
+ * by whichever process (app or msedgewebview2 child) maps them first.
+ *
+ * Two consumption shapes exist for ICoreWebView2Controller:
+ *  - the WhatsApp bridge (raw handler, 3-slot prologue): IsVisible get/put
+ *    at 3/4, Bounds get/put at 5/6, CoreWebView2 get at 7;
+ *  - a C++/WinRT UWP app (OfficeHub): IInspectable prologue through 5,
+ *    IsVisible get/put at 6/7, Bounds get/put at 8/9, CoreWebView2 get at
+ *    10, then the v1 body (ResetBrightness, DefaultBackgroundColor, zoom,
+ *    NewWindowRequested, Navigation* events) through ~40.
+ * One table serves both: 3-7 keep the B-shape slots, 8-10 mirror them in
+ * WinRT-face positions, 11-40 are S_OK stubs. */
 static struct controller *create_controller( HWND parent )
 {
     struct controller *c = HeapAlloc( GetProcessHeap(), 0, sizeof(*c) );
     const void **vt;
+    unsigned int i;
     if (!c) return NULL;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 8 * sizeof(*vt) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 64 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, c );
         return NULL;
     }
+    for (i = 0; i < 64; i++) vt[i] = webview_stub;
     vt[0] = controller_QueryInterface;
     vt[1] = controller_AddRef;
     vt[2] = controller_Release;
     vt[3] = controller_get_IsVisible;
     vt[4] = controller_put_IsVisible;
-    vt[5] = controller_get_IsVisible;   /* get_Bounds placeholder */
-    vt[6] = controller_put_IsVisible;   /* put_Bounds placeholder */
+    vt[5] = controller_get_IsVisible;   /* get_Bounds placeholder (B-shape) */
+    vt[6] = controller_put_IsVisible;   /* put_Bounds placeholder (B-shape) */
     vt[7] = controller_get_CoreWebView2;
+    vt[5] = controller_get_Bounds;      /* B-shape get_Bounds */
+    vt[6] = controller_put_Bounds;      /* B-shape put_Bounds */
+    vt[8] = controller_get_Bounds;      /* WinRT-face Bounds get */
+    vt[9] = controller_put_Bounds;      /* WinRT-face Bounds put */
+    vt[10] = controller_get_CoreWebView2;
+    vt[21] = controller_get_ContainingBrowserWindow;
+    vt[25] = controller_add_FrameNavigationStarting;
     c->vtbl = vt;
     c->ref = 1;
     c->parent = parent;
@@ -572,12 +1250,18 @@ static HRESULT WINAPI environment_CreateCoreWebView2Controller( void *t, HWND pa
 {
     struct environment *e = t;
     struct controller *c;
+    struct create_args *a;
 
     ERR( "env %p parent %p handler %p self-slot %p\n", e, parent, handler,
          ((const void **)e->vtbl)[3] );
 
+    (void)a;
     if (!(c = create_controller( parent ))) return E_OUTOFMEMORY;
-    return post_completion( handler, c, 0 );
+    /* OfficeHub is a WRL (Win32-face) client: the controller-completed
+     * delegate is Invoke(this, HRESULT status, ICoreWebView2Controller*),
+     * i.e. the controller pointer straight through as the second operand,
+     * not a WinRT-face event args object. */
+    return post_completion( handler, (void *)(INT_PTR)S_OK, c, 0 );
 }
 
 static HRESULT WINAPI environment_get_BrowserVersion( void *t, LPWSTR *v )
@@ -591,19 +1275,25 @@ static struct environment *create_environment( LPCWSTR browser_version )
 {
     struct environment *e = HeapAlloc( GetProcessHeap(), 0, sizeof(*e) );
     const void **vt;
+    unsigned int i;
     if (!e) return NULL;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 5 * sizeof(*vt) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 32 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, e );
         return NULL;
     }
+    for (i = 0; i < 32; i++) vt[i] = webview_stub;
     /* per-slot stores: RIP-relative immediates, immune to the shared .rdata
-     * pages being relocated once (app vs msedgewebview2 child image base) */
+     * pages being relocated once (app vs msedgewebview2 child image base).
+     * Slots 3-4 serve the B-shape (WhatsApp) face; slots 5+ are the WinRT
+     * face tail (BrowserVersion/GetOptions/events) for C++/WinRT apps:
+     * OfficeHub calls get_BrowserVersion at 5 and GetOptions at 6. */
     vt[0] = environment_QueryInterface;
     vt[1] = environment_AddRef;
     vt[2] = environment_Release;
     vt[3] = environment_CreateCoreWebView2Controller;
     vt[4] = environment_get_BrowserVersion;
+    vt[5] = environment_get_BrowserVersion;
     e->vtbl = vt;
     e->ref = 1;
     e->version = dup_wstr( browser_version && *browser_version ? browser_version : L"157.0.4341.42" );
@@ -728,7 +1418,7 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentWithOptions( LPCWSTR browser_version
         }
         launch_browser( user_data_folder, extra );
     }
-    hr = post_completion( handler, e, 1 );
+    hr = post_completion( handler, e, e, 1 );
     TRACE( "post_completion -> 0x%08x\n", hr );
     return hr;
 }
@@ -742,12 +1432,14 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentOptions( void **options )
 {
     struct environment_options *o = HeapAlloc( GetProcessHeap(), 0, sizeof(*o) );
     const void **vt;
+    unsigned int i;
     if (!o) return E_OUTOFMEMORY;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 11 * sizeof(*vt) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 24 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, o );
         return E_OUTOFMEMORY;
     }
+    for (i = 0; i < 24; i++) vt[i] = webview_stub;
     vt[0] = options_QueryInterface;
     vt[1] = options_AddRef;
     vt[2] = options_Release;

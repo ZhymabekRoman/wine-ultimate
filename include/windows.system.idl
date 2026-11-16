@@ -611,3 +611,21 @@ namespace Windows.System
         /* [contract(Windows.Foundation.UniversalApiContract, 10.0)] interface Windows.System.IUserChangedEventArgs2; */
     }
 }
+
+namespace Windows.System.Diagnostics.Telemetry
+{
+    runtimeclass PlatformTelemetryClient;
+
+    [exclusiveto(Windows.System.Diagnostics.Telemetry.PlatformTelemetryClient)]
+    interface IPlatformTelemetryClient : IInspectable
+    {
+        HRESULT Dummy();
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 3.0),
+     marshaling_behavior(agile), threading(both)]
+    runtimeclass PlatformTelemetryClient
+    {
+        [default] interface Windows.System.Diagnostics.Telemetry.IPlatformTelemetryClient;
+    }
+}

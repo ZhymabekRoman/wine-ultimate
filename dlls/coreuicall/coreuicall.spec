@@ -11,6 +11,10 @@
 @ stub CoreUICreateAnonymousStream
 @ cdecl qsort(ptr ptr ptr) "wine_qsort"
 @ cdecl qsort_s(ptr ptr long ptr ptr) "wine_qsort_s"
+@ cdecl abs(long) "wine_abs"
+@ cdecl labs(long) "wine_labs"
+@ cdecl -ret64 llabs(int64) "wine_llabs"
+@ cdecl -ret64 imaxabs(int64) "wine_imaxabs"
 @ cdecl rand() "wine_rand"
 @ cdecl rand_s(ptr) "wine_rand_s"
 @ cdecl srand(long) "wine_srand"
