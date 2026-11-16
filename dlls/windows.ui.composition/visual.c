@@ -623,7 +623,28 @@ static HRESULT WINAPI shape_visual_get_Shapes( void *iface, void **value )
     if (*value) IInspectable_AddRef( (IInspectable *)*value );
     return S_OK;
 }
-static const void *shape_visual_vtbl[] =
+static HRESULT WINAPI shape_visual_get_ViewBox( void *iface, void **value )
+{
+    struct visual *impl = impl_from_IShapeVisual( iface );
+    if (!value) return E_POINTER;
+    *value = impl->view_box;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
+    return S_OK;
+}
+static HRESULT WINAPI shape_visual_put_ViewBox( void *iface, void *value )
+{
+    struct visual *impl = impl_from_IShapeVisual( iface );
+    if (value) IInspectable_AddRef( (IInspectable *)value );
+    if (impl->view_box) IInspectable_Release( (IInspectable *)impl->view_box );
+    impl->view_box = value;
+    return S_OK;
+}
+static HRESULT WINAPI shape_visual_noop( void *iface )
+{
+    FIXME( "iface %p stub!\n", iface );
+    return S_OK;
+}
+static const void *shape_visual_vtbl[32] =
 {
     shape_visual_QueryInterface,
     shape_visual_AddRef,
@@ -632,6 +653,9 @@ static const void *shape_visual_vtbl[] =
     shape_visual_GetRuntimeClassName,
     shape_visual_GetTrustLevel,
     shape_visual_get_Shapes,
+    shape_visual_get_ViewBox,
+    shape_visual_put_ViewBox,
+    [9 ... 31] = shape_visual_noop,
 };
 
 static struct visual *visual_create( struct compositor *compositor, BOOL is_sprite, BOOL is_shape )

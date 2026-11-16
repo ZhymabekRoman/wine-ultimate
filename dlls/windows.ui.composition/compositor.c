@@ -764,7 +764,7 @@ static HRESULT WINAPI comp5_stub_get_zero( void *iface, void **out )
     if (out) *out = NULL;
     return S_OK;
 }
-static const void *comp5_stub_vtbl[] =
+static const void *comp5_stub_vtbl[48] =
 {
     comp5_stub_QI, comp5_stub_AddRef, comp5_stub_Release,
     comp5_stub_GetIids, comp5_stub_GetRuntimeClassName, comp5_stub_GetTrustLevel,
@@ -774,6 +774,7 @@ static const void *comp5_stub_vtbl[] =
     comp5_stub_noop, comp5_stub_noop, comp5_stub_noop, comp5_stub_noop,
     comp5_stub_noop, comp5_stub_noop, comp5_stub_noop, comp5_stub_noop,
     comp5_stub_get_zero,
+    [27 ... 47] = comp5_stub_noop,
 };
 
 static HRESULT comp5_stub_create( const WCHAR *name, void **out )

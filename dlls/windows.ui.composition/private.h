@@ -323,6 +323,7 @@ struct visual
     struct prop_set *properties;
     struct visual_collection *children;
     void *shapes;
+    void *view_box;
     struct visual *parent;
     struct ICompositionBrush *brush;
     BOOL is_sprite;
