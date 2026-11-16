@@ -234,6 +234,8 @@ extern struct obj_locator get_shared_object_locator( volatile void *object_shm )
 
 extern struct object *create_named_pipe_device( struct object *root, const struct unicode_str *name,
                                                 unsigned int attr, const struct security_descriptor *sd );
+extern int named_pipe_get_shm_fd( struct object *obj );
+extern void named_pipe_update_comp_flags( struct object *obj, unsigned int comp_flags );
 extern struct object *create_mailslot_device( struct object *root, const struct unicode_str *name,
                                               unsigned int attr, const struct security_descriptor *sd );
 extern struct object *create_console_device( struct object *root, const struct unicode_str *name,
@@ -296,6 +298,7 @@ extern void async_wake_up( struct async_queue *queue, unsigned int status );
 extern struct completion *fd_get_completion( struct fd *fd, apc_param_t *p_key );
 extern void fd_copy_completion( struct fd *src, struct fd *dst );
 extern struct iosb *async_get_iosb( struct async *async );
+extern struct iosb *create_iosb( const void *in_data, data_size_t in_size, data_size_t out_size );
 extern struct thread *async_get_thread( struct async *async );
 extern struct async *find_pending_async( struct async_queue *queue );
 extern struct async *find_pending_alpc_async( struct async_queue *queue, unsigned int msg_id );

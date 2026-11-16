@@ -3318,6 +3318,11 @@ DECL_HANDLER(get_handle_fd)
     if ((fd = get_handle_fd_obj( current->process, req->handle, 0 )))
     {
         int unix_fd = get_unix_fd( fd );
+        if (unix_fd == -1)
+        {
+            unix_fd = named_pipe_get_shm_fd( get_fd_user( fd ) );
+            if (unix_fd != -1) clear_error();
+        }
         reply->cacheable = fd->cacheable;
         if (unix_fd != -1)
         {
@@ -3477,6 +3482,7 @@ DECL_HANDLER(set_fd_completion_mode)
             fd->comp_flags |= req->flags & ( FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
                                            | FILE_SKIP_SET_EVENT_ON_HANDLE
                                            | FILE_SKIP_SET_USER_EVENT_ON_FAST_IO );
+            named_pipe_update_comp_flags( get_fd_user( fd ), fd->comp_flags );
         }
         else
             set_error( STATUS_INVALID_PARAMETER );

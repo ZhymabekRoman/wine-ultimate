@@ -881,7 +881,7 @@ static void iosb_destroy( struct object *obj )
 }
 
 /* allocate iosb struct */
-static struct iosb *create_iosb( const void *in_data, data_size_t in_size, data_size_t out_size )
+struct iosb *create_iosb( const void *in_data, data_size_t in_size, data_size_t out_size )
 {
     struct iosb *iosb;
 

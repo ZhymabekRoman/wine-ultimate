@@ -29,7 +29,44 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <stdint.h>
 #include <unistd.h>
+
+#define WINE_PIPE_SHM_MAGIC 0x57494E4550495045ULL /* "WINEPIPE" */
+#define WINE_PIPE_RING_SIZE 65536
+#define WINE_PIPE_RING_MASK (WINE_PIPE_RING_SIZE - 1)
+
+struct pipe_shm_ring
+{
+    uint32_t lock;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t cur_msg_rem;
+    uint32_t msg_count;
+    uint32_t pad[3];
+    unsigned char data[WINE_PIPE_RING_SIZE];
+};
+
+struct pipe_shm_end
+{
+    uint32_t state;
+    uint32_t flags;
+    uint32_t comp_flags;
+    uint32_t buffer_size;
+    uint32_t server_read_q;
+    uint32_t server_write_q;
+    uint32_t unsignaled;
+    uint32_t pad;
+    struct pipe_shm_ring in;
+};
+
+struct pipe_shm
+{
+    uint64_t magic;
+    uint32_t message_mode;
+    uint32_t sharing;
+    struct pipe_shm_end end[2]; /* 0 = client, 1 = server */
+};
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -124,6 +161,9 @@ struct pipe_end
                                       * pushing fragments into its ring; slot 2 = the NodeLinkMemory Section).  The
                                       * relay keeps a ref here so that a W-plane delivery into this end can pulse it
                                       * (WA_RELAY: N) — the "ring has data" edge.  NULL = no type-7 adopted here yet */
+    unsigned int         comp_flags; /* cached fd->comp_flags */
+    int                  shm_fd;     /* memfd for user-space fast-path */
+    struct pipe_shm     *shm;        /* mapped shared-memory ring buffer */
 };
 
 struct pipe_server
@@ -1517,6 +1557,233 @@ static void free_message( struct pipe_message *message )
     wine_slab_free( message, sizeof(*message) );
 }
 
+static inline int pipe_shm_side( const struct pipe_end *pipe_end )
+{
+    return pipe_end->obj.ops == &pipe_server_ops ? 1 : 0;
+}
+
+static inline void pipe_ring_lock( volatile uint32_t *lock )
+{
+    unsigned int spins = 0;
+    while (__sync_lock_test_and_set( lock, 1 ))
+    {
+        while (*lock)
+        {
+            if (++spins > 10000)
+            {
+                __atomic_store_n( lock, 1, __ATOMIC_SEQ_CST );
+                return;
+            }
+            __asm__ __volatile__( "pause" ::: "memory" );
+        }
+    }
+}
+
+static inline void pipe_ring_unlock( volatile uint32_t *lock )
+{
+    __sync_lock_release( lock );
+}
+
+static inline void pipe_ring_read_bytes( const struct pipe_shm_ring *ring, uint32_t pos, void *dst, uint32_t len )
+{
+    uint32_t idx = pos & WINE_PIPE_RING_MASK;
+    uint32_t first = WINE_PIPE_RING_SIZE - idx;
+    if (first >= len)
+    {
+        memcpy( dst, ring->data + idx, len );
+    }
+    else
+    {
+        memcpy( dst, ring->data + idx, first );
+        memcpy( (char *)dst + first, ring->data, len - first );
+    }
+}
+
+static data_size_t pipe_shm_ring_avail( struct pipe_shm_ring *ring, int message_mode )
+{
+    data_size_t avail;
+
+    pipe_ring_lock( &ring->lock );
+    avail = ring->tail - ring->head;
+    if (message_mode && ring->msg_count)
+    {
+        uint32_t headers = ring->cur_msg_rem ? (ring->msg_count - 1) * 4 : ring->msg_count * 4;
+        avail = avail >= headers ? avail - headers : 0;
+    }
+    pipe_ring_unlock( &ring->lock );
+    return avail;
+}
+
+static void pipe_shm_update_waiters( struct pipe_end *pipe_end )
+{
+    int side;
+    if (!pipe_end || !pipe_end->shm) return;
+    side = pipe_shm_side( pipe_end );
+    __atomic_store_n( &pipe_end->shm->end[side].server_read_q,
+                      (!list_empty( &pipe_end->read_q.queue ) || !list_empty( &pipe_end->message_queue )) ? 1 : 0,
+                      __ATOMIC_RELEASE );
+    __atomic_store_n( &pipe_end->shm->end[side].server_write_q,
+                      !list_empty( &pipe_end->write_q.queue ) ? 1 : 0,
+                      __ATOMIC_RELEASE );
+    if (list_empty( &pipe_end->read_q.queue ) && list_empty( &pipe_end->write_q.queue ))
+        __atomic_store_n( &pipe_end->shm->end[side].unsignaled, 0, __ATOMIC_RELEASE );
+    else
+        __atomic_store_n( &pipe_end->shm->end[side].unsignaled, 1, __ATOMIC_RELEASE );
+}
+
+static void pipe_shm_flush_to_queue( struct pipe_end *pipe_end )
+{
+    struct pipe_shm *shm = pipe_end->shm;
+    struct pipe_shm_ring *ring;
+    int side;
+
+    if (!shm) return;
+    side = pipe_shm_side( pipe_end );
+    ring = &shm->end[side].in;
+
+    pipe_ring_lock( &ring->lock );
+    while (ring->head != ring->tail || ring->msg_count)
+    {
+        uint32_t msg_len;
+        char *buf = NULL;
+        struct iosb *iosb;
+        struct pipe_message *message;
+
+        if (shm->message_mode)
+        {
+            if (ring->cur_msg_rem)
+            {
+                msg_len = ring->cur_msg_rem;
+                ring->cur_msg_rem = 0;
+            }
+            else
+            {
+                if (ring->tail - ring->head < 4) break;
+                pipe_ring_read_bytes( ring, ring->head, &msg_len, 4 );
+                ring->head += 4;
+            }
+            if (ring->tail - ring->head < msg_len) break;
+            if (msg_len)
+            {
+                if (!(buf = malloc( msg_len ))) break;
+                pipe_ring_read_bytes( ring, ring->head, buf, msg_len );
+                ring->head += msg_len;
+            }
+            if (ring->msg_count) ring->msg_count--;
+        }
+        else
+        {
+            msg_len = ring->tail - ring->head;
+            if (!msg_len) break;
+            if (!(buf = malloc( msg_len ))) break;
+            pipe_ring_read_bytes( ring, ring->head, buf, msg_len );
+            ring->head += msg_len;
+        }
+
+        iosb = create_iosb( buf, msg_len, 0 );
+        free( buf );
+        if (!iosb) break;
+        message = queue_message( pipe_end, iosb );
+        release_object( iosb );
+        if (!message) break;
+    }
+    pipe_ring_unlock( &ring->lock );
+    pipe_shm_update_waiters( pipe_end );
+}
+
+static void pipe_shm_detach( struct pipe_end *pipe_end )
+{
+    if (pipe_end->shm)
+    {
+        int side = pipe_shm_side( pipe_end );
+        __atomic_store_n( &pipe_end->shm->end[side].state, pipe_end->state, __ATOMIC_RELEASE );
+        munmap( pipe_end->shm, sizeof(struct pipe_shm) );
+        pipe_end->shm = NULL;
+    }
+    if (pipe_end->shm_fd != -1)
+    {
+        close( pipe_end->shm_fd );
+        pipe_end->shm_fd = -1;
+    }
+}
+
+static void pipe_shm_init_pair( struct pipe_end *server, struct pipe_end *client )
+{
+    int sfd, cfd;
+    struct pipe_shm *shm;
+    data_size_t max_q = WINE_PIPE_RING_SIZE - 4096;
+
+    if (relay_wanted( server ) || relay_wanted( client )) return;
+    if ((sfd = memfd_create( "wine-pipe", MFD_CLOEXEC )) == -1) return;
+    if (ftruncate( sfd, sizeof(struct pipe_shm) ) == -1)
+    {
+        close( sfd );
+        return;
+    }
+    shm = mmap( NULL, sizeof(struct pipe_shm), PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0 );
+    if (shm == MAP_FAILED)
+    {
+        close( sfd );
+        return;
+    }
+    if ((cfd = dup( sfd )) == -1)
+    {
+        munmap( shm, sizeof(struct pipe_shm) );
+        close( sfd );
+        return;
+    }
+    memset( shm, 0, offsetof(struct pipe_shm, end[0].in.data) );
+    memset( &shm->end[1], 0, offsetof(struct pipe_shm_end, in.data) );
+    shm->message_mode = server->pipe->message_mode ? 1 : 0;
+    shm->sharing = server->pipe->sharing;
+
+    shm->end[0].state = FILE_PIPE_CONNECTED_STATE;
+    shm->end[0].flags = client->flags;
+    shm->end[0].comp_flags = client->comp_flags;
+    shm->end[0].buffer_size = min( client->buffer_size, max_q );
+
+    shm->end[1].state = FILE_PIPE_CONNECTED_STATE;
+    shm->end[1].flags = server->flags;
+    shm->end[1].comp_flags = server->comp_flags;
+    shm->end[1].buffer_size = min( server->buffer_size, max_q );
+
+    __atomic_store_n( &shm->magic, WINE_PIPE_SHM_MAGIC, __ATOMIC_RELEASE );
+
+    server->shm_fd = sfd;
+    server->shm = shm;
+    client->shm_fd = cfd;
+    client->shm = mmap( NULL, sizeof(struct pipe_shm), PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0 );
+    if (client->shm == MAP_FAILED)
+    {
+        client->shm = NULL;
+        close( cfd );
+        client->shm_fd = -1;
+    }
+}
+
+int named_pipe_get_shm_fd( struct object *obj )
+{
+    struct pipe_end *pipe_end;
+
+    if (!obj || (obj->ops != &pipe_server_ops && obj->ops != &pipe_client_ops))
+        return -1;
+    pipe_end = (struct pipe_end *)obj;
+    return pipe_end->shm_fd;
+}
+
+void named_pipe_update_comp_flags( struct object *obj, unsigned int comp_flags )
+{
+    struct pipe_end *pipe_end;
+
+    if (!obj || (obj->ops != &pipe_server_ops && obj->ops != &pipe_client_ops))
+        return;
+    pipe_end = (struct pipe_end *)obj;
+    pipe_end->comp_flags = comp_flags;
+    if (pipe_end->shm)
+        __atomic_store_n( &pipe_end->shm->end[pipe_shm_side( pipe_end )].comp_flags,
+                          comp_flags, __ATOMIC_RELEASE );
+}
+
 static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status )
 {
     struct pipe_end *connection = pipe_end->connection;
@@ -1539,6 +1806,12 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
 
     pipe_end->state = status == STATUS_PIPE_DISCONNECTED
         ? FILE_PIPE_DISCONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
+    if (pipe_end->shm)
+    {
+        if (status != STATUS_PIPE_DISCONNECTED)
+            pipe_shm_flush_to_queue( pipe_end );
+        pipe_shm_detach( pipe_end );
+    }
     if (wv2io_wanted( pipe_end ))
         WV2IO( "S pid=%04x ep=%p st=%c (teardown %x)\n",
                current ? current->process->id : 0, pipe_end,
@@ -1571,6 +1844,7 @@ static void pipe_end_destroy( struct object *obj )
     struct pipe_message *message;
 
     pipe_end_disconnect( pipe_end, STATUS_PIPE_BROKEN );
+    pipe_shm_detach( pipe_end );
 
     while (!list_empty( &pipe_end->message_queue ))
     {
@@ -1846,10 +2120,16 @@ static void pipe_end_flush( struct fd *fd, struct async *async )
         return;
     }
 
-    if (pipe_end->connection && !list_empty( &pipe_end->connection->message_queue ))
+    if (pipe_end->connection)
     {
-        fd_queue_async( pipe_end->fd, async, ASYNC_TYPE_WAIT );
-        set_error( STATUS_PENDING );
+        pipe_shm_flush_to_queue( pipe_end->connection );
+        if (!list_empty( &pipe_end->connection->message_queue ))
+        {
+            fd_queue_async( pipe_end->fd, async, ASYNC_TYPE_WAIT );
+            if (pipe_end->shm)
+                __atomic_store_n( &pipe_end->shm->end[pipe_shm_side( pipe_end )].unsignaled, 1, __ATOMIC_RELEASE );
+            set_error( STATUS_PENDING );
+        }
     }
 }
 
@@ -1860,6 +2140,10 @@ static data_size_t pipe_end_get_avail( struct pipe_end *pipe_end )
 
     LIST_FOR_EACH_ENTRY( message, &pipe_end->message_queue, struct pipe_message, entry )
         avail += message->iosb->in_size - message->read_pos;
+
+    if (pipe_end->shm)
+        avail += pipe_shm_ring_avail( &pipe_end->shm->end[pipe_shm_side( pipe_end )].in,
+                                      pipe_end->shm->message_mode );
 
     return avail;
 }
@@ -2262,6 +2546,7 @@ static void reselect_read_queue( struct pipe_end *pipe_end, int reselect_write )
         else if (reselect_write)
             reselect_write_queue( pipe_end->connection );
     }
+    pipe_shm_update_waiters( pipe_end );
 }
 
 /* poll event for a pipe end's (pseudo) fd: the pollable fd is the inproc-sync
@@ -2331,11 +2616,13 @@ static void reselect_write_queue( struct pipe_end *pipe_end )
 
     ignore_reselect = 0;
     reselect_read_queue( reader, 0 );
+    pipe_shm_update_waiters( pipe_end );
 }
 
 static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
 {
     struct pipe_end *pipe_end = get_fd_user( fd );
+    pipe_shm_flush_to_queue( pipe_end );
     switch (pipe_end->state)
     {
     case FILE_PIPE_CONNECTED_STATE:
@@ -2383,6 +2670,7 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
                     reselect_write_queue( pipe_end->connection );
             }
             if (relay_wanted( pipe_end )) relay_queue_census( pipe_end, "R" );
+            pipe_shm_update_waiters( pipe_end );
             set_error( STATUS_PENDING );
             return;
         }
@@ -2422,6 +2710,7 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
         fd_set_mirror_poll( pipe_end->fd );
         set_fd_events( pipe_end->fd, default_fd_get_poll_events( pipe_end->fd ) );
     }
+    pipe_shm_update_waiters( pipe_end );
     set_error( STATUS_PENDING );
 }
 
@@ -2478,6 +2767,8 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
     if (pipe_end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE) &&
         !list_empty( &pipe_end->connection->message_queue ))
         set_fd_signaled( pipe_end->connection->fd, 1 );
+    pipe_shm_update_waiters( pipe_end );
+    pipe_shm_update_waiters( pipe_end->connection );
     set_error( STATUS_PENDING );
 }
 
@@ -2505,6 +2796,8 @@ static void pipe_end_peek( struct pipe_end *pipe_end )
     struct pipe_message *message;
     data_size_t avail = 0;
     data_size_t message_length = 0;
+
+    pipe_shm_flush_to_queue( pipe_end );
 
     if (reply_size < offsetof( FILE_PIPE_PEEK_BUFFER, Data ))
     {
@@ -2588,6 +2881,8 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
                    (unsigned int)STATUS_INVALID_READ_MODE );
         return;
     }
+
+    pipe_shm_flush_to_queue( pipe_end );
 
     /* A transceive with a message already queued is legal on Windows: the write
      * appends to the queue and the read side returns the oldest queued message
@@ -2820,10 +3115,10 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->blk_fd = -1;
     pipe_end->ring_fd = -1;
     pipe_end->ev_obj = NULL;
-    pipe_end->hb_timeout = NULL;  /* gate108: gate104 added the heartbeat timer without
-                                   * initializing it here — pipe_end_destroy's
-                                   * remove_timeout_user ate a garbage pointer on every
-                                   * server teardown (startup segfault, gate108) */
+    pipe_end->hb_timeout = NULL;
+    pipe_end->comp_flags = 0;
+    pipe_end->shm_fd = -1;
+    pipe_end->shm = NULL;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
     list_init( &pipe_end->message_queue );
@@ -2948,6 +3243,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.conn_info = CONN_INFO_VALID;
         client->conn_info = CONN_INFO_VALID;
         list_remove( &server->entry );
+        pipe_shm_init_pair( &server->pipe_end, client );
         dupx_dump( "OPEN", pipe, &server->pipe_end, client );
         if (wv2io_wanted( client ))
         {
@@ -3162,6 +3458,9 @@ DECL_HANDLER(set_named_pipe_info)
     else
     {
         pipe_end->flags = req->flags;
+        if (pipe_end->shm)
+            __atomic_store_n( &pipe_end->shm->end[pipe_shm_side( pipe_end )].flags,
+                              pipe_end->flags, __ATOMIC_RELEASE );
     }
 
     release_object( pipe_end );

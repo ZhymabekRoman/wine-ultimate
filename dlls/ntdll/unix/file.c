@@ -6322,6 +6322,7 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
 
     struct stat st;
     int fd, needs_close = FALSE;
+    enum server_fd_type type;
     ULONG attr;
     unsigned int reparse_tag;
     unsigned int options;
@@ -6339,10 +6340,17 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
         return server_get_file_info( handle, io, ptr, len, class );
     if (len < info_sizes[class])
         return io->Status = STATUS_INFO_LENGTH_MISMATCH;
+    if (class == FilePipeInformation || class == FilePipeLocalInformation || class == FilePipeRemoteInformation)
+        return server_get_file_info( handle, io, ptr, len, class );
 
-    if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options )))
+    if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, &type, &options )))
     {
         if (status != STATUS_BAD_DEVICE_TYPE) return io->Status = status;
+        return server_get_file_info( handle, io, ptr, len, class );
+    }
+    if (type == FD_TYPE_DEVICE && fstat( fd, &st ) == 0 && S_ISREG(st.st_mode))
+    {
+        if (needs_close) close( fd );
         return server_get_file_info( handle, io, ptr, len, class );
     }
 
@@ -7391,6 +7399,10 @@ static unsigned int set_pending_write( HANDLE device )
 }
 
 
+static int pipe_shm_try_read( HANDLE handle, int unix_fd, unsigned int options, HANDLE event,
+                              PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                              void *buffer, ULONG length, unsigned int *out_status );
+
 /******************************************************************************
  *              NtReadFile   (NTDLL.@)
  */
@@ -7462,7 +7474,22 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
             goto done;
         }
     }
-    else if (type == FD_TYPE_SERIAL || type == FD_TYPE_DEVICE)
+    else if (type == FD_TYPE_DEVICE)
+    {
+        int shm_res = pipe_shm_try_read( handle, unix_handle, options, event, apc, apc_user, io, buffer, length, &status );
+        if (shm_res)
+        {
+            if (needs_close) close( unix_handle );
+            if (shm_res > 0) return status;
+            return server_read_file( handle, event, apc, apc_user, io, buffer, length, offset, key );
+        }
+        if (async_read && (!offset || offset->QuadPart < 0))
+        {
+            status = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
+    }
+    else if (type == FD_TYPE_SERIAL)
     {
         if (async_read && (!offset || offset->QuadPart < 0))
         {
@@ -7681,6 +7708,549 @@ error:
     return status;
 }
 
+#define WINE_PIPE_SHM_MAGIC 0x57494E4550495045ULL
+#define WINE_PIPE_RING_SIZE 65536
+#define WINE_PIPE_RING_MASK (WINE_PIPE_RING_SIZE - 1)
+
+struct pipe_shm_ring
+{
+    uint32_t lock;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t cur_msg_rem;
+    uint32_t msg_count;
+    uint32_t pad[3];
+    unsigned char data[WINE_PIPE_RING_SIZE];
+};
+
+struct pipe_shm_end
+{
+    uint32_t state;
+    uint32_t flags;
+    uint32_t comp_flags;
+    uint32_t buffer_size;
+    uint32_t server_read_q;
+    uint32_t server_write_q;
+    uint32_t unsignaled;
+    uint32_t pad;
+    struct pipe_shm_ring in;
+};
+
+struct pipe_shm
+{
+    uint64_t magic;
+    uint32_t message_mode;
+    uint32_t sharing;
+    struct pipe_shm_end end[2];
+};
+
+#define PIPE_SHM_CACHE_SIZE 1024
+struct pipe_shm_cache_entry
+{
+    HANDLE handle;
+    dev_t dev;
+    ino_t ino;
+    int side;
+    struct pipe_shm *shm;
+};
+static struct pipe_shm_cache_entry pipe_shm_cache[PIPE_SHM_CACHE_SIZE];
+static pthread_mutex_t pipe_shm_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline void pipe_ring_lock( volatile uint32_t *lock )
+{
+    unsigned int spins = 0;
+    while (__sync_lock_test_and_set( lock, 1 ))
+    {
+        while (*lock)
+        {
+            if (++spins > 1000000)
+            {
+                __atomic_store_n( lock, 1, __ATOMIC_SEQ_CST );
+                return;
+            }
+            if ((spins & 1023) == 0) sched_yield();
+            else __asm__ __volatile__( "pause" ::: "memory" );
+        }
+    }
+}
+
+static inline void pipe_ring_unlock( volatile uint32_t *lock )
+{
+    __sync_lock_release( lock );
+}
+
+static inline void pipe_ring_read_bytes( const struct pipe_shm_ring *ring, uint32_t pos, void *dst, uint32_t len )
+{
+    uint32_t idx = pos & WINE_PIPE_RING_MASK;
+    uint32_t first = WINE_PIPE_RING_SIZE - idx;
+    if (first >= len)
+    {
+        memcpy( dst, ring->data + idx, len );
+    }
+    else
+    {
+        memcpy( dst, ring->data + idx, first );
+        memcpy( (char *)dst + first, ring->data, len - first );
+    }
+}
+
+static inline void pipe_ring_write_bytes( struct pipe_shm_ring *ring, uint32_t pos, const void *src, uint32_t len )
+{
+    uint32_t idx = pos & WINE_PIPE_RING_MASK;
+    uint32_t first = WINE_PIPE_RING_SIZE - idx;
+    if (first >= len)
+    {
+        memcpy( ring->data + idx, src, len );
+    }
+    else
+    {
+        memcpy( ring->data + idx, src, first );
+        memcpy( ring->data, (const char *)src + first, len - first );
+    }
+}
+
+/* returns: 0 = not a pipe shm, 1 = pipe shm (out_shm set, or NULL if access denied) */
+static int pipe_shm_lookup( HANDLE handle, int unix_fd, struct pipe_shm **out_shm, int *out_side )
+{
+    struct stat st;
+    unsigned int idx;
+    struct pipe_shm_cache_entry *e;
+    struct pipe_shm *shm = NULL;
+    int i, side = -1;
+
+    *out_shm = NULL;
+    if (fstat( unix_fd, &st ) == -1 || !S_ISREG(st.st_mode) || st.st_size != sizeof(struct pipe_shm))
+        return 0;
+
+    idx = (HandleToUlong( handle ) >> 2) & (PIPE_SHM_CACHE_SIZE - 1);
+
+    pthread_mutex_lock( &pipe_shm_mutex );
+    e = &pipe_shm_cache[idx];
+    if (e->handle == handle && e->dev == st.st_dev && e->ino == st.st_ino && e->shm)
+    {
+        *out_shm = e->shm;
+        *out_side = e->side;
+        pthread_mutex_unlock( &pipe_shm_mutex );
+        return 1;
+    }
+
+    for (i = 0; i < PIPE_SHM_CACHE_SIZE; i++)
+    {
+        if (pipe_shm_cache[i].shm && pipe_shm_cache[i].dev == st.st_dev && pipe_shm_cache[i].ino == st.st_ino)
+        {
+            shm = pipe_shm_cache[i].shm;
+            break;
+        }
+    }
+    pthread_mutex_unlock( &pipe_shm_mutex );
+
+    if (!shm)
+    {
+        shm = mmap( NULL, sizeof(struct pipe_shm), PROT_READ | PROT_WRITE, MAP_SHARED, unix_fd, 0 );
+        if (shm == MAP_FAILED) return 0;
+        if (__atomic_load_n( &shm->magic, __ATOMIC_ACQUIRE ) != WINE_PIPE_SHM_MAGIC)
+        {
+            munmap( shm, sizeof(struct pipe_shm) );
+            return 0;
+        }
+    }
+
+    {
+        FILE_PIPE_LOCAL_INFORMATION local_info;
+        IO_STATUS_BLOCK iosb;
+        NTSTATUS st_info = NtQueryInformationFile( handle, &iosb, &local_info, sizeof(local_info), FilePipeLocalInformation );
+        if (st_info) return 1; /* is pipe shm, but cannot query side -> fallback to server */
+        side = (local_info.NamedPipeEnd == FILE_PIPE_SERVER_END) ? 1 : 0;
+    }
+
+    pthread_mutex_lock( &pipe_shm_mutex );
+    e = &pipe_shm_cache[idx];
+    e->handle = handle;
+    e->dev = st.st_dev;
+    e->ino = st.st_ino;
+    e->side = side;
+    e->shm = shm;
+    pthread_mutex_unlock( &pipe_shm_mutex );
+
+    *out_shm = shm;
+    *out_side = side;
+    return 1;
+}
+
+static void pipe_shm_complete_io( HANDLE handle, unsigned int options, HANDLE event,
+                                  PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                                  NTSTATUS status, ULONG total, uint32_t comp_flags )
+{
+    BOOL async_io = !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT));
+    client_ptr_t iosb_ptr = iosb_client_ptr( io );
+
+    set_sync_iosb( io, status, total, options );
+    if (event) NtSetEvent( event, NULL );
+    if (apc && async_io)
+        NtQueueApcThread( GetCurrentThread(), (PNTAPCFUNC)apc, (ULONG_PTR)apc_user, iosb_ptr, 0 );
+    else if (!apc && apc_user && async_io && !(comp_flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS))
+        add_completion( handle, (ULONG_PTR)apc_user, status, total, FALSE );
+}
+
+static int pipe_shm_try_read( HANDLE handle, int unix_fd, unsigned int options, HANDLE event,
+                              PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                              void *buffer, ULONG length, unsigned int *out_status )
+{
+    struct pipe_shm *shm;
+    struct pipe_shm_end *self, *peer;
+    struct pipe_shm_ring *ring;
+    int side;
+    ULONG total = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+    uint32_t flags, comp_flags;
+
+    if (!pipe_shm_lookup( handle, unix_fd, &shm, &side )) return 0;
+    if (!shm || __atomic_load_n( &shm->magic, __ATOMIC_ACQUIRE ) != WINE_PIPE_SHM_MAGIC) return -1;
+
+    self = &shm->end[side];
+    peer = &shm->end[side ^ 1];
+    if (__atomic_load_n( &self->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE ||
+        __atomic_load_n( &peer->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE)
+        return -1;
+    if (__atomic_load_n( &self->server_read_q, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &peer->server_write_q, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &self->unsignaled, __ATOMIC_ACQUIRE ) != 0)
+        return -1;
+
+    flags = __atomic_load_n( &self->flags, __ATOMIC_ACQUIRE );
+    comp_flags = __atomic_load_n( &self->comp_flags, __ATOMIC_ACQUIRE );
+    ring = &self->in;
+
+    pipe_ring_lock( &ring->lock );
+    if (ring->head == ring->tail && ring->msg_count == 0)
+    {
+        pipe_ring_unlock( &ring->lock );
+        if (flags & NAMED_PIPE_NONBLOCKING_MODE)
+        {
+            if (event) NtResetEvent( event, NULL );
+            *out_status = STATUS_PIPE_EMPTY;
+            return 1;
+        }
+        return -1;
+    }
+
+    if (shm->message_mode)
+    {
+        if (flags & 0x0002 /* NAMED_PIPE_MESSAGE_STREAM_READ */)
+        {
+            uint32_t msg_len, to_copy;
+            if (ring->cur_msg_rem)
+            {
+                msg_len = ring->cur_msg_rem;
+            }
+            else
+            {
+                pipe_ring_read_bytes( ring, ring->head, &msg_len, 4 );
+                ring->head += 4;
+                ring->cur_msg_rem = msg_len;
+            }
+            to_copy = min( length, msg_len );
+            if (to_copy)
+            {
+                pipe_ring_read_bytes( ring, ring->head, buffer, to_copy );
+                ring->head += to_copy;
+                ring->cur_msg_rem -= to_copy;
+            }
+            total = to_copy;
+            if (ring->cur_msg_rem == 0)
+            {
+                if (ring->msg_count) ring->msg_count--;
+                status = STATUS_SUCCESS;
+            }
+            else status = STATUS_BUFFER_OVERFLOW;
+        }
+        else
+        {
+            while (total < length && (ring->head != ring->tail || ring->msg_count))
+            {
+                uint32_t msg_len, to_copy;
+                if (ring->cur_msg_rem)
+                    msg_len = ring->cur_msg_rem;
+                else
+                {
+                    pipe_ring_read_bytes( ring, ring->head, &msg_len, 4 );
+                    ring->head += 4;
+                    ring->cur_msg_rem = msg_len;
+                }
+                to_copy = min( length - total, msg_len );
+                if (to_copy)
+                {
+                    pipe_ring_read_bytes( ring, ring->head, (char *)buffer + total, to_copy );
+                    ring->head += to_copy;
+                    ring->cur_msg_rem -= to_copy;
+                    total += to_copy;
+                }
+                if (ring->cur_msg_rem == 0)
+                {
+                    if (ring->msg_count) ring->msg_count--;
+                }
+            }
+            status = STATUS_SUCCESS;
+        }
+    }
+    else
+    {
+        uint32_t avail = ring->tail - ring->head;
+        total = min( length, avail );
+        if (total)
+        {
+            pipe_ring_read_bytes( ring, ring->head, buffer, total );
+            ring->head += total;
+        }
+        status = STATUS_SUCCESS;
+    }
+    pipe_ring_unlock( &ring->lock );
+
+    pipe_shm_complete_io( handle, options, event, apc, apc_user, io, status, total, comp_flags );
+    *out_status = status;
+    return 1;
+}
+
+static int pipe_shm_try_write( HANDLE handle, int unix_fd, unsigned int options, HANDLE event,
+                               PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                               const void *buffer, ULONG length, unsigned int *out_status )
+{
+    struct pipe_shm *shm;
+    struct pipe_shm_end *self, *peer;
+    struct pipe_shm_ring *ring;
+    int side;
+    uint32_t need, used, free_space, quota, comp_flags;
+
+    if (!pipe_shm_lookup( handle, unix_fd, &shm, &side )) return 0;
+    if (!shm || __atomic_load_n( &shm->magic, __ATOMIC_ACQUIRE ) != WINE_PIPE_SHM_MAGIC) return -1;
+
+    self = &shm->end[side];
+    peer = &shm->end[side ^ 1];
+    if (__atomic_load_n( &self->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE ||
+        __atomic_load_n( &peer->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE)
+        return -1;
+    if (__atomic_load_n( &peer->server_read_q, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &self->server_write_q, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &self->unsignaled, __ATOMIC_ACQUIRE ) != 0)
+        return -1;
+
+    comp_flags = __atomic_load_n( &self->comp_flags, __ATOMIC_ACQUIRE );
+    if (!shm->message_mode && !length)
+    {
+        pipe_shm_complete_io( handle, options, event, apc, apc_user, io, STATUS_SUCCESS, 0, comp_flags );
+        *out_status = STATUS_SUCCESS;
+        return 1;
+    }
+
+    need = shm->message_mode ? (4 + length) : length;
+    if (need > WINE_PIPE_RING_SIZE) return -1;
+
+    ring = &peer->in;
+    quota = __atomic_load_n( &peer->buffer_size, __ATOMIC_ACQUIRE );
+    if (quota > WINE_PIPE_RING_SIZE) quota = WINE_PIPE_RING_SIZE;
+
+    pipe_ring_lock( &ring->lock );
+    used = ring->tail - ring->head;
+    free_space = WINE_PIPE_RING_SIZE - used;
+    if (free_space < need || (length && used + need > quota))
+    {
+        pipe_ring_unlock( &ring->lock );
+        return -1;
+    }
+    if (shm->message_mode)
+    {
+        uint32_t msg_len = length;
+        pipe_ring_write_bytes( ring, ring->tail, &msg_len, 4 );
+        ring->tail += 4;
+        if (msg_len)
+        {
+            pipe_ring_write_bytes( ring, ring->tail, buffer, msg_len );
+            ring->tail += msg_len;
+        }
+        ring->msg_count++;
+    }
+    else
+    {
+        pipe_ring_write_bytes( ring, ring->tail, buffer, length );
+        ring->tail += length;
+    }
+    pipe_ring_unlock( &ring->lock );
+
+    pipe_shm_complete_io( handle, options, event, apc, apc_user, io, STATUS_SUCCESS, length, comp_flags );
+    *out_status = STATUS_SUCCESS;
+    return 1;
+}
+
+static BOOL pipe_shm_try_peek( HANDLE handle, int unix_fd, void *out_buffer, ULONG out_size,
+                               ULONG_PTR *out_info, NTSTATUS *out_status )
+{
+    struct pipe_shm *shm;
+    struct pipe_shm_end *self, *peer;
+    struct pipe_shm_ring *ring;
+    FILE_PIPE_PEEK_BUFFER *peek = out_buffer;
+    int side;
+    uint32_t avail, msg_len = 0, copy_len = 0, data_cap;
+
+    if (out_size < offsetof( FILE_PIPE_PEEK_BUFFER, Data ))
+    {
+        *out_status = STATUS_INFO_LENGTH_MISMATCH;
+        *out_info = 0;
+        return TRUE;
+    }
+
+    if (!pipe_shm_lookup( handle, unix_fd, &shm, &side )) return FALSE;
+    if (!shm || __atomic_load_n( &shm->magic, __ATOMIC_ACQUIRE ) != WINE_PIPE_SHM_MAGIC) return FALSE;
+
+    self = &shm->end[side];
+    peer = &shm->end[side ^ 1];
+    if (__atomic_load_n( &self->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE ||
+        __atomic_load_n( &peer->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE)
+        return FALSE;
+    if (__atomic_load_n( &self->server_read_q, __ATOMIC_ACQUIRE ) != 0)
+        return FALSE;
+
+    data_cap = out_size - offsetof( FILE_PIPE_PEEK_BUFFER, Data );
+    ring = &self->in;
+    pipe_ring_lock( &ring->lock );
+    avail = ring->tail - ring->head;
+    if (shm->message_mode)
+    {
+        uint32_t headers = ring->cur_msg_rem ? (ring->msg_count - 1) * 4 : ring->msg_count * 4;
+        avail = avail >= headers ? avail - headers : 0;
+        if (ring->msg_count)
+        {
+            if (ring->cur_msg_rem)
+            {
+                msg_len = ring->cur_msg_rem;
+                copy_len = min( data_cap, msg_len );
+                if (copy_len) pipe_ring_read_bytes( ring, ring->head, peek->Data, copy_len );
+            }
+            else
+            {
+                pipe_ring_read_bytes( ring, ring->head, &msg_len, 4 );
+                copy_len = min( data_cap, msg_len );
+                if (copy_len) pipe_ring_read_bytes( ring, ring->head + 4, peek->Data, copy_len );
+            }
+        }
+    }
+    else
+    {
+        copy_len = min( data_cap, avail );
+        if (copy_len) pipe_ring_read_bytes( ring, ring->head, peek->Data, copy_len );
+    }
+    peek->NamedPipeState = FILE_PIPE_CONNECTED_STATE;
+    peek->ReadDataAvailable = avail;
+    peek->NumberOfMessages = 0;
+    peek->MessageLength = msg_len;
+    pipe_ring_unlock( &ring->lock );
+
+    *out_info = offsetof( FILE_PIPE_PEEK_BUFFER, Data[copy_len] );
+    *out_status = (shm->message_mode && msg_len > copy_len) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+    return TRUE;
+}
+
+static BOOL pipe_shm_try_transceive( HANDLE handle, int unix_fd, unsigned int options, HANDLE event,
+                                     PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
+                                     const void *in_buffer, ULONG in_size,
+                                     void *out_buffer, ULONG out_size, NTSTATUS *out_status )
+{
+    struct pipe_shm *shm;
+    struct pipe_shm_end *self, *peer;
+    struct pipe_shm_ring *wring, *rring;
+    int side;
+    uint32_t flags, comp_flags, need, used, free_space, quota;
+    uint32_t msg_len, to_copy;
+    NTSTATUS status;
+
+    if (!pipe_shm_lookup( handle, unix_fd, &shm, &side )) return FALSE;
+    if (!shm || __atomic_load_n( &shm->magic, __ATOMIC_ACQUIRE ) != WINE_PIPE_SHM_MAGIC) return FALSE;
+
+    self = &shm->end[side];
+    peer = &shm->end[side ^ 1];
+    if (__atomic_load_n( &self->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE ||
+        __atomic_load_n( &peer->state, __ATOMIC_ACQUIRE ) != FILE_PIPE_CONNECTED_STATE)
+        return FALSE;
+    if (__atomic_load_n( &self->server_read_q, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &peer->server_read_q, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &self->server_write_q, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &self->unsignaled, __ATOMIC_ACQUIRE ) != 0)
+        return FALSE;
+
+    flags = __atomic_load_n( &self->flags, __ATOMIC_ACQUIRE );
+    if (!(flags & 0x0002 /* NAMED_PIPE_MESSAGE_STREAM_READ */))
+    {
+        *out_status = STATUS_INVALID_READ_MODE;
+        return TRUE;
+    }
+
+    comp_flags = __atomic_load_n( &self->comp_flags, __ATOMIC_ACQUIRE );
+    need = 4 + in_size;
+    if (need > WINE_PIPE_RING_SIZE) return FALSE;
+    quota = __atomic_load_n( &peer->buffer_size, __ATOMIC_ACQUIRE );
+    if (quota > WINE_PIPE_RING_SIZE) quota = WINE_PIPE_RING_SIZE;
+
+    wring = &peer->in;
+    pipe_ring_lock( &wring->lock );
+    used = wring->tail - wring->head;
+    free_space = WINE_PIPE_RING_SIZE - used;
+    if (free_space < need || (in_size && used + need > quota))
+    {
+        pipe_ring_unlock( &wring->lock );
+        return FALSE;
+    }
+
+    rring = &self->in;
+    pipe_ring_lock( &rring->lock );
+    if (rring->head == rring->tail && rring->msg_count == 0)
+    {
+        pipe_ring_unlock( &rring->lock );
+        pipe_ring_unlock( &wring->lock );
+        return FALSE;
+    }
+
+    {
+        uint32_t wlen = in_size;
+        pipe_ring_write_bytes( wring, wring->tail, &wlen, 4 );
+        wring->tail += 4;
+        if (wlen)
+        {
+            pipe_ring_write_bytes( wring, wring->tail, in_buffer, wlen );
+            wring->tail += wlen;
+        }
+        wring->msg_count++;
+    }
+    pipe_ring_unlock( &wring->lock );
+
+    if (rring->cur_msg_rem)
+    {
+        msg_len = rring->cur_msg_rem;
+    }
+    else
+    {
+        pipe_ring_read_bytes( rring, rring->head, &msg_len, 4 );
+        rring->head += 4;
+        rring->cur_msg_rem = msg_len;
+    }
+    to_copy = min( out_size, msg_len );
+    if (to_copy)
+    {
+        pipe_ring_read_bytes( rring, rring->head, out_buffer, to_copy );
+        rring->head += to_copy;
+        rring->cur_msg_rem -= to_copy;
+    }
+    if (rring->cur_msg_rem == 0)
+    {
+        if (rring->msg_count) rring->msg_count--;
+        status = STATUS_SUCCESS;
+    }
+    else status = STATUS_BUFFER_OVERFLOW;
+    pipe_ring_unlock( &rring->lock );
+
+    pipe_shm_complete_io( handle, options, event, apc, apc_user, io, status, to_copy, comp_flags );
+    *out_status = status;
+    return TRUE;
+}
+
 
 /******************************************************************************
  *              NtWriteFile   (NTDLL.@)
@@ -7792,7 +8362,23 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
             goto done;
         }
     }
-    else if (type == FD_TYPE_SERIAL || type == FD_TYPE_DEVICE)
+    else if (type == FD_TYPE_DEVICE)
+    {
+        int shm_res = pipe_shm_try_write( handle, unix_handle, options, event, apc, apc_user, io, buffer, length, &status );
+        if (shm_res)
+        {
+            if (needs_close) close( unix_handle );
+            if (shm_res > 0) return status;
+            return server_write_file( handle, event, apc, apc_user, io, buffer, length, offset, key );
+        }
+        if (async_write &&
+            (!offset || (offset->QuadPart < 0 && offset->QuadPart != FILE_WRITE_TO_END_OF_FILE)))
+        {
+            status = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
+    }
+    else if (type == FD_TYPE_SERIAL)
     {
         if (async_write &&
             (!offset || (offset->QuadPart < 0 && offset->QuadPart != FILE_WRITE_TO_END_OF_FILE)))
@@ -8133,6 +8719,34 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
     case FSCTL_GET_COMPRESSION:
     case FSCTL_SET_SPARSE:
         break;
+
+    case FSCTL_PIPE_PEEK:
+        status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options );
+        if (!status)
+        {
+            BOOL handled = pipe_shm_try_peek( handle, fd, out_buffer, out_size, &size, &status );
+            if (needs_close) close( fd );
+            if (handled)
+            {
+                if (!NT_ERROR(status) && status != STATUS_PENDING)
+                    file_complete_async( handle, options, event, apc, apc_context, io, status, size );
+                return status;
+            }
+        }
+        return server_ioctl_file( handle, event, apc, apc_context, io, code,
+                                  in_buffer, in_size, out_buffer, out_size );
+
+    case FSCTL_PIPE_TRANSCEIVE:
+        status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options );
+        if (!status)
+        {
+            BOOL handled = pipe_shm_try_transceive( handle, fd, options, event, apc, apc_context, io,
+                                                    in_buffer, in_size, out_buffer, out_size, &status );
+            if (needs_close) close( fd );
+            if (handled) return status;
+        }
+        return server_ioctl_file( handle, event, apc, apc_context, io, code,
+                                  in_buffer, in_size, out_buffer, out_size );
 
     default:
         return server_ioctl_file( handle, event, apc, apc_context, io, code,
@@ -9184,9 +9798,16 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
                                               FS_INFORMATION_CLASS info_class )
 {
     int fd, needs_close;
+    enum server_fd_type type;
+    struct stat st;
     unsigned int status;
 
-    status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL );
+    status = server_get_unix_fd( handle, 0, &fd, &needs_close, &type, NULL );
+    if (!status && type == FD_TYPE_DEVICE && fstat( fd, &st ) == 0 && S_ISREG(st.st_mode))
+    {
+        if (needs_close) close( fd );
+        status = STATUS_BAD_DEVICE_TYPE;
+    }
     if (status == STATUS_BAD_DEVICE_TYPE)
     {
         struct async_irp *async;
