@@ -2700,7 +2700,7 @@ static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
     TRACE( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
-    if (is_uwp_xaml_app())
+    if (!xaml_get_app_caps()->winui3)
         return uwp_rd_lookup( &impl->IInspectable_iface, key, value );
     if (value) *value = NULL;
     return 0x8000000b; /* E_BOUNDS */
@@ -2713,7 +2713,7 @@ static HRESULT WINAPI rd_map_get_Size( void *iface, UINT32 *size )
 static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
-    if (is_uwp_xaml_app())
+    if (!xaml_get_app_caps()->winui3)
     {
         if (found) *found = uwp_rd_haskey( &impl->IInspectable_iface, key );
         return S_OK;
@@ -3212,7 +3212,7 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (!is_uwp_xaml_app() && !impl->outer &&
+    if (!impl->outer && xaml_get_app_caps()->winui3 &&
         (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
          IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP )))
     {
@@ -3642,7 +3642,7 @@ static HRESULT WINAPI xaml_window_GetIids( IInspectable *iface, ULONG *count, II
 
 static HRESULT WINAPI xaml_window_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    const WCHAR *cls = xaml_get_app_profile()->use_winui3_window_class ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
+    const WCHAR *cls = xaml_get_app_caps()->winui3 ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
     TRACE( "xaml_window_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(cls) );
     return WindowsCreateString( cls, wcslen( cls ), name );
 }
@@ -4346,118 +4346,166 @@ static void xaml_apply_window_icon( HWND top )
     }
 }
 
-static const struct xaml_app_profile xaml_app_profiles[] =
+static struct xaml_app_caps g_caps;
+static BOOL g_caps_ready;
+
+/* Ask the application's own IXamlMetadataProvider (slot 7 GetXamlTypeByFullName,
+ * shared layout of the UWP and WinUI providers) whether a type is registered. */
+static BOOL caps_provider_has( void *provider, const WCHAR *full_name )
 {
-    {
-        .family_prefix           = L"Microsoft.WindowsCalculator",
-        .use_winui3_window_class = FALSE,
-        .webview2_template       = NULL,
-        .design_component        = NULL,
-        .serve_core_controls     = TRUE,
-        .vm_type_name            = L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
-        .display_sync            = TRUE,
-        .teardown_vm             = TRUE,
-        .seed_xbf                = L"Calculator",
-    },
-    {
-        .family_prefix           = L"Microsoft.WindowsStore",
-        .use_winui3_window_class = FALSE,
-        .webview2_template       = NULL,
-        .design_component        = NULL,
-        .serve_core_controls     = TRUE,
-        .vm_type_name            = NULL,
-        .display_sync            = FALSE,
-        .teardown_vm             = FALSE,
-        .seed_xbf                = L"StoreManifestPage",
-    },
-    {
-        .family_prefix           = L"5319275A.WhatsAppDesktop",
-        .use_winui3_window_class = TRUE,
-        .webview2_template       = L"Microsoft.UI.Xaml.Controls.WebView2",
-        .design_component        = L"WhatsApp.Design.FontScaleControlPanel",
-        .serve_core_controls     = FALSE,
-        .vm_type_name            = NULL,
-        .display_sync            = FALSE,
-        .teardown_vm             = FALSE,
-        .seed_xbf                = NULL,
-    },
-    {
-        .family_prefix           = L"Microsoft.WindowsNotepad",
-        .use_winui3_window_class = FALSE,
-        .webview2_template       = NULL,
-        .design_component        = NULL,
-        .serve_core_controls     = TRUE,
-        .vm_type_name            = NULL,
-        .display_sync            = FALSE,
-        .teardown_vm             = FALSE,
-        .seed_xbf                = NULL,
-    },
-    {
-        .family_prefix           = NULL,
-        .use_winui3_window_class = FALSE,
-        .webview2_template       = NULL,
-        .design_component        = NULL,
-        .serve_core_controls     = TRUE,
-        .vm_type_name            = NULL,
-        .display_sync            = FALSE,
-        .teardown_vm             = FALSE,
-        .seed_xbf                = NULL,
-    },
-};
+    void **vtbl = *(void ***)provider;
+    HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
+    HRESULT hr = E_FAIL;
+    HSTRING h = NULL;
+    void *xt = NULL;
 
-const struct xaml_app_profile *g_profile = &xaml_app_profiles[ARRAY_SIZE( xaml_app_profiles ) - 1];
-static INIT_ONCE g_profile_once = INIT_ONCE_STATIC_INIT;
+    if (!get_by_name || !full_name || !full_name[0]) return FALSE;
+    if (FAILED(WindowsCreateString( full_name, lstrlenW( full_name ), &h )) || !h) return FALSE;
+    __TRY
+    {
+        hr = get_by_name( provider, h, &xt );
+    }
+    __EXCEPT_ALL
+    {
+        hr = E_FAIL;
+    }
+    __ENDTRY;
+    WindowsDeleteString( h );
+    if (SUCCEEDED( hr ) && xt)
+    {
+        IInspectable_Release( (IInspectable *)xt );
+        return TRUE;
+    }
+    return FALSE;
+}
 
-static BOOL WINAPI xaml_profile_init( INIT_ONCE *once, void *param, void **context )
+/* Namespace of the running App class: "CalculatorApp.App" -> "CalculatorApp". */
+static void caps_app_namespace( IInspectable *outer, WCHAR *ns, DWORD size )
 {
-    WCHAR family[256] = {0};
-    UINT32 len = ARRAY_SIZE( family );
-    SIZE_T i;
-
-    g_profile = &xaml_app_profiles[ARRAY_SIZE( xaml_app_profiles ) - 1];
-    if (GetCurrentPackageFamilyName( &len, family ) == ERROR_SUCCESS && family[0])
+    HSTRING h = NULL;
+    ns[0] = 0;
+    __TRY
     {
-        for (i = 0; i < ARRAY_SIZE( xaml_app_profiles ) - 1; i++)
+        if (SUCCEEDED( IInspectable_GetRuntimeClassName( outer, &h ) ) && h)
         {
-            const WCHAR *pfx = xaml_app_profiles[i].family_prefix;
-            SIZE_T plen = pfx ? lstrlenW( pfx ) : 0;
-            if (plen && !wcsnicmp( family, pfx, plen ) &&
-                (!family[plen] || family[plen] == L'_'))
+            const WCHAR *raw = WindowsGetStringRawBuffer( h, NULL );
+            if (raw)
             {
-                g_profile = &xaml_app_profiles[i];
-                break;
+                WCHAR *dot;
+                lstrcpynW( ns, raw, (int)size );
+                dot = wcsrchr( ns, L'.' );
+                if (dot) *dot = 0;
             }
         }
     }
+    __EXCEPT_ALL
+    {
+        ns[0] = 0;
+    }
+    __ENDTRY;
+    if (h) WindowsDeleteString( h );
+}
+
+/* Probe ns + each suffix (and the bare fallback full name) against the app's
+ * provider; on a hit store the full registered type name in out. */
+static BOOL caps_find_type( void *provider, const WCHAR *ns, const WCHAR *const *suffixes,
+                            SIZE_T count, const WCHAR *fallback_full, WCHAR *out, DWORD out_chars )
+{
+    SIZE_T i;
+    WCHAR full[160];
+
+    for (i = 0; i < count; i++)
+    {
+        full[0] = 0;
+        if (ns && ns[0]) lstrcpynW( full, ns, ARRAY_SIZE( full ) );
+        lstrcpynW( full + lstrlenW( full ), suffixes[i], (int)(ARRAY_SIZE( full ) - lstrlenW( full )) );
+        if (caps_provider_has( provider, full ))
+        {
+            lstrcpynW( out, full, (int)out_chars );
+            return TRUE;
+        }
+    }
+    if (fallback_full && caps_provider_has( provider, fallback_full ))
+    {
+        lstrcpynW( out, fallback_full, (int)out_chars );
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* Probe the running application's COM surface: which IXamlMetadataProvider face
+ * it answers (UWP vs WinUI 3), and which XAML types it has registered. */
+static BOOL caps_probe( IInspectable *outer )
+{
+    static const GUID IID_IXamlMetadataProvider_uwp =
+        { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
+    static const GUID IID_IXamlMetadataProvider_winui =
+        { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
+    static const WCHAR *page_suffixes[] =
+        { L".Controls.Calculator", L".Calculator", L".StoreManifestPage" };
+    static const WCHAR *vm_suffixes[] =
+        { L".ViewModel.StandardCalculatorViewModel", L".StandardCalculatorViewModel" };
+    static const WCHAR *design_suffixes[] =
+        { L".Design.FontScaleControlPanel" };
+    WCHAR ns[80] = {0};
+    void *provider = NULL;
+
+    if (SUCCEEDED( IInspectable_QueryInterface( outer, &IID_IXamlMetadataProvider_winui, &provider ) ) && provider)
+        g_caps.winui3 = TRUE;
+    else if (SUCCEEDED( IInspectable_QueryInterface( outer, &IID_IXamlMetadataProvider_uwp, &provider ) ) && provider)
+        g_caps.winui3 = FALSE;
+    else
+        return FALSE; /* app object not metadata-ready yet: probe again later */
+
+    caps_app_namespace( outer, ns, ARRAY_SIZE( ns ) );
+
+    if (!g_caps.winui3)
+    {
+        /* CoreApplication-driven UWP app: a registered root page enables the seed tree. */
+        WCHAR full[160] = {0};
+        if (caps_find_type( provider, ns, page_suffixes, ARRAY_SIZE( page_suffixes ), NULL,
+                            full, ARRAY_SIZE( full ) ))
+        {
+            const WCHAR *dot = wcsrchr( full, L'.' );
+            lstrcpynW( g_caps.seed_page, dot ? dot + 1 : full, ARRAY_SIZE( g_caps.seed_page ) );
+        }
+        g_caps.coreapp_seed = !!g_caps.seed_page[0];
+    }
+
+    /* A StandardCalculatorViewModel-style VM registered in the app's provider
+     * drives the display sync/teardown behaviour for any app exposing one. */
+    if (caps_find_type( provider, ns, vm_suffixes, ARRAY_SIZE( vm_suffixes ), NULL,
+                        g_caps.vm_type, ARRAY_SIZE( g_caps.vm_type ) ))
+    {
+        g_caps.teardown_vm = TRUE;
+        g_caps.display_sync = TRUE;
+    }
+
+    /* Design-time panel (e.g. FontScaleControlPanel) registered in the provider. */
+    caps_find_type( provider, ns, design_suffixes, ARRAY_SIZE( design_suffixes ),
+                    L"WhatsApp.Design.FontScaleControlPanel",
+                    g_caps.design_component, ARRAY_SIZE( g_caps.design_component ) );
+
+    IInspectable_Release( (IInspectable *)provider );
     return TRUE;
 }
 
-const struct xaml_app_profile *xaml_get_app_profile( void )
+const struct xaml_app_caps *xaml_get_app_caps( void )
 {
-    InitOnceExecuteOnce( &g_profile_once, xaml_profile_init, NULL, NULL );
-    return g_profile;
-}
-
-BOOL is_calculator_app( void )
-{
-    const WCHAR *seed = xaml_get_app_profile()->seed_xbf;
-    return seed && !wcscmp( seed, L"Calculator" );
-}
-
-BOOL is_uwp_xaml_app( void )
-{
-    const struct xaml_app_profile *p = xaml_get_app_profile();
-    return !p->use_winui3_window_class && p->serve_core_controls;
+    static BOOL probing;
+    if (!g_caps_ready && !probing && current_application && current_application->outer)
+    {
+        probing = TRUE;
+        if (caps_probe( (IInspectable *)current_application->outer ))
+            g_caps_ready = TRUE;
+        probing = FALSE;
+    }
+    return &g_caps;
 }
 
 void *uwp_get_app_outer( void )
 {
     return current_application ? current_application->outer : NULL;
-}
-
-BOOL is_whatsapp_app( void )
-{
-    return xaml_get_app_profile()->use_winui3_window_class;
 }
 
 static WNDPROC xaml_corewindow_prev_proc;
@@ -4702,7 +4750,7 @@ static void xaml_window_refresh_present( HWND hwnd )
         return;
 
     in_refresh = TRUE;
-    if (impl->swapchain && is_uwp_xaml_app())
+    if (impl->swapchain && !xaml_get_app_caps()->winui3)
     {
         HWND target = impl->target_hwnd && IsWindow( impl->target_hwnd ) ? impl->target_hwnd : hwnd;
         GetClientRect( target, &rc );
@@ -4755,7 +4803,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         return TRUE;
     if (msg == WM_PAINT)
     {
-        if (is_uwp_xaml_app())
+        if (!xaml_get_app_caps()->winui3)
         {
             RECT rc, dirty_rc;
             HWND top = GetAncestor( hwnd, GA_ROOT );
@@ -5030,7 +5078,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (!hwnd) { g_in_xaml_present = FALSE; return S_FALSE; }
 
     ERR( "xaml_window_present: hwnd=%p swapchain=%p dev=%p is_uwp=%d\n",
-         hwnd, impl->swapchain, impl->d3d11_dev, is_uwp_xaml_app() );
+         hwnd, impl->swapchain, impl->d3d11_dev, !xaml_get_app_caps()->winui3 );
 
     /* Re-install the window-slot subclass on every attach: twinapi sets the CoreWindow
      * wndproc on activation, which pushes a previous window-slot subclass aside. The
@@ -5180,7 +5228,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         TRACE( "XAML: resized composition swapchain %p to %ux%u (hr %#lx)\n",
                impl->swapchain, width, height, hr );
     }
-    if (!impl->swapchain && is_uwp_xaml_app() && !d3d11_create_failed)
+    if (!impl->swapchain && !xaml_get_app_caps()->winui3 && !d3d11_create_failed)
     {
         static const D3D_FEATURE_LEVEL feature_levels[] =
         {
@@ -5261,7 +5309,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         QueryPerformanceCounter( &t0 );
         rendered = xaml_render_retained_if_dirty( impl, hwnd, width, height, &dirty_rc );
         QueryPerformanceCounter( &t1 );
-        if (rendered && impl->swapchain && impl->d3d11_ctx && is_uwp_xaml_app())
+        if (rendered && impl->swapchain && impl->d3d11_ctx && !xaml_get_app_caps()->winui3)
             xaml_upload_retained_to_swapchain( impl, &dirty_rc );
         QueryPerformanceCounter( &t2 );
         TRACE( "XAML perf: rendered=%d render_us=%lld upload_us=%lld dirty=(%ld,%ld-%ld,%ld)\n",
@@ -5751,7 +5799,7 @@ static HRESULT WINAPI xaml_window2_GetIids( IInspectable *iface, ULONG *count, I
 }
 static HRESULT WINAPI xaml_window2_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    const WCHAR *cls = xaml_get_app_profile()->use_winui3_window_class ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
+    const WCHAR *cls = xaml_get_app_caps()->winui3 ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
     TRACE( "xaml_window2_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(cls) );
     return WindowsCreateString( cls, wcslen( cls ), name );
 }
@@ -6576,7 +6624,7 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
 
     if (current_application && current_application->outer)
     {
-        if (is_uwp_xaml_app())
+        if (!xaml_get_app_caps()->winui3)
         {
             hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_UWP, &provider );
             if (SUCCEEDED(hr) && provider) is_uwp = TRUE;
@@ -6652,7 +6700,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
     IInspectable *target_conn = (IInspectable *)component;
     BOOL is_winui_conn = TRUE;
 
-    if (is_uwp_xaml_app())
+    if (!xaml_get_app_caps()->winui3)
     {
         static const GUID IID_IControl_uwp =
             { 0xa8912263, 0x2951, 0x4f58, { 0xa9, 0xc5, 0x5a, 0x13, 0x4e, 0xaa, 0x7f, 0x07 } };
@@ -6852,9 +6900,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                     if (wcsstr(elem_name, L"ProgressRing") || wcsstr(elem_name, L"Ring"))
                                                         continue;
                                                     else if (wcsstr(elem_name, L"WebView") || wcsstr(elem_name, L"webview"))
-                                                        class_name = xaml_get_app_profile()->webview2_template
-                                                                     ? xaml_get_app_profile()->webview2_template
-                                                                     : (is_winui_conn ? L"Microsoft.UI.Xaml.Controls.WebView2" : L"Windows.UI.Xaml.Controls.WebView2");
+                                                        class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.WebView2" : L"Windows.UI.Xaml.Controls.WebView2";
                                                     else if (wcsstr(elem_name, L"Image") || wcsstr(elem_name, L"image"))
                                                         class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Image" : L"Windows.UI.Xaml.Controls.Image";
                                                     else if (wcsstr(elem_name, L"Canvas") || wcsstr(elem_name, L"canvas"))
@@ -6917,9 +6963,9 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
         void *font_scale = NULL;
 
         b_conn->lpVtbl->Connect( b_conn, 1, component );
-        if (!wcscmp( comp_name, L"MainWindow" ) && xaml_get_app_profile()->design_component)
+        if (!wcscmp( comp_name, L"MainWindow" ) && xaml_get_app_caps()->design_component[0])
         {
-            if (SUCCEEDED( xaml_create_instance_from_provider( xaml_get_app_profile()->design_component, &font_scale ) ) && font_scale)
+            if (SUCCEEDED( xaml_create_instance_from_provider( xaml_get_app_caps()->design_component, &font_scale ) ) && font_scale)
             {
                 ERR( "binding font_scale %p to conn_id 6\n", font_scale );
                 b_conn->lpVtbl->Connect( b_conn, 6, font_scale );
@@ -7178,8 +7224,8 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
 
         /* If this is the main application instance registration (called from Main/App..ctor),
          * drive the view lifecycle and message pump for pure UWP apps. FullTrust / XAML Islands
-         * apps (seed_xbf == NULL) construct Application and run their own Win32 window + pump. */
-        if (!lifecycle_started && xaml_get_app_profile()->seed_xbf)
+         * apps (coreapp_seed == FALSE) construct Application and run their own Win32 window + pump. */
+        if (!lifecycle_started && xaml_get_app_caps()->coreapp_seed)
         {
             struct view_source *source;
             lifecycle_started = TRUE;
@@ -7385,8 +7431,19 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
             if (SUCCEEDED(hr) && xaml_type)
             {
                 void **type_vtbl = *(void ***)xaml_type;
-                /* UWP IXamlType has ActivateInstance at slot 18; WinUI 3 has it at slot 19 */
-                int act_slot = is_uwp_xaml_app() ? 18 : 19;
+                /* Dispatch on the IXamlType face the returned type itself answers:
+                 * UWP IXamlType has ActivateInstance at slot 18; WinUI 3 IXamlType
+                 * merged get_BoxedType at slot 17, so ActivateInstance is at slot 19. */
+                static const GUID IID_IXamlType_winui =
+                    { 0xd24219df, 0x7ec9, 0x57f1, { 0xa2, 0x7b, 0x6a, 0xf2, 0x51, 0xd9, 0xc5, 0xbc } };
+                int act_slot = 18;
+                void *type2 = NULL;
+                if (SUCCEEDED( IInspectable_QueryInterface( (IInspectable *)xaml_type,
+                                                            &IID_IXamlType_winui, &type2 ) ) && type2)
+                {
+                    act_slot = 19;
+                    IInspectable_Release( (IInspectable *)type2 );
+                }
                 HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[act_slot];
                 TRACE( "calling IXamlType::ActivateInstance slot %d (%p)\n", act_slot, activate );
                 if (activate)

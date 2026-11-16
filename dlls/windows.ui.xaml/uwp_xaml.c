@@ -2369,6 +2369,7 @@ struct uwp_element
     HWND island_hwnd;
     HWND dialog_hwnd;
     IInspectable *outer;
+    BOOL delegating;             /* outer is a real app-side element (answers IUIElement): refcounts delegate to it */
     enum uwp_elem_kind kind;
     WCHAR class_name[128];
     WCHAR x_class[128];
@@ -3841,8 +3842,8 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
     }
 
     /* Single fallback call site when IXamlMetadataProvider is unavailable */
-    if (out_type_name && max_chars && !out_type_name[0] && xaml_get_app_profile()->vm_type_name)
-        lstrcpynW( out_type_name, xaml_get_app_profile()->vm_type_name, (int)max_chars );
+    if (out_type_name && max_chars && !out_type_name[0] && xaml_get_app_caps()->vm_type)
+        lstrcpynW( out_type_name, xaml_get_app_caps()->vm_type, (int)max_chars );
 }
 
 static IInspectable *uwp_make_button_pressed_args( int code );
@@ -3920,7 +3921,7 @@ static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name 
          SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICommand_UWP, &cmd_iface ))) && cmd_iface)
         g_calc_vm.cmd = (IInspectable *)cmd_iface;
 
-    if (g_calc_vm.cmd && is_calculator_app())
+    if (g_calc_vm.cmd)
     {
         IInspectable *mode_args = uwp_make_button_pressed_args( 200 );
         if (mode_args)
@@ -4107,7 +4108,7 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
         ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
         IUnknown_Release( (IUnknown *)self_iface );
     }
-    if (xaml_get_app_profile()->seed_xbf != NULL && ptr != uwp_get_app_outer())
+    if (ptr != uwp_get_app_outer())
     {
         static const GUID IID_IResourceDictionary_UWP_g =
             { 0x44a9796f, 0x723e, 0x4fdf, { 0xa2, 0x18, 0x03, 0x3e, 0x75, 0xb0, 0xc0, 0x84 } };
@@ -4398,7 +4399,7 @@ static ULONG WINAPI uwp_sub_AddRef( IInspectable *iface )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return 1;
-    if (impl->outer && *(void **)impl->outer && !xaml_get_app_profile()->seed_xbf)
+    if (impl->delegating)
         return IInspectable_AddRef( impl->outer );
     return uwp_nondelegating_AddRef( &impl->nondelegating_iface );
 }
@@ -4407,7 +4408,7 @@ static ULONG WINAPI uwp_sub_Release( IInspectable *iface )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return 1;
-    if (impl->outer && *(void **)impl->outer && !xaml_get_app_profile()->seed_xbf)
+    if (impl->delegating)
         return IInspectable_Release( impl->outer );
     return uwp_nondelegating_Release( &impl->nondelegating_iface );
 }
@@ -4459,7 +4460,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     }
     if (IsEqualGUID( iid, &IID_IAgileObject ))
     {
-        if (impl->outer && !xaml_get_app_profile()->seed_xbf)
+        if (impl->delegating)
         {
             *out = &impl->IInspectable_iface;
             IInspectable_AddRef( impl->outer );
@@ -8527,10 +8528,31 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     if (inner)
     {
         *inner = &impl->nondelegating_iface;
-        if (outer && !xaml_get_app_profile()->seed_xbf &&
+        /* Delegation mode is a property of the outer object, not the app: an outer
+         * that answers IUIElement is a real app-side element, so the element's
+         * lifetime rides on it; otherwise the element owns its own refcount. */
+        void *ui = NULL;
+        HRESULT qi_hr = E_FAIL;
+        if (outer &&
             !IsBadReadPtr( outer, sizeof(void *) ) &&
             !IsBadReadPtr( *(void **)outer, 2 * sizeof(void *) ))
+        {
+            __TRY
+            {
+                qi_hr = IInspectable_QueryInterface( outer, &IID_IUIElement_UWP, &ui );
+            }
+            __EXCEPT_ALL
+            {
+                qi_hr = E_FAIL;
+            }
+            __ENDTRY;
+        }
+        if (SUCCEEDED( qi_hr ) && ui)
+        {
+            IInspectable_Release( (IInspectable *)ui );
+            impl->delegating = TRUE;
             IInspectable_AddRef( outer );
+        }
         else
             InterlockedIncrement( &impl->ref );
     }
@@ -8596,7 +8618,7 @@ static void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *
             uwp_calc_vm_set_instance( dc, NULL );
         }
     }
-    else if (!xaml_get_app_profile()->teardown_vm && g_calc_vm.vm)
+    else if (!xaml_get_app_caps()->teardown_vm && g_calc_vm.vm)
     {
         uwp_calc_vm_teardown( FALSE );
     }
@@ -8684,7 +8706,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         }
         IUnknown_Release( (IUnknown *)fe_ovr );
     }
-    if (xaml_get_app_profile()->display_sync && uwp_is_display_result_element( el ))
+    if (xaml_get_app_caps()->display_sync && uwp_is_display_result_element( el ))
     {
         uwp_calc_vm_ensure();
         uwp_sync_calc_display_from_vm();
@@ -9132,7 +9154,7 @@ static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
         uc = uwp_elem_from_any( uc_raw );
         IInspectable_Release( uc_raw );
         if (!uc) return;
-        lstrcpynW( uc->name, xaml_get_app_profile()->seed_xbf ? xaml_get_app_profile()->seed_xbf : L"Calculator", ARRAY_SIZE(uc->name) );
+        lstrcpynW( uc->name, xaml_get_app_caps()->seed_page[0] ? xaml_get_app_caps()->seed_page : L"Page", ARRAY_SIZE(uc->name) );
         uwp_vec_create( uc, &uc->children_coll );
         uwp_vec_Append( uc->children_coll, &result_el->IInspectable_iface );
         uwp_vec_Append( uc->children_coll, &grid_el->IInspectable_iface );
@@ -9508,9 +9530,9 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 uwp_fire_loaded_tree( page_el );
 
                 /* Populate any empty placeholder containers from the page XBF's referenced PRI resources */
-                if (!uwp_populate_page_from_xbf_refs( page_el ) && xaml_get_app_profile()->seed_xbf)
+                if (!uwp_populate_page_from_xbf_refs( page_el ) && xaml_get_app_caps()->seed_page[0])
                 {
-                    if (!wcscmp( xaml_get_app_profile()->seed_xbf, L"Calculator" ))
+                    if (!wcscmp( xaml_get_app_caps()->seed_page, L"Calculator" ))
                     {
                         struct uwp_element *holder = uwp_find_empty_holder_border( page_el, NULL, FALSE );
                         TRACE( "xbf: falling back to seed tree\n" );
@@ -14165,7 +14187,7 @@ void uwp_invoke_button( struct uwp_element *btn )
     }
 
     /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
-    if (is_calculator_app())
+    if (xaml_get_app_caps()->vm_type[0])
     {
         int code = uwp_resolve_button_calc_code( btn );
         if (code >= 0)
@@ -15614,6 +15636,15 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         }
     }
 
+    {
+        static const GUID IID_IPopupStatics_UWP =
+            { 0xaa119f27, 0x2055, 0x483e, { 0xa4, 0xe0, 0x6f, 0x25, 0x58, 0x73, 0x2d, 0x9b } };
+        if (IsEqualGUID( iid, &IID_IPopupStatics_UWP ))
+        {
+            *out = f ? (void *)&f->IStatics_iface : (void *)iface;
+            return S_OK;
+        }
+    }
     if (f == &auto_props_factory_obj ||
         f == &feap_factory_obj ||
         IsEqualGUID( iid, &IID_ICanvasStatics_local ) ||
@@ -15755,6 +15786,11 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
         TRACE( "uwp_cf_CreateInstance(PropertyPath, path=%p, out=%p)\n", outer, inner );
         return uwp_element_create( cls, NULL, NULL, (void **)inner );
     }
+    /* If called as I*Statics::get_*Property(iface, IDependencyProperty **out)
+     * (e.g. IPopupStatics on Controls.Primitives.Popup routed to the
+     * ComposableFactory vtbl), `outer` is the out-pointer. */
+    if ((ULONG_PTR)outer >= 0x10000 && *(void **)outer == NULL)
+        return dependency_property_create( NULL, (IDependencyProperty **)outer );
     if ((ULONG_PTR)outer < 0x10000) outer = NULL;
     TRACE( "uwp_cf_CreateInstance(%s, outer=%p, inner=%p, inst=%p)\n", debugstr_w(cls), outer, inner, instance );
     return uwp_element_create( cls, outer, inner, instance );
@@ -16187,19 +16223,19 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
 
     /* For UWP apps (Calculator, Store), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory;
      * also serve core Windows.UI.Xaml.Controls panels/buttons outside WhatsApp so UWP controls use the layout/pointer engine. */
-    if ((is_uwp_xaml_app() ||
-         (xaml_get_app_profile()->serve_core_controls &&
-          (!wcscmp( buf, L"Windows.UI.Xaml.Controls.Grid" ) ||
+    if ((!xaml_get_app_caps()->winui3 ||
+         (!wcscmp( buf, L"Windows.UI.Xaml.Controls.Grid" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.StackPanel" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Panel" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Border" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Canvas" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Button" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.TextBlock" ) ||
-           !wcscmp( buf, L"CalculatorApp.Controls.CalculationResult" )))) &&
+           !wcscmp( buf, L"CalculatorApp.Controls.CalculationResult" ))) &&
         (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 ) ||
          !wcscmp( buf, L"CalculatorApp.Controls.CalculationResult" )) &&
         wcscmp( buf, L"Windows.UI.Xaml.Application" ) != 0 &&
+        wcscmp( buf, L"Microsoft.UI.Xaml.Application" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Window" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.PropertyMetadata" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.DependencyProperty" ) != 0 &&

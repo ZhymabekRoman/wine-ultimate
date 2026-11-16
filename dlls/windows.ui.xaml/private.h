@@ -102,27 +102,24 @@ void xaml_dcomp_commit( void );
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_handle_start_msg( LPARAM lparam );
-struct xaml_app_profile
+/* Runtime app capabilities, probed from the running application's own
+ * COM/WinRT surface (IXamlMetadataProvider QI + registered XAML types),
+ * not from package-family name tables. */
+struct xaml_app_caps
 {
-    const WCHAR *family_prefix;      /* e.g. L"5319275A.WhatsAppDesktop" */
-    BOOL use_winui3_window_class;    /* application.c:3508,5291 Microsoft.UI.Xaml vs Windows.UI.Xaml window class */
-    const WCHAR *webview2_template;  /* application.c:6207 template child class name, NULL = generic */
-    const WCHAR *design_component;   /* application.c:6265 e.g. WhatsApp.Design.FontScaleControlPanel, NULL none */
-    BOOL serve_core_controls;        /* uwp_xaml.c:11951 !is_whatsapp_app serve-list gate */
-    const WCHAR *vm_type_name;       /* uwp_xaml.c:2877 StandardCalculatorViewModel fallback, NULL none */
-    BOOL display_sync;               /* uwp_xaml.c:5762 sync-from-VM gate */
-    BOOL teardown_vm;                /* uwp_xaml.c:5685 gate */
-    const WCHAR *seed_xbf;           /* seed-tree fallback page name (uwp_xaml.c:6112-6194/6505-6788 gate) */
+    BOOL winui3;                 /* App answers IXamlMetadataProvider(WinUI3): Microsoft.UI.Xaml family */
+    BOOL coreapp_seed;           /* CoreApplication-driven UWP app: seed tree + view lifecycle */
+    WCHAR seed_page[64];         /* Short root-page name registered in the app provider, empty = no seed tree */
+    BOOL teardown_vm;            /* uwp_xaml.c: DataContext-clear keeps the VM alive (provider-registered VM) */
+    BOOL display_sync;           /* uwp_xaml.c: sync result display from VM (provider-registered VM) */
+    WCHAR vm_type[128];          /* Full VM type name registered in the app provider, empty = none */
+    WCHAR design_component[128]; /* Design-time panel registered in the app provider, empty = none */
 };
 
-extern const struct xaml_app_profile *g_profile;
-const struct xaml_app_profile *xaml_get_app_profile( void );
-BOOL is_calculator_app( void );
+const struct xaml_app_caps *xaml_get_app_caps( void );
 HRESULT xaml_metadata_cache_get_type( const WCHAR *full_name, void **out );
 HRESULT xaml_metadata_cache_get_type_hstring( HSTRING full_name, void **out );
 WORD xaml_metadata_cache_find_xbf_id( const WCHAR *full_name );
-BOOL is_whatsapp_app( void );
-BOOL is_uwp_xaml_app( void );
 void *uwp_get_app_outer( void );
 HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
