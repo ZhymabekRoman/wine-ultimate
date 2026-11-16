@@ -30,10 +30,12 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -65,13 +67,294 @@ struct notify
 
 static const WCHAR key_name[] = {'K','e','y'};
 
-static inline void bump_registry_epoch(void)
+#define REG_SHM_MAGIC          0x52475348u
+#define REG_SHM_VERSION        1u
+#define REG_SHM_VAL_BUCKETS    1024u
+#define REG_SHM_VAL_WAYS       4u
+#define REG_SHM_VAL_SLOTS      (REG_SHM_VAL_BUCKETS * REG_SHM_VAL_WAYS)
+#define REG_SHM_HANDLE_BUCKETS 1024u
+#define REG_SHM_HANDLE_WAYS    4u
+#define REG_SHM_HANDLE_SLOTS   (REG_SHM_HANDLE_BUCKETS * REG_SHM_HANDLE_WAYS)
+#define REG_SHM_NEG_BUCKETS    512u
+#define REG_SHM_NEG_WAYS       4u
+#define REG_SHM_NEG_SLOTS      (REG_SHM_NEG_BUCKETS * REG_SHM_NEG_WAYS)
+#define REG_SHM_VAL_MAX_NAME   128u
+#define REG_SHM_VAL_MAX_DATA   256u
+#define REG_SHM_NEG_MAX_NAME   256u
+
+struct reg_shm_val_slot
 {
-    if (user_shared_data)
+    uint32_t seq;
+    uint32_t status;
+    uint64_t key_id;
+    uint64_t epoch;
+    uint32_t type;
+    uint32_t name_len;
+    uint32_t data_len;
+    uint32_t pad;
+    WCHAR    name[REG_SHM_VAL_MAX_NAME / sizeof(WCHAR)];
+    BYTE     data[REG_SHM_VAL_MAX_DATA];
+};
+
+struct reg_shm_handle_slot
+{
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t handle;
+    uint32_t can_query;
+    uint64_t key_id;
+};
+
+struct reg_shm_neg_open_slot
+{
+    uint32_t seq;
+    uint32_t wow_flags;
+    uint64_t parent_key_id;
+    uint64_t tree_epoch;
+    uint32_t name_len;
+    uint32_t pad;
+    WCHAR    name[REG_SHM_NEG_MAX_NAME / sizeof(WCHAR)];
+};
+
+struct reg_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    uint64_t val_epoch;
+    uint64_t tree_epoch;
+    uint32_t rr_val;
+    uint32_t rr_handle;
+    uint32_t rr_neg;
+    uint32_t pad[7];
+    struct reg_shm_val_slot      val_table[REG_SHM_VAL_SLOTS];
+    struct reg_shm_handle_slot   handle_map[REG_SHM_HANDLE_SLOTS];
+    struct reg_shm_neg_open_slot neg_open_cache[REG_SHM_NEG_SLOTS];
+};
+
+static struct reg_shm *reg_shm = NULL;
+
+static inline uint64_t reg_shm_hash_name_icase( uint64_t seed, const WCHAR *str, uint32_t len_bytes )
+{
+    uint64_t h = seed;
+    uint32_t count = len_bytes / sizeof(WCHAR);
+
+    while (count--)
     {
-        volatile timeout_t *epoch = (volatile timeout_t *)((char *)user_shared_data + 0x310);
-        (*epoch)++;
+        WCHAR ch = *str++;
+        if (ch >= 'A' && ch <= 'Z') ch += 32;
+        else if (ch >= 0x80) ch = 0x80;
+        h ^= ch;
+        h *= 0x100000001b3ULL;
     }
+    return h;
+}
+
+static inline void reg_shm_write_begin( uint32_t *seq )
+{
+    uint32_t s = *seq;
+    if (s & 1) s++;
+    __atomic_store_n( seq, s + 1, __ATOMIC_RELAXED );
+    __atomic_thread_fence( __ATOMIC_SEQ_CST );
+}
+
+static inline void reg_shm_write_end( uint32_t *seq )
+{
+    uint32_t s = *seq;
+    __atomic_store_n( seq, s + 1, __ATOMIC_RELEASE );
+}
+
+static inline void reg_shm_bump_val_epoch(void)
+{
+    if (!reg_shm) return;
+    __atomic_fetch_add( &reg_shm->val_epoch, 1, __ATOMIC_RELEASE );
+}
+
+static inline void reg_shm_bump_tree_epoch(void)
+{
+    if (!reg_shm) return;
+    __atomic_fetch_add( &reg_shm->tree_epoch, 1, __ATOMIC_RELEASE );
+}
+
+static void reg_shm_set_handle( process_id_t pid, obj_handle_t handle, uint64_t key_id, uint32_t can_query )
+{
+    uint32_t bucket, i, target;
+    uint64_t h;
+
+    if (!reg_shm || !handle || !key_id) return;
+    h = ((uint64_t)pid * 0x9e3779b97f4a7c15ULL) ^ ((uint64_t)handle * 0xbf58476d1ce4e5b9ULL);
+    bucket = (uint32_t)(h & (REG_SHM_HANDLE_BUCKETS - 1)) * REG_SHM_HANDLE_WAYS;
+
+    target = bucket + (reg_shm->rr_handle++ & (REG_SHM_HANDLE_WAYS - 1));
+    for (i = 0; i < REG_SHM_HANDLE_WAYS; i++)
+    {
+        struct reg_shm_handle_slot *slot = &reg_shm->handle_map[bucket + i];
+        if ((slot->pid == pid && slot->handle == handle) || !slot->key_id)
+        {
+            target = bucket + i;
+            break;
+        }
+    }
+
+    {
+        struct reg_shm_handle_slot *slot = &reg_shm->handle_map[target];
+        reg_shm_write_begin( &slot->seq );
+        slot->pid = pid;
+        slot->handle = handle;
+        slot->can_query = can_query;
+        slot->key_id = key_id;
+        reg_shm_write_end( &slot->seq );
+    }
+}
+
+static void reg_shm_clear_handle( process_id_t pid, obj_handle_t handle )
+{
+    uint32_t bucket, i;
+    uint64_t h;
+
+    if (!reg_shm || !handle) return;
+    h = ((uint64_t)pid * 0x9e3779b97f4a7c15ULL) ^ ((uint64_t)handle * 0xbf58476d1ce4e5b9ULL);
+    bucket = (uint32_t)(h & (REG_SHM_HANDLE_BUCKETS - 1)) * REG_SHM_HANDLE_WAYS;
+
+    for (i = 0; i < REG_SHM_HANDLE_WAYS; i++)
+    {
+        struct reg_shm_handle_slot *slot = &reg_shm->handle_map[bucket + i];
+        if (slot->pid == pid && slot->handle == handle && slot->key_id)
+        {
+            reg_shm_write_begin( &slot->seq );
+            slot->key_id = 0;
+            slot->pid = 0;
+            slot->handle = 0;
+            slot->can_query = 0;
+            reg_shm_write_end( &slot->seq );
+        }
+    }
+}
+
+static void reg_shm_put_val( uint64_t key_id, uint32_t status, uint32_t type,
+                             const WCHAR *name, data_size_t name_len,
+                             const void *data, data_size_t data_len )
+{
+    uint32_t bucket, i, target;
+    uint64_t h, epoch;
+
+    if (!reg_shm || !key_id || name_len > REG_SHM_VAL_MAX_NAME) return;
+    epoch = reg_shm->val_epoch;
+    h = reg_shm_hash_name_icase( key_id, name, name_len );
+    bucket = (uint32_t)(h & (REG_SHM_VAL_BUCKETS - 1)) * REG_SHM_VAL_WAYS;
+
+    target = bucket + (reg_shm->rr_val++ & (REG_SHM_VAL_WAYS - 1));
+    for (i = 0; i < REG_SHM_VAL_WAYS; i++)
+    {
+        struct reg_shm_val_slot *slot = &reg_shm->val_table[bucket + i];
+        if (slot->key_id == key_id && slot->name_len == name_len &&
+            (!name_len || !memicmp_strW( slot->name, name, name_len )))
+        {
+            target = bucket + i;
+            break;
+        }
+        if (slot->epoch != epoch || !slot->key_id)
+            target = bucket + i;
+    }
+
+    {
+        struct reg_shm_val_slot *slot = &reg_shm->val_table[target];
+        reg_shm_write_begin( &slot->seq );
+        slot->status = status;
+        slot->key_id = key_id;
+        slot->epoch = epoch;
+        slot->type = type;
+        slot->name_len = name_len;
+        slot->data_len = data_len;
+        if (name_len) memcpy( slot->name, name, name_len );
+        if (status == STATUS_SUCCESS && data && data_len)
+            memcpy( slot->data, data, min( data_len, REG_SHM_VAL_MAX_DATA ) );
+        reg_shm_write_end( &slot->seq );
+    }
+}
+
+static void reg_shm_invalidate_val( uint64_t key_id, const WCHAR *name, data_size_t name_len )
+{
+    uint32_t bucket, i;
+    uint64_t h;
+
+    if (!reg_shm || !key_id || name_len > REG_SHM_VAL_MAX_NAME) return;
+    h = reg_shm_hash_name_icase( key_id, name, name_len );
+    bucket = (uint32_t)(h & (REG_SHM_VAL_BUCKETS - 1)) * REG_SHM_VAL_WAYS;
+
+    for (i = 0; i < REG_SHM_VAL_WAYS; i++)
+    {
+        struct reg_shm_val_slot *slot = &reg_shm->val_table[bucket + i];
+        if (slot->key_id == key_id && slot->name_len == name_len &&
+            (!name_len || !memicmp_strW( slot->name, name, name_len )))
+        {
+            reg_shm_write_begin( &slot->seq );
+            slot->key_id = 0;
+            slot->epoch = 0;
+            reg_shm_write_end( &slot->seq );
+        }
+    }
+}
+
+static void reg_shm_set_neg_open( uint64_t parent_key_id, uint32_t wow_flags,
+                                  const WCHAR *name, data_size_t name_len )
+{
+    uint32_t bucket, i, target;
+    uint64_t h, epoch;
+
+    if (!reg_shm || !name_len || name_len > REG_SHM_NEG_MAX_NAME) return;
+    epoch = reg_shm->tree_epoch;
+    h = reg_shm_hash_name_icase( parent_key_id ^ ((uint64_t)wow_flags * 0x9e3779b97f4a7c15ULL), name, name_len );
+    bucket = (uint32_t)(h & (REG_SHM_NEG_BUCKETS - 1)) * REG_SHM_NEG_WAYS;
+
+    target = bucket + (reg_shm->rr_neg++ & (REG_SHM_NEG_WAYS - 1));
+    for (i = 0; i < REG_SHM_NEG_WAYS; i++)
+    {
+        struct reg_shm_neg_open_slot *slot = &reg_shm->neg_open_cache[bucket + i];
+        if (slot->parent_key_id == parent_key_id && slot->wow_flags == wow_flags &&
+            slot->name_len == name_len && !memicmp_strW( slot->name, name, name_len ))
+        {
+            target = bucket + i;
+            break;
+        }
+        if (slot->tree_epoch != epoch || !slot->name_len)
+            target = bucket + i;
+    }
+
+    {
+        struct reg_shm_neg_open_slot *slot = &reg_shm->neg_open_cache[target];
+        reg_shm_write_begin( &slot->seq );
+        slot->wow_flags = wow_flags;
+        slot->parent_key_id = parent_key_id;
+        slot->tree_epoch = epoch;
+        slot->name_len = name_len;
+        memcpy( slot->name, name, name_len );
+        reg_shm_write_end( &slot->seq );
+    }
+}
+
+static void init_reg_shm(void)
+{
+    int fd;
+    void *ptr;
+
+    if (server_dir_fd == -1) return;
+    fd = openat( server_dir_fd, "reg_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
+    if (fd == -1) return;
+    if (ftruncate( fd, sizeof(struct reg_shm) ) == -1)
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct reg_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+
+    reg_shm = ptr;
+    memset( reg_shm, 0, sizeof(*reg_shm) );
+    reg_shm->val_epoch = 1;
+    reg_shm->tree_epoch = 1;
+    reg_shm->version = REG_SHM_VERSION;
+    __atomic_store_n( &reg_shm->magic, REG_SHM_MAGIC, __ATOMIC_RELEASE );
 }
 
 struct type_descr key_type =
@@ -101,8 +384,16 @@ struct key
     struct key_value *values;      /* values array */
     unsigned int      flags;       /* flags */
     timeout_t         modif;       /* last modification time */
+    uint64_t          key_id;      /* canonical case-insensitive path hash */
     struct list       notify_list; /* list of notifications */
 };
+
+static inline uint64_t compute_key_id( const struct key *parent, const WCHAR *name, data_size_t len )
+{
+    uint64_t seed = parent ? parent->key_id : 0xcbf29ce484222325ULL;
+    uint64_t h = reg_shm_hash_name_icase( seed ^ 0x9e3779b97f4a7c15ULL, name, len );
+    return h ? h : 1;
+}
 
 /* key flags */
 #define KEY_VOLATILE 0x0001  /* key is volatile (not saved to disk) */
@@ -665,6 +956,7 @@ static int key_close_handle( struct object *obj, struct process *process, obj_ha
     struct key * key = (struct key *) obj;
     struct notify *notify = find_notify( key, process, handle );
     if (notify) do_notification( key, notify, 1 );
+    reg_shm_clear_handle( process->id, handle );
     return 1;  /* ok to close */
 }
 
@@ -721,6 +1013,7 @@ static struct key *create_key_object( struct object *parent, const struct unicod
             key->last_value  = -1;
             key->values      = NULL;
             key->modif       = modif;
+            key->key_id      = compute_key_id( get_parent( key ), key->obj.name->name, key->obj.name->len );
             list_init( &key->notify_list );
 
             if (options & REG_OPTION_CREATE_LINK) key->flags |= KEY_SYMLINK;
@@ -1232,6 +1525,10 @@ static void set_value( struct key *key, const struct unicode_str *name,
     value->len   = len;
     value->data  = ptr;
     touch_key( key, REG_NOTIFY_CHANGE_LAST_SET );
+    if (name->len <= REG_SHM_VAL_MAX_NAME && len <= REG_SHM_VAL_MAX_DATA)
+        reg_shm_put_val( key->key_id, STATUS_SUCCESS, type, name->str, name->len, ptr, len );
+    else
+        reg_shm_invalidate_val( key->key_id, name->str, name->len );
     if (debug_level > 1) dump_operation( key, value, "Set" );
 }
 
@@ -1252,12 +1549,14 @@ static void get_value( struct key *key, const struct unicode_str *name, int *typ
         *type = value->type;
         *len  = value->len;
         if (value->data) set_reply_data( value->data, min( value->len, get_reply_max_size() ));
+        reg_shm_put_val( key->key_id, STATUS_SUCCESS, value->type, name->str, name->len, value->data, value->len );
         if (debug_level > 1) dump_operation( key, value, "Get" );
     }
     else
     {
         *type = -1;
         set_error( STATUS_OBJECT_NAME_NOT_FOUND );
+        reg_shm_put_val( key->key_id, STATUS_OBJECT_NAME_NOT_FOUND, 0, name->str, name->len, NULL, 0 );
     }
 }
 
@@ -1341,6 +1640,10 @@ static void delete_value( struct key *key, const struct unicode_str *name )
     for (i = index; i < key->last_value; i++) key->values[i] = key->values[i + 1];
     key->last_value--;
     touch_key( key, REG_NOTIFY_CHANGE_LAST_SET );
+    if (name->len <= REG_SHM_VAL_MAX_NAME)
+        reg_shm_put_val( key->key_id, STATUS_OBJECT_NAME_NOT_FOUND, 0, name->str, name->len, NULL, 0 );
+    else
+        reg_shm_invalidate_val( key->key_id, name->str, name->len );
 
     /* try to shrink the array */
     nb_values = key->nb_values;
@@ -2030,6 +2333,7 @@ void init_registry(void)
 
     /* go back to the server dir */
     if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
+    init_reg_shm();
 }
 
 /* save a registry branch to a file */
@@ -2208,7 +2512,8 @@ DECL_HANDLER(create_key)
 
     if ((key = create_key( parent, &name, req->options, access, objattr->attributes, sd )))
     {
-        bump_registry_epoch();
+        if (get_error() != STATUS_OBJECT_NAME_EXISTS)
+            reg_shm_bump_tree_epoch();
         if ((class = get_req_data_after_objattr( objattr, &key->classlen )))
         {
             key->classlen = (key->classlen / sizeof(WCHAR)) * sizeof(WCHAR);
@@ -2219,6 +2524,9 @@ DECL_HANDLER(create_key)
         else
             reply->hkey = alloc_handle_no_access_check( current->process, key,
                                                         access, objattr->attributes );
+        if (reply->hkey)
+            reg_shm_set_handle( current->process->id, reply->hkey, key->key_id,
+                                (access & KEY_QUERY_VALUE) && !(key->flags & KEY_PREDEF) );
         release_object( key );
     }
     if (parent) release_object( parent );
@@ -2238,7 +2546,18 @@ DECL_HANDLER(open_key)
     if ((key = open_key( parent, &name, access, req->attributes )))
     {
         reply->hkey = alloc_handle( current->process, key, access, req->attributes );
+        if (reply->hkey)
+            reg_shm_set_handle( current->process->id, reply->hkey, key->key_id,
+                                (access & KEY_QUERY_VALUE) && !(key->flags & KEY_PREDEF) );
         release_object( key );
+    }
+    else if (get_error() == STATUS_OBJECT_NAME_NOT_FOUND &&
+             (req->attributes & ~(OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE)) == 0 &&
+             name.len > 0 && name.len <= REG_SHM_NEG_MAX_NAME)
+    {
+        uint32_t wow_flags = (req->access & (KEY_WOW64_32KEY | KEY_WOW64_64KEY)) |
+                             (is_wow64_process( current->process ) ? 1u : 0u);
+        reg_shm_set_neg_open( parent ? parent->key_id : 0, wow_flags, name.str, name.len );
     }
     if (parent) release_object( parent );
 }
@@ -2251,7 +2570,8 @@ DECL_HANDLER(delete_key)
     if (key)
     {
         delete_key( key, 0 );
-        bump_registry_epoch();
+        reg_shm_bump_val_epoch();
+        reg_shm_bump_tree_epoch();
         release_object( key );
     }
 }
@@ -2299,7 +2619,6 @@ DECL_HANDLER(set_key_value)
         const char *data = (const char *)get_req_data() + req->namelen;
 
         set_value( key, &name, req->type, data, datalen );
-        bump_registry_epoch();
         release_object( key );
     }
 }
@@ -2313,6 +2632,7 @@ DECL_HANDLER(get_key_value)
     reply->total = 0;
     if ((key = get_hkey_obj( req->hkey, KEY_QUERY_VALUE )))
     {
+        reg_shm_set_handle( current->process->id, req->hkey, key->key_id, !(key->flags & KEY_PREDEF) );
         get_value( key, &name, &reply->type, &reply->total );
         release_object( key );
     }
@@ -2339,7 +2659,6 @@ DECL_HANDLER(delete_key_value)
     if ((key = get_hkey_obj( req->hkey, KEY_SET_VALUE )))
     {
         delete_value( key, &name );
-        bump_registry_epoch();
         release_object( key );
     }
 }
@@ -2367,6 +2686,8 @@ DECL_HANDLER(load_registry)
     if ((key = create_key( parent, &name, 0, KEY_WOW64_64KEY, 0, sd )))
     {
         load_registry( key, req->file );
+        reg_shm_bump_val_epoch();
+        reg_shm_bump_tree_epoch();
         release_object( key );
     }
     if (parent) release_object( parent );
@@ -2392,7 +2713,11 @@ DECL_HANDLER(unload_registry)
         else if (key->obj.is_permanent)
             set_error( STATUS_ACCESS_DENIED );
         else
+        {
             delete_key( key, 1 );     /* FIXME */
+            reg_shm_bump_val_epoch();
+            reg_shm_bump_tree_epoch();
+        }
         release_object( key );
     }
     if (parent) release_object( parent );
@@ -2473,6 +2798,8 @@ DECL_HANDLER(rename_key)
     if (key)
     {
         rename_key( key, &name );
+        reg_shm_bump_val_epoch();
+        reg_shm_bump_tree_epoch();
         release_object( key );
     }
 }
