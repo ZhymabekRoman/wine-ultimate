@@ -427,6 +427,15 @@ extern void flight_recorder_dump( const char *path );
 extern void close_inproc_sync( HANDLE handle );
 extern void invalidate_type_cache( HANDLE handle );
 
+extern BOOL iocp_shm_try_push( HANDLE iocp_port, ULONG_PTR key, ULONG_PTR value,
+                               NTSTATUS status, ULONG_PTR count );
+extern int wine_uring_async_inflight(void);
+extern void wine_uring_drain_nonblocking(void);
+extern BOOL wine_uring_has_pending_iocp( HANDLE iocp_port );
+extern BOOL wine_uring_has_pending_event( HANDLE event );
+extern void wine_uring_drain_for_iocp( HANDLE iocp_port, const LARGE_INTEGER *timeout );
+extern void wine_uring_drain_for_event( HANDLE event, const LARGE_INTEGER *timeout );
+
 extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
                                           ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status );
 extern NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_RECORD *rec,

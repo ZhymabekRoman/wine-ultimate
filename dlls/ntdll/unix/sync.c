@@ -2461,6 +2461,22 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
         if (is_pseudo_handle( handles[i] )) return STATUS_INVALID_HANDLE;
     }
 
+    if (wine_uring_async_inflight())
+    {
+        wine_uring_drain_nonblocking();
+        if (!timeout || timeout->QuadPart != 0)
+        {
+            for (i = 0; i < count; i++)
+            {
+                if (wine_uring_has_pending_event( handles[i] ))
+                {
+                    wine_uring_drain_for_event( handles[i], timeout );
+                    if (type == WaitAny) break;
+                }
+            }
+        }
+    }
+
     if ((ret = inproc_wait( count, handles, type, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
         TRACE( "-> %#x\n", ret );
@@ -2487,6 +2503,13 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
     unsigned int ret;
 
     TRACE( "handle %p, alertable %u, timeout %s\n", handle, alertable, debugstr_timeout(timeout) );
+
+    if (wine_uring_async_inflight())
+    {
+        wine_uring_drain_nonblocking();
+        if (wine_uring_has_pending_event( handle ) && (!timeout || timeout->QuadPart != 0))
+            wine_uring_drain_for_event( handle, timeout );
+    }
 
     if ((ret = inproc_wait( 1, &handle, WaitAny, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
     {
@@ -3205,19 +3228,13 @@ NTSTATUS WINAPI NtOpenIoCompletion( HANDLE *handle, ACCESS_MASK access, const OB
 }
 
 
-/***********************************************************************
- *             NtSetIoCompletion (NTDLL.@)
- */
-NTSTATUS WINAPI NtSetIoCompletion( HANDLE handle, ULONG_PTR key, ULONG_PTR value,
-                                   NTSTATUS status, SIZE_T count )
+BOOL iocp_shm_try_push( HANDLE handle, ULONG_PTR key, ULONG_PTR value,
+                        NTSTATUS status, ULONG_PTR count )
 {
     struct iocp_shm *shm = get_iocp_shm();
     struct iocp_shm_port *port;
     uint64_t gen;
     uint32_t access;
-    unsigned int ret;
-
-    TRACE( "(%p, %lx, %lx, %x, %lx)\n", handle, key, value, status, count );
 
     if (shm && (port = iocp_shm_lookup_port( shm, handle, &gen, &access )) &&
         (access & IO_COMPLETION_MODIFY_STATE))
@@ -3239,11 +3256,117 @@ NTSTATUS WINAPI NtSetIoCompletion( HANDLE handle, ULONG_PTR key, ULONG_PTR value
                 port->tail  = (port->tail + 1) % IOCP_SHM_RING_SLOTS;
                 __atomic_store_n( &port->ring_count, port->ring_count + 1, __ATOMIC_RELEASE );
                 iocp_shm_spin_unlock( &port->lock );
-                return STATUS_SUCCESS;
+                return TRUE;
             }
             iocp_shm_spin_unlock( &port->lock );
         }
     }
+    return FALSE;
+}
+
+static NTSTATUS iocp_shm_try_pop( HANDLE handle, ULONG_PTR *key, ULONG_PTR *value,
+                                  IO_STATUS_BLOCK *io, LARGE_INTEGER *timeout )
+{
+    struct iocp_shm *shm = get_iocp_shm();
+    struct iocp_shm_port *port;
+    uint64_t gen;
+    uint32_t access;
+
+    if (shm && (port = iocp_shm_lookup_port( shm, handle, &gen, &access )) &&
+        (access & IO_COMPLETION_MODIFY_STATE))
+    {
+        if (iocp_shm_spin_lock( &port->lock ))
+        {
+            if (__atomic_load_n( &port->allocated, __ATOMIC_ACQUIRE ) &&
+                port->gen == gen && !port->ring_disabled &&
+                __atomic_load_n( &port->server_depth, __ATOMIC_ACQUIRE ) == 0)
+            {
+                if (port->ring_count > 0)
+                {
+                    struct iocp_shm_msg msg = port->ring[port->head % IOCP_SHM_RING_SLOTS];
+                    port->head = (port->head + 1) % IOCP_SHM_RING_SLOTS;
+                    __atomic_store_n( &port->ring_count, port->ring_count - 1, __ATOMIC_RELEASE );
+                    iocp_shm_spin_unlock( &port->lock );
+                    *key            = (ULONG_PTR)msg.ckey;
+                    *value          = (ULONG_PTR)msg.cvalue;
+                    io->Information = (ULONG_PTR)msg.info;
+                    io->Status      = (NTSTATUS)msg.status;
+                    return STATUS_SUCCESS;
+                }
+                if (timeout && timeout->QuadPart == 0)
+                {
+                    iocp_shm_spin_unlock( &port->lock );
+                    return STATUS_TIMEOUT;
+                }
+            }
+            iocp_shm_spin_unlock( &port->lock );
+        }
+    }
+    return STATUS_PENDING;
+}
+
+static NTSTATUS iocp_shm_try_pop_ex( HANDLE handle, FILE_IO_COMPLETION_INFORMATION *info, ULONG count,
+                                     ULONG *written, LARGE_INTEGER *timeout )
+{
+    struct iocp_shm *shm = get_iocp_shm();
+    struct iocp_shm_port *port;
+    uint64_t gen;
+    uint32_t access;
+
+    if (shm && (port = iocp_shm_lookup_port( shm, handle, &gen, &access )) &&
+        (access & IO_COMPLETION_MODIFY_STATE))
+    {
+        if (iocp_shm_spin_lock( &port->lock ))
+        {
+            if (__atomic_load_n( &port->allocated, __ATOMIC_ACQUIRE ) &&
+                port->gen == gen && !port->ring_disabled &&
+                __atomic_load_n( &port->server_depth, __ATOMIC_ACQUIRE ) == 0)
+            {
+                if (port->ring_count > 0)
+                {
+                    ULONG n = 0;
+                    while (n < count && port->ring_count > 0)
+                    {
+                        struct iocp_shm_msg msg = port->ring[port->head % IOCP_SHM_RING_SLOTS];
+                        port->head = (port->head + 1) % IOCP_SHM_RING_SLOTS;
+                        port->ring_count--;
+                        info[n].CompletionKey             = (ULONG_PTR)msg.ckey;
+                        info[n].CompletionValue           = (ULONG_PTR)msg.cvalue;
+                        info[n].IoStatusBlock.Information = (ULONG_PTR)msg.info;
+                        info[n].IoStatusBlock.Status      = (NTSTATUS)msg.status;
+                        n++;
+                    }
+                    __atomic_thread_fence( __ATOMIC_RELEASE );
+                    iocp_shm_spin_unlock( &port->lock );
+                    *written = n;
+                    return STATUS_SUCCESS;
+                }
+                if (timeout && timeout->QuadPart == 0)
+                {
+                    iocp_shm_spin_unlock( &port->lock );
+                    *written = 1;
+                    return STATUS_TIMEOUT;
+                }
+            }
+            iocp_shm_spin_unlock( &port->lock );
+        }
+    }
+    return STATUS_PENDING;
+}
+
+
+/***********************************************************************
+ *             NtSetIoCompletion (NTDLL.@)
+ */
+NTSTATUS WINAPI NtSetIoCompletion( HANDLE handle, ULONG_PTR key, ULONG_PTR value,
+                                   NTSTATUS status, SIZE_T count )
+{
+    unsigned int ret;
+
+    TRACE( "(%p, %lx, %lx, %x, %lx)\n", handle, key, value, status, count );
+
+    if (iocp_shm_try_push( handle, key, value, status, count ))
+        return STATUS_SUCCESS;
 
     SERVER_START_REQ( add_completion )
     {
@@ -3294,44 +3417,22 @@ NTSTATUS WINAPI NtSetIoCompletionEx( HANDLE completion_handle, HANDLE completion
 NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *value,
                                       IO_STATUS_BLOCK *io, LARGE_INTEGER *timeout )
 {
-    struct iocp_shm *shm = get_iocp_shm();
-    struct iocp_shm_port *port;
-    uint64_t gen;
-    uint32_t access;
     HANDLE wait_handle = NULL;
     unsigned int status;
 
     TRACE( "(%p, %p, %p, %p, %p)\n", handle, key, value, io, timeout );
 
-    if (shm && (port = iocp_shm_lookup_port( shm, handle, &gen, &access )) &&
-        (access & IO_COMPLETION_MODIFY_STATE))
+    if (wine_uring_async_inflight())
+        wine_uring_drain_nonblocking();
+
+    status = iocp_shm_try_pop( handle, key, value, io, timeout );
+    if (status != STATUS_PENDING) return status;
+
+    if (wine_uring_has_pending_iocp( handle ) && (!timeout || timeout->QuadPart != 0))
     {
-        if (iocp_shm_spin_lock( &port->lock ))
-        {
-            if (__atomic_load_n( &port->allocated, __ATOMIC_ACQUIRE ) &&
-                port->gen == gen && !port->ring_disabled &&
-                __atomic_load_n( &port->server_depth, __ATOMIC_ACQUIRE ) == 0)
-            {
-                if (port->ring_count > 0)
-                {
-                    struct iocp_shm_msg msg = port->ring[port->head % IOCP_SHM_RING_SLOTS];
-                    port->head = (port->head + 1) % IOCP_SHM_RING_SLOTS;
-                    __atomic_store_n( &port->ring_count, port->ring_count - 1, __ATOMIC_RELEASE );
-                    iocp_shm_spin_unlock( &port->lock );
-                    *key            = (ULONG_PTR)msg.ckey;
-                    *value          = (ULONG_PTR)msg.cvalue;
-                    io->Information = (ULONG_PTR)msg.info;
-                    io->Status      = (NTSTATUS)msg.status;
-                    return STATUS_SUCCESS;
-                }
-                if (timeout && timeout->QuadPart == 0)
-                {
-                    iocp_shm_spin_unlock( &port->lock );
-                    return STATUS_TIMEOUT;
-                }
-            }
-            iocp_shm_spin_unlock( &port->lock );
-        }
+        wine_uring_drain_for_iocp( handle, timeout );
+        status = iocp_shm_try_pop( handle, key, value, io, timeout );
+        if (status != STATUS_PENDING) return status;
     }
 
     SERVER_START_REQ( remove_completion )
@@ -3375,10 +3476,6 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
 NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORMATION *info, ULONG count,
                                         ULONG *written, LARGE_INTEGER *timeout, BOOLEAN alertable )
 {
-    struct iocp_shm *shm;
-    struct iocp_shm_port *port;
-    uint64_t gen;
-    uint32_t access;
     HANDLE wait_handle = NULL;
     unsigned int status;
     ULONG i = 0;
@@ -3387,43 +3484,19 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
 
     if (!count) return STATUS_INVALID_PARAMETER;
 
-    if (!alertable && (shm = get_iocp_shm()) &&
-        (port = iocp_shm_lookup_port( shm, handle, &gen, &access )) &&
-        (access & IO_COMPLETION_MODIFY_STATE))
+    if (wine_uring_async_inflight())
+        wine_uring_drain_nonblocking();
+
+    if (!alertable)
     {
-        if (iocp_shm_spin_lock( &port->lock ))
+        status = iocp_shm_try_pop_ex( handle, info, count, written, timeout );
+        if (status != STATUS_PENDING) return status;
+
+        if (wine_uring_has_pending_iocp( handle ) && (!timeout || timeout->QuadPart != 0))
         {
-            if (__atomic_load_n( &port->allocated, __ATOMIC_ACQUIRE ) &&
-                port->gen == gen && !port->ring_disabled &&
-                __atomic_load_n( &port->server_depth, __ATOMIC_ACQUIRE ) == 0)
-            {
-                if (port->ring_count > 0)
-                {
-                    ULONG n = 0;
-                    while (n < count && port->ring_count > 0)
-                    {
-                        struct iocp_shm_msg msg = port->ring[port->head % IOCP_SHM_RING_SLOTS];
-                        port->head = (port->head + 1) % IOCP_SHM_RING_SLOTS;
-                        port->ring_count--;
-                        info[n].CompletionKey             = (ULONG_PTR)msg.ckey;
-                        info[n].CompletionValue           = (ULONG_PTR)msg.cvalue;
-                        info[n].IoStatusBlock.Information = (ULONG_PTR)msg.info;
-                        info[n].IoStatusBlock.Status      = (NTSTATUS)msg.status;
-                        n++;
-                    }
-                    __atomic_thread_fence( __ATOMIC_RELEASE );
-                    iocp_shm_spin_unlock( &port->lock );
-                    *written = n;
-                    return STATUS_SUCCESS;
-                }
-                if (timeout && timeout->QuadPart == 0)
-                {
-                    iocp_shm_spin_unlock( &port->lock );
-                    *written = 1;
-                    return STATUS_TIMEOUT;
-                }
-            }
-            iocp_shm_spin_unlock( &port->lock );
+            wine_uring_drain_for_iocp( handle, timeout );
+            status = iocp_shm_try_pop_ex( handle, info, count, written, timeout );
+            if (status != STATUS_PENDING) return status;
         }
     }
 

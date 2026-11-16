@@ -6677,6 +6677,9 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
 /******************************************************************************
  *              NtSetInformationFile   (NTDLL.@)
  */
+static void file_iocp_set( HANDLE handle, HANDLE iocp_port, ULONG_PTR ckey );
+static void file_iocp_set_flags( HANDLE handle, uint32_t flags );
+
 NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                                       void *ptr, ULONG len, FILE_INFORMATION_CLASS class )
 {
@@ -6808,6 +6811,8 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                 status = wine_server_call( req );
             }
             SERVER_END_REQ;
+            if (status == STATUS_SUCCESS)
+                file_iocp_set( handle, info->CompletionPort, info->CompletionKey );
         }
         else status = STATUS_INVALID_PARAMETER_3;
         break;
@@ -6827,6 +6832,8 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                 status = wine_server_call( req );
             }
             SERVER_END_REQ;
+            if (status == STATUS_SUCCESS)
+                file_iocp_set_flags( handle, info->Flags );
         }
         else status = STATUS_INFO_LENGTH_MISMATCH;
         break;
@@ -7555,6 +7562,381 @@ void file_complete_async( HANDLE handle, unsigned int options, HANDLE event, PIO
         add_completion( handle, (ULONG_PTR)apc_user, status, information, FALSE );
 }
 
+#define FILE_IOCP_CACHE_BUCKETS 64
+#define FILE_IOCP_CACHE_WAYS    4
+
+struct file_iocp_entry
+{
+    HANDLE    handle;
+    HANDLE    iocp_port;
+    ULONG_PTR ckey;
+    uint32_t  comp_flags;
+    uint8_t   valid;
+};
+
+static struct file_iocp_entry file_iocp_cache[FILE_IOCP_CACHE_BUCKETS * FILE_IOCP_CACHE_WAYS];
+static pthread_mutex_t file_iocp_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline unsigned int file_iocp_hash( HANDLE handle )
+{
+    ULONG_PTR h = (ULONG_PTR)handle;
+    return (unsigned int)((h ^ (h >> 6) ^ (h >> 12)) & (FILE_IOCP_CACHE_BUCKETS - 1));
+}
+
+static void file_iocp_set( HANDLE handle, HANDLE iocp_port, ULONG_PTR ckey )
+{
+    unsigned int base = file_iocp_hash( handle ) * FILE_IOCP_CACHE_WAYS;
+    unsigned int way;
+    struct file_iocp_entry *empty = NULL;
+
+    pthread_mutex_lock( &file_iocp_mutex );
+    for (way = 0; way < FILE_IOCP_CACHE_WAYS; way++)
+    {
+        struct file_iocp_entry *e = &file_iocp_cache[base + way];
+        if (e->valid && e->handle == handle)
+        {
+            e->iocp_port = iocp_port;
+            e->ckey = ckey;
+            pthread_mutex_unlock( &file_iocp_mutex );
+            return;
+        }
+        if (!e->valid && !empty) empty = e;
+    }
+    if (!empty) empty = &file_iocp_cache[base];
+    empty->handle = handle;
+    empty->iocp_port = iocp_port;
+    empty->ckey = ckey;
+    empty->comp_flags = 0;
+    empty->valid = 1;
+    pthread_mutex_unlock( &file_iocp_mutex );
+}
+
+static void file_iocp_set_flags( HANDLE handle, uint32_t flags )
+{
+    unsigned int base = file_iocp_hash( handle ) * FILE_IOCP_CACHE_WAYS;
+    unsigned int way;
+    struct file_iocp_entry *empty = NULL;
+
+    pthread_mutex_lock( &file_iocp_mutex );
+    for (way = 0; way < FILE_IOCP_CACHE_WAYS; way++)
+    {
+        struct file_iocp_entry *e = &file_iocp_cache[base + way];
+        if (e->valid && e->handle == handle)
+        {
+            e->comp_flags |= flags;
+            pthread_mutex_unlock( &file_iocp_mutex );
+            return;
+        }
+        if (!e->valid && !empty) empty = e;
+    }
+    if (!empty) empty = &file_iocp_cache[base];
+    empty->handle = handle;
+    empty->iocp_port = NULL;
+    empty->ckey = 0;
+    empty->comp_flags = flags;
+    empty->valid = 1;
+    pthread_mutex_unlock( &file_iocp_mutex );
+}
+
+static void file_iocp_get( HANDLE handle, HANDLE *iocp_port, ULONG_PTR *ckey )
+{
+    unsigned int base = file_iocp_hash( handle ) * FILE_IOCP_CACHE_WAYS;
+    unsigned int way;
+
+    *iocp_port = NULL;
+    *ckey = 0;
+    pthread_mutex_lock( &file_iocp_mutex );
+    for (way = 0; way < FILE_IOCP_CACHE_WAYS; way++)
+    {
+        struct file_iocp_entry *e = &file_iocp_cache[base + way];
+        if (e->valid && e->handle == handle)
+        {
+            *iocp_port = e->iocp_port;
+            *ckey = e->ckey;
+            break;
+        }
+    }
+    pthread_mutex_unlock( &file_iocp_mutex );
+}
+
+static void file_iocp_remove( HANDLE handle )
+{
+    unsigned int i;
+
+    pthread_mutex_lock( &file_iocp_mutex );
+    for (i = 0; i < FILE_IOCP_CACHE_BUCKETS * FILE_IOCP_CACHE_WAYS; i++)
+    {
+        if (file_iocp_cache[i].valid &&
+            (file_iocp_cache[i].handle == handle || file_iocp_cache[i].iocp_port == handle))
+        {
+            file_iocp_cache[i].valid = 0;
+        }
+    }
+    pthread_mutex_unlock( &file_iocp_mutex );
+}
+
+static void wine_uring_complete_one( const struct wine_uring_req *req, int32_t cqe_res, int slot )
+{
+    ssize_t res = cqe_res;
+    NTSTATUS status;
+    ULONG_PTR info = 0;
+
+    if (res == -EFAULT || res == -EINTR)
+    {
+        if (req->is_write)
+        {
+            while ((res = pwrite( req->unix_fd, req->buffer, req->length, req->offset )) == -1)
+            {
+                if (errno != EINTR) { res = -errno; break; }
+            }
+        }
+        else
+        {
+            while ((res = virtual_locked_pread( req->unix_fd, req->buffer, req->length, req->offset )) == -1)
+            {
+                if (errno != EINTR) { res = -errno; break; }
+            }
+        }
+    }
+
+    if (res >= 0)
+    {
+        info = (ULONG_PTR)res;
+        if (req->is_write)
+        {
+            status = STATUS_SUCCESS;
+            path_cache_invalidate_stat_all();
+        }
+        else
+        {
+            status = (info || !req->length) ? STATUS_SUCCESS : STATUS_END_OF_FILE;
+        }
+    }
+    else
+    {
+        if (req->is_write && res == -EFAULT)
+            status = STATUS_INVALID_USER_BUFFER;
+        else
+            status = errno_to_status( (int)(-res) );
+    }
+
+    if (req->needs_close) close( req->unix_fd );
+
+    if (req->is_wow64_io)
+    {
+        IO_STATUS_BLOCK32 *io32 = req->iosb_target;
+        io32->Status = status;
+        io32->Information = (ULONG)info;
+    }
+    else
+    {
+        IO_STATUS_BLOCK *io = req->iosb_target;
+        io->Status = status;
+        io->Information = info;
+    }
+
+    if (req->event) NtSetEvent( req->event, NULL );
+
+    if (req->cvalue)
+    {
+        if (!req->iocp_port || !iocp_shm_try_push( req->iocp_port, req->ckey, req->cvalue, status, info ))
+            add_completion( req->handle, req->cvalue, status, info, TRUE );
+    }
+
+    wine_uring_async_finish_slot( slot );
+}
+
+int wine_uring_async_inflight(void)
+{
+    return __atomic_load_n( &g_async_uring.inflight, __ATOMIC_ACQUIRE );
+}
+
+void wine_uring_drain_nonblocking(void)
+{
+    struct wine_uring_req req;
+    int32_t res;
+    int slot, popped;
+
+    while ((popped = wine_uring_async_pop_cqe( &req, &res, &slot )) != 0)
+    {
+        if (popped > 0)
+            wine_uring_complete_one( &req, res, slot );
+    }
+}
+
+BOOL wine_uring_has_pending_iocp( HANDLE iocp_port )
+{
+    int i;
+    if (!__atomic_load_n( &g_async_uring.inflight, __ATOMIC_ACQUIRE )) return FALSE;
+    pthread_mutex_lock( &g_async_uring.lock );
+    for (i = 0; i < WINE_URING_ASYNC_ENTRIES; i++)
+    {
+        if (g_async_uring.reqs[i].in_use &&
+            g_async_uring.reqs[i].cvalue != 0 &&
+            (g_async_uring.reqs[i].iocp_port == iocp_port || g_async_uring.reqs[i].iocp_port == NULL))
+        {
+            pthread_mutex_unlock( &g_async_uring.lock );
+            return TRUE;
+        }
+    }
+    pthread_mutex_unlock( &g_async_uring.lock );
+    return FALSE;
+}
+
+BOOL wine_uring_has_pending_event( HANDLE event )
+{
+    int i;
+    if (!event || !__atomic_load_n( &g_async_uring.inflight, __ATOMIC_ACQUIRE )) return FALSE;
+    pthread_mutex_lock( &g_async_uring.lock );
+    for (i = 0; i < WINE_URING_ASYNC_ENTRIES; i++)
+    {
+        if (g_async_uring.reqs[i].in_use &&
+            (g_async_uring.reqs[i].event == event || g_async_uring.reqs[i].handle == event))
+        {
+            pthread_mutex_unlock( &g_async_uring.lock );
+            return TRUE;
+        }
+    }
+    pthread_mutex_unlock( &g_async_uring.lock );
+    return FALSE;
+}
+
+static BOOL wine_uring_has_pending_handle( HANDLE handle )
+{
+    int i;
+    if (!__atomic_load_n( &g_async_uring.inflight, __ATOMIC_ACQUIRE )) return FALSE;
+    pthread_mutex_lock( &g_async_uring.lock );
+    for (i = 0; i < WINE_URING_ASYNC_ENTRIES; i++)
+    {
+        if (g_async_uring.reqs[i].in_use &&
+            (g_async_uring.reqs[i].handle == handle || g_async_uring.reqs[i].iocp_port == handle))
+        {
+            pthread_mutex_unlock( &g_async_uring.lock );
+            return TRUE;
+        }
+    }
+    pthread_mutex_unlock( &g_async_uring.lock );
+    return FALSE;
+}
+
+static int wine_uring_timeout_ms( const LARGE_INTEGER *timeout )
+{
+    if (!timeout) return -1;
+    if (timeout->QuadPart == 0) return 0;
+    if (timeout->QuadPart < 0)
+    {
+        ULONGLONG ms = (ULONGLONG)(-timeout->QuadPart + 9999) / 10000;
+        return ms > 0x7fffffff ? 0x7fffffff : (int)ms;
+    }
+    else
+    {
+        LARGE_INTEGER now;
+        ULONGLONG ms;
+        NtQuerySystemTime( &now );
+        if (timeout->QuadPart <= now.QuadPart) return 0;
+        ms = (ULONGLONG)(timeout->QuadPart - now.QuadPart + 9999) / 10000;
+        return ms > 0x7fffffff ? 0x7fffffff : (int)ms;
+    }
+}
+
+static void wine_uring_wait_once( int max_ms )
+{
+    int fd = -1;
+    struct pollfd pfd;
+
+    pthread_mutex_lock( &g_async_uring.lock );
+    if (g_async_uring.ring.inited) fd = g_async_uring.ring.ring_fd;
+    pthread_mutex_unlock( &g_async_uring.lock );
+    if (fd < 0) return;
+
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    poll( &pfd, 1, max_ms );
+}
+
+void wine_uring_drain_for_iocp( HANDLE iocp_port, const LARGE_INTEGER *timeout )
+{
+    int rem_ms = wine_uring_timeout_ms( timeout );
+    int step_ms;
+
+    while (wine_uring_has_pending_iocp( iocp_port ))
+    {
+        wine_uring_drain_nonblocking();
+        if (!wine_uring_has_pending_iocp( iocp_port )) break;
+        if (rem_ms == 0) break;
+        step_ms = (rem_ms < 0 || rem_ms > 20) ? 20 : rem_ms;
+        wine_uring_wait_once( step_ms );
+        wine_uring_drain_nonblocking();
+        if (rem_ms > 0) rem_ms = (rem_ms > step_ms) ? (rem_ms - step_ms) : 0;
+    }
+}
+
+void wine_uring_drain_for_event( HANDLE event, const LARGE_INTEGER *timeout )
+{
+    int rem_ms = wine_uring_timeout_ms( timeout );
+    int step_ms;
+
+    while (wine_uring_has_pending_event( event ))
+    {
+        wine_uring_drain_nonblocking();
+        if (!wine_uring_has_pending_event( event )) break;
+        if (rem_ms == 0) break;
+        step_ms = (rem_ms < 0 || rem_ms > 20) ? 20 : rem_ms;
+        wine_uring_wait_once( step_ms );
+        wine_uring_drain_nonblocking();
+        if (rem_ms > 0) rem_ms = (rem_ms > step_ms) ? (rem_ms - step_ms) : 0;
+    }
+}
+
+static void wine_uring_drain_for_handle( HANDLE handle )
+{
+    while (wine_uring_has_pending_handle( handle ))
+    {
+        wine_uring_drain_nonblocking();
+        if (!wine_uring_has_pending_handle( handle )) break;
+        wine_uring_wait_once( 10 );
+    }
+}
+
+static int wine_uring_try_submit_async( HANDLE handle, int unix_fd, int needs_close,
+                                        unsigned int options, HANDLE event,
+                                        ULONG_PTR cvalue, IO_STATUS_BLOCK *io,
+                                        void *buffer, ULONG length, uint64_t offset,
+                                        uint8_t is_write )
+{
+    struct wine_uring_req req;
+    HANDLE iocp_port = NULL;
+    ULONG_PTR ckey = 0;
+
+    if (cvalue) file_iocp_get( handle, &iocp_port, &ckey );
+    if (!iocp_port && !event) return -1;
+    if (event) NtResetEvent( event, NULL );
+
+    req.handle      = handle;
+    req.event       = event;
+    req.iocp_port   = iocp_port;
+    req.ckey        = ckey;
+    req.cvalue      = cvalue;
+    req.iosb_target = (in_wow64_call() && !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
+                      ? (void *)io->Pointer : (void *)io;
+    req.buffer      = buffer;
+    req.offset      = offset;
+    req.length      = length;
+    req.unix_fd     = unix_fd;
+    req.needs_close = needs_close;
+    req.is_write    = is_write;
+    req.is_wow64_io = (in_wow64_call() && !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT))) ? 1 : 0;
+    req.in_use      = 0;
+    req.completing  = 0;
+
+    if (wine_uring_async_submit( &req ) == 0)
+        return 0;
+
+    wine_uring_drain_nonblocking();
+    return wine_uring_async_submit( &req );
+}
+
 
 static unsigned int set_pending_write( HANDLE device )
 {
@@ -7617,6 +7999,15 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
 
         if (offset && offset->QuadPart != FILE_USE_FILE_POINTER_POSITION)
         {
+            if (async_read && length && offset->QuadPart >= 0 && !apc && !key &&
+                (cvalue != 0 || event != NULL) && wine_uring_is_enabled())
+            {
+                if (wine_uring_try_submit_async( handle, unix_handle, needs_close, options,
+                                                 event, cvalue, io, buffer, length,
+                                                 (uint64_t)offset->QuadPart, 0 ) == 0)
+                    return STATUS_PENDING;
+            }
+
             if (length && offset->QuadPart >= 0 && wine_uring_is_enabled())
             {
                 ssize_t ures = wine_uring_pread( unix_handle, buffer, length, offset->QuadPart );
@@ -8503,6 +8894,18 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
                 goto done;
             }
 
+            if (async_write && !append_write && length && offset->QuadPart >= 0 &&
+                offset->QuadPart != FILE_WRITE_TO_END_OF_FILE && !apc && !key &&
+                (cvalue != 0 || event != NULL) &&
+                !__atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE ) &&
+                wine_uring_is_enabled())
+            {
+                if (wine_uring_try_submit_async( handle, unix_handle, needs_close, options,
+                                                 event, cvalue, io, (void *)buffer, length,
+                                                 (uint64_t)off, 1 ) == 0)
+                    return STATUS_PENDING;
+            }
+
             if (length && wine_uring_is_enabled())
             {
                 ssize_t ures = wine_uring_pwrite( unix_handle, buffer, length, off );
@@ -9346,6 +9749,8 @@ static NTSTATUS cancel_io( HANDLE handle, IO_STATUS_BLOCK *io, IO_STATUS_BLOCK *
 {
     HANDLE cancel_handle;
     unsigned int status;
+
+    wine_uring_drain_for_handle( handle );
 
     SERVER_START_REQ( cancel_async )
     {
@@ -10312,6 +10717,8 @@ static unsigned int type_cache_count = 0;
 void invalidate_type_cache( HANDLE handle )
 {
     unsigned int i;
+    wine_uring_drain_for_handle( handle );
+    file_iocp_remove( handle );
     for (i = 0; i < type_cache_count; i++)
     {
         if (type_cache[i].handle == handle)
