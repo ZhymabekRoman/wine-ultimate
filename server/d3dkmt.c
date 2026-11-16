@@ -1008,7 +1008,7 @@ DECL_HANDLER(dcomp_create_shared_visual)
 
     if ((composition = create_composition()))
     {
-        composition->shared_handle = alloc_handle_no_access_check( current->process, composition, 0, 0 );
+        composition->shared_handle = alloc_handle_no_access_check( current->process, composition, COMPOSITION_QUERY_STATE, 0 );
         reply->handle = composition->shared_handle;
         release_object( composition );
     }

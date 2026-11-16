@@ -213,7 +213,10 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     if (pid != GetCurrentProcessId())
         return E_ACCESSDENIED;
 
-    /* Allow replacing or attaching multiple targets per hwnd */
+    if ((topmost && GetPropW(hwnd, wine_window_topmost_composed))
+            || (!topmost && GetPropW(hwnd, wine_window_non_topmost_composed)))
+        return DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED;
+
     target = calloc(1, sizeof(*target));
     if (!target)
         return E_OUTOFMEMORY;

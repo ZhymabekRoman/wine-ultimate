@@ -3952,7 +3952,7 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown16(IDCompositionDeviceUnk
     if (!parameter1)
         return E_INVALIDARG;
 
-    *(DWORD *)parameter1 = 0x7fffffff;
+    *parameter1 = NULL;
     return S_OK;
 }
 
@@ -3964,7 +3964,7 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown17(IDCompositionDeviceUnk
     if (!parameter1)
         return E_INVALIDARG;
 
-    *(DWORD *)parameter1 = 0x7fffffff;
+    *parameter1 = NULL;
     return S_OK;
 }
 

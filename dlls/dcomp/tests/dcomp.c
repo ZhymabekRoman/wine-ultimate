@@ -347,10 +347,13 @@ static void test_DCompositionCreateDevice2(void)
     ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
     }
 
-    /* IDCompositionDevice2 needs to be queried from the device instance */
+    /* Wine intentionally exports IDCompositionDevice2 via DCompositionCreateDevice2
+     * for Chromium / Windows.UI.Composition / dcompi; Windows returns E_NOINTERFACE. */
     hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDevice2,
             (void **)&dcomp_device2);
-    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+    ok(hr == S_OK || broken(hr == E_NOINTERFACE) /* Windows */, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        IDCompositionDevice2_Release(dcomp_device2);
 
     hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDesktopDevice,
             (void **)&desktop_device);
@@ -421,8 +424,11 @@ static void test_DCompositionWaitForCompositorClock(void)
     module = GetModuleHandleW(L"dcomp.dll");
     ok(!!module, "GetModuleHandleW failed.\n");
 
+    /* Wine intentionally exports DCompositionWaitForCompositorClock for Chromium/WebView2
+     * and CoreMessaging; older Windows 10 builds do not export it. */
     pDCompositionWaitForCompositorClock = (void *)GetProcAddress(module, "DCompositionWaitForCompositorClock");
-    ok(!pDCompositionWaitForCompositorClock, "GetProcAddress() succeeded.\n");
+    ok(!!pDCompositionWaitForCompositorClock || broken(!pDCompositionWaitForCompositorClock),
+            "GetProcAddress() failed.\n");
 }
 
 static void test_DCompositionBoostCompositorClock(void)
