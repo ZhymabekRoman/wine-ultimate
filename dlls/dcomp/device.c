@@ -469,7 +469,7 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
     desc.Height = height;
     desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc.Count = 1;
-    desc.BufferCount = 3;
+    desc.BufferCount = 2;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     desc.Flags = 0;
@@ -519,7 +519,7 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
-    static const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    static const float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     struct composite_vs_data vs_data;
     struct composite_blit_data blit_data;
     D3D11_SUBRESOURCE_DATA resource_data;
