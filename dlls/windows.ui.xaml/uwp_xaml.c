@@ -492,7 +492,6 @@ static const GUID IID_IUIE_Extra[] =
     { 0xf8f5b8bc, 0x8d67, 0x5fa9, { 0x8f, 0xb0, 0xc2, 0xc3, 0x31, 0x1e, 0x1b, 0x7c } },
     { 0x6e3501ed, 0xdd31, 0x51e9, { 0x8f, 0x14, 0x25, 0x61, 0xf9, 0x9c, 0x8a, 0x8f } },
     { 0x00378a74, 0x790b, 0x5328, { 0x8a, 0xfa, 0x7d, 0x65, 0xe2, 0x2d, 0xa4, 0x26 } },
-    { 0x103e9b13, 0x3400, 0x4a16, { 0x90, 0xb9, 0x69, 0x12, 0xbf, 0x06, 0x97, 0x4f } },
     { 0x4459a451, 0x69e8, 0x440c, { 0x98, 0x96, 0x4b, 0xb4, 0xf5, 0xf6, 0x42, 0xd1 } },
     { 0x331d8f00, 0xc5f9, 0x46a5, { 0xb6, 0xc8, 0xed, 0xe5, 0x39, 0x30, 0x45, 0x67 } },
     { 0xe48f5a8b, 0x1dff, 0x4352, { 0xa1, 0xf4, 0xe5, 0x16, 0x51, 0x4e, 0xc8, 0x82 } },
@@ -509,7 +508,6 @@ static const GUID IID_IUIE_Extra[] =
     { 0x7e9f3d59, 0x0f07, 0x4bc9, { 0x97, 0x7d, 0x03, 0x76, 0x3f, 0xf8, 0x15, 0x4f } },
     { 0xf57ae6ca, 0xd1a6, 0x4b90, { 0xa4, 0xe9, 0x54, 0xdf, 0x1b, 0xa8, 0xd2, 0xec } },
     { 0x67918e1b, 0xf2d5, 0x44d1, { 0x8b, 0x84, 0x92, 0xb8, 0x7f, 0x80, 0xa3, 0x50 } },
-    { 0x2f93eb45, 0xee43, 0x4303, { 0x9b, 0x38, 0x3f, 0xe1, 0xa1, 0x11, 0xec, 0xbf } },
     { 0x3d0813ba, 0x6890, 0x4537, { 0xbf, 0xe5, 0x79, 0x6d, 0x94, 0x58, 0xed, 0xd6 } },
     { 0x53c9f23a, 0xf25d, 0x446a, { 0x99, 0xb8, 0xc7, 0xae, 0xb8, 0x39, 0x05, 0x0f } },
     { 0x754c3266, 0x0529, 0x45e3, { 0x87, 0x48, 0xbf, 0x74, 0x7d, 0x15, 0x83, 0x57 } },
@@ -546,6 +544,14 @@ static const GUID IID_IMenuFlyoutItem3_UWP =
     { 0x9727b2e3, 0xb2b6, 0x49dc, { 0x8c, 0x22, 0xe0, 0x13, 0x8b, 0x94, 0x15, 0x59 } };
 static const GUID IID_IToggleMenuFlyoutItem_UWP =
     { 0x49841edd, 0x88e9, 0x4663, { 0xa7, 0x01, 0xcd, 0x4f, 0xd2, 0x5e, 0x39, 0x8f } };
+static const GUID IID_IContentDialog_UWP =
+    { 0x103e9b13, 0x3400, 0x4a16, { 0x90, 0xb9, 0x69, 0x12, 0xbf, 0x06, 0x97, 0x4f } };
+static const GUID IID_IContentDialog2_UWP =
+    { 0x2f93eb45, 0xee43, 0x4303, { 0x9b, 0x38, 0x3f, 0xe1, 0xa1, 0x11, 0xec, 0xbf } };
+static const GUID IID_IContentDialogFactory_UWP =
+    { 0x05557178, 0x9d8e, 0x4315, { 0xb3, 0x7d, 0x68, 0x0c, 0x14, 0x01, 0x2c, 0x35 } };
+static const GUID IID_IContentDialogClosedEventArgs_UWP =
+    { 0x4d6f20f2, 0x75d5, 0x4269, { 0x9f, 0x5c, 0xd6, 0x5b, 0x73, 0xb5, 0x33, 0x2d } };
 static const GUID IID_IUIElement4_Real_UWP =
     { 0x69145cd4, 0x199a, 0x4657, { 0x9e, 0x57, 0xe9, 0x9e, 0x8f, 0x13, 0x67, 0x12 } };
 static const GUID IID_IUIElement7_UWP =
@@ -2351,11 +2357,14 @@ struct uwp_element
     IInspectable IMenuFlyoutSubItem_iface;
     IInspectable IMenuFlyout2_iface;
     IInspectable IUIElement4_iface;
+    IInspectable IContentDialog_iface;
+    IInspectable IContentDialog2_iface;
     IInspectable ITeachingTip_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
 
     LONG ref;
     HWND island_hwnd;
+    HWND dialog_hwnd;
     IInspectable *outer;
     enum uwp_elem_kind kind;
     WCHAR class_name[128];
@@ -2364,6 +2373,12 @@ struct uwp_element
     WCHAR uid[64];
     WCHAR text[256];
     WCHAR accel_text[64];
+    IInspectable *dialog_title_obj;
+    WCHAR dialog_title[128];
+    WCHAR dialog_primary_text[64];
+    WCHAR dialog_secondary_text[64];
+    WCHAR dialog_close_text[64];
+    int dialog_default_btn;
     int conn_id;
 
     struct uwp_element *parent;
@@ -3324,44 +3339,6 @@ static void uwp_calc_vm_teardown( BOOL final_cleanup )
     }
 }
 
-/* Single documented shim for .NET Native / C++/CX StandardCalculatorViewModel RCW:
- * ButtonPressed::Execute on the real C++/CX VM expects a CalculatorButtonPressedEventArgs
- * ref class, whereas vtbl slot 79 is SendCommandToCalcManager(int) which directly drives
- * CStandardCalculatorManager::SendCommand (including 200 = Command::ModeBasic to allocate
- * m_calculatorManager at this+392). */
-static HRESULT uwp_calc_vm_slot79_shim( IInspectable *vm, int code )
-{
-    HRESULT hr = E_FAIL;
-    int attempt;
-
-    if (!vm) return E_POINTER;
-    if (!xaml_get_app_profile()->vm_slot79) return E_FAIL;
-    for (attempt = 0; attempt < 2; attempt++)
-    {
-        MSG msg;
-        __TRY
-        {
-            HRESULT (WINAPI *send)(void *, int) = (void *)(*(void ***)vm)[79];
-            hr = send ? send( vm, code ) : E_FAIL;
-        }
-        __EXCEPT_ALL
-        {
-            hr = E_FAIL;
-            TRACE( "uwp_calc_vm_slot79_shim: slot 79 fault (attempt %d, code %d)\n", attempt, code );
-        }
-        __ENDTRY;
-        TRACE( "uwp_calc_vm_slot79_shim: code %d attempt %d -> hr %#lx\n", code, attempt, hr );
-        if (hr != E_FAIL || attempt > 0) break;
-        MsgWaitForMultipleObjectsEx( 0, NULL, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
-        while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
-        {
-            TranslateMessage( &msg );
-            DispatchMessageW( &msg );
-        }
-    }
-    return hr;
-}
-
 /* Resolve ViewModel type name (and optionally activate via IXamlType) from the page/view XBF
  * metadata via IXamlMetadataProvider::GetXamlTypeByFullName(view_type)->GetMember("Model")->get_Type(). */
 static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_chars, IInspectable **out_instance )
@@ -3497,7 +3474,7 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
         lstrcpynW( out_type_name, xaml_get_app_profile()->vm_type_name, (int)max_chars );
 }
 
-static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name, BOOL send_mode_basic )
+static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name )
 {
     void *npc = NULL;
     IInspectable *cmd_prop = NULL;
@@ -3563,14 +3540,6 @@ static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name,
     if (!g_calc_vm.cmd && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
         g_calc_vm.cmd = (IInspectable *)cmd_iface;
 
-    if (send_mode_basic && xaml_get_app_profile()->vm_command_modebasic)
-    {
-        /* Command::ModeBasic (200 = 0xc8) synchronously initializes CCalcEngine */
-        UINT cmd = xaml_get_app_profile()->vm_command_modebasic;
-        HRESULT mhr = uwp_calc_vm_slot79_shim( g_calc_vm.vm, (int)cmd );
-        TRACE( "uwp_calc_vm_set_instance: %s(%u) -> %#lx\n",
-               debugstr_w(xaml_get_app_profile()->vm_init_cmd), cmd, mhr );
-    }
     g_calc_vm.pumped = TRUE;
     uwp_sync_calc_display_from_vm();
 }
@@ -3600,15 +3569,117 @@ static void uwp_calc_vm_ensure( void )
 
     if (vm_inst)
     {
-        uwp_calc_vm_set_instance( vm_inst, vm_type_name, TRUE );
+        uwp_calc_vm_set_instance( vm_inst, vm_type_name );
         IInspectable_Release( vm_inst );
     }
 }
 
-static void uwp_calc_vm_send( int code )
+static IInspectable *uwp_make_button_pressed_args( int code, IInspectable *cmd_param )
+{
+    static const WCHAR args_cls[] = L"CalculatorApp.ViewModel.Common.CalculatorButtonPressedEventArgs";
+    HSTRING h_cls = NULL, h_mem = NULL;
+    IInspectable *args = NULL;
+    void *app_outer = uwp_get_app_outer();
+    void *provider = NULL, *xaml_type = NULL, *member = NULL;
+    HRESULT hr;
+
+    if (SUCCEEDED(WindowsCreateString( args_cls, ARRAY_SIZE(args_cls) - 1, &h_cls )) && h_cls)
+    {
+        IActivationFactory *af = NULL;
+        hr = RoGetActivationFactory( h_cls, &IID_IActivationFactory, (void **)&af );
+        TRACE( "uwp_make_button_pressed_args: RoGetActivationFactory -> %#lx af=%p\n", hr, (void *)af );
+        if (SUCCEEDED(hr) && af)
+        {
+            ULONG iid_cnt = 0, i;
+            IID *iids = NULL;
+            if (SUCCEEDED(af->lpVtbl->GetIids( af, &iid_cnt, &iids )) && iids)
+            {
+                for (i = 0; i < iid_cnt; i++)
+                {
+                    void *fac = NULL;
+                    if (IsEqualGUID( &iids[i], &IID_IActivationFactory )) continue;
+                    if (SUCCEEDED(IActivationFactory_QueryInterface( af, &iids[i], &fac )) && fac)
+                    {
+                        HRESULT chr = E_FAIL;
+                        __TRY
+                        {
+                            HRESULT (WINAPI *create_inst)(void *, HSTRING, INT32, IInspectable **) =
+                                (void *)(*(void ***)fac)[6];
+                            if (create_inst) chr = create_inst( fac, NULL, code, &args );
+                        }
+                        __EXCEPT_ALL { chr = E_FAIL; args = NULL; }
+                        __ENDTRY;
+                        TRACE( "uwp_make_button_pressed_args: iid[%lu] %s CreateInstance(%d) -> %#lx args=%p\n",
+                               i, debugstr_guid(&iids[i]), code, chr, (void *)args );
+                        IUnknown_Release( (IUnknown *)fac );
+                        if (SUCCEEDED(chr) && args) break;
+                        args = NULL;
+                    }
+                }
+                CoTaskMemFree( iids );
+            }
+            IActivationFactory_Release( af );
+        }
+    }
+    if (!args && app_outer && h_cls &&
+        SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider)
+    {
+        struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
+        if (mp->lpVtbl->GetXamlTypeByFullName &&
+            SUCCEEDED(mp->lpVtbl->GetXamlTypeByFullName( mp, h_cls, (struct xaml_type **)&xaml_type )) && xaml_type)
+        {
+            struct xaml_type *xt = (struct xaml_type *)xaml_type;
+            if (xt->lpVtbl->ActivateInstance)
+            {
+                __TRY { hr = xt->lpVtbl->ActivateInstance( xt, &args ); }
+                __EXCEPT_ALL { hr = E_FAIL; args = NULL; }
+                __ENDTRY;
+                TRACE( "uwp_make_button_pressed_args: IXamlType::ActivateInstance -> %#lx args=%p\n", hr, (void *)args );
+            }
+        }
+    }
+    if (args && app_outer && h_cls)
+    {
+        if (!provider && SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider) {}
+        if (provider && !xaml_type)
+        {
+            struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
+            if (mp->lpVtbl->GetXamlTypeByFullName)
+                mp->lpVtbl->GetXamlTypeByFullName( mp, h_cls, (struct xaml_type **)&xaml_type );
+        }
+        if (xaml_type)
+        {
+            struct xaml_type *xt = (struct xaml_type *)xaml_type;
+            if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( L"ButtonId", 8, &h_mem )) && h_mem)
+            {
+                if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_mem, (struct xaml_member **)&member )) && member)
+                {
+                    struct xaml_member *xm = (struct xaml_member *)member;
+                    IInspectable *val = cmd_param ? cmd_param : box_int32_value( code );
+                    if (cmd_param) IInspectable_AddRef( cmd_param );
+                    if (xm->lpVtbl->SetValue && val)
+                    {
+                        __TRY { hr = xm->lpVtbl->SetValue( xm, args, val ); }
+                        __EXCEPT_ALL { hr = E_FAIL; }
+                        __ENDTRY;
+                        TRACE( "uwp_make_button_pressed_args: SetValue(ButtonId=%d) -> %#lx\n", code, hr );
+                    }
+                    if (val) IInspectable_Release( val );
+                    IInspectable_Release( (IInspectable *)member );
+                }
+                WindowsDeleteString( h_mem );
+            }
+        }
+    }
+    if (xaml_type) IInspectable_Release( (IInspectable *)xaml_type );
+    if (provider) IInspectable_Release( (IInspectable *)provider );
+    if (h_cls) WindowsDeleteString( h_cls );
+    return args;
+}
+
+static void uwp_calc_vm_send( int code, IInspectable *cmd_param )
 {
     WCHAR pre_disp[256] = {0}, post_disp[256] = {0};
-    BOOL handled = FALSE;
 
     uwp_calc_vm_ensure();
     if (!g_calc_vm.vm) return;
@@ -3616,11 +3687,12 @@ static void uwp_calc_vm_send( int code )
     uwp_vm_read_display_value( g_calc_vm.vm, g_calc_vm.vm_class_name, pre_disp, ARRAY_SIZE(pre_disp) );
     TRACE( "uwp_calc_vm_send: code %d pre DisplayValue = %s\n", code, debugstr_w(pre_disp) );
 
-    /* 1. Try ICommand::Execute(boxed_code) when an ICommand face is available */
     if (g_calc_vm.cmd)
     {
-        IInspectable *param = box_int32_value( code );
+        IInspectable *args = uwp_make_button_pressed_args( code, cmd_param );
+        IInspectable *param = args ? args : (cmd_param ? cmd_param : box_int32_value( code ));
         HRESULT chr = E_FAIL;
+        if (!args && cmd_param) IInspectable_AddRef( cmd_param );
         __TRY
         {
             struct command_iface *cmd = (struct command_iface *)g_calc_vm.cmd;
@@ -3632,17 +3704,10 @@ static void uwp_calc_vm_send( int code )
         }
         __ENDTRY;
         if (param) IInspectable_Release( param );
-        if (SUCCEEDED(chr) &&
-            uwp_vm_read_display_value( g_calc_vm.vm, g_calc_vm.vm_class_name, post_disp, ARRAY_SIZE(post_disp) ) &&
-            wcscmp( pre_disp, post_disp ) != 0)
-        {
-            handled = TRUE;
-        }
+        uwp_vm_read_display_value( g_calc_vm.vm, g_calc_vm.vm_class_name, post_disp, ARRAY_SIZE(post_disp) );
+        TRACE( "uwp_calc_vm_send: code %d (args=%p) Execute -> %#lx post DisplayValue = %s\n",
+               code, (void *)args, chr, debugstr_w(post_disp) );
     }
-
-    /* 2. Fallback to documented slot-79 shim for .NET Native / C++/CX RCW */
-    if (!handled && xaml_get_app_profile()->vm_slot79)
-        uwp_calc_vm_slot79_shim( g_calc_vm.vm, code );
 
     uwp_sync_calc_display_from_vm();
 }
@@ -4097,6 +4162,10 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     }
     else if (IsEqualGUID( iid, &IID_IMenuFlyout2_Real_UWP ))
         *out = &impl->IMenuFlyout2_iface;
+    else if (IsEqualGUID( iid, &IID_IContentDialog_UWP ))
+        *out = &impl->IContentDialog_iface;
+    else if (IsEqualGUID( iid, &IID_IContentDialog2_UWP ))
+        *out = &impl->IContentDialog2_iface;
     else if (IsEqualGUID( iid, &IID_ITeachingTip_WinUI ))
         *out = &impl->ITeachingTip_iface;
     else if (IsEqualGUID( iid, &IID_IGrid_UWP ) ||
@@ -5201,10 +5270,28 @@ static HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child
             lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
         }
     }
-    else if (!wcscmp( nm, L"ContentRootGrid" ) || !wcscmp( nm, L"RootGrid" ))
+    else if (!wcscmp( nm, L"ContentRootGrid" ) || !wcscmp( nm, L"RootGrid" ) ||
+             !wcscmp( nm, L"DialogSpace" ) || !wcscmp( nm, L"CommandSpace" ))
     {
         IInspectable *raw = NULL;
         if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&raw )) && raw)
+        {
+            child = uwp_elem_from_any( raw );
+            IInspectable_Release( raw );
+        }
+        if (child)
+        {
+            child->parent = impl;
+            child->actual_w = 360.0;
+            child->actual_h = 180.0;
+            lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+        }
+    }
+    else if (!wcscmp( nm, L"PrimaryButton" ) || !wcscmp( nm, L"SecondaryButton" ) ||
+             !wcscmp( nm, L"CloseButton" ))
+    {
+        IInspectable *raw = NULL;
+        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&raw )) && raw)
         {
             child = uwp_elem_from_any( raw );
             IInspectable_Release( raw );
@@ -7008,6 +7095,411 @@ static const void *uwp_mf2_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 
+/* --- IContentDialog, IContentDialog2, IContentDialogClosedEventArgs --- */
+struct uwp_cd_closed_args
+{
+    const void *vtbl;
+    LONG ref;
+    int result;
+};
+
+static HRESULT WINAPI cd_closed_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IContentDialogClosedEventArgs_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_cd_closed_args *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cd_closed_args_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_cd_closed_args *)iface)->ref );
+}
+static ULONG WINAPI cd_closed_args_Release( void *iface )
+{
+    struct uwp_cd_closed_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI cd_closed_args_get_Result( void *iface, int *out )
+{
+    struct uwp_cd_closed_args *a = iface;
+    if (out) *out = a ? a->result : 0;
+    return S_OK;
+}
+static const void *uwp_cd_closed_args_vtbl[8] =
+{
+    cd_closed_args_QI,
+    cd_closed_args_AddRef,
+    cd_closed_args_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    cd_closed_args_get_Result,
+    uwp_generic_noop,
+};
+
+static void uwp_cd_fire_closed( struct uwp_element *impl, int result )
+{
+    struct uwp_cd_closed_args *args;
+    IInspectable *sender;
+    int i;
+    if (!impl) return;
+    if (impl->dialog_hwnd && IsWindow( impl->dialog_hwnd ))
+    {
+        HWND dh = impl->dialog_hwnd;
+        impl->dialog_hwnd = NULL;
+        DestroyWindow( dh );
+    }
+    args = calloc( 1, sizeof(*args) );
+    if (!args) return;
+    args->vtbl = uwp_cd_closed_args_vtbl;
+    args->ref = 1;
+    args->result = result;
+    sender = impl->outer ? impl->outer : &impl->IContentDialog_iface;
+    for (i = 0; i < impl->flyout_closed_cnt; i++)
+    {
+        if (impl->flyout_closed_handlers[i])
+        {
+            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->flyout_closed_handlers[i];
+            __TRY { h->lpVtbl->Invoke( h, sender, args ); }
+            __EXCEPT_ALL {}
+            __ENDTRY;
+        }
+    }
+    cd_closed_args_Release( args );
+    if (g_island_hwnd_cnt > 0 && g_island_hwnds[0])
+    {
+        HWND root = GetAncestor( g_island_hwnds[0], GA_ROOT );
+        if (root && IsWindow( root ))
+        {
+            RedrawWindow( root, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
+            PostMessageW( root, WM_NULL, 0, 0 );
+        }
+    }
+    uwp_invalidate_window();
+}
+
+static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
+{
+    struct uwp_element *impl = (struct uwp_element *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
+    if (msg == WM_NCCREATE)
+    {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams );
+        return DefWindowProcW( hwnd, msg, wp, lp );
+    }
+    if (msg == WM_ERASEBKGND)
+        return 1;
+    if (msg == WM_APP + 1)
+    {
+        if (IsWindow( hwnd ) && IsWindowVisible( hwnd ))
+            SetFocus( hwnd );
+        return 0;
+    }
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && impl)
+    {
+        if (wp == VK_ESCAPE)
+        {
+            uwp_cd_fire_closed( impl, 0 );
+            return 0;
+        }
+        if (wp == VK_RETURN)
+        {
+            int res = (impl->dialog_default_btn == 1) ? 1 : ((impl->dialog_default_btn == 2) ? 2 : 0);
+            uwp_cd_fire_closed( impl, res );
+            return 0;
+        }
+    }
+    if (msg == WM_LBUTTONUP && impl)
+    {
+        RECT rc;
+        int mx = (short)LOWORD( lp ), my = (short)HIWORD( lp );
+        GetClientRect( hwnd, &rc );
+        if (my >= rc.bottom - 52 && my <= rc.bottom - 14)
+        {
+            int btn_w = (rc.right - rc.left - 36) / 3;
+            if (mx >= rc.left + 12 && mx < rc.left + 12 + btn_w && impl->dialog_primary_text[0])
+                uwp_cd_fire_closed( impl, 1 );
+            else if (mx >= rc.left + 18 + btn_w && mx < rc.left + 18 + 2 * btn_w && impl->dialog_secondary_text[0])
+                uwp_cd_fire_closed( impl, 2 );
+            else if (mx >= rc.left + 24 + 2 * btn_w)
+                uwp_cd_fire_closed( impl, 0 );
+        }
+        return 0;
+    }
+    if (msg == WM_PAINT && impl)
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint( hwnd, &ps );
+        if (hdc)
+        {
+            RECT rc, trc, brc;
+            HBRUSH bg_br = CreateSolidBrush( RGB( 43, 43, 43 ) );
+            HBRUSH bd_br = CreateSolidBrush( RGB( 80, 80, 80 ) );
+            HBRUSH p_br  = CreateSolidBrush( RGB( 0, 120, 212 ) );
+            HBRUSH s_br  = CreateSolidBrush( RGB( 60, 60, 60 ) );
+            HFONT f_title = CreateFontW( -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                         CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            HFONT f_body  = CreateFontW( -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                         CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            HGDIOBJ old_f = SelectObject( hdc, f_title );
+            int btn_w;
+
+            GetClientRect( hwnd, &rc );
+            FillRect( hdc, &rc, bg_br );
+            FrameRect( hdc, &rc, bd_br );
+            SetBkMode( hdc, TRANSPARENT );
+            SetTextColor( hdc, RGB( 255, 255, 255 ) );
+
+            SetRect( &trc, 20, 16, rc.right - 20, 46 );
+            DrawTextW( hdc, impl->dialog_title[0] ? impl->dialog_title : L"Notepad", -1, &trc,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+
+            SelectObject( hdc, f_body );
+            SetRect( &brc, 20, 52, rc.right - 20, rc.bottom - 62 );
+            DrawTextW( hdc, impl->text, -1, &brc, DT_LEFT | DT_WORDBREAK );
+
+            btn_w = (rc.right - rc.left - 36) / 3;
+            if (impl->dialog_primary_text[0])
+            {
+                RECT r1 = { 12, rc.bottom - 46, 12 + btn_w, rc.bottom - 14 };
+                FillRect( hdc, &r1, p_br );
+                DrawTextW( hdc, impl->dialog_primary_text, -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+            }
+            if (impl->dialog_secondary_text[0])
+            {
+                RECT r2 = { 18 + btn_w, rc.bottom - 46, 18 + 2 * btn_w, rc.bottom - 14 };
+                FillRect( hdc, &r2, s_br );
+                DrawTextW( hdc, impl->dialog_secondary_text, -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+            }
+            {
+                RECT r3 = { 24 + 2 * btn_w, rc.bottom - 46, rc.right - 12, rc.bottom - 14 };
+                FillRect( hdc, &r3, s_br );
+                DrawTextW( hdc, impl->dialog_close_text[0] ? impl->dialog_close_text : L"Cancel", -1, &r3,
+                           DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+            }
+
+            SelectObject( hdc, old_f );
+            DeleteObject( f_body );
+            DeleteObject( f_title );
+            DeleteObject( s_br );
+            DeleteObject( p_br );
+            DeleteObject( bd_br );
+            DeleteObject( bg_br );
+        }
+        EndPaint( hwnd, &ps );
+        return 0;
+    }
+    return DefWindowProcW( hwnd, msg, wp, lp );
+}
+
+static HRESULT WINAPI uwp_cd_get_Title( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->dialog_title_obj : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_put_Title( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->dialog_title_obj) IInspectable_Release( impl->dialog_title_obj );
+    impl->dialog_title_obj = val;
+    if (val)
+    {
+        IInspectable_AddRef( val );
+        uwp_unbox_string( val, impl->dialog_title, ARRAY_SIZE(impl->dialog_title) );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_get_NullOut( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_get_BoolFalse( void *iface, boolean *out )
+{
+    if (out) *out = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_get_BoolTrue( void *iface, boolean *out )
+{
+    if (out) *out = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_get_PrimaryButtonText( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    return WindowsCreateString( impl ? impl->dialog_primary_text : L"",
+                                impl ? wcslen(impl->dialog_primary_text) : 0, out );
+}
+static HRESULT WINAPI uwp_cd_put_PrimaryButtonText( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (impl) lstrcpynW( impl->dialog_primary_text, raw ? raw : L"", ARRAY_SIZE(impl->dialog_primary_text) );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_get_SecondaryButtonText( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    return WindowsCreateString( impl ? impl->dialog_secondary_text : L"",
+                                impl ? wcslen(impl->dialog_secondary_text) : 0, out );
+}
+static HRESULT WINAPI uwp_cd_put_SecondaryButtonText( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (impl) lstrcpynW( impl->dialog_secondary_text, raw ? raw : L"", ARRAY_SIZE(impl->dialog_secondary_text) );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd2_get_CloseButtonText( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    return WindowsCreateString( impl ? impl->dialog_close_text : L"",
+                                impl ? wcslen(impl->dialog_close_text) : 0, out );
+}
+static HRESULT WINAPI uwp_cd2_put_CloseButtonText( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (impl) lstrcpynW( impl->dialog_close_text, raw ? raw : L"", ARRAY_SIZE(impl->dialog_close_text) );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd2_get_DefaultButton( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->dialog_default_btn : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd2_put_DefaultButton( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->dialog_default_btn = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_Hide( void *iface )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) uwp_cd_fire_closed( impl, 0 );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cd_ShowAsync( void *iface, void **out )
+{
+    static BOOL cls_reg = FALSE;
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    HWND owner = NULL;
+    RECT orc = { 100, 100, 900, 700 };
+    int dw = 380, dh = 180, dx, dy;
+
+    if (out) *out = NULL;
+    if (!impl) return S_OK;
+
+    uwp_fire_loaded_tree( impl );
+
+    if (g_island_hwnd_cnt > 0 && g_island_hwnds[0])
+        owner = GetAncestor( g_island_hwnds[0], GA_ROOT );
+    if (!owner) owner = GetActiveWindow();
+    if (owner && IsWindow( owner ))
+        GetWindowRect( owner, &orc );
+    dx = (orc.left + orc.right - dw) / 2;
+    dy = (orc.top + orc.bottom - dh) / 2;
+
+    if (!cls_reg)
+    {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = uwp_cd_popup_wndproc;
+        wc.hInstance = GetModuleHandleW( NULL );
+        wc.hCursor = LoadCursorW( NULL, (LPCWSTR)IDC_ARROW );
+        wc.lpszClassName = L"WineUwpContentDialogPopup";
+        RegisterClassExW( &wc );
+        cls_reg = TRUE;
+    }
+    if (impl->dialog_hwnd && IsWindow( impl->dialog_hwnd ))
+        DestroyWindow( impl->dialog_hwnd );
+    impl->dialog_hwnd = CreateWindowExW( WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                                         L"WineUwpContentDialogPopup", L"",
+                                         WS_POPUP | WS_VISIBLE,
+                                         dx, dy, dw, dh,
+                                         owner, NULL, GetModuleHandleW( NULL ), impl );
+    if (impl->dialog_hwnd)
+    {
+        InvalidateRect( impl->dialog_hwnd, NULL, FALSE );
+        UpdateWindow( impl->dialog_hwnd );
+        PostMessageW( impl->dialog_hwnd, WM_APP + 1, 0, 0 );
+    }
+    return S_OK;
+}
+
+static const void *uwp_cd_vtbl[48] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 47] = uwp_generic_noop,
+    [6] = uwp_cd_get_Title,
+    [7] = uwp_cd_put_Title,
+    [8] = uwp_cd_get_NullOut,
+    [10] = uwp_cd_get_BoolFalse,
+    [12] = uwp_cd_get_PrimaryButtonText,
+    [13] = uwp_cd_put_PrimaryButtonText,
+    [14] = uwp_cd_get_SecondaryButtonText,
+    [15] = uwp_cd_put_SecondaryButtonText,
+    [16] = uwp_cd_get_NullOut,
+    [18] = uwp_cd_get_NullOut,
+    [20] = uwp_cd_get_NullOut,
+    [22] = uwp_cd_get_NullOut,
+    [24] = uwp_cd_get_BoolTrue,
+    [26] = uwp_cd_get_BoolTrue,
+    [28] = uwp_ui_event_add,
+    [30] = uwp_flyout_add_Closed,
+    [32] = uwp_ui_event_add,
+    [34] = uwp_ui_event_add,
+    [36] = uwp_ui_event_add,
+    [38] = uwp_cd_Hide,
+    [39] = uwp_cd_ShowAsync,
+};
+
+static const void *uwp_cd2_vtbl[24] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 23] = uwp_generic_noop,
+    [6] = uwp_cd2_get_CloseButtonText,
+    [7] = uwp_cd2_put_CloseButtonText,
+    [8] = uwp_cd_get_NullOut,
+    [10] = uwp_cd_get_NullOut,
+    [12] = uwp_cd_get_BoolTrue,
+    [14] = uwp_ui_event_add,
+    [16] = uwp_cd_get_NullOut,
+    [18] = uwp_cd2_get_DefaultButton,
+    [19] = uwp_cd2_put_DefaultButton,
+};
+
 static HRESULT WINAPI uwp_tt_get_IsOpen( void *iface, boolean *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -7532,6 +8024,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IMenuFlyoutSubItem_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mfsi_vtbl;
     impl->IMenuFlyout2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mf2_vtbl;
     impl->IUIElement4_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ui4_vtbl;
+    impl->IContentDialog_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cd_vtbl;
+    impl->IContentDialog2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cd2_vtbl;
     impl->ITeachingTip_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_teachingtip_vtbl;
     impl->IWeakReferenceSource_iface.lpVtbl = &uwp_wrs_vtbl;
 
@@ -7594,6 +8088,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
         *instance = &impl->IXamlUICommand_iface;
     else if (wcsstr( impl->class_name, L"FlyoutItem" ))
         *instance = &impl->IMenuFlyoutItem_iface;
+    else if (wcsstr( impl->class_name, L"ContentDialog" ))
+        *instance = &impl->IContentDialog_iface;
     else if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.DispatcherTimer" ))
         *instance = &impl->IInspectable_iface;
     else
@@ -7623,11 +8119,11 @@ static void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *
         if (SUCCEEDED(IInspectable_QueryInterface( dc, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
         {
             IUnknown_Release( (IUnknown *)npc );
-            uwp_calc_vm_set_instance( dc, NULL, FALSE );
+            uwp_calc_vm_set_instance( dc, NULL );
         }
         else if (uwp_is_display_result_element( impl ))
         {
-            uwp_calc_vm_set_instance( dc, NULL, FALSE );
+            uwp_calc_vm_set_instance( dc, NULL );
         }
     }
     else if (!xaml_get_app_profile()->teardown_vm && g_calc_vm.vm)
@@ -13426,11 +13922,11 @@ void uwp_invoke_button( struct uwp_element *btn )
     }
 
     /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
-    if (xaml_get_app_profile()->vm_slot79)
+    if (is_calculator_app())
     {
         int code = uwp_resolve_button_calc_code( btn );
         if (code >= 0)
-            uwp_calc_vm_send( code );
+            uwp_calc_vm_send( code, btn->command_param );
     }
 
     uwp_invalidate_window();
@@ -14768,7 +15264,8 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IStateTriggerBaseFactory2_UWP ) ||
         IsEqualGUID( iid, &IID_IDesktopWindowXamlSourceFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IDispatcherTimerFactory_UWP ) ||
-        IsEqualGUID( iid, &IID_IKeyboardAcceleratorFactory_UWP ))
+        IsEqualGUID( iid, &IID_IKeyboardAcceleratorFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IContentDialogFactory_UWP ))
     {
         *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
         return S_OK;
