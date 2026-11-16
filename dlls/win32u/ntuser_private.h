@@ -40,6 +40,15 @@ enum system_timer_id
 
 #define OBJ_OTHER_PROCESS ((void *)1)  /* returned by get_user_handle_ptr on unknown handles */
 
+struct win_prop_entry
+{
+    HANDLE data;
+    WCHAR *name;
+    ATOM   atom;
+    BOOL   present;
+    DWORD  tick;
+};
+
 typedef struct tagWND
 {
     HWND               handle;        /* window full handle */
@@ -76,6 +85,9 @@ typedef struct tagWND
     int                clip_clients;  /* Has client surfaces that needs to be clipped out */
     unsigned int       cbWndExtra;    /* class cbWndExtra at window creation */
     DWORD_PTR          userdata;      /* User private data */
+    struct win_prop_entry *prop_cache; /* Cached window properties */
+    unsigned int       prop_cache_count;
+    unsigned int       prop_cache_cap;
     DWORD              wExtra[1];     /* Window extra bytes */
 } WND;
 

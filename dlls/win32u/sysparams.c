@@ -3113,7 +3113,7 @@ static UINT get_monitor_dpi( HMONITOR handle, UINT type, UINT *x, UINT *y )
 UINT get_win_monitor_dpi( HWND hwnd, UINT *raw_dpi )
 {
     UINT dpi = NTUSER_DPI_CONTEXT_GET_DPI( get_window_dpi_awareness_context( hwnd ) );
-    HWND parent = get_parent( hwnd );
+    HWND parent;
     RECT rect = {0};
     WND *win;
 
@@ -3136,7 +3136,7 @@ UINT get_win_monitor_dpi( HWND hwnd, UINT *raw_dpi )
     }
     else
     {
-        rect = is_iconic( hwnd ) ? win->normal_rect : win->rects.window;
+        rect = (win->dwStyle & WS_MINIMIZE) ? win->normal_rect : win->rects.window;
         release_win_ptr( win );
     }
 

@@ -39,6 +39,300 @@ WINE_DEFAULT_DEBUG_CHANNEL(win);
 
 static void *client_objects[MAX_USER_HANDLES];
 
+#define OTHER_WIN_CACHE_SIZE 512
+#define OTHER_WIN_CACHE_TTL_MS 16
+#define WIN_PROP_NEG_TTL_MS 50
+#define WIN_PROP_CACHE_MAX 64
+
+struct other_win_rects_slot
+{
+    DWORD tick;
+    UINT  dpi;
+    BOOL  valid;
+    struct window_rects rects;
+};
+
+struct other_win_cache_entry
+{
+    HWND   hwnd;
+    UINT64 uniq;
+    struct other_win_rects_slot rects[4];
+    DWORD  info_tick;
+    DWORD  style;
+    DWORD  ex_style;
+    BOOL   has_style;
+    BOOL   has_ex_style;
+    BOOL   has_unicode;
+    BOOL   is_unicode;
+    DWORD  parent_tick;
+    HWND   parent;
+    BOOL   has_parent;
+    DWORD  owner_tick;
+    HWND   owner;
+    BOOL   has_owner;
+};
+
+static struct other_win_cache_entry other_win_cache[OTHER_WIN_CACHE_SIZE];
+static pthread_rwlock_t other_win_cache_lock = PTHREAD_RWLOCK_INITIALIZER;
+
+static inline BOOL get_other_win_entry( HWND hwnd, struct user_entry *entry, HWND *full )
+{
+    const volatile struct user_entry *entries = shared_session->user_entries;
+    WORD index = USER_HANDLE_TO_INDEX( hwnd );
+    UINT64 uniq;
+
+    if (index >= MAX_USER_HANDLES) return FALSE;
+    uniq = ReadAcquire64( (LONG64 *)&entries[index].uniq );
+    if (!HIWORD(hwnd) || HIWORD(hwnd) == 0xffff)
+    {
+        if (LOWORD(uniq) != NTUSER_OBJ_WINDOW) return FALSE;
+    }
+    else if (uniq != MAKELONG(NTUSER_OBJ_WINDOW, HIWORD(hwnd))) return FALSE;
+    entry->offset = entries[index].offset;
+    entry->tid = entries[index].tid;
+    entry->pid = entries[index].pid;
+    entry->id = entries[index].id;
+    __SHARED_READ_FENCE;
+    entry->uniq = ReadNoFence64( &entries[index].uniq );
+    if (entry->uniq != uniq) return FALSE;
+    *full = USER_HANDLE_FROM_INDEX( index, entry->generation );
+    return TRUE;
+}
+
+static void other_win_cache_invalidate( HWND hwnd )
+{
+    struct user_entry entry;
+    HWND full;
+    UINT idx;
+
+    if (!hwnd) return;
+    if (get_other_win_entry( hwnd, &entry, &full ))
+        idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+    else
+        idx = USER_HANDLE_TO_INDEX( hwnd ) & (OTHER_WIN_CACHE_SIZE - 1);
+
+    pthread_rwlock_wrlock( &other_win_cache_lock );
+    if (!hwnd || USER_HANDLE_TO_INDEX( other_win_cache[idx].hwnd ) == USER_HANDLE_TO_INDEX( hwnd ))
+        memset( &other_win_cache[idx], 0, sizeof(other_win_cache[idx]) );
+    pthread_rwlock_unlock( &other_win_cache_lock );
+}
+
+static void other_win_cache_clear_all( void )
+{
+    pthread_rwlock_wrlock( &other_win_cache_lock );
+    memset( other_win_cache, 0, sizeof(other_win_cache) );
+    pthread_rwlock_unlock( &other_win_cache_lock );
+}
+
+static struct other_win_cache_entry *other_win_cache_prepare( HWND full, UINT64 uniq )
+{
+    UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+    struct other_win_cache_entry *slot = &other_win_cache[idx];
+
+    if (slot->hwnd != full || slot->uniq != uniq)
+    {
+        memset( slot, 0, sizeof(*slot) );
+        slot->hwnd = full;
+        slot->uniq = uniq;
+    }
+    return slot;
+}
+
+static void win_prop_cache_free( WND *win )
+{
+    unsigned int i;
+
+    for (i = 0; i < win->prop_cache_count; i++)
+        free( win->prop_cache[i].name );
+    free( win->prop_cache );
+    win->prop_cache = NULL;
+    win->prop_cache_count = 0;
+    win->prop_cache_cap = 0;
+}
+
+static BOOL win_prop_cache_lookup( WND *win, const WCHAR *str, HANDLE *data )
+{
+    unsigned int i;
+    DWORD now;
+
+    if (!win->prop_cache_count) return FALSE;
+    if (IS_INTRESOURCE(str))
+    {
+        ATOM atom = LOWORD(str);
+        for (i = 0; i < win->prop_cache_count; i++)
+        {
+            struct win_prop_entry *e = &win->prop_cache[i];
+            if (e->atom != atom || e->name) continue;
+            if (e->present)
+            {
+                *data = e->data;
+                return TRUE;
+            }
+            now = NtGetTickCount();
+            if ((DWORD)(now - e->tick) < WIN_PROP_NEG_TTL_MS)
+            {
+                *data = NULL;
+                return TRUE;
+            }
+            return FALSE;
+        }
+    }
+    else
+    {
+        for (i = 0; i < win->prop_cache_count; i++)
+        {
+            struct win_prop_entry *e = &win->prop_cache[i];
+            if (!e->name || wcsicmp( e->name, str )) continue;
+            if (e->present)
+            {
+                *data = e->data;
+                return TRUE;
+            }
+            now = NtGetTickCount();
+            if ((DWORD)(now - e->tick) < WIN_PROP_NEG_TTL_MS)
+            {
+                *data = NULL;
+                return TRUE;
+            }
+            return FALSE;
+        }
+    }
+    return FALSE;
+}
+
+static void win_prop_cache_drop_cross_kind( WND *win, BOOL is_atom )
+{
+    unsigned int i = 0;
+
+    while (i < win->prop_cache_count)
+    {
+        struct win_prop_entry *e = &win->prop_cache[i];
+        BOOL match = is_atom ? (e->name != NULL) : (e->name == NULL);
+        if (match)
+        {
+            free( e->name );
+            *e = win->prop_cache[--win->prop_cache_count];
+        }
+        else i++;
+    }
+}
+
+static void win_prop_cache_update( WND *win, const WCHAR *str, HANDLE data, BOOL present )
+{
+    unsigned int i;
+    DWORD now = NtGetTickCount();
+    struct win_prop_entry *e = NULL;
+
+    if (IS_INTRESOURCE(str))
+    {
+        ATOM atom = LOWORD(str);
+        for (i = 0; i < win->prop_cache_count; i++)
+        {
+            if (!win->prop_cache[i].name && win->prop_cache[i].atom == atom)
+            {
+                e = &win->prop_cache[i];
+                break;
+            }
+        }
+        if (!e)
+        {
+            if (win->prop_cache_count >= WIN_PROP_CACHE_MAX)
+            {
+                free( win->prop_cache[0].name );
+                win->prop_cache[0] = win->prop_cache[--win->prop_cache_count];
+            }
+            if (win->prop_cache_count == win->prop_cache_cap)
+            {
+                unsigned int new_cap = win->prop_cache_cap ? win->prop_cache_cap * 2 : 8;
+                struct win_prop_entry *new_arr = realloc( win->prop_cache, new_cap * sizeof(*new_arr) );
+                if (!new_arr) return;
+                win->prop_cache = new_arr;
+                win->prop_cache_cap = new_cap;
+            }
+            e = &win->prop_cache[win->prop_cache_count++];
+            e->name = NULL;
+            e->atom = atom;
+        }
+    }
+    else
+    {
+        size_t len;
+        WCHAR *copy;
+        for (i = 0; i < win->prop_cache_count; i++)
+        {
+            if (win->prop_cache[i].name && !wcsicmp( win->prop_cache[i].name, str ))
+            {
+                e = &win->prop_cache[i];
+                break;
+            }
+        }
+        if (!e)
+        {
+            len = (lstrlenW( str ) + 1) * sizeof(WCHAR);
+            if (!(copy = malloc( len ))) return;
+            memcpy( copy, str, len );
+            if (win->prop_cache_count >= WIN_PROP_CACHE_MAX)
+            {
+                free( win->prop_cache[0].name );
+                win->prop_cache[0] = win->prop_cache[--win->prop_cache_count];
+            }
+            if (win->prop_cache_count == win->prop_cache_cap)
+            {
+                unsigned int new_cap = win->prop_cache_cap ? win->prop_cache_cap * 2 : 8;
+                struct win_prop_entry *new_arr = realloc( win->prop_cache, new_cap * sizeof(*new_arr) );
+                if (!new_arr)
+                {
+                    free( copy );
+                    return;
+                }
+                win->prop_cache = new_arr;
+                win->prop_cache_cap = new_cap;
+            }
+            e = &win->prop_cache[win->prop_cache_count++];
+            e->name = copy;
+            e->atom = 0;
+        }
+    }
+    e->data = data;
+    e->present = present;
+    e->tick = now;
+}
+
+static void win_prop_cache_remove( WND *win, const WCHAR *str )
+{
+    unsigned int i;
+
+    if (IS_INTRESOURCE(str))
+    {
+        ATOM atom = LOWORD(str);
+        win_prop_cache_drop_cross_kind( win, TRUE );
+        for (i = 0; i < win->prop_cache_count; i++)
+        {
+            if (!win->prop_cache[i].name && win->prop_cache[i].atom == atom)
+            {
+                win->prop_cache[i].present = FALSE;
+                win->prop_cache[i].data = NULL;
+                win->prop_cache[i].tick = NtGetTickCount();
+                return;
+            }
+        }
+    }
+    else
+    {
+        win_prop_cache_drop_cross_kind( win, FALSE );
+        for (i = 0; i < win->prop_cache_count; i++)
+        {
+            if (win->prop_cache[i].name && !wcsicmp( win->prop_cache[i].name, str ))
+            {
+                win->prop_cache[i].present = FALSE;
+                win->prop_cache[i].data = NULL;
+                win->prop_cache[i].tick = NtGetTickCount();
+                return;
+            }
+        }
+    }
+}
+
 #define SWP_AGG_NOGEOMETRYCHANGE \
     (SWP_NOSIZE | SWP_NOCLIENTSIZE | SWP_NOZORDER)
 #define SWP_AGG_NOPOSCHANGE \
@@ -549,13 +843,56 @@ HWND get_parent( HWND hwnd )
         DWORD style = get_window_long( hwnd, GWL_STYLE );
         if (style & (WS_POPUP | WS_CHILD))
         {
+            struct user_entry entry;
+            HWND full;
+            if (get_other_win_entry( hwnd, &entry, &full ))
+            {
+                DWORD now = NtGetTickCount();
+                UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+                BOOL hit = FALSE;
+
+                pthread_rwlock_rdlock( &other_win_cache_lock );
+                if (other_win_cache[idx].hwnd == full && other_win_cache[idx].uniq == entry.uniq)
+                {
+                    if ((style & WS_POPUP) && other_win_cache[idx].has_owner &&
+                        (DWORD)(now - other_win_cache[idx].owner_tick) < OTHER_WIN_CACHE_TTL_MS)
+                    {
+                        retval = other_win_cache[idx].owner;
+                        hit = TRUE;
+                    }
+                    else if ((style & WS_CHILD) && other_win_cache[idx].has_parent &&
+                             (DWORD)(now - other_win_cache[idx].parent_tick) < OTHER_WIN_CACHE_TTL_MS)
+                    {
+                        retval = other_win_cache[idx].parent;
+                        hit = TRUE;
+                    }
+                }
+                pthread_rwlock_unlock( &other_win_cache_lock );
+                if (hit) return retval;
+            }
             SERVER_START_REQ( get_window_tree )
             {
                 req->handle = wine_server_user_handle( hwnd );
                 if (!wine_server_call_err( req ))
                 {
-                    if (style & WS_POPUP) retval = wine_server_ptr_handle( reply->owner );
-                    else if (style & WS_CHILD) retval = wine_server_ptr_handle( reply->parent );
+                    HWND p = wine_server_ptr_handle( reply->parent );
+                    HWND o = wine_server_ptr_handle( reply->owner );
+                    if (style & WS_POPUP) retval = o;
+                    else if (style & WS_CHILD) retval = p;
+                    if (get_other_win_entry( hwnd, &entry, &full ))
+                    {
+                        DWORD now = NtGetTickCount();
+                        struct other_win_cache_entry *slot;
+                        pthread_rwlock_wrlock( &other_win_cache_lock );
+                        slot = other_win_cache_prepare( full, entry.uniq );
+                        slot->parent = p;
+                        slot->parent_tick = now;
+                        slot->has_parent = TRUE;
+                        slot->owner = o;
+                        slot->owner_tick = now;
+                        slot->has_owner = TRUE;
+                        pthread_rwlock_unlock( &other_win_cache_lock );
+                    }
                 }
             }
             SERVER_END_REQ;
@@ -644,6 +981,7 @@ HWND WINAPI NtUserSetParent( HWND hwnd, HWND parent )
     SERVER_END_REQ;
     release_win_ptr( win );
     if (!ret) return 0;
+    other_win_cache_invalidate( hwnd );
 
     get_window_rect_rel( hwnd, COORDS_SCREEN, &new_screen_rect, 0 );
     context = set_thread_dpi_awareness_context( get_window_dpi_awareness_context( hwnd ));
@@ -716,6 +1054,28 @@ HWND get_window_relative( HWND hwnd, UINT rel )
             release_win_ptr( win );
             return retval;
         }
+        else
+        {
+            struct user_entry entry;
+            HWND full;
+            if (get_other_win_entry( hwnd, &entry, &full ))
+            {
+                DWORD now = NtGetTickCount();
+                UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+                BOOL hit = FALSE;
+
+                pthread_rwlock_rdlock( &other_win_cache_lock );
+                if (other_win_cache[idx].hwnd == full && other_win_cache[idx].uniq == entry.uniq &&
+                    other_win_cache[idx].has_owner &&
+                    (DWORD)(now - other_win_cache[idx].owner_tick) < OTHER_WIN_CACHE_TTL_MS)
+                {
+                    retval = other_win_cache[idx].owner;
+                    hit = TRUE;
+                }
+                pthread_rwlock_unlock( &other_win_cache_lock );
+                if (hit) return retval;
+            }
+        }
         /* else fall through to server call */
     }
 
@@ -769,7 +1129,39 @@ static HWND *list_window_parents( HWND hwnd )
     for (;;)
     {
         if (!(win = get_win_ptr( current ))) goto empty;
-        if (win == WND_OTHER_PROCESS) break;  /* need to do it the hard way */
+        if (win == WND_OTHER_PROCESS)
+        {
+            struct user_entry entry;
+            HWND full, cached_parent = 0;
+            BOOL hit = FALSE;
+
+            if (get_other_win_entry( current, &entry, &full ))
+            {
+                DWORD now = NtGetTickCount();
+                UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+
+                pthread_rwlock_rdlock( &other_win_cache_lock );
+                if (other_win_cache[idx].hwnd == full && other_win_cache[idx].uniq == entry.uniq &&
+                    other_win_cache[idx].has_parent &&
+                    (DWORD)(now - other_win_cache[idx].parent_tick) < OTHER_WIN_CACHE_TTL_MS)
+                {
+                    cached_parent = other_win_cache[idx].parent;
+                    hit = TRUE;
+                }
+                pthread_rwlock_unlock( &other_win_cache_lock );
+            }
+            if (!hit) break;  /* need to do it the hard way */
+            list[pos] = current = cached_parent;
+            if (!current) return list;
+            if (++pos == size - 1)
+            {
+                HWND *new_list = realloc( list, (size + 16) * sizeof(HWND) );
+                if (!new_list) goto empty;
+                list = new_list;
+                size += 16;
+            }
+            continue;
+        }
         if (win == WND_DESKTOP)
         {
             if (!pos) goto empty;
@@ -804,10 +1196,33 @@ static HWND *list_window_parents( HWND hwnd )
         if (!count) goto empty;
         if (size > count)
         {
+            struct user_entry entry;
+            HWND full;
+            DWORD now = NtGetTickCount();
             /* start from the end since HWND is potentially larger than user_handle_t */
             for (i = count - 1; i >= 0; i--)
                 list[i] = wine_server_ptr_handle( ((user_handle_t *)list)[i] );
             list[count] = 0;
+            if (get_other_win_entry( hwnd, &entry, &full ))
+            {
+                struct other_win_cache_entry *slot;
+                pthread_rwlock_wrlock( &other_win_cache_lock );
+                slot = other_win_cache_prepare( full, entry.uniq );
+                slot->parent = list[0];
+                slot->parent_tick = now;
+                slot->has_parent = TRUE;
+                for (i = 0; i + 1 < count; i++)
+                {
+                    if (get_other_win_entry( list[i], &entry, &full ))
+                    {
+                        slot = other_win_cache_prepare( full, entry.uniq );
+                        slot->parent = list[i + 1];
+                        slot->parent_tick = now;
+                        slot->has_parent = TRUE;
+                    }
+                }
+                pthread_rwlock_unlock( &other_win_cache_lock );
+            }
             return list;
         }
         free( list );
@@ -870,10 +1285,48 @@ HWND WINAPI NtUserGetAncestor( HWND hwnd, UINT type )
         }
         else /* need to query the server */
         {
+            struct user_entry entry;
+            HWND full;
+            if (get_other_win_entry( hwnd, &entry, &full ))
+            {
+                DWORD now = NtGetTickCount();
+                UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+                BOOL hit = FALSE;
+
+                pthread_rwlock_rdlock( &other_win_cache_lock );
+                if (other_win_cache[idx].hwnd == full && other_win_cache[idx].uniq == entry.uniq &&
+                    other_win_cache[idx].has_parent &&
+                    (DWORD)(now - other_win_cache[idx].parent_tick) < OTHER_WIN_CACHE_TTL_MS)
+                {
+                    ret = other_win_cache[idx].parent;
+                    hit = TRUE;
+                }
+                pthread_rwlock_unlock( &other_win_cache_lock );
+                if (hit) break;
+            }
             SERVER_START_REQ( get_window_tree )
             {
                 req->handle = wine_server_user_handle( hwnd );
-                if (!wine_server_call_err( req )) ret = wine_server_ptr_handle( reply->parent );
+                if (!wine_server_call_err( req ))
+                {
+                    HWND p = wine_server_ptr_handle( reply->parent );
+                    HWND o = wine_server_ptr_handle( reply->owner );
+                    ret = p;
+                    if (get_other_win_entry( hwnd, &entry, &full ))
+                    {
+                        DWORD now = NtGetTickCount();
+                        struct other_win_cache_entry *slot;
+                        pthread_rwlock_wrlock( &other_win_cache_lock );
+                        slot = other_win_cache_prepare( full, entry.uniq );
+                        slot->parent = p;
+                        slot->parent_tick = now;
+                        slot->has_parent = TRUE;
+                        slot->owner = o;
+                        slot->owner_tick = now;
+                        slot->has_owner = TRUE;
+                        pthread_rwlock_unlock( &other_win_cache_lock );
+                    }
+                }
             }
             SERVER_END_REQ;
         }
@@ -994,10 +1447,43 @@ BOOL is_window_unicode( HWND hwnd )
     }
     else
     {
+        struct user_entry entry;
+        HWND full;
+        if (get_other_win_entry( hwnd, &entry, &full ))
+        {
+            DWORD now = NtGetTickCount();
+            UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+            BOOL hit = FALSE;
+
+            pthread_rwlock_rdlock( &other_win_cache_lock );
+            if (other_win_cache[idx].hwnd == full && other_win_cache[idx].uniq == entry.uniq &&
+                other_win_cache[idx].has_unicode &&
+                (DWORD)(now - other_win_cache[idx].info_tick) < OTHER_WIN_CACHE_TTL_MS)
+            {
+                ret = other_win_cache[idx].is_unicode;
+                hit = TRUE;
+            }
+            pthread_rwlock_unlock( &other_win_cache_lock );
+            if (hit) return ret;
+        }
         SERVER_START_REQ( get_window_info )
         {
             req->handle = wine_server_user_handle( hwnd );
-            if (!wine_server_call_err( req )) ret = reply->is_unicode;
+            if (!wine_server_call_err( req ))
+            {
+                ret = reply->is_unicode;
+                if (get_other_win_entry( hwnd, &entry, &full ))
+                {
+                    DWORD now = NtGetTickCount();
+                    struct other_win_cache_entry *slot;
+                    pthread_rwlock_wrlock( &other_win_cache_lock );
+                    slot = other_win_cache_prepare( full, entry.uniq );
+                    slot->is_unicode = ret;
+                    slot->has_unicode = TRUE;
+                    slot->info_tick = now;
+                    pthread_rwlock_unlock( &other_win_cache_lock );
+                }
+            }
         }
         SERVER_END_REQ;
     }
@@ -1215,17 +1701,67 @@ static LONG_PTR get_window_long_size( HWND hwnd, INT offset, UINT size, BOOL ans
 
     if (win == WND_OTHER_PROCESS)
     {
+        struct user_entry entry;
+        HWND full;
         if (offset == GWLP_WNDPROC)
         {
             RtlSetLastWin32Error( ERROR_ACCESS_DENIED );
             return 0;
+        }
+        if ((offset == GWL_STYLE || offset == GWL_EXSTYLE) && size >= sizeof(LONG) &&
+            get_other_win_entry( hwnd, &entry, &full ))
+        {
+            DWORD now = NtGetTickCount();
+            UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+            BOOL hit = FALSE;
+
+            pthread_rwlock_rdlock( &other_win_cache_lock );
+            if (other_win_cache[idx].hwnd == full && other_win_cache[idx].uniq == entry.uniq &&
+                (DWORD)(now - other_win_cache[idx].info_tick) < OTHER_WIN_CACHE_TTL_MS)
+            {
+                if (offset == GWL_STYLE && other_win_cache[idx].has_style)
+                {
+                    retval = other_win_cache[idx].style;
+                    hit = TRUE;
+                }
+                else if (offset == GWL_EXSTYLE && other_win_cache[idx].has_ex_style)
+                {
+                    retval = other_win_cache[idx].ex_style;
+                    hit = TRUE;
+                }
+            }
+            pthread_rwlock_unlock( &other_win_cache_lock );
+            if (hit) return retval;
         }
         SERVER_START_REQ( get_window_info )
         {
             req->handle = wine_server_user_handle( hwnd );
             req->offset = offset;
             req->size = size;
-            if (!wine_server_call_err( req )) retval = reply->info;
+            if (!wine_server_call_err( req ))
+            {
+                retval = reply->info;
+                if ((offset == GWL_STYLE || offset == GWL_EXSTYLE) && size >= sizeof(LONG) &&
+                    get_other_win_entry( hwnd, &entry, &full ))
+                {
+                    DWORD now = NtGetTickCount();
+                    struct other_win_cache_entry *slot;
+                    pthread_rwlock_wrlock( &other_win_cache_lock );
+                    slot = other_win_cache_prepare( full, entry.uniq );
+                    if (offset == GWL_STYLE)
+                    {
+                        slot->style = (DWORD)retval;
+                        slot->has_style = TRUE;
+                    }
+                    else
+                    {
+                        slot->ex_style = (DWORD)retval;
+                        slot->has_ex_style = TRUE;
+                    }
+                    slot->info_tick = now;
+                    pthread_rwlock_unlock( &other_win_cache_lock );
+                }
+            }
         }
         SERVER_END_REQ;
         return retval;
@@ -1330,6 +1866,7 @@ UINT set_window_style_bits( HWND hwnd, UINT set_bits, UINT clear_bits )
     release_win_ptr( win );
 
     if (!ok) return 0;
+    other_win_cache_invalidate( hwnd );
 
     user_driver->pSetWindowStyle( hwnd, GWL_STYLE, &style );
     if (made_visible) update_window_state( hwnd );
@@ -1382,6 +1919,7 @@ static HWND set_window_owner( HWND hwnd, HWND owner )
     }
     SERVER_END_REQ;
     release_win_ptr( win );
+    other_win_cache_invalidate( hwnd );
     return ret;
 }
 
@@ -1544,8 +2082,13 @@ static LONG_PTR set_window_long_internal( HWND hwnd, INT offset, UINT size,
         }
     }
     SERVER_END_REQ;
-
-    if (offset == GWL_EXSTYLE && ((style.styleOld ^ style.styleNew) & WS_EX_LAYERED)) layered = TRUE;
+    if (ok)
+    {
+        if (offset == GWL_EXSTYLE && ((style.styleOld ^ style.styleNew) & WS_EX_LAYOUTRTL))
+            other_win_cache_clear_all();
+        else
+            other_win_cache_invalidate( hwnd );
+    }
     if ((offset == GWL_STYLE && ((style.styleOld ^ style.styleNew) & WS_VISIBLE)) || layered)
     {
         made_visible = (win->dwStyle & WS_VISIBLE) != 0;
@@ -1712,15 +2255,42 @@ int get_window_pixel_format( HWND hwnd )
 HANDLE WINAPI NtUserGetProp( HWND hwnd, const WCHAR *str )
 {
     ULONG_PTR ret = 0;
+    HANDLE cached;
+    WND *win;
+    BOOL found = FALSE;
+
+    if (IS_INTRESOURCE(str) ? !LOWORD(str) : !*str) return NULL;
+
+    win = get_win_ptr( hwnd );
+    if (!win)
+    {
+        RtlSetLastWin32Error( ERROR_INVALID_WINDOW_HANDLE );
+        return NULL;
+    }
+    if (win != WND_OTHER_PROCESS && win != WND_DESKTOP)
+    {
+        if (win_prop_cache_lookup( win, str, &cached ))
+        {
+            release_win_ptr( win );
+            return cached;
+        }
+        release_win_ptr( win );
+    }
 
     SERVER_START_REQ( get_window_property )
     {
         req->window = wine_server_user_handle( hwnd );
         if (IS_INTRESOURCE(str)) req->atom = LOWORD(str);
         else wine_server_add_data( req, str, lstrlenW(str) * sizeof(WCHAR) );
-        if (!wine_server_call_err( req )) ret = reply->data;
+        if ((found = !wine_server_call_err( req ))) ret = reply->data;
     }
     SERVER_END_REQ;
+
+    if ((win = get_win_ptr( hwnd )) && win != WND_OTHER_PROCESS && win != WND_DESKTOP)
+    {
+        win_prop_cache_update( win, str, (HANDLE)ret, found && ret != 0 );
+        release_win_ptr( win );
+    }
     return (HANDLE)ret;
 }
 
@@ -1733,6 +2303,7 @@ HANDLE WINAPI NtUserGetProp( HWND hwnd, const WCHAR *str )
 BOOL WINAPI NtUserSetProp( HWND hwnd, const WCHAR *str, HANDLE handle )
 {
     BOOL ret;
+    WND *win;
 
     SERVER_START_REQ( set_window_property )
     {
@@ -1743,6 +2314,15 @@ BOOL WINAPI NtUserSetProp( HWND hwnd, const WCHAR *str, HANDLE handle )
         ret = !wine_server_call_err( req );
     }
     SERVER_END_REQ;
+    if (ret && (win = get_win_ptr( hwnd )) && win != WND_OTHER_PROCESS && win != WND_DESKTOP)
+    {
+        if (IS_INTRESOURCE(str) ? LOWORD(str) : *str)
+        {
+            win_prop_cache_drop_cross_kind( win, IS_INTRESOURCE(str) );
+            win_prop_cache_update( win, str, handle, TRUE );
+        }
+        release_win_ptr( win );
+    }
     return ret;
 }
 
@@ -1756,6 +2336,7 @@ BOOL WINAPI NtUserSetProp( HWND hwnd, const WCHAR *str, HANDLE handle )
 HANDLE WINAPI NtUserRemoveProp( HWND hwnd, const WCHAR *str )
 {
     ULONG_PTR ret = 0;
+    WND *win;
 
     SERVER_START_REQ( remove_window_property )
     {
@@ -1765,6 +2346,13 @@ HANDLE WINAPI NtUserRemoveProp( HWND hwnd, const WCHAR *str )
         if (!wine_server_call_err( req )) ret = reply->data;
     }
     SERVER_END_REQ;
+
+    if ((win = get_win_ptr( hwnd )) && win != WND_OTHER_PROCESS && win != WND_DESKTOP)
+    {
+        if (IS_INTRESOURCE(str) ? LOWORD(str) : *str)
+            win_prop_cache_remove( win, str );
+        release_win_ptr( win );
+    }
 
     return (HANDLE)ret;
 }
@@ -1934,6 +2522,29 @@ BOOL get_window_rects( HWND hwnd, enum coords_relative relative, struct window_r
     }
 
 other_process:
+    if ((unsigned int)relative < ARRAY_SIZE(other_win_cache[0].rects))
+    {
+        struct user_entry entry;
+        HWND full;
+        if (get_other_win_entry( hwnd, &entry, &full ))
+        {
+            DWORD now = NtGetTickCount();
+            UINT idx = USER_HANDLE_TO_INDEX( full ) & (OTHER_WIN_CACHE_SIZE - 1);
+            BOOL hit = FALSE;
+
+            pthread_rwlock_rdlock( &other_win_cache_lock );
+            if (other_win_cache[idx].hwnd == full && other_win_cache[idx].uniq == entry.uniq &&
+                other_win_cache[idx].rects[relative].valid &&
+                other_win_cache[idx].rects[relative].dpi == dpi &&
+                (DWORD)(now - other_win_cache[idx].rects[relative].tick) < OTHER_WIN_CACHE_TTL_MS)
+            {
+                *rects = other_win_cache[idx].rects[relative].rects;
+                hit = TRUE;
+            }
+            pthread_rwlock_unlock( &other_win_cache_lock );
+            if (hit) return TRUE;
+        }
+    }
     SERVER_START_REQ( get_window_rectangles )
     {
         req->handle = wine_server_user_handle( hwnd );
@@ -1944,6 +2555,23 @@ other_process:
             rects->window = wine_server_get_rect( reply->window );
             rects->client = wine_server_get_rect( reply->client );
             rects->visible = rects->window;
+            if ((unsigned int)relative < ARRAY_SIZE(other_win_cache[0].rects))
+            {
+                struct user_entry entry;
+                HWND full;
+                if (get_other_win_entry( hwnd, &entry, &full ))
+                {
+                    DWORD now = NtGetTickCount();
+                    struct other_win_cache_entry *slot;
+                    pthread_rwlock_wrlock( &other_win_cache_lock );
+                    slot = other_win_cache_prepare( full, entry.uniq );
+                    slot->rects[relative].rects = *rects;
+                    slot->rects[relative].dpi = dpi;
+                    slot->rects[relative].tick = now;
+                    slot->rects[relative].valid = TRUE;
+                    pthread_rwlock_unlock( &other_win_cache_lock );
+                }
+            }
         }
     }
     SERVER_END_REQ;
@@ -2318,6 +2946,10 @@ static BOOL apply_window_pos( HWND hwnd, HWND insert_after, UINT swp_flags, stru
             win->dwStyle      = reply->new_style;
             win->dwExStyle    = reply->new_ex_style;
             win->rects        = *new_rects;
+            if ((win->flags & WIN_CHILDREN_MOVED) || (win->dwExStyle & WS_EX_LAYOUTRTL))
+                other_win_cache_clear_all();
+            else
+                other_win_cache_invalidate( hwnd );
             if ((win->surface = new_surface)) window_surface_add_ref( win->surface );
             surface_win       = wine_server_ptr_handle( reply->surface_win );
             if (get_window_long( win->parent, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL)
@@ -5308,6 +5940,8 @@ static void free_window_handle( HWND hwnd )
         }
         SERVER_END_REQ;
         user_unlock();
+        other_win_cache_invalidate( hwnd );
+        win_prop_cache_free( win );
         free( win->pScroll );
         free( win->text );
         free( win );
