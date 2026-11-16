@@ -635,6 +635,15 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * side-by-side by the app.  It is resolved through the ActivatableClassId\DllPath
      * registry mapping (absolute path) below, so that the server loads regardless of
      * the activating process's own application directory. */
+    /* Route CoreWebView2Environment to windows.ui.xaml.dll so the app's
+     * CreateWithOptionsAsync shares the single EmbeddedBrowserWebView instance
+     * owned by wv2_start_browser instead of loading a colliding second one. */
+    if (!wcscmp(classid, L"Microsoft.Web.WebView2.Core.CoreWebView2Environment"))
+    {
+        *out = wcsdup(L"windows.ui.xaml.dll");
+        return S_OK;
+    }
+
     if (!wcsncmp(classid, L"Windows.System.Threading.", 25))
     {
         *out = wcsdup(L"windows.system.threading.dll");

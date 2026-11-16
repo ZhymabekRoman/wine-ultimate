@@ -1272,6 +1272,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.WebView2" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.WebView2" ))
         IActivationFactory_QueryInterface( webview2_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Microsoft.Web.WebView2.Core.CoreWebView2Environment" ))
+        IActivationFactory_QueryInterface( cwv2_env_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.UserControl" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.UserControl" ))
         IActivationFactory_QueryInterface( user_control_factory, &IID_IActivationFactory, (void **)factory );

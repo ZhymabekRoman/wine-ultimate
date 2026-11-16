@@ -75,6 +75,7 @@ extern IActivationFactory *window_factory;
 extern IActivationFactory *property_metadata_factory;
 extern IActivationFactory *dependency_property_factory;
 extern IActivationFactory *webview2_factory;
+extern IActivationFactory *cwv2_env_factory;
 extern IActivationFactory *user_control_factory;
 extern IActivationFactory *content_control_factory;
 extern IActivationFactory *element_factory;

@@ -3340,10 +3340,14 @@ struct cwv2_env
 
 static HRESULT WINAPI cwv2_env_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
+    static const GUID IID_ICoreWebView2Environment_rt =
+        { 0xd8cc7831, 0xb783, 0x556b, { 0xb9, 0xce, 0x89, 0x9c, 0x1e, 0x95, 0xd5, 0x85 } };
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_ICoreWebView2Environment ))
+        IsEqualGUID( iid, &IID_ICoreWebView2Environment ) ||
+        IsEqualGUID( iid, &IID_ICoreWebView2Environment_rt ))
     {
         *out = iface;
         IInspectable_AddRef( iface );
@@ -3381,6 +3385,216 @@ static const void *cwv2_env_vtbl[256] =
     [5] = cwv2_env_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
 };
+
+struct cwv2_env_asyncop
+{
+    IInspectable IInspectable_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+    void *handler;
+    IInspectable *result;
+};
+
+static inline struct cwv2_env_asyncop *impl_from_env_asyncop( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct cwv2_env_asyncop, IInspectable_iface );
+}
+static inline struct cwv2_env_asyncop *impl_from_env_asyncop_info( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct cwv2_env_asyncop, IAsyncInfo_iface );
+}
+static HRESULT WINAPI env_asyncop_QueryInterface( void *iface, REFIID iid, void **obj )
+{
+    struct cwv2_env_asyncop *impl = impl_from_env_asyncop( iface );
+    if (!obj) return E_POINTER;
+    *obj = NULL;
+    if (!iid || IsEqualGUID( iid, &IID_IMarshal ) || IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ))
+        return E_NOINTERFACE;
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *obj = &impl->IAsyncInfo_iface;
+        IInspectable_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+    *obj = &impl->IInspectable_iface;
+    IInspectable_AddRef( (IInspectable *)*obj );
+    return S_OK;
+}
+static ULONG WINAPI env_asyncop_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_env_asyncop( iface )->ref );
+}
+static ULONG WINAPI env_asyncop_Release( void *iface )
+{
+    struct cwv2_env_asyncop *impl = impl_from_env_asyncop( iface );
+    LONG r = InterlockedDecrement( &impl->ref );
+    if (!r)
+    {
+        if (impl->result) IInspectable_Release( impl->result );
+        if (impl->handler) ((IInspectable *)impl->handler)->lpVtbl->Release( impl->handler );
+        free( impl );
+    }
+    return r;
+}
+static HRESULT WINAPI env_asyncop_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI env_asyncop_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<Microsoft.Web.WebView2.Core.CoreWebView2Environment>", 87, name );
+}
+static HRESULT WINAPI env_asyncop_GetTrustLevel( void *iface, TrustLevel *lvl )
+{
+    if (lvl) *lvl = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI env_asyncop_put_Completed( void *iface, void *handler )
+{
+    struct cwv2_env_asyncop *impl = impl_from_env_asyncop( iface );
+    if (impl->handler) ((IInspectable *)impl->handler)->lpVtbl->Release( impl->handler );
+    impl->handler = handler;
+    if (handler)
+    {
+        HRESULT (WINAPI *invoke)( void *, void *, int ) = (*(void ***)handler)[3];
+        ((IInspectable *)handler)->lpVtbl->AddRef( handler );
+        if (invoke) invoke( handler, iface, 1 /* Completed */ );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI env_asyncop_get_Completed( void *iface, void **handler )
+{
+    struct cwv2_env_asyncop *impl = impl_from_env_asyncop( iface );
+    if (!handler) return E_POINTER;
+    *handler = impl->handler;
+    if (*handler) ((IInspectable *)*handler)->lpVtbl->AddRef( *handler );
+    return S_OK;
+}
+static HRESULT WINAPI env_asyncop_GetResults( void *iface, void **out )
+{
+    struct cwv2_env_asyncop *impl = impl_from_env_asyncop( iface );
+    if (!out) return E_POINTER;
+    *out = impl->result;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static const void *env_asyncop_vtbl[] =
+{
+    env_asyncop_QueryInterface,
+    env_asyncop_AddRef,
+    env_asyncop_Release,
+    env_asyncop_GetIids,
+    env_asyncop_GetRuntimeClassName,
+    env_asyncop_GetTrustLevel,
+    env_asyncop_put_Completed,
+    env_asyncop_get_Completed,
+    env_asyncop_GetResults,
+};
+static HRESULT WINAPI env_asyncop_info_QI( IAsyncInfo *iface, REFIID iid, void **obj )
+{
+    return env_asyncop_QueryInterface( &impl_from_env_asyncop_info( iface )->IInspectable_iface, iid, obj );
+}
+static ULONG WINAPI env_asyncop_info_AddRef( IAsyncInfo *iface )
+{
+    return env_asyncop_AddRef( &impl_from_env_asyncop_info( iface )->IInspectable_iface );
+}
+static ULONG WINAPI env_asyncop_info_Release( IAsyncInfo *iface )
+{
+    return env_asyncop_Release( &impl_from_env_asyncop_info( iface )->IInspectable_iface );
+}
+static HRESULT WINAPI env_asyncop_info_get_Id( IAsyncInfo *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI env_asyncop_info_get_Status( IAsyncInfo *iface, AsyncStatus *s ) { if (s) *s = 1; return S_OK; }
+static HRESULT WINAPI env_asyncop_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *c ) { if (c) *c = S_OK; return S_OK; }
+static HRESULT WINAPI env_asyncop_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
+static HRESULT WINAPI env_asyncop_info_Close( IAsyncInfo *iface ) { return S_OK; }
+static const struct IAsyncInfoVtbl env_asyncop_info_vtbl =
+{
+    env_asyncop_info_QI, env_asyncop_info_AddRef, env_asyncop_info_Release,
+    (void *)env_asyncop_GetIids, (void *)env_asyncop_GetRuntimeClassName, (void *)env_asyncop_GetTrustLevel,
+    env_asyncop_info_get_Id, env_asyncop_info_get_Status, env_asyncop_info_get_ErrorCode,
+    env_asyncop_info_Cancel, env_asyncop_info_Close,
+};
+
+static HRESULT cwv2_env_create_op( void **op )
+{
+    struct cwv2_env *e;
+    struct cwv2_env_asyncop *a;
+    if (!op) return E_POINTER;
+    if (!(e = calloc( 1, sizeof(*e) ))) return E_OUTOFMEMORY;
+    e->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_env_vtbl );
+    e->ref = 1;
+    if (!(a = calloc( 1, sizeof(*a) ))) { IInspectable_Release( &e->IInspectable_iface ); return E_OUTOFMEMORY; }
+    a->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)env_asyncop_vtbl;
+    a->IAsyncInfo_iface.lpVtbl = &env_asyncop_info_vtbl;
+    a->ref = 1;
+    a->result = &e->IInspectable_iface;
+    *op = &a->IInspectable_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI cwv2_env_factory_QI( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IMarshal ) || IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = iface;
+    IActivationFactory_AddRef( iface );
+    return S_OK;
+}
+static ULONG WINAPI cwv2_env_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI cwv2_env_factory_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI cwv2_env_factory_GetIids( IActivationFactory *iface, ULONG *cnt, IID **iids )
+{ if (cnt) *cnt = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI cwv2_env_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{ return WindowsCreateString( L"Microsoft.Web.WebView2.Core.CoreWebView2Environment", 51, name ); }
+static HRESULT WINAPI cwv2_env_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *lvl )
+{ if (lvl) *lvl = BaseTrust; return S_OK; }
+static HRESULT WINAPI cwv2_env_factory_CreateAsync( void *iface, void **op )
+{
+    ERR( "cwv2_env_factory_CreateAsync op=%p\n", op );
+    return cwv2_env_create_op( op );
+}
+static HRESULT WINAPI cwv2_env_factory_CreateWithOptionsAsync( void *iface, HSTRING browser, HSTRING udf, void *opts, void **op )
+{
+    ERR( "cwv2_env_factory_CreateWithOptionsAsync udf=%s op=%p\n", debugstr_hstring( udf ), op );
+    return cwv2_env_create_op( op );
+}
+static HRESULT WINAPI cwv2_env_factory_GetAvailableBrowserVersionString( void *iface, HSTRING *ver )
+{
+    return WindowsCreateString( L"156.0.4314.42", 13, ver );
+}
+static HRESULT WINAPI cwv2_env_factory_GetAvailableBrowserVersionString2( void *iface, HSTRING browser, HSTRING *ver )
+{
+    return WindowsCreateString( L"156.0.4314.42", 13, ver );
+}
+static HRESULT WINAPI cwv2_env_factory_CompareBrowserVersionString( void *iface, HSTRING v1, HSTRING v2, INT32 *res )
+{
+    if (res) *res = 0;
+    return S_OK;
+}
+static const void *cwv2_env_factory_vtbl[] =
+{
+    cwv2_env_factory_QI,
+    cwv2_env_factory_AddRef,
+    cwv2_env_factory_Release,
+    cwv2_env_factory_GetIids,
+    cwv2_env_factory_GetRuntimeClassName,
+    cwv2_env_factory_GetTrustLevel,
+    cwv2_env_factory_CreateAsync,
+    cwv2_env_factory_CreateWithOptionsAsync,
+    cwv2_env_factory_GetAvailableBrowserVersionString,
+    cwv2_env_factory_GetAvailableBrowserVersionString2,
+    cwv2_env_factory_CompareBrowserVersionString,
+};
+static struct { const void **vtbl; } cwv2_env_factory_obj = { cwv2_env_factory_vtbl };
+IActivationFactory *cwv2_env_factory = (IActivationFactory *)&cwv2_env_factory_obj;
 
 static inline struct core_webview2 *impl_from_cwv2( void *iface )
 {
@@ -4715,7 +4929,113 @@ static const void *cwv2_domloaded_args_vtbl[256] =
     [6] = domloaded_get_NavigationId,
 };
 
-/* Generic EventArgs fallback (WebResourceRequested / ContextMenuRequested) */
+/* WebResourceRequest: 6=get_Uri (COM 3), 8=get_Method (COM 5) */
+static const GUID IID_ICoreWebView2WebResourceRequest_rt =
+    { 0x5c742259, 0x67d2, 0x5df2, { 0x83, 0x82, 0x0f, 0x20, 0x1b, 0x4d, 0x71, 0x97 } };
+
+static HRESULT WINAPI wrr_req_get_Uri( void *iface, HSTRING *out )
+{ return evargs_get_str( impl_from_evargs( iface ), 3, out ); }
+static HRESULT WINAPI wrr_req_get_Method( void *iface, HSTRING *out )
+{ return evargs_get_str( impl_from_evargs( iface ), 5, out ); }
+
+static const void *cwv2_wrr_req_vtbl[256] =
+{
+    [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
+    [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
+    [6 ... 255] = element_generic_slot,
+    [6] = wrr_req_get_Uri,
+    [8] = wrr_req_get_Method,
+};
+
+/* WebResourceRequestedEventArgs: 6=get_Request (COM 3), 7=get_Response, 9=get_ResourceContext (COM 7) */
+static HRESULT WINAPI wrr_evargs_get_Request( void *iface, void **out )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    void *com_req = NULL;
+    struct cwv2_event_args *wrap;
+    HRESULT hr = E_FAIL;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, void ** ) = (*(void ***)impl->com_args)[3];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            hr = fn( impl->com_args, &com_req );
+    }
+    if (FAILED( hr ) || !com_req) return SUCCEEDED( hr ) ? E_FAIL : hr;
+    wrap = calloc( 1, sizeof(*wrap) );
+    if (!wrap)
+    {
+        ((IUnknown *)com_req)->lpVtbl->Release( com_req );
+        return E_OUTOFMEMORY;
+    }
+    wrap->IInspectable_iface.lpVtbl = (const IInspectableVtbl *)cwv2_wrr_req_vtbl;
+    wrap->ref = 1;
+    wrap->winrt_iid = IID_ICoreWebView2WebResourceRequest_rt;
+    wrap->com_args = com_req;
+    *out = &wrap->IInspectable_iface;
+    return S_OK;
+}
+static HRESULT WINAPI wrr_evargs_get_Response( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI wrr_evargs_get_ResourceContext( void *iface, int *out )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    if (!out) return E_POINTER;
+    *out = 0;
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, int * ) = (*(void ***)impl->com_args)[7];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            return fn( impl->com_args, out );
+    }
+    return S_OK;
+}
+
+static const void *cwv2_wrr_evargs_vtbl[256] =
+{
+    [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
+    [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
+    [6 ... 255] = element_generic_slot,
+    [6] = wrr_evargs_get_Request,
+    [7] = wrr_evargs_get_Response,
+    [9] = wrr_evargs_get_ResourceContext,
+};
+
+/* ProcessFailedEventArgs: 6=get_ProcessFailedKind (COM 3) */
+static const GUID IID_ICoreWebView2ProcessFailedEventArgs_rt =
+    { 0x25a8f8c9, 0xd944, 0x539d, { 0xaf, 0xa3, 0x24, 0x17, 0x2b, 0x48, 0xef, 0x47 } };
+
+static HRESULT WINAPI procfail_get_ProcessFailedKind( void *iface, int *out )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    HRESULT hr = S_OK;
+    if (!out) return E_POINTER;
+    *out = 0;
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, int * ) = (*(void ***)impl->com_args)[3];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            hr = fn( impl->com_args, out );
+    }
+    TRACE( "procfail_get_ProcessFailedKind hr=%#lx kind=%d\n", hr, *out );
+    return hr;
+}
+
+static const void *cwv2_procfail_args_vtbl[256] =
+{
+    [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
+    [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
+    [6 ... 255] = element_generic_slot,
+    [6] = procfail_get_ProcessFailedKind,
+};
+
+/* Generic EventArgs fallback (ContextMenuRequested) */
 static const void *cwv2_generic_evargs_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
@@ -4847,12 +5167,12 @@ CWV2_EVENT_PAIR( FrameNavigationStarting, 17, 18, cwv2_navstart_args_vtbl, &IID_
 CWV2_EVENT_PAIR( FrameNavigationCompleted, 19, 20, cwv2_navcomp_args_vtbl, &IID_ICoreWebView2NavigationCompletedEventArgs_rt )
 CWV2_EVENT_PAIR( ScriptDialogOpening, 21, 22, NULL, NULL )
 CWV2_EVENT_PAIR( PermissionRequested, 23, 24, NULL, NULL )
-CWV2_EVENT_PAIR( ProcessFailed, 25, 26, NULL, NULL )
+CWV2_EVENT_PAIR( ProcessFailed, 25, 26, cwv2_procfail_args_vtbl, &IID_ICoreWebView2ProcessFailedEventArgs_rt )
 CWV2_EVENT_PAIR( WebMessageReceived, 34, 35, cwv2_webmsg_args_vtbl, &IID_ICoreWebView2WebMessageReceivedEventArgs_rt )
 CWV2_EVENT_PAIR( NewWindowRequested, 44, 45, NULL, NULL )
 CWV2_EVENT_PAIR( DocumentTitleChanged, 46, 47, NULL, NULL )
 CWV2_EVENT_PAIR( ContainsFullScreenElementChanged, 52, 53, NULL, NULL )
-CWV2_EVENT_PAIR( WebResourceRequested, 55, 56, cwv2_generic_evargs_vtbl, &IID_ICoreWebView2WebResourceRequestedEventArgs_rt )
+CWV2_EVENT_PAIR( WebResourceRequested, 55, 56, cwv2_wrr_evargs_vtbl, &IID_ICoreWebView2WebResourceRequestedEventArgs_rt )
 CWV2_EVENT_PAIR( WindowCloseRequested, 59, 60, NULL, NULL )
 
 static HRESULT WINAPI cwv2_2_add_WebResourceResponseReceived( void *iface, void *handler, EventRegistrationToken *token )
@@ -5924,6 +6244,7 @@ static HRESULT WINAPI wv2_add_CoreWebView2Initialized( void *iface, void *handle
     impl->init_handler = (IInspectable *)handler;
     if (impl->init_handler) IInspectable_AddRef( impl->init_handler );
     if (token) token->value = 1;
+    wv2_defer_start_browser( impl );
     return S_OK;
 }
 
@@ -7140,190 +7461,10 @@ static HRESULT WINAPI wv2_EnsureCoreWebView2Async( void *iface, void **op )
     return xaml_async_action_create( (IAsyncAction **)op );
 }
 
-struct rt_ctrl_op_handler
-{
-    const void **vtbl;
-    LONG ref;
-    struct xaml_element *impl;
-    void *iface;
-    HWND hw;
-    void *ctrl_op;
-    struct xaml_async_action *act;
-};
-
-static HRESULT WINAPI rt_ctrl_op_QueryInterface( void *iface, REFIID iid, void **out )
-{
-    if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IMarshal ) || IsEqualGUID( iid, &IID_IWeakReferenceSource ))
-    {
-        *out = NULL;
-        return E_NOINTERFACE;
-    }
-    *out = iface;
-    InterlockedIncrement( &((struct rt_ctrl_op_handler *)iface)->ref );
-    return S_OK;
-}
-static ULONG WINAPI rt_ctrl_op_AddRef( void *iface )
-{
-    return InterlockedIncrement( &((struct rt_ctrl_op_handler *)iface)->ref );
-}
-static ULONG WINAPI rt_ctrl_op_Release( void *iface )
-{
-    struct rt_ctrl_op_handler *h = iface;
-    LONG r = InterlockedDecrement( &h->ref );
-    if (!r)
-    {
-        if (h->ctrl_op) IInspectable_Release( (IInspectable *)h->ctrl_op );
-        if (h->act) xaml_async_action_Release( &h->act->IAsyncAction_iface );
-        HeapFree( GetProcessHeap(), 0, (void *)h->vtbl );
-        HeapFree( GetProcessHeap(), 0, h );
-    }
-    return r;
-}
-static HRESULT WINAPI rt_ctrl_op_Invoke( void *iface, void *async_op, int status )
-{
-    struct rt_ctrl_op_handler *h = iface;
-    void *rt_ctrl = NULL, *rt_core = NULL;
-    HRESULT hr = E_FAIL;
-
-    ERR( "rt_ctrl_op_Invoke async_op=%p status=%d\n", async_op, status );
-    if (async_op && status == 1 && *(void ***)async_op)
-    {
-        HRESULT (WINAPI *get_results)( void *, void ** ) = (*(void ***)async_op)[8];
-        if (get_results)
-        {
-            hr = get_results( async_op, &rt_ctrl );
-            ERR( "rt_ctrl_op_Invoke GetResults -> hr %#lx, rt_ctrl %p\n", hr, rt_ctrl );
-        }
-    }
-    if (SUCCEEDED( hr ) && rt_ctrl && *(void ***)rt_ctrl)
-    {
-        typedef struct { float X, Y, Width, Height; } winrt_rect_t;
-        HRESULT (WINAPI *put_vis)( void *, boolean ) = (*(void ***)rt_ctrl)[7];
-        HRESULT (WINAPI *put_bounds)( void *, winrt_rect_t * ) = (*(void ***)rt_ctrl)[9];
-        HRESULT (WINAPI *get_core)( void *, void ** ) = (*(void ***)rt_ctrl)[14];
-        RECT cr = { 0, 0, 1272, 990 };
-        winrt_rect_t wr;
-        if (h->hw && IsWindow( h->hw )) GetClientRect( h->hw, &cr );
-        wr.X = 0.0f; wr.Y = 0.0f;
-        wr.Width = (float)(cr.right > 0 ? cr.right : 1272);
-        wr.Height = (float)(cr.bottom > 0 ? cr.bottom : 990);
-        if (put_bounds) put_bounds( rt_ctrl, &wr );
-        if (put_vis) put_vis( rt_ctrl, TRUE );
-        wv2_ensure_host_subclass( h->hw );
-        wv2_sync_child_hwnds( h->hw, (int)wr.Width, (int)wr.Height );
-        if (get_core)
-        {
-            hr = get_core( rt_ctrl, &rt_core );
-            ERR( "rt_ctrl_op_Invoke get_CoreWebView2 -> hr %#lx, rt_core %p\n", hr, rt_core );
-        }
-        if (SUCCEEDED( hr ) && rt_core && !h->impl->core_webview2)
-            h->impl->core_webview2 = rt_core;
-        h->impl->loader_controller = rt_ctrl;
-    }
-    trigger_core_webview2_initialized( h->impl, h->iface );
-    xaml_async_action_complete( h->act, SUCCEEDED( hr ) ? S_OK : hr );
-    return S_OK;
-}
-
 static HRESULT WINAPI wv22_EnsureCoreWebView2Async( void *iface, void *env, void **op )
 {
-    static const GUID IID_ICoreWebView2Environment_rt =
-        { 0xd8cc7831, 0xb783, 0x556b, { 0xb9, 0xce, 0x89, 0x9c, 0x1e, 0x95, 0xd5, 0x85 } };
     struct xaml_element *impl = impl_from_IWebView22( iface );
-
-    ERR( "wv22_EnsureCoreWebView2Async iface %p, env %p, op %p (core=%p)\n",
-         iface, env, op, impl->core_webview2 );
-
-    if (!op) return E_POINTER;
-    if (impl->core_webview2)
-    {
-        trigger_core_webview2_initialized( impl, iface );
-        return xaml_async_action_create( (IAsyncAction **)op );
-    }
-
-    if (env)
-    {
-        HWND hw = impl->parent_hwnd ? impl->parent_hwnd : wv2_get_controller_parent();
-        HSTRING h_cls = NULL;
-        IInspectable *winref_fact = NULL;
-        void *winref_stat = NULL, *winref = NULL, *rt_env = NULL, *ctrl_op = NULL;
-        HRESULT hr = E_FAIL;
-
-        static const WCHAR winref_cls[] = L"Microsoft.Web.WebView2.Core.CoreWebView2ControllerWindowReference";
-        if (SUCCEEDED( WindowsCreateString( winref_cls, ARRAY_SIZE(winref_cls) - 1, &h_cls ) ))
-        {
-            hr = RoGetActivationFactory( h_cls, &IID_IInspectable, (void **)&winref_fact );
-            WindowsDeleteString( h_cls );
-        }
-        if (SUCCEEDED( hr ) && winref_fact)
-        {
-            ULONG cnt = 0;
-            IID *iids = NULL;
-            if (SUCCEEDED( IInspectable_GetIids( winref_fact, &cnt, &iids ) ) && iids && cnt > 0)
-            {
-                static const GUID IID_IActivationFactory_g =
-                    { 0x00000035, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
-                ULONG idx = (IsEqualGUID( &iids[0], &IID_IActivationFactory_g ) && cnt > 1) ? 1 : 0;
-                ERR( "wv22_EnsureCoreWebView2Async: winref_fact cnt=%lu iid[%lu]=%s\n", cnt, idx, debugstr_guid( &iids[idx] ) );
-                hr = IInspectable_QueryInterface( winref_fact, &iids[idx], &winref_stat );
-                CoTaskMemFree( iids );
-            }
-            else
-                hr = E_NOINTERFACE;
-            IInspectable_Release( winref_fact );
-        }
-        if (SUCCEEDED( hr ) && winref_stat && *(void ***)winref_stat)
-        {
-            HRESULT (WINAPI *from_hwnd)( void *, UINT64, void ** ) = (*(void ***)winref_stat)[6];
-            if (from_hwnd) hr = from_hwnd( winref_stat, (UINT64)(ULONG_PTR)hw, &winref );
-            ERR( "wv22_EnsureCoreWebView2Async: from_hwnd(%p) -> hr %#lx winref %p\n", hw, hr, winref );
-            IInspectable_Release( (IInspectable *)winref_stat );
-        }
-        if (SUCCEEDED( hr ) && winref)
-        {
-            hr = IInspectable_QueryInterface( (IInspectable *)env, &IID_ICoreWebView2Environment_rt, &rt_env );
-            ERR( "wv22_EnsureCoreWebView2Async: QI(rt_env) -> hr %#lx rt_env %p\n", hr, rt_env );
-            if (SUCCEEDED( hr ) && rt_env && *(void ***)rt_env)
-            {
-                HRESULT (WINAPI *create_ctrl)( void *, void *, void ** ) = (*(void ***)rt_env)[9];
-                if (create_ctrl) hr = create_ctrl( rt_env, winref, &ctrl_op );
-                IInspectable_Release( (IInspectable *)rt_env );
-            }
-            IInspectable_Release( (IInspectable *)winref );
-        }
-        ERR( "wv22_EnsureCoreWebView2Async: CreateCoreWebView2ControllerAsync(hw=%p) -> hr %#lx ctrl_op %p\n",
-             hw, hr, ctrl_op );
-        if (SUCCEEDED( hr ) && ctrl_op && *(void ***)ctrl_op)
-        {
-            struct xaml_async_action *act = NULL;
-            struct rt_ctrl_op_handler *ch = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ch) );
-            const void **vt = HeapAlloc( GetProcessHeap(), 0, 4 * sizeof(*vt) );
-            if (ch && vt && SUCCEEDED( xaml_async_action_create_ex( FALSE, &act, (IAsyncAction **)op ) ))
-            {
-                HRESULT (WINAPI *put_completed)( void *, void * ) = (*(void ***)ctrl_op)[6];
-                vt[0] = rt_ctrl_op_QueryInterface;
-                vt[1] = rt_ctrl_op_AddRef;
-                vt[2] = rt_ctrl_op_Release;
-                vt[3] = rt_ctrl_op_Invoke;
-                ch->vtbl = vt;
-                ch->ref = 1;
-                ch->impl = impl;
-                ch->iface = iface;
-                ch->hw = hw;
-                ch->ctrl_op = ctrl_op;
-                ch->act = act;
-                xaml_async_action_AddRef( &act->IAsyncAction_iface );
-                if (put_completed) put_completed( ctrl_op, ch );
-                rt_ctrl_op_Release( ch );
-                return S_OK;
-            }
-            if (vt) HeapFree( GetProcessHeap(), 0, vt );
-            if (ch) HeapFree( GetProcessHeap(), 0, ch );
-            IInspectable_Release( (IInspectable *)ctrl_op );
-        }
-    }
-
+    ERR( "wv22_EnsureCoreWebView2Async iface %p, env %p, op %p\n", iface, env, op );
     wv2_defer_start_browser( impl );
     trigger_core_webview2_initialized( impl, iface );
     return xaml_async_action_create( (IAsyncAction **)op );
