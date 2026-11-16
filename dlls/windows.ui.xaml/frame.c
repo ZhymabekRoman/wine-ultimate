@@ -2771,6 +2771,8 @@ struct xaml_async_action
     IAsyncAction IAsyncAction_iface;
     IAsyncInfo IAsyncInfo_iface;
     LONG ref;
+    BOOL completed;
+    HRESULT hr;
     IAsyncActionCompletedHandler *handler;
 };
 
@@ -2837,7 +2839,8 @@ static HRESULT WINAPI xaml_async_action_put_Completed( IAsyncAction *iface, IAsy
     if (impl->handler)
     {
         IAsyncActionCompletedHandler_AddRef( impl->handler );
-        IAsyncActionCompletedHandler_Invoke( impl->handler, iface, 1 /* Completed */ );
+        if (impl->completed)
+            IAsyncActionCompletedHandler_Invoke( impl->handler, iface, FAILED( impl->hr ) ? 3 /* Error */ : 1 /* Completed */ );
     }
     return S_OK;
 }
@@ -2884,8 +2887,18 @@ static HRESULT WINAPI xaml_async_info_GetIids( IAsyncInfo *iface, ULONG *count, 
 static HRESULT WINAPI xaml_async_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name ) { return E_NOTIMPL; }
 static HRESULT WINAPI xaml_async_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level ) { return E_NOTIMPL; }
 static HRESULT WINAPI xaml_async_info_get_Id( IAsyncInfo *iface, unsigned int *id ) { if (id) *id = 1; return S_OK; }
-static HRESULT WINAPI xaml_async_info_get_Status( IAsyncInfo *iface, AsyncStatus *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
-static HRESULT WINAPI xaml_async_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
+static HRESULT WINAPI xaml_async_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
+{
+    struct xaml_async_action *impl = impl_from_async_info( iface );
+    if (status) *status = !impl->completed ? 0 /* Started */ : (FAILED( impl->hr ) ? 3 /* Error */ : 1 /* Completed */);
+    return S_OK;
+}
+static HRESULT WINAPI xaml_async_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *code )
+{
+    struct xaml_async_action *impl = impl_from_async_info( iface );
+    if (code) *code = impl->hr;
+    return S_OK;
+}
 static HRESULT WINAPI xaml_async_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
 static HRESULT WINAPI xaml_async_info_Close( IAsyncInfo *iface ) { return S_OK; }
 
@@ -2904,7 +2917,7 @@ static const struct IAsyncInfoVtbl xaml_async_info_vtbl =
     xaml_async_info_Close,
 };
 
-static HRESULT xaml_async_action_create( IAsyncAction **out )
+static HRESULT xaml_async_action_create_ex( BOOL completed, struct xaml_async_action **out_impl, IAsyncAction **out )
 {
     struct xaml_async_action *impl;
     if (!out) return E_POINTER;
@@ -2912,8 +2925,26 @@ static HRESULT xaml_async_action_create( IAsyncAction **out )
     impl->IAsyncAction_iface.lpVtbl = &xaml_async_action_vtbl;
     impl->IAsyncInfo_iface.lpVtbl = &xaml_async_info_vtbl;
     impl->ref = 1;
+    impl->completed = completed;
+    impl->hr = S_OK;
     *out = &impl->IAsyncAction_iface;
+    if (out_impl) *out_impl = impl;
     return S_OK;
+}
+
+static HRESULT xaml_async_action_create( IAsyncAction **out )
+{
+    return xaml_async_action_create_ex( TRUE, NULL, out );
+}
+
+static void xaml_async_action_complete( struct xaml_async_action *impl, HRESULT hr )
+{
+    if (!impl || impl->completed) return;
+    impl->hr = hr;
+    impl->completed = TRUE;
+    if (impl->handler)
+        IAsyncActionCompletedHandler_Invoke( impl->handler, &impl->IAsyncAction_iface,
+                FAILED( hr ) ? 3 /* Error */ : 1 /* Completed */ );
 }
 
 enum cwv2_pending_kind
@@ -5668,7 +5699,7 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
             ShowWindow( child, SW_SHOW );
             SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
                           SWP_SHOWWINDOW | SWP_NOACTIVATE );
-            TRACE( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
+            ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
                    child, debugstr_w( cls ), ctx->width, ctx->height );
         }
         ctx->count++;
@@ -5723,6 +5754,10 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
 {
     struct wv2_enum_ctx *ctx = (struct wv2_enum_ctx *)lparam;
     WCHAR cls[128] = {0};
+    DWORD pid = 0;
+
+    GetWindowThreadProcessId( hwnd, &pid );
+    if (pid != GetCurrentProcessId()) return TRUE;
 
     GetClassNameW( hwnd, cls, ARRAY_SIZE( cls ) );
     TRACE( "wv2_sync_top_cb: seen hwnd %p class %s\n", hwnd, debugstr_w(cls) );
@@ -5889,11 +5924,6 @@ static HRESULT WINAPI wv2_add_CoreWebView2Initialized( void *iface, void *handle
     impl->init_handler = (IInspectable *)handler;
     if (impl->init_handler) IInspectable_AddRef( impl->init_handler );
     if (token) token->value = 1;
-    /* The app stalls before EnsureCoreWebView2Async in this build, so start the
-     * browser on handler registration (deferred to the pump, see s330 above):
-     * the environment completion (and with it the controller and the mojo
-     * pipes) overlaps the app's async chain. */
-    wv2_defer_start_browser( impl );
     return S_OK;
 }
 
@@ -6119,6 +6149,11 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
     void *core = NULL;
 
     ERR( "wv2_ctrl_handler_Invoke hr %#lx controller %p real=%d\n", hr, controller, h->impl->real_loader );
+    if (FAILED( hr ))
+    {
+        ERR( "wv2_ctrl_handler_Invoke: controller creation failed (%#lx), ignoring broken controller\n", hr );
+        return hr;
+    }
     if (controller)
     {
         if (h->impl->real_loader)
@@ -7105,10 +7140,191 @@ static HRESULT WINAPI wv2_EnsureCoreWebView2Async( void *iface, void **op )
     return xaml_async_action_create( (IAsyncAction **)op );
 }
 
+struct rt_ctrl_op_handler
+{
+    const void **vtbl;
+    LONG ref;
+    struct xaml_element *impl;
+    void *iface;
+    HWND hw;
+    void *ctrl_op;
+    struct xaml_async_action *act;
+};
+
+static HRESULT WINAPI rt_ctrl_op_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IMarshal ) || IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = iface;
+    InterlockedIncrement( &((struct rt_ctrl_op_handler *)iface)->ref );
+    return S_OK;
+}
+static ULONG WINAPI rt_ctrl_op_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct rt_ctrl_op_handler *)iface)->ref );
+}
+static ULONG WINAPI rt_ctrl_op_Release( void *iface )
+{
+    struct rt_ctrl_op_handler *h = iface;
+    LONG r = InterlockedDecrement( &h->ref );
+    if (!r)
+    {
+        if (h->ctrl_op) IInspectable_Release( (IInspectable *)h->ctrl_op );
+        if (h->act) xaml_async_action_Release( &h->act->IAsyncAction_iface );
+        HeapFree( GetProcessHeap(), 0, (void *)h->vtbl );
+        HeapFree( GetProcessHeap(), 0, h );
+    }
+    return r;
+}
+static HRESULT WINAPI rt_ctrl_op_Invoke( void *iface, void *async_op, int status )
+{
+    struct rt_ctrl_op_handler *h = iface;
+    void *rt_ctrl = NULL, *rt_core = NULL;
+    HRESULT hr = E_FAIL;
+
+    ERR( "rt_ctrl_op_Invoke async_op=%p status=%d\n", async_op, status );
+    if (async_op && status == 1 && *(void ***)async_op)
+    {
+        HRESULT (WINAPI *get_results)( void *, void ** ) = (*(void ***)async_op)[8];
+        if (get_results)
+        {
+            hr = get_results( async_op, &rt_ctrl );
+            ERR( "rt_ctrl_op_Invoke GetResults -> hr %#lx, rt_ctrl %p\n", hr, rt_ctrl );
+        }
+    }
+    if (SUCCEEDED( hr ) && rt_ctrl && *(void ***)rt_ctrl)
+    {
+        typedef struct { float X, Y, Width, Height; } winrt_rect_t;
+        HRESULT (WINAPI *put_vis)( void *, boolean ) = (*(void ***)rt_ctrl)[7];
+        HRESULT (WINAPI *put_bounds)( void *, winrt_rect_t * ) = (*(void ***)rt_ctrl)[9];
+        HRESULT (WINAPI *get_core)( void *, void ** ) = (*(void ***)rt_ctrl)[14];
+        RECT cr = { 0, 0, 1272, 990 };
+        winrt_rect_t wr;
+        if (h->hw && IsWindow( h->hw )) GetClientRect( h->hw, &cr );
+        wr.X = 0.0f; wr.Y = 0.0f;
+        wr.Width = (float)(cr.right > 0 ? cr.right : 1272);
+        wr.Height = (float)(cr.bottom > 0 ? cr.bottom : 990);
+        if (put_bounds) put_bounds( rt_ctrl, &wr );
+        if (put_vis) put_vis( rt_ctrl, TRUE );
+        wv2_ensure_host_subclass( h->hw );
+        wv2_sync_child_hwnds( h->hw, (int)wr.Width, (int)wr.Height );
+        if (get_core)
+        {
+            hr = get_core( rt_ctrl, &rt_core );
+            ERR( "rt_ctrl_op_Invoke get_CoreWebView2 -> hr %#lx, rt_core %p\n", hr, rt_core );
+        }
+        if (SUCCEEDED( hr ) && rt_core && !h->impl->core_webview2)
+            h->impl->core_webview2 = rt_core;
+        h->impl->loader_controller = rt_ctrl;
+    }
+    trigger_core_webview2_initialized( h->impl, h->iface );
+    xaml_async_action_complete( h->act, SUCCEEDED( hr ) ? S_OK : hr );
+    return S_OK;
+}
+
 static HRESULT WINAPI wv22_EnsureCoreWebView2Async( void *iface, void *env, void **op )
 {
+    static const GUID IID_ICoreWebView2Environment_rt =
+        { 0xd8cc7831, 0xb783, 0x556b, { 0xb9, 0xce, 0x89, 0x9c, 0x1e, 0x95, 0xd5, 0x85 } };
     struct xaml_element *impl = impl_from_IWebView22( iface );
-    ERR( "wv22_EnsureCoreWebView2Async iface %p, env %p, op %p\n", iface, env, op );
+
+    ERR( "wv22_EnsureCoreWebView2Async iface %p, env %p, op %p (core=%p)\n",
+         iface, env, op, impl->core_webview2 );
+
+    if (!op) return E_POINTER;
+    if (impl->core_webview2)
+    {
+        trigger_core_webview2_initialized( impl, iface );
+        return xaml_async_action_create( (IAsyncAction **)op );
+    }
+
+    if (env)
+    {
+        HWND hw = impl->parent_hwnd ? impl->parent_hwnd : wv2_get_controller_parent();
+        HSTRING h_cls = NULL;
+        IInspectable *winref_fact = NULL;
+        void *winref_stat = NULL, *winref = NULL, *rt_env = NULL, *ctrl_op = NULL;
+        HRESULT hr = E_FAIL;
+
+        static const WCHAR winref_cls[] = L"Microsoft.Web.WebView2.Core.CoreWebView2ControllerWindowReference";
+        if (SUCCEEDED( WindowsCreateString( winref_cls, ARRAY_SIZE(winref_cls) - 1, &h_cls ) ))
+        {
+            hr = RoGetActivationFactory( h_cls, &IID_IInspectable, (void **)&winref_fact );
+            WindowsDeleteString( h_cls );
+        }
+        if (SUCCEEDED( hr ) && winref_fact)
+        {
+            ULONG cnt = 0;
+            IID *iids = NULL;
+            if (SUCCEEDED( IInspectable_GetIids( winref_fact, &cnt, &iids ) ) && iids && cnt > 0)
+            {
+                static const GUID IID_IActivationFactory_g =
+                    { 0x00000035, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+                ULONG idx = (IsEqualGUID( &iids[0], &IID_IActivationFactory_g ) && cnt > 1) ? 1 : 0;
+                ERR( "wv22_EnsureCoreWebView2Async: winref_fact cnt=%lu iid[%lu]=%s\n", cnt, idx, debugstr_guid( &iids[idx] ) );
+                hr = IInspectable_QueryInterface( winref_fact, &iids[idx], &winref_stat );
+                CoTaskMemFree( iids );
+            }
+            else
+                hr = E_NOINTERFACE;
+            IInspectable_Release( winref_fact );
+        }
+        if (SUCCEEDED( hr ) && winref_stat && *(void ***)winref_stat)
+        {
+            HRESULT (WINAPI *from_hwnd)( void *, UINT64, void ** ) = (*(void ***)winref_stat)[6];
+            if (from_hwnd) hr = from_hwnd( winref_stat, (UINT64)(ULONG_PTR)hw, &winref );
+            ERR( "wv22_EnsureCoreWebView2Async: from_hwnd(%p) -> hr %#lx winref %p\n", hw, hr, winref );
+            IInspectable_Release( (IInspectable *)winref_stat );
+        }
+        if (SUCCEEDED( hr ) && winref)
+        {
+            hr = IInspectable_QueryInterface( (IInspectable *)env, &IID_ICoreWebView2Environment_rt, &rt_env );
+            ERR( "wv22_EnsureCoreWebView2Async: QI(rt_env) -> hr %#lx rt_env %p\n", hr, rt_env );
+            if (SUCCEEDED( hr ) && rt_env && *(void ***)rt_env)
+            {
+                HRESULT (WINAPI *create_ctrl)( void *, void *, void ** ) = (*(void ***)rt_env)[9];
+                if (create_ctrl) hr = create_ctrl( rt_env, winref, &ctrl_op );
+                IInspectable_Release( (IInspectable *)rt_env );
+            }
+            IInspectable_Release( (IInspectable *)winref );
+        }
+        ERR( "wv22_EnsureCoreWebView2Async: CreateCoreWebView2ControllerAsync(hw=%p) -> hr %#lx ctrl_op %p\n",
+             hw, hr, ctrl_op );
+        if (SUCCEEDED( hr ) && ctrl_op && *(void ***)ctrl_op)
+        {
+            struct xaml_async_action *act = NULL;
+            struct rt_ctrl_op_handler *ch = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ch) );
+            const void **vt = HeapAlloc( GetProcessHeap(), 0, 4 * sizeof(*vt) );
+            if (ch && vt && SUCCEEDED( xaml_async_action_create_ex( FALSE, &act, (IAsyncAction **)op ) ))
+            {
+                HRESULT (WINAPI *put_completed)( void *, void * ) = (*(void ***)ctrl_op)[6];
+                vt[0] = rt_ctrl_op_QueryInterface;
+                vt[1] = rt_ctrl_op_AddRef;
+                vt[2] = rt_ctrl_op_Release;
+                vt[3] = rt_ctrl_op_Invoke;
+                ch->vtbl = vt;
+                ch->ref = 1;
+                ch->impl = impl;
+                ch->iface = iface;
+                ch->hw = hw;
+                ch->ctrl_op = ctrl_op;
+                ch->act = act;
+                xaml_async_action_AddRef( &act->IAsyncAction_iface );
+                if (put_completed) put_completed( ctrl_op, ch );
+                rt_ctrl_op_Release( ch );
+                return S_OK;
+            }
+            if (vt) HeapFree( GetProcessHeap(), 0, vt );
+            if (ch) HeapFree( GetProcessHeap(), 0, ch );
+            IInspectable_Release( (IInspectable *)ctrl_op );
+        }
+    }
+
+    wv2_defer_start_browser( impl );
     trigger_core_webview2_initialized( impl, iface );
     return xaml_async_action_create( (IAsyncAction **)op );
 }
@@ -7343,11 +7559,6 @@ HRESULT element_create_typed( const WCHAR *class_name, void **instance )
         {
             impl->is_webview = TRUE;
             impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)element_vtbl;
-            /* Start env -> controller -> browser at element creation: the app
-             * parks on an early async await before registering the
-             * CoreWebView2Initialized handler, so waiting for the handler
-             * leaves msedgewebview2 unspawned. */
-            wv2_defer_start_browser( impl );
         }
         else
             impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)element_vtbl;
@@ -7365,10 +7576,6 @@ HRESULT xaml_create_webview2( void **out )
     {
         impl->is_webview = TRUE;
         *out = &impl->IInspectable_iface;
-        /* The app parks on an early async await before registering
-         * CoreWebView2Initialized, so kick off env -> controller -> browser on
-         * element creation; handler add stays idempotent via browser_started. */
-        wv2_defer_start_browser( impl );
     }
     return hr;
 }
