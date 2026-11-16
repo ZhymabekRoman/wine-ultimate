@@ -790,14 +790,6 @@ static void STDMETHODCALLTYPE d3d11_device_context_DrawIndexed(ID3D11DeviceConte
         UINT index_count, UINT start_index_location, INT base_vertex_location)
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
-    static DWORD last_log;
-    DWORD now = GetTickCount();
-
-    if (now - last_log > 1000)
-    {
-        last_log = now;
-        ERR("D3D11: DrawIndexed context %p, index_count %u\n", iface, index_count);
-    }
 
     TRACE("iface %p, index_count %u, start_index_location %u, base_vertex_location %d.\n",
             iface, index_count, start_index_location, base_vertex_location);
@@ -828,7 +820,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Map(ID3D11DeviceContext4 *
     TRACE("iface %p, resource %p, subresource_idx %u, map_type %u, map_flags %#x, mapped_subresource %p.\n",
             iface, resource, subresource_idx, map_type, map_flags, mapped_subresource);
 
-    if (map_flags)
+    if (map_flags & ~D3D11_MAP_FLAG_DO_NOT_WAIT)
         FIXME("Ignoring map_flags %#x.\n", map_flags);
 
     mapped_subresource->pData = NULL;

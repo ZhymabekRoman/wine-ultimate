@@ -327,6 +327,29 @@ static inline VkImageAspectFlags vk_aspect_mask_from_format(const struct wined3d
     return mask;
 }
 
+#define WINED3D_UPLOAD_RING_CHUNK_SIZE (4 * 1024 * 1024)
+#define WINED3D_UPLOAD_RING_MAX_ALLOC  (1024 * 1024)
+#define WINED3D_UPLOAD_RING_MAX_CHUNKS 16
+#define WINED3D_UPLOAD_RING_USAGE_VK   (VK_BUFFER_USAGE_TRANSFER_SRC_BIT \
+        | VK_BUFFER_USAGE_TRANSFER_DST_BIT \
+        | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT \
+        | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT \
+        | VK_BUFFER_USAGE_INDEX_BUFFER_BIT \
+        | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT)
+
+struct wined3d_upload_ring_chunk_vk
+{
+    VkBuffer vk_buffer;
+    VkDeviceMemory vk_memory;
+    void *map_ptr;
+    VkDeviceSize size;
+    VkDeviceSize offset;
+    VkBufferUsageFlags usage;
+    VkMemoryPropertyFlags memory_type;
+    uint64_t command_buffer_id;
+    LONG live_bos;
+};
+
 struct wined3d_bo_vk
 {
     struct wined3d_bo b;
@@ -334,6 +357,7 @@ struct wined3d_bo_vk
     VkBuffer vk_buffer;
     struct wined3d_allocator_block *memory;
     struct wined3d_bo_slab_vk *slab;
+    struct wined3d_upload_ring_chunk_vk *ring_chunk;
 
     VkDeviceMemory vk_memory;
 
@@ -568,6 +592,7 @@ struct wined3d_pipeline_layout_vk
 struct wined3d_graphics_pipeline_key_vk
 {
     VkPipelineShaderStageCreateInfo stages[WINED3D_SHADER_TYPE_GRAPHICS_COUNT];
+    uint64_t stage_hashes[WINED3D_SHADER_TYPE_GRAPHICS_COUNT];
     VkVertexInputBindingDivisorDescriptionEXT divisors[MAX_ATTRIBS];
     VkVertexInputAttributeDescription attributes[MAX_ATTRIBS];
     VkVertexInputBindingDescription bindings[MAX_ATTRIBS];
@@ -728,6 +753,14 @@ struct wined3d_context_vk
     struct wine_rb_tree pipeline_layouts;
     struct wine_rb_tree graphics_pipelines;
     struct wine_rb_tree bo_slab_available;
+
+    struct
+    {
+        struct wined3d_upload_ring_chunk_vk chunks[WINED3D_UPLOAD_RING_MAX_CHUNKS];
+        SIZE_T chunk_count;
+        SIZE_T current_chunk;
+        VkDeviceSize alignment;
+    } upload_ring;
 };
 
 static inline struct wined3d_context_vk *wined3d_context_vk(struct wined3d_context *context)
@@ -735,6 +768,9 @@ static inline struct wined3d_context_vk *wined3d_context_vk(struct wined3d_conte
     return CONTAINING_RECORD(context, struct wined3d_context_vk, c);
 }
 
+bool wined3d_context_vk_alloc_upload_bo(struct wined3d_context_vk *context_vk,
+        VkDeviceSize size, VkBufferUsageFlags usage, bool track_live_bo,
+        struct wined3d_bo_vk *bo);
 struct wined3d_allocator_block *wined3d_context_vk_allocate_memory(struct wined3d_context_vk *context_vk,
         unsigned int memory_type, VkDeviceSize size, VkDeviceMemory *vk_memory);
 bool wined3d_context_vk_allocate_query(struct wined3d_context_vk *context_vk,
@@ -1194,6 +1230,8 @@ static inline void wined3d_context_vk_reference_bo(const struct wined3d_context_
         struct wined3d_bo_vk *bo)
 {
     bo->command_buffer_id = context_vk->current_command_buffer.id;
+    if (bo->ring_chunk)
+        bo->ring_chunk->command_buffer_id = context_vk->current_command_buffer.id;
 }
 
 static inline void wined3d_context_vk_reference_image(const struct wined3d_context_vk *context_vk,

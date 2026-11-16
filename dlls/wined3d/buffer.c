@@ -799,7 +799,16 @@ void wined3d_buffer_copy_bo_address(struct wined3d_buffer *dst_buffer, struct wi
         map_flags |= WINED3D_MAP_DISCARD;
 
     if (map_flags & WINED3D_MAP_DISCARD)
+    {
         wined3d_buffer_acquire_bo_for_write(dst_buffer, context);
+        if ((dst_buffer->flags & WINED3D_BUFFER_USE_BO)
+                && (dst_buffer->locations & (WINED3D_LOCATION_CLEARED | WINED3D_LOCATION_DISCARDED))
+                && wined3d_buffer_prepare_location(dst_buffer, context, WINED3D_LOCATION_BUFFER))
+        {
+            wined3d_buffer_validate_location(dst_buffer, WINED3D_LOCATION_BUFFER);
+            wined3d_buffer_invalidate_location(dst_buffer, ~WINED3D_LOCATION_BUFFER);
+        }
+    }
 
     dst_location = wined3d_buffer_get_memory(dst_buffer, context, &dst_addr);
     dst_addr.addr += dst_offset;

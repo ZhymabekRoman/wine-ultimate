@@ -262,6 +262,7 @@ struct wined3d_d3d_info
     uint32_t persistent_map : 1;
     uint32_t gpu_push_constants : 1;
     uint32_t ffp_hlsl : 1;
+    uint32_t inline_cs : 1;
     enum wined3d_feature_level feature_level;
 
     DWORD multisample_draw_location;

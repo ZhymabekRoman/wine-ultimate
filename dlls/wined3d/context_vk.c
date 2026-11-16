@@ -524,6 +524,7 @@ static bool wined3d_context_vk_create_slab_bo(struct wined3d_context_vk *context
     *bo = slab->bo;
     bo->memory = NULL;
     bo->slab = slab;
+    bo->ring_chunk = NULL;
     bo->b.refcount = 1;
     bo->b.client_map_count = 0;
     bo->b.map_ptr = NULL;
@@ -615,6 +616,7 @@ BOOL wined3d_context_vk_create_bo(struct wined3d_context_vk *context_vk, VkDevic
     list_init(&bo->b.users);
     bo->command_buffer_id = 0;
     bo->slab = NULL;
+    bo->ring_chunk = NULL;
     bo->host_synced = false;
 
     TRACE("Created buffer 0x%s, memory 0x%s for bo %p.\n",
@@ -1183,6 +1185,12 @@ void wined3d_context_vk_destroy_bo(struct wined3d_context_vk *context_vk, const 
     TRACE("context_vk %p, bo %p.\n", context_vk, bo);
 
     assert(list_empty(&bo->b.users));
+
+    if (bo->ring_chunk)
+    {
+        InterlockedDecrement(&bo->ring_chunk->live_bos);
+        return;
+    }
 
     if (bo->command_buffer_id == context_vk->current_command_buffer.id)
         context_vk->retired_bo_size += bo->size;
@@ -1945,6 +1953,18 @@ void wined3d_context_vk_cleanup(struct wined3d_context_vk *context_vk)
     if (context_vk->vk_so_counter_bo.vk_buffer)
         wined3d_context_vk_destroy_bo(context_vk, &context_vk->vk_so_counter_bo);
     wined3d_context_vk_cleanup_resources(context_vk, VK_NULL_HANDLE);
+    for (i = 0; i < context_vk->upload_ring.chunk_count; ++i)
+    {
+        struct wined3d_upload_ring_chunk_vk *chunk = &context_vk->upload_ring.chunks[i];
+
+        if (chunk->map_ptr)
+        {
+            VK_CALL(vkUnmapMemory(device_vk->vk_device, chunk->vk_memory));
+            adapter_adjust_mapped_memory(device_vk->d.adapter, -chunk->size);
+        }
+        VK_CALL(vkDestroyBuffer(device_vk->vk_device, chunk->vk_buffer, NULL));
+        VK_CALL(vkFreeMemory(device_vk->vk_device, chunk->vk_memory, NULL));
+    }
     /* Destroy the command pool after cleaning up resources. In particular,
      * this needs to happen after all command buffers are freed, because
      * vkFreeCommandBuffers() requires a valid pool handle. */
@@ -2241,6 +2261,226 @@ void wined3d_context_vk_wait_command_buffer(struct wined3d_context_vk *context_v
     ERR("Failed to find fence for command buffer with id 0x%s.\n", wine_dbgstr_longlong(id));
 }
 
+static bool wined3d_context_vk_create_upload_chunk(struct wined3d_context_vk *context_vk,
+        struct wined3d_upload_ring_chunk_vk *chunk)
+{
+    struct wined3d_adapter_vk *adapter_vk = wined3d_adapter_vk(context_vk->c.device->adapter);
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
+    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
+    VkMemoryPropertyFlags prop_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    VkMemoryRequirements memory_requirements;
+    VkMemoryAllocateInfo allocate_info;
+    VkBufferCreateInfo create_info;
+    unsigned int memory_type_idx;
+    VkResult vr;
+
+    create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    create_info.pNext = NULL;
+    create_info.flags = 0;
+    create_info.size = WINED3D_UPLOAD_RING_CHUNK_SIZE;
+    create_info.usage = WINED3D_UPLOAD_RING_USAGE_VK;
+    create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    create_info.queueFamilyIndexCount = 0;
+    create_info.pQueueFamilyIndices = NULL;
+
+    if ((vr = VK_CALL(vkCreateBuffer(device_vk->vk_device, &create_info, NULL, &chunk->vk_buffer))) < 0)
+    {
+        WARN("Failed to create upload ring buffer, vr %s.\n", wined3d_debug_vkresult(vr));
+        return false;
+    }
+
+    VK_CALL(vkGetBufferMemoryRequirements(device_vk->vk_device, chunk->vk_buffer, &memory_requirements));
+    memory_type_idx = wined3d_adapter_vk_get_memory_type_index(adapter_vk,
+            memory_requirements.memoryTypeBits, prop_flags);
+    if (memory_type_idx == ~0u)
+    {
+        VK_CALL(vkDestroyBuffer(device_vk->vk_device, chunk->vk_buffer, NULL));
+        return false;
+    }
+
+    allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate_info.pNext = NULL;
+    allocate_info.allocationSize = memory_requirements.size;
+    allocate_info.memoryTypeIndex = memory_type_idx;
+    if ((vr = VK_CALL(vkAllocateMemory(device_vk->vk_device, &allocate_info, NULL, &chunk->vk_memory))) < 0)
+    {
+        VK_CALL(vkDestroyBuffer(device_vk->vk_device, chunk->vk_buffer, NULL));
+        return false;
+    }
+
+    if ((vr = VK_CALL(vkBindBufferMemory(device_vk->vk_device, chunk->vk_buffer, chunk->vk_memory, 0))) < 0)
+    {
+        VK_CALL(vkFreeMemory(device_vk->vk_device, chunk->vk_memory, NULL));
+        VK_CALL(vkDestroyBuffer(device_vk->vk_device, chunk->vk_buffer, NULL));
+        return false;
+    }
+
+    if ((vr = VK_CALL(vkMapMemory(device_vk->vk_device, chunk->vk_memory, 0,
+            WINED3D_UPLOAD_RING_CHUNK_SIZE, 0, &chunk->map_ptr))) < 0)
+    {
+        VK_CALL(vkFreeMemory(device_vk->vk_device, chunk->vk_memory, NULL));
+        VK_CALL(vkDestroyBuffer(device_vk->vk_device, chunk->vk_buffer, NULL));
+        return false;
+    }
+
+    adapter_adjust_mapped_memory(device_vk->d.adapter, WINED3D_UPLOAD_RING_CHUNK_SIZE);
+    chunk->size = WINED3D_UPLOAD_RING_CHUNK_SIZE;
+    chunk->offset = 0;
+    chunk->usage = WINED3D_UPLOAD_RING_USAGE_VK;
+    chunk->memory_type = adapter_vk->memory_properties.memoryTypes[memory_type_idx].propertyFlags;
+    chunk->command_buffer_id = 0;
+    chunk->live_bos = 0;
+    return true;
+}
+
+bool wined3d_context_vk_alloc_upload_bo(struct wined3d_context_vk *context_vk,
+        VkDeviceSize size, VkBufferUsageFlags usage, bool track_live_bo,
+        struct wined3d_bo_vk *bo)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
+    struct wined3d_upload_ring_chunk_vk *chunk = NULL;
+    VkDeviceSize align, aligned_offset;
+    SIZE_T i;
+
+    if (!size)
+        size = 1;
+    if (size > WINED3D_UPLOAD_RING_MAX_ALLOC || (usage & ~WINED3D_UPLOAD_RING_USAGE_VK))
+        return false;
+    {
+        static int no_ring = -1;
+
+        if (no_ring < 0)
+        {
+            const char *env = getenv("WINED3D_VK_NO_RING");
+            no_ring = (env && atoi(env)) ? 1 : 0;
+        }
+        if (no_ring)
+            return false;
+    }
+
+    align = context_vk->upload_ring.alignment;
+    if (!align)
+        align = 256;
+
+    wined3d_device_vk_allocator_lock(device_vk);
+
+    if (context_vk->upload_ring.chunk_count)
+    {
+        struct wined3d_upload_ring_chunk_vk *cur = &context_vk->upload_ring.chunks[context_vk->upload_ring.current_chunk];
+
+        aligned_offset = (cur->offset + align - 1) & ~(align - 1);
+        if (aligned_offset + size <= cur->size)
+        {
+            chunk = cur;
+            goto found;
+        }
+    }
+
+    /* Try to find an existing completed chunk. When called from the context
+     * owner path (!track_live_bo), poll Vulkan fences first to retire any
+     * finished command buffers. */
+    if (!track_live_bo)
+    {
+        wined3d_device_vk_allocator_unlock(device_vk);
+        wined3d_context_vk_cleanup_resources(context_vk, VK_NULL_HANDLE);
+        wined3d_device_vk_allocator_lock(device_vk);
+    }
+
+    for (i = 0; i < context_vk->upload_ring.chunk_count; ++i)
+    {
+        struct wined3d_upload_ring_chunk_vk *cand = &context_vk->upload_ring.chunks[i];
+
+        if (!InterlockedCompareExchange(&cand->live_bos, 0, 0)
+                && cand->command_buffer_id <= context_vk->completed_command_buffer_id)
+        {
+            cand->offset = 0;
+            cand->command_buffer_id = 0;
+            context_vk->upload_ring.current_chunk = i;
+            chunk = cand;
+            aligned_offset = 0;
+            goto found;
+        }
+    }
+
+    if (context_vk->upload_ring.chunk_count < WINED3D_UPLOAD_RING_MAX_CHUNKS)
+    {
+        SIZE_T idx = context_vk->upload_ring.chunk_count;
+        struct wined3d_upload_ring_chunk_vk *new_chunk = &context_vk->upload_ring.chunks[idx];
+
+        if (wined3d_context_vk_create_upload_chunk(context_vk, new_chunk))
+        {
+            context_vk->upload_ring.chunk_count = idx + 1;
+            context_vk->upload_ring.current_chunk = idx;
+            chunk = new_chunk;
+            aligned_offset = 0;
+            goto found;
+        }
+    }
+
+    if (!track_live_bo)
+    {
+        uint64_t best_id = UINT64_MAX;
+        SIZE_T best_idx = 0;
+
+        for (i = 0; i < context_vk->upload_ring.chunk_count; ++i)
+        {
+            struct wined3d_upload_ring_chunk_vk *cand = &context_vk->upload_ring.chunks[i];
+
+            if (!InterlockedCompareExchange(&cand->live_bos, 0, 0) && cand->command_buffer_id < best_id)
+            {
+                best_id = cand->command_buffer_id;
+                best_idx = i;
+            }
+        }
+        if (best_id != UINT64_MAX)
+        {
+            wined3d_device_vk_allocator_unlock(device_vk);
+            if (best_id == context_vk->current_command_buffer.id)
+                wined3d_context_vk_submit_command_buffer(context_vk, 0, NULL, NULL, 0, NULL);
+            wined3d_context_vk_wait_command_buffer(context_vk, best_id);
+            wined3d_device_vk_allocator_lock(device_vk);
+
+            chunk = &context_vk->upload_ring.chunks[best_idx];
+            if (!InterlockedCompareExchange(&chunk->live_bos, 0, 0)
+                    && chunk->command_buffer_id <= context_vk->completed_command_buffer_id)
+            {
+                chunk->offset = 0;
+                chunk->command_buffer_id = 0;
+                context_vk->upload_ring.current_chunk = best_idx;
+                aligned_offset = 0;
+                goto found;
+            }
+        }
+    }
+
+    wined3d_device_vk_allocator_unlock(device_vk);
+    return false;
+
+found:
+    chunk->offset = aligned_offset + size;
+    InterlockedIncrement(&chunk->live_bos);
+    wined3d_device_vk_allocator_unlock(device_vk);
+
+    bo->b.refcount = 1;
+    bo->b.client_map_count = 0;
+    bo->b.map_ptr = chunk->map_ptr;
+    bo->b.buffer_offset = aligned_offset;
+    bo->b.memory_offset = aligned_offset;
+    bo->b.coherent = true;
+    list_init(&bo->b.users);
+    bo->vk_buffer = chunk->vk_buffer;
+    bo->memory = NULL;
+    bo->slab = NULL;
+    bo->ring_chunk = chunk;
+    bo->vk_memory = chunk->vk_memory;
+    bo->size = size;
+    bo->usage = chunk->usage;
+    bo->memory_type = chunk->memory_type;
+    bo->command_buffer_id = 0;
+    bo->host_synced = false;
+    return true;
+}
+
 void wined3d_context_vk_image_barrier(struct wined3d_context_vk *context_vk,
         VkCommandBuffer vk_command_buffer, VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
         VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout old_layout,
@@ -2299,6 +2539,8 @@ static int wined3d_graphics_pipeline_vk_compare(const void *key, const struct wi
     for (i = 0; i < a->pipeline_desc.stageCount; ++i)
     {
         if ((ret = wined3d_uint64_compare(a->stages[i].module, b->stages[i].module)))
+            return ret;
+        if ((ret = wined3d_uint64_compare(a->stage_hashes[i], b->stage_hashes[i])))
             return ret;
     }
 
@@ -2728,9 +2970,22 @@ static bool wined3d_context_vk_update_graphics_pipeline_key(struct wined3d_conte
         stage_count = 0;
         for (i = 0; i < ARRAY_SIZE(context_vk->graphics.vk_modules); ++i)
         {
+            const struct wined3d_shader *s;
+            uint64_t h = 14695981039346656037ull;
+
             if (!(module = context_vk->graphics.vk_modules[i]))
                 continue;
 
+            if ((s = state->shader[i]) && s->byte_code)
+            {
+                const uint8_t *bytes = s->byte_code;
+                unsigned int j;
+
+                for (j = 0; j < s->byte_code_size; ++j)
+                    h = (h ^ bytes[j]) * 1099511628211ull;
+            }
+
+            key->stage_hashes[stage_count] = h;
             stage = &key->stages[stage_count++];
             stage->stage = vk_shader_stage_from_wined3d(i);
             stage->module = module;
@@ -4421,6 +4676,20 @@ HRESULT wined3d_context_vk_init(struct wined3d_context_vk *context_vk, struct wi
     }
 
     wined3d_context_vk_init_graphics_pipeline_key(context_vk);
+    {
+        const VkPhysicalDeviceLimits *limits = &adapter_vk->device_limits;
+        VkDeviceSize align = 256;
+
+        if (limits->minUniformBufferOffsetAlignment > align)
+            align = limits->minUniformBufferOffsetAlignment;
+        if (limits->minTexelBufferOffsetAlignment > align)
+            align = limits->minTexelBufferOffsetAlignment;
+        if (limits->minStorageBufferOffsetAlignment > align)
+            align = limits->minStorageBufferOffsetAlignment;
+        if (limits->nonCoherentAtomSize > align)
+            align = limits->nonCoherentAtomSize;
+        context_vk->upload_ring.alignment = align;
+    }
 
     list_init(&context_vk->render_pass_queries);
     list_init(&context_vk->active_queries);

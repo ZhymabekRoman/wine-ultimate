@@ -799,6 +799,9 @@ static void wined3d_bo_vk_unmap(struct wined3d_bo_vk *bo, struct wined3d_context
     const struct wined3d_vk_info *vk_info;
     struct wined3d_bo_slab_vk *slab;
 
+    if (bo->ring_chunk)
+        return;
+
     /* This may race with the client thread, but it's not a hard limit anyway. */
     if (device_vk->d.adapter->mapped_size <= MAX_PERSISTENT_MAPPED_BYTES)
     {
@@ -962,7 +965,15 @@ static void *adapter_vk_map_bo_address(struct wined3d_context *context,
 
     if ((map_flags & WINED3D_MAP_DISCARD) && bo->command_buffer_id > context_vk->completed_command_buffer_id)
     {
-        if (wined3d_context_vk_create_bo(context_vk, bo->size, bo->usage, bo->memory_type, &tmp))
+        bool ok = false;
+
+        if (bo->ring_chunk || ((bo->memory_type & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+                && !(bo->usage & ~WINED3D_UPLOAD_RING_USAGE_VK)))
+            ok = wined3d_context_vk_alloc_upload_bo(context_vk, bo->size, bo->usage, true, &tmp);
+        if (!ok)
+            ok = wined3d_context_vk_create_bo(context_vk, bo->size, bo->usage, bo->memory_type, &tmp);
+
+        if (ok)
         {
             bool host_synced = bo->host_synced;
 
@@ -1181,6 +1192,75 @@ void adapter_vk_copy_bo_address(struct wined3d_context *context,
     if (dst_bo && (!(dst_bo->memory_type & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) || (!(map_flags & WINED3D_MAP_DISCARD)
             && dst_bo->command_buffer_id > context_vk->completed_command_buffer_id)))
     {
+        if (range_count == 1 && !src_bo && !dst->addr && !ranges[0].offset
+                && ranges[0].size == dst_bo->size && (map_flags & WINED3D_MAP_DISCARD)
+                && dst_bo->b.refcount == 1
+                && wined3d_context_vk_alloc_upload_bo(context_vk, dst_bo->size,
+                        dst_bo->usage, true, &staging_bo))
+        {
+            struct wined3d_bo_user *bo_user;
+            bool host_synced = dst_bo->host_synced;
+
+            memcpy((uint8_t *)staging_bo.b.map_ptr + staging_bo.b.memory_offset,
+                    src->addr, ranges[0].size);
+
+            LIST_FOR_EACH_ENTRY(bo_user, &dst_bo->b.users, struct wined3d_bo_user, entry)
+                bo_user->valid = false;
+            list_init(&dst_bo->b.users);
+
+            wined3d_context_vk_destroy_bo(context_vk, dst_bo);
+            *dst_bo = staging_bo;
+            dst_bo->host_synced = host_synced;
+            list_init(&dst_bo->b.users);
+            return;
+        }
+
+        if (range_count == 1 && !src_bo && ranges[0].size <= WINED3D_UPLOAD_RING_MAX_ALLOC
+                && wined3d_context_vk_alloc_upload_bo(context_vk, ranges[0].size,
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, &staging_bo))
+        {
+            struct wined3d_bo_address dst_adj = *dst;
+            struct wined3d_range r = {0, ranges[0].size};
+
+            memcpy((uint8_t *)staging_bo.b.map_ptr + staging_bo.b.memory_offset,
+                    (const uint8_t *)src->addr + ranges[0].offset, ranges[0].size);
+
+            dst_adj.addr += ranges[0].offset;
+            staging.buffer_object = &staging_bo.b;
+            staging.addr = NULL;
+            adapter_vk_copy_bo_address(context, &dst_adj, &staging, 1, &r, WINED3D_MAP_WRITE);
+
+            wined3d_context_vk_destroy_bo(context_vk, &staging_bo);
+            return;
+        }
+
+        if (size <= WINED3D_UPLOAD_RING_MAX_ALLOC
+                && wined3d_context_vk_alloc_upload_bo(context_vk, size,
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, &staging_bo))
+        {
+            uint8_t *ring_ptr = (uint8_t *)staging_bo.b.map_ptr + staging_bo.b.memory_offset;
+
+            if (!src_bo)
+            {
+                for (i = 0; i < range_count; ++i)
+                    memcpy(ring_ptr + ranges[i].offset, (const uint8_t *)src->addr + ranges[i].offset, ranges[i].size);
+            }
+            else
+            {
+                src_ptr = adapter_vk_map_bo_address(context, src, size, WINED3D_MAP_READ);
+                for (i = 0; i < range_count; ++i)
+                    memcpy(ring_ptr + ranges[i].offset, src_ptr + ranges[i].offset, ranges[i].size);
+                adapter_vk_unmap_bo_address(context, src, 0, NULL);
+            }
+
+            staging.buffer_object = &staging_bo.b;
+            staging.addr = NULL;
+            adapter_vk_copy_bo_address(context, dst, &staging, range_count, ranges, WINED3D_MAP_WRITE);
+
+            wined3d_context_vk_destroy_bo(context_vk, &staging_bo);
+            return;
+        }
+
         if (!(wined3d_context_vk_create_bo(context_vk, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &staging_bo)))
         {
@@ -1250,6 +1330,17 @@ static bool adapter_vk_alloc_bo(struct wined3d_device *device, struct wined3d_re
 
     if (!(bo_vk = malloc(sizeof(*bo_vk))))
         return false;
+
+    if ((resource->type != WINED3D_RTYPE_BUFFER
+                || (!(resource->access & WINED3D_RESOURCE_ACCESS_MAP_R)
+                    && !(resource->bind_flags & (WINED3D_BIND_STREAM_OUTPUT | WINED3D_BIND_UNORDERED_ACCESS))))
+            && size <= WINED3D_UPLOAD_RING_MAX_ALLOC
+            && wined3d_context_vk_alloc_upload_bo(context_vk, size, buffer_usage, true, bo_vk))
+    {
+        addr->buffer_object = &bo_vk->b;
+        addr->addr = NULL;
+        return true;
+    }
 
     if (!(wined3d_context_vk_create_bo(context_vk, size, buffer_usage, memory_type, bo_vk)))
     {
@@ -1752,7 +1843,7 @@ static void adapter_vk_flush_context(struct wined3d_context *context)
 {
     struct wined3d_context_vk *context_vk = wined3d_context_vk(context);
 
-    ERR("WINED3D_VK: adapter_vk_flush_context context %p\n", context);
+    TRACE("context %p.\n", context);
 
     wined3d_context_vk_submit_command_buffer(context_vk, 0, NULL, NULL, 0, NULL);
 }
@@ -1765,15 +1856,6 @@ static void adapter_vk_draw_primitive(struct wined3d_device *device,
     struct wined3d_context_vk *context_vk;
     VkCommandBuffer vk_command_buffer;
     uint32_t instance_count;
-    static DWORD last_log;
-    DWORD now = GetTickCount();
-
-    if (now - last_log > 1000)
-    {
-        last_log = now;
-        ERR("WINED3D_VK: adapter_vk_draw_primitive device %p, rtv %p\n",
-            device, state->fb.render_targets[0]);
-    }
 
     context_vk = wined3d_context_vk(context_acquire(device, NULL, 0));
     vk_info = context_vk->vk_info;
@@ -2402,6 +2484,10 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
     d3d_info->persistent_map = true;
     d3d_info->gpu_push_constants = true;
     d3d_info->ffp_hlsl = true;
+    {
+        const char *vk_csmt = getenv("WINED3D_VK_CSMT");
+        d3d_info->inline_cs = !(vk_csmt && atoi(vk_csmt));
+    }
 
     /* Like GL, Vulkan doesn't explicitly specify a filling convention and only mandates that a
      * shared edge of two adjacent triangles generate a fragment for exactly one of the triangles.
