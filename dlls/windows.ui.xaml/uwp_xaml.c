@@ -529,6 +529,8 @@ static const GUID IID_IUIE_Extra[] =
     { 0x4459a451, 0x69e8, 0x440c, { 0x98, 0x96, 0x4b, 0xb4, 0xf5, 0xf6, 0x42, 0xd1 } },
     { 0x688ea9b9, 0x1e4e, 0x4596, { 0x86, 0xe3, 0x42, 0x8b, 0x27, 0x33, 0x4f, 0xaf } },
     { 0xd4d61391, 0x39ac, 0x4950, { 0x91, 0x66, 0x36, 0x06, 0xc2, 0x64, 0x41, 0x8b } },
+    { 0x9af0803b, 0xd04c, 0x467a, { 0xbb, 0xd5, 0x9b, 0x81, 0xf0, 0x2d, 0x9a, 0x56 } }, /* IIconElement */
+    { 0xac935626, 0x190a, 0x4de2, { 0x8d, 0x71, 0x7c, 0xc4, 0x74, 0x7d, 0xa5, 0x80 } }, /* IMenuFlyoutSubItem2 */
 };
 static const GUID IID_ITabView_WinUI =
     { 0x6aa787ab, 0x5a30, 0x5ea2, { 0xbe, 0x5b, 0xae, 0xd8, 0x68, 0x38, 0x17, 0x56 } };
@@ -2563,6 +2565,11 @@ static void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, 
 static void uwp_close_flyout_popup( BOOL fire_closed );
 static BOOL uwp_popup_is_open_for( struct uwp_element *flyout );
 static BOOL uwp_popup_handle_escape( void );
+static HWND g_popup_hwnd = NULL;
+static HWND g_sub_popup_hwnd = NULL;
+static struct uwp_element *g_popup_owner_el = NULL;
+static struct uwp_element *g_last_closed_flyout = NULL;
+static DWORD g_last_closed_tick = 0;
 
 struct uwp_accel_entry
 {
@@ -4050,7 +4057,10 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IRadioButton_UWP ))
         *out = &impl->IToggleButton_iface;
     else if (IsEqualGUID( iid, &IID_IToggleMenuFlyoutItem_UWP ))
-        *out = &impl->IToggleMenuFlyoutItem_iface;
+    {
+        if (wcsstr( impl->class_name, L"ToggleMenuFlyoutItem" ))
+            *out = &impl->IToggleMenuFlyoutItem_iface;
+    }
     else if (IsEqualGUID( iid, &IID_IRadioButtons_WinUI ))
         *out = &impl->IStyle_iface;
     else if (IsEqualGUID( iid, &IID_IPanel_UWP ) ||
@@ -4059,7 +4069,10 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IMenuBar_WinUI ))
         *out = &impl->IPanel_iface;
     else if (IsEqualGUID( iid, &IID_IMenuFlyoutSubItem_UWP ))
-        *out = &impl->IMenuFlyoutSubItem_iface;
+    {
+        if (wcsstr( impl->class_name, L"MenuFlyoutSubItem" ))
+            *out = &impl->IMenuFlyoutSubItem_iface;
+    }
     else if (IsEqualGUID( iid, &IID_IUIElement4_Real_UWP ) ||
              IsEqualGUID( iid, &IID_IUIElement4_UWP ))
         *out = &impl->IUIElement4_iface;
@@ -4073,9 +4086,15 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_ICommand_UWP2 ))
         *out = &impl->ICommand_iface;
     else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem_UWP ))
-        *out = &impl->IMenuFlyoutItem_iface;
+    {
+        if (wcsstr( impl->class_name, L"MenuFlyoutItem" ))
+            *out = &impl->IMenuFlyoutItem_iface;
+    }
     else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem3_UWP ))
-        *out = &impl->IMenuFlyoutItem3_iface;
+    {
+        if (wcsstr( impl->class_name, L"MenuFlyoutItem" ))
+            *out = &impl->IMenuFlyoutItem3_iface;
+    }
     else if (IsEqualGUID( iid, &IID_IMenuFlyout2_Real_UWP ))
         *out = &impl->IMenuFlyout2_iface;
     else if (IsEqualGUID( iid, &IID_ITeachingTip_WinUI ))
@@ -7312,10 +7331,29 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
         EndPaint( hwnd, &ps );
         return 0;
     }
-    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) && impl && impl->content)
+    if (msg == WM_MOUSELEAVE)
+    {
+        if (g_hovered_elem)
+        {
+            g_hovered_elem->is_hovered = FALSE;
+            g_hovered_elem = NULL;
+            InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return 0;
+    }
+    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_MOUSEMOVE) && impl && impl->content)
     {
         RECT rc;
         GetClientRect( hwnd, &rc );
+        if (msg == WM_MOUSEMOVE)
+        {
+            TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent( &tme );
+        }
+        if (msg == WM_LBUTTONDOWN)
+            TRACE( "uwp_island_wndproc: LBUTTONDOWN hwnd=%p (%d,%d) size=%dx%d\n",
+                   hwnd, (short)LOWORD(lp), (short)HIWORD(lp),
+                   (int)(rc.right - rc.left), (int)(rc.bottom - rc.top) );
         uwp_handle_mouse_input( hwnd, msg, (short)LOWORD(lp), (short)HIWORD(lp),
                                 rc.right - rc.left, rc.bottom - rc.top, impl->content );
         return 0;
@@ -8819,64 +8857,13 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
 
 static const WCHAR *uwp_btype_to_class_name( WORD tid )
 {
-    switch (tid)
-    {
-    case 0x802a: return L"Windows.UI.Color";
-    case 0x802c: return L"Windows.UI.Xaml.Controls.ColumnDefinition";
-    case 0x8034: return L"Windows.Foundation.Double";
-    case 0x803b: return L"Windows.UI.Xaml.Media.FontFamily";
-    case 0x803c: return L"Windows.UI.Text.FontWeight";
-    case 0x806a: return L"Windows.UI.Xaml.Controls.RowDefinition";
-    case 0x8072: return L"Windows.UI.Xaml.Style";
-    case 0x807c: return L"Windows.UI.Xaml.Thickness";
-    case 0x8089: return L"Windows.UI.Xaml.VisualState";
-    case 0x808a: return L"Windows.UI.Xaml.VisualStateGroup";
-    case 0x80bf: return L"Windows.UI.Xaml.DataTemplate";
-    case 0x80c2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
-    case 0x80c5: return L"Windows.UI.Xaml.Media.Animation.DiscreteObjectKeyFrame";
-    case 0x80ca: return L"Windows.UI.Xaml.Media.Animation.DoubleAnimation";
-    case 0x80d2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
-    case 0x80d5: return L"Windows.UI.Xaml.Controls.Flyout";
-    case 0x80ee: return L"Windows.UI.Xaml.Controls.MenuFlyout";
-    case 0x80f0: return L"Windows.UI.Xaml.Media.Animation.ObjectAnimationUsingKeyFrames";
-    case 0x8106: return L"Windows.UI.Xaml.Setter";
-    case 0x8107: return L"Windows.UI.Xaml.Setter";
-    case 0x8109: return L"Windows.UI.Xaml.Media.SolidColorBrush";
-    case 0x811e: return L"Windows.UI.Xaml.Controls.Border";
-    case 0x8146: return L"Windows.UI.Xaml.Controls.Image";
-    case 0x816b: return L"Windows.UI.Xaml.Controls.Primitives.Popup";
-    case 0x8173: return L"Windows.UI.Xaml.ResourceDictionary";
-    case 0x8176: return L"Windows.UI.Xaml.Controls.RichTextBlock";
-    case 0x817a: return L"Windows.UI.Xaml.Media.RotateTransform";
-    case 0x817c: return L"Windows.UI.Xaml.Documents.Run";
-    case 0x8189: return L"Windows.UI.Xaml.Media.Animation.Storyboard";
-    case 0x818c: return L"Windows.UI.Xaml.Controls.TextBlock";
-    case 0x819c: return L"Windows.UI.Xaml.Controls.FontIcon";
-    case 0x81b0: return L"Windows.UI.Xaml.Controls.Canvas";
-    case 0x81b8: return L"Windows.UI.Xaml.Controls.FontIcon";
-    case 0x81ba: return L"Windows.UI.Xaml.Controls.Grid";
-    case 0x81bf: return L"Windows.UI.Xaml.Documents.Hyperlink";
-    case 0x81e1: return L"Windows.UI.Xaml.Controls.StackPanel";
-    case 0x81e3: return L"Windows.UI.Xaml.Controls.TextBox";
-    case 0x81eb: return L"Windows.UI.Xaml.Controls.UserControl";
-    case 0x81f3: return L"Windows.UI.Xaml.Controls.AutoSuggestBox";
-    case 0x81fd: return L"Windows.UI.Xaml.Controls.Frame";
-    case 0x8209: return L"Windows.UI.Xaml.Controls.MenuFlyoutItem";
-    case 0x820d: return L"Windows.UI.Xaml.Controls.Page";
-    case 0x821c: return L"Windows.UI.Xaml.Controls.Button";
-    case 0x8222: return L"Windows.UI.Xaml.Controls.HyperlinkButton";
-    case 0x8228: return L"Windows.UI.Xaml.Controls.ScrollViewer";
-    case 0x822a: return L"Windows.UI.Xaml.Controls.ToggleMenuFlyoutItem";
-    case 0x822d: return L"Windows.UI.Xaml.Controls.AppBarButton";
-    case 0x8232: return L"Windows.UI.Xaml.Controls.RadioButton";
-    case 0x8234: return L"Windows.UI.Xaml.Controls.Primitives.ToggleButton";
-    case 0x8242: return L"Windows.UI.Xaml.GridLength";
-    case 0x82ea: return L"Windows.UI.Xaml.DeferredElement";
-    case 0x82f5: return L"Windows.UI.Xaml.AdaptiveTrigger";
-    case 0x8381: return L"Windows.UI.Xaml.Input.KeyboardAccelerator";
-    case 0x83c9: return L"Windows.UI.Xaml.Input.XamlUICommand";
-    default:     return L"Windows.UI.Xaml.Controls.ContentControl";
-    }
+    WORD idx = tid & 0x7fff;
+
+    if ((tid & 0x8000) && idx < ARRAY_SIZE( xbf_known_types ) && xbf_known_types[idx])
+        return xbf_known_types[idx];
+
+    FIXME( "Unknown XBF builtin type %#04x\n", tid );
+    return L"Windows.UI.Xaml.Controls.ContentControl";
 }
 
 /* Set a custom XAML property (e.g. CalculatorButton.ButtonId = "Zero") via IXamlMetadataProvider */
@@ -9405,17 +9392,17 @@ static void uwp_el_set_border_argb( struct uwp_element *el, UINT32 argb )
 
 static BOOL uwp_is_bg_pid( WORD pid )
 {
-    return pid == 0x821d || pid == 0x8287 || pid == 0x81f7 || pid == 0x82dd;
+    return pid == XBF_PROP_CONTROL_BACKGROUND || pid == XBF_PROP_PANEL_BACKGROUND || pid == XBF_PROP_BORDER_BACKGROUND || pid == XBF_PROP_SHAPE_FILL;
 }
 
 static BOOL uwp_is_fg_pid( WORD pid )
 {
-    return pid == 0x8228 || pid == 0x8314 || pid == 0x8248 || pid == 0x80ff;
+    return pid == XBF_PROP_CONTROL_FOREGROUND || pid == XBF_PROP_TEXTBLOCK_FOREGROUND || pid == XBF_PROP_ICONELEMENT_FOREGROUND || pid == XBF_PROP_TEXTELEMENT_FOREGROUND;
 }
 
 static BOOL uwp_is_border_pid( WORD pid )
 {
-    return pid == 0x821e || pid == 0x81f8 || pid == 0x8695 || pid == 0x82e0;
+    return pid == XBF_PROP_CONTROL_BORDER_BRUSH || pid == XBF_PROP_BORDER_BRUSH || pid == XBF_PROP_GRID_BORDER_BRUSH || pid == XBF_PROP_SHAPE_STROKE;
 }
 
 static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
@@ -9428,7 +9415,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
     {
         if (sv->kind == UWP_RD_BRUSH)
         {
-            if (pid == 0x81dc || pid == 0x87a8) /* SolidColorBrush.Color / RevealBrush.Color */
+            if (pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR || pid == XBF_PROP_FALLBACK_COLOR) /* SolidColorBrush.Color / RevealBrush.Color */
             {
                 if (vt == 0x08)
                 {
@@ -9448,7 +9435,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                     }
                 }
             }
-            else if (pid == 0x804e) /* Brush.Opacity */
+            else if (pid == XBF_PROP_BRUSH_OPACITY) /* Brush.Opacity */
             {
                 if (vt == 0x03 || vt == 0x04)
                     sv->opacity = num;
@@ -9461,11 +9448,11 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                 }
             }
         }
-        else if (sv->kind == UWP_RD_STYLE && pid == 0x80f4 && sval && sval[0]) /* Style.BasedOn */
+        else if (sv->kind == UWP_RD_STYLE && pid == XBF_PROP_BASED_ON && sval && sval[0]) /* Style.BasedOn */
         {
             uwp_extract_resource_key( sval, sv->based_on, ARRAY_SIZE(sv->based_on) );
         }
-        else if (sv->kind == UWP_RD_COLOR && pid == 0x81dc && vt == 0x08)
+        else if (sv->kind == UWP_RD_COLOR && pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR && vt == 0x08)
         {
             sv->argb = (UINT32)num;
             sv->has_argb = TRUE;
@@ -9476,7 +9463,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
 
     if (el->kind == UWP_KIND_BRUSH)
     {
-        if (pid == 0x81dc || pid == 0x87a8)
+        if (pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR || pid == XBF_PROP_FALLBACK_COLOR)
         {
             if (vt == 0x08)
             {
@@ -9497,14 +9484,14 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
             }
             return;
         }
-        if (pid == 0x804e)
+        if (pid == XBF_PROP_BRUSH_OPACITY)
         {
             if (vt == 0x03 || vt == 0x04) el->brush_opacity = num;
             return;
         }
     }
 
-    if (el->kind == UWP_KIND_RESOURCE_DICT && pid == 0x82b0 && sval && sval[0]) /* Source */
+    if (el->kind == UWP_KIND_RESOURCE_DICT && pid == XBF_PROP_RESOURCE_DICTIONARY_SOURCE && sval && sval[0]) /* Source */
     {
         uwp_load_res_xbf_into_bucket( ctx ? ctx->base_xbf_dir : NULL, sval, uwp_rd_bucket_for_el( el, TRUE ) );
         return;
@@ -9542,16 +9529,16 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
 
         switch (pid)
         {
-        case 0x8195: /* FrameworkElement.Style */
+        case XBF_PROP_STYLE: /* FrameworkElement.Style */
             if (sval && sval[0])
                 uwp_apply_style_by_name( ctx, el, sval );
             break;
-        case 0x835c: el->grid_row = (int)num; break;
-        case 0x8359: el->grid_col = (int)num; break;
-        case 0x835e: el->grid_row_span = max( 1, (int)num ); break;
-        case 0x835b: el->grid_col_span = max( 1, (int)num ); break;
-        case 0x80e3: /* RowDefinition.Height */
-        case 0x805f: /* ColumnDefinition.Width */
+        case XBF_PROP_GRID_ROW: el->grid_row = (int)num; break;
+        case XBF_PROP_GRID_COLUMN: el->grid_col = (int)num; break;
+        case XBF_PROP_GRID_ROW_SPAN: el->grid_row_span = max( 1, (int)num ); break;
+        case XBF_PROP_GRID_COLUMN_SPAN: el->grid_col_span = max( 1, (int)num ); break;
+        case XBF_PROP_ROWDEF_HEIGHT: /* RowDefinition.Height */
+        case XBF_PROP_COLUMNDEF_WIDTH: /* ColumnDefinition.Width */
             if (vt == 0x07) { el->grid_len_type = (int)vec4[0]; el->grid_len_val = vec4[1]; }
             else if (vt == 0x03 || vt == 0x04) { el->grid_len_type = 1; el->grid_len_val = num; }
             else if (is_res_ref && sval && sval[0])
@@ -9565,54 +9552,54 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                 }
             }
             break;
-        case 0x805d: /* ColumnDefinition.MaxWidth */
-        case 0x818e: /* FrameworkElement.MaxWidth */
+        case XBF_PROP_COLUMNDEF_MAXWIDTH: /* ColumnDefinition.MaxWidth */
+        case XBF_PROP_FRAMEWORKELEMENT_MAXHEIGHT: /* FrameworkElement.MaxWidth */
             if (vt == 0x03 || vt == 0x04) el->max_width = num;
             break;
-        case 0x805e: /* ColumnDefinition.MinWidth */
+        case XBF_PROP_COLUMNDEF_MINWIDTH: /* ColumnDefinition.MinWidth */
             if (vt == 0x03 || vt == 0x04) el->min_width = num;
             break;
-        case 0x80e4: /* RowDefinition.MaxHeight */
-        case 0x818f: /* FrameworkElement.MaxHeight */
+        case XBF_PROP_ROWDEF_MAXHEIGHT: /* RowDefinition.MaxHeight */
+        case XBF_PROP_FRAMEWORKELEMENT_MAXWIDTH: /* FrameworkElement.MaxHeight */
             if (vt == 0x03 || vt == 0x04) el->max_height = num;
             break;
-        case 0x80e5: /* RowDefinition.MinHeight */
+        case XBF_PROP_ROWDEF_MINHEIGHT: /* RowDefinition.MinHeight */
             if (vt == 0x03 || vt == 0x04) el->min_height = num;
             break;
-        case 0x818d: /* Margin */
+        case XBF_PROP_MARGIN: /* Margin */
             if (vt == 0x06)
             {
                 el->margin_l = vec4[0]; el->margin_t = vec4[1];
                 el->margin_r = vec4[2]; el->margin_b = vec4[3];
             }
             break;
-        case 0x822d: /* Control.Padding */
-        case 0x828a: /* Border.Padding */
+        case XBF_PROP_CONTROL_PADDING: /* Control.Padding */
+        case XBF_PROP_PANEL_IS_IGNORING_TRANSITIONS: /* Border.Padding */
             if (vt == 0x06)
             {
                 el->padding_l = vec4[0]; el->padding_t = vec4[1];
                 el->padding_r = vec4[2]; el->padding_b = vec4[3];
             }
             break;
-        case 0x821f: /* Control.BorderThickness */
-        case 0x8289: /* Border.BorderThickness */
+        case XBF_PROP_CONTROL_BORDER_THICKNESS: /* Control.BorderThickness */
+        case XBF_PROP_PANEL_CHILDREN_TRANSITIONS: /* Border.BorderThickness */
             if (vt == 0x06)
             {
                 el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
                 el->border_thick_r = vec4[2]; el->border_thick_b = vec4[3];
             }
             break;
-        case 0x8340: /* ContentControl.Content */
-        case 0x8769: /* TextBlock.Text */
-        case 0x873a: /* FontIcon.Glyph */
+        case XBF_PROP_CONTENT: /* ContentControl.Content */
+        case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV: /* TextBlock.Text */
+        case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE: /* FontIcon.Glyph */
             if (sval && sval[0])
                 lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
             break;
-        case 0x824c: /* Image.Source */
+        case XBF_PROP_IMAGE_SOURCE: /* Image.Source */
             if (sval && sval[0])
                 lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
             break;
-        case 0x8008: /* x:Uid or Name */
+        case XBF_PROP_AUTOMATION_ID: /* x:Uid or Name */
             if (sval && sval[0])
             {
                 lstrcpynW( el->uid, sval, ARRAY_SIZE(el->uid) );
@@ -9648,9 +9635,9 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                 }
             }
             break;
-        case 0x829e: /* FontSize */
-        case 0x8224: /* Control.FontSize */
-        case 0x8310: /* TextBlock.FontSize */
+        case XBF_PROP_POPUP_HORIZONTAL_OFFSET: /* FontSize */
+        case XBF_PROP_CONTROL_FONTSIZE: /* Control.FontSize */
+        case XBF_PROP_TEXTBLOCK_FONTSIZE: /* TextBlock.FontSize */
             if (vt == 0x03 || vt == 0x04)
             {
                 if (num > 0) el->font_size = num;
@@ -9663,7 +9650,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                     el->font_size = de->dval;
             }
             break;
-        case 0x8199: /* Width */
+        case XBF_PROP_WIDTH: /* Width */
             if (vt == 0x03 || vt == 0x04) el->width = num;
             else if (is_res_ref && sval && sval[0])
             {
@@ -9673,8 +9660,8 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                     el->width = de->dval;
             }
             break;
-        case 0x8188: /* Height */
-        case 0x8189: /* FrameworkElement.Height */
+        case XBF_PROP_FLOW_DIRECTION: /* Height */
+        case XBF_PROP_FRAMEWORKELEMENT_HEIGHT: /* FrameworkElement.Height */
             if (vt == 0x03 || vt == 0x04) el->height = num;
             else if (is_res_ref && sval && sval[0])
             {
@@ -9684,7 +9671,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                     el->height = de->dval;
             }
             break;
-        case 0x8191: /* MinWidth */
+        case XBF_PROP_MIN_WIDTH: /* MinWidth */
             if (vt == 0x03 || vt == 0x04) el->min_width = num;
             else if (is_res_ref && sval && sval[0])
             {
@@ -9694,7 +9681,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                     el->min_width = de->dval;
             }
             break;
-        case 0x8190: /* MinHeight */
+        case XBF_PROP_MIN_HEIGHT: /* MinHeight */
             if (vt == 0x03 || vt == 0x04) el->min_height = num;
             else if (is_res_ref && sval && sval[0])
             {
@@ -9704,28 +9691,28 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
                     el->min_height = de->dval;
             }
             break;
-        case 0x818a: /* HorizontalAlignment */
+        case XBF_PROP_HORIZONTAL_ALIGNMENT: /* HorizontalAlignment */
             el->h_align = (int)num;
             break;
-        case 0x8198: /* VerticalAlignment */
+        case XBF_PROP_VERTICAL_ALIGNMENT: /* VerticalAlignment */
             el->v_align = (int)num;
             break;
-        case 0x8438: /* StackPanel.Orientation */
+        case XBF_PROP_ORIENTATION: /* StackPanel.Orientation */
             el->orientation = (int)num;
             break;
-        case 0x8138: /* UIElement.Visibility (XBF v2) */
-        case 0x8167: /* UIElement.Visibility */
+        case XBF_PROP_UIELEMENT_VISIBILITY_V2: /* UIElement.Visibility (XBF v2) */
+        case XBF_PROP_UIELEMENT_VISIBILITY: /* UIElement.Visibility */
             el->visibility = (int)num;
             break;
-        case 0x87d4: /* KeyboardAccelerator.Key */
+        case XBF_PROP_ACCELERATOR_KEY: /* KeyboardAccelerator.Key */
             el->accel_key = (UINT)num;
             uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
             break;
-        case 0x87d5: /* KeyboardAccelerator.Modifiers */
+        case XBF_PROP_ACCELERATOR_MODIFIERS: /* KeyboardAccelerator.Modifiers */
             el->accel_mods = (UINT)num;
             uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
             break;
-        case 0x87d6: /* KeyboardAccelerator.IsEnabled */
+        case XBF_PROP_ACCELERATOR_SCOPE_OWNER: /* KeyboardAccelerator.IsEnabled */
             el->accel_enabled = (num != 0.0);
             uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
             break;
@@ -9816,7 +9803,7 @@ static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD 
         {
             WORD tid = *(const WORD *)(ctx->nodes + p);
             p += 2;
-            if (tid == 0x8109) /* inline SolidColorBrush */
+            if (tid == XBF_TYPE_BRUSH_C) /* inline SolidColorBrush */
             {
                 UINT32 argb = 0;
                 BOOL has_c = FALSE;
@@ -9833,7 +9820,7 @@ static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD 
                         WCHAR sbuf[128] = {0};
                         p += 2;
                         if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
-                        if (spid == 0x81dc)
+                        if (spid == XBF_PROP_SOLIDCOLORBRUSH_COLOR)
                         {
                             if (vt == 0x08) { argb = (UINT32)num; has_c = TRUE; }
                             else if (sbuf[0]) lstrcpynW( cref, sbuf, ARRAY_SIZE(cref) );
@@ -10126,41 +10113,41 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                    (tid < ctx->type_cnt) ? debugstr_w(ctx->types[tid].full_name) : "(btype)",
                    (unsigned long)cur_rel_off, (unsigned long)end_p, sub_idx );
 
-            if (tid == 0x8173) is_rd_type = TRUE;
+            if (tid == XBF_TYPE_RESOURCE_DICTIONARY) is_rd_type = TRUE;
             else if (!(tid & 0x8000) && tid < ctx->type_cnt &&
                      (wcsstr( ctx->types[tid].short_name, L"ResourceDictionary" ) ||
                       !wcscmp( ctx->types[tid].short_name, L"XamlControlsResources" )))
                 is_rd_type = TRUE;
 
-            if (tid == 0x802a)
+            if (tid == XBF_TYPE_COLOR)
             {
                 sv.kind = UWP_RD_COLOR;
                 if (vt_init == 0x08) { sv.argb = (UINT32)num_init; sv.has_argb = TRUE; }
                 else if (sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb )) sv.has_argb = TRUE;
             }
-            else if (tid == 0x8034)
+            else if (tid == XBF_TYPE_DOUBLE)
             {
                 sv.kind = UWP_RD_DOUBLE;
                 sv.dval = num_init;
             }
-            else if (tid == 0x8242)
+            else if (tid == XBF_TYPE_GRID_LENGTH)
             {
                 sv.kind = UWP_RD_DOUBLE;
                 sv.dval = (vt_init == 0x07) ? vec4_init[1] : num_init;
             }
-            else if (tid == 0x807c)
+            else if (tid == XBF_TYPE_THICKNESS)
             {
                 sv.kind = UWP_RD_THICKNESS;
                 memcpy( sv.vec4, vec4_init, sizeof(sv.vec4) );
             }
-            else if (tid == 0x8109 || tid == 0x80c2 || tid == 0x80d2 ||
+            else if (tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_BRUSH_A || tid == XBF_TYPE_BRUSH_B ||
                      (!(tid & 0x8000) && tid < ctx->type_cnt && wcsstr( ctx->types[tid].short_name, L"Brush" )))
             {
                 sv.kind = UWP_RD_BRUSH;
                 if (op == 0x16 && sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb ))
                     sv.has_argb = TRUE;
             }
-            else if (tid == 0x8072)
+            else if (tid == XBF_TYPE_STYLE)
             {
                 sv.kind = UWP_RD_STYLE;
             }
@@ -10182,9 +10169,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             }
             else if ((ctx->rd_only || rd_tbl) && !is_rd_type &&
                      (!ctx->connector ||
-                      tid == 0x8072 || tid == 0x8109 || tid == 0x8106 || tid == 0x8107 ||
-                      tid == 0x80c2 || tid == 0x80d2 || tid == 0x8034 || tid == 0x8071 ||
-                      tid == 0x807c || tid == 0x802c || tid == 0x8173))
+                      tid == XBF_TYPE_STYLE || tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
+                      tid == XBF_TYPE_BRUSH_A || tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_STRING ||
+                      tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))
             {
                 /* Lightweight mode inside ResourceDictionary XBFs: no COM/visual element needed */
                 el = NULL;
@@ -10197,7 +10184,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     cls_name = uwp_btype_to_class_name( tid );
                     uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
                     el = uwp_elem_from_any( inst );
-                    if (el && tid == 0x82ea) el->kind = UWP_KIND_DEFERRED;
+                    if (el && tid == XBF_TYPE_DEFERRED_ELEMENT) el->kind = UWP_KIND_DEFERRED;
                 }
                 else if (tid < ctx->type_cnt)
                 {
@@ -10294,9 +10281,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
 
             if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && ctx->root_el)
             {
-                if (tid == 0x808a)
+                if (tid == XBF_TYPE_VISUAL_STATE_GROUP)
                     uwp_vsm_add_group( ctx->root_el, NULL );
-                else if (tid == 0x8089)
+                else if (tid == XBF_TYPE_VISUAL_STATE)
                 {
                     struct uwp_vsm_group *grp = (ctx->root_el->vsm_group_cnt > 0)
                         ? &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1]
@@ -10383,9 +10370,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && ctx->root_el && ctx->root_el->vsm_group_cnt > 0)
                 {
                     struct uwp_vsm_group *grp = &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1];
-                    if (top_tid == 0x808a)
+                    if (top_tid == XBF_TYPE_VISUAL_STATE_GROUP)
                         lstrcpynW( grp->name, sbuf, ARRAY_SIZE(grp->name) );
-                    else if (top_tid == 0x8089 && grp->state_cnt > 0)
+                    else if (top_tid == XBF_TYPE_VISUAL_STATE && grp->state_cnt > 0)
                         lstrcpynW( grp->states[grp->state_cnt - 1].name, sbuf, ARRAY_SIZE(grp->states[grp->state_cnt - 1].name) );
                 }
             }
@@ -10460,7 +10447,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 {
                     struct uwp_vsm_group *grp = &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1];
                     struct uwp_vsm_state *st = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
-                    if (top_sv->tid == 0x82f5 && st && (pid == 0x8618 || pid == 0x8619))
+                    if (top_sv->tid == XBF_TYPE_ADAPTIVE_TRIGGER && st && (pid == XBF_PROP_MIN_WINDOW_HEIGHT || pid == XBF_PROP_MIN_WINDOW_WIDTH))
                     {
                         double trig_val = num;
                         if ((is_res_ref || vt == 0x05 || vt == 0x09) && sbuf[0])
@@ -10472,16 +10459,16 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                             else
                                 trig_val = wcstod( sbuf, NULL );
                         }
-                        if (pid == 0x8618) st->min_window_height = trig_val;
+                        if (pid == XBF_PROP_MIN_WINDOW_HEIGHT) st->min_window_height = trig_val;
                         else st->min_window_width = trig_val;
                         st->has_trigger = TRUE;
                     }
-                    else if ((top_sv->tid == 0x8106 || top_sv->tid == 0x8107) && st)
+                    else if ((top_sv->tid == XBF_TYPE_SETTER_A || top_sv->tid == XBF_TYPE_SETTER_B) && st)
                     {
-                        if (pid == 0x861a && sbuf[0])
+                        if (pid == XBF_PROP_SETTER_TARGET && sbuf[0])
                             vsm_split_setter_target( sbuf, top_sv->vsm_target, ARRAY_SIZE(top_sv->vsm_target),
                                                      top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
-                        else if (pid == 0x81db)
+                        else if (pid == XBF_PROP_SETTER_VALUE)
                         {
                             lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
                             top_sv->vsm_vt = vt;
@@ -10490,14 +10477,14 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                             top_sv->vsm_has_val = TRUE;
                         }
                     }
-                    else if (top_sv->tid == 0x80f0 && st)
+                    else if (top_sv->tid == XBF_TYPE_OBJECT_ANIMATION_USING_KEY_FRAMES && st)
                     {
-                        if (pid == 0x8306 && sbuf[0])
+                        if (pid == XBF_PROP_STORYBOARD_TARGET_NAME && sbuf[0])
                             lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
-                        else if (pid == 0x8307 && sbuf[0])
+                        else if (pid == XBF_PROP_STORYBOARD_TARGET_PROPERTY && sbuf[0])
                             vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
                     }
-                    else if (top_sv->tid == 0x80c5 && st && pid == 0x80b8)
+                    else if (top_sv->tid == XBF_TYPE_DISCRETE_OBJECT_KEY_FRAME && st && pid == XBF_PROP_KEYFRAME_VALUE)
                     {
                         lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
                         top_sv->vsm_vt = vt;
@@ -10537,15 +10524,15 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 {
                     struct uwp_vsm_group *grp = &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1];
                     struct uwp_vsm_state *st = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
-                    if ((last_popped.tid == 0x8106 || last_popped.tid == 0x8107) && st &&
+                    if ((last_popped.tid == XBF_TYPE_SETTER_A || last_popped.tid == XBF_TYPE_SETTER_B) && st &&
                         last_popped.vsm_target[0] && last_popped.vsm_prop[0] && last_popped.vsm_has_val)
                     {
                         uwp_vsm_state_add_setter( st, last_popped.vsm_target, last_popped.vsm_prop,
                                                   last_popped.vsm_val_str, last_popped.vsm_vt,
                                                   last_popped.vsm_num, last_popped.vsm_is_res_ref );
                     }
-                    else if (last_popped.tid == 0x80c5 && st && last_popped.vsm_has_val &&
-                             obj_sp > 0 && val_stack[obj_sp - 1].tid == 0x80f0 &&
+                    else if (last_popped.tid == XBF_TYPE_DISCRETE_OBJECT_KEY_FRAME && st && last_popped.vsm_has_val &&
+                             obj_sp > 0 && val_stack[obj_sp - 1].tid == XBF_TYPE_OBJECT_ANIMATION_USING_KEY_FRAMES &&
                              val_stack[obj_sp - 1].vsm_target[0] && val_stack[obj_sp - 1].vsm_prop[0])
                     {
                         uwp_vsm_state_add_setter( st, val_stack[obj_sp - 1].vsm_target,
@@ -10593,7 +10580,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             {
                 struct uwp_element *parent_el = (obj_sp > 0) ? obj_stack[obj_sp - 1] : NULL;
                 WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : 0;
-                if (pid == 0x82b1 && last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT)
+                if (pid == XBF_PROP_THEME_DICTIONARIES && last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT)
                 {
                     struct uwp_rd_bucket *parent_rd = (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
                         ? uwp_rd_bucket_for_el( parent_el, TRUE )
@@ -10625,8 +10612,8 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             if (has_last_popped && obj_sp > 0)
             {
                 struct uwp_element *parent_el = obj_stack[obj_sp - 1];
-                WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : 0x8288;
-                if (pid == 0x82af && last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT)
+                WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : XBF_PROP_PANEL_CHILDREN;
+                if (pid == XBF_PROP_MERGED_DICTIONARIES && last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT)
                 {
                     struct uwp_rd_bucket *parent_rd = (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
                         ? uwp_rd_bucket_for_el( parent_el, TRUE )
@@ -10636,7 +10623,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 }
                 else if (parent_el && last_popped.raw)
                 {
-                    if (pid == 0x87d7 || (last_popped.el && (last_popped.el->kind == UWP_KIND_ACCELERATOR ||
+                    if (pid == XBF_PROP_KEYBOARD_ACCELERATORS || (last_popped.el && (last_popped.el->kind == UWP_KIND_ACCELERATOR ||
                                                              wcsstr( last_popped.el->class_name, L"Accelerator" ))))
                     {
                         if (!parent_el->accelerators_coll) uwp_vec_create( parent_el, &parent_el->accelerators_coll );
@@ -10649,17 +10636,17 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                                                 last_popped.el->accel_enabled );
                         }
                     }
-                    else if (pid == 0x835d) /* RowDefinitions */
+                    else if (pid == XBF_PROP_GRID_ROW_DEFINITIONS) /* RowDefinitions */
                     {
                         if (!parent_el->row_defs_coll) uwp_vec_create( parent_el, &parent_el->row_defs_coll );
                         uwp_vec_Append( parent_el->row_defs_coll, last_popped.raw );
                     }
-                    else if (pid == 0x835a) /* ColumnDefinitions */
+                    else if (pid == XBF_PROP_GRID_COLUMN_DEFINITIONS) /* ColumnDefinitions */
                     {
                         if (!parent_el->col_defs_coll) uwp_vec_create( parent_el, &parent_el->col_defs_coll );
                         uwp_vec_Append( parent_el->col_defs_coll, last_popped.raw );
                     }
-                    else if (pid == 0x8288 || pid == 0x8377 || parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL)
+                    else if (pid == XBF_PROP_PANEL_CHILDREN || pid == XBF_PROP_ITEMS || parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL)
                     {
                         if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
                         uwp_vec_Append( parent_el->children_coll, last_popped.raw );
@@ -10685,7 +10672,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 BOOL is_dict = (last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT);
                 struct uwp_rd_bucket *child_rd = last_popped.el ? uwp_rd_bucket_for_el( last_popped.el, FALSE ) : NULL;
 
-                if (is_dict || (child_rd && (pid == 0x8194 || pid == 0x82af || pid == 0x82b1)))
+                if (is_dict || (child_rd && (pid == XBF_PROP_FRAMEWORKELEMENT_RESOURCES || pid == XBF_PROP_MERGED_DICTIONARIES || pid == XBF_PROP_THEME_DICTIONARIES)))
                 {
                     struct uwp_rd_bucket *dest_b = (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
                         ? uwp_rd_bucket_for_el( parent_el, TRUE )
@@ -10694,7 +10681,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                         child_rd = uwp_rd_bucket_for_el( last_popped.el, TRUE );
                     if (dest_b && child_rd && dest_b != child_rd)
                     {
-                        if (pid == 0x82b1) /* ThemeDictionaries */
+                        if (pid == XBF_PROP_THEME_DICTIONARIES) /* ThemeDictionaries */
                             uwp_rd_link_theme( dest_b, (last_popped.el && last_popped.el->name[0]) ? last_popped.el->name : L"Default", child_rd );
                         else
                             uwp_rd_link_merged( dest_b, child_rd );
@@ -10732,7 +10719,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                             else if (uwp_is_border_pid( pid )) uwp_el_set_border_argb( parent_el, argb );
                         }
                     }
-                    else if (last_popped.kind == UWP_RD_STYLE && pid == 0x8195)
+                    else if (last_popped.kind == UWP_RD_STYLE && pid == XBF_PROP_STYLE)
                     {
                         int si;
                         if (last_popped.based_on[0])
@@ -10749,7 +10736,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                             lstrcpynW( parent_el->text, last_popped.el->text, ARRAY_SIZE(parent_el->text) );
                     }
                     else if (last_popped.raw &&
-                             (pid == 0x86f9 ||
+                             (pid == XBF_PROP_CONTEXT_FLYOUT ||
                               (ctx && pid < ctx->prop_cnt && !wcscmp( ctx->props[pid].name, L"ContextFlyout" ))))
                     {
                         if (parent_el->context_flyout) IInspectable_Release( parent_el->context_flyout );
@@ -10763,8 +10750,8 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                               (last_popped.el->kind != UWP_KIND_STYLE &&
                                last_popped.el->kind != UWP_KIND_BRUSH &&
                                last_popped.el->kind != UWP_KIND_COLOR)) &&
-                             (pid == 0x8340 || pid == 0x83e7 || pid == 0x81fa || pid == 0x8134 || pid == 0x829c ||
-                              (!parent_el->content && pid != 0x8133 && pid != 0x8194 && pid != 0x8010 && pid != 0x000c)))
+                             (pid == XBF_PROP_CONTENT || pid == XBF_PROP_USERCONTROL_CONTENT || pid == XBF_PROP_BORDER_CHILD || pid == XBF_PROP_RENDER_TRANSFORM_ORIGIN || pid == XBF_PROP_POPUP_CHILD ||
+                              (!parent_el->content && pid != XBF_PROP_UIELEMENT_RENDER_TRANSFORM && pid != XBF_PROP_FRAMEWORKELEMENT_RESOURCES && pid != XBF_PROP_AUTOMATION_NAME && pid != 0x000c)))
                     {
                         if (parent_el->content) IInspectable_Release( parent_el->content );
                         parent_el->content = last_popped.raw;
@@ -10804,7 +10791,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                         if (vk)
                             uwp_accel_register( NULL, target_el, vk, mods, TRUE );
                     }
-                    if (pid == 0x8340 || pid == 0x8769 || pid == 0x8320 || (!is_vk && !target_el->text[0]))
+                    if (pid == XBF_PROP_CONTENT || pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV || pid == XBF_PROP_TEXTBLOCK_TEXT || (!is_vk && !target_el->text[0]))
                         lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
                 }
             }
@@ -12026,25 +12013,33 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k, vis_cnt = 0;
+        int fixed_h = 0, auto_cnt = 0;
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
             if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
                 ch->kind != UWP_KIND_ACCELERATOR && ch->kind != UWP_KIND_XAML_COMMAND &&
-                (!wcsstr( ch->class_name, L"TeachingTip" ) || ch->is_open) &&
+                !wcsstr( ch->class_name, L"TeachingTip" ) &&
                 wcscmp( ch->name, L"TeachingTipTarget" ) != 0)
+            {
                 vis_cnt++;
+                if (ch->height > 0.0 && !isnan( ch->height ) && (int)ch->height < h)
+                    fixed_h += (int)(ch->height + 0.5);
+                else
+                    auto_cnt++;
+            }
         }
         if (vis_cnt > 0)
         {
-            int idx = 0, cur_y = rc.top;
+            int idx = 0, auto_idx = 0, cur_y = rc.top;
+            int auto_total_h = max( 0, h - fixed_h );
             for (k = 0; k < children->count; k++)
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 RECT crc = rc;
                 if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
                     ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
-                    (wcsstr( ch->class_name, L"TeachingTip" ) && !ch->is_open) ||
+                    wcsstr( ch->class_name, L"TeachingTip" ) ||
                     !wcscmp( ch->name, L"TeachingTipTarget" )) continue;
                 if (el->orientation == 1) /* Horizontal */
                 {
@@ -12059,12 +12054,25 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
                 }
                 else
                 {
-                    crc.top    = (cur_y > rc.top) ? cur_y : (rc.top + (h * idx) / (int)vis_cnt);
-                    crc.bottom = rc.top + (h * (idx + 1)) / (int)vis_cnt;
+                    int slice = (auto_cnt > 0)
+                        ? ((auto_total_h * (auto_idx + 1)) / auto_cnt - (auto_total_h * auto_idx) / auto_cnt)
+                        : 0;
+                    crc.top    = cur_y;
+                    crc.bottom = min( (int)rc.bottom, cur_y + slice );
                     cur_y = crc.bottom;
+                    auto_idx++;
                 }
                 idx++;
                 uwp_arrange_element( ch, crc );
+            }
+        }
+        if (h >= 60)
+        {
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                if (ch && ch->visibility == 0 && wcsstr( ch->class_name, L"TeachingTip" ) && ch->is_open)
+                    uwp_arrange_element( ch, rc );
             }
         }
     }
@@ -12078,6 +12086,9 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
             RECT crc;
             if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Accelerator" )) continue;
+            ch->parent = el;
+            if (!wcsstr( ch->class_name, L"MenuBarItem" ))
+                lstrcpynW( ch->class_name, L"Microsoft.UI.Xaml.Controls.MenuBarItem", ARRAY_SIZE(ch->class_name) );
             SetRect( &crc, rc.left + 8 + (int)idx * item_w, rc.top,
                      min( (int)rc.right, (int)rc.left + 8 + (int)(idx + 1) * item_w ), rc.bottom );
             ch->bounds = crc;
@@ -13425,6 +13436,8 @@ void uwp_invoke_button( struct uwp_element *btn )
 }
 
 static struct uwp_element *g_pressed_btn = NULL;
+static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
+                                      const struct xaml_pointer_info *info, BOOL bubble );
 
 BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content )
 {
@@ -13446,6 +13459,34 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
     if (msg == WM_LBUTTONDOWN)
     {
         struct uwp_element *btn = uwp_hit_test_button( root_el, x, y );
+        if (btn && wcsstr( btn->class_name, L"MenuBarItem" ))
+        {
+            if (uwp_popup_is_open_for( btn ))
+            {
+                uwp_close_flyout_popup( TRUE );
+                g_last_closed_flyout = NULL;
+                return TRUE;
+            }
+            if (g_last_closed_flyout == btn && (GetTickCount() - g_last_closed_tick) < 250)
+            {
+                g_last_closed_flyout = NULL;
+                return TRUE;
+            }
+            {
+                struct xaml_pointer_info info = {0};
+                POINT spt = { btn->bounds.left, btn->bounds.bottom };
+                info.x = (float)x;
+                info.y = (float)y;
+                info.pointer_id = 1;
+                info.is_left = TRUE;
+                info.is_in_contact = TRUE;
+                info.is_in_window = TRUE;
+                uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
+                if (hwnd) ClientToScreen( hwnd, &spt );
+                uwp_show_flyout_popup( btn, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
+            }
+            return TRUE;
+        }
         if (btn)
         {
             g_pressed_btn = btn;
@@ -13456,6 +13497,34 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             uwp_invalidate_window();
             return TRUE;
         }
+    }
+    else if (msg == WM_MOUSEMOVE)
+    {
+        struct uwp_element *hit = uwp_hit_test_button( root_el, x, y );
+        if (hit != g_hovered_elem)
+        {
+            if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
+            g_hovered_elem = hit;
+            if (hit) hit->is_hovered = TRUE;
+            if (hit && wcsstr( hit->class_name, L"MenuBarItem" ) &&
+                g_popup_owner_el && wcsstr( g_popup_owner_el->class_name, L"MenuBarItem" ) &&
+                hit != g_popup_owner_el)
+            {
+                struct xaml_pointer_info info = {0};
+                POINT spt = { hit->bounds.left, hit->bounds.bottom };
+                info.x = (float)x;
+                info.y = (float)y;
+                info.pointer_id = 1;
+                info.is_left = TRUE;
+                info.is_in_contact = TRUE;
+                info.is_in_window = TRUE;
+                uwp_fire_element_pointer( hit, XAML_PTR_PRESSED, &info, TRUE );
+                if (hwnd) ClientToScreen( hwnd, &spt );
+                uwp_show_flyout_popup( hit, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
+            }
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return hit != NULL;
     }
     else if (msg == WM_LBUTTONUP)
     {
@@ -13957,12 +14026,6 @@ struct uwp_popup_state
     struct uwp_popup_item items[64];
 };
 
-static HWND g_popup_hwnd = NULL;
-static HWND g_sub_popup_hwnd = NULL;
-static struct uwp_element *g_popup_owner_el = NULL;
-static struct uwp_element *g_last_closed_flyout = NULL;
-static DWORD g_last_closed_tick = 0;
-
 static void uwp_fire_flyout_closed( struct uwp_element *flyout )
 {
     int i;
@@ -14104,6 +14167,8 @@ static LRESULT CALLBACK uwp_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARA
             {
                 struct uwp_element *clicked_el = it->el;
                 HWND owner = st->owner_hwnd;
+                if (wcsstr( clicked_el->class_name, L"ToggleMenuFlyoutItem" ))
+                    clicked_el->is_checked = !clicked_el->is_checked;
                 uwp_invoke_button( clicked_el );
                 uwp_close_flyout_popup( TRUE );
                 if (owner && IsWindow( owner )) SetFocus( owner );
@@ -14271,18 +14336,56 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
                                               HWND owner_hwnd, HWND parent_popup, int screen_x, int screen_y )
 {
     static BOOL cls_reg = FALSE;
-    struct uwp_vec_view *children;
+    struct uwp_element *raw_items[64];
+    unsigned int raw_cnt = 0, k;
     struct uwp_popup_state *st;
-    unsigned int k;
     int cur_y = 6, max_w = 220, pop_w, pop_h;
     HDC screen_dc;
     HFONT font = NULL;
     HGDIOBJ old_font = NULL;
     HWND hwnd;
 
-    if (!flyout || !flyout->children_coll) return NULL;
-    children = CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface );
-    if (!children || children->count == 0) return NULL;
+    if (!flyout) return NULL;
+    if (flyout->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; children && k < children->count && raw_cnt < ARRAY_SIZE(raw_items); k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch) raw_items[raw_cnt++] = ch;
+        }
+    }
+    if (raw_cnt == 0 && flyout->outer)
+    {
+        void *mbi = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( flyout->outer, &IID_IMenuBarItem_WinUI, &mbi )) && mbi)
+        {
+            void *vec = NULL;
+            HRESULT (WINAPI *get_items)(void *, void **) = (void *)(*(void ***)mbi)[8];
+            if (get_items && SUCCEEDED(get_items( mbi, &vec )) && vec)
+            {
+                UINT32 cnt = 0;
+                HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
+                HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
+                if (get_size && SUCCEEDED(get_size( vec, &cnt )))
+                {
+                    for (k = 0; k < cnt && raw_cnt < ARRAY_SIZE(raw_items); k++)
+                    {
+                        void *item = NULL;
+                        if (get_at && SUCCEEDED(get_at( vec, k, &item )) && item)
+                        {
+                            struct uwp_element *ch = uwp_elem_from_any( item );
+                            if (ch) raw_items[raw_cnt++] = ch;
+                            IUnknown_Release( (IUnknown *)item );
+                        }
+                    }
+                }
+                IUnknown_Release( (IUnknown *)vec );
+            }
+            IUnknown_Release( (IUnknown *)mbi );
+        }
+    }
+    if (raw_cnt == 0) return NULL;
 
     if (!cls_reg)
     {
@@ -14313,9 +14416,9 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
         old_font = SelectObject( screen_dc, font );
     }
 
-    for (k = 0; k < children->count && st->item_cnt < (int)ARRAY_SIZE(st->items); k++)
+    for (k = 0; k < raw_cnt && st->item_cnt < (int)ARRAY_SIZE(st->items); k++)
     {
-        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        struct uwp_element *ch = raw_items[k];
         struct uwp_popup_item *it;
         if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Accelerator" )) continue;
 

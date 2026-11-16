@@ -2090,6 +2090,11 @@ static RECT get_visible_rect( HWND hwnd, BOOL shaped, UINT style, UINT ex_style,
     visible_rect.right  -= rect.right;
     visible_rect.top    -= rect.top;
     visible_rect.bottom -= rect.bottom;
+    /* Do not clip windows that extend their client area into the non-client frame via WM_NCCALCSIZE. */
+    if (visible_rect.left > rects->client.left) visible_rect.left = max( rects->window.left, rects->client.left );
+    if (visible_rect.top > rects->client.top) visible_rect.top = max( rects->window.top, rects->client.top );
+    if (visible_rect.right < rects->client.right) visible_rect.right = min( rects->window.right, rects->client.right );
+    if (visible_rect.bottom < rects->client.bottom) visible_rect.bottom = min( rects->window.bottom, rects->client.bottom );
     if (visible_rect.top >= visible_rect.bottom) visible_rect.bottom = visible_rect.top + 1;
     if (visible_rect.left >= visible_rect.right) visible_rect.right = visible_rect.left + 1;
 
