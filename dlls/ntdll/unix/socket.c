@@ -28,6 +28,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <poll.h>
+#include <pthread.h>
 #include <unistd.h>
 #ifdef HAVE_IFADDRS_H
 # include <ifaddrs.h>
@@ -1614,6 +1616,258 @@ static int get_sock_type( HANDLE handle )
 }
 
 
+#define AFD_POLL_FAST_MAX 64
+#define CONNECTING_SOCKS_MAX 256
+
+static HANDLE connecting_socks[CONNECTING_SOCKS_MAX];
+static int connecting_socks_count;
+static pthread_mutex_t connecting_socks_mutex = PTHREAD_MUTEX_INITIALIZER;
+static __thread BOOL in_afd_poll_fallback;
+
+static void mark_connecting_socket( HANDLE handle )
+{
+    int i, empty = -1;
+
+    pthread_mutex_lock( &connecting_socks_mutex );
+    for (i = 0; i < CONNECTING_SOCKS_MAX; ++i)
+    {
+        if (connecting_socks[i] == handle)
+        {
+            pthread_mutex_unlock( &connecting_socks_mutex );
+            return;
+        }
+        if (!connecting_socks[i] && empty < 0) empty = i;
+    }
+    if (empty >= 0)
+    {
+        connecting_socks[empty] = handle;
+        __atomic_add_fetch( &connecting_socks_count, 1, __ATOMIC_RELEASE );
+    }
+    pthread_mutex_unlock( &connecting_socks_mutex );
+}
+
+static BOOL consume_connecting_socket( HANDLE handle )
+{
+    int i;
+
+    if (!__atomic_load_n( &connecting_socks_count, __ATOMIC_ACQUIRE ))
+        return FALSE;
+
+    pthread_mutex_lock( &connecting_socks_mutex );
+    for (i = 0; i < CONNECTING_SOCKS_MAX; ++i)
+    {
+        if (connecting_socks[i] == handle)
+        {
+            connecting_socks[i] = NULL;
+            __atomic_sub_fetch( &connecting_socks_count, 1, __ATOMIC_RELEASE );
+            pthread_mutex_unlock( &connecting_socks_mutex );
+            return TRUE;
+        }
+    }
+    pthread_mutex_unlock( &connecting_socks_mutex );
+    return FALSE;
+}
+
+static NTSTATUS sock_ioctl_poll( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
+                                 IO_STATUS_BLOCK *io, void *in_buffer, UINT in_size,
+                                 void *out_buffer, UINT out_size )
+{
+    ULONGLONG sock_handles[AFD_POLL_FAST_MAX];
+    int masks[AFD_POLL_FAST_MAX];
+    int out_flags[AFD_POLL_FAST_MAX];
+    int needs_close[AFD_POLL_FAST_MAX];
+    struct pollfd pfds[AFD_POLL_FAST_MAX];
+    unsigned int count, i, resolved = 0, signaled_count = 0;
+    unsigned int options = 0;
+    enum server_fd_type poll_type;
+    int poll_fd, poll_needs_close = 0;
+    BOOLEAN is_wow, exclusive;
+    LONGLONG timeout;
+    size_t output_size;
+    NTSTATUS status;
+    int ret;
+
+    if (!in_buffer || !out_buffer || out_size < in_size)
+        return STATUS_BAD_DEVICE_TYPE;
+
+    if (in_afd_poll_fallback)
+    {
+        in_afd_poll_fallback = FALSE;
+        return STATUS_BAD_DEVICE_TYPE;
+    }
+
+    is_wow = in_wow64_call();
+    if (is_wow)
+    {
+        const struct afd_poll_params_32 *params32 = in_buffer;
+        if (in_size < sizeof(*params32)) return STATUS_BAD_DEVICE_TYPE;
+        count = params32->count;
+        exclusive = params32->exclusive;
+        timeout = params32->timeout;
+        if (!count || count > AFD_POLL_FAST_MAX || exclusive) return STATUS_BAD_DEVICE_TYPE;
+        if (in_size < offsetof( struct afd_poll_params_32, sockets[count] )) return STATUS_BAD_DEVICE_TYPE;
+        for (i = 0; i < count; ++i)
+        {
+            sock_handles[i] = params32->sockets[i].socket;
+            masks[i] = params32->sockets[i].flags;
+            out_flags[i] = 0;
+        }
+    }
+    else
+    {
+        const struct afd_poll_params_64 *params64 = in_buffer;
+        if (in_size < sizeof(*params64)) return STATUS_BAD_DEVICE_TYPE;
+        count = params64->count;
+        exclusive = params64->exclusive;
+        timeout = params64->timeout;
+        if (!count || count > AFD_POLL_FAST_MAX || exclusive) return STATUS_BAD_DEVICE_TYPE;
+        if (in_size < offsetof( struct afd_poll_params_64, sockets[count] )) return STATUS_BAD_DEVICE_TYPE;
+        for (i = 0; i < count; ++i)
+        {
+            sock_handles[i] = params64->sockets[i].socket;
+            masks[i] = params64->sockets[i].flags;
+            out_flags[i] = 0;
+        }
+    }
+
+    if ((status = server_get_unix_fd( handle, 0, &poll_fd, &poll_needs_close, &poll_type, &options )))
+        return STATUS_BAD_DEVICE_TYPE;
+    if (poll_needs_close) close( poll_fd );
+    if (poll_type != FD_TYPE_SOCKET)
+        return STATUS_BAD_DEVICE_TYPE;
+
+    if (apc || (apc_user && !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT))))
+        return STATUS_BAD_DEVICE_TYPE;
+
+    for (i = 0; i < count; ++i)
+    {
+        HANDLE sh = is_wow ? ULongToHandle( (ULONG)sock_handles[i] ) : (HANDLE)(ULONG_PTR)sock_handles[i];
+        enum server_fd_type stype;
+        int sfd, snc = 0;
+        short ev = 0;
+
+        if (masks[i] & ~(AFD_POLL_READ | AFD_POLL_OOB | AFD_POLL_WRITE | AFD_POLL_HUP |
+                         AFD_POLL_RESET | AFD_POLL_CLOSE | AFD_POLL_ACCEPT | AFD_POLL_CONNECT_ERR))
+            goto fallback;
+
+        if (server_get_unix_fd( sh, 0, &sfd, &snc, &stype, NULL ) || stype != FD_TYPE_SOCKET)
+        {
+            if (snc) close( sfd );
+            goto fallback;
+        }
+        needs_close[i] = snc;
+        pfds[i].fd = sfd;
+        if (masks[i] & (AFD_POLL_READ | AFD_POLL_ACCEPT | AFD_POLL_HUP | AFD_POLL_RESET))
+            ev |= POLLIN;
+        if (masks[i] & AFD_POLL_OOB)
+            ev |= POLLPRI;
+        if (masks[i] & AFD_POLL_WRITE)
+            ev |= POLLOUT;
+        pfds[i].events = ev;
+        pfds[i].revents = 0;
+        resolved = i + 1;
+    }
+
+    do
+    {
+        ret = poll( pfds, count, 0 );
+    } while (ret < 0 && errno == EINTR);
+
+    if (ret < 0) goto fallback;
+    if (ret == 0 && timeout != 0) goto fallback;
+
+    if (ret > 0)
+    {
+        for (i = 0; i < count; ++i)
+        {
+            HANDLE sh = is_wow ? ULongToHandle( (ULONG)sock_handles[i] ) : (HANDLE)(ULONG_PTR)sock_handles[i];
+            short rev = pfds[i].revents;
+
+            if (!rev) continue;
+            if (rev & (POLLHUP | POLLERR | POLLNVAL | POLLPRI))
+            {
+                if (rev & (POLLHUP | POLLERR))
+                    consume_connecting_socket( sh );
+                goto fallback;
+            }
+            if ((rev & POLLOUT) && consume_connecting_socket( sh ))
+                goto fallback;
+            if (rev & POLLIN)
+            {
+                char dummy;
+                ssize_t nr;
+
+                if ((masks[i] & (AFD_POLL_READ | AFD_POLL_ACCEPT)) != (AFD_POLL_READ | AFD_POLL_ACCEPT))
+                    goto fallback;
+
+                nr = recv( pfds[i].fd, &dummy, 1, MSG_PEEK | MSG_DONTWAIT );
+                if (nr <= 0)
+                {
+                    if (nr < 0 && errno == EAGAIN)
+                        rev &= ~POLLIN;
+                    else
+                        goto fallback;
+                }
+            }
+
+            if (rev & POLLIN)
+                out_flags[i] |= (masks[i] & AFD_POLL_READ) ? AFD_POLL_READ : AFD_POLL_ACCEPT;
+            if (rev & POLLOUT)
+                out_flags[i] |= AFD_POLL_WRITE;
+            out_flags[i] &= masks[i];
+            if (out_flags[i]) ++signaled_count;
+        }
+
+        if (!signaled_count && timeout != 0)
+            goto fallback;
+    }
+
+    for (i = 0; i < resolved; ++i)
+        if (needs_close[i]) close( pfds[i].fd );
+
+    if (is_wow)
+    {
+        struct afd_poll_params_32 *out32 = out_buffer;
+        output_size = offsetof( struct afd_poll_params_32, sockets[signaled_count] );
+        memset( out32, 0, output_size );
+        out32->timeout = timeout;
+        out32->exclusive = exclusive;
+        for (i = 0; i < count; ++i)
+        {
+            if (!out_flags[i]) continue;
+            out32->sockets[out32->count].socket = (ULONG)sock_handles[i];
+            out32->sockets[out32->count].flags = out_flags[i];
+            out32->sockets[out32->count].status = 0;
+            ++out32->count;
+        }
+    }
+    else
+    {
+        struct afd_poll_params_64 *out64 = out_buffer;
+        output_size = offsetof( struct afd_poll_params_64, sockets[signaled_count] );
+        memset( out64, 0, output_size );
+        out64->timeout = timeout;
+        out64->exclusive = exclusive;
+        for (i = 0; i < count; ++i)
+        {
+            if (!out_flags[i]) continue;
+            out64->sockets[out64->count].socket = sock_handles[i];
+            out64->sockets[out64->count].flags = out_flags[i];
+            out64->sockets[out64->count].status = 0;
+            ++out64->count;
+        }
+    }
+
+    file_complete_async( handle, options, event, apc, apc_user, io, STATUS_SUCCESS, output_size );
+    return STATUS_SUCCESS;
+
+fallback:
+    for (i = 0; i < resolved; ++i)
+        if (needs_close[i]) close( pfds[i].fd );
+    return STATUS_BAD_DEVICE_TYPE;
+}
+
+
 NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io,
                      UINT code, void *in_buffer, UINT in_size, void *out_buffer, UINT out_size )
 {
@@ -1703,7 +1957,19 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
         }
 
         case IOCTL_AFD_POLL:
-            status = STATUS_BAD_DEVICE_TYPE;
+            status = sock_ioctl_poll( handle, event, apc, apc_user, io, in_buffer, in_size, out_buffer, out_size );
+            if (status != STATUS_BAD_DEVICE_TYPE) return status;
+            if (is_local_sync_handle( event ))
+            {
+                HANDLE real_event;
+                NTSTATUS s = promote_local_sync_handle( event, &real_event );
+                if (s) return s;
+                in_afd_poll_fallback = TRUE;
+                s = NtDeviceIoControlFile( handle, real_event, apc, apc_user, io, code,
+                                           in_buffer, in_size, out_buffer, out_size );
+                in_afd_poll_fallback = FALSE;
+                return s;
+            }
             break;
 
         case IOCTL_AFD_RECV:
@@ -2669,6 +2935,11 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
         case IOCTL_AFD_WINE_SET_TCP_KEEPCNT:
             return do_setsockopt( handle, io, IPPROTO_TCP, TCP_KEEPCNT, in_buffer, in_size );
 
+        case IOCTL_AFD_WINE_CONNECT:
+            mark_connecting_socket( handle );
+            status = STATUS_BAD_DEVICE_TYPE;
+            break;
+
         default:
         {
             if ((code >> 16) == FILE_DEVICE_NETWORK)
@@ -2687,6 +2958,15 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
     }
 
     if (needs_close) close( fd );
+
+    if ((status == STATUS_BAD_DEVICE_TYPE || status == STATUS_NOT_SUPPORTED) && is_local_sync_handle( event ))
+    {
+        HANDLE real_event;
+        NTSTATUS s = promote_local_sync_handle( event, &real_event );
+        if (s) return s;
+        return NtDeviceIoControlFile( handle, real_event, apc, apc_user, io, code,
+                                      in_buffer, in_size, out_buffer, out_size );
+    }
 
     return status;
 }
