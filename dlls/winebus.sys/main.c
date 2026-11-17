@@ -1197,8 +1197,8 @@ static void bus_options_init(void)
     if (options.disable_hidraw) TRACE("UDEV hidraw devices disabled in registry\n");
     options.disable_input = check_bus_option(L"DisableInput", 0);
     if (options.disable_input) TRACE("UDEV input devices disabled in registry\n");
-    options.disable_udevd = check_bus_option(L"DisableUdevd", 0);
-    if (options.disable_udevd) TRACE("UDEV udevd use disabled in registry\n");
+    options.disable_udevd = check_bus_option(L"DisableUdevd", 1);
+    if (options.disable_udevd) TRACE("UDEV udevd use disabled\n");
 
     if (!options.disable_sdl)
     {

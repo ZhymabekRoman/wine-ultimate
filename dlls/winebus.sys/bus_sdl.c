@@ -24,13 +24,25 @@
 
 #include "config.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
+#ifdef HAVE_SYS_INOTIFY_H
+# include <sys/inotify.h>
+#endif
+#ifdef HAVE_LINUX_INPUT_H
+# include <linux/input.h>
+#endif
+#ifdef HAVE_LINUX_HIDRAW_H
+# include <linux/hidraw.h>
+#endif
 #include <dlfcn.h>
 #ifdef HAVE_SDL_H
 # include <SDL.h>
@@ -1071,14 +1083,105 @@ static void process_device_event(SDL_Event *event)
     pthread_mutex_unlock(&sdl_cs);
 }
 
-NTSTATUS sdl_bus_init(void *args)
+static int sdl_ctrl_pipe[2] = { -1, -1 };
+static int sdl_inotify_fd = -1;
+
+static BOOL has_accessible_gamepad_or_joystick(void)
+{
+    struct dirent *dent;
+    DIR *dir;
+
+#ifdef HAVE_LINUX_INPUT_H
+    if ((dir = opendir("/dev/input")))
+    {
+        while ((dent = readdir(dir)))
+        {
+            unsigned long keybits[(KEY_MAX + sizeof(long) * 8 - 1) / (sizeof(long) * 8)] = { 0 };
+            char path[64];
+            unsigned int n;
+            int fd, len;
+
+            if (sscanf(dent->d_name, "event%u%n", &n, &len) != 1 || len != strlen(dent->d_name))
+                continue;
+            snprintf(path, sizeof(path), "/dev/input/event%u", n);
+            if ((fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)) < 0)
+                continue;
+            if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) >= 0)
+            {
+                unsigned int code;
+                for (code = BTN_JOYSTICK; code <= BTN_THUMBR; code++)
+                {
+                    if (keybits[code / (sizeof(long) * 8)] & (1UL << (code % (sizeof(long) * 8))))
+                    {
+                        close(fd);
+                        closedir(dir);
+                        return TRUE;
+                    }
+                }
+                for (code = BTN_TRIGGER_HAPPY1; code <= BTN_TRIGGER_HAPPY40; code++)
+                {
+                    if (keybits[code / (sizeof(long) * 8)] & (1UL << (code % (sizeof(long) * 8))))
+                    {
+                        close(fd);
+                        closedir(dir);
+                        return TRUE;
+                    }
+                }
+            }
+            close(fd);
+        }
+        closedir(dir);
+    }
+#endif
+
+#ifdef HAVE_LINUX_HIDRAW_H
+    if ((dir = opendir("/dev")))
+    {
+        while ((dent = readdir(dir)))
+        {
+            struct hidraw_report_descriptor rpt_desc;
+            char path[64];
+            unsigned int n;
+            int fd, len, desc_size = 0;
+
+            if (sscanf(dent->d_name, "hidraw%u%n", &n, &len) != 1 || len != strlen(dent->d_name))
+                continue;
+            snprintf(path, sizeof(path), "/dev/hidraw%u", n);
+            if ((fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC)) < 0)
+                continue;
+            if (ioctl(fd, HIDIOCGRDESCSIZE, &desc_size) >= 0 && desc_size > 0 && desc_size <= HID_MAX_DESCRIPTOR_SIZE)
+            {
+                rpt_desc.size = desc_size;
+                if (ioctl(fd, HIDIOCGRDESC, &rpt_desc) >= 0)
+                {
+                    int i;
+                    for (i = 0; i + 3 < desc_size && i < 16; i++)
+                    {
+                        if (rpt_desc.value[i] == 0x05 && rpt_desc.value[i + 1] == 0x01 &&
+                            rpt_desc.value[i + 2] == 0x09 &&
+                            (rpt_desc.value[i + 3] == 0x04 || rpt_desc.value[i + 3] == 0x05 ||
+                             rpt_desc.value[i + 3] == 0x08))
+                        {
+                            close(fd);
+                            closedir(dir);
+                            return TRUE;
+                        }
+                    }
+                }
+            }
+            close(fd);
+        }
+        closedir(dir);
+    }
+#endif
+
+    return FALSE;
+}
+
+static NTSTATUS sdl_init_runtime(void)
 {
     const char *mapping;
     int i;
-
-    TRACE("args %p\n", args);
-
-    options = (struct bus_options *)args;
 
     if (!(sdl_handle = dlopen(SONAME_LIBSDL2, RTLD_NOW)))
     {
@@ -1187,6 +1290,33 @@ failed:
     return STATUS_UNSUCCESSFUL;
 }
 
+NTSTATUS sdl_bus_init(void *args)
+{
+    TRACE("args %p\n", args);
+
+    options = (struct bus_options *)args;
+
+#ifdef HAVE_SYS_INOTIFY_H
+    if (!has_accessible_gamepad_or_joystick())
+    {
+        if (pipe2(sdl_ctrl_pipe, O_NONBLOCK | O_CLOEXEC) == 0 &&
+            (sdl_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC)) >= 0)
+        {
+            int flags = IN_CREATE | IN_ATTRIB;
+            inotify_add_watch(sdl_inotify_fd, "/dev", flags);
+            inotify_add_watch(sdl_inotify_fd, "/dev/input", flags);
+            TRACE("No accessible gamepad/joystick at startup; deferring SDL_Init\n");
+            return STATUS_SUCCESS;
+        }
+        if (sdl_ctrl_pipe[0] >= 0) { close(sdl_ctrl_pipe[0]); sdl_ctrl_pipe[0] = -1; }
+        if (sdl_ctrl_pipe[1] >= 0) { close(sdl_ctrl_pipe[1]); sdl_ctrl_pipe[1] = -1; }
+        if (sdl_inotify_fd >= 0) { close(sdl_inotify_fd); sdl_inotify_fd = -1; }
+    }
+#endif
+
+    return sdl_init_runtime();
+}
+
 NTSTATUS sdl_bus_wait(void *args)
 {
     struct bus_event *result = args;
@@ -1194,6 +1324,61 @@ NTSTATUS sdl_bus_wait(void *args)
 
     /* cleanup previously returned event */
     bus_event_cleanup(result);
+
+    if (!sdl_handle)
+    {
+        struct pollfd pfd[2];
+        char buf[256];
+
+        pfd[0].fd = sdl_ctrl_pipe[0];
+        pfd[0].events = POLLIN;
+        pfd[1].fd = sdl_inotify_fd;
+        pfd[1].events = POLLIN;
+
+        while (!sdl_handle)
+        {
+            pfd[0].revents = 0;
+            pfd[1].revents = 0;
+            if (poll(pfd, 2, -1) < 0)
+            {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (pfd[0].revents & POLLIN)
+            {
+                TRACE("SDL deferred loop exiting\n");
+                pthread_mutex_lock(&sdl_cs);
+                close(sdl_ctrl_pipe[0]); sdl_ctrl_pipe[0] = -1;
+                close(sdl_ctrl_pipe[1]); sdl_ctrl_pipe[1] = -1;
+                close(sdl_inotify_fd); sdl_inotify_fd = -1;
+                pthread_mutex_unlock(&sdl_cs);
+                bus_event_queue_destroy(&event_queue);
+                return STATUS_SUCCESS;
+            }
+            if (pfd[1].revents & POLLIN)
+            {
+                while (read(sdl_inotify_fd, buf, sizeof(buf)) > 0) {}
+                if (has_accessible_gamepad_or_joystick())
+                {
+                    pthread_mutex_lock(&sdl_cs);
+                    if (sdl_init_runtime() == STATUS_SUCCESS)
+                    {
+                        close(sdl_ctrl_pipe[0]); sdl_ctrl_pipe[0] = -1;
+                        close(sdl_ctrl_pipe[1]); sdl_ctrl_pipe[1] = -1;
+                        close(sdl_inotify_fd); sdl_inotify_fd = -1;
+                        pthread_mutex_unlock(&sdl_cs);
+                        break;
+                    }
+                    pthread_mutex_unlock(&sdl_cs);
+                }
+            }
+        }
+        if (!sdl_handle)
+        {
+            bus_event_queue_destroy(&event_queue);
+            return STATUS_SUCCESS;
+        }
+    }
 
     do
     {
@@ -1213,14 +1398,27 @@ NTSTATUS sdl_bus_stop(void *args)
 {
     SDL_Event event;
 
-    if (!sdl_handle) return STATUS_SUCCESS;
+    pthread_mutex_lock(&sdl_cs);
+    if (!sdl_handle)
+    {
+        if (sdl_ctrl_pipe[1] >= 0)
+        {
+            char c = 1;
+            if (write(sdl_ctrl_pipe[1], &c, 1) < 0)
+                WARN("failed to write sdl_ctrl_pipe\n");
+        }
+        pthread_mutex_unlock(&sdl_cs);
+        return STATUS_SUCCESS;
+    }
 
     event.type = quit_event;
     if (pSDL_PushEvent(&event) != 1)
     {
+        pthread_mutex_unlock(&sdl_cs);
         ERR("error pushing quit event\n");
         return STATUS_UNSUCCESSFUL;
     }
+    pthread_mutex_unlock(&sdl_cs);
 
     return STATUS_SUCCESS;
 }
