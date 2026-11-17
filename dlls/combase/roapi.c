@@ -382,12 +382,12 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
     size_t i;
 
     RtlAcquireSRWLockExclusive( &class_lib_cache_lock );
+    for (i = 0; i < ARRAY_SIZE(static_exact_routes); i++)
+        class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
     scan_appx_env_paths_locked( L"WINE_PACKAGE_PATH" );
     scan_appx_env_paths_locked( L"WINE_FRAMEWORK_PACKAGE_PATH" );
     scan_appx_env_paths_locked( L"WINEPATH" );
     scan_appx_env_paths_locked( L"PATH" );
-    for (i = 0; i < ARRAY_SIZE(static_exact_routes); i++)
-        class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
     RtlReleaseSRWLockExclusive( &class_lib_cache_lock );
     return TRUE;
 }
