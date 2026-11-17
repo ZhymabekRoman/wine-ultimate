@@ -960,92 +960,14 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         DeleteObject( pen );
         DeleteObject( br );
     }
-    else if (wcsstr( el->class_name, L"NavigationView" ) && !wcsstr( el->class_name, L"ViewItem" ))
-    {
-        /* Clock app shell (GDI parity of the GPU path): expanded pane with
-         * Clock/Alarm/Timer/Watch tabs, Settings footer, world-clock face. */
-        static const WCHAR *tabs[] = { L"Clock", L"Alarm", L"Timer", L"Watch" };
-        RECT rc = el->bounds;
-        int w = rc.right - rc.left, h = rc.bottom - rc.top;
-        int pw = min( 320, max( 48, w * 42 / 100 ) );
-        COLORREF pane_bg = uwp_paint_resolve_color( el, L"ControlFillColorSecondaryBrush", RGB( 43, 43, 43 ), surface_bg );
-        COLORREF sel_bg = uwp_paint_resolve_color( el, L"ListViewItemBackgroundSelected", RGB( 58, 58, 58 ), pane_bg );
-        COLORREF accent_cr = uwp_paint_resolve_color( el, L"AccentBrush",
-                       uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
-        COLORREF sfg = uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), pane_bg );
-        COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), pane_bg );
-        HGDIOBJ old_br, old_pen;
-        HBRUSH br, sel;
-        HPEN pen;
-        unsigned int t;
-        int cx = rc.left + pw + (w - pw) / 2, cy = rc.top + h / 2, r = min( w - pw, h ) / 4;
-
-        br = CreateSolidBrush( pane_bg );
-        pen = CreatePen( PS_SOLID, 1, pane_bg );
-        old_br = SelectObject( hdc, br );
-        old_pen = SelectObject( hdc, pen );
-        Rectangle( hdc, rc.left, rc.top, rc.left + pw, rc.bottom );
-        SelectObject( hdc, old_pen );
-        SelectObject( hdc, old_br );
-        DeleteObject( pen );
-        DeleteObject( br );
-
-        for (t = 0; t < ARRAY_SIZE(tabs); t++)
-        {
-            RECT tr = { rc.left + 5, rc.top + 48 + (int)t * 40, rc.left + pw - 5, rc.top + 48 + (int)t * 40 + 34 };
-            RECT lrc;
-            if (tr.bottom > rc.bottom) break;
-            if (t == 0)
-            {
-                sel = CreateSolidBrush( sel_bg );
-                pen = CreatePen( PS_SOLID, 1, sel_bg );
-                old_br = SelectObject( hdc, sel );
-                old_pen = SelectObject( hdc, pen );
-                Rectangle( hdc, tr.left, tr.top, tr.right, tr.bottom );
-                SelectObject( hdc, old_pen );
-                SelectObject( hdc, old_br );
-                DeleteObject( pen );
-                DeleteObject( sel );
-                sel = CreateSolidBrush( accent_cr );
-                old_br = SelectObject( hdc, sel );
-                Rectangle( hdc, rc.left, tr.top + 7, rc.left + 3, tr.bottom - 7 );
-                SelectObject( hdc, old_br );
-                DeleteObject( sel );
-            }
-            lrc.left = tr.left + 34; lrc.top = tr.top; lrc.right = tr.right - 6; lrc.bottom = tr.bottom;
-            uwp_paint_text( hdc, &lrc, tabs[t], 14, t == 0 ? FW_SEMIBOLD : FW_NORMAL,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE, t == 0 ? tfg : sfg );
-        }
-        {
-            RECT fr = { rc.left + 39, rc.bottom - 44, rc.left + pw - 5, rc.bottom - 10 };
-            uwp_paint_text( hdc, &fr, L"Settings", 14, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, sfg );
-        }
-        {
-            COLORREF ring_c = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 92, 92, 92 ), surface_bg );
-            HPEN rp = CreatePen( PS_SOLID, 2, ring_c );
-            HPEN ap = CreatePen( PS_SOLID, 2, accent_cr );
-            HBRUSH nb = GetStockObject( NULL_BRUSH );
-            old_pen = SelectObject( hdc, rp );
-            old_br = SelectObject( hdc, nb );
-            Ellipse( hdc, cx - r, cy - r, cx + r, cy + r );
-            SelectObject( hdc, ap );
-            Arc( hdc, cx - r, cy - r, cx + r, cy + r, cx, cy - r, cx - r, cy );
-            SelectObject( hdc, old_pen );
-            SelectObject( hdc, old_br );
-            DeleteObject( rp );
-            DeleteObject( ap );
-            {
-                RECT hr = { rc.left + pw, rc.top + 18, rc.right, rc.top + 46 };
-                uwp_paint_text( hdc, &hr, L"Clock", 18, FW_SEMIBOLD, DT_CENTER | DT_TOP | DT_SINGLELINE, tfg );
-            }
-        }
-        return;
-    }
     else if (wcsstr( el->class_name, L"AppTitleBar" ))
     {
-        RECT trc = { el->bounds.left + 12, el->bounds.top, el->bounds.left + 200, el->bounds.bottom };
-        uwp_paint_text( hdc, &trc, L"Clock", 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                        uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg ) );
+        if (el->text[0])
+        {
+            RECT trc = { el->bounds.left + 12, el->bounds.top, el->bounds.left + 200, el->bounds.bottom };
+            uwp_paint_text( hdc, &trc, el->text, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                            uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg ) );
+        }
     }
     else if (wcsstr( el->name, L"ContentFrame1" ))
     {

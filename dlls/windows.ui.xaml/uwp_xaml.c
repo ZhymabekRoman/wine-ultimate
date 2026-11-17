@@ -1648,7 +1648,7 @@ ULONG WINAPI uwp_sub_AddRef( IInspectable *iface )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return 1;
-    if (impl->delegating)
+    if (impl->delegating && impl->outer)
         return IInspectable_AddRef( impl->outer );
     return uwp_nondelegating_AddRef( &impl->nondelegating_iface );
 }
@@ -1657,7 +1657,7 @@ ULONG WINAPI uwp_sub_Release( IInspectable *iface )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return 1;
-    if (impl->delegating)
+    if (impl->delegating && impl->outer)
         return IInspectable_Release( impl->outer );
     return uwp_nondelegating_Release( &impl->nondelegating_iface );
 }
@@ -1715,7 +1715,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     }
     if (IsEqualGUID( iid, &IID_IAgileObject ))
     {
-        if (impl->delegating)
+        if (impl->delegating && impl->outer)
         {
             *out = &impl->IInspectable_iface;
             IInspectable_AddRef( impl->outer );
@@ -2810,21 +2810,42 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
          * their named template parts.  The generic builtin template is minimal, so
          * synthesise the part with the class the control casts it to and cache it on
          * impl->named_elems so repeated lookups return the same element. */
-        IInspectable *raw = NULL;
-        if (SUCCEEDED(uwp_element_create( uwp_tpl_part_class( nm ), NULL, NULL, (void **)&raw )) && raw)
+        int i;
+        for (i = 0; i < impl->named_cnt; i++)
         {
-            child = uwp_elem_from_any( raw );
-            IInspectable_Release( raw );
+            if (impl->named_elems[i] && !wcscmp( impl->named_elems[i]->name, nm ))
+            {
+                child = impl->named_elems[i];
+                break;
+            }
         }
-        if (child)
+        if (!child)
         {
-            child->parent = impl;
-            child->visibility = uwp_tpl_part_collapsed( nm ) ? 1 : 0;
-            lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-            if (!wcscmp( nm, L"MenuItemsHost" ) || !wcscmp( nm, L"FooterMenuItemsHost" ) ||
-                !wcscmp( nm, L"PaneContentGrid" ))
-                child->width = 320.0;
-            uwp_element_add_named( impl, child );
+            IInspectable *raw = NULL;
+            if (SUCCEEDED(uwp_element_create( uwp_tpl_part_class( nm ), NULL, NULL, (void **)&raw )) && raw)
+            {
+                child = uwp_elem_from_any( raw );
+                IInspectable_Release( raw );
+            }
+            if (child)
+            {
+                child->parent = impl;
+                child->visibility = uwp_tpl_part_collapsed( nm ) ? 1 : 0;
+                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                if (!wcscmp( nm, L"MenuItemsHost" ) || !wcscmp( nm, L"FooterMenuItemsHost" ) ||
+                    !wcscmp( nm, L"PaneContentGrid" ))
+                    child->width = 320.0;
+                if (wcsstr( impl->class_name, L"NavigationView" ) && !wcscmp( nm, L"TogglePaneButton" ))
+                {
+                    child->width = 48.0;
+                    child->height = 40.0;
+                    if (!child->text[0])
+                        lstrcpynW( child->text, L"\x2630", ARRAY_SIZE(child->text) );
+                    if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+                    if (impl->children_coll) uwp_vec_Append( impl->children_coll, &child->IInspectable_iface );
+                }
+                uwp_element_add_named( impl, child );
+            }
         }
     }
     else

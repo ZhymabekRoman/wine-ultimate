@@ -593,68 +593,16 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
         xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
                             0.0f, cr_to_argb( rail_bg ), cr_to_argb( rail_bd ), 1.0f, 1.0f );
     }
-    else if (wcsstr( el->class_name, L"NavigationView" ) && !wcsstr( el->class_name, L"ViewItem" ))
-    {
-        /* Clock app shell: expanded pane with Clock/Alarm/Timer/Watch tabs
-         * (NavigationViewItems live in the app-side MenuItems collection,
-         * not in the visual children), Settings footer, analog world-clock
-         * face in the content area. */
-        static const WCHAR *tabs[] = { L"Clock", L"Alarm", L"Timer", L"Watch" };
-        RECT rc = el->bounds;
-        int w = rc.right - rc.left, h = rc.bottom - rc.top;
-        int pw = min( 320, max( 48, w * 42 / 100 ) );
-        COLORREF pane_bg = uwp_paint_resolve_color( el, L"ControlFillColorSecondaryBrush", RGB( 43, 43, 43 ), surface_bg );
-        COLORREF sel_bg = uwp_paint_resolve_color( el, L"ListViewItemBackgroundSelected", RGB( 58, 58, 58 ), pane_bg );
-        COLORREF accent_cr = uwp_paint_resolve_color( el, L"AccentBrush",
-                       uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
-        COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), pane_bg );
-        COLORREF sfg = uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), pane_bg );
-        unsigned int t;
-        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)(rc.left + pw), (float)rc.bottom, NULL,
-                            0.0f, cr_to_argb( pane_bg ), 0, 0.0f, 1.0f );
-        for (t = 0; t < ARRAY_SIZE(tabs); t++)
-        {
-            RECT tr = { rc.left + 5, rc.top + 48 + (int)t * 40, rc.left + pw - 5, rc.top + 48 + (int)t * 40 + 34 };
-            RECT lrc;
-            if (tr.bottom > rc.bottom) break;
-            if (t == 0)
-            {
-                xaml_gpu_push_rect( (float)tr.left, (float)tr.top, (float)tr.right, (float)tr.bottom, NULL,
-                                    4.0f, cr_to_argb( sel_bg ), 0, 0.0f, 1.0f );
-                xaml_gpu_push_rect( (float)rc.left, (float)(tr.top + 7), (float)(rc.left + 3), (float)(tr.bottom - 7),
-                                    NULL, 0.0f, cr_to_argb( accent_cr ), 0, 0.0f, 1.0f );
-            }
-            lrc.left = tr.left + 34; lrc.top = tr.top; lrc.right = tr.right - 6; lrc.bottom = tr.bottom;
-            xaml_gpu_push_text( ctx, tabs[t], 14, t == 0 ? FW_SEMIBOLD : FW_NORMAL,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE, &lrc, NULL,
-                                t == 0 ? tfg : sfg, 1.0f );
-        }
-        {
-            RECT fr = { rc.left + 39, rc.bottom - 44, rc.left + pw - 5, rc.bottom - 10 };
-            xaml_gpu_push_text( ctx, L"Settings", 14, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                                &fr, NULL, sfg, 1.0f );
-        }
-        {
-            RECT hr;
-            int cx = rc.left + pw + (w - pw) / 2, cy = rc.top + h / 2, r = min( w - pw, h ) / 4;
-            COLORREF ring_c = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 92, 92, 92 ), surface_bg );
-            xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL,
-                                cr_to_argb( ring_c ), 2.5f, FALSE );
-            xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL,
-                                cr_to_argb( accent_cr ), 2.5f, TRUE );
-            hr.left = rc.left + pw; hr.top = rc.top + 18; hr.right = rc.right; hr.bottom = rc.top + 46;
-            xaml_gpu_push_text( ctx, L"Clock", 18, FW_SEMIBOLD, DT_CENTER | DT_TOP | DT_SINGLELINE,
-                                &hr, NULL, tfg, 1.0f );
-        }
-        return;
-    }
     else if (wcsstr( el->class_name, L"AppTitleBar" ))
     {
-        RECT rc = el->bounds;
-        COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg );
-        RECT trc = { rc.left + 12, rc.top, rc.left + 200, rc.bottom };
-        xaml_gpu_push_text( ctx, L"Clock", 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                            &trc, NULL, tfg, 1.0f );
+        if (el->text[0])
+        {
+            RECT rc = el->bounds;
+            COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg );
+            RECT trc = { rc.left + 12, rc.top, rc.left + 200, rc.bottom };
+            xaml_gpu_push_text( ctx, el->text, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                                &trc, NULL, tfg, 1.0f );
+        }
     }
     else if (wcsstr( el->name, L"ContentFrame1" ))
     {
