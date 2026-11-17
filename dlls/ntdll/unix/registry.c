@@ -45,7 +45,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(reg);
 #define MAX_VALUE_LENGTH (16383 * sizeof(WCHAR))
 
 #define REG_SHM_MAGIC          0x52475348u
-#define REG_SHM_VERSION        1u
+#define REG_SHM_VERSION        2u
 #define REG_SHM_VAL_BUCKETS    1024u
 #define REG_SHM_VAL_WAYS       4u
 #define REG_SHM_VAL_SLOTS      (REG_SHM_VAL_BUCKETS * REG_SHM_VAL_WAYS)
@@ -58,6 +58,20 @@ WINE_DEFAULT_DEBUG_CHANNEL(reg);
 #define REG_SHM_VAL_MAX_NAME   128u
 #define REG_SHM_VAL_MAX_DATA   256u
 #define REG_SHM_NEG_MAX_NAME   256u
+#define REG_SHM_ENUM_BUCKETS   8u
+#define REG_SHM_ENUM_WAYS      2u
+#define REG_SHM_ENUM_SLOTS     (REG_SHM_ENUM_BUCKETS * REG_SHM_ENUM_WAYS)
+#define REG_SHM_ENUM_MAX_NAME  128u
+#define REG_SHM_ENUM_MAX_CLASS 128u
+#define REG_SHM_ENUM_MAX_DATA  1024u
+#define REG_SHM_ENUM_MAX_VALS  3072u
+#define REG_SHM_ENUM_MAX_SUBKEYS 24u
+#define REG_SHM_KEY_BUCKETS    1024u
+#define REG_SHM_KEY_WAYS       4u
+#define REG_SHM_KEY_SLOTS      (REG_SHM_KEY_BUCKETS * REG_SHM_KEY_WAYS)
+#define REG_SHM_ENUM_FLAG_VALS    0x01u
+#define REG_SHM_ENUM_FLAG_SUBKEYS 0x02u
+#define REG_SHM_ENUM_FLAG_SELF    0x04u
 
 struct reg_shm_val_slot
 {
@@ -93,6 +107,57 @@ struct reg_shm_neg_open_slot
     WCHAR    name[REG_SHM_NEG_MAX_NAME / sizeof(WCHAR)];
 };
 
+struct reg_shm_enum_val
+{
+    uint32_t type;
+    uint32_t name_len;
+    uint32_t data_len;
+    uint32_t pad;
+    WCHAR    name[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+    BYTE     data[REG_SHM_ENUM_MAX_DATA];
+};
+
+struct reg_shm_enum_sub
+{
+    int64_t  modif;
+    uint32_t name_len;
+    uint32_t class_len;
+    WCHAR    name[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+    WCHAR    class[REG_SHM_ENUM_MAX_CLASS / sizeof(WCHAR)];
+};
+
+struct reg_shm_key_slot
+{
+    uint32_t seq;
+    uint32_t val_epoch;
+    uint32_t tree_epoch;
+    uint32_t pad;
+    uint64_t key_id;
+};
+
+struct reg_shm_enum_slot
+{
+    uint32_t seq;
+    uint32_t flags;
+    uint64_t key_id;
+    uint32_t val_epoch;
+    uint32_t tree_epoch;
+    int64_t  modif;
+    uint32_t val_count;
+    uint32_t subkey_count;
+    uint32_t max_subkey;
+    uint32_t max_class;
+    uint32_t max_value;
+    uint32_t max_data;
+    uint32_t self_name_len;
+    uint32_t self_class_len;
+    uint32_t pad;
+    WCHAR    self_name[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+    WCHAR    self_class[REG_SHM_ENUM_MAX_CLASS / sizeof(WCHAR)];
+    struct reg_shm_enum_val vals[REG_SHM_ENUM_MAX_VALS];
+    struct reg_shm_enum_sub subkeys[REG_SHM_ENUM_MAX_SUBKEYS];
+};
+
 struct reg_shm
 {
     uint32_t magic;
@@ -102,10 +167,15 @@ struct reg_shm
     uint32_t rr_val;
     uint32_t rr_handle;
     uint32_t rr_neg;
-    uint32_t pad[7];
+    uint32_t rr_enum;
+    uint32_t rr_key;
+    uint64_t key_gen;
+    uint32_t pad[4];
     struct reg_shm_val_slot      val_table[REG_SHM_VAL_SLOTS];
     struct reg_shm_handle_slot   handle_map[REG_SHM_HANDLE_SLOTS];
     struct reg_shm_neg_open_slot neg_open_cache[REG_SHM_NEG_SLOTS];
+    struct reg_shm_enum_slot     enum_table[REG_SHM_ENUM_SLOTS];
+    struct reg_shm_key_slot      key_table[REG_SHM_KEY_SLOTS];
 };
 
 static const struct reg_shm *reg_shm = NULL;
@@ -265,6 +335,45 @@ static inline int reg_shm_lookup_neg_open( const struct reg_shm *shm, HANDLE roo
                 return 1;
             break;
         }
+    }
+    return 0;
+}
+
+static inline const struct reg_shm_enum_slot *reg_shm_find_enum( const struct reg_shm *shm, uint64_t key_id )
+{
+    uint64_t h = key_id * 0x9e3779b97f4a7c15ULL;
+    uint32_t bucket = (uint32_t)(h & (REG_SHM_ENUM_BUCKETS - 1)) * REG_SHM_ENUM_WAYS;
+    uint32_t i;
+
+    for (i = 0; i < REG_SHM_ENUM_WAYS; i++)
+    {
+        const struct reg_shm_enum_slot *slot = &shm->enum_table[bucket + i];
+        if (__atomic_load_n( &slot->key_id, __ATOMIC_RELAXED ) == key_id) return slot;
+    }
+    return NULL;
+}
+
+static inline int reg_shm_key_epochs( const struct reg_shm *shm, uint64_t key_id,
+                                      uint32_t *val_epoch, uint32_t *tree_epoch )
+{
+    uint64_t h = key_id * 0x9e3779b97f4a7c15ULL;
+    uint32_t bucket = (uint32_t)(h & (REG_SHM_KEY_BUCKETS - 1)) * REG_SHM_KEY_WAYS;
+    const struct reg_shm_key_slot *slot;
+    uint32_t i, s1, s2;
+
+    for (i = 0; i < REG_SHM_KEY_WAYS; i++)
+    {
+        slot = &shm->key_table[bucket + i];
+        if (__atomic_load_n( &slot->key_id, __ATOMIC_RELAXED ) != key_id) continue;
+        do
+        {
+            s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
+            *val_epoch = slot->val_epoch;
+            *tree_epoch = slot->tree_epoch;
+            s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
+        } while (s1 != s2 || (s1 & 1));
+        return 1;
     }
     return 0;
 }
@@ -499,6 +608,170 @@ static NTSTATUS enumerate_key( HANDLE handle, int index, KEY_INFORMATION_CLASS i
     }
     fixed_size = (char *)data_ptr - (char *)info;
 
+    if (info_class != KeyNameInformation)
+    {
+        const struct reg_shm *shm = get_reg_shm();
+        uint32_t can_query = 0;
+        uint64_t key_id = shm ? reg_shm_lookup_handle( shm, handle, &can_query ) : 0;
+
+        if (key_id && can_query)
+        {
+            const struct reg_shm_enum_slot *slot = reg_shm_find_enum( shm, key_id );
+            int tries;
+
+            for (tries = 0; slot && tries < 8; tries++)
+            {
+                uint32_t s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+                uint32_t flags, s2, snamelen = 0, sclasslen = 0;
+                uint32_t subkey_count = 0, val_count = 0, max_subkey = 0, max_class = 0;
+                uint32_t max_value = 0, max_data = 0, reply_size, total = 0;
+                uint32_t kve, kte;
+                uint64_t vepoch, tepoch;
+                int64_t tmodif = 0;
+                unsigned int avail;
+                int nomore = 0;
+                WCHAR sname[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+                WCHAR sclass[REG_SHM_ENUM_MAX_CLASS / sizeof(WCHAR)];
+
+                if (s1 & 1) continue;
+                if ((info_class == KeyFullInformation || info_class == KeyCachedInformation) &&
+                    index != (ULONG)-1) break;
+                flags = slot->flags;
+                vepoch = slot->val_epoch;
+                tepoch = slot->tree_epoch;
+                tmodif = slot->modif;
+
+                if (index != (ULONG)-1)
+                {
+                    if (!(flags & REG_SHM_ENUM_FLAG_SUBKEYS)) break;
+                    subkey_count = slot->subkey_count;
+                    if (index >= subkey_count) { nomore = 1; }
+                    else
+                    {
+                        snamelen = slot->subkeys[index].name_len;
+                        sclasslen = slot->subkeys[index].class_len;
+                        tmodif = slot->subkeys[index].modif;
+                        if (snamelen > REG_SHM_ENUM_MAX_NAME || sclasslen > REG_SHM_ENUM_MAX_CLASS) break;
+                        if (snamelen) memcpy( sname, slot->subkeys[index].name, snamelen );
+                        if (sclasslen) memcpy( sclass, slot->subkeys[index].class, sclasslen );
+                    }
+                }
+                else
+                {
+                    if (!(flags & REG_SHM_ENUM_FLAG_SELF)) break;
+                    snamelen = slot->self_name_len;
+                    sclasslen = slot->self_class_len;
+                    if (snamelen > REG_SHM_ENUM_MAX_NAME || sclasslen > REG_SHM_ENUM_MAX_CLASS) break;
+                    if (snamelen) memcpy( sname, slot->self_name, snamelen );
+                    if (sclasslen) memcpy( sclass, slot->self_class, sclasslen );
+                    if (info_class == KeyFullInformation || info_class == KeyCachedInformation)
+                    {
+                        if ((flags & (REG_SHM_ENUM_FLAG_VALS | REG_SHM_ENUM_FLAG_SUBKEYS)) !=
+                            (REG_SHM_ENUM_FLAG_VALS | REG_SHM_ENUM_FLAG_SUBKEYS)) break;
+                        val_count = slot->val_count;
+                        subkey_count = slot->subkey_count;
+                        max_subkey = slot->max_subkey;
+                        max_class = slot->max_class;
+                        max_value = slot->max_value;
+                        max_data = slot->max_data;
+                    }
+                }
+                __atomic_thread_fence( __ATOMIC_ACQUIRE );
+                s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
+                if (s1 != s2) continue;
+                if (!reg_shm_key_epochs( shm, key_id, &kve, &kte )) break;
+                if (tepoch != kte) break;
+                if ((info_class == KeyFullInformation || info_class == KeyCachedInformation) &&
+                    index == (ULONG)-1 && vepoch != kve) break;
+                if (nomore) return STATUS_NO_MORE_ENTRIES;
+
+                avail = length > fixed_size ? length - fixed_size : 0;
+                switch (info_class)
+                {
+                case KeyBasicInformation:
+                {
+                    KEY_BASIC_INFORMATION keyinfo;
+                    total = snamelen;
+                    keyinfo.LastWriteTime.QuadPart = tmodif;
+                    keyinfo.TitleIndex = 0;
+                    keyinfo.NameLength = min( total, avail );
+                    memcpy( info, &keyinfo, min( length, fixed_size ));
+                    memcpy( data_ptr, sname, keyinfo.NameLength );
+                    break;
+                }
+
+                case KeyNodeInformation:
+                {
+                    KEY_NODE_INFORMATION keyinfo;
+                    total = snamelen + sclasslen;
+                    reply_size = min( total, avail );
+                    keyinfo.LastWriteTime.QuadPart = tmodif;
+                    keyinfo.TitleIndex = 0;
+                    keyinfo.NameLength = min( snamelen, reply_size );
+                    if (snamelen < reply_size)
+                    {
+                        keyinfo.ClassLength = reply_size - snamelen;
+                        keyinfo.ClassOffset = fixed_size + snamelen;
+                    }
+                    else
+                    {
+                        keyinfo.ClassLength = 0;
+                        keyinfo.ClassOffset = -1;
+                    }
+                    memcpy( info, &keyinfo, min( length, fixed_size ));
+                    memcpy( data_ptr, sname, keyinfo.NameLength );
+                    if (keyinfo.ClassLength) memcpy( (char *)data_ptr + snamelen, sclass, keyinfo.ClassLength );
+                    break;
+                }
+
+                case KeyFullInformation:
+                {
+                    KEY_FULL_INFORMATION keyinfo;
+                    total = sclasslen;
+                    reply_size = min( total, avail );
+                    keyinfo.LastWriteTime.QuadPart = tmodif;
+                    keyinfo.TitleIndex = 0;
+                    keyinfo.ClassLength = reply_size;
+                    keyinfo.ClassOffset = reply_size ? fixed_size : -1;
+                    keyinfo.SubKeys = subkey_count;
+                    keyinfo.MaxNameLen = max_subkey;
+                    keyinfo.MaxClassLen = max_class;
+                    keyinfo.Values = val_count;
+                    keyinfo.MaxValueNameLen = max_value;
+                    keyinfo.MaxValueDataLen = max_data;
+                    memcpy( info, &keyinfo, min( length, fixed_size ));
+                    if (reply_size) memcpy( data_ptr, sclass, reply_size );
+                    break;
+                }
+
+                case KeyCachedInformation:
+                {
+                    KEY_CACHED_INFORMATION keyinfo;
+                    total = snamelen;
+                    keyinfo.LastWriteTime.QuadPart = tmodif;
+                    keyinfo.TitleIndex = 0;
+                    keyinfo.SubKeys = subkey_count;
+                    keyinfo.MaxNameLen = max_subkey;
+                    keyinfo.Values = val_count;
+                    keyinfo.MaxValueNameLen = max_value;
+                    keyinfo.MaxValueDataLen = max_data;
+                    keyinfo.NameLength = min( total, avail );
+                    memcpy( info, &keyinfo, min( length, fixed_size ));
+                    memcpy( data_ptr, sname, keyinfo.NameLength );
+                    break;
+                }
+
+                default:
+                    break;
+                }
+                *result_len = fixed_size + total;
+                if (length < fixed_size) return STATUS_BUFFER_TOO_SMALL;
+                if (length < *result_len) return STATUS_BUFFER_OVERFLOW;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+
     SERVER_START_REQ( enum_key )
     {
         req->hkey       = wine_server_obj_handle( handle );
@@ -704,6 +977,66 @@ NTSTATUS WINAPI NtEnumerateValueKey( HANDLE handle, ULONG index, KEY_VALUE_INFOR
         return STATUS_INVALID_PARAMETER;
     }
     fixed_size = (char *)ptr - (char *)info;
+
+    {
+        const struct reg_shm *shm = get_reg_shm();
+        uint32_t can_query = 0;
+        uint64_t key_id = shm ? reg_shm_lookup_handle( shm, handle, &can_query ) : 0;
+
+        if (key_id && can_query)
+        {
+            const struct reg_shm_enum_slot *slot = reg_shm_find_enum( shm, key_id );
+            int tries;
+
+            for (tries = 0; slot && tries < 8; tries++)
+            {
+                uint32_t s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+                uint32_t flags, count, stype, snamelen, sdatalen, s2, total, avail;
+                uint32_t kve, kte;
+                uint64_t vepoch;
+                WCHAR sname[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+                BYTE sdata[REG_SHM_ENUM_MAX_DATA];
+
+                if (s1 & 1) continue;
+                vepoch = slot->val_epoch;
+                flags = slot->flags;
+                count = slot->val_count;
+                if (!reg_shm_key_epochs( shm, key_id, &kve, &kte )) break;
+                if (vepoch != kve) break;
+                if (!(flags & REG_SHM_ENUM_FLAG_VALS)) break;
+                if (index >= count)
+                {
+                    s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
+                    if (s1 == s2) return STATUS_NO_MORE_ENTRIES;
+                    continue;
+                }
+                stype = slot->vals[index].type;
+                snamelen = slot->vals[index].name_len;
+                sdatalen = slot->vals[index].data_len;
+                if (snamelen > REG_SHM_ENUM_MAX_NAME || sdatalen > REG_SHM_ENUM_MAX_DATA) break;
+                if (snamelen) memcpy( sname, slot->vals[index].name, snamelen );
+                if (sdatalen) memcpy( sdata, slot->vals[index].data, sdatalen );
+                __atomic_thread_fence( __ATOMIC_ACQUIRE );
+                s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
+                if (s1 != s2) continue;
+
+                total = info_class == KeyValueBasicInformation ? snamelen :
+                        info_class == KeyValueFullInformation ? snamelen + sdatalen : sdatalen;
+                copy_key_value_info( info_class, info, length, stype, snamelen, sdatalen );
+                avail = length > fixed_size ? length - fixed_size : 0;
+                if (info_class != KeyValuePartialInformation)
+                {
+                    memcpy( ptr, sname, min( avail, snamelen ));
+                    if (info_class == KeyValueFullInformation && avail > snamelen)
+                        memcpy( (char *)ptr + snamelen, sdata, min( avail - snamelen, sdatalen ));
+                }
+                else memcpy( ptr, sdata, min( avail, sdatalen ));
+                *result_len = fixed_size + total;
+                if (length < *result_len) return STATUS_BUFFER_OVERFLOW;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
 
     SERVER_START_REQ( enum_key_value )
     {

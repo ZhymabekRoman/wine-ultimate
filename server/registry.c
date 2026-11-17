@@ -68,7 +68,7 @@ struct notify
 static const WCHAR key_name[] = {'K','e','y'};
 
 #define REG_SHM_MAGIC          0x52475348u
-#define REG_SHM_VERSION        1u
+#define REG_SHM_VERSION        2u
 #define REG_SHM_VAL_BUCKETS    1024u
 #define REG_SHM_VAL_WAYS       4u
 #define REG_SHM_VAL_SLOTS      (REG_SHM_VAL_BUCKETS * REG_SHM_VAL_WAYS)
@@ -81,6 +81,20 @@ static const WCHAR key_name[] = {'K','e','y'};
 #define REG_SHM_VAL_MAX_NAME   128u
 #define REG_SHM_VAL_MAX_DATA   256u
 #define REG_SHM_NEG_MAX_NAME   256u
+#define REG_SHM_ENUM_BUCKETS   8u
+#define REG_SHM_ENUM_WAYS      2u
+#define REG_SHM_ENUM_SLOTS     (REG_SHM_ENUM_BUCKETS * REG_SHM_ENUM_WAYS)
+#define REG_SHM_ENUM_MAX_NAME  128u
+#define REG_SHM_ENUM_MAX_CLASS 128u
+#define REG_SHM_ENUM_MAX_DATA  1024u
+#define REG_SHM_ENUM_MAX_VALS  3072u
+#define REG_SHM_ENUM_MAX_SUBKEYS 24u
+#define REG_SHM_KEY_BUCKETS    1024u
+#define REG_SHM_KEY_WAYS       4u
+#define REG_SHM_KEY_SLOTS      (REG_SHM_KEY_BUCKETS * REG_SHM_KEY_WAYS)
+#define REG_SHM_ENUM_FLAG_VALS    0x01u
+#define REG_SHM_ENUM_FLAG_SUBKEYS 0x02u
+#define REG_SHM_ENUM_FLAG_SELF    0x04u
 
 struct reg_shm_val_slot
 {
@@ -116,6 +130,57 @@ struct reg_shm_neg_open_slot
     WCHAR    name[REG_SHM_NEG_MAX_NAME / sizeof(WCHAR)];
 };
 
+struct reg_shm_enum_val
+{
+    uint32_t type;
+    uint32_t name_len;
+    uint32_t data_len;
+    uint32_t pad;
+    WCHAR    name[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+    BYTE     data[REG_SHM_ENUM_MAX_DATA];
+};
+
+struct reg_shm_enum_sub
+{
+    int64_t  modif;
+    uint32_t name_len;
+    uint32_t class_len;
+    WCHAR    name[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+    WCHAR    class[REG_SHM_ENUM_MAX_CLASS / sizeof(WCHAR)];
+};
+
+struct reg_shm_key_slot
+{
+    uint32_t seq;
+    uint32_t val_epoch;
+    uint32_t tree_epoch;
+    uint32_t pad;
+    uint64_t key_id;
+};
+
+struct reg_shm_enum_slot
+{
+    uint32_t seq;
+    uint32_t flags;
+    uint64_t key_id;
+    uint32_t val_epoch;
+    uint32_t tree_epoch;
+    int64_t  modif;
+    uint32_t val_count;
+    uint32_t subkey_count;
+    uint32_t max_subkey;
+    uint32_t max_class;
+    uint32_t max_value;
+    uint32_t max_data;
+    uint32_t self_name_len;
+    uint32_t self_class_len;
+    uint32_t pad;
+    WCHAR    self_name[REG_SHM_ENUM_MAX_NAME / sizeof(WCHAR)];
+    WCHAR    self_class[REG_SHM_ENUM_MAX_CLASS / sizeof(WCHAR)];
+    struct reg_shm_enum_val vals[REG_SHM_ENUM_MAX_VALS];
+    struct reg_shm_enum_sub subkeys[REG_SHM_ENUM_MAX_SUBKEYS];
+};
+
 struct reg_shm
 {
     uint32_t magic;
@@ -125,10 +190,15 @@ struct reg_shm
     uint32_t rr_val;
     uint32_t rr_handle;
     uint32_t rr_neg;
-    uint32_t pad[7];
+    uint32_t rr_enum;
+    uint32_t rr_key;
+    uint64_t key_gen;
+    uint32_t pad[4];
     struct reg_shm_val_slot      val_table[REG_SHM_VAL_SLOTS];
     struct reg_shm_handle_slot   handle_map[REG_SHM_HANDLE_SLOTS];
     struct reg_shm_neg_open_slot neg_open_cache[REG_SHM_NEG_SLOTS];
+    struct reg_shm_enum_slot     enum_table[REG_SHM_ENUM_SLOTS];
+    struct reg_shm_key_slot      key_table[REG_SHM_KEY_SLOTS];
 };
 
 static struct reg_shm *reg_shm = NULL;
@@ -173,6 +243,74 @@ static inline void reg_shm_bump_tree_epoch(void)
 {
     if (!reg_shm) return;
     __atomic_fetch_add( &reg_shm->tree_epoch, 1, __ATOMIC_RELEASE );
+}
+
+/* find (creating if needed) the per-key epoch slot for a key id */
+static struct reg_shm_key_slot *reg_shm_get_key_slot( uint64_t key_id )
+{
+    uint32_t bucket, i, target;
+    uint64_t h, gen;
+    struct reg_shm_key_slot *slot;
+
+    if (!reg_shm || !key_id) return NULL;
+    h = key_id * 0x9e3779b97f4a7c15ULL;
+    bucket = (uint32_t)(h & (REG_SHM_KEY_BUCKETS - 1)) * REG_SHM_KEY_WAYS;
+
+    for (i = 0; i < REG_SHM_KEY_WAYS; i++)
+    {
+        slot = &reg_shm->key_table[bucket + i];
+        if (slot->key_id == key_id) return slot;
+        if (!slot->key_id)
+        {
+            gen = ++reg_shm->key_gen;
+            slot->key_id = key_id;
+            slot->val_epoch = gen;
+            slot->tree_epoch = gen;
+            return slot;
+        }
+    }
+    target = bucket + (reg_shm->rr_key++ & (REG_SHM_KEY_WAYS - 1));
+    slot = &reg_shm->key_table[target];
+    gen = ++reg_shm->key_gen;
+    slot->key_id = key_id;
+    slot->val_epoch = gen;
+    slot->tree_epoch = gen;
+    return slot;
+}
+
+static void reg_shm_touch_val( uint64_t key_id )
+{
+    struct reg_shm_key_slot *slot = reg_shm_get_key_slot( key_id );
+    if (!slot) return;
+    reg_shm_write_begin( &slot->seq );
+    slot->val_epoch++;
+    reg_shm_write_end( &slot->seq );
+}
+
+static void reg_shm_touch_tree( uint64_t key_id )
+{
+    struct reg_shm_key_slot *slot = reg_shm_get_key_slot( key_id );
+    if (!slot) return;
+    reg_shm_write_begin( &slot->seq );
+    slot->tree_epoch++;
+    reg_shm_write_end( &slot->seq );
+}
+
+static void reg_shm_get_key_epochs( uint64_t key_id, uint32_t *val_epoch, uint32_t *tree_epoch )
+{
+    struct reg_shm_key_slot *slot = reg_shm_get_key_slot( key_id );
+    uint32_t s1, s2;
+
+    *val_epoch = *tree_epoch = 0;
+    if (!slot) return;
+    do
+    {
+        s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        *val_epoch = slot->val_epoch;
+        *tree_epoch = slot->tree_epoch;
+        s2 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+    } while (s1 != s2);
 }
 
 static void reg_shm_set_handle( process_id_t pid, obj_handle_t handle, uint64_t key_id, uint32_t can_query )
@@ -1172,6 +1310,7 @@ static struct key *create_key( struct key *parent, const struct unicode_str *nam
     else
     {
         if (parent) touch_key( get_parent( key ), REG_NOTIFY_CHANGE_NAME );
+        if (parent) reg_shm_touch_tree( parent->key_id );
         if (debug_level > 1) dump_operation( key, NULL, "Create" );
     }
     return key;
@@ -1204,6 +1343,91 @@ static struct key *create_key_recursive( struct key *root, const struct unicode_
         else break;
     }
     return parent;
+}
+
+/* publish an enumeration snapshot (values + subkeys) of a key into shared memory */
+static void reg_shm_fill_enum( struct key *key )
+{
+    struct reg_shm_enum_slot *slot;
+    uint32_t bucket, i, target, flags = 0;
+    uint64_t h;
+
+    if (!reg_shm || !key->key_id) return;
+    h = key->key_id * 0x9e3779b97f4a7c15ULL;
+    bucket = (uint32_t)(h & (REG_SHM_ENUM_BUCKETS - 1)) * REG_SHM_ENUM_WAYS;
+
+    target = bucket + (reg_shm->rr_enum++ & (REG_SHM_ENUM_WAYS - 1));
+    for (i = 0; i < REG_SHM_ENUM_WAYS; i++)
+    {
+        slot = &reg_shm->enum_table[bucket + i];
+        if (slot->key_id == key->key_id || !slot->key_id)
+        {
+            target = bucket + i;
+            break;
+        }
+    }
+    slot = &reg_shm->enum_table[target];
+
+    reg_shm_write_begin( &slot->seq );
+    slot->key_id = key->key_id;
+    reg_shm_get_key_epochs( key->key_id, &slot->val_epoch, &slot->tree_epoch );
+    slot->modif = key->modif;
+    slot->val_count = key->last_value + 1;
+    slot->subkey_count = key->last_subkey + 1;
+    slot->max_subkey = slot->max_class = slot->max_value = slot->max_data = 0;
+    for (i = 0; i < slot->subkey_count; i++)
+    {
+        if (key->subkeys[i]->obj.name->len > slot->max_subkey) slot->max_subkey = key->subkeys[i]->obj.name->len;
+        if (key->subkeys[i]->classlen > slot->max_class) slot->max_class = key->subkeys[i]->classlen;
+    }
+    for (i = 0; i < slot->val_count; i++)
+    {
+        if (key->values[i].namelen > slot->max_value) slot->max_value = key->values[i].namelen;
+        if (key->values[i].len > slot->max_data) slot->max_data = key->values[i].len;
+    }
+    slot->self_name_len = key->obj.name ? key->obj.name->len : 0;
+    slot->self_class_len = key->classlen;
+    if (slot->self_name_len <= REG_SHM_ENUM_MAX_NAME && slot->self_class_len <= REG_SHM_ENUM_MAX_CLASS)
+    {
+        flags |= REG_SHM_ENUM_FLAG_SELF;
+        if (slot->self_name_len) memcpy( slot->self_name, key->obj.name->name, slot->self_name_len );
+        if (slot->self_class_len) memcpy( slot->self_class, key->class, slot->self_class_len );
+    }
+    if (slot->val_count <= REG_SHM_ENUM_MAX_VALS)
+    {
+        flags |= REG_SHM_ENUM_FLAG_VALS;
+        for (i = 0; i < slot->val_count; i++)
+        {
+            slot->vals[i].type = key->values[i].type;
+            slot->vals[i].name_len = key->values[i].namelen;
+            slot->vals[i].data_len = key->values[i].len;
+            slot->vals[i].pad = 0;
+            if (key->values[i].namelen)
+                memcpy( slot->vals[i].name, key->values[i].name, min( key->values[i].namelen, REG_SHM_ENUM_MAX_NAME ) );
+            if (key->values[i].data && key->values[i].len)
+                memcpy( slot->vals[i].data, key->values[i].data, min( key->values[i].len, REG_SHM_ENUM_MAX_DATA ) );
+        }
+    }
+    if (slot->subkey_count <= REG_SHM_ENUM_MAX_SUBKEYS)
+    {
+        for (i = 0; i < slot->subkey_count; i++)
+            if (key->subkeys[i]->obj.name->len > REG_SHM_ENUM_MAX_NAME ||
+                key->subkeys[i]->classlen > REG_SHM_ENUM_MAX_CLASS) break;
+        if (i == slot->subkey_count)
+        {
+            flags |= REG_SHM_ENUM_FLAG_SUBKEYS;
+            for (i = 0; i < slot->subkey_count; i++)
+            {
+                slot->subkeys[i].modif = key->subkeys[i]->modif;
+                slot->subkeys[i].name_len = key->subkeys[i]->obj.name->len;
+                slot->subkeys[i].class_len = key->subkeys[i]->classlen;
+                memcpy( slot->subkeys[i].name, key->subkeys[i]->obj.name->name, slot->subkeys[i].name_len );
+                if (slot->subkeys[i].class_len) memcpy( slot->subkeys[i].class, key->subkeys[i]->class, slot->subkeys[i].class_len );
+            }
+        }
+    }
+    slot->flags = flags;
+    reg_shm_write_end( &slot->seq );
 }
 
 /* query information about a key or a subkey */
@@ -1359,6 +1583,7 @@ static void rename_key( struct key *key, const struct unicode_str *new_name )
 
     if (debug_level > 1) dump_operation( key, NULL, "Rename" );
     touch_key( key, REG_NOTIFY_CHANGE_NAME );
+    if (parent) reg_shm_touch_tree( parent->key_id );
 }
 
 /* delete a key and its values */
@@ -1394,6 +1619,9 @@ static int delete_key( struct key *key, int recurse )
     key->flags |= KEY_DELETED;
     unlink_named_object( &key->obj );
     touch_key( parent, REG_NOTIFY_CHANGE_NAME );
+    reg_shm_touch_tree( parent->key_id );
+    reg_shm_touch_tree( key->key_id );
+    reg_shm_touch_val( key->key_id );
     return 1;
 }
 
@@ -1525,6 +1753,8 @@ static void set_value( struct key *key, const struct unicode_str *name,
     value->len   = len;
     value->data  = ptr;
     touch_key( key, REG_NOTIFY_CHANGE_LAST_SET );
+    reg_shm_bump_val_epoch();
+    reg_shm_touch_val( key->key_id );
     if (name->len <= REG_SHM_VAL_MAX_NAME && len <= REG_SHM_VAL_MAX_DATA)
         reg_shm_put_val( key->key_id, STATUS_SUCCESS, type, name->str, name->len, ptr, len );
     else
@@ -1640,6 +1870,8 @@ static void delete_value( struct key *key, const struct unicode_str *name )
     for (i = index; i < key->last_value; i++) key->values[i] = key->values[i + 1];
     key->last_value--;
     touch_key( key, REG_NOTIFY_CHANGE_LAST_SET );
+    reg_shm_bump_val_epoch();
+    reg_shm_touch_val( key->key_id );
     if (name->len <= REG_SHM_VAL_MAX_NAME)
         reg_shm_put_val( key->key_id, STATUS_OBJECT_NAME_NOT_FOUND, 0, name->str, name->len, NULL, 0 );
     else
@@ -2595,6 +2827,7 @@ DECL_HANDLER(enum_key)
     if ((key = get_hkey_obj( req->hkey, req->index == -1 ? 0 : KEY_ENUMERATE_SUB_KEYS )))
     {
         enum_key( key, req->index, req->info_class, reply );
+        if (!get_error() && !(key->flags & KEY_DELETED)) reg_shm_fill_enum( key );
         release_object( key );
     }
 }
@@ -2646,6 +2879,7 @@ DECL_HANDLER(enum_key_value)
     if ((key = get_hkey_obj( req->hkey, KEY_QUERY_VALUE )))
     {
         enum_value( key, req->index, req->info_class, reply );
+        if (!get_error() && !(key->flags & KEY_DELETED)) reg_shm_fill_enum( key );
         release_object( key );
     }
 }
@@ -2688,6 +2922,8 @@ DECL_HANDLER(load_registry)
         load_registry( key, req->file );
         reg_shm_bump_val_epoch();
         reg_shm_bump_tree_epoch();
+        reg_shm_touch_val( key->key_id );
+        reg_shm_touch_tree( key->key_id );
         release_object( key );
     }
     if (parent) release_object( parent );
