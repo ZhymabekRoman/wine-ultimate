@@ -1016,8 +1016,10 @@ static void unix_face_destroy( struct unix_face *This )
     free( This );
 }
 
-static int add_unix_face( const char *unix_name, const WCHAR *file, void *data_ptr, SIZE_T data_size,
-                          DWORD face_index, DWORD flags, DWORD *num_faces )
+static int add_unix_face_cached( const char *unix_name, const WCHAR *file, void *data_ptr, SIZE_T data_size,
+                                 DWORD face_index, DWORD flags, DWORD *num_faces,
+                                 void (*record_cb)(void *, const char *, const struct unix_face *, DWORD, DWORD),
+                                 void *record_ctx )
 {
     struct unix_face *unix_face;
     int ret;
@@ -1036,6 +1038,8 @@ static int add_unix_face( const char *unix_name, const WCHAR *file, void *data_p
 
     if (!HIWORD( flags )) flags |= ADDFONT_AA_FLAGS( default_aa_flags );
 
+    if (record_cb) record_cb( record_ctx, unix_name, unix_face, face_index, flags );
+
     ret = add_gdi_face( unix_face->family_name, unix_face->second_name, unix_face->style_name, unix_face->full_name,
                         file, data_ptr, data_size, face_index, unix_face->fs, unix_face->ntm_flags, unix_face->weight,
                         unix_face->font_version, flags, unix_face->scalable ? NULL : &unix_face->size );
@@ -1048,6 +1052,12 @@ static int add_unix_face( const char *unix_name, const WCHAR *file, void *data_p
     if (num_faces) *num_faces = unix_face->num_faces;
     unix_face_destroy( unix_face );
     return ret;
+}
+
+static int add_unix_face( const char *unix_name, const WCHAR *file, void *data_ptr, SIZE_T data_size,
+                          DWORD face_index, DWORD flags, DWORD *num_faces )
+{
+    return add_unix_face_cached( unix_name, file, data_ptr, data_size, face_index, flags, num_faces, NULL, NULL );
 }
 
 static INT AddFontToList(const WCHAR *dos_name, const char *unix_name, void *font_data_ptr,
@@ -1188,7 +1198,364 @@ static FcPattern *create_family_pattern( const char *name, FcPattern **cached )
     return ret;
 }
 
-static void fontconfig_add_font( FcPattern *pattern, UINT flags )
+#define FC_FACE_CACHE_MAGIC 0x57464331u /* "WFC1" */
+#define FC_ALIGN4(x) (((x) + 3u) & ~3u)
+
+struct fc_cache_header
+{
+    DWORD magic;
+    DWORD lcid;
+    DWORD default_aa_flags;
+    DWORD num_dirs;
+};
+
+struct fc_dir_entry_hdr
+{
+    INT64 mtime_sec;
+    INT64 mtime_nsec;
+    DWORD dir_len;      /* bytes, excluding NUL */
+    DWORD nfont;        /* FcFontSet::nfont */
+    DWORD num_faces;    /* number of parsed faces recorded */
+    DWORD data_size;    /* total bytes of face records following dir_path */
+};
+
+struct fc_face_rec_hdr
+{
+    DWORD face_index;
+    DWORD flags;
+    DWORD ntm_flags;
+    UINT  weight;
+    DWORD font_version;
+    FONTSIGNATURE fs;
+    struct bitmap_font_size size;
+    BYTE  scalable;
+    BYTE  reserved[3];
+    DWORD unix_name_len; /* bytes including NUL */
+    INT32 family_wlen;   /* WCHARs including NUL, -1 if NULL */
+    INT32 second_wlen;   /* WCHARs including NUL, -1 if NULL */
+    INT32 style_wlen;    /* WCHARs including NUL, -1 if NULL */
+    INT32 full_wlen;     /* WCHARs including NUL, -1 if NULL */
+};
+
+struct fc_dir_rec_buf
+{
+    char *data;
+    size_t size;
+    size_t cap;
+    DWORD num_faces;
+};
+
+struct fc_cached_dir
+{
+    const struct fc_dir_entry_hdr *hdr;
+    const char *dir_path;
+    const char *faces_data;
+    BOOL seen;
+};
+
+struct fc_cache_ctx
+{
+    void *map;
+    size_t map_size;
+    struct fc_cached_dir *dirs;
+    DWORD num_dirs;
+    struct fc_dir_rec_buf *new_dirs;
+    DWORD num_new_dirs;
+    DWORD cap_new_dirs;
+    BOOL dirty;
+};
+
+static BOOL fc_buf_append( struct fc_dir_rec_buf *buf, const void *src, size_t len )
+{
+    size_t aligned = FC_ALIGN4( len );
+    if (buf->size + aligned > buf->cap)
+    {
+        size_t new_cap = buf->cap ? buf->cap * 2 : 16384;
+        char *new_data;
+        while (new_cap < buf->size + aligned) new_cap *= 2;
+        if (!(new_data = realloc( buf->data, new_cap ))) return FALSE;
+        buf->data = new_data;
+        buf->cap = new_cap;
+    }
+    if (len) memcpy( buf->data + buf->size, src, len );
+    if (aligned > len) memset( buf->data + buf->size + len, 0, aligned - len );
+    buf->size += aligned;
+    return TRUE;
+}
+
+static void fc_record_face_cb( void *ctx, const char *unix_name, const struct unix_face *unix_face,
+                               DWORD face_index, DWORD flags )
+{
+    struct fc_dir_rec_buf *buf = ctx;
+    struct fc_face_rec_hdr rec;
+
+    if (!unix_name) return;
+
+    memset( &rec, 0, sizeof(rec) );
+    rec.face_index = face_index;
+    rec.flags = flags;
+    rec.ntm_flags = unix_face->ntm_flags;
+    rec.weight = unix_face->weight;
+    rec.font_version = unix_face->font_version;
+    rec.fs = unix_face->fs;
+    if (!unix_face->scalable) rec.size = unix_face->size;
+    rec.scalable = unix_face->scalable ? 1 : 0;
+    rec.unix_name_len = strlen( unix_name ) + 1;
+    rec.family_wlen = unix_face->family_name ? (INT32)(wcslen( unix_face->family_name ) + 1) : -1;
+    rec.second_wlen = unix_face->second_name ? (INT32)(wcslen( unix_face->second_name ) + 1) : -1;
+    rec.style_wlen  = unix_face->style_name  ? (INT32)(wcslen( unix_face->style_name ) + 1)  : -1;
+    rec.full_wlen   = unix_face->full_name   ? (INT32)(wcslen( unix_face->full_name ) + 1)   : -1;
+
+    if (!fc_buf_append( buf, &rec, sizeof(rec) )) return;
+    if (!fc_buf_append( buf, unix_name, rec.unix_name_len )) return;
+    if (rec.family_wlen > 0 && !fc_buf_append( buf, unix_face->family_name, rec.family_wlen * sizeof(WCHAR) )) return;
+    if (rec.second_wlen > 0 && !fc_buf_append( buf, unix_face->second_name, rec.second_wlen * sizeof(WCHAR) )) return;
+    if (rec.style_wlen  > 0 && !fc_buf_append( buf, unix_face->style_name,  rec.style_wlen * sizeof(WCHAR) ))  return;
+    if (rec.full_wlen   > 0 && !fc_buf_append( buf, unix_face->full_name,   rec.full_wlen * sizeof(WCHAR) ))   return;
+    buf->num_faces++;
+}
+
+static void fc_build_dos_name( const char *dir, size_t dir_len, const WCHAR *dos_dir, size_t dos_dir_len,
+                               const char *unix_name, WCHAR **out )
+{
+    if (dos_dir && dir_len > 0)
+    {
+        const char *base = NULL;
+        if (dir_len == 1 && dir[0] == '/')
+        {
+            if (unix_name[0] == '/') base = unix_name + 1;
+        }
+        else if (strncmp( unix_name, dir, dir_len ) == 0 && unix_name[dir_len] == '/')
+        {
+            base = unix_name + dir_len + 1;
+        }
+
+        if (base && *base && !strchr( base, '/' ))
+        {
+            size_t base_len = strlen( base );
+            size_t need_slash = (dos_dir_len > 0 && dos_dir[dos_dir_len - 1] != '\\') ? 1 : 0;
+            WCHAR *buf = malloc( (dos_dir_len + need_slash + base_len + 1) * sizeof(WCHAR) );
+            if (buf)
+            {
+                ULONG utf16_bytes = 0;
+                memcpy( buf, dos_dir, dos_dir_len * sizeof(WCHAR) );
+                if (need_slash) buf[dos_dir_len++] = '\\';
+                if (!RtlUTF8ToUnicodeN( buf + dos_dir_len, (base_len + 1) * sizeof(WCHAR),
+                                        &utf16_bytes, base, base_len ))
+                {
+                    buf[dos_dir_len + utf16_bytes / sizeof(WCHAR)] = 0;
+                    *out = buf;
+                    return;
+                }
+                free( buf );
+            }
+        }
+    }
+    *out = NULL;
+    ntdll_get_dos_file_name( unix_name, out, FILE_OPEN );
+}
+
+static void fc_get_cache_path( char *path, size_t size )
+{
+    const char *xdg = getenv( "XDG_CACHE_HOME" );
+    const char *home = getenv( "HOME" );
+    char dir[900];
+
+    if (xdg && xdg[0])
+    {
+        snprintf( dir, sizeof(dir), "%s/wine", xdg );
+        mkdir( dir, 0755 );
+        snprintf( path, size, "%s/fc_faces_%x.bin", dir, (unsigned int)system_lcid );
+    }
+    else if (home && home[0])
+    {
+        snprintf( dir, sizeof(dir), "%s/.cache", home );
+        mkdir( dir, 0755 );
+        snprintf( dir, sizeof(dir), "%s/.cache/wine", home );
+        mkdir( dir, 0755 );
+        snprintf( path, size, "%s/fc_faces_%x.bin", dir, (unsigned int)system_lcid );
+    }
+    else
+    {
+        snprintf( path, size, "/tmp/wine_fc_faces_%u_%x.bin", (unsigned int)getuid(), (unsigned int)system_lcid );
+    }
+}
+
+static void fc_cache_load( struct fc_cache_ctx *ctx, const char *cache_path )
+{
+    const struct fc_cache_header *hdr;
+    struct stat st;
+    const char *p, *end;
+    DWORD i;
+    int fd;
+
+    memset( ctx, 0, sizeof(*ctx) );
+    if ((fd = open( cache_path, O_RDONLY )) == -1) return;
+    if (fstat( fd, &st ) == -1 || st.st_size < (off_t)sizeof(*hdr))
+    {
+        close( fd );
+        return;
+    }
+    ctx->map_size = st.st_size;
+    ctx->map = mmap( NULL, ctx->map_size, PROT_READ, MAP_PRIVATE, fd, 0 );
+    close( fd );
+    if (ctx->map == MAP_FAILED)
+    {
+        ctx->map = NULL;
+        return;
+    }
+
+    hdr = ctx->map;
+    if (hdr->magic != FC_FACE_CACHE_MAGIC || hdr->lcid != system_lcid ||
+        hdr->default_aa_flags != default_aa_flags || hdr->num_dirs > 4096)
+    {
+        munmap( ctx->map, ctx->map_size );
+        ctx->map = NULL;
+        return;
+    }
+
+    if (!(ctx->dirs = calloc( hdr->num_dirs ? hdr->num_dirs : 1, sizeof(*ctx->dirs) )))
+    {
+        munmap( ctx->map, ctx->map_size );
+        ctx->map = NULL;
+        return;
+    }
+
+    p = (const char *)(hdr + 1);
+    end = (const char *)ctx->map + ctx->map_size;
+    for (i = 0; i < hdr->num_dirs; i++)
+    {
+        const struct fc_dir_entry_hdr *dhdr;
+        size_t dir_aligned;
+
+        if ((size_t)(end - p) < sizeof(*dhdr)) break;
+        dhdr = (const struct fc_dir_entry_hdr *)p;
+        p += sizeof(*dhdr);
+        dir_aligned = FC_ALIGN4( dhdr->dir_len );
+        if ((size_t)(end - p) < dir_aligned) break;
+        ctx->dirs[i].hdr = dhdr;
+        ctx->dirs[i].dir_path = p;
+        p += dir_aligned;
+        if ((size_t)(end - p) < dhdr->data_size) break;
+        ctx->dirs[i].faces_data = p;
+        p += dhdr->data_size;
+        ctx->num_dirs++;
+    }
+}
+
+static BOOL fc_cache_replay_dir( const struct fc_cached_dir *cdir, const char *dir, size_t dir_len,
+                                 const WCHAR *dos_dir, size_t dos_dir_len )
+{
+    const char *p = cdir->faces_data;
+    const char *end = p + cdir->hdr->data_size;
+    DWORD i;
+
+    for (i = 0; i < cdir->hdr->num_faces; i++)
+    {
+        const struct fc_face_rec_hdr *rec;
+        const char *unix_name;
+        const WCHAR *family_name = NULL, *second_name = NULL, *style_name = NULL, *full_name = NULL;
+        WCHAR *dos_name = NULL;
+
+        if ((size_t)(end - p) < sizeof(*rec)) return FALSE;
+        rec = (const struct fc_face_rec_hdr *)p;
+        p += sizeof(*rec);
+
+        if ((size_t)(end - p) < FC_ALIGN4( rec->unix_name_len )) return FALSE;
+        unix_name = p;
+        p += FC_ALIGN4( rec->unix_name_len );
+
+        if (rec->family_wlen > 0)
+        {
+            size_t bytes = FC_ALIGN4( (size_t)rec->family_wlen * sizeof(WCHAR) );
+            if ((size_t)(end - p) < bytes) return FALSE;
+            family_name = (const WCHAR *)p;
+            p += bytes;
+        }
+        if (rec->second_wlen > 0)
+        {
+            size_t bytes = FC_ALIGN4( (size_t)rec->second_wlen * sizeof(WCHAR) );
+            if ((size_t)(end - p) < bytes) return FALSE;
+            second_name = (const WCHAR *)p;
+            p += bytes;
+        }
+        if (rec->style_wlen > 0)
+        {
+            size_t bytes = FC_ALIGN4( (size_t)rec->style_wlen * sizeof(WCHAR) );
+            if ((size_t)(end - p) < bytes) return FALSE;
+            style_name = (const WCHAR *)p;
+            p += bytes;
+        }
+        if (rec->full_wlen > 0)
+        {
+            size_t bytes = FC_ALIGN4( (size_t)rec->full_wlen * sizeof(WCHAR) );
+            if ((size_t)(end - p) < bytes) return FALSE;
+            full_name = (const WCHAR *)p;
+            p += bytes;
+        }
+
+        fc_build_dos_name( dir, dir_len, dos_dir, dos_dir_len, unix_name, &dos_name );
+        add_gdi_face( family_name, second_name, style_name, full_name, dos_name, NULL, 0,
+                      rec->face_index, rec->fs, rec->ntm_flags, rec->weight, rec->font_version,
+                      rec->flags, rec->scalable ? NULL : &rec->size );
+        free( dos_name );
+    }
+    return TRUE;
+}
+
+static void fc_cache_save( struct fc_cache_ctx *ctx, const char *cache_path )
+{
+    struct fc_cache_header hdr;
+    char tmp_path[1100];
+    DWORD i, total_dirs = 0;
+    int fd;
+
+    for (i = 0; i < ctx->num_dirs; i++)
+        if (ctx->dirs[i].seen) total_dirs++;
+    total_dirs += ctx->num_new_dirs;
+
+    snprintf( tmp_path, sizeof(tmp_path), "%s.tmp.%u", cache_path, (unsigned int)getpid() );
+    if ((fd = open( tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644 )) == -1) return;
+
+    hdr.magic = FC_FACE_CACHE_MAGIC;
+    hdr.lcid = system_lcid;
+    hdr.default_aa_flags = default_aa_flags;
+    hdr.num_dirs = total_dirs;
+    if (write( fd, &hdr, sizeof(hdr) ) != sizeof(hdr)) goto fail;
+
+    for (i = 0; i < ctx->num_dirs; i++)
+    {
+        const struct fc_cached_dir *cd = &ctx->dirs[i];
+        size_t dir_aligned;
+        static const char zeros[4] = {0};
+
+        if (!cd->seen) continue;
+        dir_aligned = FC_ALIGN4( cd->hdr->dir_len );
+        if (write( fd, cd->hdr, sizeof(*cd->hdr) ) != sizeof(*cd->hdr)) goto fail;
+        if (write( fd, cd->dir_path, cd->hdr->dir_len ) != (ssize_t)cd->hdr->dir_len) goto fail;
+        if (dir_aligned > cd->hdr->dir_len &&
+            write( fd, zeros, dir_aligned - cd->hdr->dir_len ) != (ssize_t)(dir_aligned - cd->hdr->dir_len)) goto fail;
+        if (cd->hdr->data_size &&
+            write( fd, cd->faces_data, cd->hdr->data_size ) != (ssize_t)cd->hdr->data_size) goto fail;
+    }
+
+    for (i = 0; i < ctx->num_new_dirs; i++)
+    {
+        const struct fc_dir_rec_buf *nb = &ctx->new_dirs[i];
+        if (write( fd, nb->data, nb->size ) != (ssize_t)nb->size) goto fail;
+    }
+
+    close( fd );
+    if (rename( tmp_path, cache_path ) == -1) unlink( tmp_path );
+    return;
+
+fail:
+    close( fd );
+    unlink( tmp_path );
+}
+
+static void fontconfig_add_font( FcPattern *pattern, UINT flags, const char *dir, size_t dir_len,
+                                 const WCHAR *dos_dir, size_t dos_dir_len, struct fc_dir_rec_buf *rec_buf )
 {
     const char *unix_name, *format;
     WCHAR *dos_name;
@@ -1228,8 +1595,9 @@ static void fontconfig_add_font( FcPattern *pattern, UINT flags )
     if (pFcPatternGetInteger( pattern, FC_INDEX, 0, &face_index ) != FcResultMatch)
         face_index = 0;
 
-    ntdll_get_dos_file_name( unix_name, &dos_name, FILE_OPEN );
-    add_unix_face( unix_name, dos_name, NULL, 0, face_index, flags, NULL );
+    fc_build_dos_name( dir, dir_len, dos_dir, dos_dir_len, unix_name, &dos_name );
+    add_unix_face_cached( unix_name, dos_name, NULL, 0, face_index, flags, NULL,
+                          rec_buf ? fc_record_face_cb : NULL, rec_buf );
     free( dos_name );
 }
 
@@ -1292,7 +1660,41 @@ static void init_fontconfig(void)
     }
 }
 
-static void fontconfig_add_fonts_from_dir_list( FcConfig *config, FcStrList *dir_list, FcStrSet *done_set, UINT flags )
+static struct fc_cached_dir *fc_cache_find_dir( struct fc_cache_ctx *ctx, const char *dir, size_t dir_len,
+                                                const struct stat *st, DWORD nfont )
+{
+    DWORD i;
+    for (i = 0; i < ctx->num_dirs; i++)
+    {
+        struct fc_cached_dir *cd = &ctx->dirs[i];
+        if (cd->hdr->dir_len == dir_len &&
+            cd->hdr->nfont == nfont &&
+            cd->hdr->mtime_sec == (INT64)st->st_mtim.tv_sec &&
+            cd->hdr->mtime_nsec == (INT64)st->st_mtim.tv_nsec &&
+            memcmp( cd->dir_path, dir, dir_len ) == 0)
+        {
+            return cd;
+        }
+    }
+    return NULL;
+}
+
+static struct fc_dir_rec_buf *fc_cache_alloc_new_dir( struct fc_cache_ctx *ctx )
+{
+    if (ctx->num_new_dirs >= ctx->cap_new_dirs)
+    {
+        DWORD new_cap = ctx->cap_new_dirs ? ctx->cap_new_dirs * 2 : 32;
+        struct fc_dir_rec_buf *arr = realloc( ctx->new_dirs, new_cap * sizeof(*arr) );
+        if (!arr) return NULL;
+        ctx->new_dirs = arr;
+        ctx->cap_new_dirs = new_cap;
+    }
+    memset( &ctx->new_dirs[ctx->num_new_dirs], 0, sizeof(ctx->new_dirs[0]) );
+    return &ctx->new_dirs[ctx->num_new_dirs++];
+}
+
+static void fontconfig_add_fonts_from_dir_list( FcConfig *config, FcStrList *dir_list, FcStrSet *done_set,
+                                                UINT flags, struct fc_cache_ctx *ctx )
 {
     const FcChar8 *dir;
     FcFontSet *font_set = NULL;
@@ -1305,14 +1707,63 @@ static void fontconfig_add_fonts_from_dir_list( FcConfig *config, FcStrList *dir
 
     while ((dir = pFcStrListNext( dir_list )))
     {
+        const char *dir_str = (const char *)dir;
+        size_t dir_len;
+        WCHAR *dos_dir = NULL;
+        size_t dos_dir_len = 0;
+        struct stat dir_st;
+        BOOL have_stat;
+        struct fc_cached_dir *cached_dir = NULL;
+
         if (pFcStrSetMember( done_set, dir )) continue;
 
         TRACE( "adding fonts from %s\n", dir );
         if (!(cache = pFcDirCacheRead( dir, FcFalse, config ))) continue;
 
         if (!(font_set = pFcCacheCopySet( cache ))) goto done;
-        for (i = 0; i < font_set->nfont; i++)
-            fontconfig_add_font( font_set->fonts[i], flags );
+
+        dir_len = strlen( dir_str );
+        if (!ntdll_get_dos_file_name( dir_str, &dos_dir, FILE_OPEN ) && dos_dir)
+            dos_dir_len = wcslen( dos_dir );
+
+        have_stat = (stat( dir_str, &dir_st ) == 0);
+        if (have_stat && font_set->nfont > 0)
+            cached_dir = fc_cache_find_dir( ctx, dir_str, dir_len, &dir_st, (DWORD)font_set->nfont );
+
+        if (cached_dir && fc_cache_replay_dir( cached_dir, dir_str, dir_len, dos_dir, dos_dir_len ))
+        {
+            cached_dir->seen = TRUE;
+        }
+        else
+        {
+            struct fc_dir_rec_buf *rec_buf = NULL;
+            struct fc_dir_entry_hdr dhdr;
+
+            if (have_stat && font_set->nfont > 0 && (rec_buf = fc_cache_alloc_new_dir( ctx )))
+            {
+                memset( &dhdr, 0, sizeof(dhdr) );
+                dhdr.mtime_sec = (INT64)dir_st.st_mtim.tv_sec;
+                dhdr.mtime_nsec = (INT64)dir_st.st_mtim.tv_nsec;
+                dhdr.dir_len = (DWORD)dir_len;
+                dhdr.nfont = (DWORD)font_set->nfont;
+                fc_buf_append( rec_buf, &dhdr, sizeof(dhdr) );
+                fc_buf_append( rec_buf, dir_str, dir_len );
+                ctx->dirty = TRUE;
+            }
+
+            for (i = 0; i < font_set->nfont; i++)
+                fontconfig_add_font( font_set->fonts[i], flags, dir_str, dir_len, dos_dir, dos_dir_len, rec_buf );
+
+            if (rec_buf)
+            {
+                size_t hdr_bytes = sizeof(dhdr) + FC_ALIGN4( dir_len );
+                struct fc_dir_entry_hdr *hdr_ptr = (struct fc_dir_entry_hdr *)rec_buf->data;
+                hdr_ptr->num_faces = rec_buf->num_faces;
+                hdr_ptr->data_size = (DWORD)(rec_buf->size - hdr_bytes);
+            }
+        }
+
+        free( dos_dir );
         pFcFontSetDestroy( font_set );
         font_set = NULL;
 
@@ -1327,12 +1778,13 @@ static void fontconfig_add_fonts_from_dir_list( FcConfig *config, FcStrList *dir
         subdir_set = NULL;
 
         pFcStrSetAdd( done_set, dir );
-        fontconfig_add_fonts_from_dir_list( config, subdir_list, done_set, flags );
+        fontconfig_add_fonts_from_dir_list( config, subdir_list, done_set, flags, ctx );
         pFcStrListDone( subdir_list );
         subdir_list = NULL;
     }
 
 done:
+    if (font_set) pFcFontSetDestroy( font_set );
     if (subdir_set) pFcStrSetDestroy( subdir_set );
     if (cache) pFcDirCacheUnload( cache );
 }
@@ -1342,13 +1794,26 @@ static void load_fontconfig_fonts( void )
     FcStrList *dir_list = NULL;
     FcStrSet *done_set = NULL;
     FcConfig *config;
+    struct fc_cache_ctx ctx;
+    char cache_path[1024];
+    DWORD i;
 
     if (!fontconfig_enabled) return;
     if (!(config = pFcConfigGetCurrent())) goto done;
     if (!(done_set = pFcStrSetCreate())) goto done;
     if (!(dir_list = pFcConfigGetFontDirs( config ))) goto done;
 
-    fontconfig_add_fonts_from_dir_list( config, dir_list, done_set, ADDFONT_EXTERNAL_FONT );
+    fc_get_cache_path( cache_path, sizeof(cache_path) );
+    fc_cache_load( &ctx, cache_path );
+
+    fontconfig_add_fonts_from_dir_list( config, dir_list, done_set, ADDFONT_EXTERNAL_FONT, &ctx );
+
+    if (ctx.dirty) fc_cache_save( &ctx, cache_path );
+
+    for (i = 0; i < ctx.num_new_dirs; i++) free( ctx.new_dirs[i].data );
+    free( ctx.new_dirs );
+    free( ctx.dirs );
+    if (ctx.map) munmap( ctx.map, ctx.map_size );
 
 done:
     if (dir_list) pFcStrListDone( dir_list );
