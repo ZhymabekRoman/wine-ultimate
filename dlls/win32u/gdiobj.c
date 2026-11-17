@@ -87,7 +87,32 @@ static const LOGBRUSH DkGrayBrush = { BS_SOLID, RGB(64,64,64), 0 };
 
 static const LOGBRUSH DCBrush = { BS_SOLID, RGB(255,255,255), 0 };
 
-static pthread_mutex_t gdi_lock;
+#define GDI_LOCK_BUCKETS 256
+#define GDI_LOCK_BUCKET(idx) ((idx) & (GDI_LOCK_BUCKETS - 1))
+
+struct gdi_lock_bucket
+{
+    pthread_mutex_t lock;
+    char pad[64 - (sizeof(pthread_mutex_t) & 63)];
+};
+
+static struct gdi_lock_bucket gdi_buckets[GDI_LOCK_BUCKETS];
+static pthread_mutex_t gdi_alloc_lock;
+
+static __thread unsigned int tls_gdi_lock_stack[32];
+static __thread unsigned int tls_gdi_lock_depth;
+
+static inline unsigned int lock_gdi_bucket( unsigned int idx )
+{
+    unsigned int b = GDI_LOCK_BUCKET( idx );
+    pthread_mutex_lock( &gdi_buckets[b].lock );
+    return b;
+}
+
+static inline void unlock_gdi_bucket( unsigned int b )
+{
+    pthread_mutex_unlock( &gdi_buckets[b].lock );
+}
 
 
 /****************************************************************************
@@ -452,10 +477,10 @@ static const struct DefaultFontInfo default_fonts[] =
 void make_gdi_object_system( HGDIOBJ handle, BOOL set)
 {
     GDI_HANDLE_ENTRY *entry;
+    unsigned int b = lock_gdi_bucket( LOWORD(handle) );
 
-    pthread_mutex_lock( &gdi_lock );
     if ((entry = handle_entry( handle ))) entry_obj( entry )->system = !!set;
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
 }
 
 /******************************************************************************
@@ -490,10 +515,10 @@ UINT GDI_get_ref_count( HGDIOBJ handle )
 {
     GDI_HANDLE_ENTRY *entry;
     UINT ret = 0;
+    unsigned int b = lock_gdi_bucket( LOWORD(handle) );
 
-    pthread_mutex_lock( &gdi_lock );
     if ((entry = handle_entry( handle ))) ret = entry_obj( entry )->selcount;
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
     return ret;
 }
 
@@ -506,11 +531,11 @@ UINT GDI_get_ref_count( HGDIOBJ handle )
 HGDIOBJ GDI_inc_ref_count( HGDIOBJ handle )
 {
     GDI_HANDLE_ENTRY *entry;
+    unsigned int b = lock_gdi_bucket( LOWORD(handle) );
 
-    pthread_mutex_lock( &gdi_lock );
     if ((entry = handle_entry( handle ))) entry_obj( entry )->selcount++;
     else handle = 0;
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
     return handle;
 }
 
@@ -523,8 +548,8 @@ HGDIOBJ GDI_inc_ref_count( HGDIOBJ handle )
 BOOL GDI_dec_ref_count( HGDIOBJ handle )
 {
     GDI_HANDLE_ENTRY *entry;
+    unsigned int b = lock_gdi_bucket( LOWORD(handle) );
 
-    pthread_mutex_lock( &gdi_lock );
     if ((entry = handle_entry( handle )))
     {
         assert( entry_obj( entry )->selcount );
@@ -532,13 +557,13 @@ BOOL GDI_dec_ref_count( HGDIOBJ handle )
         {
             /* handle delayed DeleteObject*/
             entry_obj( entry )->deleted = 0;
-            pthread_mutex_unlock( &gdi_lock );
+            unlock_gdi_bucket( b );
             TRACE( "executing delayed DeleteObject for %p\n", handle );
             NtGdiDeleteObjectApp( handle );
             return TRUE;
         }
     }
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
     return entry != NULL;
 }
 
@@ -691,13 +716,17 @@ static const char *gdi_obj_type( unsigned type )
 
 static void dump_gdi_objects( void )
 {
-    GDI_HANDLE_ENTRY *entry;
+    GDI_HANDLE_ENTRY *entry, *end;
 
     TRACE( "%u objects:\n", GDI_MAX_HANDLE_COUNT );
 
-    pthread_mutex_lock( &gdi_lock );
-    for (entry = gdi_shared->Handles; entry < next_unused; entry++)
+    pthread_mutex_lock( &gdi_alloc_lock );
+    end = next_unused;
+    pthread_mutex_unlock( &gdi_alloc_lock );
+
+    for (entry = gdi_shared->Handles; entry < end; entry++)
     {
+        unsigned int b = lock_gdi_bucket( entry - gdi_shared->Handles );
         if (!entry->Type)
             TRACE( "handle %p FREE\n", entry_to_handle( entry ));
         else
@@ -705,8 +734,8 @@ static void dump_gdi_objects( void )
                    entry_to_handle( entry ), wine_dbgstr_longlong( entry->Object ),
                    gdi_obj_type( entry->ExtType << NTGDI_HANDLE_TYPE_SHIFT ),
                    entry_obj( entry )->selcount, entry_obj( entry )->deleted );
+        unlock_gdi_bucket( b );
     }
-    pthread_mutex_unlock( &gdi_lock );
 }
 
 /***********************************************************************
@@ -718,10 +747,11 @@ HGDIOBJ alloc_gdi_handle( struct gdi_obj_header *obj, DWORD type, const struct g
 {
     GDI_HANDLE_ENTRY *entry;
     HGDIOBJ ret;
+    unsigned int b;
 
     assert( type );  /* type 0 is reserved to mark free entries */
 
-    pthread_mutex_lock( &gdi_lock );
+    pthread_mutex_lock( &gdi_alloc_lock );
 
     entry = next_free;
     if (entry)
@@ -730,21 +760,26 @@ HGDIOBJ alloc_gdi_handle( struct gdi_obj_header *obj, DWORD type, const struct g
         entry = next_unused++;
     else
     {
-        pthread_mutex_unlock( &gdi_lock );
+        pthread_mutex_unlock( &gdi_alloc_lock );
         ERR( "out of GDI object handles, expect a crash\n" );
         if (TRACE_ON(gdi)) dump_gdi_objects();
         return 0;
     }
+    pthread_mutex_unlock( &gdi_alloc_lock );
+
     obj->funcs    = funcs;
     obj->selcount = 0;
     obj->system   = 0;
     obj->deleted  = 0;
+
+    b = lock_gdi_bucket( entry - gdi_shared->Handles );
     entry->Object  = (UINT_PTR)obj;
     entry->ExtType = type >> NTGDI_HANDLE_TYPE_SHIFT;
     entry->Type    = entry->ExtType & 0x1f;
     if (++entry->Generation == 0x80) entry->Generation = 1;
     ret = entry_to_handle( entry );
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
+
     TRACE( "allocated %s %p %u/%u\n", gdi_obj_type(type), ret,
            InterlockedIncrement( &debug_count ), GDI_MAX_HANDLE_COUNT );
     return ret;
@@ -760,18 +795,25 @@ void *free_gdi_handle( HGDIOBJ handle )
 {
     void *object = NULL;
     GDI_HANDLE_ENTRY *entry;
+    unsigned int b = lock_gdi_bucket( LOWORD(handle) );
 
-    pthread_mutex_lock( &gdi_lock );
     if ((entry = handle_entry( handle )))
     {
         TRACE( "freed %s %p %u/%u\n", gdi_obj_type( entry->ExtType << NTGDI_HANDLE_TYPE_SHIFT ),
                handle, InterlockedDecrement( &debug_count ) + 1, GDI_MAX_HANDLE_COUNT );
         object = entry_obj( entry );
         entry->Type = 0;
+        entry->Object = 0;
+    }
+    unlock_gdi_bucket( b );
+
+    if (entry)
+    {
+        pthread_mutex_lock( &gdi_alloc_lock );
         entry->Object = (UINT_PTR)next_free;
         next_free = entry;
+        pthread_mutex_unlock( &gdi_alloc_lock );
     }
-    pthread_mutex_unlock( &gdi_lock );
     return object;
 }
 
@@ -798,8 +840,11 @@ void *get_any_obj_ptr( HGDIOBJ handle, DWORD *type )
 {
     void *ptr = NULL;
     GDI_HANDLE_ENTRY *entry;
+    unsigned int b;
 
-    pthread_mutex_lock( &gdi_lock );
+    if (!handle) return NULL;
+
+    b = lock_gdi_bucket( LOWORD(handle) );
 
     if ((entry = handle_entry( handle )))
     {
@@ -807,7 +852,13 @@ void *get_any_obj_ptr( HGDIOBJ handle, DWORD *type )
         *type = entry->ExtType << NTGDI_HANDLE_TYPE_SHIFT;
     }
 
-    if (!ptr) pthread_mutex_unlock( &gdi_lock );
+    if (!ptr)
+        unlock_gdi_bucket( b );
+    else
+    {
+        assert( tls_gdi_lock_depth < ARRAY_SIZE( tls_gdi_lock_stack ) );
+        tls_gdi_lock_stack[tls_gdi_lock_depth++] = b;
+    }
     return ptr;
 }
 
@@ -836,7 +887,8 @@ void *GDI_GetObjPtr( HGDIOBJ handle, DWORD type )
  */
 void GDI_ReleaseObj( HGDIOBJ handle )
 {
-    pthread_mutex_unlock( &gdi_lock );
+    assert( tls_gdi_lock_depth > 0 );
+    unlock_gdi_bucket( tls_gdi_lock_stack[--tls_gdi_lock_depth] );
 }
 
 
@@ -859,11 +911,11 @@ BOOL WINAPI NtGdiDeleteObjectApp( HGDIOBJ obj )
     GDI_HANDLE_ENTRY *entry;
     const struct gdi_obj_funcs *funcs = NULL;
     struct gdi_obj_header *header;
+    unsigned int b = lock_gdi_bucket( LOWORD(obj) );
 
-    pthread_mutex_lock( &gdi_lock );
     if (!(entry = handle_entry( obj )))
     {
-        pthread_mutex_unlock( &gdi_lock );
+        unlock_gdi_bucket( b );
         return FALSE;
     }
 
@@ -871,7 +923,7 @@ BOOL WINAPI NtGdiDeleteObjectApp( HGDIOBJ obj )
     if (header->system)
     {
 	TRACE("Preserving system object %p\n", obj);
-        pthread_mutex_unlock( &gdi_lock );
+        unlock_gdi_bucket( b );
 	return TRUE;
     }
 
@@ -884,7 +936,7 @@ BOOL WINAPI NtGdiDeleteObjectApp( HGDIOBJ obj )
     }
     else funcs = header->funcs;
 
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
 
     TRACE("%p\n", obj );
 
@@ -928,16 +980,17 @@ INT WINAPI NtGdiExtGetObjectW( HGDIOBJ handle, INT count, void *buffer )
     GDI_HANDLE_ENTRY *entry;
     const struct gdi_obj_funcs *funcs = NULL;
     INT result = 0;
+    unsigned int b;
 
     TRACE("%p %d %p\n", handle, count, buffer );
 
-    pthread_mutex_lock( &gdi_lock );
+    b = lock_gdi_bucket( LOWORD(handle) );
     if ((entry = handle_entry( handle )))
     {
         funcs = entry_obj( entry )->funcs;
         handle = entry_to_handle( entry );  /* make it a full handle */
     }
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
 
     if (funcs && funcs->pGetObjectW)
     {
@@ -988,14 +1041,14 @@ BOOL WINAPI NtGdiUnrealizeObject( HGDIOBJ obj )
 {
     const struct gdi_obj_funcs *funcs = NULL;
     GDI_HANDLE_ENTRY *entry;
+    unsigned int b = lock_gdi_bucket( LOWORD(obj) );
 
-    pthread_mutex_lock( &gdi_lock );
     if ((entry = handle_entry( obj )))
     {
         funcs = entry_obj( entry )->funcs;
         obj = entry_to_handle( entry );  /* make it a full handle */
     }
-    pthread_mutex_unlock( &gdi_lock );
+    unlock_gdi_bucket( b );
 
     if (funcs && funcs->pUnrealizeObject) return funcs->pUnrealizeObject( obj );
     return funcs != NULL;
@@ -1032,12 +1085,14 @@ BOOL WINAPI NtGdiSetColorAdjustment( HDC hdc, const COLORADJUSTMENT *ca )
 void gdi_init(void)
 {
     pthread_mutexattr_t attr;
-    unsigned int dpi;
+    unsigned int i, dpi;
 
     pthread_mutexattr_init( &attr );
     pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
-    pthread_mutex_init( &gdi_lock, &attr );
+    for (i = 0; i < GDI_LOCK_BUCKETS; i++)
+        pthread_mutex_init( &gdi_buckets[i].lock, &attr );
     pthread_mutexattr_destroy( &attr );
+    pthread_mutex_init( &gdi_alloc_lock, NULL );
 
     init_gdi_shared();
     if (!gdi_shared) return;
