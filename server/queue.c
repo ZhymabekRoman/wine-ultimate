@@ -936,34 +936,6 @@ static inline int qsync_debug( void )
 #define QSTATE QSYNC("%s q=%p wb=%08x cb=%08x wm=%08x cm=%08x", tag, queue, \
     queue_shm->wake_bits, queue_shm->changed_bits, queue_shm->wake_mask, queue_shm->changed_mask)
 
-/* check if the queue has any pending wake condition, ignoring the
- * per-caller masks: the wake event must track "queue has work" so that
- * a consumed wake-up is re-armed while any source (timer, paint,
- * driver, posted) is still pending, not only sources matching the
- * mask installed by the last visitor */
-static inline int get_queue_msgs( struct msg_queue *queue )
-{
-    const queue_shm_t *queue_shm = queue->shared;
-    return queue_shm->wake_bits || queue_shm->changed_bits || queue_shm->internal_bits;
-}
-
-/* like get_queue_msgs() but matching MsgWaitForMultipleObjects semantics:
- * sent messages (QS_SENDMESSAGE) are dispatched by the message pump itself,
- * so they must not keep a MsgWait wake event signaled; doing so starves
- * timer/paint/posted wakes behind a perpetual wake that PeekMessage(0,0)
- * can never drain */
-static inline int get_queue_wait_msgs( struct msg_queue *queue )
-{
-    const queue_shm_t *queue_shm = queue->shared;
-    /* QS_TIMER aggregates WM_TIMER and WM_SYSTIMER; the periodic system
-     * timers (caret, tray) re-arm the MsgWait wake event every second, so
-     * exclude QS_TIMER from the wake mask and let the MsgWait timeout be
-     * the pump driver for them (Windows: MsgWait wakes on user input,
-     * paint, posted, timer - systray caret is not a wake source) */
-    return (queue_shm->wake_bits & (QS_ALLINPUT & ~(QS_SENDMESSAGE | QS_TIMER))) ||
-           queue_shm->changed_bits || queue_shm->internal_bits;
-}
-
 /* set some queue bits */
 static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
 {
@@ -988,7 +960,7 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
 
     msg_shm_sync_state( queue );
 
-    if (get_queue_msgs( queue ))
+    if (get_queue_status( queue ))
     {
         const char *tag = "setbits->sig";
         QSTATE;
@@ -1020,7 +992,7 @@ static inline void clear_queue_bits( struct msg_queue *queue, unsigned int bits 
         if (queue->keystate_lock) unlock_input_keystate( queue->input );
         queue->keystate_lock = 0;
     }
-    if (!get_queue_msgs( queue ))
+    if (!get_queue_status( queue ))
     {
         const char *tag = "clrbits->rst";
         QSTATE;
@@ -3431,7 +3403,7 @@ DECL_HANDLER(set_queue_mask)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_wait_msgs( queue ))
+    if (!get_queue_status( queue ))
     {
         const char *tag = "setmask->rst";
         QSTATE;
@@ -3464,7 +3436,7 @@ DECL_HANDLER(get_queue_status)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_msgs( queue ))
+    if (!get_queue_status( queue ))
     {
         const char *tag = "getstat->rst";
         QSTATE;
@@ -3672,7 +3644,7 @@ DECL_HANDLER(get_message)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_msgs( queue ))
+    if (!get_queue_status( queue ))
     {
         const char *tag = "getmsg->rst";
         QSTATE;
@@ -3737,7 +3709,7 @@ DECL_HANDLER(get_message)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_msgs( queue ))
+    if (!get_queue_status( queue ))
     {
         const char *tag = "pend->rst";
         QSTATE;
