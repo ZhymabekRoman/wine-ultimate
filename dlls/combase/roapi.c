@@ -405,6 +405,7 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         { L"Windows.System.Profile.EducationSettings",                  L"windows.system.profile.dll" },
         { L"Windows.Devices.Input.PenDevice",                           L"windows.devices.input.dll" },
         { L"Windows.System.User",                                       L"windows.system.dll" },
+        { L"Windows.Management.Policies.NamedPolicy",                   L"windows.system.dll" },
         { L"Windows.System.DispatcherQueue",                            L"coremessaging.dll" },
         { L"Windows.System.DispatcherQueueController",                  L"coremessaging.dll" },
         { L"Microsoft.UI.Dispatching.DispatcherQueue",                  L"coremessaging.dll" },

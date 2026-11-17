@@ -3051,6 +3051,326 @@ static struct logging_channel_factory logging_channel_factory_obj =
     logging_channel_factory2_vtbl,
 };
 
+/* Windows.Foundation.Diagnostics.LoggingOptions
+ *
+ * Value-bag options object for LoggingChannel creation.  ILoggingOptions
+ * {3dc7f4c9-27b7-4874-8b27-79e3e5d7b89c} carries seven get/put property pairs
+ * (Keywords INT64, Tags UINT32, Task HSTRING, Opcode BYTE, ActivityId GUID,
+ * RelatedActivityId GUID, CorrelationVector HSTRING) at slots 6..19.  The
+ * class factory serves both IActivationFactory (ActivateInstance) and
+ * ILoggingOptionsFactory {d713c6cb-98ab-464b-9f22-a3268478368a}
+ * (CreateLoggingOptions slot 6, CreateWithKeywords(INT64,...) slot 7);
+ * mspaint resolves the class with the factory IID directly. */
+static const GUID IID_ILoggingOptionsFactory =
+    { 0xd713c6cb, 0x98ab, 0x464b, { 0x9f, 0x22, 0xa3, 0x26, 0x84, 0x78, 0x36, 0x8a } };
+static const GUID IID_ILoggingOptions =
+    { 0x3dc7f4c9, 0x27b7, 0x4874, { 0x8b, 0x27, 0x79, 0xe3, 0xe5, 0xd7, 0xb8, 0x9c } };
+
+struct logging_options
+{
+    const void **vtbl;
+    LONG ref;
+    INT64 keywords;
+    UINT32 tags;
+    HSTRING task;
+    BYTE opcode;
+    GUID activity_id;
+    GUID related_activity_id;
+    HSTRING correlation_vector;
+};
+
+static inline struct logging_options *impl_from_logging_options( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct logging_options, vtbl );
+}
+
+static HRESULT WINAPI logging_options_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ILoggingOptions ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "logging_options: unknown iid %s\n", debugstr_guid(iid) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI logging_options_AddRef( void *iface )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI logging_options_Release( void *iface )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        WindowsDeleteString( impl->task );
+        WindowsDeleteString( impl->correlation_vector );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI logging_options_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Diagnostics.LoggingOptions", 45, name );
+}
+
+static HRESULT WINAPI logging_options_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_get_Keywords( void *iface, INT64 *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (!value) return E_POINTER;
+    *value = impl->keywords;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_put_Keywords( void *iface, INT64 value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    impl->keywords = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_get_Tags( void *iface, UINT32 *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (!value) return E_POINTER;
+    *value = impl->tags;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_put_Tags( void *iface, UINT32 value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    impl->tags = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_get_Task( void *iface, HSTRING *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->task, value );
+}
+
+static HRESULT WINAPI logging_options_put_Task( void *iface, HSTRING value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    WindowsDeleteString( impl->task );
+    return WindowsDuplicateString( value, &impl->task );
+}
+
+static HRESULT WINAPI logging_options_get_Opcode( void *iface, BYTE *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (!value) return E_POINTER;
+    *value = impl->opcode;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_put_Opcode( void *iface, BYTE value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    impl->opcode = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_get_ActivityId( void *iface, GUID *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (!value) return E_POINTER;
+    *value = impl->activity_id;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_put_ActivityId( void *iface, const GUID *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (value) impl->activity_id = *value;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_get_RelatedActivityId( void *iface, GUID *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (!value) return E_POINTER;
+    *value = impl->related_activity_id;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_put_RelatedActivityId( void *iface, const GUID *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (value) impl->related_activity_id = *value;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_get_CorrelationVector( void *iface, HSTRING *value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->correlation_vector, value );
+}
+
+static HRESULT WINAPI logging_options_put_CorrelationVector( void *iface, HSTRING value )
+{
+    struct logging_options *impl = impl_from_logging_options( iface );
+    WindowsDeleteString( impl->correlation_vector );
+    return WindowsDuplicateString( value, &impl->correlation_vector );
+}
+
+static const void *logging_options_vtbl[] =
+{
+    logging_options_QueryInterface,
+    logging_options_AddRef,
+    logging_options_Release,
+    logging_options_GetIids,
+    logging_options_GetRuntimeClassName,
+    logging_options_GetTrustLevel,
+    logging_options_get_Keywords,          /* 6 */
+    logging_options_put_Keywords,
+    logging_options_get_Tags,
+    logging_options_put_Tags,
+    logging_options_get_Task,
+    logging_options_put_Task,
+    logging_options_get_Opcode,
+    logging_options_put_Opcode,
+    logging_options_get_ActivityId,
+    logging_options_put_ActivityId,
+    logging_options_get_RelatedActivityId,
+    logging_options_put_RelatedActivityId,
+    logging_options_get_CorrelationVector,
+    logging_options_put_CorrelationVector, /* 19 */
+};
+
+static struct logging_options *create_logging_options( INT64 keywords )
+{
+    struct logging_options *obj;
+
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return NULL;
+    obj->vtbl = logging_options_vtbl;
+    obj->ref = 1;
+    obj->keywords = keywords;
+    WindowsCreateString( L"", 0, &obj->task );
+    WindowsCreateString( L"", 0, &obj->correlation_vector );
+    return obj;
+}
+
+struct logging_options_factory
+{
+    const void **vtbl_factory;
+    const void **vtbl_options_factory;
+};
+static struct logging_options_factory logging_options_factory_obj;
+
+static HRESULT WINAPI logging_options_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &logging_options_factory_obj.vtbl_factory;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ILoggingOptionsFactory ))
+    {
+        *out = &logging_options_factory_obj.vtbl_options_factory;
+        return S_OK;
+    }
+    FIXME( "logging_options_factory: unknown iid %s\n", debugstr_guid(iid) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI logging_options_factory_ActivateInstance( IActivationFactory *iface,
+                                                                IInspectable **instance )
+{
+    struct logging_options *obj;
+
+    if (!instance) return E_POINTER;
+    if (!(obj = create_logging_options( 0 ))) return E_OUTOFMEMORY;
+    *instance = (IInspectable *)&obj->vtbl;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_factory_CreateLoggingOptions( void *iface,
+                                                                    IInspectable **instance )
+{
+    struct logging_options *obj;
+
+    if (!instance) return E_POINTER;
+    if (!(obj = create_logging_options( 0 ))) return E_OUTOFMEMORY;
+    *instance = (IInspectable *)&obj->vtbl;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_options_factory_CreateWithKeywords( void *iface, INT64 keywords,
+                                                                  IInspectable **instance )
+{
+    struct logging_options *obj;
+
+    if (!instance) return E_POINTER;
+    if (!(obj = create_logging_options( keywords ))) return E_OUTOFMEMORY;
+    *instance = (IInspectable *)&obj->vtbl;
+    return S_OK;
+}
+
+static const void *logging_options_factory_vtbl[] =
+{
+    logging_options_factory_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    logging_options_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_options_factory_ActivateInstance,
+};
+
+static const void *logging_options_options_factory_vtbl[] =
+{
+    logging_options_factory_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    logging_options_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_options_factory_CreateLoggingOptions,
+    logging_options_factory_CreateWithKeywords,
+};
+
+static struct logging_options_factory logging_options_factory_obj =
+{
+    logging_options_factory_vtbl,
+    logging_options_options_factory_vtbl,
+};
+
 /* Windows.Foundation.GuidHelper (IGuidHelperStatics {59c7966b-ae52-5283-ad7f-a1b9e9678add}) */
 static const GUID IID_IGuidHelperStatics =
     { 0x59c7966b, 0xae52, 0x5283, { 0xad, 0x7f, 0xa1, 0xb9, 0xe9, 0x67, 0x8a, 0xdd } };
@@ -3191,6 +3511,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         *factory = (IActivationFactory *)&logging_channel_options_factory_obj;
     if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingChannel"))
         *factory = (IActivationFactory *)&logging_channel_factory_obj;
+    if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingOptions"))
+        *factory = (IActivationFactory *)&logging_options_factory_obj.vtbl_factory;
     if (!wcscmp(buffer, L"Windows.Foundation.GuidHelper"))
         *factory = (IActivationFactory *)&guid_helper_factory_obj.vtbl_factory;
 

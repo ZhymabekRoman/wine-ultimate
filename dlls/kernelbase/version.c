@@ -2359,6 +2359,36 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *le
     return ret;
 }
 
+/***********************************************************************
+ *         ParseApplicationUserModelId   (kernelbase.@)
+ *
+ * Splits "FamilyName!AdditionalUserModelId": the family is implicit in the
+ * caller's input, so the API only hands back the part after the '!'.
+ */
+HRESULT WINAPI ParseApplicationUserModelId( UINT32 app_user_model_id_len, const WCHAR *app_user_model_id,
+                                            UINT32 *extra_user_model_id_len, WCHAR *extra_user_model_id )
+{
+    const WCHAR *p;
+    UINT32 len;
+
+    TRACE( "(%u %s %p %p)\n", app_user_model_id_len, debugstr_w( app_user_model_id ),
+           extra_user_model_id_len, extra_user_model_id );
+
+    if (!app_user_model_id) return E_POINTER;
+    if (!extra_user_model_id_len) return E_INVALIDARG;
+    if (!(p = wcschr( app_user_model_id, L'!' ))) return E_INVALIDARG;
+
+    len = wcslen( p + 1 ) + 1;
+    if (!extra_user_model_id || *extra_user_model_id_len < len)
+    {
+        *extra_user_model_id_len = len;
+        return HRESULT_FROM_WIN32( ERROR_INSUFFICIENT_BUFFER );
+    }
+    memcpy( extra_user_model_id, p + 1, len * sizeof(WCHAR) );
+    *extra_user_model_id_len = len;
+    return S_OK;
+}
+
 /* EXPERIMENT: source package identity from env vars so packaged apps (WhatsApp
  * WinUI3) get a non-empty package context. Set WINE_PACKAGE_FULL_NAME /
  * WINE_PACKAGE_FAMILY_NAME when launching. */

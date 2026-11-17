@@ -1185,6 +1185,7 @@
 @ stdcall -import PeekNamedPipe(long ptr long ptr ptr ptr)
 @ stdcall -import PostQueuedCompletionStatus(long long ptr ptr)
 @ stdcall -import PackageIdFromFullName(wstr long ptr ptr)
+@ stdcall ParseApplicationUserModelId(long wstr ptr wstr) kernelbase.ParseApplicationUserModelId
 @ stdcall PowerClearRequest(long long)
 @ stdcall PowerCreateRequest(ptr)
 @ stdcall PowerSetRequest(long long)
