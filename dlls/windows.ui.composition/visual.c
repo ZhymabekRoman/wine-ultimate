@@ -25,6 +25,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(composition);
 
 static const GUID IID_IShapeVisual_local =
     { 0xb47ce2f7, 0x9a88, 0x42c4, { 0x9e, 0x87, 0x2e, 0x50, 0x0c, 0xa8, 0x68, 0x8c } };
+static const GUID IID_IRedirectVisual_local =
+    { 0x8cc6e340, 0x8b75, 0x5422, { 0xb0, 0x6f, 0x09, 0xff, 0xe9, 0xf8, 0x61, 0x7e } };
 
 static inline struct visual *impl_from_IVisual( struct IVisual *iface )
 {
@@ -88,6 +90,12 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
     if (IsEqualGUID( iid, &IID_IShapeVisual_local ))
     {
         *out = &impl->IShapeVisual_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IRedirectVisual_local ))
+    {
+        *out = &impl->IRedirectVisual_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -658,6 +666,83 @@ static const void *shape_visual_vtbl[32] =
     [9 ... 31] = shape_visual_noop,
 };
 
+/*
+ * RedirectVisual. Compositor::CreateRedirectVisual and
+ * Compositor::CreateRedirectVisualWithSourceVisual (ICompositor6,
+ * UniversalApiContract 7.0) return a ContainerVisual answering
+ * IRedirectVisual {8cc6e340-8b75-5422-b06f-09ffe9f8617e}, which is not in
+ * include/windows.ui.composition.idl and so is answered through a
+ * struct IInspectable plus a function-pointer vtable: IInspectable prologue
+ * followed by Source get/put. The source visual is stored on the object and
+ * round-tripped; the redirect itself is not rendered.
+ */
+
+static inline struct visual *impl_from_IRedirectVisual( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct visual, IRedirectVisual_iface );
+}
+
+static HRESULT WINAPI redirect_visual_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return visual_QueryInterface( &impl_from_IRedirectVisual( iface )->IVisual_iface, iid, out );
+}
+static ULONG WINAPI redirect_visual_AddRef( void *iface )
+{
+    return visual_AddRef( &impl_from_IRedirectVisual( iface )->IVisual_iface );
+}
+static ULONG WINAPI redirect_visual_Release( void *iface )
+{
+    return visual_Release( &impl_from_IRedirectVisual( iface )->IVisual_iface );
+}
+static HRESULT WINAPI redirect_visual_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return visual_GetIids( &impl_from_IRedirectVisual( iface )->IVisual_iface, c, i );
+}
+static HRESULT WINAPI redirect_visual_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.Composition.RedirectVisual", 35, n );
+}
+static HRESULT WINAPI redirect_visual_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return visual_GetTrustLevel( &impl_from_IRedirectVisual( iface )->IVisual_iface, l );
+}
+
+static HRESULT WINAPI redirect_visual_get_Source( void *iface, void **value )
+{
+    struct visual *impl = impl_from_IRedirectVisual( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = impl->redirect_source;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
+    return S_OK;
+}
+
+static HRESULT WINAPI redirect_visual_put_Source( void *iface, void *value )
+{
+    struct visual *impl = impl_from_IRedirectVisual( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (value) IInspectable_AddRef( (IInspectable *)value );
+    if (impl->redirect_source) IInspectable_Release( (IInspectable *)impl->redirect_source );
+    impl->redirect_source = value;
+    return S_OK;
+}
+
+static const void *redirect_visual_vtbl[] =
+{
+    redirect_visual_QueryInterface,
+    redirect_visual_AddRef,
+    redirect_visual_Release,
+    redirect_visual_GetIids,
+    redirect_visual_GetRuntimeClassName,
+    redirect_visual_GetTrustLevel,
+    redirect_visual_get_Source,
+    redirect_visual_put_Source,
+};
+
 static struct visual *visual_create( struct compositor *compositor, BOOL is_sprite, BOOL is_shape )
 {
     struct visual *impl;
@@ -667,6 +752,7 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
     impl->IContainerVisual_iface.lpVtbl = &container_visual_vtbl;
     impl->ISpriteVisual_iface.lpVtbl = &sprite_visual_vtbl;
     impl->IShapeVisual_iface.lpVtbl = (const struct IInspectableVtbl *)shape_visual_vtbl;
+    impl->IRedirectVisual_iface.lpVtbl = (const struct IInspectableVtbl *)redirect_visual_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &visual_object_vtbl;
     impl->IClosable_iface.lpVtbl = &visual_closable_vtbl;
     impl->ref = 1;

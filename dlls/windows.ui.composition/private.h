@@ -108,6 +108,7 @@ struct compositor
 {
     struct ICompositor ICompositor_iface;
     struct IInspectable ICompositor5_iface;
+    struct IInspectable ICompositor6_iface;
     struct ICompositorInterop ICompositorInterop_iface;
     struct ICompositorDesktopInterop ICompositorDesktopInterop_iface;
     struct IClosable IClosable_iface;
@@ -127,6 +128,7 @@ enum animation_kind
     ANIM_VECTOR4_KEY,
     ANIM_QUATERNION_KEY,
     ANIM_PATH_KEY,
+    ANIM_BOOLEAN_KEY,
 };
 
 struct keyframe_animation
@@ -139,6 +141,7 @@ struct keyframe_animation
     struct IVector3KeyFrameAnimation IVector3KeyFrameAnimation_iface;
     struct IVector4KeyFrameAnimation IVector4KeyFrameAnimation_iface;
     struct IQuaternionKeyFrameAnimation IQuaternionKeyFrameAnimation_iface;
+    struct IInspectable IBooleanKeyFrameAnimation_iface;
     struct IInspectable IPathKeyFrameAnimation_iface;
     struct IInspectable IKeyFrameAnimation_iface;
     struct IInspectable IKeyFrameAnimation2_iface;
@@ -193,6 +196,26 @@ struct inset_clip
     struct compositor *compositor;
     struct prop_set *properties;
     FLOAT left, top, right, bottom;
+};
+
+/*
+ * CompositionGeometricClip (UniversalApiContract 7.0). Its default interface
+ * ICompositionGeometricClip {0xc840b581-81c9-4444-a2c1-ccaece3a50e5} is not in
+ * include/windows.ui.composition.idl, so it is answered through a
+ * struct IInspectable + function-pointer vtable, in the style of
+ * struct compositor::ICompositor5_iface.
+ */
+struct geometric_clip
+{
+    struct ICompositionClip ICompositionClip_iface;
+    struct IInspectable ICompositionGeometricClip_iface;
+    struct ICompositionObject ICompositionObject_iface;
+    struct IClosable IClosable_iface;
+    LONG ref;
+    struct compositor *compositor;
+    struct prop_set *properties;
+    void *geometry;
+    void *view_box;
 };
 
 struct color_brush
@@ -316,6 +339,7 @@ struct visual
     struct IContainerVisual IContainerVisual_iface;
     struct ISpriteVisual ISpriteVisual_iface;
     struct IInspectable IShapeVisual_iface;
+    struct IInspectable IRedirectVisual_iface;
     struct ICompositionObject ICompositionObject_iface;
     struct IClosable IClosable_iface;
     LONG ref;
@@ -324,6 +348,9 @@ struct visual
     struct visual_collection *children;
     void *shapes;
     void *view_box;
+    /* RedirectVisual::Source, an IVisual * kept as void * because the
+     * interface is not in include/windows.ui.composition.idl. */
+    void *redirect_source;
     struct visual *parent;
     struct ICompositionBrush *brush;
     BOOL is_sprite;
@@ -372,6 +399,7 @@ struct expression_animation *expression_animation_create( struct compositor *com
 struct easing_function *cubic_bezier_easing_create( struct compositor *compositor, Vector2 point1, Vector2 point2 );
 struct easing_function *linear_easing_create( struct compositor *compositor );
 struct inset_clip *inset_clip_create( struct compositor *compositor, FLOAT left, FLOAT top, FLOAT right, FLOAT bottom );
+struct geometric_clip *geometric_clip_create( struct compositor *compositor, void *geometry );
 struct color_brush *color_brush_create( struct compositor *compositor, Color color );
 struct surface_brush *surface_brush_create( struct compositor *compositor, struct ICompositionSurface *surface );
 struct composition_target *composition_target_create( struct compositor *compositor, struct IDCompositionTarget *dcomp_target, HWND hwnd );

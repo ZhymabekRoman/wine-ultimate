@@ -182,6 +182,8 @@ static const GUID IID_IKeyFrameAnimation7_local =
 
 static const GUID IID_IPathKeyFrameAnimation_local =
     { 0x9d0d18c9, 0x1576, 0x4b3f, { 0xbe, 0x60, 0x1d, 0x50, 0x31, 0xf5, 0xe7, 0x1b } };
+static const GUID IID_IBooleanKeyFrameAnimation_local =
+    { 0x95e23a08, 0xd1f4, 0x4972, { 0x97, 0x70, 0x3e, 0xfe, 0x68, 0xd8, 0x2e, 0x14 } };
 
 static inline struct keyframe_animation *impl_from_ICompositionAnimation( struct ICompositionAnimation *iface )
 {
@@ -199,6 +201,7 @@ static const GUID *keyframe_kind_iid( enum animation_kind kind )
         case ANIM_VECTOR4_KEY: return &IID_IVector4KeyFrameAnimation;
         case ANIM_QUATERNION_KEY: return &IID_IQuaternionKeyFrameAnimation;
         case ANIM_PATH_KEY: return &IID_IPathKeyFrameAnimation_local;
+        case ANIM_BOOLEAN_KEY: return &IID_IBooleanKeyFrameAnimation_local;
     }
     return NULL;
 }
@@ -214,6 +217,7 @@ static void *keyframe_kind_iface( struct keyframe_animation *impl, enum animatio
         case ANIM_VECTOR4_KEY: return &impl->IVector4KeyFrameAnimation_iface;
         case ANIM_QUATERNION_KEY: return &impl->IQuaternionKeyFrameAnimation_iface;
         case ANIM_PATH_KEY: return &impl->IPathKeyFrameAnimation_iface;
+        case ANIM_BOOLEAN_KEY: return &impl->IBooleanKeyFrameAnimation_iface;
     }
     return NULL;
 }
@@ -229,6 +233,7 @@ static const WCHAR *keyframe_kind_class_name( enum animation_kind kind )
         case ANIM_VECTOR4_KEY: return RuntimeClass_Windows_UI_Composition_Vector4KeyFrameAnimation;
         case ANIM_QUATERNION_KEY: return RuntimeClass_Windows_UI_Composition_QuaternionKeyFrameAnimation;
         case ANIM_PATH_KEY: return L"Windows.UI.Composition.PathKeyFrameAnimation";
+        case ANIM_BOOLEAN_KEY: return L"Windows.UI.Composition.BooleanKeyFrameAnimation";
     }
     return NULL;
 }
@@ -571,6 +576,44 @@ static const struct IColorKeyFrameAnimationVtbl colorkey_vtbl =
     colorkey_InsertKeyFrameWithEasingFunction,
 };
 
+/*
+ * BooleanKeyFrameAnimation. Compositor::CreateBooleanKeyFrameAnimation
+ * (ICompositor6, UniversalApiContract 7.0) returns this object. Its default
+ * interface IBooleanKeyFrameAnimation {95e23a08-d1f4-4972-9770-3efe68d82e14}
+ * is not in include/windows.ui.composition.idl, so it is answered through a
+ * struct IInspectable plus a function-pointer vtable: IInspectable prologue
+ * followed by the single InsertKeyFrame(normalizedProgress, value) slot. There
+ * is no animation engine, so the frames are accepted and discarded.
+ */
+
+static inline struct keyframe_animation *impl_from_booleankey( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct keyframe_animation, IBooleanKeyFrameAnimation_iface );
+}
+static HRESULT WINAPI booleankey_QueryInterface( void *iface, REFIID iid, void **out ) { return keyframe_QueryInterface( &impl_from_booleankey(iface)->ICompositionAnimation_iface, iid, out ); }
+static ULONG WINAPI booleankey_AddRef( void *iface ) { return keyframe_AddRef( &impl_from_booleankey(iface)->ICompositionAnimation_iface ); }
+static ULONG WINAPI booleankey_Release( void *iface ) { return keyframe_Release( &impl_from_booleankey(iface)->ICompositionAnimation_iface ); }
+static HRESULT WINAPI booleankey_GetIids( void *iface, ULONG *c, IID **i ) { return keyframe_GetIids( &impl_from_booleankey(iface)->ICompositionAnimation_iface, c, i ); }
+static HRESULT WINAPI booleankey_GetRuntimeClassName( void *iface, HSTRING *n ) { return keyframe_GetRuntimeClassName( &impl_from_booleankey(iface)->ICompositionAnimation_iface, n ); }
+static HRESULT WINAPI booleankey_GetTrustLevel( void *iface, TrustLevel *l ) { return keyframe_GetTrustLevel( &impl_from_booleankey(iface)->ICompositionAnimation_iface, l ); }
+
+static HRESULT WINAPI booleankey_InsertKeyFrame( void *iface, FLOAT key, BOOLEAN value )
+{
+    TRACE( "iface %p, key %g, value %d stub!\n", iface, key, value );
+    return S_OK;
+}
+
+static const void *booleankey_vtbl[] =
+{
+    booleankey_QueryInterface,
+    booleankey_AddRef,
+    booleankey_Release,
+    booleankey_GetIids,
+    booleankey_GetRuntimeClassName,
+    booleankey_GetTrustLevel,
+    booleankey_InsertKeyFrame,
+};
+
 static inline struct keyframe_animation *impl_from_pathkey( void *iface )
 {
     return CONTAINING_RECORD( iface, struct keyframe_animation, IPathKeyFrameAnimation_iface );
@@ -810,6 +853,7 @@ struct keyframe_animation *keyframe_animation_create( struct compositor *composi
     impl->IVector3KeyFrameAnimation_iface.lpVtbl = &vector3key_vtbl;
     impl->IVector4KeyFrameAnimation_iface.lpVtbl = &vector4key_vtbl;
     impl->IQuaternionKeyFrameAnimation_iface.lpVtbl = &quatkey_vtbl;
+    impl->IBooleanKeyFrameAnimation_iface.lpVtbl = (const struct IInspectableVtbl *)booleankey_vtbl;
     impl->IPathKeyFrameAnimation_iface.lpVtbl = (const struct IInspectableVtbl *)pathkey_vtbl;
     impl->IKeyFrameAnimation_iface.lpVtbl = (const struct IInspectableVtbl *)kfa_vtbl;
     impl->IKeyFrameAnimation2_iface.lpVtbl = (const struct IInspectableVtbl *)kfa2_vtbl;
@@ -1491,6 +1535,270 @@ struct inset_clip *inset_clip_create( struct compositor *compositor, FLOAT left,
     impl->top = top;
     impl->right = right;
     impl->bottom = bottom;
+    if (compositor) IInspectable_AddRef( (IInspectable *)&compositor->ICompositor_iface );
+    return impl;
+}
+
+/*
+ * CompositionGeometricClip.
+ *
+ * Compositor::CreateGeometricClip (ICompositor6, UniversalApiContract 7.0)
+ * returns this object, and Compositor::CreateGeometricClipWithGeometry seeds
+ * its Geometry. The app-visible default interface is
+ * ICompositionGeometricClip {c840b581-81c9-4444-a2c1-ccaece3a50e5}, which is
+ * not in include/windows.ui.composition.idl; like ICompositor5 it is answered
+ * through a struct IInspectable plus a function-pointer vtable. Slots after
+ * the IInspectable prologue are Geometry/get, Geometry/put, ViewBox/get,
+ * ViewBox/put. The clip shape is not rendered (the DirectComposition bridge has
+ * no geometry path), so Geometry and ViewBox round-trip the values the app
+ * stores on them and stay empty otherwise.
+ */
+
+static const GUID IID_ICompositionGeometricClip_local =
+    { 0xc840b581, 0x81c9, 0x4444, { 0xa2, 0xc1, 0xcc, 0xae, 0xce, 0x3a, 0x50, 0xe5 } };
+
+static inline struct geometric_clip *impl_from_geometric_clip( struct ICompositionClip *iface )
+{
+    return CONTAINING_RECORD( iface, struct geometric_clip, ICompositionClip_iface );
+}
+
+static HRESULT WINAPI geometric_clip_QueryInterface( struct ICompositionClip *iface, REFIID iid, void **out )
+{
+    struct geometric_clip *impl = impl_from_geometric_clip( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown )
+        || IsEqualGUID( iid, &IID_IInspectable )
+        || IsEqualGUID( iid, &IID_IAgileObject )
+        || IsEqualGUID( iid, &IID_ICompositionClip ))
+    {
+        *out = &impl->ICompositionClip_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositionGeometricClip_local ))
+    {
+        *out = &impl->ICompositionGeometricClip_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositionObject ))
+    {
+        *out = &impl->ICompositionObject_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IClosable ))
+    {
+        *out = &impl->IClosable_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI geometric_clip_AddRef( struct ICompositionClip *iface )
+{
+    struct geometric_clip *impl = impl_from_geometric_clip( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI geometric_clip_Release( struct ICompositionClip *iface )
+{
+    struct geometric_clip *impl = impl_from_geometric_clip( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->geometry) IInspectable_Release( (IInspectable *)impl->geometry );
+        if (impl->view_box) IInspectable_Release( (IInspectable *)impl->view_box );
+        comp_release_refs( impl->compositor, impl->properties );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI geometric_clip_GetIids( struct ICompositionClip *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI geometric_clip_GetRuntimeClassName( struct ICompositionClip *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.UI.Composition.CompositionGeometricClip",
+            ARRAYSIZE( L"Windows.UI.Composition.CompositionGeometricClip" ) - 1, class_name );
+}
+
+static HRESULT WINAPI geometric_clip_GetTrustLevel( struct ICompositionClip *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static const struct ICompositionClipVtbl geometric_clip_vtbl =
+{
+    geometric_clip_QueryInterface,
+    geometric_clip_AddRef,
+    geometric_clip_Release,
+    geometric_clip_GetIids,
+    geometric_clip_GetRuntimeClassName,
+    geometric_clip_GetTrustLevel,
+};
+
+static inline struct geometric_clip *impl_from_geometric_iface( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct geometric_clip, ICompositionGeometricClip_iface );
+}
+
+static HRESULT WINAPI geometric_iface_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+    return geometric_clip_QueryInterface( &impl->ICompositionClip_iface, iid, out );
+}
+static ULONG WINAPI geometric_iface_AddRef( void *iface )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+    return geometric_clip_AddRef( &impl->ICompositionClip_iface );
+}
+static ULONG WINAPI geometric_iface_Release( void *iface )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+    return geometric_clip_Release( &impl->ICompositionClip_iface );
+}
+static HRESULT WINAPI geometric_iface_GetIids( void *iface, ULONG *c, IID **i )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+    return geometric_clip_GetIids( &impl->ICompositionClip_iface, c, i );
+}
+static HRESULT WINAPI geometric_iface_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+    return geometric_clip_GetRuntimeClassName( &impl->ICompositionClip_iface, n );
+}
+static HRESULT WINAPI geometric_iface_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+    return geometric_clip_GetTrustLevel( &impl->ICompositionClip_iface, l );
+}
+
+static HRESULT WINAPI geometric_iface_get_Geometry( void *iface, void **value )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = impl->geometry;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
+    return S_OK;
+}
+
+static HRESULT WINAPI geometric_iface_put_Geometry( void *iface, void *value )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (value) IInspectable_AddRef( (IInspectable *)value );
+    if (impl->geometry) IInspectable_Release( (IInspectable *)impl->geometry );
+    impl->geometry = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI geometric_iface_get_ViewBox( void *iface, void **value )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = impl->view_box;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
+    return S_OK;
+}
+
+static HRESULT WINAPI geometric_iface_put_ViewBox( void *iface, void *value )
+{
+    struct geometric_clip *impl = impl_from_geometric_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (value) IInspectable_AddRef( (IInspectable *)value );
+    if (impl->view_box) IInspectable_Release( (IInspectable *)impl->view_box );
+    impl->view_box = value;
+    return S_OK;
+}
+
+/* IInspectable prologue + Geometry get/put + ViewBox get/put. */
+static const void *geometric_iface_vtbl[] =
+{
+    geometric_iface_QueryInterface,
+    geometric_iface_AddRef,
+    geometric_iface_Release,
+    geometric_iface_GetIids,
+    geometric_iface_GetRuntimeClassName,
+    geometric_iface_GetTrustLevel,
+    geometric_iface_get_Geometry,
+    geometric_iface_put_Geometry,
+    geometric_iface_get_ViewBox,
+    geometric_iface_put_ViewBox,
+};
+
+DEFINE_INHERITED_PROLOGUE( geometric_object, ICompositionObject, struct geometric_clip, ICompositionClip_iface )
+COMP_OBJECT_IMPL( geometric_object, struct geometric_clip )
+
+static const struct ICompositionObjectVtbl geometric_object_vtbl =
+{
+    geometric_object_QueryInterface,
+    geometric_object_AddRef,
+    geometric_object_Release,
+    geometric_object_GetIids,
+    geometric_object_GetRuntimeClassName,
+    geometric_object_GetTrustLevel,
+    geometric_object_get_Compositor,
+    geometric_object_get_Dispatcher,
+    geometric_object_get_Properties,
+    geometric_object_StartAnimation,
+    geometric_object_StopAnimation,
+};
+
+DEFINE_INHERITED_PROLOGUE( geometric_closable, IClosable, struct geometric_clip, ICompositionClip_iface )
+COMP_CLOSABLE_IMPL( geometric_closable, struct geometric_clip )
+
+static const struct IClosableVtbl geometric_closable_vtbl =
+{
+    geometric_closable_QueryInterface,
+    geometric_closable_AddRef,
+    geometric_closable_Release,
+    geometric_closable_GetIids,
+    geometric_closable_GetRuntimeClassName,
+    geometric_closable_GetTrustLevel,
+    geometric_closable_Close,
+};
+
+struct geometric_clip *geometric_clip_create( struct compositor *compositor, void *geometry )
+{
+    struct geometric_clip *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->ICompositionClip_iface.lpVtbl = &geometric_clip_vtbl;
+    impl->ICompositionGeometricClip_iface.lpVtbl = (const struct IInspectableVtbl *)geometric_iface_vtbl;
+    impl->ICompositionObject_iface.lpVtbl = &geometric_object_vtbl;
+    impl->IClosable_iface.lpVtbl = &geometric_closable_vtbl;
+    impl->ref = 1;
+    impl->compositor = compositor;
+    if (geometry)
+    {
+        IInspectable_AddRef( (IInspectable *)geometry );
+        impl->geometry = geometry;
+    }
     if (compositor) IInspectable_AddRef( (IInspectable *)&compositor->ICompositor_iface );
     return impl;
 }

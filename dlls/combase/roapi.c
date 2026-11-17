@@ -726,6 +726,19 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Windows.System.Profile.WindowsIntegrityPolicy is the fourth app-visible
+     * probe of the namespace that has no ActivatableClassId key in the prefix:
+     * the Microsoft Store asks for its statics at startup and retry-loops on the
+     * REGDB_E_CLASSNOTREG answer. Route it to the builtin module that
+     * implements the class' DllGetActivationFactory, in the exact style of the
+     * EducationSettings route above. Exact-match, so that SystemId,
+     * SystemManufacturers and Analytics retain the registry lookup. */
+    if (!wcscmp(classid, L"Windows.System.Profile.WindowsIntegrityPolicy"))
+    {
+        *out = wcsdup(L"windows.system.profile.dll");
+        return S_OK;
+    }
+
     if (!wcscmp(classid, L"Windows.Devices.Input.PenDevice"))
     {
         *out = wcsdup(L"windows.devices.input.dll");

@@ -70,6 +70,9 @@ HRESULT compositor_ensure_device( struct compositor *impl )
 
 static const GUID IID_ICompositor5_local =
     { 0x48ea31ad, 0x7fcd, 0x4076, { 0xa7, 0x9c, 0x90, 0xcc, 0x4b, 0x85, 0x2c, 0x9b } };
+/* Declared here; the interface itself is implemented at its vtable below. */
+static const GUID IID_ICompositor6_local =
+    { 0x7a38b2bd, 0xcec8, 0x4eeb, { 0x83, 0x0f, 0xd8, 0xd0, 0x7a, 0xed, 0xeb, 0xc3 } };
 
 static inline struct compositor *impl_from_ICompositor( struct ICompositor *iface )
 {
@@ -94,6 +97,12 @@ static HRESULT WINAPI compositor_QueryInterface( struct ICompositor *iface, REFI
     if (IsEqualGUID( iid, &IID_ICompositor5_local ))
     {
         *out = &impl->ICompositor5_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositor6_local ))
+    {
+        *out = &impl->ICompositor6_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -910,6 +919,131 @@ static const void *compositor5_vtbl[] =
     compositor5_RequestCommitAsync,
 };
 
+/*
+ * ICompositor6 {7a38b2bd-cec8-4eeb-830f-d8d07aedebc3} (UniversalApiContract
+ * 7.0, Windows 10 1809) is the Compositor slice the WinUI CompositionAnimations
+ * use: Compositor::CreateGeometricClip(+WithGeometry), CreateRedirectVisual
+ * (+WithSourceVisual) and CreateBooleanKeyFrameAnimation. It is not in
+ * include/windows.ui.composition.idl, so, like ICompositor5, it is answered
+ * through a struct IInspectable plus a function-pointer vtable. Slots after the
+ * IInspectable prologue follow the idl order of the real
+ * Windows.UI.Composition.ICompositor6.
+ */
+
+static inline struct compositor *impl_from_ICompositor6( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct compositor, ICompositor6_iface );
+}
+static HRESULT WINAPI compositor6_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return compositor_QueryInterface( &impl_from_ICompositor6(iface)->ICompositor_iface, iid, out );
+}
+static ULONG WINAPI compositor6_AddRef( void *iface )
+{
+    return compositor_AddRef( &impl_from_ICompositor6(iface)->ICompositor_iface );
+}
+static ULONG WINAPI compositor6_Release( void *iface )
+{
+    return compositor_Release( &impl_from_ICompositor6(iface)->ICompositor_iface );
+}
+static HRESULT WINAPI compositor6_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return compositor_GetIids( &impl_from_ICompositor6(iface)->ICompositor_iface, c, i );
+}
+static HRESULT WINAPI compositor6_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return compositor_GetRuntimeClassName( &impl_from_ICompositor6(iface)->ICompositor_iface, n );
+}
+static HRESULT WINAPI compositor6_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return compositor_GetTrustLevel( &impl_from_ICompositor6(iface)->ICompositor_iface, l );
+}
+
+static HRESULT WINAPI compositor6_CreateGeometricClip( void *iface, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor6( iface );
+    struct geometric_clip *clip;
+
+    TRACE( "iface %p, res %p.\n", iface, res );
+
+    if (!res) return E_POINTER;
+    if (!(clip = geometric_clip_create( impl, NULL ))) return E_OUTOFMEMORY;
+    *res = &clip->ICompositionGeometricClip_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI compositor6_CreateGeometricClipWithGeometry( void *iface, void *geometry, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor6( iface );
+    struct geometric_clip *clip;
+
+    TRACE( "iface %p, geometry %p, res %p.\n", iface, geometry, res );
+
+    if (!res) return E_POINTER;
+    if (!(clip = geometric_clip_create( impl, geometry ))) return E_OUTOFMEMORY;
+    *res = &clip->ICompositionGeometricClip_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI compositor6_CreateRedirectVisual( void *iface, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor6( iface );
+    struct visual *visual;
+
+    TRACE( "iface %p, res %p.\n", iface, res );
+
+    if (!res) return E_POINTER;
+    if (!(visual = container_visual_create( impl ))) return E_OUTOFMEMORY;
+    *res = &visual->IRedirectVisual_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI compositor6_CreateRedirectVisualWithSourceVisual( void *iface, void *source, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor6( iface );
+    struct visual *visual;
+
+    TRACE( "iface %p, source %p, res %p.\n", iface, source, res );
+
+    if (!res) return E_POINTER;
+    if (!(visual = container_visual_create( impl ))) return E_OUTOFMEMORY;
+    if (source)
+    {
+        IInspectable_AddRef( (IInspectable *)source );
+        visual->redirect_source = source;
+    }
+    *res = &visual->IRedirectVisual_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI compositor6_CreateBooleanKeyFrameAnimation( void *iface, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor6( iface );
+    struct keyframe_animation *anim;
+
+    TRACE( "iface %p, res %p.\n", iface, res );
+
+    if (!res) return E_POINTER;
+    if (!(anim = keyframe_animation_create( impl, ANIM_BOOLEAN_KEY ))) return E_OUTOFMEMORY;
+    *res = &anim->IBooleanKeyFrameAnimation_iface;
+    return S_OK;
+}
+
+static const void *compositor6_vtbl[] =
+{
+    compositor6_QueryInterface,
+    compositor6_AddRef,
+    compositor6_Release,
+    compositor6_GetIids,
+    compositor6_GetRuntimeClassName,
+    compositor6_GetTrustLevel,
+    compositor6_CreateGeometricClip,
+    compositor6_CreateGeometricClipWithGeometry,
+    compositor6_CreateRedirectVisual,
+    compositor6_CreateRedirectVisualWithSourceVisual,
+    compositor6_CreateBooleanKeyFrameAnimation,
+};
+
 struct compositor *compositor_create( void )
 {
     struct compositor *impl;
@@ -917,6 +1051,7 @@ struct compositor *compositor_create( void )
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ICompositor_iface.lpVtbl = &compositor_vtbl;
     impl->ICompositor5_iface.lpVtbl = (const struct IInspectableVtbl *)compositor5_vtbl;
+    impl->ICompositor6_iface.lpVtbl = (const struct IInspectableVtbl *)compositor6_vtbl;
     impl->ICompositorInterop_iface.lpVtbl = &cinterop_vtbl;
     impl->ICompositorDesktopInterop_iface.lpVtbl = &cdesktop_vtbl;
     impl->IClosable_iface.lpVtbl = &compositor_closable_vtbl;

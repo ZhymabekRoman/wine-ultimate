@@ -424,16 +424,27 @@ static struct platform_diagnostics_statics platform_diagnostics_statics =
 static const GUID IID_IWindowsIntegrityPolicyStatics_local =
     { 0x7d1d81db, 0x8d63, 0x4789, { 0x9e, 0xa5, 0xdd, 0xcf, 0x65, 0xa9, 0x4f, 0x3c } };
 
+struct wip_factory
+{
+    const void *vtbl;
+};
+static struct wip_factory wip_factory_obj;
+static struct wip_factory wip_statics_obj;
+
 static HRESULT WINAPI wip_factory_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IWindowsIntegrityPolicyStatics_local ))
+        IsEqualGUID( iid, &IID_IActivationFactory ))
     {
-        *out = iface;
+        *out = &wip_factory_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IWindowsIntegrityPolicyStatics_local ))
+    {
+        *out = &wip_statics_obj;
         return S_OK;
     }
     *out = NULL;
@@ -451,15 +462,13 @@ static HRESULT WINAPI wip_factory_ActivateInstance( IActivationFactory *iface, I
 {
     return CLASS_E_CLASSNOTAVAILABLE;
 }
-/* IWindowsIntegrityPolicyStatics methods:
- * Slot 6: get_IsEnabled(boolean *value)
- * Slot 7: get_IsDisableEmbeddedSignatures(boolean *value)
- * Slot 8: get_IsAppAllowed(boolean *value)
- * Slot 9: get_IsAppAllowedEx(...)
- */
+/* IWindowsIntegrityPolicyStatics getters, all BOOLEAN and all FALSE: the
+ * app-visible answer is that device integrity protection is off. */
 static HRESULT WINAPI wip_statics_get_IsEnabled( void *iface, boolean *val ) { if (val) *val = FALSE; return S_OK; }
 static HRESULT WINAPI wip_statics_get_bool( void *iface, boolean *val ) { if (val) *val = FALSE; return S_OK; }
 
+/* IActivationFactory projection of the class: IInspectable prologue +
+ * ActivateInstance at slot 6. */
 static const void *wip_factory_vtbl[] =
 {
     wip_factory_QI,
@@ -469,13 +478,29 @@ static const void *wip_factory_vtbl[] =
     wip_factory_GetRuntimeClassName,
     wip_factory_GetTrustLevel,
     wip_factory_ActivateInstance,
-    wip_statics_get_IsEnabled,
-    wip_statics_get_bool,
-    wip_statics_get_bool,
-    wip_statics_get_bool,
-    wip_statics_get_bool,
 };
-static struct { const void **vtbl; } wip_factory_obj = { wip_factory_vtbl };
+
+/*
+ * IWindowsIntegrityPolicyStatics {7d1d81db-8d63-4789-9ea5-ddcf65a94f3c} has its
+ * own vtable, so QueryInterface hands out wip_statics_obj for it and the statics
+ * property getters start at slot 6 instead of following ActivateInstance.
+ */
+static const void *wip_statics_vtbl[] =
+{
+    wip_factory_QI,
+    wip_factory_AddRef,
+    wip_factory_Release,
+    wip_factory_GetIids,
+    wip_factory_GetRuntimeClassName,
+    wip_factory_GetTrustLevel,
+    wip_statics_get_IsEnabled,              /* slot 6: get_IsEnabled */
+    wip_statics_get_bool,                   /* slot 7: get_IsEnabledForTrial */
+    wip_statics_get_bool,                   /* slot 8: get_CanDisable */
+    wip_statics_get_bool,                   /* slot 9: get_IsDisableSupported */
+};
+
+static struct wip_factory wip_factory_obj = { wip_factory_vtbl };
+static struct wip_factory wip_statics_obj = { wip_statics_vtbl };
 
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
