@@ -3745,6 +3745,324 @@ done:
 }
 
 
+#define DLL_INDEX_MAX_DIRS 64
+
+struct dll_indexed_dir
+{
+    WCHAR *path;
+    ULONG  len;
+    BOOL   indexed;
+};
+
+struct dll_index_entry
+{
+    ULONG     hash;
+    USHORT    len;
+    ULONGLONG dir_mask;
+    WCHAR    *name;
+};
+
+static RTL_SRWLOCK dll_dir_index_lock = RTL_SRWLOCK_INIT;
+static struct dll_indexed_dir dll_indexed_dirs[DLL_INDEX_MAX_DIRS];
+static ULONG dll_indexed_dir_count;
+static struct dll_index_entry *dll_index_table;
+static ULONG dll_index_cap;
+static ULONG dll_index_count;
+static BOOL winepath_env_checked;
+static UNICODE_STRING winepath_env;
+
+static inline WCHAR dll_tolower( WCHAR c )
+{
+    if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
+    if (c < 128) return c;
+    return RtlDowncaseUnicodeChar( c );
+}
+
+static ULONG dll_name_hash( const WCHAR *name, ULONG len )
+{
+    ULONG h = 2166136261u, i;
+
+    for (i = 0; i < len; i++)
+    {
+        h ^= (ULONG)dll_tolower( name[i] );
+        h *= 16777619u;
+    }
+    return h ? h : 1;
+}
+
+static BOOL dll_name_eq_lower( const WCHAR *a, const WCHAR *b_lower, ULONG len )
+{
+    ULONG i;
+
+    for (i = 0; i < len; i++)
+        if (dll_tolower( a[i] ) != b_lower[i]) return FALSE;
+    return TRUE;
+}
+
+static BOOL is_path_in_list( const WCHAR *dir, ULONG len, const WCHAR *list )
+{
+    const WCHAR *p = list;
+
+    if (!list) return FALSE;
+    while (*p)
+    {
+        const WCHAR *end = p;
+        ULONG plen;
+
+        while (*end && *end != ';') end++;
+        plen = end - p;
+        while (plen > 3 && (p[plen - 1] == '\\' || p[plen - 1] == '/')) plen--;
+        if (plen == len && !wcsnicmp( dir, p, len )) return TRUE;
+        p = (*end == ';') ? end + 1 : end;
+    }
+    return FALSE;
+}
+
+static BOOL dir_contains_pkg_marker( const WCHAR *dir, ULONG len )
+{
+    static const WCHAR m1[] = L"\\windowsapps";
+    static const WCHAR m2[] = L"\\dependencies";
+    ULONG i;
+
+    for (i = 0; i < len; i++)
+    {
+        if (dir[i] != '\\' && dir[i] != '/') continue;
+        if (i + ARRAY_SIZE(m1) - 1 <= len && !wcsnicmp( dir + i + 1, m1 + 1, ARRAY_SIZE(m1) - 2 ))
+        {
+            ULONG end = i + ARRAY_SIZE(m1) - 1;
+            if (end == len || dir[end] == '\\' || dir[end] == '/') return TRUE;
+        }
+        if (i + ARRAY_SIZE(m2) - 1 <= len && !wcsnicmp( dir + i + 1, m2 + 1, ARRAY_SIZE(m2) - 2 ))
+        {
+            ULONG end = i + ARRAY_SIZE(m2) - 1;
+            if (end == len || dir[end] == '\\' || dir[end] == '/') return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* Must be called with dll_dir_index_lock held exclusively */
+static BOOL is_indexable_dll_dir( const WCHAR *dir, ULONG len )
+{
+    if (is_prefix_bootstrap || len < 3) return FALSE;
+    if (dir[1] != ':' || (dir[2] != '\\' && dir[2] != '/')) return FALSE;
+
+    if (len >= 10 && !wcsnicmp( dir, L"C:\\windows", 10 ) &&
+        (len == 10 || dir[10] == '\\' || dir[10] == '/'))
+        return TRUE;
+
+    if (system_dll_path.Buffer && is_path_in_list( dir, len, system_dll_path.Buffer ))
+        return TRUE;
+
+    if (!winepath_env_checked)
+    {
+        winepath_env_checked = TRUE;
+        get_env_var( L"WINEPATH", 0, &winepath_env );
+    }
+    if (winepath_env.Buffer && is_path_in_list( dir, len, winepath_env.Buffer ))
+        return TRUE;
+
+    return dir_contains_pkg_marker( dir, len );
+}
+
+/* Must be called with dll_dir_index_lock held exclusively */
+static void dll_index_rehash( ULONG new_cap )
+{
+    struct dll_index_entry *new_table;
+    ULONG i, mask = new_cap - 1;
+
+    new_table = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                 new_cap * sizeof(*new_table) );
+    if (!new_table) return;
+
+    for (i = 0; i < dll_index_cap; i++)
+    {
+        ULONG idx;
+        if (!dll_index_table[i].hash) continue;
+        idx = dll_index_table[i].hash & mask;
+        while (new_table[idx].hash) idx = (idx + 1) & mask;
+        new_table[idx] = dll_index_table[i];
+    }
+
+    RtlFreeHeap( GetProcessHeap(), 0, dll_index_table );
+    dll_index_table = new_table;
+    dll_index_cap = new_cap;
+}
+
+/* Must be called with dll_dir_index_lock held exclusively */
+static void dll_index_insert( const WCHAR *name, ULONG nlen, ULONGLONG bit )
+{
+    ULONG hash, mask, idx, i;
+    WCHAR *copy;
+
+    if (!dll_index_table)
+        dll_index_rehash( 4096 );
+    else if ((dll_index_count + 1) * 10 >= dll_index_cap * 7)
+        dll_index_rehash( dll_index_cap * 2 );
+
+    if (!dll_index_table) return;
+
+    hash = dll_name_hash( name, nlen );
+    mask = dll_index_cap - 1;
+    idx = hash & mask;
+
+    while (dll_index_table[idx].hash)
+    {
+        if (dll_index_table[idx].hash == hash &&
+            dll_index_table[idx].len == nlen &&
+            dll_name_eq_lower( name, dll_index_table[idx].name, nlen ))
+        {
+            dll_index_table[idx].dir_mask |= bit;
+            return;
+        }
+        idx = (idx + 1) & mask;
+    }
+
+    copy = RtlAllocateHeap( GetProcessHeap(), 0, (nlen + 1) * sizeof(WCHAR) );
+    if (!copy) return;
+    for (i = 0; i < nlen; i++) copy[i] = dll_tolower( name[i] );
+    copy[nlen] = 0;
+
+    dll_index_table[idx].hash = hash;
+    dll_index_table[idx].len = (USHORT)nlen;
+    dll_index_table[idx].dir_mask = bit;
+    dll_index_table[idx].name = copy;
+    dll_index_count++;
+}
+
+/* Must be called with dll_dir_index_lock held exclusively */
+static BOOL dll_index_populate_dir( const WCHAR *dir, ULONG len, ULONG dir_idx )
+{
+    WCHAR *dir_buf;
+    UNICODE_STRING nt_name;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    HANDLE hdir;
+    NTSTATUS status;
+    BYTE buf[8192];
+    BOOLEAN first = TRUE;
+    ULONGLONG bit = 1ULL << dir_idx;
+
+    dir_buf = RtlAllocateHeap( GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR) );
+    if (!dir_buf) return FALSE;
+    memcpy( dir_buf, dir, len * sizeof(WCHAR) );
+    dir_buf[len] = 0;
+
+    status = RtlDosPathNameToNtPathName_U_WithStatus( dir_buf, &nt_name, NULL, NULL );
+    RtlFreeHeap( GetProcessHeap(), 0, dir_buf );
+    if (status) return FALSE;
+
+    InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = NtOpenFile( &hdir, GENERIC_READ | SYNCHRONIZE, &attr, &io,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+    RtlFreeUnicodeString( &nt_name );
+
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND)
+        return TRUE;
+    if (status) return FALSE;
+
+    while (!NtQueryDirectoryFile( hdir, NULL, NULL, NULL, &io, buf, sizeof(buf),
+                                  FileNamesInformation, FALSE, NULL, first ))
+    {
+        FILE_NAMES_INFORMATION *info = (FILE_NAMES_INFORMATION *)buf;
+        first = FALSE;
+        for (;;)
+        {
+            ULONG nlen = info->FileNameLength / sizeof(WCHAR);
+            if (nlen > 0 && nlen <= 260)
+            {
+                if (!(nlen == 1 && info->FileName[0] == '.') &&
+                    !(nlen == 2 && info->FileName[0] == '.' && info->FileName[1] == '.'))
+                    dll_index_insert( info->FileName, nlen, bit );
+            }
+            if (!info->NextEntryOffset) break;
+            info = (FILE_NAMES_INFORMATION *)((BYTE *)info + info->NextEntryOffset);
+        }
+    }
+
+    NtClose( hdir );
+    return TRUE;
+}
+
+static int dll_dir_index_find_or_add( const WCHAR *dir, ULONG len, BOOL *newly_indexed )
+{
+    ULONG i;
+    int ret = -1;
+
+    *newly_indexed = FALSE;
+    while (len > 3 && (dir[len - 1] == '\\' || dir[len - 1] == '/')) len--;
+    if (len < 3) return -1;
+
+    RtlAcquireSRWLockShared( &dll_dir_index_lock );
+    for (i = 0; i < dll_indexed_dir_count; i++)
+    {
+        if (dll_indexed_dirs[i].len == len && !wcsnicmp( dir, dll_indexed_dirs[i].path, len ))
+        {
+            ret = dll_indexed_dirs[i].indexed ? (int)i : -1;
+            RtlReleaseSRWLockShared( &dll_dir_index_lock );
+            return ret;
+        }
+    }
+    RtlReleaseSRWLockShared( &dll_dir_index_lock );
+
+    RtlAcquireSRWLockExclusive( &dll_dir_index_lock );
+    for (i = 0; i < dll_indexed_dir_count; i++)
+    {
+        if (dll_indexed_dirs[i].len == len && !wcsnicmp( dir, dll_indexed_dirs[i].path, len ))
+        {
+            ret = dll_indexed_dirs[i].indexed ? (int)i : -1;
+            RtlReleaseSRWLockExclusive( &dll_dir_index_lock );
+            return ret;
+        }
+    }
+
+    if (dll_indexed_dir_count < DLL_INDEX_MAX_DIRS && is_indexable_dll_dir( dir, len ))
+    {
+        WCHAR *copy = RtlAllocateHeap( GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR) );
+        if (copy)
+        {
+            ULONG idx = dll_indexed_dir_count++;
+            memcpy( copy, dir, len * sizeof(WCHAR) );
+            copy[len] = 0;
+            dll_indexed_dirs[idx].path = copy;
+            dll_indexed_dirs[idx].len = len;
+            dll_indexed_dirs[idx].indexed = dll_index_populate_dir( dir, len, idx );
+            *newly_indexed = TRUE;
+            if (dll_indexed_dirs[idx].indexed) ret = (int)idx;
+        }
+    }
+    RtlReleaseSRWLockExclusive( &dll_dir_index_lock );
+    return ret;
+}
+
+static ULONGLONG dll_dir_index_lookup( const WCHAR *name, ULONG len, ULONG hash )
+{
+    ULONGLONG mask = 0;
+    ULONG cap_mask, idx;
+
+    RtlAcquireSRWLockShared( &dll_dir_index_lock );
+    if (dll_index_table && dll_index_cap)
+    {
+        cap_mask = dll_index_cap - 1;
+        idx = hash & cap_mask;
+        while (dll_index_table[idx].hash)
+        {
+            if (dll_index_table[idx].hash == hash &&
+                dll_index_table[idx].len == len &&
+                dll_name_eq_lower( name, dll_index_table[idx].name, len ))
+            {
+                mask = dll_index_table[idx].dir_mask;
+                break;
+            }
+            idx = (idx + 1) & cap_mask;
+        }
+    }
+    RtlReleaseSRWLockShared( &dll_dir_index_lock );
+    return mask;
+}
+
+
 /***********************************************************************
  *	search_dll_file
  *
@@ -3757,13 +4075,23 @@ static NTSTATUS search_dll_file( LPCWSTR paths, LPCWSTR search, UNICODE_STRING *
     WCHAR *name;
     BOOL found_image = FALSE;
     NTSTATUS status = STATUS_DLL_NOT_FOUND;
-    ULONG len;
+    ULONG len, search_len = wcslen( search ), search_hash = 0;
+    BOOL can_use_index = FALSE, dir_mask_valid = FALSE;
+    ULONGLONG dir_mask = 0;
 
     if (!paths) paths = default_load_path;
     len = wcslen( paths );
 
     if (len < wcslen( system_dir )) len = wcslen( system_dir );
-    len += wcslen( search ) + 2;
+    len += search_len + 2;
+
+    if (search_len > 0 && search_len <= 260 &&
+        search[search_len - 1] != '.' &&
+        !wcschr( search, '\\' ) && !wcschr( search, '/' ) && !wcschr( search, '~' ))
+    {
+        can_use_index = TRUE;
+        search_hash = dll_name_hash( search, search_len );
+    }
 
     if (!(name = RtlAllocateHeap( GetProcessHeap(), 0, len * sizeof(WCHAR) )))
         return STATUS_NO_MEMORY;
@@ -3775,6 +4103,27 @@ static NTSTATUS search_dll_file( LPCWSTR paths, LPCWSTR search, UNICODE_STRING *
         while (*ptr && *ptr != ';') ptr++;
         len = ptr - paths;
         if (*ptr == ';') ptr++;
+
+        if (can_use_index && len >= 3)
+        {
+            BOOL newly_indexed;
+            int dir_idx = dll_dir_index_find_or_add( paths, len, &newly_indexed );
+            if (newly_indexed) dir_mask_valid = FALSE;
+            if (dir_idx >= 0)
+            {
+                if (!dir_mask_valid)
+                {
+                    dir_mask = dll_dir_index_lookup( search, search_len, search_hash );
+                    dir_mask_valid = TRUE;
+                }
+                if (!(dir_mask & (1ULL << dir_idx)))
+                {
+                    paths = ptr;
+                    continue;
+                }
+            }
+        }
+
         memcpy( name, paths, len * sizeof(WCHAR) );
         if (len && name[len - 1] != '\\') name[len++] = '\\';
         wcscpy( name + len, search );
