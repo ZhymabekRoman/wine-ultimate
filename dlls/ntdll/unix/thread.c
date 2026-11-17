@@ -43,6 +43,8 @@
 #ifdef HAVE_SYS_TIMES_H
 #include <sys/times.h>
 #endif
+
+extern pid_t wine_cached_unix_pid(void);
 #ifdef HAVE_SYS_SYSCALL_H
 #include <sys/syscall.h>
 #endif
@@ -2201,7 +2203,7 @@ static void set_native_thread_name( HANDLE handle, const UNICODE_STRING *name )
     if (status != STATUS_SUCCESS || unix_pid == -1 || unix_tid == -1)
         return;
 
-    if (unix_pid != getpid())
+    if (unix_pid != wine_cached_unix_pid())
     {
         static int once;
         if (!once++) FIXME("cross-process native thread naming not supported\n");
@@ -2260,7 +2262,7 @@ static void set_native_thread_name( HANDLE handle, const UNICODE_STRING *name )
     if (status != STATUS_SUCCESS || unix_pid == -1 || unix_tid == -1)
         return;
 
-    if (unix_pid != getpid())
+    if (unix_pid != wine_cached_unix_pid())
     {
         static int once;
         if (!once++) FIXME("cross-process native thread naming not supported\n");

@@ -43,6 +43,8 @@
 #endif
 
 #include "ntstatus.h"
+
+extern pid_t wine_cached_unix_pid(void);
 #include "windef.h"
 #include "winternl.h"
 #include "unix_private.h"
@@ -1529,7 +1531,7 @@ NTSTATUS WINAPI NtAllocateUuids( ULARGE_INTEGER *time, ULONG *delta, ULONG *sequ
         /* mix in machine identity, process start time and current time */
         if (stat( "/proc/self", &st ) != -1) machine ^= (ULONGLONG)st.st_ctime << 17;
         if (gettimeofday( &tv, NULL ) != -1) machine ^= ((ULONGLONG)tv.tv_sec << 7) ^ tv.tv_usec;
-        state = (machine ^ ((ULONGLONG)getpid() * 0x9e3779b97f4a7c15)) | 1;
+        state = (machine ^ ((ULONGLONG)wine_cached_unix_pid() * 0x9e3779b97f4a7c15)) | 1;
 
         time_limit.QuadPart = splitmix64_next( &state ) & 0x0fffffffffffffffull;  /* 60-bit unique id */
         if (!time_limit.QuadPart) time_limit.QuadPart = 1;

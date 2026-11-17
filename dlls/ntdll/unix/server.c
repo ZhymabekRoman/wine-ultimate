@@ -34,6 +34,7 @@
 #ifdef HAVE_PTHREAD_NP_H
 # include <pthread_np.h>
 #endif
+#include <pthread.h>
 #ifdef HAVE_PWD_H
 # include <pwd.h>
 #endif
@@ -1781,6 +1782,31 @@ void process_exit_wrapper( int status )
     exit( status );
 }
 
+static pid_t cached_unix_pid;
+static pthread_once_t cached_unix_pid_once = PTHREAD_ONCE_INIT;
+
+static void cached_unix_pid_atfork_child(void)
+{
+    __atomic_store_n( &cached_unix_pid, getpid(), __ATOMIC_RELEASE );
+}
+
+static void init_cached_unix_pid(void)
+{
+    pthread_atfork( NULL, NULL, cached_unix_pid_atfork_child );
+    __atomic_store_n( &cached_unix_pid, getpid(), __ATOMIC_RELEASE );
+}
+
+pid_t wine_cached_unix_pid(void)
+{
+    pid_t p = __atomic_load_n( &cached_unix_pid, __ATOMIC_ACQUIRE );
+    if (!p)
+    {
+        pthread_once( &cached_unix_pid_once, init_cached_unix_pid );
+        p = __atomic_load_n( &cached_unix_pid, __ATOMIC_ACQUIRE );
+        if (!p) p = getpid();
+    }
+    return p;
+}
 
 /***********************************************************************
  *           server_init_process
@@ -1868,7 +1894,7 @@ size_t server_init_process(void)
 
     SERVER_START_REQ( init_first_thread )
     {
-        req->unix_pid    = getpid();
+        req->unix_pid    = wine_cached_unix_pid();
         req->unix_tid    = get_unix_tid();
         req->reply_fd    = reply_pipe;
         req->wait_fd     = data->wait_fd[1];

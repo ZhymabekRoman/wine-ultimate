@@ -40,6 +40,8 @@
 #include "winternl.h"
 #include "unix_private.h"
 
+extern pid_t wine_cached_unix_pid(void);
+
 #define FLIGHT_RECORDER_RING_BYTES (4 * 1024 * 1024)
 #define FLIGHT_RECORDER_TEXT_LEN   232
 #define FLIGHT_RECORDER_DUMP_TAIL  1000
@@ -101,7 +103,7 @@ void flight_recorder_vlog( const char *fmt, va_list ap )
 
     __atomic_store_n( &e->seq, 0, __ATOMIC_RELEASE );
     e->timestamp_ns = now_ns;
-    e->pid = pid ? pid : (DWORD)getpid();
+    e->pid = pid ? pid : (DWORD)wine_cached_unix_pid();
     e->tid = tdata ? tdata->tid : 0;
 
     n = vsnprintf( e->text, sizeof(e->text), fmt, ap );
@@ -171,7 +173,7 @@ void flight_recorder_log_raw( const char *str, unsigned int len )
 
     now_ns = flight_now_ns();
     tdata = get_thread_data();
-    cur_pid = pid ? pid : (DWORD)getpid();
+    cur_pid = pid ? pid : (DWORD)wine_cached_unix_pid();
     cur_tid = tdata ? tdata->tid : 0;
 
     p = str;
@@ -205,7 +207,7 @@ void flight_recorder_dump( const char *path )
 
     if (!path || !path[0])
     {
-        cur_pid = pid ? pid : (DWORD)getpid();
+        cur_pid = pid ? pid : (DWORD)wine_cached_unix_pid();
         snprintf( fallback_path, sizeof(fallback_path), "/var/tmp/wa-lanes/dumps/wine_%u_trace.txt",
                   (unsigned int)cur_pid );
         path = fallback_path;
@@ -223,7 +225,7 @@ void flight_recorder_dump( const char *path )
     if (count > FLIGHT_RECORDER_SLOTS) count = FLIGHT_RECORDER_SLOTS;
     start_seq = end_seq - count;
 
-    cur_pid = pid ? pid : (DWORD)getpid();
+    cur_pid = pid ? pid : (DWORD)wine_cached_unix_pid();
     hdr_len = snprintf( out_buf, sizeof(out_buf),
                         "# Wine Flight Recorder trace (pid=%u total_events=%llu dumped=%llu)\n",
                         (unsigned int)cur_pid, (unsigned long long)end_seq, (unsigned long long)count );
