@@ -125,12 +125,14 @@ static struct list builtin_modules = LIST_INIT( builtin_modules );
 struct file_view
 {
     struct wine_rb_entry entry;  /* entry in global view tree */
+    struct list   reserve_entry; /* entry in private_reserve_views */
     void         *base;          /* base address */
     size_t        size;          /* size in bytes */
     unsigned int  protect;       /* protection for all pages at allocation time and SEC_* flags */
     dev_t         pe_dev;        /* backing file identity for pe_reloc cache */
     ino_t         pe_ino;
     off_t         pe_size;
+    off_t         sec_offset;    /* section offset for private SEC_RESERVE views */
     time_t        pe_mtime;
 };
 
@@ -148,6 +150,7 @@ struct file_view
 #define VPROT_SYSTEM           0x0200  /* system view (underlying mmap not under our control) */
 #define VPROT_PLACEHOLDER      0x0400
 #define VPROT_FREE_PLACEHOLDER 0x0800
+#define VPROT_SEC_PRIVATE      0x1000
 
 /* Conversion from VPROT_* to Win32 flags */
 static const BYTE VIRTUAL_Win32Flags[16] =
@@ -171,6 +174,7 @@ static const BYTE VIRTUAL_Win32Flags[16] =
 };
 
 static struct wine_rb_tree views_tree;
+static struct list private_reserve_views = LIST_INIT( private_reserve_views );
 static pthread_mutex_t virtual_mutex;
 pthread_key_t thread_data_key = 0;
 
@@ -1917,6 +1921,7 @@ static void delete_view( struct file_view *view ) /* [in] View */
     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
     set_page_vprot( view->base, view->size, 0 );
     if (view->protect & VPROT_ARM64EC) clear_arm64ec_range( view->base, view->size );
+    if (view->protect & VPROT_SEC_PRIVATE) list_remove( &view->reserve_entry );
     unregister_view( view );
     free_view( view );
 }
@@ -2655,7 +2660,7 @@ static SIZE_T get_committed_size( struct file_view *view, void *base, size_t max
     base = ROUND_ADDR( base, page_mask );
     offset = (char *)base - (char *)view->base;
 
-    if (view->protect & SEC_RESERVE)
+    if ((view->protect & SEC_RESERVE) && !(view->protect & VPROT_SEC_PRIVATE))
     {
         size = 0;
 
@@ -4210,6 +4215,7 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     void *base;
     int unix_handle = -1, needs_close;
     unsigned int vprot, sec_flags;
+    BOOL is_private_reserve;
     struct file_view *view;
     LARGE_INTEGER offset;
     sigset_t sigset;
@@ -4238,6 +4244,8 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
 
     res = get_mapping_info( handle, access, &sec_flags, &full_size, &pe_mapping );
     if (res) return res;
+    is_private_reserve = (sec_flags & 1) != 0;
+    sec_flags &= ~1;
 
     offset.QuadPart = offset_ptr ? offset_ptr->QuadPart : 0;
 
@@ -4316,6 +4324,43 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
 
     if (NT_SUCCESS(res))
     {
+        if (is_private_reserve)
+        {
+            struct stat st;
+            if (!fstat( unix_handle, &st ))
+            {
+                struct file_view *other;
+                view->pe_dev = st.st_dev;
+                view->pe_ino = st.st_ino;
+                view->sec_offset = offset.QuadPart;
+                view->protect |= VPROT_SEC_PRIVATE;
+                LIST_FOR_EACH_ENTRY( other, &private_reserve_views, struct file_view, reserve_entry )
+                {
+                    if (other->pe_dev == view->pe_dev && other->pe_ino == view->pe_ino)
+                    {
+                        off_t ov_start = max( view->sec_offset, other->sec_offset );
+                        off_t ov_end = min( view->sec_offset + (off_t)view->size,
+                                            other->sec_offset + (off_t)other->size );
+                        if (ov_start < ov_end)
+                        {
+                            char *src = (char *)other->base + (ov_start - other->sec_offset);
+                            char *dst = (char *)view->base + (ov_start - view->sec_offset);
+                            size_t rem = ov_end - ov_start;
+                            while (rem)
+                            {
+                                BYTE pv;
+                                size_t len = get_vprot_range_size( src, rem, VPROT_COMMITTED, &pv );
+                                if (pv & VPROT_COMMITTED) set_page_vprot_bits( dst, len, VPROT_COMMITTED, 0 );
+                                src += len;
+                                dst += len;
+                                rem -= len;
+                            }
+                        }
+                    }
+                }
+                list_add_tail( &private_reserve_views, &view->reserve_entry );
+            }
+        }
         *addr_ptr = view->base;
         *size_ptr = size;
 #ifdef MADV_POPULATE_READ
@@ -6296,14 +6341,36 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
             }
             if (!(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE) && had_uncommitted)
             {
-                SERVER_START_REQ( add_mapping_committed_range )
+                if (view->protect & VPROT_SEC_PRIVATE)
                 {
-                    req->base   = wine_server_client_ptr( view->base );
-                    req->offset = (char *)base - (char *)view->base;
-                    req->size   = size;
-                    wine_server_call( req );
+                    struct file_view *other;
+                    off_t c_start = view->sec_offset + ((char *)base - (char *)view->base);
+                    off_t c_end = c_start + size;
+                    LIST_FOR_EACH_ENTRY( other, &private_reserve_views, struct file_view, reserve_entry )
+                    {
+                        if (other != view && other->pe_dev == view->pe_dev && other->pe_ino == view->pe_ino)
+                        {
+                            off_t ov_start = max( c_start, other->sec_offset );
+                            off_t ov_end = min( c_end, other->sec_offset + (off_t)other->size );
+                            if (ov_start < ov_end)
+                            {
+                                char *dst = (char *)other->base + (ov_start - other->sec_offset);
+                                set_page_vprot_bits( dst, ov_end - ov_start, VPROT_COMMITTED, 0 );
+                            }
+                        }
+                    }
                 }
-                SERVER_END_REQ;
+                else
+                {
+                    SERVER_START_REQ( add_mapping_committed_range )
+                    {
+                        req->base   = wine_server_client_ptr( view->base );
+                        req->offset = (char *)base - (char *)view->base;
+                        req->size   = size;
+                        wine_server_call( req );
+                    }
+                    SERVER_END_REQ;
+                }
             }
 
 #ifdef MADV_HUGEPAGE

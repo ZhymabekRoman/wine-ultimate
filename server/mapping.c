@@ -1730,6 +1730,11 @@ DECL_HANDLER(get_mapping_info)
 
     reply->size    = mapping->size;
     reply->flags   = mapping->flags;
+    if ((req->access & (SECTION_MAP_READ | SECTION_MAP_WRITE)) &&
+        mapping->committed && !mapping->obj.name && mapping->obj.handle_count <= 1)
+    {
+        reply->flags |= 1;
+    }
 
     if (mapping->flags & SEC_IMAGE)
     {
