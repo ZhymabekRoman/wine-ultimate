@@ -5,9 +5,15 @@ SOURCES = \
 	application.c \
 	classes.idl \
 	color_helper.c \
+	controls_nav.c \
+	dp_vsm.c \
 	frame.c \
 	gpu_renderer.c \
+	layout_gdi.c \
+	layout_gpu.c \
 	main.c \
 	pri.c \
 	swapchain_panel.c \
-	uwp_xaml.c
+	uwp_xaml.c \
+	webview2_bridge.c \
+	xbf_parser.c
