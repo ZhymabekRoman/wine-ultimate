@@ -320,6 +320,37 @@ static void scan_appx_env_paths_locked( const WCHAR *env_name )
     free( val );
 }
 
+/* True for the WinUI XAML surface (Microsoft.UI.Xaml and Microsoft.UI.Xaml.*),
+ * the class family a WinUI 3 app re-implements in its own Microsoft.UI.Xaml.dll
+ * and a WinUI 2.8 app leaves on Wine's UWP windows.ui.xaml.dll.  Used to order
+ * the cache seed below.  Microsoft.UI.Dispatching.* (DispatcherQueue) is not
+ * part of it, so it keeps its coremessaging.dll route. */
+static BOOL is_microsoft_ui_xaml_class( const WCHAR *classid )
+{
+    static const WCHAR prefix[] = L"Microsoft.UI.Xaml";
+    return !wcsncmp( classid, prefix, ARRAY_SIZE( prefix ) - 1 );
+}
+
+/* WhatsApp (WindowsAppRuntime 1.6) relies on Wine's windows.ui.xaml.dll
+ * for Microsoft.UI.Xaml.* (routing to its manifest's Microsoft.UI.Xaml.dll
+ * fails Application.Start with 0x80004005).  Other WinUI 3 apps (e.g. Paint
+ * on WindowsAppRuntime 2.x) use their manifest's Microsoft.UI.Xaml.dll. */
+static BOOL keep_builtin_winui_xaml( void )
+{
+    WCHAR buf[MAX_PATH];
+    DWORD len = GetModuleFileNameW( NULL, buf, ARRAY_SIZE(buf) );
+    if (len && len < ARRAY_SIZE(buf))
+    {
+        const WCHAR *base = wcsrchr( buf, '\\' );
+        base = base ? base + 1 : buf;
+        if (!wcsicmp( base, L"WhatsApp.Root.exe" )) return TRUE;
+    }
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ) &&
+        !wcsicmp( buf, L"5319275A.WhatsAppDesktop_cv1g1gvanyjgm" ))
+        return TRUE;
+    return FALSE;
+}
+
 static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ctx )
 {
     static const struct
@@ -380,14 +411,42 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         { L"Microsoft.UI.Dispatching.DispatcherQueueController",        L"coremessaging.dll" },
     };
     size_t i;
+    BOOL defer_xaml = !keep_builtin_winui_xaml();
 
     RtlAcquireSRWLockExclusive( &class_lib_cache_lock );
+
+    /* class_lib_insert_locked() is first-writer-wins, so the insert order sets the
+     * priority between a hard-coded route and the app's own AppxManifest
+     * (InProcessServer).  Seed in three passes:
+     *
+     *   1. Non-XAML exact routes first (and Microsoft.UI.Xaml.* too when
+     *      keep_builtin_winui_xaml() is TRUE, e.g. WhatsApp).
+     *      Microsoft.UI.Dispatching.DispatcherQueue/Controller -> coremessaging.dll
+     *      and the twinapi.appcore / windows.storage / dcompi routes keep their
+     *      exact target even when the app manifest also declares the class.
+     *   2. AppxManifest scan.  A WinUI 3 app (Paint, Microsoft.WindowsAppRuntime.2)
+     *      declares Microsoft.UI.Xaml.Application / DependencyProperty / the controls
+     *      in its AppxManifest, pointing at its own Microsoft.UI.Xaml.dll, so those
+     *      classes now route to the app's WinUI 3 module instead of Wine's UWP
+     *      windows.ui.xaml.dll (which made PaintUI.dll's DllMain fail 0x800703e6).
+     *   3. Microsoft.UI.Xaml exact routes last.  A WinUI 2.8 app (Calculator, Clock,
+     *      Store) declares only Microsoft.UI.Xaml.Controls.* in its manifest, so the
+     *      Microsoft.UI.Xaml.Application/DependencyProperty/PropertyMetadata statics
+     *      are not in the cache and fall back to windows.ui.xaml.dll, as before. */
     for (i = 0; i < ARRAY_SIZE(static_exact_routes); i++)
-        class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
+        if (!defer_xaml || !is_microsoft_ui_xaml_class( static_exact_routes[i].classid ))
+            class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
+
     scan_appx_env_paths_locked( L"WINE_PACKAGE_PATH" );
     scan_appx_env_paths_locked( L"WINE_FRAMEWORK_PACKAGE_PATH" );
     scan_appx_env_paths_locked( L"WINEPATH" );
     scan_appx_env_paths_locked( L"PATH" );
+
+    if (defer_xaml)
+        for (i = 0; i < ARRAY_SIZE(static_exact_routes); i++)
+            if (is_microsoft_ui_xaml_class( static_exact_routes[i].classid ))
+                class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
+
     RtlReleaseSRWLockExclusive( &class_lib_cache_lock );
     return TRUE;
 }
