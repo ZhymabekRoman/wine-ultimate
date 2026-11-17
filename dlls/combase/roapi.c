@@ -182,6 +182,144 @@ static void class_lib_insert_locked( const WCHAR *classid, const WCHAR *library,
     class_lib_cache[bucket] = e;
 }
 
+static void scan_appx_manifest_file( const WCHAR *dir )
+{
+    WCHAR manifest_path[MAX_PATH], dll_path[MAX_PATH];
+    HANDLE hfile;
+    LARGE_INTEGER file_size;
+    char *buf, *p, *end;
+    DWORD bytes_read = 0, dir_len;
+
+    if (!dir || !dir[0]) return;
+    dir_len = wcslen( dir );
+    while (dir_len > 0 && (dir[dir_len - 1] == '\\' || dir[dir_len - 1] == '/'))
+        dir_len--;
+    if (dir_len + 18 >= MAX_PATH) return;
+
+    memcpy( manifest_path, dir, dir_len * sizeof(WCHAR) );
+    wcscpy( manifest_path + dir_len, L"\\AppxManifest.xml" );
+
+    hfile = CreateFileW( manifest_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (hfile == INVALID_HANDLE_VALUE) return;
+
+    if (!GetFileSizeEx( hfile, &file_size ) || file_size.QuadPart <= 0 || file_size.QuadPart > 8 * 1024 * 1024)
+    {
+        CloseHandle( hfile );
+        return;
+    }
+
+    buf = malloc( (size_t)file_size.QuadPart + 1 );
+    if (!buf || !ReadFile( hfile, buf, (DWORD)file_size.QuadPart, &bytes_read, NULL ))
+    {
+        free( buf );
+        CloseHandle( hfile );
+        return;
+    }
+    CloseHandle( hfile );
+    buf[bytes_read] = '\0';
+
+    TRACE("Scanning AppxManifest %s (%lu bytes)\n", debugstr_w(manifest_path), bytes_read);
+
+    p = buf;
+    end = buf + bytes_read;
+    while (p < end)
+    {
+        char *srv = strstr( p, "<InProcessServer" );
+        char *srv_end, *path_start, *path_end, *cur;
+        WCHAR rel_path[MAX_PATH];
+        int rel_len;
+
+        if (!srv) break;
+        srv_end = strstr( srv, "</InProcessServer>" );
+        if (!srv_end) break;
+
+        path_start = strstr( srv, "<Path>" );
+        if (path_start && path_start < srv_end)
+        {
+            path_start += 6;
+            path_end = strstr( path_start, "</Path>" );
+            if (path_end && path_end < srv_end)
+            {
+                while (path_start < path_end && (*path_start == ' ' || *path_start == '\t' || *path_start == '\r' || *path_start == '\n'))
+                    path_start++;
+                while (path_end > path_start && (path_end[-1] == ' ' || path_end[-1] == '\t' || path_end[-1] == '\r' || path_end[-1] == '\n'))
+                    path_end--;
+
+                rel_len = MultiByteToWideChar( CP_UTF8, 0, path_start, (int)(path_end - path_start), rel_path, MAX_PATH - 1 );
+                if (rel_len > 0)
+                {
+                    rel_path[rel_len] = 0;
+                    if (wcschr( rel_path, ':' ) || rel_path[0] == '\\' || rel_path[0] == '/')
+                    {
+                        wcscpy( dll_path, rel_path );
+                    }
+                    else if (dir_len + 1 + rel_len < MAX_PATH)
+                    {
+                        memcpy( dll_path, dir, dir_len * sizeof(WCHAR) );
+                        dll_path[dir_len] = '\\';
+                        wcscpy( dll_path + dir_len + 1, rel_path );
+                    }
+                    else
+                    {
+                        dll_path[0] = 0;
+                    }
+
+                    if (dll_path[0])
+                    {
+                        cur = srv;
+                        while (cur < srv_end)
+                        {
+                            char *ac = strstr( cur, "ActivatableClassId=" );
+                            char quote, *q_end;
+                            WCHAR classid_w[256];
+                            int clen;
+
+                            if (!ac || ac >= srv_end) break;
+                            ac += 19;
+                            if (ac >= srv_end || (*ac != '"' && *ac != '\'')) { cur = ac; continue; }
+                            quote = *ac++;
+                            q_end = memchr( ac, quote, srv_end - ac );
+                            if (!q_end) break;
+
+                            clen = MultiByteToWideChar( CP_UTF8, 0, ac, (int)(q_end - ac), classid_w, ARRAY_SIZE(classid_w) - 1 );
+                            if (clen > 0)
+                            {
+                                classid_w[clen] = 0;
+                                class_lib_insert_locked( classid_w, dll_path, S_OK );
+                            }
+                            cur = q_end + 1;
+                        }
+                    }
+                }
+            }
+        }
+        p = srv_end + 18;
+    }
+
+    free( buf );
+}
+
+static void scan_appx_env_paths_locked( const WCHAR *env_name )
+{
+    DWORD len = GetEnvironmentVariableW( env_name, NULL, 0 );
+    WCHAR *val, *tok, *next;
+
+    if (!len) return;
+    if (!(val = malloc( len * sizeof(WCHAR) ))) return;
+    if (GetEnvironmentVariableW( env_name, val, len ))
+    {
+        tok = val;
+        while (tok && *tok)
+        {
+            next = wcschr( tok, ';' );
+            if (next) *next++ = 0;
+            if (*tok) scan_appx_manifest_file( tok );
+            tok = next;
+        }
+    }
+    free( val );
+}
+
 static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ctx )
 {
     static const struct
@@ -244,6 +382,10 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
     size_t i;
 
     RtlAcquireSRWLockExclusive( &class_lib_cache_lock );
+    scan_appx_env_paths_locked( L"WINE_PACKAGE_PATH" );
+    scan_appx_env_paths_locked( L"WINE_FRAMEWORK_PACKAGE_PATH" );
+    scan_appx_env_paths_locked( L"WINEPATH" );
+    scan_appx_env_paths_locked( L"PATH" );
     for (i = 0; i < ARRAY_SIZE(static_exact_routes); i++)
         class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
     RtlReleaseSRWLockExclusive( &class_lib_cache_lock );
