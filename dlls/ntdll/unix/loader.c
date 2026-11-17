@@ -389,8 +389,11 @@ static void init_paths(void)
 
     if ((build_dir = remove_tail( ntdll_dir, "/dlls/ntdll" )))
     {
+        char *wow64_path = build_path( build_dir, "loader-wow64" );
         wineloader = build_path( build_dir, "loader/wine" );
-        alt_build_dir = realpath_dirname( build_path( build_dir, "loader-wow64" ));
+        if (!access( wow64_path, F_OK ))
+            alt_build_dir = realpath_dirname( wow64_path );
+        free( wow64_path );
     }
     else
     {

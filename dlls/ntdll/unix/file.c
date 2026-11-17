@@ -2599,6 +2599,207 @@ static unsigned int get_drives_info( struct file_identity info[MAX_DOS_DRIVES] )
 }
 
 
+#define DOS_DRIVE_CACHE_TTL_TICKS 20000000ULL /* 2 seconds in 100ns ticks */
+#define FD_DRIVE_CACHE_SIZE 64
+
+struct dos_drive_cache_entry {
+    uint32_t seq;
+    uint8_t  valid;
+    uint8_t  is_root;
+    uint16_t path_len;
+    uint64_t verified_ts;
+    char     resolved_path[PATH_MAX];
+};
+
+static struct dos_drive_cache_entry dos_drive_cache[MAX_DOS_DRIVES];
+static pthread_mutex_t dos_drive_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+struct fd_drive_cache_entry {
+    dev_t    dev;
+    ino_t    ino;
+    int      drive;
+    uint64_t verified_ts;
+};
+
+static struct fd_drive_cache_entry fd_drive_cache[FD_DRIVE_CACHE_SIZE];
+static pthread_mutex_t fd_drive_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint64_t dos_drive_now_ticks(void)
+{
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_COARSE
+    if (clock_gettime( CLOCK_MONOTONIC_COARSE, &ts ) == 0)
+        return ((uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec) / 100;
+#endif
+    if (clock_gettime( CLOCK_MONOTONIC, &ts ) == 0)
+        return ((uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec) / 100;
+    return 0;
+}
+
+static BOOL resolve_dos_drive_cached( int drive, char *out_buf, size_t out_size, int *out_len )
+{
+    struct dos_drive_cache_entry *entry;
+    uint64_t now;
+    uint32_t s1, s2;
+    char dosdev_path[PATH_MAX];
+    char resolved[PATH_MAX];
+    int len;
+
+    if (drive < 0 || drive >= MAX_DOS_DRIVES || !config_dir) return FALSE;
+    entry = &dos_drive_cache[drive];
+    now = dos_drive_now_ticks();
+
+    s1 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+    if (s1 && !(s1 & 1))
+    {
+        if ((now - entry->verified_ts) < DOS_DRIVE_CACHE_TTL_TICKS)
+        {
+            uint8_t valid = entry->valid;
+            uint8_t is_root = entry->is_root;
+            uint16_t path_len = entry->path_len;
+            if (valid && !is_root && path_len < out_size)
+                memcpy( out_buf, entry->resolved_path, path_len + 1 );
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
+            s2 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+            if (s1 == s2)
+            {
+                if (!valid) return FALSE;
+                if (is_root)
+                {
+                    *out_len = 0;
+                    out_buf[0] = 0;
+                    return TRUE;
+                }
+                if (path_len < out_size)
+                {
+                    *out_len = path_len;
+                    return TRUE;
+                }
+            }
+        }
+    }
+
+    mutex_lock( &dos_drive_cache_mutex );
+    now = dos_drive_now_ticks();
+    if (entry->seq && (now - entry->verified_ts) < DOS_DRIVE_CACHE_TTL_TICKS)
+    {
+        BOOL ok = FALSE;
+        if (entry->valid)
+        {
+            if (entry->is_root)
+            {
+                *out_len = 0;
+                out_buf[0] = 0;
+                ok = TRUE;
+            }
+            else if (entry->path_len < out_size)
+            {
+                memcpy( out_buf, entry->resolved_path, entry->path_len + 1 );
+                *out_len = entry->path_len;
+                ok = TRUE;
+            }
+        }
+        mutex_unlock( &dos_drive_cache_mutex );
+        return ok;
+    }
+
+    snprintf( dosdev_path, sizeof(dosdev_path), "%s/dosdevices/%c:", config_dir, 'a' + drive );
+    s1 = entry->seq;
+    __atomic_store_n( &entry->seq, s1 + 1, __ATOMIC_RELEASE );
+    if (realpath( dosdev_path, resolved ))
+    {
+        entry->valid = 1;
+        if (resolved[0] == '/' && resolved[1] == 0)
+        {
+            entry->is_root = 1;
+            entry->path_len = 0;
+            entry->resolved_path[0] = 0;
+        }
+        else
+        {
+            len = strlen( resolved );
+            entry->is_root = 0;
+            entry->path_len = len;
+            memcpy( entry->resolved_path, resolved, len + 1 );
+        }
+    }
+    else
+    {
+        entry->valid = 0;
+        entry->is_root = 0;
+        entry->path_len = 0;
+    }
+    entry->verified_ts = now;
+    __atomic_store_n( &entry->seq, s1 + 2, __ATOMIC_RELEASE );
+
+    if (entry->valid && (entry->is_root || entry->path_len < out_size))
+    {
+        if (entry->is_root)
+        {
+            *out_len = 0;
+            out_buf[0] = 0;
+        }
+        else
+        {
+            memcpy( out_buf, entry->resolved_path, entry->path_len + 1 );
+            *out_len = entry->path_len;
+        }
+        mutex_unlock( &dos_drive_cache_mutex );
+        return TRUE;
+    }
+    mutex_unlock( &dos_drive_cache_mutex );
+    return FALSE;
+}
+
+static int find_dos_device_in_cache( const char *unix_name )
+{
+    int i, best_drive = -1;
+    int best_len = -1;
+    uint64_t now;
+
+    if (!unix_name || unix_name[0] != '/') return -1;
+    now = dos_drive_now_ticks();
+
+    for (i = 0; i < MAX_DOS_DRIVES; i++)
+    {
+        struct dos_drive_cache_entry *entry = &dos_drive_cache[i];
+        uint32_t s1 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        uint8_t valid, is_root;
+        uint16_t path_len;
+        char prefix[PATH_MAX];
+        uint32_t s2;
+
+        if (!s1 || (s1 & 1)) continue;
+        if ((now - entry->verified_ts) >= DOS_DRIVE_CACHE_TTL_TICKS) continue;
+        valid = entry->valid;
+        is_root = entry->is_root;
+        path_len = entry->path_len;
+        if (valid && !is_root && path_len > 0 && path_len < sizeof(prefix))
+            memcpy( prefix, entry->resolved_path, path_len );
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        s2 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        if (s1 != s2 || !valid) continue;
+
+        if (is_root)
+        {
+            if (best_len < 0)
+            {
+                best_len = 0;
+                best_drive = i;
+            }
+        }
+        else if ((int)path_len > best_len &&
+                 !strncmp( unix_name, prefix, path_len ) &&
+                 (unix_name[path_len] == '/' || unix_name[path_len] == 0))
+        {
+            best_len = path_len;
+            best_drive = i;
+        }
+    }
+    return best_drive;
+}
+
+
 /* Find a DOS device which can act as the root of "path".
  * Similar to find_drive_root(), but returns -1 instead of crossing volumes. */
 static int find_dos_device( const char *path )
@@ -2661,13 +2862,38 @@ static NTSTATUS get_mountmgr_fs_info( HANDLE handle, int fd, struct mountmgr_uni
     if (fd != -1)
     {
 #if defined(linux)
-        char proc_path[64], target[PATH_MAX];
-        ssize_t len;
-        sprintf( proc_path, "/proc/self/fd/%d", fd );
-        if ((len = readlink( proc_path, target, sizeof(target) - 1 )) > 0)
+        struct stat fd_st;
+        if (!fstat( fd, &fd_st ) && (S_ISDIR(fd_st.st_mode) || S_ISREG(fd_st.st_mode)))
         {
-            target[len] = 0;
-            letter = find_dos_device( target );
+            uint64_t now = dos_drive_now_ticks();
+            unsigned int idx = ((uint64_t)fd_st.st_dev * 2654435761u ^ (uint64_t)fd_st.st_ino) & (FD_DRIVE_CACHE_SIZE - 1);
+            mutex_lock( &fd_drive_cache_mutex );
+            if (fd_drive_cache[idx].dev == fd_st.st_dev &&
+                fd_drive_cache[idx].ino == fd_st.st_ino &&
+                (now - fd_drive_cache[idx].verified_ts) < DOS_DRIVE_CACHE_TTL_TICKS)
+            {
+                letter = fd_drive_cache[idx].drive;
+                mutex_unlock( &fd_drive_cache_mutex );
+            }
+            else
+            {
+                char proc_path[64], target[PATH_MAX];
+                ssize_t len;
+                mutex_unlock( &fd_drive_cache_mutex );
+                sprintf( proc_path, "/proc/self/fd/%d", fd );
+                if ((len = readlink( proc_path, target, sizeof(target) - 1 )) > 0)
+                {
+                    target[len] = 0;
+                    letter = find_dos_device_in_cache( target );
+                    if (letter == -1) letter = find_dos_device( target );
+                    mutex_lock( &fd_drive_cache_mutex );
+                    fd_drive_cache[idx].dev = fd_st.st_dev;
+                    fd_drive_cache[idx].ino = fd_st.st_ino;
+                    fd_drive_cache[idx].drive = letter;
+                    fd_drive_cache[idx].verified_ts = now;
+                    mutex_unlock( &fd_drive_cache_mutex );
+                }
+            }
         }
 #endif
     }
@@ -3460,18 +3686,48 @@ static int get_drive_index( int root_fd, const char *unix_name )
     if (root_fd != AT_FDCWD && root_fd >= 0)
     {
 #if defined(linux)
-        char proc_path[64], target[PATH_MAX];
-        ssize_t len;
-        sprintf( proc_path, "/proc/self/fd/%d", root_fd );
-        if ((len = readlink( proc_path, target, sizeof(target) - 1 )) > 0)
+        struct stat fd_st;
+        if (!fstat( root_fd, &fd_st ) && (S_ISDIR(fd_st.st_mode) || S_ISREG(fd_st.st_mode)))
         {
-            target[len] = 0;
-            return find_dos_device( target );
+            uint64_t now = dos_drive_now_ticks();
+            unsigned int idx = ((uint64_t)fd_st.st_dev * 2654435761u ^ (uint64_t)fd_st.st_ino) & (FD_DRIVE_CACHE_SIZE - 1);
+            int cached_drive;
+            mutex_lock( &fd_drive_cache_mutex );
+            if (fd_drive_cache[idx].dev == fd_st.st_dev &&
+                fd_drive_cache[idx].ino == fd_st.st_ino &&
+                (now - fd_drive_cache[idx].verified_ts) < DOS_DRIVE_CACHE_TTL_TICKS)
+            {
+                cached_drive = fd_drive_cache[idx].drive;
+                mutex_unlock( &fd_drive_cache_mutex );
+                return cached_drive;
+            }
+            mutex_unlock( &fd_drive_cache_mutex );
+            {
+                char proc_path[64], target[PATH_MAX];
+                ssize_t len;
+                sprintf( proc_path, "/proc/self/fd/%d", root_fd );
+                if ((len = readlink( proc_path, target, sizeof(target) - 1 )) > 0)
+                {
+                    int drv;
+                    target[len] = 0;
+                    drv = find_dos_device_in_cache( target );
+                    if (drv == -1) drv = find_dos_device( target );
+                    mutex_lock( &fd_drive_cache_mutex );
+                    fd_drive_cache[idx].dev = fd_st.st_dev;
+                    fd_drive_cache[idx].ino = fd_st.st_ino;
+                    fd_drive_cache[idx].drive = drv;
+                    fd_drive_cache[idx].verified_ts = now;
+                    mutex_unlock( &fd_drive_cache_mutex );
+                    return drv;
+                }
+            }
         }
 #endif
     }
     else if (unix_name && unix_name[0] == '/')
     {
+        int drv = find_dos_device_in_cache( unix_name );
+        if (drv != -1) return drv;
         return find_dos_device( unix_name );
     }
 
@@ -4439,6 +4695,45 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
     }
     prefix_len = pos;
     prefix[prefix_len] = 0;
+
+    if (prefix_len == 2 && prefix[1] == ':' && prefix[0] >= 'a' && prefix[0] <= 'z' && name_len > 2)
+    {
+        char resolved_drive[PATH_MAX];
+        int resolved_len = 0;
+        if (resolve_dos_drive_cached( prefix[0] - 'a', resolved_drive, sizeof(resolved_drive), &resolved_len ))
+        {
+            unix_len = name_len * 3 + MAX_DIR_ENTRY_LEN + 3 + resolved_len + 1;
+            if (!(unix_name = malloc( unix_len ))) return STATUS_NO_MEMORY;
+            if (resolved_len)
+            {
+                memcpy( unix_name, resolved_drive, resolved_len );
+                unix_name[resolved_len] = 0;
+            }
+            else
+            {
+                unix_name[0] = 0;
+            }
+            pos = resolved_len;
+            prefix_len++;  /* skip initial backslash */
+            if (name_len > prefix_len && name[prefix_len] == '\\') prefix_len++;  /* allow a second backslash */
+            nt_pos += prefix_len;
+
+            status = lookup_unix_name( AT_FDCWD, attr, nt_name, nt_pos, &unix_name, unix_len,
+                                       pos, disposition, open_reparse, is_unix, reparse_count );
+            if (status == STATUS_SUCCESS || status == STATUS_NO_SUCH_FILE)
+            {
+                *unix_name_ret = unix_name;
+            }
+            else
+            {
+                if ((status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
+                    && (!nt_name || !nt_name->Buffer))
+                    path_cache_insert( attr, unix_name, open_reparse, status );
+                free( unix_name );
+            }
+            return status;
+        }
+    }
 
     unix_len = name_len * 3 + MAX_DIR_ENTRY_LEN + 3;
     unix_len += strlen(config_dir) + sizeof("/dosdevices/");
