@@ -405,8 +405,120 @@ NTSTATUS errno_to_status( int err )
 }
 
 
+#define XATTR_NEG_REPARSE  0x01
+#define XATTR_NEG_DOSATTR  0x02
+#define XATTR_NEG_ALL      (XATTR_NEG_REPARSE | XATTR_NEG_DOSATTR)
+#define XATTR_NEG_SLOTS    2048
+
+struct xattr_neg_slot
+{
+    dev_t dev;
+    ino_t ino;
+    time_t ctime_sec;
+    long ctime_nsec;
+    unsigned int gen;
+    unsigned int neg_mask;
+};
+
+static struct xattr_neg_slot xattr_neg_cache[XATTR_NEG_SLOTS];
+static unsigned int xattr_neg_gen = 1;
+static pthread_mutex_t xattr_neg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline long stat_ctime_nsec( const struct stat *st )
+{
+#ifdef HAVE_STRUCT_STAT_ST_CTIM
+    return st->st_ctim.tv_nsec;
+#elif defined(HAVE_STRUCT_STAT_ST_CTIMESPEC)
+    return st->st_ctimespec.tv_nsec;
+#else
+    return 0;
+#endif
+}
+
+static void xattr_neg_invalidate( void )
+{
+    pthread_mutex_lock( &xattr_neg_mutex );
+    if (!++xattr_neg_gen)
+    {
+        memset( xattr_neg_cache, 0, sizeof(xattr_neg_cache) );
+        xattr_neg_gen = 1;
+    }
+    pthread_mutex_unlock( &xattr_neg_mutex );
+}
+
+static unsigned int xattr_neg_lookup( const struct stat *st )
+{
+    unsigned int idx = ((unsigned int)st->st_ino ^ ((unsigned int)st->st_dev * 2654435761u)) & (XATTR_NEG_SLOTS - 1);
+    long ctime_nsec = stat_ctime_nsec( st );
+    unsigned int mask = 0;
+
+    pthread_mutex_lock( &xattr_neg_mutex );
+    if (xattr_neg_cache[idx].gen == xattr_neg_gen &&
+        xattr_neg_cache[idx].dev == st->st_dev &&
+        xattr_neg_cache[idx].ino == st->st_ino &&
+        xattr_neg_cache[idx].ctime_sec == st->st_ctime &&
+        xattr_neg_cache[idx].ctime_nsec == ctime_nsec)
+    {
+        mask = xattr_neg_cache[idx].neg_mask;
+    }
+    pthread_mutex_unlock( &xattr_neg_mutex );
+    return mask;
+}
+
+static void xattr_neg_store( const struct stat *st, unsigned int neg_mask )
+{
+    unsigned int idx = ((unsigned int)st->st_ino ^ ((unsigned int)st->st_dev * 2654435761u)) & (XATTR_NEG_SLOTS - 1);
+    long ctime_nsec = stat_ctime_nsec( st );
+
+    if (!neg_mask) return;
+    pthread_mutex_lock( &xattr_neg_mutex );
+    if (xattr_neg_cache[idx].gen == xattr_neg_gen &&
+        xattr_neg_cache[idx].dev == st->st_dev &&
+        xattr_neg_cache[idx].ino == st->st_ino &&
+        xattr_neg_cache[idx].ctime_sec == st->st_ctime &&
+        xattr_neg_cache[idx].ctime_nsec == ctime_nsec)
+    {
+        xattr_neg_cache[idx].neg_mask |= neg_mask;
+    }
+    else
+    {
+        xattr_neg_cache[idx].dev = st->st_dev;
+        xattr_neg_cache[idx].ino = st->st_ino;
+        xattr_neg_cache[idx].ctime_sec = st->st_ctime;
+        xattr_neg_cache[idx].ctime_nsec = ctime_nsec;
+        xattr_neg_cache[idx].gen = xattr_neg_gen;
+        xattr_neg_cache[idx].neg_mask = neg_mask;
+    }
+    pthread_mutex_unlock( &xattr_neg_mutex );
+}
+
+#if defined(HAVE_SYS_XATTR_H) && !defined(__APPLE__) && !defined(XATTR_ADDITIONAL_OPTIONS)
+static unsigned int xattr_probe_list( const char *path, int fd )
+{
+    char list[512];
+    ssize_t len, i = 0;
+    unsigned int neg_mask = XATTR_NEG_ALL;
+
+    len = path ? listxattr( path, list, sizeof(list) ) : flistxattr( fd, list, sizeof(list) );
+    if (len < 0)
+        return (errno == ENOTSUP) ? XATTR_NEG_ALL : 0;
+
+    while (i < len)
+    {
+        const char *name = &list[i];
+        if (!strcmp( name, XATTR_REPARSE ))
+            neg_mask &= ~XATTR_NEG_REPARSE;
+        else if (!strcmp( name, SAMBA_XATTR_DOS_ATTRIB ))
+            neg_mask &= ~XATTR_NEG_DOSATTR;
+        i += strlen( name ) + 1;
+    }
+    return neg_mask;
+}
+#endif
+
 static int xattr_fremove( int filedes, const char *name )
 {
+    xattr_neg_invalidate();
 #ifdef HAVE_SYS_XATTR_H
 # ifdef XATTR_ADDITIONAL_OPTIONS
     return fremovexattr( filedes, name, 0 );
@@ -424,6 +536,7 @@ static int xattr_fremove( int filedes, const char *name )
 
 static int xattr_fset( int filedes, const char *name, const void *value, size_t size )
 {
+    xattr_neg_invalidate();
 #ifdef HAVE_SYS_XATTR_H
 # ifdef XATTR_ADDITIONAL_OPTIONS
     return fsetxattr( filedes, name, value, size, 0, 0 );
@@ -517,6 +630,7 @@ static int xattr_fget( int filedes, const char *name, void *value, size_t size )
 
 static int xattr_set( const char *path, const char *name, const void *value, size_t size )
 {
+    xattr_neg_invalidate();
 #ifdef HAVE_SYS_XATTR_H
 # ifdef XATTR_ADDITIONAL_OPTIONS
     return setxattr( path, name, value, size, 0, 0 );
@@ -535,6 +649,7 @@ static int xattr_set( const char *path, const char *name, const void *value, siz
 
 static int xattr_remove( const char *path, const char *name )
 {
+    xattr_neg_invalidate();
 #ifdef HAVE_SYS_XATTR_H
 # ifdef XATTR_ADDITIONAL_OPTIONS
     return removexattr( path, name, 0 );
@@ -1731,6 +1846,8 @@ static int fd_get_file_info( HANDLE handle, int fd, unsigned int options,
     char attr_data[65];
     int attr_len, ret;
 
+    unsigned int neg_mask, store_mask = 0;
+
     *attr = 0;
     ret = fstat( fd, st );
     if (ret == -1) return ret;
@@ -1746,28 +1863,59 @@ static int fd_get_file_info( HANDLE handle, int fd, unsigned int options,
         }
     }
 
-    attr_len = xattr_fget( fd, XATTR_REPARSE, buffer, sizeof(buffer) );
-    if (attr_len >= 0 && attr_len >= sizeof(ULONG))
+    neg_mask = xattr_neg_lookup( st );
+#if defined(HAVE_SYS_XATTR_H) && !defined(__APPLE__) && !defined(XATTR_ADDITIONAL_OPTIONS)
+    if (!neg_mask)
     {
-        *attr |= FILE_ATTRIBUTE_REPARSE_POINT;
-        if (reparse_tag) memcpy( reparse_tag, buffer, sizeof(ULONG) );
+        neg_mask = xattr_probe_list( NULL, fd );
+        if (neg_mask) xattr_neg_store( st, neg_mask );
     }
+#endif
 
-    attr_len = xattr_fget( fd, SAMBA_XATTR_DOS_ATTRIB, attr_data, sizeof(attr_data)-1 );
-    if (attr_len != -1)
-        *attr |= parse_samba_dos_attrib_data( attr_data, attr_len );
-    else
+    if (!(neg_mask & XATTR_NEG_REPARSE))
     {
-        if (errno == ENOTSUP) return ret;
+        attr_len = xattr_fget( fd, XATTR_REPARSE, buffer, sizeof(buffer) );
+        if (attr_len >= 0 && attr_len >= sizeof(ULONG))
+        {
+            *attr |= FILE_ATTRIBUTE_REPARSE_POINT;
+            if (reparse_tag) memcpy( reparse_tag, buffer, sizeof(ULONG) );
+        }
+        else if (attr_len < 0)
+        {
+            if (errno == ENOTSUP
 #ifdef ENODATA
-        if (errno == ENODATA) return ret;
+                || errno == ENODATA
 #endif
 #ifdef ENOATTR
-        if (errno == ENOATTR) return ret;
+                || errno == ENOATTR
 #endif
-        WARN( "Failed to get extended attribute " SAMBA_XATTR_DOS_ATTRIB ". errno %d (%s)\n",
-              errno, strerror( errno ) );
+                )
+                store_mask |= XATTR_NEG_REPARSE;
+        }
     }
+
+    if (!(neg_mask & XATTR_NEG_DOSATTR))
+    {
+        attr_len = xattr_fget( fd, SAMBA_XATTR_DOS_ATTRIB, attr_data, sizeof(attr_data)-1 );
+        if (attr_len != -1)
+            *attr |= parse_samba_dos_attrib_data( attr_data, attr_len );
+        else
+        {
+            if (errno == ENOTSUP
+#ifdef ENODATA
+                || errno == ENODATA
+#endif
+#ifdef ENOATTR
+                || errno == ENOATTR
+#endif
+                )
+                store_mask |= XATTR_NEG_DOSATTR;
+            else
+                WARN( "Failed to get extended attribute " SAMBA_XATTR_DOS_ATTRIB ". errno %d (%s)\n",
+                      errno, strerror( errno ) );
+        }
+    }
+    if (store_mask) xattr_neg_store( st, store_mask );
     return ret;
 }
 
@@ -1828,6 +1976,7 @@ static int get_file_info( const char *path, struct stat *st, ULONG *attr, ULONG 
     char *parent_path;
     char attr_data[65];
     int attr_len, ret;
+    unsigned int neg_mask, store_mask = 0;
 
     *attr = 0;
     ret = lstat( path, st );
@@ -1862,30 +2011,66 @@ static int get_file_info( const char *path, struct stat *st, ULONG *attr, ULONG 
     }
     *attr |= get_file_attributes( st );
 
-    attr_len = xattr_get( path, XATTR_REPARSE, buffer, sizeof(buffer) );
-    if (attr_len >= 0 && attr_len >= sizeof(ULONG))
+    neg_mask = xattr_neg_lookup( st );
+#if defined(HAVE_SYS_XATTR_H) && !defined(__APPLE__) && !defined(XATTR_ADDITIONAL_OPTIONS)
+    if (!neg_mask)
     {
-        *attr |= FILE_ATTRIBUTE_REPARSE_POINT;
-        if (reparse_tag) memcpy( reparse_tag, buffer, sizeof(ULONG) );
+        neg_mask = xattr_probe_list( path, -1 );
+        if (neg_mask) xattr_neg_store( st, neg_mask );
+    }
+#endif
+
+    if (!(neg_mask & XATTR_NEG_REPARSE))
+    {
+        attr_len = xattr_get( path, XATTR_REPARSE, buffer, sizeof(buffer) );
+        if (attr_len >= 0 && attr_len >= sizeof(ULONG))
+        {
+            *attr |= FILE_ATTRIBUTE_REPARSE_POINT;
+            if (reparse_tag) memcpy( reparse_tag, buffer, sizeof(ULONG) );
+        }
+        else if (attr_len < 0)
+        {
+            if (errno == ENOTSUP
+#ifdef ENODATA
+                || errno == ENODATA
+#endif
+#ifdef ENOATTR
+                || errno == ENOATTR
+#endif
+                )
+                store_mask |= XATTR_NEG_REPARSE;
+        }
     }
 
-    attr_len = xattr_get( path, SAMBA_XATTR_DOS_ATTRIB, attr_data, sizeof(attr_data)-1 );
-    if (attr_len != -1)
-        *attr |= parse_samba_dos_attrib_data( attr_data, attr_len );
-    else
+    if (neg_mask & XATTR_NEG_DOSATTR)
     {
         if (is_hidden_file( path ))
             *attr |= FILE_ATTRIBUTE_HIDDEN;
-        if (errno == ENOTSUP) return ret;
+    }
+    else
+    {
+        attr_len = xattr_get( path, SAMBA_XATTR_DOS_ATTRIB, attr_data, sizeof(attr_data)-1 );
+        if (attr_len != -1)
+            *attr |= parse_samba_dos_attrib_data( attr_data, attr_len );
+        else
+        {
+            if (is_hidden_file( path ))
+                *attr |= FILE_ATTRIBUTE_HIDDEN;
+            if (errno == ENOTSUP
 #ifdef ENODATA
-        if (errno == ENODATA) return ret;
+                || errno == ENODATA
 #endif
 #ifdef ENOATTR
-        if (errno == ENOATTR) return ret;
+                || errno == ENOATTR
 #endif
-        WARN( "Failed to get extended attribute " SAMBA_XATTR_DOS_ATTRIB " from %s. errno %d (%s)\n",
-              debugstr_a(path), errno, strerror( errno ) );
+                )
+                store_mask |= XATTR_NEG_DOSATTR;
+            else
+                WARN( "Failed to get extended attribute " SAMBA_XATTR_DOS_ATTRIB " from %s. errno %d (%s)\n",
+                      debugstr_a(path), errno, strerror( errno ) );
+        }
     }
+    if (store_mask) xattr_neg_store( st, store_mask );
     return ret;
 }
 

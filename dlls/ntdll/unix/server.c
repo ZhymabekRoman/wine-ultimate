@@ -102,6 +102,7 @@ timeout_t server_start_time = 0;  /* time of server startup */
 int user_shared_data_fd = -1;
 
 sigset_t server_block_set;  /* signals to block during server calls */
+static __thread unsigned int server_sig_depth;
 static int fd_socket = -1;  /* socket to exchange file descriptors with the server */
 static int initial_cwd = -1;
 static pid_t server_pid;
@@ -444,9 +445,11 @@ unsigned int CDECL wine_server_call( void *req_ptr )
 
     if ((ret = server_promote_local_handles( req_ptr ))) return ret;
 
-    pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
+    if (!server_sig_depth++)
+        pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
     ret = server_call_unlocked( req_ptr );
-    pthread_sigmask( SIG_SETMASK, &old_set, NULL );
+    if (!--server_sig_depth)
+        pthread_sigmask( SIG_SETMASK, &old_set, NULL );
     return ret;
 }
 
@@ -467,7 +470,8 @@ NTSTATUS unixcall_wine_server_call( void *args )
  */
 void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
 {
-    pthread_sigmask( SIG_BLOCK, &server_block_set, sigset );
+    if (!server_sig_depth++)
+        pthread_sigmask( SIG_BLOCK, &server_block_set, sigset );
     mutex_lock( mutex );
 }
 
@@ -478,7 +482,8 @@ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigse
 void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
 {
     mutex_unlock( mutex );
-    pthread_sigmask( SIG_SETMASK, sigset, NULL );
+    if (!--server_sig_depth)
+        pthread_sigmask( SIG_SETMASK, sigset, NULL );
 }
 
 
@@ -888,7 +893,8 @@ unsigned int server_select( const union select_op *select_op, data_size_t size, 
 
     do
     {
-        pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
+        if (!server_sig_depth++)
+            pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
         for (;;)
         {
             SERVER_START_REQ( select )
@@ -922,7 +928,8 @@ unsigned int server_select( const union select_op *select_op, data_size_t size, 
             if (size >= sizeof(select_op->signal_and_wait) && select_op->op == SELECT_SIGNAL_AND_WAIT)
                 size = offsetof( union select_op, signal_and_wait.signal );
         }
-        pthread_sigmask( SIG_SETMASK, &old_set, NULL );
+        if (!--server_sig_depth)
+            pthread_sigmask( SIG_SETMASK, &old_set, NULL );
         if (signaled) break;
 
         ret = wait_select_reply( data->wait_fd, &cookie );
