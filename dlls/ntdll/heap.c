@@ -2230,6 +2230,7 @@ BOOLEAN WINAPI DECLSPEC_HOTPATCH RtlFreeHeap( HANDLE handle, ULONG flags, void *
 
     if (handle == process_heap && process_heap &&
         !((ULONG_PTR)ptr & (BLOCK_ALIGN - 1)) &&
+        ((ULONG_PTR)ptr & 0xfff) >= sizeof(struct block) &&
         !(flags & ~HEAP_NO_SERIALIZE) &&
         !(process_heap->flags & HEAP_MAG_DISALLOWED_FLAGS) &&
         !process_heap->pending_free && !RUNNING_ON_VALGRIND)

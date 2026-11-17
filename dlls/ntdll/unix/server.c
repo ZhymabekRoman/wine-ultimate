@@ -296,14 +296,11 @@ unsigned int server_call_unlocked( void *req_ptr )
 
 
 /***********************************************************************
- *           wine_server_call
- *
- * Perform a server call.
+ *           server_promote_local_handles
  */
-unsigned int CDECL wine_server_call( void *req_ptr )
+unsigned int server_promote_local_handles( void *req_ptr )
 {
     struct __server_request_info *req = req_ptr;
-    sigset_t old_set;
     unsigned int ret;
 
     switch (req->u.req.request_header.req)
@@ -431,6 +428,21 @@ unsigned int CDECL wine_server_call( void *req_ptr )
     default:
         break;
     }
+    return STATUS_SUCCESS;
+}
+
+
+/***********************************************************************
+ *           wine_server_call
+ *
+ * Perform a server call.
+ */
+unsigned int CDECL wine_server_call( void *req_ptr )
+{
+    sigset_t old_set;
+    unsigned int ret;
+
+    if ((ret = server_promote_local_handles( req_ptr ))) return ret;
 
     pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
     ret = server_call_unlocked( req_ptr );

@@ -421,6 +421,7 @@ extern void file_complete_async( HANDLE handle, unsigned int options, HANDLE eve
 extern void set_async_direct_result( HANDLE *async_handle, unsigned int options, IO_STATUS_BLOCK *io,
                                      NTSTATUS status, ULONG_PTR information, BOOL mark_pending );
 
+extern unsigned int server_promote_local_handles( void *req_ptr );
 extern NTSTATUS unixcall_wine_dbg_write( void *args );
 extern NTSTATUS unixcall_flight_recorder_log( void *args );
 extern NTSTATUS unixcall_wine_server_call( void *args );

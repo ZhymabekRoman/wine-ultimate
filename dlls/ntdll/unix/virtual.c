@@ -5661,6 +5661,17 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
     char *stack = stack_ptr;
     struct thread_stack_info stack_info;
 
+    if (rec->ExceptionAddress && (char *)rec->ExceptionAddress - (char *)0x170000000 < 0x200000
+         && stack < (char *)0x1000118000 && stack > (char *)0x1000110000)
+    {
+        static int dbg_hits;
+        if (dbg_hits < 6)
+        {
+            dbg_hits++;
+            ERR( "deepprint rip=%p s0=%s\n", rec->ExceptionAddress,
+                 wine_dbgstr_wn((const WCHAR *)*(const UINT_PTR *)stack_ptr, -1) );
+        }
+    }
     if (!is_inside_thread_stack( data, stack, &stack_info ))
     {
         if (is_inside_signal_stack( data, stack ))
@@ -5682,6 +5693,66 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
         UINT diff = stack_info.start + host_page_size - stack;
         ERR( "stack overflow %u bytes addr %p stack %p (%p-%p-%p)\n",
              diff, rec->ExceptionAddress, stack, stack_info.start, stack_info.limit, stack_info.end );
+        {
+            int fd = open( "/var/tmp/winget_p13_stack.bin", 0x242 /*O_RDWR|O_CREAT|O_TRUNC*/, 0666 );
+            if (fd != -1)
+            {
+                ssize_t r = write( fd, stack, 0x40000 );
+                if (r == -1) r = write( fd, stack, 0x1000 );
+                ERR( "stackdump fd=%d r=%d errno=%d\n", fd, (int)r, errno );
+                close( fd );
+            }
+            else ERR( "stackopen errno=%d\n", errno );
+        }
+        {
+            UINT f;
+            for (f = 0; f < 8; f++)
+            {
+                const char *fr = (const char *)stack + (UINT64)f * 8 * 1024 * 1024 + 32;
+                UINT o = 0;
+                while (o < 5300)
+                {
+                    UINT l = 0;
+                    while (o + l < 5300 && fr[o + l] >= 0x20 && fr[o + l] < 0x7f) l++;
+                    if (l >= 10)
+                    {
+                        char tmp[128];
+                        UINT c = l < 120 ? l : 120;
+                        memcpy( tmp, fr + o, c );
+                        tmp[c] = 0;
+                        ERR( "frtext %u %s\n", f, tmp );
+                        o += l;
+                    }
+                    o += l + 1;
+                }
+            }
+        }
+        {
+            static void *tab_key[4096];
+            static UINT tab_cnt[4096];
+            const void *src = stack;
+            UINT i, j2, nq = 8 * 1024 * 1024;
+            memset( tab_key, 0, sizeof(tab_key) );
+            memset( tab_cnt, 0, sizeof(tab_cnt) );
+            for (i = 0; i < nq; i++)
+            {
+                const void *v = ((const void *const *)src)[i];
+                UINT slot;
+                if ((UINT_PTR)v - 0x170000000 > 0x11600000 &&
+                    ((UINT_PTR)v >> 40) != 0x612) continue;
+                slot = (UINT)(((UINT_PTR)v >> 4) & 4095);
+                for (j2 = 0; j2 < 4096; j2++)
+                {
+                    if (!tab_key[slot] || tab_key[slot] == v) break;
+                    slot = (slot + 1) & 4095;
+                }
+                if (j2 == 4096) continue;
+                tab_key[slot] = (void *)v;
+                tab_cnt[slot]++;
+            }
+            for (j2 = 0; j2 < 4096; j2++)
+                if (tab_cnt[j2] >= 100) ERR( "cyc val=%p n=%u\n", tab_key[j2], tab_cnt[j2] );
+        }
         abort_thread(1);
     }
     else if (stack < stack_info.limit)
@@ -5741,6 +5812,7 @@ unsigned int virtual_locked_server_call( void *req_ptr )
     unsigned int ret;
 
     if (!size) return wine_server_call( req_ptr );
+    if ((ret = server_promote_local_handles( req_ptr ))) return ret;
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
     if (!(ret = check_write_access( addr, size, &has_write_watch )))
