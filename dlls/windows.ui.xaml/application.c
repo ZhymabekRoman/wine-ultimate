@@ -5281,9 +5281,9 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         desc.SampleDesc.Count = 1;
         desc.SampleDesc.Quality = 0;
         desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        desc.BufferCount = 2;
+        desc.BufferCount = 1;
         desc.Scaling = DXGI_SCALING_STRETCH;
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
         desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
         desc.Flags = 0;
 

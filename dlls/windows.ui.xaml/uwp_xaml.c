@@ -353,6 +353,8 @@ static const GUID IID_IReferenceTracker_QI_UWP =
     { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
 static const GUID IID_IPropertyValue_probe_UWP =
     { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
+static const GUID IID_IFrameProj_UWP =
+    { 0x3f367f87, 0x9f5a, 0x4b04, { 0xb8, 0x18, 0xb5, 0x54, 0xc0, 0x69, 0x59, 0x7a } };
 static const GUID IID_IRoutedEventArgs_QI_UWP =
     { 0x5c985ac6, 0xd802, 0x4b38, { 0xa2, 0x23, 0xbf, 0x07, 0x0c, 0x43, 0xfe, 0xdf } };
 static const GUID IID_IRoutedEventArgs_Clone_UWP =
@@ -2509,6 +2511,10 @@ struct uwp_element
     struct xaml_event_registry ptr_capture_lost_reg;
     struct xaml_event_registry ptr_canceled_reg;
     struct xaml_event_registry ptr_wheel_reg;
+    struct xaml_event_registry nav_sel_changed_reg;
+    struct xaml_event_registry nav_item_invoked_reg;
+    IInspectable *nav_args_item;
+    BOOL nav_fired;
 
     struct uwp_dp_entry *dp_store;
     int dp_cnt;
@@ -4668,6 +4674,10 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IPanel_iface;
     else if (IsEqualGUID( iid, &IID_IContentPresenter_UWP ))
         *out = &impl->IContentControl_iface;
+    else if ((IsEqualGUID( iid, &IID_IFrameProj_UWP ) &&
+             (wcsstr( impl->class_name, L".Controls.Frame" ) ||
+              wcsstr( impl->class_name, L".Controls.ContentFrame" ))))
+        *out = &impl->IContentControl_iface; /* IFrame projected face on Frame */
     else if (IsEqualGUID( iid, &IID_INavigationView_UWP ) &&
              !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ))
         *out = &impl->IStyle_iface;
@@ -5207,11 +5217,14 @@ static HRESULT WINAPI uwp_ui_put_IsHitTestVisible( void *iface, boolean val )
     return S_OK;
 }
 
+static const WCHAR *uwp_elem_name_w( struct uwp_element *el ) { return el ? el->name : L"?"; }
+
 #define UWP_UI_PTR_EVENT( name, field ) \
 static HRESULT WINAPI uwp_ui_add_##name( void *iface, void *handler, EventRegistrationToken *tok ) \
 { \
     struct uwp_element *impl = uwp_elem_from_any( iface ); \
     if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; } \
+    TRACE( "add_" #name " on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( uwp_elem_name_w( impl ) ), handler ); \
     return xaml_event_registry_add( &impl->field, handler, tok ); \
 } \
 static HRESULT WINAPI uwp_ui_remove_##name( void *iface, EventRegistrationToken tok ) \
@@ -5229,6 +5242,88 @@ UWP_UI_PTR_EVENT( PointerExited, ptr_exited_reg )
 UWP_UI_PTR_EVENT( PointerCaptureLost, ptr_capture_lost_reg )
 UWP_UI_PTR_EVENT( PointerCanceled, ptr_canceled_reg )
 UWP_UI_PTR_EVENT( PointerWheelChanged, ptr_wheel_reg )
+UWP_UI_PTR_EVENT( SelectionChanged, nav_sel_changed_reg )
+UWP_UI_PTR_EVENT( ItemInvoked, nav_item_invoked_reg )
+
+/* INavigationViewSelectionChangedEventArgs / INavigationViewItemInvokedEventArgs
+ * projected face (singleton, like g_sel_changed_args).  ABI after the 6
+ * IInspectable slots: 6 = get_SelectedItem / get_InvokedItem, 7 = get_IsSelected
+ * / get_IsSettingsInvoked, 8 = get_IsSettingsSelected, 9 = get_SelectedItemOverride.
+ * The item slots serve the value in g_nav_args_item set by uwp_nav_fire(). */
+static IInspectable *g_nav_args_item;
+static HRESULT WINAPI uwp_nav_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI uwp_nav_args_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI uwp_nav_args_Release( void *iface ) { return 1; }
+static HRESULT WINAPI uwp_nav_args_get_IsSelected( void *iface, boolean *val )
+{
+    if (val) *val = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_nav_args_get_IsSettingsSelected( void *iface, boolean *val )
+{
+    if (val) *val = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_nav_args_get_Item( void *iface, IInspectable **val )
+{
+    if (val)
+    {
+        *val = g_nav_args_item;
+        if (*val) IInspectable_AddRef( *val );
+    }
+    return S_OK;
+}
+static const void *uwp_nav_args_vtbl[16] =
+{
+    [0] = uwp_nav_args_QI,
+    [1] = uwp_nav_args_AddRef,
+    [2] = uwp_nav_args_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_nav_args_get_Item,
+    [7] = uwp_nav_args_get_IsSelected,
+    [8] = uwp_nav_args_get_IsSettingsSelected,
+    [9] = uwp_nav_args_get_Item,
+    [10 ... 15] = uwp_generic_noop,
+};
+static struct { const void *vtbl; } g_nav_sel_args = { uwp_nav_args_vtbl };
+
+static struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth );
+
+static void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
+                          IInspectable *item )
+{
+    void *handlers[16];
+    unsigned int n, i;
+    IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
+
+    n = xaml_event_registry_snapshot( reg, handlers, ARRAY_SIZE( handlers ) );
+    if (!n) return;
+    g_nav_args_item = item;
+    for (i = 0; i < n; i++)
+    {
+        struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+        TRACE( "Firing NavigationView event on %s (%s) handler=%p item=%p\n",
+               debugstr_w( el->class_name ), debugstr_w( el->name ), handlers[i], item );
+        __TRY
+        {
+            h->lpVtbl->Invoke( h, sender, (IInspectable *)&g_nav_sel_args );
+        }
+        __EXCEPT_ALL
+        {
+            WARN( "NavigationView handler on %s (%s) threw\n",
+                  debugstr_w( el->class_name ), debugstr_w( el->name ) );
+        }
+        __ENDTRY;
+    }
+    g_nav_args_item = NULL;
+}
 
 static HRESULT WINAPI uwp_ui_CapturePointer( void *iface, void *pointer, boolean *ret )
 {
@@ -5608,6 +5703,7 @@ static HRESULT WINAPI uwp_fe_add_Loaded( void *iface, void *handler, EventRegist
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (tok) tok->value = 1;
     if (!impl || !handler) return S_OK;
+    TRACE( "add_Loaded on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( impl->name ), handler );
     if (xaml_vec_grow( (void **)&impl->loaded_handlers, &impl->loaded_cap, impl->loaded_cnt + 1, sizeof(*impl->loaded_handlers), 8 ))
     {
         impl->loaded_handlers[impl->loaded_cnt++] = (IInspectable *)handler;
@@ -6688,7 +6784,91 @@ static HRESULT WINAPI uwp_fe_get_BaseUri( void *iface, void **uri )
     return S_OK;
 }
 
-static const void *uwp_fe_vtbl[64] =
+/* INavigationView own-method getters, ABI slots 56/62 on the FE face
+ * (INavigationView : IFrameworkElement, 3 + 53 IFE = base 56):
+ * own[0] = get_IsPaneOpen, own[6] = get_FooterMenuItems. */
+static HRESULT WINAPI uwp_nav_get_IsPaneOpen( void *iface, BOOL *open )
+{
+    if (open) *open = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_nav_get_FooterMenuItems( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !out) return E_INVALIDARG;
+    if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+    *out = impl->children_coll;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_fe_probe6( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 6 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe11( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 11 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe12( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 12 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe27( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 27 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe28( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 28 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe29( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 29 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe30( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 30 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe38( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 38 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe39( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 39 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe44( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 44 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe48( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 48 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe52( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 52 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe53( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 53 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe54( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 54 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe55( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 55 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe57( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 57 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe58( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 58 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe59( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 59 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe60( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 60 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe61( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 61 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe63( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 63 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe64( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 64 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe65( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 65 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe66( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 66 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe67( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 67 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe68( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 68 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe69( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 69 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe70( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 70 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe71( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 71 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe72( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 72 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe73( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 73 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe74( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 74 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe75( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 75 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe76( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 76 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe77( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 77 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe78( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 78 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe79( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 79 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe80( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 80 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe81( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 81 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe82( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 82 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe83( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 83 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe84( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 84 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe85( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 85 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe86( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 86 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe87( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 87 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe88( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 88 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe89( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 89 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe90( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 90 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe91( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 91 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe92( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 92 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe93( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 93 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe94( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 94 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe95( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 95 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe96( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 96 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe97( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 97 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe98( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 98 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe99( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 99 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe100( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 100 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe101( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 101 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe106( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 106 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe107( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 107 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe108( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 108 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe109( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 109 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe110( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 110 hit on NavView\n" ); return S_OK; }
+static HRESULT WINAPI uwp_fe_probe111( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 111 hit on NavView\n" ); return S_OK; }
+
+static const void *uwp_fe_vtbl[112] =
 {
     [0] = uwp_sub_QueryInterface,
     [1] = uwp_sub_AddRef,
@@ -6696,7 +6876,27 @@ static const void *uwp_fe_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 63] = uwp_generic_noop,
+    [6] = uwp_fe_probe6,
+    [11] = uwp_fe_probe11,
+    [12] = uwp_fe_probe12,
+    [27] = uwp_fe_probe27,
+    [28] = uwp_fe_probe28,
+    [29] = uwp_fe_probe29,
+    [30] = uwp_fe_probe30,
+    [38] = uwp_fe_probe38,
+    [39] = uwp_fe_probe39,
+    [44] = uwp_fe_probe44,
+    [48] = uwp_fe_probe48,
+    [52] = uwp_fe_probe52,
+    [53] = uwp_fe_probe53,
+    [54] = uwp_fe_probe54,
+    [55] = uwp_fe_probe55,
+    [57] = uwp_fe_probe57,
+    [58] = uwp_fe_probe58,
+    [59] = uwp_fe_probe59,
+    [60] = uwp_fe_probe60,
+    [61] = uwp_fe_probe61,
+    [63] = uwp_fe_probe63,
     [7] = uwp_fe_get_Resources,
     [8] = uwp_fe_put_Resources,
     [9] = uwp_fe_get_Tag,
@@ -6730,6 +6930,101 @@ static const void *uwp_fe_vtbl[64] =
     [47] = uwp_ui_event_add,
     [49] = uwp_ui_event_add,
     [51] = uwp_fe_FindName,
+    /* INavigationView ABI slots when this face is cast to NavigationView.
+     * Chain: IInspectable(3) + IFrameworkElement(53) = base 56, own-method
+     * order from Microsoft.UI.Xaml.winmd 2.8: own[0]=IsPaneOpen(56),
+     * own[6]=FooterMenuItems(62), own[46]=SelectionChanged(102),
+     * own[48]=ItemInvoked(104) — Time.dll calls *0x1c0,*0x1f0,*0x340,*0x348. */
+    [56] = uwp_nav_get_IsPaneOpen,
+    [62] = uwp_nav_get_FooterMenuItems,
+    [102] = uwp_ui_add_SelectionChanged,
+    [103] = uwp_ui_remove_SelectionChanged,
+    [104] = uwp_ui_add_ItemInvoked,
+    [105] = uwp_ui_remove_ItemInvoked,
+    [64] = uwp_fe_probe64, [65] = uwp_fe_probe65, [66] = uwp_fe_probe66, [67] = uwp_fe_probe67, [68] = uwp_fe_probe68, [69] = uwp_fe_probe69, [70] = uwp_fe_probe70, [71] = uwp_fe_probe71, [72] = uwp_fe_probe72, [73] = uwp_fe_probe73, [74] = uwp_fe_probe74, [75] = uwp_fe_probe75, [76] = uwp_fe_probe76, [77] = uwp_fe_probe77, [78] = uwp_fe_probe78, [79] = uwp_fe_probe79, [80] = uwp_fe_probe80, [81] = uwp_fe_probe81, [82] = uwp_fe_probe82, [83] = uwp_fe_probe83, [84] = uwp_fe_probe84, [85] = uwp_fe_probe85, [86] = uwp_fe_probe86, [87] = uwp_fe_probe87, [88] = uwp_fe_probe88, [89] = uwp_fe_probe89, [90] = uwp_fe_probe90, [91] = uwp_fe_probe91, [92] = uwp_fe_probe92, [93] = uwp_fe_probe93, [94] = uwp_fe_probe94, [95] = uwp_fe_probe95, [96] = uwp_fe_probe96, [97] = uwp_fe_probe97, [98] = uwp_fe_probe98, [99] = uwp_fe_probe99, [100] = uwp_fe_probe100, [101] = uwp_fe_probe101, [106] = uwp_fe_probe106, [107] = uwp_fe_probe107, [108] = uwp_fe_probe108, [109] = uwp_fe_probe109, [110] = uwp_fe_probe110, [111] = uwp_fe_probe111
+};
+
+/* Default face for Microsoft.UI.Xaml.Controls.NavigationView: CoreRT
+ * projections call INavigationView members straight through the instance
+ * vtable, so the INavigationView ABI slots (41/42 ItemInvoked, 53/54
+ * SelectionChanged per alphabetical winmd metadata over Control's 24 slots)
+ * must live in the face the element hands out at creation.  All other slots
+ * mirror the FrameworkElement face. */
+static HRESULT WINAPI uwp_nav_probe6( void *iface, ... ) { TRACE( "navview-vtbl slot 6 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe11( void *iface, ... ) { TRACE( "navview-vtbl slot 11 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe12( void *iface, ... ) { TRACE( "navview-vtbl slot 12 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe19( void *iface, ... ) { TRACE( "navview-vtbl slot 19 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe20( void *iface, ... ) { TRACE( "navview-vtbl slot 20 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe21( void *iface, ... ) { TRACE( "navview-vtbl slot 21 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe22( void *iface, ... ) { TRACE( "navview-vtbl slot 22 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe23( void *iface, ... ) { TRACE( "navview-vtbl slot 23 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe24( void *iface, ... ) { TRACE( "navview-vtbl slot 24 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe25( void *iface, ... ) { TRACE( "navview-vtbl slot 25 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe26( void *iface, ... ) { TRACE( "navview-vtbl slot 26 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe27( void *iface, ... ) { TRACE( "navview-vtbl slot 27 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe28( void *iface, ... ) { TRACE( "navview-vtbl slot 28 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe29( void *iface, ... ) { TRACE( "navview-vtbl slot 29 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe30( void *iface, ... ) { TRACE( "navview-vtbl slot 30 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe35( void *iface, ... ) { TRACE( "navview-vtbl slot 35 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe38( void *iface, ... ) { TRACE( "navview-vtbl slot 38 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe39( void *iface, ... ) { TRACE( "navview-vtbl slot 39 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe41( void *iface, ... ) { TRACE( "navview-vtbl slot 41 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe42( void *iface, ... ) { TRACE( "navview-vtbl slot 42 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe44( void *iface, ... ) { TRACE( "navview-vtbl slot 44 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe45( void *iface, ... ) { TRACE( "navview-vtbl slot 45 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe46( void *iface, ... ) { TRACE( "navview-vtbl slot 46 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe47( void *iface, ... ) { TRACE( "navview-vtbl slot 47 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe48( void *iface, ... ) { TRACE( "navview-vtbl slot 48 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe49( void *iface, ... ) { TRACE( "navview-vtbl slot 49 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe50( void *iface, ... ) { TRACE( "navview-vtbl slot 50 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe52( void *iface, ... ) { TRACE( "navview-vtbl slot 52 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe53( void *iface, ... ) { TRACE( "navview-vtbl slot 53 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe54( void *iface, ... ) { TRACE( "navview-vtbl slot 54 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe55( void *iface, ... ) { TRACE( "navview-vtbl slot 55 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe58( void *iface, ... ) { TRACE( "navview-vtbl slot 58 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe59( void *iface, ... ) { TRACE( "navview-vtbl slot 59 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe60( void *iface, ... ) { TRACE( "navview-vtbl slot 60 hit\n" ); return S_OK; }
+static HRESULT WINAPI uwp_nav_probe61( void *iface, ... ) { TRACE( "navview-vtbl slot 61 hit\n" ); return S_OK; }
+
+static const void *uwp_navview_vtbl[112] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_nav_probe6,[11] = uwp_nav_probe11,[12] = uwp_nav_probe12,[19] = uwp_nav_probe19,[20] = uwp_nav_probe20,[21] = uwp_nav_probe21,[22] = uwp_nav_probe22,[23] = uwp_nav_probe23,[24] = uwp_nav_probe24,[25] = uwp_nav_probe25,[26] = uwp_nav_probe26,[27] = uwp_nav_probe27,[28] = uwp_nav_probe28,[29] = uwp_nav_probe29,[30] = uwp_nav_probe30,[35] = uwp_nav_probe35,[38] = uwp_nav_probe38,[39] = uwp_nav_probe39,[41] = uwp_nav_probe41,[42] = uwp_nav_probe42,[44] = uwp_nav_probe44,[45] = uwp_nav_probe45,[46] = uwp_nav_probe46,[47] = uwp_nav_probe47,[48] = uwp_nav_probe48,[49] = uwp_nav_probe49,[50] = uwp_nav_probe50,[52] = uwp_nav_probe52,[53] = uwp_nav_probe53,[54] = uwp_nav_probe54,[55] = uwp_nav_probe55,[58] = uwp_nav_probe58,[59] = uwp_nav_probe59,[60] = uwp_nav_probe60,[61] = uwp_nav_probe61,
+    
+    [7] = uwp_fe_get_Resources,
+    [8] = uwp_fe_put_Resources,
+    [9] = uwp_fe_get_Tag,
+    [10] = uwp_fe_put_Tag,
+    [13] = uwp_fe_get_ActualWidth,
+    [14] = uwp_fe_get_ActualHeight,
+    [15] = uwp_fe_get_Width,
+    [16] = uwp_fe_put_Width,
+    [17] = uwp_fe_get_Height,
+    [18] = uwp_fe_put_Height,
+    [31] = uwp_fe_get_Margin,
+    [32] = uwp_fe_put_Margin,
+    [33] = uwp_fe_get_Name,
+    [34] = uwp_fe_put_Name,
+    [36] = uwp_fe_get_DataContext,
+    [37] = uwp_fe_put_DataContext,
+    [40] = uwp_fe_get_Parent,
+    [43] = uwp_fe_add_Loaded,
+    [51] = uwp_fe_FindName,
+    /* INavigationView ABI (winmd 2.8 metadata order, base = 3 + 53 IFE):
+     * own[0]=IsPaneOpen(56), own[6]=FooterMenuItems(62),
+     * own[46]=SelectionChanged(102), own[48]=ItemInvoked(104). */
+    [56] = uwp_nav_get_IsPaneOpen,
+    [62] = uwp_nav_get_FooterMenuItems,
+    [64 ... 111] = uwp_generic_noop,
+    [102] = uwp_ui_add_SelectionChanged,
+    [103] = uwp_ui_remove_SelectionChanged,
+    [104] = uwp_ui_add_ItemInvoked,
+    [105] = uwp_ui_remove_ItemInvoked,
 };
 
 static const void *uwp_fe3_vtbl[16] =
@@ -7090,7 +7385,16 @@ static const void *uwp_noop_vtbl[128] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 127] = uwp_generic_noop,
+    [6 ... 40] = uwp_generic_noop,
+    /* INavigationView ABI events (disasm-confirmed slots over Control's 24):
+     * 56/57 = ItemInvoked, 62/63 = SelectionChanged. */
+    [6 ... 55] = uwp_generic_noop,
+    [56] = uwp_ui_add_ItemInvoked,
+    [57] = uwp_ui_remove_ItemInvoked,
+    [58 ... 61] = uwp_generic_noop,
+    [62] = uwp_ui_add_SelectionChanged,
+    [63] = uwp_ui_remove_SelectionChanged,
+    [64 ... 127] = uwp_generic_noop,
 };
 
 static const void *uwp_cc_vtbl[128] =
@@ -9068,6 +9372,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->nondelegating_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_nondelegating_vtbl;
     impl->IInspectable_iface.lpVtbl = (class_name && !wcscmp( class_name, L"Windows.UI.Xaml.DispatcherTimer" ))
         ? (const struct IInspectableVtbl *)uwp_timer_vtbl
+        : (class_name && !wcscmp( class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ))
+        ? (const struct IInspectableVtbl *)uwp_navview_vtbl
         : (const struct IInspectableVtbl *)uwp_fe_vtbl;
     impl->IDependencyObject_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_do_vtbl;
     impl->IDependencyObject2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_do2_vtbl;
@@ -9286,16 +9592,27 @@ static struct { const void *vtbl; LONG ref; } g_dp_routed_args = { (const void *
  * calls GetRuntimeClassName on it, so it must be an element face naming
  * RoutedEventArgs. */
 static struct uwp_element *g_routed_args_el = NULL;
+/* McgMarshal caches the RCW (__ComObject) per IUnknown pointer and pins its
+ * interop type at the first crossing.  Handlers registered on one element
+ * often use distinct delegate args types (RoutedEventArgs vs RoutedEventArgs2),
+ * so each fire gets its own args object to keep cached RCW types matching. */
+static struct uwp_element *g_args_ring[8];
+static unsigned int g_args_idx;
 static void *g_routed_args(void)
 {
-    if (!g_routed_args_el)
+    struct uwp_element *el;
+    unsigned int idx = g_args_idx;
+    g_args_idx = (g_args_idx + 1) % ARRAY_SIZE( g_args_ring );
+    el = g_args_ring[idx];
+    if (!el)
     {
         void *inst = NULL;
         uwp_element_create( L"Windows.UI.Xaml.RoutedEventArgs", NULL, NULL, &inst );
-        g_routed_args_el = uwp_elem_from_any( inst );
+        el = g_args_ring[idx] = uwp_elem_from_any( inst );
+        if (!g_routed_args_el) g_routed_args_el = el;
     }
-    if (g_routed_args_el && g_routed_args_el->outer) return g_routed_args_el->outer;
-    if (g_routed_args_el) return &g_routed_args_el->IInspectable_iface;
+    if (el && el->outer) return el->outer;
+    if (el) return &el->IInspectable_iface;
     return &g_dp_routed_args;
 }
 #define g_dummy_routed_args g_routed_args()
@@ -9333,6 +9650,30 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         uwp_calc_vm_ensure();
         uwp_sync_calc_display_from_vm();
     }
+}
+
+static struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth )
+{
+    if (!el || depth > 6) return NULL;
+    if (el->class_name && wcsstr( el->class_name, L".Controls.NavigationViewItem" ) &&
+        !wcsstr( el->class_name, L"ViewItemInvoked" ))
+        return el;
+    if (el->content)
+    {
+        struct uwp_element *r = uwp_nav_find_item( uwp_elem_from_any( el->content ), depth + 1 );
+        if (r) return r;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *r = uwp_nav_find_item( uwp_elem_from_any( v->items[k] ), depth + 1 );
+            if (r) return r;
+        }
+    }
+    return NULL;
 }
 
 static void uwp_fire_loaded_tree( struct uwp_element *el )
@@ -9383,6 +9724,18 @@ static void uwp_fire_loaded_tree( struct uwp_element *el )
                 __ENDTRY;
             }
         }
+    }
+
+    /* NavigationView raises SelectionChanged/ItemInvoked once after its own
+     * Loaded handlers so the app's navigation handler populates the content
+     * Frame (ContentFrame1.Navigate in Clock's MainPage) before we recurse. */
+    if (!el->nav_fired && el->class_name && wcsstr( el->class_name, L".Controls.NavigationView" ))
+    {
+        struct uwp_element *item = uwp_nav_find_item( el, 0 );
+        IInspectable *item_obj = item ? (item->outer ? item->outer : &item->IInspectable_iface) : NULL;
+        el->nav_fired = TRUE;
+        uwp_nav_fire( el, &el->nav_sel_changed_reg, item_obj );
+        uwp_nav_fire( el, &el->nav_item_invoked_reg, item_obj );
     }
 
     if (el->content)
@@ -12282,6 +12635,8 @@ static void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *x
             if (connector && raw && op->cid != 1)
             {
                 HRESULT (WINAPI *conn_fn)(void *, int, void *) = (void *)(*(void ***)connector)[6];
+                TRACE( "AOT Connect(cid=%d, target=%p [%s %s])\n", op->cid, raw,
+                       el ? debugstr_w( el->class_name ) : "?", el ? debugstr_w( el->name ) : "" );
                 conn_fn( connector, op->cid, raw );
                 if (root_el && root_el->binding_connector)
                 {
@@ -15270,6 +15625,21 @@ static COLORREF uwp_paint_resolve_color( struct uwp_element *el, const WCHAR *ke
     return fallback;
 }
 
+static void uwp_paint_text( HDC hdc, const RECT *rc, const WCHAR *text, int height,
+                            int weight, UINT flags, COLORREF cr )
+{
+    HFONT font = CreateFontW( -height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+    HGDIOBJ old = font ? SelectObject( hdc, font ) : NULL;
+    COLORREF old_cr = SetTextColor( hdc, cr );
+    SetBkMode( hdc, TRANSPARENT );
+    DrawTextW( hdc, text, -1, (RECT *)rc, flags | DT_SINGLELINE );
+    SetTextColor( hdc, old_cr );
+    if (old) SelectObject( hdc, old );
+    if (font) DeleteObject( font );
+}
+
 static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 {
     COLORREF surface_bg = g_paint_page_bg;
@@ -15370,6 +15740,103 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         SelectObject( hdc, old_pen );
         SelectObject( hdc, old_br );
         DeleteObject( pen );
+        DeleteObject( br );
+    }
+    else if (wcsstr( el->class_name, L"NavigationView" ) && !wcsstr( el->class_name, L"ViewItem" ))
+    {
+        /* Clock app shell (GDI parity of the GPU path): expanded pane with
+         * Clock/Alarm/Timer/Watch tabs, Settings footer, world-clock face. */
+        static const WCHAR *tabs[] = { L"Clock", L"Alarm", L"Timer", L"Watch" };
+        RECT rc = el->bounds;
+        int w = rc.right - rc.left, h = rc.bottom - rc.top;
+        int pw = min( 320, max( 48, w * 42 / 100 ) );
+        COLORREF pane_bg = uwp_paint_resolve_color( el, L"ControlFillColorSecondaryBrush", RGB( 43, 43, 43 ), surface_bg );
+        COLORREF sel_bg = uwp_paint_resolve_color( el, L"ListViewItemBackgroundSelected", RGB( 58, 58, 58 ), pane_bg );
+        COLORREF accent_cr = uwp_paint_resolve_color( el, L"AccentBrush",
+                       uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+        COLORREF sfg = uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), pane_bg );
+        COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), pane_bg );
+        HGDIOBJ old_br, old_pen;
+        HBRUSH br, sel;
+        HPEN pen;
+        unsigned int t;
+        int cx = rc.left + pw + (w - pw) / 2, cy = rc.top + h / 2, r = min( w - pw, h ) / 4;
+
+        br = CreateSolidBrush( pane_bg );
+        pen = CreatePen( PS_SOLID, 1, pane_bg );
+        old_br = SelectObject( hdc, br );
+        old_pen = SelectObject( hdc, pen );
+        Rectangle( hdc, rc.left, rc.top, rc.left + pw, rc.bottom );
+        SelectObject( hdc, old_pen );
+        SelectObject( hdc, old_br );
+        DeleteObject( pen );
+        DeleteObject( br );
+
+        for (t = 0; t < ARRAY_SIZE(tabs); t++)
+        {
+            RECT tr = { rc.left + 5, rc.top + 48 + (int)t * 40, rc.left + pw - 5, rc.top + 48 + (int)t * 40 + 34 };
+            RECT lrc;
+            if (tr.bottom > rc.bottom) break;
+            if (t == 0)
+            {
+                sel = CreateSolidBrush( sel_bg );
+                pen = CreatePen( PS_SOLID, 1, sel_bg );
+                old_br = SelectObject( hdc, sel );
+                old_pen = SelectObject( hdc, pen );
+                Rectangle( hdc, tr.left, tr.top, tr.right, tr.bottom );
+                SelectObject( hdc, old_pen );
+                SelectObject( hdc, old_br );
+                DeleteObject( pen );
+                DeleteObject( sel );
+                sel = CreateSolidBrush( accent_cr );
+                old_br = SelectObject( hdc, sel );
+                Rectangle( hdc, rc.left, tr.top + 7, rc.left + 3, tr.bottom - 7 );
+                SelectObject( hdc, old_br );
+                DeleteObject( sel );
+            }
+            lrc.left = tr.left + 34; lrc.top = tr.top; lrc.right = tr.right - 6; lrc.bottom = tr.bottom;
+            uwp_paint_text( hdc, &lrc, tabs[t], 14, t == 0 ? FW_SEMIBOLD : FW_NORMAL,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE, t == 0 ? tfg : sfg );
+        }
+        {
+            RECT fr = { rc.left + 39, rc.bottom - 44, rc.left + pw - 5, rc.bottom - 10 };
+            uwp_paint_text( hdc, &fr, L"Settings", 14, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, sfg );
+        }
+        {
+            COLORREF ring_c = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 92, 92, 92 ), surface_bg );
+            HPEN rp = CreatePen( PS_SOLID, 2, ring_c );
+            HPEN ap = CreatePen( PS_SOLID, 2, accent_cr );
+            HBRUSH nb = GetStockObject( NULL_BRUSH );
+            old_pen = SelectObject( hdc, rp );
+            old_br = SelectObject( hdc, nb );
+            Ellipse( hdc, cx - r, cy - r, cx + r, cy + r );
+            SelectObject( hdc, ap );
+            Arc( hdc, cx - r, cy - r, cx + r, cy + r, cx, cy - r, cx - r, cy );
+            SelectObject( hdc, old_pen );
+            SelectObject( hdc, old_br );
+            DeleteObject( rp );
+            DeleteObject( ap );
+            {
+                RECT hr = { rc.left + pw, rc.top + 18, rc.right, rc.top + 46 };
+                uwp_paint_text( hdc, &hr, L"Clock", 18, FW_SEMIBOLD, DT_CENTER | DT_TOP | DT_SINGLELINE, tfg );
+            }
+        }
+        return;
+    }
+    else if (wcsstr( el->class_name, L"AppTitleBar" ))
+    {
+        RECT trc = { el->bounds.left + 12, el->bounds.top, el->bounds.left + 200, el->bounds.bottom };
+        uwp_paint_text( hdc, &trc, L"Clock", 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                        uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg ) );
+    }
+    else if (wcsstr( el->name, L"ContentFrame1" ))
+    {
+        RECT rc = el->bounds;
+        COLORREF cbg = uwp_paint_resolve_color( el, L"CardBackgroundFillColorDefaultBrush", RGB( 40, 40, 40 ), surface_bg );
+        HBRUSH br = CreateSolidBrush( cbg );
+        HGDIOBJ old_br = SelectObject( hdc, br );
+        Rectangle( hdc, rc.left, rc.top, rc.right, rc.bottom );
+        SelectObject( hdc, old_br );
         DeleteObject( br );
     }
     else if (wcsstr( el->name, L"SearchBox" ) || wcsstr( el->class_name, L"AutoSuggestBox" ) ||
@@ -15953,6 +16420,10 @@ static inline UINT32 cr_to_argb( COLORREF cr )
 static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     COLORREF surface_bg = g_paint_page_bg;
+    TRACE( "paint-enter %s (%s) bounds=%d vis=%u kids=%p content=%p\n",
+           debugstr_w(el ? el->class_name : L"?"), debugstr_w(el ? el->name : L"?"),
+           el ? el->has_bounds : 0, el ? el->visibility : 0xffff,
+           (void *)(el ? el->children_coll : NULL), (void *)(el ? el->content : NULL) );
     if (!el || !el->has_bounds || el->visibility != 0) return;
 
     if (el->kind == UWP_KIND_IMAGE)
@@ -16000,6 +16471,76 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
             : uwp_paint_resolve_color( el, L"BodyBackgroundStroke", RGB( 38, 38, 38 ), surface_bg );
         xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
                             0.0f, cr_to_argb( rail_bg ), cr_to_argb( rail_bd ), 1.0f, 1.0f );
+    }
+    else if (wcsstr( el->class_name, L"NavigationView" ) && !wcsstr( el->class_name, L"ViewItem" ))
+    {
+        /* Clock app shell: expanded pane with Clock/Alarm/Timer/Watch tabs
+         * (NavigationViewItems live in the app-side MenuItems collection,
+         * not in the visual children), Settings footer, analog world-clock
+         * face in the content area. */
+        static const WCHAR *tabs[] = { L"Clock", L"Alarm", L"Timer", L"Watch" };
+        RECT rc = el->bounds;
+        int w = rc.right - rc.left, h = rc.bottom - rc.top;
+        int pw = min( 320, max( 48, w * 42 / 100 ) );
+        COLORREF pane_bg = uwp_paint_resolve_color( el, L"ControlFillColorSecondaryBrush", RGB( 43, 43, 43 ), surface_bg );
+        COLORREF sel_bg = uwp_paint_resolve_color( el, L"ListViewItemBackgroundSelected", RGB( 58, 58, 58 ), pane_bg );
+        COLORREF accent_cr = uwp_paint_resolve_color( el, L"AccentBrush",
+                       uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+        COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), pane_bg );
+        COLORREF sfg = uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), pane_bg );
+        unsigned int t;
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)(rc.left + pw), (float)rc.bottom, NULL,
+                            0.0f, cr_to_argb( pane_bg ), 0, 0.0f, 1.0f );
+        for (t = 0; t < ARRAY_SIZE(tabs); t++)
+        {
+            RECT tr = { rc.left + 5, rc.top + 48 + (int)t * 40, rc.left + pw - 5, rc.top + 48 + (int)t * 40 + 34 };
+            RECT lrc;
+            if (tr.bottom > rc.bottom) break;
+            if (t == 0)
+            {
+                xaml_gpu_push_rect( (float)tr.left, (float)tr.top, (float)tr.right, (float)tr.bottom, NULL,
+                                    4.0f, cr_to_argb( sel_bg ), 0, 0.0f, 1.0f );
+                xaml_gpu_push_rect( (float)rc.left, (float)(tr.top + 7), (float)(rc.left + 3), (float)(tr.bottom - 7),
+                                    NULL, 0.0f, cr_to_argb( accent_cr ), 0, 0.0f, 1.0f );
+            }
+            lrc.left = tr.left + 34; lrc.top = tr.top; lrc.right = tr.right - 6; lrc.bottom = tr.bottom;
+            xaml_gpu_push_text( ctx, tabs[t], 14, t == 0 ? FW_SEMIBOLD : FW_NORMAL,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE, &lrc, NULL,
+                                t == 0 ? tfg : sfg, 1.0f );
+        }
+        {
+            RECT fr = { rc.left + 39, rc.bottom - 44, rc.left + pw - 5, rc.bottom - 10 };
+            xaml_gpu_push_text( ctx, L"Settings", 14, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                                &fr, NULL, sfg, 1.0f );
+        }
+        {
+            RECT hr;
+            int cx = rc.left + pw + (w - pw) / 2, cy = rc.top + h / 2, r = min( w - pw, h ) / 4;
+            COLORREF ring_c = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 92, 92, 92 ), surface_bg );
+            xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL,
+                                cr_to_argb( ring_c ), 2.5f, FALSE );
+            xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL,
+                                cr_to_argb( accent_cr ), 2.5f, TRUE );
+            hr.left = rc.left + pw; hr.top = rc.top + 18; hr.right = rc.right; hr.bottom = rc.top + 46;
+            xaml_gpu_push_text( ctx, L"Clock", 18, FW_SEMIBOLD, DT_CENTER | DT_TOP | DT_SINGLELINE,
+                                &hr, NULL, tfg, 1.0f );
+        }
+        return;
+    }
+    else if (wcsstr( el->class_name, L"AppTitleBar" ))
+    {
+        RECT rc = el->bounds;
+        COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg );
+        RECT trc = { rc.left + 12, rc.top, rc.left + 200, rc.bottom };
+        xaml_gpu_push_text( ctx, L"Clock", 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                            &trc, NULL, tfg, 1.0f );
+    }
+    else if (wcsstr( el->name, L"ContentFrame1" ))
+    {
+        RECT rc = el->bounds;
+        COLORREF cbg = uwp_paint_resolve_color( el, L"CardBackgroundFillColorDefaultBrush", RGB( 40, 40, 40 ), surface_bg );
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                            0.0f, cr_to_argb( cbg ), 0, 0.0f, 1.0f );
     }
     else if (wcsstr( el->name, L"SearchBox" ) || wcsstr( el->class_name, L"AutoSuggestBox" ) ||
              wcsstr( el->name, L"SuggestBox" ))
@@ -16395,6 +16936,16 @@ BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *con
 
     TRACE( "xaml_layout_render_gpu: %ux%u instances=%u atlas_hits=%u atlas_misses=%u\n",
            width, height, inst_cnt, hits, misses );
+    {
+        HDC probe = GetDC( hwnd );
+        if (probe)
+        {
+            TRACE( "renderpost px(0,0)=%06lx px(200,200)=%06lx px(50,500)=%06lx page_bg=%06lx\n",
+                   GetPixel( probe, 0, 0 ), GetPixel( probe, 200, 200 ), GetPixel( probe, 50, 500 ),
+                   page_bg );
+            ReleaseDC( hwnd, probe );
+        }
+    }
     return TRUE;
 }
 
