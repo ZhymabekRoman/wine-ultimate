@@ -42,9 +42,15 @@
 /*******************************************************************
  *         syscalls
  */
+#ifndef __arm64ec_x64__
+#define NtContinue syscall_NtContinue
+#endif
 #define SYSCALL_ENTRY(id,name,args) __ASM_SYSCALL_FUNC( id, name )
 ALL_SYSCALLS
 #undef SYSCALL_ENTRY
+#ifndef __arm64ec_x64__
+#undef NtContinue
+#endif
 
 
 /**************************************************************************
@@ -638,6 +644,81 @@ __ASM_GLOBAL_FUNC( call_consolidate_callback,
                    __ASM_CFI(".cfi_adjust_cfa_offset -8\n\t")
                    __ASM_CFI(".cfi_same_value %rbp\n\t")
                    "ret")
+
+/*******************************************************************
+ *              NtContinue (NTDLL.@)
+ *
+ * PE-side user-mode fast-path for non-alertable, non-debugged NtContinue
+ * when only standard integer/control/floating-point registers are restored.
+ */
+__ASM_GLOBAL_FUNC( NtContinue,
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "testb %dl,%dl\n\t"
+                   "jnz " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "movq %gs:0x60,%rax\n\t"               /* Peb */
+                   "cmpb $0,0x02(%rax)\n\t"               /* BeingDebugged */
+                   "jne " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "testq %rcx,%rcx\n\t"                  /* context == NULL */
+                   "jz " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "movl 0x30(%rcx),%eax\n\t"             /* context->ContextFlags */
+                   "andl $0xffefffff,%eax\n\t"            /* & ~CONTEXT_AMD64 */
+                   "testl $0xfffffff0,%eax\n\t"           /* ~(CONTROL|INTEGER|SEGMENTS|FLOATING_POINT) */
+                   "jnz " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "andl $0x03,%eax\n\t"
+                   "cmpl $0x03,%eax\n\t"                  /* require CONTROL | INTEGER */
+                   "jne " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "cmpw $0x33,0x38(%rcx)\n\t"            /* context->SegCs */
+                   "jne " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "cmpw $0x2b,0x42(%rcx)\n\t"            /* context->SegSs */
+                   "jne " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "testl $0x100,0x44(%rcx)\n\t"          /* context->EFlags & TF */
+                   "jnz " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "testb $0x08,0x30(%rcx)\n\t"           /* CONTEXT_FLOATING_POINT */
+                   "jz 1f\n\t"
+                   "testl $0xffff0000,0x34(%rcx)\n\t"     /* reserved MxCsr bits */
+                   "jnz " __ASM_NAME("syscall_NtContinue") "\n\t"
+                   "ldmxcsr 0x34(%rcx)\n\t"
+                   "movups 0x1a0(%rcx),%xmm0\n\t"
+                   "movups 0x1b0(%rcx),%xmm1\n\t"
+                   "movups 0x1c0(%rcx),%xmm2\n\t"
+                   "movups 0x1d0(%rcx),%xmm3\n\t"
+                   "movups 0x1e0(%rcx),%xmm4\n\t"
+                   "movups 0x1f0(%rcx),%xmm5\n\t"
+                   "movups 0x200(%rcx),%xmm6\n\t"
+                   "movups 0x210(%rcx),%xmm7\n\t"
+                   "movups 0x220(%rcx),%xmm8\n\t"
+                   "movups 0x230(%rcx),%xmm9\n\t"
+                   "movups 0x240(%rcx),%xmm10\n\t"
+                   "movups 0x250(%rcx),%xmm11\n\t"
+                   "movups 0x260(%rcx),%xmm12\n\t"
+                   "movups 0x270(%rcx),%xmm13\n\t"
+                   "movups 0x280(%rcx),%xmm14\n\t"
+                   "movups 0x290(%rcx),%xmm15\n"
+                   "1:\tmovq 0x98(%rcx),%rdx\n\t"         /* target Rsp */
+                   "movq 0xf8(%rcx),%rax\n\t"             /* target Rip */
+                   "movq %rax,-8(%rdx)\n\t"
+                   "movl 0x44(%rcx),%eax\n\t"             /* context->EFlags */
+                   "andl $0x240cd5,%eax\n\t"              /* CF|PF|AF|ZF|SF|DF|OF|AC|ID */
+                   "orl $0x202,%eax\n\t"                  /* IF | reserved bit 1 */
+                   "movq %rax,-16(%rdx)\n\t"
+                   "movq 0x78(%rcx),%rax\n\t"
+                   "movq 0x90(%rcx),%rbx\n\t"
+                   "movq 0xa0(%rcx),%rbp\n\t"
+                   "movq 0xa8(%rcx),%rsi\n\t"
+                   "movq 0xb0(%rcx),%rdi\n\t"
+                   "movq 0xb8(%rcx),%r8\n\t"
+                   "movq 0xc0(%rcx),%r9\n\t"
+                   "movq 0xc8(%rcx),%r10\n\t"
+                   "movq 0xd0(%rcx),%r11\n\t"
+                   "movq 0xd8(%rcx),%r12\n\t"
+                   "movq 0xe0(%rcx),%r13\n\t"
+                   "movq 0xe8(%rcx),%r14\n\t"
+                   "movq 0xf0(%rcx),%r15\n\t"
+                   "leaq -16(%rdx),%rsp\n\t"
+                   "movq 0x88(%rcx),%rdx\n\t"
+                   "movq 0x80(%rcx),%rcx\n\t"
+                   "popfq\n\t"
+                   "retq" )
 
 /*******************************************************************
  *              RtlRestoreContext (NTDLL.@)
