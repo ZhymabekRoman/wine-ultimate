@@ -32,6 +32,7 @@
 #include "inspectable.h"
 #include "eventtoken.h"
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Storage_Streams

@@ -1434,7 +1434,7 @@ static const struct __FIIterable_1_Windows__CStorage__CStorageFileVtbl file_iter
     file_iterable_First,
 };
 
-static HRESULT file_vector_view_create( IStorageFile **items, UINT32 count, IVectorView_StorageFile **out )
+HRESULT file_vector_view_create( IStorageFile **items, UINT32 count, IVectorView_StorageFile **out )
 {
     struct file_vector_view *impl = calloc( 1, sizeof(*impl) );
     if (!impl)

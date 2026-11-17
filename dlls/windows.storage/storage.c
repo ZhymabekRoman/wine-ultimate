@@ -1468,8 +1468,65 @@ static HRESULT WINAPI storage_folder_GetItemAsync( IStorageFolder *iface, HSTRIN
 static HRESULT WINAPI storage_folder_GetFilesAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface,
                                                                                       IAsyncOperation_IVectorView_StorageFile **operation )
 {
-    FIXME( "stub!\n" );
-    return E_NOTIMPL;
+    struct storage_folder *impl = impl_from_IStorageFolder( iface );
+    WCHAR pattern[STORAGE_MAX_PATH];
+    IStorageFile **files = NULL;
+    IVectorView_StorageFile *view = NULL;
+    HANDLE find;
+    WIN32_FIND_DATAW data;
+    UINT32 count = 0, cap = 0, valid = 0;
+    HRESULT hr;
+
+    folder_join_path( impl->path, L"*", pattern, ARRAY_SIZE(pattern) );
+    if ((find = FindFirstFileW( pattern, &data )) == INVALID_HANDLE_VALUE)
+    {
+        if (GetLastError() != ERROR_NO_MORE_FILES)
+            return HRESULT_FROM_WIN32( GetLastError() );
+    }
+    else
+    {
+        do
+        {
+            WCHAR path[STORAGE_MAX_PATH];
+            IStorageFile *file = NULL;
+
+            if (!wcscmp( data.cFileName, L"." ) || !wcscmp( data.cFileName, L".." )) continue;
+            if (count == cap)
+            {
+                IStorageFile **grown;
+                cap = cap ? cap * 2 : 16;
+                if (!(grown = realloc( files, cap * sizeof(*files) ))) { free( files ); return E_OUTOFMEMORY; }
+                files = grown;
+            }
+            folder_join_path( impl->path, data.cFileName, path, ARRAY_SIZE(path) );
+            if (SUCCEEDED(storage_file_create( path, &file )))
+            {
+                files[count++] = file;
+                if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                ++valid;
+            }
+        }
+        while (FindNextFileW( find, &data ));
+        FindClose( find );
+    }
+
+    {   /* keep directories in the view too; GetFiles filters by type on Windows */
+        IStorageFile **items = files;
+        UINT32 i;
+        if (!items)
+        {
+            if (!(items = calloc( 1, sizeof(*items) ))) return E_OUTOFMEMORY;
+        }
+        (void)i;
+        hr = file_vector_view_create( items, count, &view );
+        if (FAILED(hr)) return hr;
+    }
+
+    hr = async_operation_inspectable_create( &IID_IAsyncOperation_IVectorView_StorageFile,
+            L"Windows.Foundation.IAsyncOperation`1<Windows.Foundation.Collections.IVectorView`1<Windows.Storage.StorageFile>>",
+            (IInspectable *)view, (void **)operation );
+    IVectorView_StorageFile_Release( view );
+    return hr;
 }
 
 static HRESULT WINAPI storage_folder_GetFoldersAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface,

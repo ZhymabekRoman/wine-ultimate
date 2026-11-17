@@ -776,26 +776,9 @@ struct str_vector
  * ref discipline is unchanged from the heap-string arm (GetAt answers a
  * borrowed handle, WindowsDeleteString on a reference is a no-op, context
  * teardown leaves the shared header in place). */
-static const WCHAR lang_enUS[] = L"en-US";
-static HSTRING_HEADER lang_header;
-
-static BOOL is_store_app(void)
-{
-    WCHAR path[MAX_PATH];
-    GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
-    return (wcsstr( path, L"WinStore" ) != NULL || wcsstr( path, L"Calculator" ) != NULL);
-}
-
 static inline HRESULT lang_ref_of( HSTRING item, HSTRING *out )
 {
-    UINT32 len = 0;
-    const WCHAR *raw;
-
-    if (is_store_app())
-        return WindowsDuplicateString( item, out );
-
-    raw = WindowsGetStringRawBuffer( item, &len );
-    return WindowsCreateStringReference( raw, len, &lang_header, out );
+    return WindowsDuplicateString( item, out );
 }
 
 static inline struct str_vector *ov_from( void *iface ) { return (struct str_vector *)iface; }
@@ -910,11 +893,7 @@ static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
      * UserDataPaths), so FindString never hit and the wrapper EEType stayed
      * flag 0x100.  Answer the exact key so the instantiated Mcg class has
      * 0x40, the cast miss fires the QI fallback and rc2 answers {9828e927}. */
-    static const WCHAR mcg_key72[] = L"Windows.Storage.UserDataPaths";
-
-    if (is_store_app())
-        return className( L"Windows.Foundation.Collections.IVectorView`1<System.String>", n );
-    return className( mcg_key72, n );
+    return className( L"Windows.Foundation.Collections.IVectorView`1<System.String>", n );
 }
 static HRESULT WINAPI svv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
@@ -3373,13 +3352,11 @@ static HRESULT WINAPI map_GetSubtree( void *iface, HSTRING name, void **out )
     *out = NULL;
     return E_FAIL;
 }
-/* IResourceMap: [II 5][TopLevelResourceKey 6][QualifierValues 7][Language 8]
- *               [ResourceCount 9][GetValue 10][GetValueForContext 11][GetSubtree 12] */
+/* IResourceMap: [II 5][Uri 6][GetValue 7][GetValueForContext 8][GetSubtree 9] */
 static const void *res_map_vtbl[] =
 {
     map_QueryInterface, map_AddRef, map_Release, map_GetIids, map_GetRuntimeClassName, map_GetTrustLevel,
-    map_Uri, map_QualifierValues, map_Language, map_ResourceCount,
-    map_GetValue, map_GetValueForContext, map_GetSubtree,
+    map_Uri, map_GetValue, map_GetValueForContext, map_GetSubtree,
 };
 
 /* IResourceMap2: [II 5][GetByIndex 6][GetCount 7][GetFullCount 8][FullGetByIndex 9] */
@@ -3907,10 +3884,7 @@ static HRESULT WINAPI ctx_Languages( void *iface, void **out )
 {
     struct res_context *impl = ctx_from( iface );
     TRACE( "get_Languages\n" );
-    if (is_store_app())
-        *out = &impl->languages.vt_vv;
-    else
-        *out = &impl->languages.vt_ov;
+    *out = &impl->languages.vt_vv;
     incr( &impl->languages.ref );
     return S_OK;
 }
@@ -4014,7 +3988,9 @@ static HRESULT create_context( struct res_context **out )
      * representation from the reference handle GetAt hands out.  Windows
      * reports the primary language plus its neutral parent (en-US, en). */
     {
+        static const WCHAR lang_enUS[] = L"en-US";
         static const WCHAR lang_en[] = { 'e', 'n', 0 };
+        static HSTRING_HEADER lang_header;
         static HSTRING_HEADER lang_header2;
         HSTRING ref;
         WindowsCreateStringReference( lang_enUS, 5, &lang_header, &ref );
@@ -4351,12 +4327,7 @@ static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n )
      * miss on typeID 0x1806800000 goes CanCastComObject -> QI {9828e927-...} ->
      * our IIterable<KVP> answer -> triple insert with tid 0x1806800000 -> pass.
      * Key = name-pool 0xc6 toolbox signature (IObservableMap`1<KVP ss> family). */
-    static const WCHAR mcg_key_c6[] =
-        L"Windows.Foundation.Collections.IObservableMap`1<System.Collections.Generic.IKeyValuePair`2<System.Collections.Generic.String,System.Collections.Generic.String>,System.Collections.Generic.IEnumerable`1<System.Collections.Generic.IKeyValuePair`2<Windows.UI.Xaml.Interop.String,System.Collections.Generic.String>>,System.Collections.Generic.IReadOnlyDictionary`2<Windows.Foundation.Diagnostics.ILoggingField,Spectro.Toml.TomlValue>,Spectro.UI.Controls.MediaDisplayInformation,Windows.ApplicationModel.Chat.ChatMessageResourceMap,Windows.ApplicationModel.Resources.Core.ResourceMap,Windows.ApplicationModel.Resources.Core.ResourceQualifierValues,Windows.Data.Text.WordSegmentResourceMap,Windows.Foundation.Diagnostics.LoggingChannelAttribute,Windows.Storage.Provider.IPropertyStore,Windows.UI.Xaml.Interop.IBindableIterable,Windows.UI.Xaml.Interop.IBindableIterator,Windows.UI.Xaml.Interop.IBindableVector,Windows.UI.Xaml.Interop.IBindableVectorView,Windows.Foundation.Diagnostics.ILoggingPropertyKeyValueInterface,Windows.UI.Xaml.Interop.IPropertyStorePropertyIterator,Windows.Foundation.Collections.IObservableVector`1<Windows.Globalization.JapanesePhonemeReading>";
-
-    if (is_store_app())
-        return className( L"Windows.ApplicationModel.Resources.Core.ResourceContext", n );
-    return className( mcg_key_c6, n );
+    return className( L"Windows.ApplicationModel.Resources.Core.ResourceContext", n );
 }
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc2_GetForCurrentView( void *iface, void **out )
@@ -4775,12 +4746,6 @@ static HRESULT WINAPI rm_UnloadPriFiles( void *iface, void *files )
 static const void *res_manager_vtbl[] =
 {
     rm_QueryInterface, rm_AddRef, rm_Release, rm_GetIids, rm_GetRuntimeClassName, rm_GetTrustLevel,
-    rm_CurrentCulture, rm_put_CurrentCulture,
-    rm_MainResourceMap, rm_AllResourceMaps, rm_DefaultContext, rm_LoadPriFiles, rm_UnloadPriFiles,
-};
-static const void *res_manager_store_vtbl[] =
-{
-    rm_QueryInterface, rm_AddRef, rm_Release, rm_GetIids, rm_GetRuntimeClassName, rm_GetTrustLevel,
     rm_MainResourceMap, rm_AllResourceMaps, rm_DefaultContext, rm_LoadPriFiles, rm_UnloadPriFiles,
 };
 static HRESULT WINAPI rm2_QueryInterface( void *iface, REFIID iid, void **out ) { return rm_QueryInterface( rm2_from( iface ), iid, out ); }
@@ -5014,8 +4979,6 @@ static HRESULT WINAPI rmf_ActivateInstance( void *iface, void **instance )
 {
     TRACE( "rmf_ActivateInstance enter\n" );
 
-    if (is_store_app())
-        res_manager_inst.vt_rm = res_manager_store_vtbl;
     *instance = &res_manager_inst.vt_rm;
     incr( &res_manager_inst.ref );
     return S_OK;
@@ -5034,8 +4997,6 @@ static HRESULT WINAPI rms_GetTrustLevel( void *iface, INT32 *t ) { return get_tr
 static HRESULT WINAPI rms_Current( void *iface, void **out )
 {
     TRACE( "ResourceManager::Current\n" );
-    if (is_store_app())
-        res_manager_inst.vt_rm = res_manager_store_vtbl;
     *out = &res_manager_inst.vt_rm;
     incr( &res_manager_inst.ref );
     return S_OK;
@@ -5204,6 +5165,7 @@ struct mm_factory
     const void *vt_statics;  /* IMemoryManagerStatics */
     const void *vt_statics2; /* IMemoryManagerStatics2 */
     const void *vt_statics3; /* IMemoryManagerStatics3 */
+    const void *vt_statics_report; /* IMemoryManagerStatics2 {6eee351f} */
 };
 static struct mm_factory *mmf_from_s( void *iface, size_t off ) { return (struct mm_factory *)((BYTE *)iface - off); }
 
@@ -5293,6 +5255,16 @@ static const void *mm_statics3_vtbl[] =
     msm3_QueryInterface, msm_AddRef, msm_Release, msm_GetIids, msm_GetRuntimeClassName, msm_GetTrustLevel,
     msm3_get_UsageLimit, msm3_put_UsageLimit, msm3_get_DiagnosticEnabled, msm3_put_DiagnosticEnabled,
 };
+static HRESULT WINAPI msmr_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return msmf_QueryInterface( mmf_from_s( iface, offsetof( struct mm_factory, vt_statics_report )), iid, out );
+}
+static const void *mm_statics_report_vtbl[] =
+{
+    msmr_QueryInterface, msm_AddRef, msm_Release, msm_GetIids, msm_GetRuntimeClassName, msm_GetTrustLevel,
+    msm_GetCurrentAppMemoryReport,   /* 6: GetAppMemoryReport */
+    msm_GetCurrentAppMemoryReport,   /* 7: GetProcessMemoryReport */
+};
 static HRESULT WINAPI mmf_QueryInterface( void *iface, REFIID iid, void **out )
 {
     return msmf_QueryInterface( (struct mm_factory *)iface, iid, out );
@@ -5305,8 +5277,12 @@ static HRESULT WINAPI msmf_QueryInterface( struct mm_factory *impl, REFIID iid, 
         *out = &impl->vt_primary;
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics_g ) ||
-        IsEqualGUID( iid, &IID_IMemoryManagerStatics_Real ))
+    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics_g ))
+    {
+        *out = &impl->vt_statics_report;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics_Real ))
     {
         *out = &impl->vt_statics;
         return S_OK;
@@ -5343,7 +5319,7 @@ static const void *mm_factory_vtbl[] =
     mmf_QueryInterface, mmf_AddRef, mmf_Release, mmf_GetIids, mmf_GetRuntimeClassName, mmf_GetTrustLevel,
     mmf_ActivateInstance,
 };
-static struct mm_factory mm_factory = { mm_factory_vtbl, mm_statics_vtbl, mm_statics2_vtbl, mm_statics3_vtbl };
+static struct mm_factory mm_factory = { mm_factory_vtbl, mm_statics_vtbl, mm_statics2_vtbl, mm_statics3_vtbl, mm_statics_report_vtbl };
 
 /* ------------------------------------------------------------------ */
 /* exports                                                             */
@@ -5436,9 +5412,11 @@ static void mrm_prearm_pinbuffer(void)
     base = (unsigned char *)hmod;
 
     slot = (UINT_PTR *)(base + 0x55de30);   /* s_ExceptionInfoBufferPinningHandle */
-    fake = (UINT_PTR *)(base + 0x55df60);   /* unused .bss hole */
     if (*slot)                              /* arm once, when slot is empty */
         return;
+
+    fake = VirtualAlloc( NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
+    if (!fake) return;
 
     fake[0] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
     fake[1] = 0x800;                        /* Length: 2KB payload window */
@@ -5466,19 +5444,19 @@ static void mrm_prearm_pinbuffer(void)
      * GCHandle statics with the same fake-System.Byte[] cell shape, one
      * dedicated fake per slot from the .bss holes. */
     {
-        UINT_PTR *fakes[2] = { (UINT_PTR *)(base + 0x55df78),
-                               (UINT_PTR *)(base + 0x55df90) };
         int n;
         for (n = 0; n < 2; n++)
         {
             UINT_PTR *ws = (UINT_PTR *)(base + 0x55de38) + n * 2;
+            UINT_PTR *f;
             UINT_PTR *c;
             if (*ws) continue;
+            f = VirtualAlloc( NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
             c = alloc_gchandle_cell();
-            if (!c) continue;
-            fakes[n][0] = (UINT_PTR)(base + 0xe0f80);
-            fakes[n][1] = 1;
-            c[0] = (UINT_PTR)fakes[n];
+            if (!f || !c) continue;
+            f[0] = (UINT_PTR)(base + 0xe0f80);
+            f[1] = 1;
+            c[0] = (UINT_PTR)f;
             c[1] = 0;
             *ws = (UINT_PTR)c | 1;
             TRACE("prearm pinbuffer wer-slot %p armed\n", ws);

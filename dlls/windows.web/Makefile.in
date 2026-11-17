@@ -1,7 +1,8 @@
 MODULE  = windows.web.dll
-IMPORTS = combase
+IMPORTS = combase winhttp
 
 SOURCES = \
+	cjson/cJSON.c \
 	classes.idl \
 	http.c \
 	json_array.c \

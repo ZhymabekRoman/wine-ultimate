@@ -671,9 +671,13 @@ void CDECL RtlRestoreContext( CONTEXT *context, EXCEPTION_RECORD *rec )
         context->Rip = (ULONG64)call_consolidate_callback( context, consolidate, rec );
     }
 
-    /* hack: remove no longer accessible TEB frames */
-    while (is_valid_frame( (ULONG_PTR)teb_frame ) && (ULONG64)teb_frame < context->Rsp)
+    /* hack: remove no longer accessible TEB frames
+     * bound the walk: a self-referencing frame (a push at the same stack slot
+     * nested under itself) makes the linked list cyclic; cap at one frame per
+     * 8 bytes of a 8 MB stack so a pathological chain cannot spin forever */
+    for (ULONG depth = 0; depth < 1024 * 1024; depth++)
     {
+        if (!is_valid_frame( (ULONG_PTR)teb_frame ) || (ULONG64)teb_frame >= context->Rsp) break;
         TRACE( "removing TEB frame: %p\n", teb_frame );
         teb_frame = __wine_pop_frame( teb_frame );
     }

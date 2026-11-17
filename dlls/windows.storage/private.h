@@ -34,6 +34,7 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#include "windows.foundation.collections.h"
 #define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Storage_Pickers
 #define WIDL_using_Windows_Storage_Streams
@@ -61,6 +62,7 @@ extern IActivationFactory *file_save_picker_factory;
 extern IActivationFactory *folder_picker_factory;
 
 HRESULT storage_file_create( const WCHAR *path, IStorageFile **out );
+HRESULT file_vector_view_create( IStorageFile **items, UINT32 count, IVectorView_StorageFile **out );
 HRESULT storage_folder_create( const WCHAR *path, IStorageFolder **out );
 HRESULT read_file_bytes( const WCHAR *path, BYTE **out_bytes, DWORD *out_size );
 HRESULT buffer_create( UINT32 capacity, IBuffer **out );

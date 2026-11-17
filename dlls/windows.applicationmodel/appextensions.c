@@ -43,6 +43,7 @@
 
 #include "private.h"
 #include "objbase.h"
+#include "windows.storage.h"
 
 #include "wine/debug.h"
 
@@ -334,6 +335,73 @@ struct source_package
 };
 static struct source_package source_package_obj;
 
+/* Real Windows.Storage.StorageFolder for the source package path, created
+ * lazily.  v1.29 QIs InstalledLocation for IStorageFolder {65aed1ae} and
+ * awaits [8] CreateFolderAsync; the version-ref probe (IPackage2) shares the
+ * same IID, so one object must survive both call shapes. */
+static IStorageFolder *src_folder_obj;
+
+static HRESULT src_get_folder( IStorageFolder **out )
+{
+    static const WCHAR class_name[] = L"Windows.Storage.StorageFolder";
+    IActivationFactory *factory;
+    IStorageFolderStatics *statics;
+    IAsyncOperation_StorageFolder *op;
+    HSTRING class, path;
+    HRESULT hr;
+
+    if (src_folder_obj)
+    {
+        *out = src_folder_obj;
+        return S_OK;
+    }
+    if ((hr = WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &class )))
+        return hr;
+    if (FAILED(hr = RoGetActivationFactory( class, &IID_IActivationFactory, (void **)&factory )))
+    {
+        WindowsDeleteString( class );
+        return hr;
+    }
+    WindowsDeleteString( class );
+    if (FAILED(hr = IActivationFactory_QueryInterface( factory, &IID_IStorageFolderStatics, (void **)&statics )))
+    {
+        IActivationFactory_Release( factory );
+        return hr;
+    }
+    if (FAILED(hr = WindowsCreateString( source_package_path(), lstrlenW( source_package_path() ), &path )))
+    {
+        IStorageFolderStatics_Release( statics );
+        IActivationFactory_Release( factory );
+        return hr;
+    }
+    hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &op );
+    WindowsDeleteString( path );
+    if (SUCCEEDED(hr))
+    {
+        IStorageFolder *result = NULL;
+        hr = IAsyncOperation_StorageFolder_GetResults( op, &result );
+        if (SUCCEEDED(hr) && result)
+        {
+            hr = IStorageFolder_QueryInterface( result, &IID_IStorageFolder, (void **)&src_folder_obj );
+            IStorageFolder_Release( result );
+            if (SUCCEEDED(hr))
+            {
+                *out = src_folder_obj;
+                goto done;
+            }
+        }
+        IAsyncOperation_StorageFolder_Release( op );
+    }
+    IStorageFolderStatics_Release( statics );
+    IActivationFactory_Release( factory );
+    return hr;
+done:
+    IAsyncOperation_StorageFolder_Release( op );
+    IStorageFolderStatics_Release( statics );
+    IActivationFactory_Release( factory );
+    return S_OK;
+}
+
 static HRESULT WINAPI dstr_QueryInterface( void *iface, REFIID iid, void **out )
 {
     static const GUID IID_IPackage2 =
@@ -344,6 +412,7 @@ static HRESULT WINAPI dstr_QueryInterface( void *iface, REFIID iid, void **out )
     TRACE( "dstr QI %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IPackage2 ))
     {
+        if (SUCCEEDED(src_get_folder( (IStorageFolder **)out ))) return S_OK;
         InterlockedIncrement( &version_ref_obj.ref );
         *out = &version_ref_obj;
         return S_OK;
@@ -416,12 +485,44 @@ static HRESULT WINAPI dstr_IsResource( void *iface, boolean *value )
     *value = false;
     return S_OK;
 }
-/* slot 8: IPackage2 probe used by the source-version check */
-static HRESULT WINAPI dstr_GetSourceInfo( void *iface, void **value )
+/* slot 8: IStorageFolder::CreateFolderAsync over the InstalledLocation.
+ * The v1.29 GetPackages path (PreIndexedPackageSourceFactory.cpp:530) calls
+ * [9]=get_InstalledLocation, QIs IStorageFolder and awaits [8]("Public");
+ * answering with the version-ref probe (a struct { 0,2,0,0 } = 0x20000) makes
+ * the await bridge QI 0x20000 as an object pointer.  Hand out a real
+ * Windows.Storage.StorageFolder async operation instead. */
+static HRESULT WINAPI dstr_CreateFolderAsync( void *iface, HSTRING name, void **value )
 {
-    InterlockedIncrement( &version_ref_obj.ref );
-    *value = &version_ref_obj;
-    return S_OK;
+    static const WCHAR class_name[] = L"Windows.Storage.StorageFolder";
+    IActivationFactory *factory;
+    IStorageFolderStatics *statics;
+    HSTRING class, path;
+    HRESULT hr;
+
+    TRACE( "dstr_CreateFolderAsync\n" );
+    if ((hr = WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &class )))
+        return hr;
+    if ((hr = WindowsCreateString( source_package_path(), lstrlenW( source_package_path() ), &path )))
+    {
+        WindowsDeleteString( class );
+        return hr;
+    }
+    if (FAILED(hr = RoGetActivationFactory( class, &IID_IActivationFactory, (void **)&factory )))
+    {
+        WindowsDeleteString( class );
+        WindowsDeleteString( path );
+        return hr;
+    }
+    WindowsDeleteString( class );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IStorageFolderStatics, (void **)&statics );
+    if (SUCCEEDED(hr))
+    {
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, (IAsyncOperation_StorageFolder **)value );
+        IStorageFolderStatics_Release( statics );
+    }
+    IActivationFactory_Release( factory );
+    WindowsDeleteString( path );
+    return hr;
 }
 static HRESULT WINAPI dstr_get_FamilyName( void *iface, HSTRING *value )
 {
@@ -464,7 +565,7 @@ static struct dstr_folder *create_dstr_folder( const WCHAR *str )
     dstr_vtbl_page[5] = dstr_GetTrustLevel;
     dstr_vtbl_page[6] = dstr_get_Id;
     dstr_vtbl_page[7] = dstr_get_Path;
-    dstr_vtbl_page[8] = dstr_GetSourceInfo;
+    dstr_vtbl_page[8] = dstr_CreateFolderAsync;
     dstr_vtbl_page[9] = dstr_get_FamilyName;
     dstr_vtbl_page[10] = dstr_get_InstallPath;
     for (i = 11; i < ARRAY_SIZE(dstr_vtbl_page); i++)

@@ -197,6 +197,7 @@ static const GUID IID_ICoreApplicationViewTitleBar_custom = {0x08d17364, 0x4e43,
 struct core_application_view_title_bar
 {
     ICoreApplicationViewTitleBar ICoreApplicationViewTitleBar_iface;
+    const void *IWeakReferenceSource_iface;
     LONG ref;
     boolean extend_view_into_title_bar;
     __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable *is_visible_changed_handler;
@@ -982,12 +983,116 @@ static inline struct core_application_view_title_bar *impl_from_ICoreApplication
     return CONTAINING_RECORD( iface, struct core_application_view_title_bar, ICoreApplicationViewTitleBar_iface );
 }
 
+static const GUID IID_IWeakReference_tb = {0x00000037, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const GUID IID_IWeakReferenceSource_tb = {0x00000038, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+
+struct tb_weakref
+{
+    const void *vtbl;
+    LONG ref;
+    struct core_application_view_title_bar *owner;
+};
+
+static HRESULT WINAPI tb_weakref_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IWeakReference_tb ))
+    {
+        InterlockedIncrement( &((struct tb_weakref *)iface)->ref );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI tb_weakref_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct tb_weakref *)iface)->ref );
+}
+static ULONG WINAPI tb_weakref_Release( void *iface )
+{
+    struct tb_weakref *wr = iface;
+    ULONG ref = InterlockedDecrement( &wr->ref );
+    if (!ref)
+    {
+        if (wr->owner) ICoreApplicationViewTitleBar_Release( &wr->owner->ICoreApplicationViewTitleBar_iface );
+        free( wr );
+    }
+    return ref;
+}
+static HRESULT WINAPI tb_weakref_Resolve( void *iface, REFIID iid, void **out )
+{
+    struct tb_weakref *wr = iface;
+    if (!wr->owner) { *out = NULL; return S_OK; }
+    return ICoreApplicationViewTitleBar_QueryInterface( &wr->owner->ICoreApplicationViewTitleBar_iface, iid, out );
+}
+static const void *tb_weakref_vtbl[] =
+{
+    tb_weakref_QueryInterface,
+    tb_weakref_AddRef,
+    tb_weakref_Release,
+    tb_weakref_Resolve,
+};
+
+static HRESULT WINAPI core_application_view_title_bar_QueryInterface( ICoreApplicationViewTitleBar *iface, REFIID iid, void **out );
+
+struct tb_weakref_source
+{
+    const void *vtbl;
+};
+
+static HRESULT WINAPI tb_wrs_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct core_application_view_title_bar *impl =
+        CONTAINING_RECORD( iface, struct core_application_view_title_bar, IWeakReferenceSource_iface );
+    return core_application_view_title_bar_QueryInterface( &impl->ICoreApplicationViewTitleBar_iface, iid, out );
+}
+static ULONG WINAPI tb_wrs_AddRef( void *iface )
+{
+    struct core_application_view_title_bar *impl =
+        CONTAINING_RECORD( iface, struct core_application_view_title_bar, IWeakReferenceSource_iface );
+    return ICoreApplicationViewTitleBar_AddRef( &impl->ICoreApplicationViewTitleBar_iface );
+}
+static ULONG WINAPI tb_wrs_Release( void *iface )
+{
+    struct core_application_view_title_bar *impl =
+        CONTAINING_RECORD( iface, struct core_application_view_title_bar, IWeakReferenceSource_iface );
+    return ICoreApplicationViewTitleBar_Release( &impl->ICoreApplicationViewTitleBar_iface );
+}
+static HRESULT WINAPI tb_wrs_GetWeakReference( void *iface, void **ref )
+{
+    struct core_application_view_title_bar *impl =
+        CONTAINING_RECORD( iface, struct core_application_view_title_bar, IWeakReferenceSource_iface );
+    struct tb_weakref *wr;
+    if (!ref) return E_POINTER;
+    if (!(wr = calloc( 1, sizeof(*wr) ))) return E_OUTOFMEMORY;
+    wr->vtbl = tb_weakref_vtbl;
+    wr->ref = 1;
+    wr->owner = impl;
+    ICoreApplicationViewTitleBar_AddRef( &impl->ICoreApplicationViewTitleBar_iface );
+    *ref = wr;
+    return S_OK;
+}
+static const void *tb_wrs_vtbl[] =
+{
+    tb_wrs_QueryInterface,
+    tb_wrs_AddRef,
+    tb_wrs_Release,
+    tb_wrs_GetWeakReference,
+};
+
 static HRESULT WINAPI core_application_view_title_bar_QueryInterface( ICoreApplicationViewTitleBar *iface,
         REFIID iid, void **out )
 {
     struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
 
     TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_tb ))
+    {
+        ICoreApplicationViewTitleBar_AddRef( &impl->ICoreApplicationViewTitleBar_iface );
+        *out = &impl->IWeakReferenceSource_iface;
+        return S_OK;
+    }
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -1191,6 +1296,7 @@ static HRESULT core_application_view_title_bar_create( ICoreApplicationViewTitle
     struct core_application_view_title_bar *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->ICoreApplicationViewTitleBar_iface.lpVtbl = &core_application_view_title_bar_vtbl;
+    impl->IWeakReferenceSource_iface = tb_wrs_vtbl;
     impl->ref = 1;
     *value = &impl->ICoreApplicationViewTitleBar_iface;
     return S_OK;
