@@ -133,6 +133,15 @@ void *opengl_drawable_create( UINT size, const struct opengl_drawable_funcs *fun
     return drawable;
 }
 
+static __thread struct
+{
+    BOOL valid;
+    void *dpy;
+    void *draw;
+    void *read;
+    void *ctx;
+} tls_egl_current;
+
 void opengl_drawable_add_ref( struct opengl_drawable *drawable )
 {
     ULONG ref = InterlockedIncrement( &drawable->ref );
@@ -150,7 +159,13 @@ void opengl_drawable_release( struct opengl_drawable *drawable )
         const struct egl_platform *egl = &display_egl;
 
         drawable->funcs->destroy( drawable );
-        if (drawable->surface) funcs->p_eglDestroySurface( egl->display, drawable->surface );
+        if (drawable->surface)
+        {
+            if (tls_egl_current.valid &&
+                (tls_egl_current.draw == drawable->surface || tls_egl_current.read == drawable->surface))
+                tls_egl_current.valid = FALSE;
+            funcs->p_eglDestroySurface( egl->display, drawable->surface );
+        }
         if (drawable->client) client_surface_release( drawable->client );
         free( drawable );
     }
@@ -609,20 +624,23 @@ static BOOL describe_egl_config( EGLConfig config, struct wgl_pixel_format *fmt,
     fmt->max_pbuffer_height = 4096;
     fmt->max_pbuffer_pixels = fmt->max_pbuffer_width * fmt->max_pbuffer_height;
 
-    if (funcs->p_eglGetConfigAttrib( egl->display, config, EGL_TRANSPARENT_RED_VALUE, &value ))
+    if (fmt->transparent == GL_TRUE)
     {
-        fmt->transparent_red_value_valid = GL_TRUE;
-        fmt->transparent_red_value = value;
-    }
-    if (funcs->p_eglGetConfigAttrib( egl->display, config, EGL_TRANSPARENT_GREEN_VALUE, &value ))
-    {
-        fmt->transparent_green_value_valid = GL_TRUE;
-        fmt->transparent_green_value = value;
-    }
-    if (funcs->p_eglGetConfigAttrib( egl->display, config, EGL_TRANSPARENT_BLUE_VALUE, &value ))
-    {
-        fmt->transparent_blue_value_valid = GL_TRUE;
-        fmt->transparent_blue_value = value;
+        if (funcs->p_eglGetConfigAttrib( egl->display, config, EGL_TRANSPARENT_RED_VALUE, &value ))
+        {
+            fmt->transparent_red_value_valid = GL_TRUE;
+            fmt->transparent_red_value = value;
+        }
+        if (funcs->p_eglGetConfigAttrib( egl->display, config, EGL_TRANSPARENT_GREEN_VALUE, &value ))
+        {
+            fmt->transparent_green_value_valid = GL_TRUE;
+            fmt->transparent_green_value = value;
+        }
+        if (funcs->p_eglGetConfigAttrib( egl->display, config, EGL_TRANSPARENT_BLUE_VALUE, &value ))
+        {
+            fmt->transparent_blue_value_valid = GL_TRUE;
+            fmt->transparent_blue_value = value;
+        }
     }
     fmt->transparent_alpha_value_valid = GL_TRUE;
     fmt->transparent_alpha_value = 0;
@@ -652,7 +670,15 @@ static BOOL egldrv_describe_pixel_format( int format, struct wgl_pixel_format *d
     struct egl_platform *egl = &display_egl;
     int count = egl->config_count;
 
-    if (--format < 0 || format > ARRAY_SIZE(pixel_format_flags) * count) return FALSE;
+    if (--format < 0 || format >= ARRAY_SIZE(pixel_format_flags) * count) return FALSE;
+    if (format >= count && pixel_formats && desc != &pixel_formats[format % count])
+    {
+        UINT new_flags = pixel_format_flags[format / count];
+        *desc = pixel_formats[format % count];
+        desc->pfd.dwFlags = (desc->pfd.dwFlags & ~pixel_format_flags[0]) | new_flags;
+        if (!new_flags) desc->pfd.dwFlags &= ~PFD_DRAW_TO_WINDOW;
+        return TRUE;
+    }
     return describe_egl_config( egl->configs[format % count], desc, pixel_format_flags[format / count] );
 }
 
@@ -836,6 +862,8 @@ static BOOL egldrv_context_destroy( void *context )
     const struct opengl_funcs *funcs = &display_funcs;
     const struct egl_platform *egl = &display_egl;
 
+    if (tls_egl_current.valid && tls_egl_current.ctx == context)
+        tls_egl_current.valid = FALSE;
     funcs->p_eglDestroyContext( egl->display, context );
     return TRUE;
 }
@@ -844,10 +872,30 @@ static BOOL egldrv_make_current( struct opengl_drawable *draw, struct opengl_dra
 {
     const struct opengl_funcs *funcs = &display_funcs;
     const struct egl_platform *egl = &display_egl;
+    EGLSurface draw_surf = context ? draw->surface : EGL_NO_SURFACE;
+    EGLSurface read_surf = context ? read->surface : EGL_NO_SURFACE;
+    EGLContext ctx = context ? (EGLContext)context : EGL_NO_CONTEXT;
 
     TRACE( "draw %s, read %s, context %p\n", debugstr_opengl_drawable( draw ), debugstr_opengl_drawable( read ), context );
 
-    return funcs->p_eglMakeCurrent( egl->display, context ? draw->surface : EGL_NO_SURFACE, context ? read->surface : EGL_NO_SURFACE, context );
+    if (tls_egl_current.valid &&
+        tls_egl_current.dpy == egl->display &&
+        tls_egl_current.draw == draw_surf &&
+        tls_egl_current.read == read_surf &&
+        tls_egl_current.ctx == ctx)
+    {
+        return TRUE;
+    }
+
+    if (!funcs->p_eglMakeCurrent( egl->display, draw_surf, read_surf, ctx ))
+        return FALSE;
+
+    tls_egl_current.valid = TRUE;
+    tls_egl_current.dpy = egl->display;
+    tls_egl_current.draw = draw_surf;
+    tls_egl_current.read = read_surf;
+    tls_egl_current.ctx = ctx;
+    return TRUE;
 }
 
 static void egldrv_pbuffer_destroy( struct opengl_drawable *drawable )
@@ -2709,7 +2757,9 @@ void win32u_glImportSemaphoreWin32NameEXT( GLuint semaphore, GLenum type, const 
     }
 }
 
-static void display_funcs_init(void)
+static pthread_once_t egl_init_once = PTHREAD_ONCE_INIT;
+
+static void egl_gpus_init(void)
 {
     struct egl_platform *egl, *next;
     UINT status;
@@ -2719,6 +2769,33 @@ static void display_funcs_init(void)
     if ((status = user_driver->pOpenGLInit( WINE_OPENGL_DRIVER_VERSION, &display_funcs, &driver_funcs )))
         WARN( "Failed to initialize the driver OpenGL functions, status %#x\n", status );
     init_egl_platforms( &display_funcs, driver_funcs );
+
+    if (!list_empty( &devices_egl ))
+    {
+        if (!display_funcs.p_glGetString)
+            display_funcs.p_glGetString = driver_funcs->p_get_proc_address( "glGetString" );
+        if (!display_funcs.p_glGetIntegerv)
+            display_funcs.p_glGetIntegerv = driver_funcs->p_get_proc_address( "glGetIntegerv" );
+        if (!display_funcs.p_glGetUnsignedBytevEXT)
+            display_funcs.p_glGetUnsignedBytevEXT = driver_funcs->p_get_proc_address( "glGetUnsignedBytevEXT" );
+        if (!display_funcs.p_glGetUnsignedBytei_vEXT)
+            display_funcs.p_glGetUnsignedBytei_vEXT = driver_funcs->p_get_proc_address( "glGetUnsignedBytei_vEXT" );
+
+        global_extensions[WGL_WINE_query_renderer] = 1;
+        display_funcs.p_query_renderer = win32u_query_renderer;
+        display_funcs.p_wglQueryCurrentRendererIntegerWINE = win32u_wglQueryCurrentRendererIntegerWINE;
+        display_funcs.p_wglQueryCurrentRendererStringWINE = win32u_wglQueryCurrentRendererStringWINE;
+        display_funcs.p_wglQueryRendererIntegerWINE = win32u_wglQueryRendererIntegerWINE;
+        display_funcs.p_wglQueryRendererStringWINE = win32u_wglQueryRendererStringWINE;
+
+        LIST_FOR_EACH_ENTRY_SAFE( egl, next, &devices_egl, struct egl_platform, entry )
+            init_device_info( egl, &display_funcs );
+    }
+}
+
+static void display_funcs_init(void)
+{
+    pthread_once( &egl_init_once, egl_gpus_init );
 
     formats_count = driver_funcs->p_init_pixel_formats( &onscreen_count );
     if (!(pixel_formats = malloc( formats_count * sizeof(*pixel_formats) ))) ERR( "Failed to allocate memory for pixel formats\n" );
@@ -2813,18 +2890,6 @@ static void display_funcs_init(void)
         display_funcs.p_glImportSemaphoreWin32HandleEXT = win32u_glImportSemaphoreWin32HandleEXT;
         display_funcs.p_glImportSemaphoreWin32NameEXT = win32u_glImportSemaphoreWin32NameEXT;
     }
-
-    if (!list_empty( &devices_egl ))
-    {
-        global_extensions[WGL_WINE_query_renderer] = 1;
-        display_funcs.p_query_renderer = win32u_query_renderer;
-        display_funcs.p_wglQueryCurrentRendererIntegerWINE = win32u_wglQueryCurrentRendererIntegerWINE;
-        display_funcs.p_wglQueryCurrentRendererStringWINE = win32u_wglQueryCurrentRendererStringWINE;
-        display_funcs.p_wglQueryRendererIntegerWINE = win32u_wglQueryRendererIntegerWINE;
-        display_funcs.p_wglQueryRendererStringWINE = win32u_wglQueryRendererStringWINE;
-        LIST_FOR_EACH_ENTRY_SAFE( egl, next, &devices_egl, struct egl_platform, entry )
-            init_device_info( egl, &display_funcs );
-    }
 }
 
 /***********************************************************************
@@ -2849,7 +2914,7 @@ BOOL get_opengl_gpus( struct list *gpus )
 {
     struct egl_platform *egl;
 
-    if (!__wine_get_opengl_driver( WINE_OPENGL_DRIVER_VERSION )) return FALSE;
+    pthread_once( &egl_init_once, egl_gpus_init );
 
     LIST_FOR_EACH_ENTRY( egl, &devices_egl, struct egl_platform, entry )
     {

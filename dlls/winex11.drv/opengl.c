@@ -896,13 +896,28 @@ static UINT x11drv_init_pixel_formats( UINT *onscreen_count )
     return size;
 }
 
+static __thread struct
+{
+    BOOL valid;
+    Display *dpy;
+    GLXDrawable draw;
+    GLXDrawable read;
+    GLXContext ctx;
+} tls_glx_current;
+
 static void x11drv_surface_destroy( struct opengl_drawable *base )
 {
     struct gl_drawable *gl = impl_from_opengl_drawable( base );
 
     TRACE( "drawable %s\n", debugstr_opengl_drawable( base ) );
 
-    if (gl->drawable) pglXDestroyWindow( gdi_display, gl->drawable );
+    if (gl->drawable)
+    {
+        if (tls_glx_current.valid &&
+            (tls_glx_current.draw == gl->drawable || tls_glx_current.read == gl->drawable))
+            tls_glx_current.valid = FALSE;
+        pglXDestroyWindow( gdi_display, gl->drawable );
+    }
 }
 
 static BOOL set_swap_interval( struct gl_drawable *gl, int interval )
@@ -1177,6 +1192,8 @@ static BOOL x11drv_describe_pixel_format( int format, struct wgl_pixel_format *p
 static BOOL x11drv_context_destroy( void *context )
 {
     TRACE("(%p)\n", context);
+    if (tls_glx_current.valid && tls_glx_current.ctx == context)
+        tls_glx_current.valid = FALSE;
     pglXDestroyContext( gdi_display, context );
     return TRUE;
 }
@@ -1191,13 +1208,33 @@ static void *x11drv_get_proc_address( const char *name )
 static BOOL x11drv_make_current( struct opengl_drawable *draw_base, struct opengl_drawable *read_base, void *context )
 {
     struct gl_drawable *draw = impl_from_opengl_drawable( draw_base ), *read = impl_from_opengl_drawable( read_base );
+    GLXDrawable draw_drawable = context ? draw->drawable : None;
+    GLXDrawable read_drawable = (pglXMakeContextCurrent && context) ? read->drawable : draw_drawable;
     BOOL ret;
 
     TRACE( "draw %s, read %s, context %p\n", debugstr_opengl_drawable( draw_base ), debugstr_opengl_drawable( read_base ), context );
 
-    if (!pglXMakeContextCurrent || !context) ret = pglXMakeCurrent( gdi_display, context ? draw->drawable : None, context );
-    else ret = pglXMakeContextCurrent( gdi_display, draw->drawable, read->drawable, context );
-    if (ret) NtCurrentTeb()->glReserved2 = context;
+    if (tls_glx_current.valid &&
+        tls_glx_current.dpy == gdi_display &&
+        tls_glx_current.draw == draw_drawable &&
+        tls_glx_current.read == read_drawable &&
+        tls_glx_current.ctx == context)
+    {
+        NtCurrentTeb()->glReserved2 = context;
+        return TRUE;
+    }
+
+    if (!pglXMakeContextCurrent || !context) ret = pglXMakeCurrent( gdi_display, draw_drawable, context );
+    else ret = pglXMakeContextCurrent( gdi_display, draw_drawable, read_drawable, context );
+    if (ret)
+    {
+        NtCurrentTeb()->glReserved2 = context;
+        tls_glx_current.valid = TRUE;
+        tls_glx_current.dpy = gdi_display;
+        tls_glx_current.draw = draw_drawable;
+        tls_glx_current.read = read_drawable;
+        tls_glx_current.ctx = context;
+    }
     return ret;
 }
 
@@ -1335,7 +1372,13 @@ static void x11drv_pbuffer_destroy( struct opengl_drawable *base )
 
     TRACE( "drawable %s\n", debugstr_opengl_drawable( base ) );
 
-    if (gl->drawable) pglXDestroyPbuffer( gdi_display, gl->drawable );
+    if (gl->drawable)
+    {
+        if (tls_glx_current.valid &&
+            (tls_glx_current.draw == gl->drawable || tls_glx_current.read == gl->drawable))
+            tls_glx_current.valid = FALSE;
+        pglXDestroyPbuffer( gdi_display, gl->drawable );
+    }
 }
 
 static BOOL x11drv_pbuffer_updated( HDC hdc, struct opengl_drawable *base, GLenum cube_face, GLint mipmap_level )
