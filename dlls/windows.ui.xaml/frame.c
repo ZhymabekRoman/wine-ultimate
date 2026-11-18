@@ -1369,7 +1369,12 @@ static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface );
 static void **vtbl_dup_n( const void *src, size_t count )
 {
     void **d = calloc( 256, sizeof(*d) );
-    if (d) memcpy( d, src, count * sizeof(*d) );
+    if (d)
+    {
+        size_t i;
+        memcpy( d, src, count * sizeof(*d) );
+        for (i = count; i < 256; i++) d[i] = element_generic_slot;
+    }
     return d;
 }
 
