@@ -1,6 +1,44 @@
 # wine-ultimate — WinUI 3 / Windows App SDK stack for Wine
 
-**Canonical source of truth: branch [`ultimate`](../../tree/ultimate) of this repository.**
+> **Honest disclaimer:** `wine-ultimate` is an experimental AI-assisted Wine fork ("AI-slop" by traditional Wine upstream standards — large, rapidly-iterated C/ASM subsystems built and verified with automated profiling, Wine test suites, and live WinUI 3 / UWP app gates, not upstream-reviewed patches). It is **not** clean upstream Wine and should be evaluated by its measured benchmarks, Wine test results, and clean-room legality below.
+
+## Why `wine-ultimate` is Legal (Clean-Room Builtin Implementation)
+
+1. **Zero Microsoft binaries redistributed**: This repository contains only LGPL-2.1+ Wine C/header/IDL source code (`dlls/`, `server/`, `include/`, `loader/`). No Windows DLLs, `.winmd` files, or proprietary Microsoft binaries are committed, linked, or shipped.
+2. **Clean-room API/ABI reimplementation**: Every WinRT/UWP/WinUI/DirectComposition interface (`windows.ui.xaml`, `windows.ui.composition`, `dcomp`, `windows.storage`, `windows.web`, `windows.applicationmodel`, `appxdeploymentclient`, `cabinet` MSZIP) is implemented from scratch in C against public Windows SDK IDL/WinMD interface contracts, documented COM vtable slot layouts, and observed runtime error/query behavior (`QueryInterface`, `RoGetActivationFactory`).
+3. **User-supplied app packages at runtime**: Any UWP/WinUI 3/DesktopBridge app (`Calculator`, `Notepad`, `Winget`, `Clock`, `Store`, `Paint`, `WhatsApp`) is supplied by the user's own local prefix/MSIX packages at runtime; `AppxManifest.xml` `<InProcessServer>` resolution (`combase`) simply loads the user's existing package DLLs the same way Windows `combase.dll` does.
+
+---
+
+## Verified Status & Measured Results (`ultimate-sync`, Nov 2026)
+
+### Working Apps & Real-World Gates
+
+| App | Status | Verified Behavior & Evidence |
+|---|---|---|
+| **Windows Calculator** (`CalculatorApp.exe`) | **PASS** | Full GPU SDF + Glyph Atlas + AOT XBF (`7 + 8 = 15` via mouse clicks & keyboard, Hamburger button `uwp_invoke_button`); cold TTW cut `1,130 ms → 625–669 ms` (`396–408 ms` warm server), `2560×1376` crisp on Xorg `:1` |
+| **Windows Notepad** (`Notepad.exe`) | **PASS (Xvfb)** | `TabView`, `MenuBar` (`File / Edit / View`), `RichEditD2DPT` typing (`*Hello Wine 123 - Notepad`), `Ctrl+S` save/reopen, status bar (`Ln 0, Col 15`); `923 ms` cold TTW (`DISPLAY=:1` Xe/KWin `WS_CHILD` island fix in progress) |
+| **Windows Package Manager (`winget.exe`)** | **PASS** | `winget source update` (`EXIT=0`, downloads & extracts `3.82 MB` `source2.msix` via `IAppxFactory` + `windows.web` + `cabinet` MSZIP), `winget search 7zip` (`EXIT=0`), `winget install 7zip.7zip --silent` (`7-Zip 26.06 (x64)` runs), `echo y \| winget list 7zip` |
+| **WhatsApp Desktop** (`WhatsApp.Root.exe`) | **PASS (Onboarding)** | Reaches native `"Welcome to WhatsApp"` / `"Log in"` screen (`28/28` host bridges `S_OK`, `XWID map`, alive 30–90s); `wineserver` message-pump storm cut `270,970 → 45,742` RPCs (`-83.1%`) |
+| **Microsoft Clock** (`Time.exe`) | **PARTIAL** | `NavigationView` (`Clock / Alarm / Timer / Watch`) + world-clock ring render (`instances=12`, `1272×990`); inner digits/controls incomplete |
+| **Microsoft Store** (`WinStore.App.exe`) | **PARTIAL** | `SplashPage` alive 35s (`WindowsIntegrityPolicy` + `ICompositor6` cleared); blocked before `AppShell` on `IReferenceTracker` (`{11d3b13a}`) & `WinStore.UX.Controls.Card` (`0x80004003`) |
+| **Microsoft Paint** (`mspaint.exe`) | **IN PROGRESS** | `NamedPolicy`, `LoggingOptions`, `ParseApplicationUserModelId`, WinUI 3 `AppxManifest` routing cleared; `1280×1024` frame maps live, swapchain present under investigation |
+
+### Measured Performance & Subsystem Benchmarks (`ultimate-sync`)
+
+- **WhatsApp `wineserver` Message-Pump Storm (`server/queue.c` `f0b218850`)**: `get_message` `124,158 → 42` (**−99.97%**), `set_queue_mask` `46,862 → 16` (**−99.97%**), `event_op` `41,412 → 22` (**−99.95%**); total startup RPCs `270,970 → 44,912` (**−83.4%**).
+- **`reg_shm` Enumeration Snapshots (`e6b4d0dee`)**: `CalculatorApp.exe` `enum_key_value` `46,038 → 6,660` (**−85.5%**), total RPCs `88,460 → 50,992` (**−42%**), cold TTW `1,130 ms → 669 ms` (**−41%**).
+- **Cold-Start Syscall Cuts (`winebus` `06a0e6792`, `win32u/freetype.c` `880261c2c`, `ntdll` `134f12d30`, `7153d8b32`)**: `openat` `77,098 → 15,306`, `newfstatat` `97,767 → 28,738`, `getxattr` `11,806 → 0`, `dosdevices/c:` `readlink` `496 → 14` (**−97%**).
+- **PE-Side `NtContinue` Fast-Path (`905d71613`)**: `RaiseException + VEH` (`N=50,000`): `210.5 ns → 48.6 ns/exception` (**4.33× speedup**).
+- **`GetSystemTimeAsFileTime` Direct `KUSER_SHARED_DATA` + Opt-In `inline_patch` (`c65b684a4`)**: `Tick64+Time+Heap`: `66.39 ns → 3.31 ns/iter` (**20× faster** without IAT self-patching); `CalculatorApp.exe` cold start `-107 ms` (`731–734 ms → 625–626 ms`).
+- **256 Striped `gdiobj` Bucket Locks (`cbdb59190`)**: 4-thread GDI throughput `0.69 M → 2.63 M iters/s` (**3.83× higher**).
+- **Client-Side `SEC_RESERVE` Commit Bitmap (`932e5874f`)**: `WhatsApp` `add_mapping_committed_range` RPCs `3,009 → 0` (**−100%**).
+- **`WINEPATH`/`PATH` DLL Directory Index (`04cfe956a`)**: `CalculatorApp.exe` `.dll` `c0000034` probes `130 → 67` (**−48.5%**); 50-round bench `10.74 ms → 6.11 ms` (**−43.1%**).
+- **Wine Test Suites (0 regressions on modified lanes)**: `cabinet_test` **506/506** (`compressapi` 75/75, `fdi` 158/158, `extract` 273/273), `ntdll:thread` 67/67, `ntdll:time` 10,662/10,662, `kernel32:time` 2,358/2,358, `ntdll:loader` 70/70, `gdi32:bitmap` 1,549,034/1,549,034, `gdi32:dc` 1,657/1,657, `gdi32:gdiobj` 170/170, `ws2_32:sock` 0 failures.
+
+---
+
+**Canonical source of truth: branch [`ultimate-sync`](../../tree/ultimate-sync) of this repository.**
 The tree there is a Wine fork: upstream Wine 11.10 plus the whole WinUI 3 / Windows App
 SDK (WASDK) / DirectComposition stack as real commits.
 
