@@ -362,6 +362,11 @@ static void dump_close_handle_request( const struct close_handle_request *req )
     fprintf( stderr, " handle=%04x", req->handle );
 }
 
+static void dump_close_handles_request( const struct close_handles_request *req )
+{
+    dump_varargs_user_handles( " handles=", cur_size );
+}
+
 static void dump_set_handle_info_request( const struct set_handle_info_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -3789,6 +3794,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_queue_apc_request,
     (dump_func)dump_get_apc_result_request,
     (dump_func)dump_close_handle_request,
+    (dump_func)dump_close_handles_request,
     (dump_func)dump_set_handle_info_request,
     (dump_func)dump_dup_handle_request,
     (dump_func)dump_allocate_reserve_object_request,
@@ -4121,6 +4127,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_resume_thread_reply,
     (dump_func)dump_queue_apc_reply,
     (dump_func)dump_get_apc_result_reply,
+    NULL,
     NULL,
     (dump_func)dump_set_handle_info_reply,
     (dump_func)dump_dup_handle_reply,
@@ -4455,6 +4462,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "queue_apc",
     "get_apc_result",
     "close_handle",
+    "close_handles",
     "set_handle_info",
     "dup_handle",
     "allocate_reserve_object",

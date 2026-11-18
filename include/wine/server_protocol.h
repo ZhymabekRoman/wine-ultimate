@@ -1497,6 +1497,18 @@ struct close_handle_reply
 };
 
 
+struct close_handles_request
+{
+    struct request_header __header;
+    /* VARARG(handles,user_handles); */
+    char __pad_12[4];
+};
+struct close_handles_reply
+{
+    struct reply_header __header;
+};
+
+
 
 struct set_handle_info_request
 {
@@ -6599,6 +6611,7 @@ enum request
     REQ_queue_apc,
     REQ_get_apc_result,
     REQ_close_handle,
+    REQ_close_handles,
     REQ_set_handle_info,
     REQ_dup_handle,
     REQ_allocate_reserve_object,
@@ -6935,6 +6948,7 @@ union generic_request
     struct queue_apc_request queue_apc_request;
     struct get_apc_result_request get_apc_result_request;
     struct close_handle_request close_handle_request;
+    struct close_handles_request close_handles_request;
     struct set_handle_info_request set_handle_info_request;
     struct dup_handle_request dup_handle_request;
     struct allocate_reserve_object_request allocate_reserve_object_request;
@@ -7269,6 +7283,7 @@ union generic_reply
     struct queue_apc_reply queue_apc_reply;
     struct get_apc_result_reply get_apc_result_reply;
     struct close_handle_reply close_handle_reply;
+    struct close_handles_reply close_handles_reply;
     struct set_handle_info_reply set_handle_info_reply;
     struct dup_handle_reply dup_handle_reply;
     struct allocate_reserve_object_reply allocate_reserve_object_reply;
@@ -7578,6 +7593,6 @@ union generic_reply
     struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 974
+#define SERVER_PROTOCOL_VERSION 975
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

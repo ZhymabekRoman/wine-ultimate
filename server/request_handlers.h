@@ -29,6 +29,7 @@ DECL_HANDLER(resume_thread);
 DECL_HANDLER(queue_apc);
 DECL_HANDLER(get_apc_result);
 DECL_HANDLER(close_handle);
+DECL_HANDLER(close_handles);
 DECL_HANDLER(set_handle_info);
 DECL_HANDLER(dup_handle);
 DECL_HANDLER(allocate_reserve_object);
@@ -362,6 +363,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_queue_apc,
     (req_handler)req_get_apc_result,
     (req_handler)req_close_handle,
+    (req_handler)req_close_handles,
     (req_handler)req_set_handle_info,
     (req_handler)req_dup_handle,
     (req_handler)req_allocate_reserve_object,
@@ -890,6 +892,7 @@ C_ASSERT( offsetof(struct get_apc_result_reply, result) == 8 );
 C_ASSERT( sizeof(struct get_apc_result_reply) == 48 );
 C_ASSERT( offsetof(struct close_handle_request, handle) == 12 );
 C_ASSERT( sizeof(struct close_handle_request) == 16 );
+C_ASSERT( sizeof(struct close_handles_request) == 16 );
 C_ASSERT( offsetof(struct set_handle_info_request, handle) == 12 );
 C_ASSERT( offsetof(struct set_handle_info_request, flags) == 16 );
 C_ASSERT( offsetof(struct set_handle_info_request, mask) == 20 );

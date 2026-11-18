@@ -954,6 +954,16 @@ DECL_HANDLER(close_handle)
     set_error( err );
 }
 
+/* close a batch of handles deferred by the client */
+DECL_HANDLER(close_handles)
+{
+    const obj_handle_t *handles = get_req_data();
+    data_size_t count = get_req_data_size() / sizeof(*handles);
+    unsigned int i;
+
+    for (i = 0; i < count; i++) close_handle( current->process, handles[i] );
+}
+
 /* set a handle information */
 DECL_HANDLER(set_handle_info)
 {

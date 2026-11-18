@@ -2440,6 +2440,43 @@ NTSTATUS WINAPI NtCompareTokens( HANDLE first, HANDLE second, BOOLEAN *equal )
 }
 
 
+/* Deferred close ring: registry key closes are batched into close_handles
+ * requests. Keys are reference-counted named objects with no fd, pipe EOF,
+ * sharing-violation, or wait-signaling semantics tied to the close point,
+ * so delaying the server-side release is invisible to the client. obj_shm
+ * validates handle presence and OBJ_PROTECT_CLOSE up front; anything that
+ * obj_shm does not confirm as an unprotected Key closes synchronously. */
+#define CLOSE_RING_SIZE 64
+static obj_handle_t close_ring[CLOSE_RING_SIZE];
+static unsigned int close_ring_count;
+
+/* flush queued deferred closes; called with fd_cache_mutex held */
+static void flush_close_ring(void)
+{
+    unsigned int n = close_ring_count;
+
+    if (!n) return;
+    close_ring_count = 0;
+
+    SERVER_START_REQ( close_handles )
+    {
+        wine_server_add_data( req, close_ring, n * sizeof(obj_handle_t) );
+        wine_server_call( req );
+    }
+    SERVER_END_REQ;
+}
+
+static inline BOOL is_deferrable_key_handle( HANDLE handle )
+{
+    static const WCHAR keyW[] = {'K','e','y'};
+    struct obj_shm_handle_slot slot;
+
+    if (!obj_shm_lookup_handle( handle, &slot )) return FALSE;
+    if (slot.attr & OBJ_PROTECT_CLOSE) return FALSE;
+    if (slot.type_len != sizeof(keyW) || memcmp( slot.type_name, keyW, sizeof(keyW) )) return FALSE;
+    return TRUE;
+}
+
 /**************************************************************************
  *           NtClose
  */
@@ -2449,6 +2486,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
     HANDLE port;
     unsigned int ret;
     int fd;
+    BOOL defer;
 
     if (HandleToLong( handle ) >= ~5 && HandleToLong( handle ) <= ~0)
         return STATUS_SUCCESS;
@@ -2459,6 +2497,8 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
         return close_local_sync_handle( handle );
     }
 
+    defer = is_deferrable_key_handle( handle );
+
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */
     server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
@@ -2468,6 +2508,19 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
     fd = remove_fd_from_cache( handle );
     close_inproc_sync( handle );
     invalidate_type_cache( handle );
+
+    if (defer)
+    {
+        if (close_ring_count == CLOSE_RING_SIZE) flush_close_ring();
+        close_ring[close_ring_count++] = wine_server_obj_handle( handle );
+        server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+        path_cache_invalidate_stat_all();
+        if (fd != -1) close( fd );
+        return STATUS_SUCCESS;
+    }
+
+    /* keep close ordering: flush older deferred closes first */
+    flush_close_ring();
 
     SERVER_START_REQ( close_handle )
     {
