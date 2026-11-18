@@ -680,7 +680,7 @@ static HRESULT WINAPI kfa_get_Duration( void *iface, struct TimeSpan *value )
 static HRESULT WINAPI kfa_put_Duration( void *iface, struct TimeSpan value )
 {
     struct keyframe_animation *impl = impl_from_kfa( iface );
-    TRACE( "iface %p, duration %I64d\n", iface, value.Duration );
+    TRACE( "iface %p, duration %s\n", iface, wine_dbgstr_longlong( value.Duration ) );
     impl->duration = value;
     return S_OK;
 }
@@ -911,6 +911,22 @@ static HRESULT WINAPI expression_QueryInterface( struct ICompositionAnimation *i
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IKeyFrameAnimation5_local ))
+    {
+        *out = &impl->ICompositionAnimation5_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    {
+        static const GUID IID_ICompositionObject2_local =
+            { 0x3052b611, 0x56c3, 0x4c3e, { 0x8b, 0xf3, 0xf6, 0xe1, 0xad, 0x47, 0x3f, 0x06 } };
+        if (IsEqualGUID( iid, &IID_ICompositionObject2_local ))
+        {
+            *out = &impl->ICompositionObject2_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+    }
     if (IsEqualGUID( iid, &IID_IClosable ))
     {
         *out = &impl->IClosable_iface;
@@ -1058,6 +1074,58 @@ DEFINE_INHERITED_PROLOGUE( expression_closable, IClosable, struct expression_ani
         ICompositionAnimation_iface )
 COMP_CLOSABLE_IMPL( expression_closable, struct expression_animation )
 
+static HRESULT WINAPI expression_anim5_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct expression_animation *impl = CONTAINING_RECORD( iface, struct expression_animation, ICompositionAnimation5_iface );
+    return expression_QueryInterface( &impl->ICompositionAnimation_iface, iid, out );
+}
+static ULONG WINAPI expression_anim5_AddRef( void *iface )
+{
+    struct expression_animation *impl = CONTAINING_RECORD( iface, struct expression_animation, ICompositionAnimation5_iface );
+    return expression_AddRef( &impl->ICompositionAnimation_iface );
+}
+static ULONG WINAPI expression_anim5_Release( void *iface )
+{
+    struct expression_animation *impl = CONTAINING_RECORD( iface, struct expression_animation, ICompositionAnimation5_iface );
+    return expression_Release( &impl->ICompositionAnimation_iface );
+}
+static HRESULT WINAPI expression_anim5_GetIids( void *iface, ULONG *c, IID **i )
+{
+    struct expression_animation *impl = CONTAINING_RECORD( iface, struct expression_animation, ICompositionAnimation5_iface );
+    return expression_GetIids( &impl->ICompositionAnimation_iface, c, i );
+}
+static HRESULT WINAPI expression_anim5_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct expression_animation *impl = CONTAINING_RECORD( iface, struct expression_animation, ICompositionAnimation5_iface );
+    return expression_GetRuntimeClassName( &impl->ICompositionAnimation_iface, n );
+}
+static HRESULT WINAPI expression_anim5_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    struct expression_animation *impl = CONTAINING_RECORD( iface, struct expression_animation, ICompositionAnimation5_iface );
+    return expression_GetTrustLevel( &impl->ICompositionAnimation_iface, l );
+}
+static HRESULT WINAPI expression_anim5_stub( void *iface, void *a1, void *a2 )
+{
+    return S_OK;
+}
+static const void *expression_anim5_vtbl[] =
+{
+    expression_anim5_QueryInterface,
+    expression_anim5_AddRef,
+    expression_anim5_Release,
+    expression_anim5_GetIids,
+    expression_anim5_GetRuntimeClassName,
+    expression_anim5_GetTrustLevel,
+    expression_anim5_stub,
+    expression_anim5_stub,
+    expression_anim5_stub,
+    expression_anim5_stub,
+    expression_anim5_stub,
+    expression_anim5_stub,
+    expression_anim5_stub,
+    expression_anim5_stub,
+};
+
 static const struct IClosableVtbl expression_closable_vtbl =
 {
     expression_closable_QueryInterface,
@@ -1078,6 +1146,8 @@ struct expression_animation *expression_animation_create( struct compositor *com
     impl->ICompositionAnimationBase_iface.lpVtbl = &expression_base_vtbl;
     impl->IExpressionAnimation_iface.lpVtbl = &expression_iface_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &expression_object_vtbl;
+    impl->ICompositionObject2_iface.lpVtbl = expression_anim5_vtbl;
+    impl->ICompositionAnimation5_iface.lpVtbl = expression_anim5_vtbl;
     impl->IClosable_iface.lpVtbl = &expression_closable_vtbl;
     impl->ref = 1;
     impl->compositor = compositor;
@@ -3053,7 +3123,7 @@ static HRESULT WINAPI graphics_device_add_RenderingDeviceReplaced( struct ICompo
 static HRESULT WINAPI graphics_device_remove_RenderingDeviceReplaced( struct ICompositionGraphicsDevice *iface,
         EventRegistrationToken token )
 {
-    TRACE( "iface %p, token %I64x stub!\n", iface, token.value );
+    TRACE( "iface %p, token %s stub!\n", iface, wine_dbgstr_longlong( token.value ) );
     return S_OK;
 }
 
@@ -3414,7 +3484,7 @@ static HRESULT WINAPI scoped_batch_add_Completed( struct ICompositionScopedBatch
 static HRESULT WINAPI scoped_batch_remove_Completed( struct ICompositionScopedBatch *iface,
         EventRegistrationToken token )
 {
-    TRACE( "iface %p, token %I64x stub!\n", iface, token.value );
+    TRACE( "iface %p, token %s stub!\n", iface, wine_dbgstr_longlong( token.value ) );
     return S_OK;
 }
 
@@ -3587,7 +3657,7 @@ static HRESULT WINAPI commit_batch_add_Completed( struct ICompositionCommitBatch
 static HRESULT WINAPI commit_batch_remove_Completed( struct ICompositionCommitBatch *iface,
         EventRegistrationToken token )
 {
-    TRACE( "iface %p, token %I64x stub!\n", iface, token.value );
+    TRACE( "iface %p, token %s stub!\n", iface, wine_dbgstr_longlong( token.value ) );
     return S_OK;
 }
 

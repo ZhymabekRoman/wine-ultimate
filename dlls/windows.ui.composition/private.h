@@ -107,6 +107,8 @@ struct visual_collection;
 struct compositor
 {
     struct ICompositor ICompositor_iface;
+    struct IInspectable ICompositor2_iface;
+    struct IInspectable ICompositorWithVisualSurface_iface;
     struct IInspectable ICompositor5_iface;
     struct IInspectable ICompositor6_iface;
     struct ICompositorInterop ICompositorInterop_iface;
@@ -165,6 +167,14 @@ struct expression_animation
     struct ICompositionAnimationBase ICompositionAnimationBase_iface;
     struct IExpressionAnimation IExpressionAnimation_iface;
     struct ICompositionObject ICompositionObject_iface;
+    struct ICompositionObject2_iface_stub
+    {
+        const void *lpVtbl;
+    } ICompositionObject2_iface;
+    struct ICompositionAnimation5_iface_stub
+    {
+        const void *lpVtbl;
+    } ICompositionAnimation5_iface;
     struct IClosable IClosable_iface;
     LONG ref;
     struct compositor *compositor;
@@ -340,7 +350,11 @@ struct visual
     struct ISpriteVisual ISpriteVisual_iface;
     struct IInspectable IShapeVisual_iface;
     struct IInspectable IRedirectVisual_iface;
+    struct IInspectable IVisual2_iface;
+    struct IInspectable ISpriteVisual2_iface;
+    struct IInspectable IVisual3_iface;
     struct ICompositionObject ICompositionObject_iface;
+    struct IInspectable ICompositionObject2_iface;
     struct IClosable IClosable_iface;
     LONG ref;
     struct compositor *compositor;

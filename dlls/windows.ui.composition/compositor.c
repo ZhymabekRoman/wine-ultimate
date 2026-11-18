@@ -68,6 +68,10 @@ HRESULT compositor_ensure_device( struct compositor *impl )
     return hr;
 }
 
+static const GUID IID_ICompositor2_local =
+    { 0x735081dc, 0x5e24, 0x45da, { 0xa3, 0x8f, 0xe3, 0x2c, 0xc3, 0x49, 0xa9, 0xa0 } };
+static const GUID IID_ICompositorWithVisualSurface_local =
+    { 0xcfa1658b, 0x0123, 0x4551, { 0x88, 0x91, 0x89, 0xbd, 0xcc, 0x40, 0x32, 0x2b } };
 static const GUID IID_ICompositor5_local =
     { 0x48ea31ad, 0x7fcd, 0x4076, { 0xa7, 0x9c, 0x90, 0xcc, 0x4b, 0x85, 0x2c, 0x9b } };
 /* Declared here; the interface itself is implemented at its vtable below. */
@@ -91,6 +95,18 @@ static HRESULT WINAPI compositor_QueryInterface( struct ICompositor *iface, REFI
         || IsEqualGUID( iid, &IID_ICompositor ))
     {
         *out = &impl->ICompositor_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositor2_local ))
+    {
+        *out = &impl->ICompositor2_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositorWithVisualSurface_local ))
+    {
+        *out = &impl->ICompositorWithVisualSurface_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -843,7 +859,6 @@ static HRESULT WINAPI compositor5_CreateBounceVector2Animation( void *iface, voi
 static HRESULT WINAPI compositor5_CreateBounceVector3Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.BounceVector3NaturalMotionAnimation", res ); }
 static HRESULT WINAPI compositor5_CreateContainerShape( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionContainerShape", res ); }
 static HRESULT WINAPI compositor5_CreateEllipseGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionEllipseGeometry", res ); }
-static HRESULT WINAPI compositor5_CreateGeometricClip( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionGeometricClip", res ); }
 static HRESULT WINAPI compositor5_CreateLineGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionLineGeometry", res ); }
 static HRESULT WINAPI compositor5_CreatePathGeometry( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionPathGeometry", res ); }
 static HRESULT WINAPI compositor5_CreatePathGeometryWithPath( void *iface, void *path, void **res )
@@ -1044,12 +1059,167 @@ static const void *compositor6_vtbl[] =
     compositor6_CreateBooleanKeyFrameAnimation,
 };
 
+static inline struct compositor *impl_from_ICompositor2( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct compositor, ICompositor2_iface );
+}
+static HRESULT WINAPI compositor2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return compositor_QueryInterface( &impl_from_ICompositor2(iface)->ICompositor_iface, iid, out );
+}
+static ULONG WINAPI compositor2_AddRef( void *iface )
+{
+    return compositor_AddRef( &impl_from_ICompositor2(iface)->ICompositor_iface );
+}
+static ULONG WINAPI compositor2_Release( void *iface )
+{
+    return compositor_Release( &impl_from_ICompositor2(iface)->ICompositor_iface );
+}
+static HRESULT WINAPI compositor2_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return compositor_GetIids( &impl_from_ICompositor2(iface)->ICompositor_iface, c, i );
+}
+static HRESULT WINAPI compositor2_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return compositor_GetRuntimeClassName( &impl_from_ICompositor2(iface)->ICompositor_iface, n );
+}
+static HRESULT WINAPI compositor2_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return compositor_GetTrustLevel( &impl_from_ICompositor2(iface)->ICompositor_iface, l );
+}
+static HRESULT WINAPI compositor2_CreateAmbientLight( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.AmbientLight", res );
+}
+static HRESULT WINAPI compositor2_CreateAnimationGroup( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.CompositionAnimationGroup", res );
+}
+static HRESULT WINAPI compositor2_CreateBackdropBrush( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.CompositionBackdropBrush", res );
+}
+static HRESULT WINAPI compositor2_CreateDistantLight( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.DistantLight", res );
+}
+static HRESULT WINAPI compositor2_CreateDropShadow( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.DropShadow", res );
+}
+static HRESULT WINAPI compositor2_CreateImplicitAnimationCollection( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.ImplicitAnimationCollection", res );
+}
+static HRESULT WINAPI compositor2_CreateLayerVisual( void *iface, void **res )
+{
+    struct compositor *impl = impl_from_ICompositor2( iface );
+    struct IContainerVisual *cv = NULL;
+    HRESULT hr;
+    if (!res) return E_POINTER;
+    *res = NULL;
+    hr = compositor_CreateContainerVisual( &impl->ICompositor_iface, &cv );
+    if (SUCCEEDED(hr) && cv) *res = cv;
+    return hr;
+}
+static HRESULT WINAPI compositor2_CreateMaskBrush( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.CompositionMaskBrush", res );
+}
+static HRESULT WINAPI compositor2_CreateNineGridBrush( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.CompositionNineGridBrush", res );
+}
+static HRESULT WINAPI compositor2_CreatePointLight( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.PointLight", res );
+}
+static HRESULT WINAPI compositor2_CreateSpotLight( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.SpotLight", res );
+}
+static HRESULT WINAPI compositor2_CreateStepEasingFunction( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.StepEasingFunction", res );
+}
+static HRESULT WINAPI compositor2_CreateStepEasingFunctionWithStepCount( void *iface, INT32 stepCount, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.StepEasingFunction", res );
+}
+static const void *compositor2_vtbl[] =
+{
+    compositor2_QueryInterface,
+    compositor2_AddRef,
+    compositor2_Release,
+    compositor2_GetIids,
+    compositor2_GetRuntimeClassName,
+    compositor2_GetTrustLevel,
+    compositor2_CreateAmbientLight,
+    compositor2_CreateAnimationGroup,
+    compositor2_CreateBackdropBrush,
+    compositor2_CreateDistantLight,
+    compositor2_CreateDropShadow,
+    compositor2_CreateImplicitAnimationCollection,
+    compositor2_CreateLayerVisual,
+    compositor2_CreateMaskBrush,
+    compositor2_CreateNineGridBrush,
+    compositor2_CreatePointLight,
+    compositor2_CreateSpotLight,
+    compositor2_CreateStepEasingFunction,
+    compositor2_CreateStepEasingFunctionWithStepCount,
+};
+
+static inline struct compositor *impl_from_ICompositorWithVisualSurface( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct compositor, ICompositorWithVisualSurface_iface );
+}
+static HRESULT WINAPI comp_vs_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return compositor_QueryInterface( &impl_from_ICompositorWithVisualSurface(iface)->ICompositor_iface, iid, out );
+}
+static ULONG WINAPI comp_vs_AddRef( void *iface )
+{
+    return compositor_AddRef( &impl_from_ICompositorWithVisualSurface(iface)->ICompositor_iface );
+}
+static ULONG WINAPI comp_vs_Release( void *iface )
+{
+    return compositor_Release( &impl_from_ICompositorWithVisualSurface(iface)->ICompositor_iface );
+}
+static HRESULT WINAPI comp_vs_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return compositor_GetIids( &impl_from_ICompositorWithVisualSurface(iface)->ICompositor_iface, c, i );
+}
+static HRESULT WINAPI comp_vs_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return compositor_GetRuntimeClassName( &impl_from_ICompositorWithVisualSurface(iface)->ICompositor_iface, n );
+}
+static HRESULT WINAPI comp_vs_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return compositor_GetTrustLevel( &impl_from_ICompositorWithVisualSurface(iface)->ICompositor_iface, l );
+}
+static HRESULT WINAPI comp_vs_CreateVisualSurface( void *iface, void **res )
+{
+    return comp5_stub_create( L"Windows.UI.Composition.CompositionVisualSurface", res );
+}
+static const void *compositor_vs_vtbl[] =
+{
+    comp_vs_QueryInterface,
+    comp_vs_AddRef,
+    comp_vs_Release,
+    comp_vs_GetIids,
+    comp_vs_GetRuntimeClassName,
+    comp_vs_GetTrustLevel,
+    comp_vs_CreateVisualSurface,
+};
+
 struct compositor *compositor_create( void )
 {
     struct compositor *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ICompositor_iface.lpVtbl = &compositor_vtbl;
+    impl->ICompositor2_iface.lpVtbl = (const struct IInspectableVtbl *)compositor2_vtbl;
+    impl->ICompositorWithVisualSurface_iface.lpVtbl = (const struct IInspectableVtbl *)compositor_vs_vtbl;
     impl->ICompositor5_iface.lpVtbl = (const struct IInspectableVtbl *)compositor5_vtbl;
     impl->ICompositor6_iface.lpVtbl = (const struct IInspectableVtbl *)compositor6_vtbl;
     impl->ICompositorInterop_iface.lpVtbl = &cinterop_vtbl;

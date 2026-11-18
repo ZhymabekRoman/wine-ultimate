@@ -99,6 +99,42 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
+    {
+        static const GUID IID_IVisual2_local =
+            { 0x401b61bb, 0x0007, 0x4363, { 0xb1, 0xf3, 0x6b, 0xcc, 0x00, 0x3f, 0xb8, 0x3e } };
+        static const GUID IID_ISpriteVisual2_local =
+            { 0x588c9664, 0x997a, 0x4850, { 0x91, 0xfe, 0x53, 0xcb, 0x58, 0xf8, 0x1c, 0xe9 } };
+        static const GUID IID_ICompositionObject2_local =
+            { 0x3052b611, 0x56c3, 0x4c3e, { 0x8b, 0xf3, 0xf6, 0xe1, 0xad, 0x47, 0x3f, 0x06 } };
+        static const GUID IID_IVisual3_local =
+            { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } };
+        static const GUID IID_IVisual_Calc4_local =
+            { 0x9476bf11, 0xe24b, 0x5bf9, { 0x9e, 0xbe, 0x62, 0x74, 0x10, 0x9b, 0x27, 0x11 } };
+        if (IsEqualGUID( iid, &IID_IVisual2_local ))
+        {
+            *out = &impl->IVisual2_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IVisual3_local ) || IsEqualGUID( iid, &IID_IVisual_Calc4_local ))
+        {
+            *out = &impl->IVisual3_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_ISpriteVisual2_local ))
+        {
+            *out = &impl->ISpriteVisual2_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_ICompositionObject2_local ))
+        {
+            *out = &impl->ICompositionObject2_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+    }
     if (IsEqualGUID( iid, &IID_ICompositionObject ))
     {
         *out = &impl->ICompositionObject_iface;
@@ -743,6 +779,208 @@ static const void *redirect_visual_vtbl[] =
     redirect_visual_put_Source,
 };
 
+static HRESULT WINAPI visual2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual2_iface );
+    return visual_QueryInterface( &impl->IVisual_iface, iid, out );
+}
+static ULONG WINAPI visual2_AddRef( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual2_iface );
+    return visual_AddRef( &impl->IVisual_iface );
+}
+static ULONG WINAPI visual2_Release( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual2_iface );
+    return visual_Release( &impl->IVisual_iface );
+}
+static HRESULT WINAPI visual2_GetIids( void *iface, ULONG *c, IID **i )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual2_iface );
+    return visual_GetIids( &impl->IVisual_iface, c, i );
+}
+static HRESULT WINAPI visual2_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual2_iface );
+    return visual_GetRuntimeClassName( &impl->IVisual_iface, n );
+}
+static HRESULT WINAPI visual2_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual2_iface );
+    return visual_GetTrustLevel( &impl->IVisual_iface, l );
+}
+static HRESULT WINAPI visual2_get_ParentForTransform( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI visual2_put_ParentForTransform( void *iface, void *value )
+{
+    return S_OK;
+}
+static HRESULT WINAPI visual2_get_RelativeOffsetAdjustment( void *iface, struct Vector3 *value )
+{
+    if (!value) return E_POINTER;
+    memset( value, 0, sizeof(*value) );
+    return S_OK;
+}
+static HRESULT WINAPI visual2_put_RelativeOffsetAdjustment( void *iface, struct Vector3 value )
+{
+    return S_OK;
+}
+static HRESULT WINAPI visual2_get_RelativeSizeAdjustment( void *iface, struct Vector2 *value )
+{
+    if (!value) return E_POINTER;
+    memset( value, 0, sizeof(*value) );
+    return S_OK;
+}
+static HRESULT WINAPI visual2_put_RelativeSizeAdjustment( void *iface, struct Vector2 value )
+{
+    return S_OK;
+}
+static const void *visual2_vtbl[] =
+{
+    visual2_QueryInterface,
+    visual2_AddRef,
+    visual2_Release,
+    visual2_GetIids,
+    visual2_GetRuntimeClassName,
+    visual2_GetTrustLevel,
+    visual2_get_ParentForTransform,
+    visual2_put_ParentForTransform,
+    visual2_get_RelativeOffsetAdjustment,
+    visual2_put_RelativeOffsetAdjustment,
+    visual2_get_RelativeSizeAdjustment,
+    visual2_put_RelativeSizeAdjustment,
+};
+
+static HRESULT WINAPI sprite_visual2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ISpriteVisual2_iface );
+    return visual_QueryInterface( &impl->IVisual_iface, iid, out );
+}
+static ULONG WINAPI sprite_visual2_AddRef( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ISpriteVisual2_iface );
+    return visual_AddRef( &impl->IVisual_iface );
+}
+static ULONG WINAPI sprite_visual2_Release( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ISpriteVisual2_iface );
+    return visual_Release( &impl->IVisual_iface );
+}
+static HRESULT WINAPI sprite_visual2_GetIids( void *iface, ULONG *c, IID **i )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ISpriteVisual2_iface );
+    return visual_GetIids( &impl->IVisual_iface, c, i );
+}
+static HRESULT WINAPI sprite_visual2_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ISpriteVisual2_iface );
+    return visual_GetRuntimeClassName( &impl->IVisual_iface, n );
+}
+static HRESULT WINAPI sprite_visual2_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ISpriteVisual2_iface );
+    return visual_GetTrustLevel( &impl->IVisual_iface, l );
+}
+static HRESULT WINAPI sprite_visual2_get_Shadow( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI sprite_visual2_put_Shadow( void *iface, void *value )
+{
+    return S_OK;
+}
+static const void *sprite_visual2_vtbl[] =
+{
+    sprite_visual2_QueryInterface,
+    sprite_visual2_AddRef,
+    sprite_visual2_Release,
+    sprite_visual2_GetIids,
+    sprite_visual2_GetRuntimeClassName,
+    sprite_visual2_GetTrustLevel,
+    sprite_visual2_get_Shadow,
+    sprite_visual2_put_Shadow,
+};
+
+static HRESULT WINAPI visual_obj2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ICompositionObject2_iface );
+    return visual_QueryInterface( &impl->IVisual_iface, iid, out );
+}
+static ULONG WINAPI visual_obj2_AddRef( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ICompositionObject2_iface );
+    return visual_AddRef( &impl->IVisual_iface );
+}
+static ULONG WINAPI visual_obj2_Release( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ICompositionObject2_iface );
+    return visual_Release( &impl->IVisual_iface );
+}
+static HRESULT WINAPI visual_obj2_GetIids( void *iface, ULONG *c, IID **i )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ICompositionObject2_iface );
+    return visual_GetIids( &impl->IVisual_iface, c, i );
+}
+static HRESULT WINAPI visual_obj2_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ICompositionObject2_iface );
+    return visual_GetRuntimeClassName( &impl->IVisual_iface, n );
+}
+static HRESULT WINAPI visual_obj2_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, ICompositionObject2_iface );
+    return visual_GetTrustLevel( &impl->IVisual_iface, l );
+}
+static HRESULT WINAPI visual_obj2_get_Comment( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI visual_obj2_put_Comment( void *iface, HSTRING value )
+{
+    return S_OK;
+}
+static HRESULT WINAPI visual_obj2_get_ImplicitAnimations( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI visual_obj2_put_ImplicitAnimations( void *iface, void *value )
+{
+    return S_OK;
+}
+static HRESULT WINAPI visual_obj2_StartAnimationGroup( void *iface, void *value )
+{
+    return S_OK;
+}
+static HRESULT WINAPI visual_obj2_StopAnimationGroup( void *iface, void *value )
+{
+    return S_OK;
+}
+static const void *visual_obj2_vtbl[] =
+{
+    visual_obj2_QueryInterface,
+    visual_obj2_AddRef,
+    visual_obj2_Release,
+    visual_obj2_GetIids,
+    visual_obj2_GetRuntimeClassName,
+    visual_obj2_GetTrustLevel,
+    visual_obj2_get_Comment,
+    visual_obj2_put_Comment,
+    visual_obj2_get_ImplicitAnimations,
+    visual_obj2_put_ImplicitAnimations,
+    visual_obj2_StartAnimationGroup,
+    visual_obj2_StopAnimationGroup,
+};
+
 static struct visual *visual_create( struct compositor *compositor, BOOL is_sprite, BOOL is_shape )
 {
     struct visual *impl;
@@ -753,7 +991,11 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
     impl->ISpriteVisual_iface.lpVtbl = &sprite_visual_vtbl;
     impl->IShapeVisual_iface.lpVtbl = (const struct IInspectableVtbl *)shape_visual_vtbl;
     impl->IRedirectVisual_iface.lpVtbl = (const struct IInspectableVtbl *)redirect_visual_vtbl;
+    impl->IVisual2_iface.lpVtbl = (const struct IInspectableVtbl *)visual2_vtbl;
+    impl->IVisual3_iface.lpVtbl = (const struct IInspectableVtbl *)visual2_vtbl;
+    impl->ISpriteVisual2_iface.lpVtbl = (const struct IInspectableVtbl *)sprite_visual2_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &visual_object_vtbl;
+    impl->ICompositionObject2_iface.lpVtbl = (const struct IInspectableVtbl *)visual_obj2_vtbl;
     impl->IClosable_iface.lpVtbl = &visual_closable_vtbl;
     impl->ref = 1;
     impl->compositor = compositor;
