@@ -2342,6 +2342,7 @@ static HRESULT cwv2_forward_add_event( struct core_webview2 *impl, void *com_obj
             b->args_vtbl = args_vtbl;
             if (args_iid) b->args_iid = *args_iid;
             hr = fn( com_obj, b, token );
+            TRACE( "cwv2_forward_add_event slot=%d com_obj=%p hr=%#lx\n", com_slot, com_obj, hr );
             evbridge_Release( b );
             return hr;
         }
@@ -3321,7 +3322,6 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
                 ERR( "wv2_sync_top_cb: moving foreign %p (%s) pid=%lu offscreen\n", hwnd, debugstr_w( cls ), pid );
                 SetWindowPos( hwnd, HWND_BOTTOM, -4000, -4000, 0, 0,
                               SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
-                ShowWindowAsync( hwnd, SW_HIDE );
             }
         }
         return TRUE;
