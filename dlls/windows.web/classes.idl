@@ -22,6 +22,7 @@
 #pragma winrt ns_prefix
 
 import "windows.data.json.idl";
+import "windows.web.http.idl";
 
 namespace Windows.Data.Json {
     runtimeclass JsonArray;
@@ -29,10 +30,19 @@ namespace Windows.Data.Json {
     runtimeclass JsonValue;
 }
 
-namespace Windows.Web.Http {
+namespace Windows.Web.Http
+{
+    interface IHttpClientFactory;
+
     runtimeclass HttpClient;
     runtimeclass HttpRequestMessage;
     runtimeclass HttpResponseMessage;
     runtimeclass HttpStringContent;
+    runtimeclass HttpStreamContent;
     runtimeclass HttpMethod;
+}
+
+namespace Windows.Web.Http.Filters
+{
+    runtimeclass HttpBaseProtocolFilter;
 }

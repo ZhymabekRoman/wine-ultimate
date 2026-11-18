@@ -1,0 +1,474 @@
+/*
+ * Windows.Web.Http namespace
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.foundation.collections.idl";
+import "windows.storage.streams.idl";
+
+namespace Windows.Web.Http {
+    typedef enum HttpCompletionOption {
+        CompletionResponseContentRead   = 0,
+        CompletionResponseHeadersRead   = 1
+    } HttpCompletionOption;
+
+    typedef enum HttpSource {
+        HttpSourceConnection    = 0,
+        HttpSourceLocalCache    = 1,
+        HttpSourceNetwork       = 2
+    } HttpSource;
+
+    typedef enum HTTPVersion {
+        HttpVersion10   = 0,
+        HttpVersion11   = 1,
+        HttpVersion20   = 2
+    } HTTPVersion;
+
+    typedef enum UnicodeEncoding {
+        UnicodeEncodingUtf8         = 0,
+        UnicodeEncodingUtf16        = 1,
+        UnicodeEncodingUtf16LE      = 2,
+        UnicodeEncodingUtf16BE      = 3
+    } UnicodeEncoding;
+
+    typedef enum HttpProgressStatus {
+        HttpProgressStatusCreated               = 0,
+        HttpProgressStatusDeferralRequested     = 1,
+        HttpProgressStatusStartReceived         = 2,
+        HttpProgressStatusResponseHeadersRead   = 3,
+        HttpProgressStatusResponseRead          = 4,
+        HttpProgressStatusSending               = 5,
+        HttpProgressStatusSentRequestHeaders    = 6,
+        HttpProgressStatusSentRequestContent    = 7,
+        HttpProgressStatusRequestCompletedClose = 8,
+        HttpProgressStatusRequestCompletedAbort = 9
+    } HttpProgressStatus;
+
+    typedef struct HttpProgress {
+        UINT64 BytesReceived;
+        UINT32 IncomingLength;
+        UINT32 IncomingCorrelationVectorLength;
+        UINT64 TotalBytesToReceive;
+        UINT64 BytesSent;
+        UINT64 TotalBytesToSend;
+        enum HttpProgressStatus Status;
+    } HttpProgress;
+
+    namespace Headers {
+        interface IHttpHeaderCollection;
+        interface IHttpContentHeaderCollection;
+        interface IHttpRequestHeaderCollection;
+        interface IHttpResponseHeaderCollection;
+    }
+
+    namespace Filters {
+        interface IHttpFilter;
+        interface IHttpBaseProtocolFilter;
+    }
+
+    interface IHttpContent;
+    interface IHttpMethod;
+    interface IHttpMethodFactory;
+    interface IHttpMethodStatics;
+    interface IHttpClient;
+    interface IHttpClient2;
+    interface IHttpClientFactory;
+    interface IHttpRequestMessage;
+    interface IHttpRequestMessageFactory;
+    interface IHttpResponseMessage;
+    interface IHttpResponseMessageFactory;
+    interface IHttpStringContentFactory;
+    interface IHttpStreamContentFactory;
+    interface IHttpTransportInformation;
+
+    runtimeclass HttpBaseProtocolFilter;
+    runtimeclass HttpClient;
+    runtimeclass HttpContentHeaderCollection;
+    runtimeclass HttpMethod;
+    runtimeclass HttpRequestHeaderCollection;
+    runtimeclass HttpRequestMessage;
+    runtimeclass HttpResponseMessage;
+    runtimeclass HttpResponseHeaderCollection;
+    runtimeclass HttpStreamContent;
+    runtimeclass HttpStringContent;
+
+    declare {
+        interface Windows.Foundation.Collections.IMap<HSTRING, Windows.Foundation.IInspectable *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *>;
+        interface Windows.Foundation.IAsyncOperation<HSTRING>;
+        interface Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IBuffer *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IInputStream *>;
+        interface Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.IAsyncOperationWithProgress<HSTRING, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.IAsyncOperationWithProgress<Windows.Storage.Streams.IBuffer *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.IAsyncOperationWithProgress<Windows.Storage.Streams.IInputStream *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.IAsyncOperationWithProgress<UINT64, UINT64>;
+        interface Windows.Foundation.AsyncOperationProgressHandler<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Web.Http.HttpResponseMessage *>;
+        interface Windows.Foundation.AsyncOperationWithProgressCompletedHandler<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationWithProgressCompletedHandler<HSTRING, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationWithProgressCompletedHandler<Windows.Storage.Streams.IBuffer *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationWithProgressCompletedHandler<Windows.Storage.Streams.IInputStream *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationWithProgressCompletedHandler<UINT64, UINT64>;
+        interface Windows.Foundation.AsyncOperationProgressHandler<HSTRING, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationProgressHandler<Windows.Storage.Streams.IBuffer *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationProgressHandler<Windows.Storage.Streams.IInputStream *, Windows.Web.Http.HttpProgress>;
+        interface Windows.Foundation.AsyncOperationProgressHandler<UINT64, UINT64>;
+    }
+
+    [uuid("6b14a441-fba7-4bd2-af0a-839de7c295da")]
+    interface IHttpContent : IInspectable
+    {
+        HRESULT GetBufferAsync([out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Storage.Streams.IBuffer *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT TryComputeLength([out] UINT64 *length, [out] boolean *succeeded);
+        HRESULT ReadAsInputStreamAsync([out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Storage.Streams.IInputStream *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT ReadAsStringAsync([out, retval] Windows.Foundation.IAsyncOperationWithProgress<HSTRING, Windows.Web.Http.HttpProgress> **result);
+        HRESULT WriteToStreamAsync([in] Windows.Storage.Streams.IRandomAccessStream *stream,
+                                   [out, retval] Windows.Foundation.IAsyncOperationWithProgress<UINT64, UINT64> **result);
+        [propget] HRESULT ContentLength([out, retval] UINT64 *value);
+        [propget] HRESULT ContentType([out, retval] HSTRING *value);
+        [propget] HRESULT Headers([out, retval] Windows.Web.Http.Headers.IHttpContentHeaderCollection **value);
+    }
+
+    [uuid("728d4022-700d-4fe0-afa5-40299c58dbfd")]
+    interface IHttpMethod : IInspectable
+    {
+        [propget] HRESULT Method([out, retval] HSTRING *value);
+    }
+
+    [uuid("64d171f0-d99a-4153-8dc6-d68cc4cce317")]
+    interface IHttpMethodStatics : IInspectable
+    {
+        [propget] HRESULT Delete([out, retval] Windows.Web.Http.IHttpMethod **value);
+        [propget] HRESULT Get([out, retval] Windows.Web.Http.IHttpMethod **value);
+        [propget] HRESULT Head([out, retval] Windows.Web.Http.IHttpMethod **value);
+        [propget] HRESULT Options([out, retval] Windows.Web.Http.IHttpMethod **value);
+        [propget] HRESULT Patch([out, retval] Windows.Web.Http.IHttpMethod **value);
+        [propget] HRESULT Post([out, retval] Windows.Web.Http.IHttpMethod **value);
+        [propget] HRESULT Put([out, retval] Windows.Web.Http.IHttpMethod **value);
+    }
+
+    [uuid("3c51d10d-36d7-40f8-a86d-e759caf2f83f")]
+    interface IHttpMethodFactory : IInspectable
+    {
+        HRESULT Create([in] HSTRING method, [out, retval] Windows.Web.Http.IHttpMethod **value);
+    }
+
+    namespace Headers {
+        [uuid("514c5529-728d-4a2c-a1e0-3075b1c36e97")]
+        interface IHttpHeaderCollection : IInspectable
+        {
+            HRESULT Append([in] HSTRING name, [in] HSTRING value);
+            HRESULT TryAppendWithoutValidation([in] HSTRING name, [in] HSTRING value, [out, retval] boolean *result);
+        }
+
+        [uuid("40612a44-47ae-4b7e-9124-69628b64aa18")]
+        interface IHttpContentHeaderCollection : Windows.Web.Http.Headers.IHttpHeaderCollection
+        {
+        }
+
+        [uuid("af40329b-b544-469b-86b9-ac3d466fea36")]
+        interface IHttpRequestHeaderCollection : Windows.Web.Http.Headers.IHttpHeaderCollection
+        {
+        }
+
+        [uuid("7a990969-fa3f-41ed-aac6-bf957975c16b")]
+        interface IHttpResponseHeaderCollection : Windows.Web.Http.Headers.IHttpHeaderCollection
+        {
+        }
+    }
+
+    [uuid("f5762b3c-74d4-4811-b5dc-9f8b4e2f9abf")]
+    interface IHttpRequestMessage : IInspectable
+    {
+        [propget] HRESULT Content([out, retval] Windows.Web.Http.IHttpContent **value);
+        [propput] HRESULT Content([in] Windows.Web.Http.IHttpContent *value);
+        [propget] HRESULT Headers([out, retval] Windows.Web.Http.Headers.IHttpRequestHeaderCollection **value);
+        [propget] HRESULT Method([out, retval] Windows.Web.Http.IHttpMethod **value);
+        [propput] HRESULT Method([in] Windows.Web.Http.IHttpMethod *value);
+        [propget] HRESULT Properties([out, retval] Windows.Foundation.Collections.IMap<HSTRING, Windows.Foundation.IInspectable *> **value);
+        [propget] HRESULT RequestUri([out, retval] Windows.Foundation.Uri **value);
+        [propput] HRESULT RequestUri([in] Windows.Foundation.Uri *value);
+        [propget] HRESULT TransportInformation([out, retval] Windows.Web.Http.IHttpTransportInformation **value);
+    }
+
+    [uuid("5bac994e-3886-412e-aec3-52ec7f25616f")]
+    interface IHttpRequestMessageFactory : IInspectable
+    {
+        HRESULT Create([in] Windows.Web.Http.IHttpMethod *method, [in] Windows.Foundation.Uri *uri,
+                       [out, retval] Windows.Web.Http.IHttpRequestMessage **value);
+    }
+
+    [uuid("fee200fb-8664-44e0-95d9-42696199bffc")]
+    interface IHttpResponseMessage : IInspectable
+    {
+        [propget] HRESULT Content([out, retval] Windows.Web.Http.IHttpContent **value);
+        HRESULT EnsureSuccessStatusCode([out, retval] Windows.Web.Http.IHttpResponseMessage **value);
+        [propget] HRESULT Headers([out, retval] Windows.Web.Http.Headers.IHttpResponseHeaderCollection **value);
+        [propget] HRESULT IsSuccessStatusCode([out, retval] boolean *value);
+        [propget] HRESULT ReasonPhrase([out, retval] HSTRING *value);
+        [propput] HRESULT ReasonPhrase([in] HSTRING value);
+        [propget] HRESULT RequestMessage([out, retval] Windows.Web.Http.IHttpRequestMessage **value);
+        [propput] HRESULT RequestMessage([in] Windows.Web.Http.IHttpRequestMessage *value);
+        [propget] HRESULT Source([out, retval] HttpSource *value);
+        [propput] HRESULT Source([in] HttpSource value);
+        [propget] HRESULT StatusCode([out, retval] UINT32 *value);
+        [propput] HRESULT StatusCode([in] UINT32 value);
+        [propget] HRESULT Version([out, retval] HTTPVersion *value);
+        [propput] HRESULT Version([in] HTTPVersion value);
+    }
+
+    [uuid("52a8af99-f095-43da-b60f-7cfc2bc7ea2f")]
+    interface IHttpResponseMessageFactory : IInspectable
+    {
+        HRESULT Create([in] UINT32 statusCode, [out, retval] Windows.Web.Http.IHttpResponseMessage **value);
+    }
+
+    [uuid("46649d5b-2e93-48eb-8e61-19677878e57f")]
+    interface IHttpStringContentFactory : IInspectable
+    {
+        HRESULT CreateFromString([in] HSTRING content, [out, retval] Windows.Web.Http.IHttpContent **value);
+        HRESULT CreateFromStringWithEncoding([in] HSTRING content, [in] UnicodeEncoding encoding,
+                                             [out, retval] Windows.Web.Http.IHttpContent **value);
+        HRESULT CreateFromStringWithEncodingAndMediaType([in] HSTRING content, [in] UnicodeEncoding encoding,
+                                                         [in] HSTRING mediaType, [out, retval] Windows.Web.Http.IHttpContent **value);
+    }
+
+    [uuid("d799228c-c766-4633-ae29-964a296377ab")]
+    interface IHttpStreamContentFactory : IInspectable
+    {
+        HRESULT CreateInstance([in] Windows.Storage.Streams.IInputStream *inputStream,
+                               [out, retval] Windows.Web.Http.IHttpContent **value);
+        [propget] HRESULT Compressor([out, retval] Windows.Foundation.IInspectable **value);
+        [propput] HRESULT Compressor([in] Windows.Foundation.IInspectable *value);
+    }
+
+    [uuid("7fda1151-3574-4880-a8ba-e6b1e0061f3d")]
+    interface IHttpClient : IInspectable
+    {
+        HRESULT DeleteAsync([in] Windows.Foundation.Uri *uri,
+                            [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT GetAsync([in] Windows.Foundation.Uri *uri,
+                         [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT GetAsync2([in] Windows.Foundation.Uri *uri, [in] HttpCompletionOption completionOption,
+                          [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT GetBufferAsync([in] Windows.Foundation.Uri *uri,
+                               [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Storage.Streams.IBuffer *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT GetInputStreamAsync([in] Windows.Foundation.Uri *uri,
+                                    [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Storage.Streams.IInputStream *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT GetStringAsync([in] Windows.Foundation.Uri *uri,
+                               [out, retval] Windows.Foundation.IAsyncOperationWithProgress<HSTRING, Windows.Web.Http.HttpProgress> **result);
+        HRESULT PostAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Web.Http.IHttpContent *content,
+                          [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT PutAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Web.Http.IHttpContent *content,
+                         [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT SendRequestAsync([in] Windows.Web.Http.IHttpRequestMessage *request,
+                                 [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        HRESULT SendRequestAsync2([in] Windows.Web.Http.IHttpRequestMessage *request, [in] HttpCompletionOption completionOption,
+                                  [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        [propget] HRESULT DefaultRequestHeaders([out, retval] Windows.Web.Http.Headers.IHttpRequestHeaderCollection **value);
+    }
+
+    [uuid("cdd83348-e8b7-4cec-b1b0-dc455fe72c92")]
+    interface IHttpClient2 : IInspectable
+    {
+        HRESULT TryDeleteAsync([in] Windows.Foundation.Uri *uri,
+                               [out, retval] Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *> **result);
+        HRESULT TryGetAsync([in] Windows.Foundation.Uri *uri,
+                            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *> **result);
+        HRESULT TryGetAsync2([in] Windows.Foundation.Uri *uri, [in] HttpCompletionOption completionOption,
+                             [out, retval] Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *> **result);
+        HRESULT TryGetBufferAsync([in] Windows.Foundation.Uri *uri,
+                                  [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IBuffer *> **result);
+        HRESULT TryGetInputStreamAsync([in] Windows.Foundation.Uri *uri,
+                                       [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IInputStream *> **result);
+        HRESULT TryGetStringAsync([in] Windows.Foundation.Uri *uri,
+                                  [out, retval] Windows.Foundation.IAsyncOperation<HSTRING> **result);
+        HRESULT TryPostAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Web.Http.IHttpContent *content,
+                             [out, retval] Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *> **result);
+        HRESULT TryPutAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Web.Http.IHttpContent *content,
+                            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *> **result);
+        HRESULT TrySendRequestAsync([in] Windows.Web.Http.IHttpRequestMessage *request,
+                                    [out, retval] Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *> **result);
+        HRESULT TrySendRequestAsync2([in] Windows.Web.Http.IHttpRequestMessage *request, [in] HttpCompletionOption completionOption,
+                                     [out, retval] Windows.Foundation.IAsyncOperation<Windows.Web.Http.HttpResponseMessage *> **result);
+    }
+
+    [uuid("c30c4eca-e3fa-4f99-afb4-63cc65009462")]
+    interface IHttpClientFactory : IInspectable
+    {
+        HRESULT Create([in] Windows.Web.Http.Filters.IHttpBaseProtocolFilter *filter,
+                       [out, retval] Windows.Web.Http.IHttpClient **value);
+    }
+
+    [uuid("d69d88c1-508e-4cd3-8de3-3deae42f1129")]
+    interface IHttpTransportInformation : IInspectable
+    {
+    }
+
+    namespace Filters {
+        typedef enum AutomaticDecompression {
+            AutomaticDecompressionNone     = 0,
+            AutomaticDecompressionGZip     = 1,
+            AutomaticDecompressionDeflate  = 2
+        } AutomaticDecompression;
+
+        interface ICacheControl;
+        interface ICookieManager;
+        interface IHttpFilter;
+        interface IHttpBaseProtocolFilter;
+        interface IHttpBaseProtocolFilter2;
+        interface IHttpBaseProtocolFilter3;
+        interface IHttpBaseProtocolFilter4;
+
+        [uuid("7a04db9a-6d92-4d58-9c0d-1b0b6dc2a8a5")]
+        interface ICacheControl : IInspectable
+        {
+        }
+
+        [uuid("13c32443-3497-47c9-8f53-7fd9dda7e1b4")]
+        interface ICookieManager : IInspectable
+        {
+        }
+
+        [uuid("a4cb6dd5-0902-439e-bfd7-e12552b165ce")]
+        interface IHttpFilter : IInspectable
+        {
+            HRESULT SendRequestAsync([in] Windows.Web.Http.IHttpRequestMessage *request,
+                                     [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Web.Http.HttpResponseMessage *, Windows.Web.Http.HttpProgress> **result);
+        }
+
+        [uuid("71c89b09-e131-4b54-a53c-eb43ff37e9bb")]
+        interface IHttpBaseProtocolFilter : IInspectable
+        {
+            [propget] HRESULT AllowAutoRedirect([out, retval] boolean *value);
+            [propput] HRESULT AllowAutoRedirect([in] boolean value);
+            [propget] HRESULT AllowUI([out, retval] boolean *value);
+            [propput] HRESULT AllowUI([in] boolean value);
+            [propget] HRESULT AutomaticDecompression([out, retval] AutomaticDecompression *value);
+            [propput] HRESULT AutomaticDecompression([in] AutomaticDecompression value);
+            [propget] HRESULT CacheControl([out, retval] Windows.Web.Http.Filters.ICacheControl **value);
+            [propget] HRESULT CookieManager([out, retval] Windows.Web.Http.Filters.ICookieManager **value);
+            [propget] HRESULT ClientCertificate([out, retval] Windows.Foundation.IInspectable **value);
+            [propput] HRESULT ClientCertificate([in] Windows.Foundation.IInspectable *value);
+            [propget] HRESULT IgnorableServerCertificateErrors([out, retval] Windows.Foundation.IInspectable **value);
+            [propget] HRESULT MaxConnectionsPerServer([out, retval] UINT32 *value);
+            [propput] HRESULT MaxConnectionsPerServer([in] UINT32 value);
+            [propget] HRESULT ProxyCredential([out, retval] Windows.Foundation.IInspectable **value);
+            [propput] HRESULT ProxyCredential([in] Windows.Foundation.IInspectable *value);
+            [propget] HRESULT ServerCredential([out, retval] Windows.Foundation.IInspectable **value);
+            [propput] HRESULT ServerCredential([in] Windows.Foundation.IInspectable *value);
+            [propget] HRESULT UseProxy([out, retval] boolean *value);
+            [propput] HRESULT UseProxy([in] boolean value);
+        }
+
+        [uuid("2ec30013-9427-4900-a017-fa7da3b5c9ae")]
+        interface IHttpBaseProtocolFilter2 : Windows.Web.Http.Filters.IHttpBaseProtocolFilter
+        {
+        }
+
+        [uuid("d43f4d4c-bd42-43ae-8717-ad2c8f4b2937")]
+        interface IHttpBaseProtocolFilter3 : Windows.Web.Http.Filters.IHttpBaseProtocolFilter
+        {
+        }
+
+        [uuid("9fe36ccf-2983-4893-941f-eb518ca8cef9")]
+        interface IHttpBaseProtocolFilter4 : Windows.Web.Http.Filters.IHttpBaseProtocolFilter
+        {
+        }
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpContentHeaderCollection
+    {
+        [default] interface Windows.Web.Http.Headers.IHttpContentHeaderCollection;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpRequestHeaderCollection
+    {
+        [default] interface Windows.Web.Http.Headers.IHttpRequestHeaderCollection;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpResponseHeaderCollection
+    {
+        [default] interface Windows.Web.Http.Headers.IHttpResponseHeaderCollection;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpMethod
+    {
+        [default] interface Windows.Web.Http.IHttpMethod;
+        interface Windows.Foundation.IStringable;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpRequestMessage
+    {
+        [default] interface Windows.Web.Http.IHttpRequestMessage;
+        interface Windows.Foundation.IClosable;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpResponseMessage
+    {
+        [default] interface Windows.Web.Http.IHttpResponseMessage;
+        interface Windows.Foundation.IClosable;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpStringContent
+    {
+        [default] interface Windows.Web.Http.IHttpContent;
+        interface Windows.Foundation.IClosable;
+        interface Windows.Foundation.IStringable;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpStreamContent
+    {
+        [default] interface Windows.Web.Http.IHttpContent;
+        interface Windows.Foundation.IClosable;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpClient
+    {
+        [default] interface Windows.Web.Http.IHttpClient;
+        interface Windows.Web.Http.IHttpClient2;
+        interface Windows.Foundation.IClosable;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass HttpBaseProtocolFilter
+    {
+        [default] interface Windows.Web.Http.Filters.IHttpBaseProtocolFilter;
+        interface Windows.Web.Http.Filters.IHttpBaseProtocolFilter2;
+        interface Windows.Web.Http.Filters.IHttpBaseProtocolFilter3;
+        interface Windows.Web.Http.Filters.IHttpBaseProtocolFilter4;
+        interface Windows.Foundation.IClosable;
+    }
+}

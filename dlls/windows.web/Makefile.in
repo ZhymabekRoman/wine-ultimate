@@ -4,7 +4,10 @@ IMPORTS = combase winhttp
 SOURCES = \
 	cjson/cJSON.c \
 	classes.idl \
-	http.c \
+	http_async.c \
+	http_client.c \
+	http_headers.c \
+	http_message.c \
 	json_array.c \
 	json_object.c \
 	json_value.c \

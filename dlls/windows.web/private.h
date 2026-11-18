@@ -36,6 +36,10 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Data_Json
 #include "windows.data.json.h"
+#define WIDL_using_Windows_Web_Http
+#define WIDL_using_Windows_Web_Http_Headers
+#define WIDL_using_Windows_Web_Http_Filters
+#include "windows.web.http.h"
 
 #include "cjson/cJSON.h"
 
