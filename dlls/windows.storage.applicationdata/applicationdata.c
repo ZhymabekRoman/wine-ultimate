@@ -41,12 +41,11 @@ static void wrdump( const char *tag )
 {
     static const char *const head = (const char *)0x6fff00000000;
     if (!is_readable_ptr( head, 0x50 )) return;
-    fprintf( stderr, "WRDUMP tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n", tag,
-             (unsigned long)*(const ULONGLONG *)(head + 0x30),
-             (unsigned long)*(const ULONGLONG *)(head + 0x38),
-             (unsigned long)*(const ULONGLONG *)(head + 0x40),
-             (unsigned long)*(const ULONGLONG *)(head + 0x48) );
-    fflush( stderr );
+    TRACE( "tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n", tag,
+           (unsigned long)*(const ULONGLONG *)(head + 0x30),
+           (unsigned long)*(const ULONGLONG *)(head + 0x38),
+           (unsigned long)*(const ULONGLONG *)(head + 0x40),
+           (unsigned long)*(const ULONGLONG *)(head + 0x48) );
 }
 
 /* Arm-3 probe 2 (s229): real XAML IReferenceTracker face on the
@@ -189,7 +188,7 @@ static void qi_log_record( REFIID iid, HRESULT hr, const char *obj )
     LONG n = InterlockedIncrement( &qi_log_count );
 
     if (n <= 50)
-        fprintf( stderr, "QILOG obj=%s iid=%s hr=%08lx\n", obj, wine_dbgstr_guid( iid ), (unsigned long)hr );
+        TRACE( "obj=%s iid=%s hr=%08lx\n", obj, wine_dbgstr_guid( iid ), (unsigned long)hr );
 
     /* Arm-3 probe 7 (s237): writer trace of the composite wrapper block at
      * the pinned heap-head base. Dump base+0x30..0x48 on the first 8 QIs,
@@ -201,12 +200,11 @@ static void qi_log_record( REFIID iid, HRESULT hr, const char *obj )
         static const char *const head = (const char *)0x6fff00000000;
         if (is_readable_ptr( head, 0x50 ))
         {
-            fprintf( stderr, "WRDUMP n=%ld tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n",
-                     n, obj, (unsigned long)*(const ULONGLONG *)(head + 0x30),
-                     (unsigned long)*(const ULONGLONG *)(head + 0x38),
-                     (unsigned long)*(const ULONGLONG *)(head + 0x40),
-                     (unsigned long)*(const ULONGLONG *)(head + 0x48) );
-            fflush( stderr );
+            TRACE( "n=%ld tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n",
+                   n, obj, (unsigned long)*(const ULONGLONG *)(head + 0x30),
+                   (unsigned long)*(const ULONGLONG *)(head + 0x38),
+                   (unsigned long)*(const ULONGLONG *)(head + 0x40),
+                   (unsigned long)*(const ULONGLONG *)(head + 0x48) );
         }
     }
     if (n == 50)

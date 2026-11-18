@@ -25,15 +25,7 @@
 
 #include <stdio.h>
 
-static void WINAPI sdbg_( const char *fmt, ... )
-{
-    va_list ap;
-    fprintf( stderr, "WB8 [tid %04x] ", (unsigned)GetCurrentThreadId() );
-    va_start( ap, fmt );
-    vfprintf( stderr, fmt, ap );
-    va_end( ap );
-}
-#define SDBG(...) sdbg_(__VA_ARGS__)
+#define SDBG(...) TRACE( __VA_ARGS__ )
 
 WINE_DEFAULT_DEBUG_CHANNEL(web);
 

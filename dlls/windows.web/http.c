@@ -29,15 +29,7 @@
 #include "wine/exception.h"
 #include "winhttp.h"
 #include <stdio.h>
-static void WINAPI wdbg_(const char *fmt, ...)
-{
-    va_list ap;
-    fprintf(stderr, "WB8 [tid %04x] ", (unsigned)GetCurrentThreadId());
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-}
-#define WDBG(...) wdbg_(__VA_ARGS__)
+#define WDBG(...) TRACE(__VA_ARGS__)
 
 WINE_DEFAULT_DEBUG_CHANNEL(web);
 
