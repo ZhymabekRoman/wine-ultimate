@@ -4,6 +4,8 @@
 
 ## Why `wine-ultimate` is Legal (Clean-Room Builtin Implementation)
 
+`wine-ultimate` was implemented as an explicit clean-room alternative to [designgears/wine-uwp](https://github.com/designgears/wine-uwp) — we reject the approach of extracting or copying proprietary Windows system DLLs from a Microsoft ISO.
+
 1. **Zero Microsoft binaries redistributed**: This repository contains only LGPL-2.1+ Wine C/header/IDL source code (`dlls/`, `server/`, `include/`, `loader/`). No Windows DLLs, `.winmd` files, or proprietary Microsoft binaries are committed, linked, or shipped.
 2. **Clean-room API/ABI reimplementation**: Every WinRT/UWP/WinUI/DirectComposition interface (`windows.ui.xaml`, `windows.ui.composition`, `dcomp`, `windows.storage`, `windows.web`, `windows.applicationmodel`, `appxdeploymentclient`, `cabinet` MSZIP) is implemented from scratch in C against public Windows SDK IDL/WinMD interface contracts, documented COM vtable slot layouts, and observed runtime error/query behavior (`QueryInterface`, `RoGetActivationFactory`).
 3. **User-supplied app packages at runtime**: Any UWP/WinUI 3/DesktopBridge app (`Calculator`, `Notepad`, `Winget`, `Clock`, `Store`, `Paint`, `WhatsApp`) is supplied by the user's own local prefix/MSIX packages at runtime; `AppxManifest.xml` `<InProcessServer>` resolution (`combase`) simply loads the user's existing package DLLs the same way Windows `combase.dll` does.
