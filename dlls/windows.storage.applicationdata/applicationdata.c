@@ -2122,9 +2122,6 @@ static HRESULT WINAPI storage_folder_GetRuntimeClassName( IStorageFolder *iface,
 static HRESULT WINAPI storage_folder_GetTrustLevel( IStorageFolder *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
 
-static HRESULT WINAPI storage_folder_GetParentAsync( IStorageFolder *iface, IAsyncOperation_StorageFolder **operation )
-{ return E_NOTIMPL; }
-
 static HRESULT WINAPI storage_folder_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, IAsyncOperation_StorageFile **operation )
 { FIXME( "stub\n" ); return E_NOTIMPL; }
 static HRESULT WINAPI storage_folder_CreateFileAsync( IStorageFolder *iface, HSTRING name, CreationCollisionOption collision, IAsyncOperation_StorageFile **operation )
@@ -2154,7 +2151,6 @@ static const struct IStorageFolderVtbl storage_folder_vtbl =
     storage_folder_GetIids,
     storage_folder_GetRuntimeClassName,
     storage_folder_GetTrustLevel,
-    storage_folder_GetParentAsync,
     storage_folder_CreateFileAsyncOverloadDefaultOptions,
     storage_folder_CreateFileAsync,
     storage_folder_CreateFolderAsyncOverloadDefaultOptions,
@@ -2236,11 +2232,21 @@ static const struct IStorageItemVtbl storage_item_vtbl =
 static HRESULT storage_folder_create( const WCHAR *path, IStorageFolder **out )
 {
     struct storage_folder *impl;
+    WCHAR *p;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IStorageFolder_iface.lpVtbl = &storage_folder_vtbl;
     impl->IStorageItem_iface.lpVtbl = &storage_item_vtbl;
     impl->ref = 1;
     lstrcpynW( impl->path, path, ARRAY_SIZE(impl->path) );
+    for (p = impl->path + 3; *p; p++)
+    {
+        if (*p == '\\')
+        {
+            *p = 0;
+            CreateDirectoryW( impl->path, NULL );
+            *p = '\\';
+        }
+    }
     CreateDirectoryW( impl->path, NULL );
     *out = &impl->IStorageFolder_iface;
     return S_OK;
