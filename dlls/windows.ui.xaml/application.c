@@ -3944,12 +3944,13 @@ static BOOL xaml_manifest_display_name( const WCHAR *dir, WCHAR *out, DWORD cch 
     DWORD size, read, wlen;
     HANDLE file;
     BOOL ok = FALSE;
+    UINT cp = CP_UTF8;
 
     lstrcpyW( path, dir );
     lstrcatW( path, manifest_name );
     if ((file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL )) == INVALID_HANDLE_VALUE)
     {
-        TRACE( "manifest open %s failed, err %u\n", debugstr_w( path ), GetLastError() );
+        TRACE( "manifest open %s failed, err %u\n", debugstr_w( path ), (unsigned int)GetLastError() );
         return FALSE;
     }
     size = GetFileSize( file, NULL );
@@ -3961,7 +3962,6 @@ static BOOL xaml_manifest_display_name( const WCHAR *dir, WCHAR *out, DWORD cch 
     ReadFile( file, raw, size, &read, NULL );
     CloseHandle( file );
     raw[read] = 0;
-    UINT cp = CP_UTF8;
     wlen = MultiByteToWideChar( cp, 0, raw, read, NULL, 0 );
     if (!wlen
             && !(wlen = MultiByteToWideChar( cp = CP_UTF8, MB_USEGLYPHCHARS, raw, read, NULL, 0 ))
@@ -4513,10 +4513,6 @@ void *uwp_get_app_outer( void )
 
 static WNDPROC xaml_corewindow_prev_proc;
 static HWND xaml_corewindow_subclassed_hwnd;
-/* FLIP_SEQUENTIAL back buffer: wine swaps front/back on each Present, so paint the
- * buffer that is currently the back buffer and track the flip after every Present.
- * Always painting buffer 0 shows one-present-stale content (black on the first flip). */
-static UINT xaml_back_index;
 
 static void xaml_fill_pointer_info( HWND hwnd, HWND top, UINT msg, WPARAM wparam, LPARAM lparam,
                                     struct xaml_pointer_info *info, POINT *out_pt )
@@ -4717,28 +4713,6 @@ static BOOL xaml_render_retained_if_dirty( struct xaml_window *impl, HWND hwnd, 
     impl->has_dirty_rect = FALSE;
     SetRectEmpty( &impl->dirty_rect );
     if (out_dirty) *out_dirty = upload_rc;
-    return TRUE;
-}
-
-/* Paint every child's DC as well: the X tree shows a child window at the same
- * geometry as the mapped top-level, and the visible surface may be that child. */
-static BOOL CALLBACK xaml_paint_child( HWND hwnd, LPARAM lparam )
-{
-    RECT rc;
-    HDC hdc = GetDC( hwnd );
-    if (hdc)
-    {
-        GetClientRect( hwnd, &rc );
-        if (rc.right > 0 && rc.bottom > 0)
-        {
-            if (global_xaml_window.retained_valid && global_xaml_window.retained_dc)
-                BitBlt( hdc, 0, 0, rc.right, rc.bottom, global_xaml_window.retained_dc, 0, 0, SRCCOPY );
-            else
-                xaml_layout_render( hwnd, hdc, rc.right, rc.bottom, global_xaml_window.content );
-        }
-        ReleaseDC( hwnd, hdc );
-        TRACE( "xaml painted child %p %ldx%ld\n", hwnd, rc.right, rc.bottom );
-    }
     return TRUE;
 }
 
@@ -5439,7 +5413,7 @@ void xaml_get_layout_metrics( HWND hwnd, SIZE *client, float *scale )
             HMONITOR mon = (hwnd && IsWindow( hwnd ))
                 ? MonitorFromWindow( hwnd, MONITOR_DEFAULTTOPRIMARY )
                 : MonitorFromPoint( (POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY );
-            MONITORINFO mi = { sizeof(mi) };
+            MONITORINFO mi = { .cbSize = sizeof(mi) };
             LONG w = 0, h = 0;
 
             if (mon && GetMonitorInfoW( mon, &mi ))
@@ -5647,7 +5621,7 @@ static HRESULT WINAPI xaml_window_add_Activated( IInspectable *iface, void *hand
 {
     struct xaml_window *impl = &global_xaml_window;
     TRACE( "iface %p, handler %p\n", iface, handler );
-    if (impl->activated_handler_count < ARRAY_SIZE(impl->activated_handlers))
+    if (impl->activated_handler_count < (int)ARRAY_SIZE(impl->activated_handlers))
     {
         impl->activated_handlers[impl->activated_handler_count++] = handler;
         if (handler) IUnknown_AddRef( (IUnknown *)handler );
@@ -5831,11 +5805,13 @@ static const struct xaml_window_vtbl_type xaml_window_vtbl =
     xaml_window_Activate,
     xaml_window_Close,
     {
-        [0 ... 233] = (void *)xaml_window_zero_out,
+        [0 ... 42] = (void *)xaml_window_zero_out,
         [75 - 32] = (void *)xaml_window_add_Loaded,
         [76 - 32] = (void *)xaml_window_remove_Loaded,
+        [45 ... 97] = (void *)xaml_window_zero_out,
         [130 - 32] = (void *)xaml_window_add_Loaded,
         [131 - 32] = (void *)xaml_window_remove_Loaded,
+        [100 ... 233] = (void *)xaml_window_zero_out,
     }
 };
 
@@ -6376,17 +6352,15 @@ static const void *xaml_window_wrs_vtbl[] =
 
 static struct xaml_window global_xaml_window =
 {
-    {(const struct IInspectableVtbl *)&xaml_window_vtbl},
-    {(const struct IInspectableVtbl *)xaml_window2_vtbl},
-    {(const struct IInspectableVtbl *)xaml_window3_vtbl},
-    {(const struct IInspectableVtbl *)xaml_window_private_vtbl},
-    {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
-    {(const struct IInspectableVtbl *)ms_xaml_window2_vtbl},
-    {&xaml_window_native_vtbl},
-    xaml_window_wrs_vtbl,
-    1,
-    NULL,
-    NULL,
+    .IInspectable_iface = {(const struct IInspectableVtbl *)&xaml_window_vtbl},
+    .IWindow2_iface = {(const struct IInspectableVtbl *)xaml_window2_vtbl},
+    .IWindow3_iface = {(const struct IInspectableVtbl *)xaml_window3_vtbl},
+    .IWindowPrivate_iface = {(const struct IInspectableVtbl *)xaml_window_private_vtbl},
+    .ms_IWindow_iface = {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
+    .ms_IWindow2_iface = {(const struct IInspectableVtbl *)ms_xaml_window2_vtbl},
+    .IWindowNative_iface = {&xaml_window_native_vtbl},
+    .IWeakReferenceSource_iface = xaml_window_wrs_vtbl,
+    .ref = 1,
 };
 
 /* IWindowStatics implementation */
@@ -6534,6 +6508,7 @@ static const struct window_statics_extended_vtbl window_statics_vtbl =
     window_statics_GetTrustLevel,
     window_statics_get_Current,
     window_statics_ActivateInstance,
+    { NULL },
 };
 
 static struct window_statics window_statics_obj =
@@ -6668,12 +6643,6 @@ static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
         IApplicationInitializationCallback *callback );
 static HRESULT WINAPI application_statics_get_Current( IApplicationStatics *iface,
         IApplication **current );
-
-static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
-{
-    struct application_factory *impl = impl_from_IActivationFactory( iface );
-    return application_factory_CreateInstance( &impl->IApplicationFactory_iface, NULL, NULL, (IApplication **)instance );
-}
 
 static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void **out )
 {
@@ -7502,13 +7471,14 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
                     { 0xd24219df, 0x7ec9, 0x57f1, { 0xa2, 0x7b, 0x6a, 0xf2, 0x51, 0xd9, 0xc5, 0xbc } };
                 int act_slot = 18;
                 void *type2 = NULL;
+                HRESULT (WINAPI *activate)(void *, void **);
                 if (SUCCEEDED( IInspectable_QueryInterface( (IInspectable *)xaml_type,
                                                             &IID_IXamlType_winui, &type2 ) ) && type2)
                 {
                     act_slot = 19;
                     IInspectable_Release( (IInspectable *)type2 );
                 }
-                HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[act_slot];
+                activate = (void *)type_vtbl[act_slot];
                 TRACE( "calling IXamlType::ActivateInstance slot %d (%p)\n", act_slot, activate );
                 if (activate)
                 {

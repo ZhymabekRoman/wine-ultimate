@@ -433,7 +433,7 @@ static HRESULT WINAPI uwp_dwxs_AttachToWindow( void *iface, HWND parent_wnd )
     if (!impl) return E_NOINTERFACE;
     if (!cls_reg)
     {
-        WNDCLASSEXW wc = { sizeof(wc) };
+        WNDCLASSEXW wc = { .cbSize = sizeof(wc) };
         wc.lpfnWndProc = uwp_island_wndproc;
         wc.hInstance = GetModuleHandleW( NULL );
         wc.hCursor = LoadCursorW( NULL, (LPCWSTR)IDC_ARROW );
@@ -530,8 +530,9 @@ const void *uwp_timer_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 15] = uwp_generic_noop,
+    [6 ... 8] = uwp_generic_noop,
     [9] = uwp_timer_add_Tick,
+    [10 ... 15] = uwp_generic_noop,
 };
 
 /* CoreRT's McgMarshal.ComInterfaceToObject wraps a projected IInspectable in a
@@ -1287,6 +1288,8 @@ static const GUID IID_IButtonBaseStatics_Calc =
 
 static const GUID IID_IElementCompositionPreviewStatics_UWP =
     { 0x08c92b38, 0xec99, 0x4c55, { 0xbc, 0x85, 0xa1, 0xc1, 0x80, 0xb2, 0x76, 0x46 } };
+static const GUID IID_IElementCompositionPreviewStatics2_UWP =
+    { 0x24148fbb, 0x23d6, 0x4f37, { 0xba, 0x0c, 0x07, 0x33, 0xe7, 0x99, 0x72, 0x2d } };
 
 static __x_ABI_CWindows_CUI_CComposition_CICompositor *g_ecp_compositor = NULL;
 
@@ -1314,13 +1317,26 @@ static __x_ABI_CWindows_CUI_CComposition_CICompositor *ecp_get_compositor( void 
     return g_ecp_compositor;
 }
 
+static const void *ecp_statics_obj;
+static const void *ecp_statics2_obj;
+
 static HRESULT WINAPI ecp_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_UWP ))
+        IsEqualGUID( iid, &IID_IAgileObject ))
     {
         *out = iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_UWP ))
+    {
+        *out = (void *)&ecp_statics_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics2_UWP ))
+    {
+        *out = (void *)&ecp_statics2_obj;
         return S_OK;
     }
     *out = NULL;
@@ -1404,12 +1420,23 @@ static const void *ecp_statics_vtbl[] =
     ecp_GetElementChildVisual,
     ecp_SetElementChildVisual,
     ecp_GetScrollViewerManipulationPropertySet,
+};
+static const void *ecp_statics_obj = ecp_statics_vtbl;
+
+static const void *ecp_statics2_vtbl[] =
+{
+    ecp_QueryInterface,
+    ecp_AddRef,
+    ecp_Release,
+    ecp_GetIids,
+    ecp_GetRuntimeClassName,
+    ecp_GetTrustLevel,
     ecp_SetImplicitShowAnimation,
     ecp_SetImplicitHideAnimation,
     ecp_SetIsTranslationEnabled,
     ecp_GetPointerPositionPropertySet,
 };
-static const void *ecp_statics_obj = ecp_statics_vtbl;
+static const void *ecp_statics2_obj = ecp_statics2_vtbl;
 
 static const void *comp_target_statics_obj;
 HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
@@ -1437,6 +1464,11 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
     if (IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_UWP ))
     {
         *out = (void *)&ecp_statics_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics2_UWP ))
+    {
+        *out = (void *)&ecp_statics2_obj;
         return S_OK;
     }
     if (f && !wcscmp( f->class_name, L"Windows.UI.Xaml.Media.CompositionTarget" ))
@@ -1696,21 +1728,34 @@ const void *uwp_cf_statics_vtbl[64] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6 ... 63] = uwp_generic_noop,
     [6] = uwp_cf_dp_prop,
+    [7 ... 8] = uwp_generic_noop,
     [9] = uwp_cf_dp_prop_slot9,
+    [10 ... 11] = uwp_generic_noop,
     [12] = uwp_cf_dp_prop,
+    [13 ... 14] = uwp_generic_noop,
     [15] = uwp_cf_dp_prop,
+    [16 ... 17] = uwp_generic_noop,
     [18] = uwp_cf_dp_prop,
+    [19 ... 20] = uwp_generic_noop,
     [21] = uwp_cf_dp_prop,
+    [22 ... 23] = uwp_generic_noop,
     [24] = uwp_cf_dp_prop,
+    [25 ... 26] = uwp_generic_noop,
     [27] = uwp_cf_dp_prop,
+    [28 ... 29] = uwp_generic_noop,
     [30] = uwp_cf_dp_prop,
+    [31 ... 32] = uwp_generic_noop,
     [33] = uwp_cf_dp_prop,
+    [34 ... 35] = uwp_generic_noop,
     [36] = uwp_cf_dp_prop,
+    [37 ... 38] = uwp_generic_noop,
     [39] = uwp_cf_dp_prop,
+    [40 ... 41] = uwp_generic_noop,
     [42] = uwp_cf_dp_prop,
+    [43 ... 44] = uwp_generic_noop,
     [45] = uwp_cf_dp_prop,
+    [46 ... 63] = uwp_generic_noop,
 };
 
 const void *uwp_dp_statics_vtbl[32] =
@@ -1754,5 +1799,5 @@ const void *scb_factory_vtbl[16] =
     [7 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory scb_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)scb_factory_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_statics_vtbl}, L"Windows.UI.Xaml.Media.SolidColorBrush" };
+    { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)scb_factory_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_statics_vtbl}, L"Windows.UI.Xaml.Media.SolidColorBrush", { NULL } };
 

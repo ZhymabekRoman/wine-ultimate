@@ -231,12 +231,12 @@ static BOOL parse_sections( pri_index *idx )
 
         if (off > idx->size || size < PRI_SEC_HEADER_SIZE || first_sec + off + size > idx->size)
         {
-            WARN( "section %u out of bounds (off %#x size %#x)\n", i, (unsigned int)off, (unsigned int)size );
+            WARN( "section %u out of bounds (off %#x size %#x)\n", (unsigned int)i, (unsigned int)off, (unsigned int)size );
             return FALSE;
         }
         if (get32( idx->map + first_sec + off + 24 ) != size)
         {
-            WARN( "section %u header length %u != directory %u\n", i,
+            WARN( "section %u header length %u != directory %u\n", (unsigned int)i,
                   (unsigned int)get32( idx->map + first_sec + off + 24 ), (unsigned int)size );
             return FALSE;
         }

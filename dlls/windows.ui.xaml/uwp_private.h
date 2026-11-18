@@ -1,5 +1,6 @@
 #ifndef UWP_PRIVATE_H
 #define UWP_PRIVATE_H
+#include "weakreference.h"
 extern const GUID IID_IPropertyValue_g;
 typedef struct IWeakReference IWeakReference;
 typedef struct IWeakReferenceVtbl IWeakReferenceVtbl;
@@ -12,45 +13,24 @@ struct uwp_grid_length { double Value; int GridUnitType; };
 typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
 typedef LONG (WINAPI *p_RegEnumKeyExW_t)( HKEY, DWORD, LPWSTR, LPDWORD, LPDWORD, LPWSTR, LPDWORD, PFILETIME );
 
-extern struct xaml_type;
-extern struct xaml_type_vtbl;
-extern struct xaml_member;
-extern struct xaml_member_vtbl;
-extern struct xaml_metadata_provider;
-extern struct xaml_metadata_provider_vtbl;
-extern struct xaml_event_handler;
-extern struct xaml_event_handler_vtbl;
-extern struct notify_property_changed;
-extern struct notify_property_changed_vtbl;
-extern struct property_changed_args;
-extern struct property_changed_args_vtbl;
-extern struct reference_int32;
-extern struct reference_int32_vtbl;
-extern struct command_iface;
-extern struct command_iface_vtbl;
-extern struct IWeakReference;
-extern struct IWeakReferenceVtbl;
+struct xaml_type;
+struct xaml_type_vtbl;
+struct xaml_member;
+struct xaml_member_vtbl;
+struct xaml_metadata_provider;
+struct xaml_metadata_provider_vtbl;
+struct xaml_event_handler;
+struct xaml_event_handler_vtbl;
+struct notify_property_changed;
+struct notify_property_changed_vtbl;
+struct property_changed_args;
+struct property_changed_args_vtbl;
+struct reference_int32;
+struct reference_int32_vtbl;
+struct command_iface;
+struct command_iface_vtbl;
 
 #define XAML_META_CACHE_SIZE 1024
-
-extern struct xaml_type;
-extern struct xaml_type_vtbl;
-extern struct xaml_member;
-extern struct xaml_member_vtbl;
-extern struct xaml_metadata_provider;
-extern struct xaml_metadata_provider_vtbl;
-extern struct xaml_event_handler;
-extern struct xaml_event_handler_vtbl;
-extern struct notify_property_changed;
-extern struct notify_property_changed_vtbl;
-extern struct property_changed_args;
-extern struct property_changed_args_vtbl;
-extern struct reference_int32;
-extern struct reference_int32_vtbl;
-extern struct command_iface;
-extern struct command_iface_vtbl;
-extern struct IWeakReference;
-extern struct IWeakReferenceVtbl;
 
 
 #define XAML_FACTORY_HASH_SIZE 32   /* power of two, > 2x the entry count */
@@ -987,15 +967,15 @@ extern struct uwp_calc_vm g_calc_vm;
 
 #define XAML_META_CACHE_SIZE 1024
 /* Shared internal declarations for the windows.ui.xaml module split. */
-extern struct xaml_type;
-extern struct xaml_member;
-extern struct xaml_metadata_provider;
-extern struct notify_property_changed;
-extern struct property_changed_args;
-extern struct reference_int32;
-extern struct command_iface;
+struct xaml_type;
+struct xaml_member;
+struct xaml_metadata_provider;
+struct notify_property_changed;
+struct property_changed_args;
+struct reference_int32;
+struct command_iface;
 /* Generic event delegate: { QueryInterface, AddRef, Release, Invoke(sender, args) }. */
-extern struct xaml_event_handler;
+struct xaml_event_handler;
 UINT32 apply_opacity_to_argb( UINT32 argb, double opacity );
 COLORREF blend_argb_over( UINT32 fg_argb, COLORREF bg_cr );
 IInspectable *box_bool_value( boolean b );
@@ -1025,11 +1005,11 @@ ULONG WINAPI element_wv2_Release( IInspectable *iface );
 void ensure_winui_pri_cat( void );
 struct uwp_rd_bucket *get_rd_bucket( void *rd_key, BOOL create );
 HANDLE get_xaml_window_ready_event( void );
-inline struct xaml_element *impl_from_IDependencyObject( void *iface );
-inline struct xaml_element *impl_from_IWebView2( void *iface );
-inline struct xaml_element *impl_from_IWebView22( void *iface );
-inline struct xaml_async_action *impl_from_async_action( IAsyncAction *iface );
-inline struct xaml_async_action *impl_from_async_info( IAsyncInfo *iface );
+struct xaml_element *impl_from_IDependencyObject( void *iface );
+struct xaml_element *impl_from_IWebView2( void *iface );
+struct xaml_element *impl_from_IWebView22( void *iface );
+struct xaml_async_action *impl_from_async_action( IAsyncAction *iface );
+struct xaml_async_action *impl_from_async_info( IAsyncInfo *iface );
 const BYTE *pri_get_data( DWORD *out_size );
 void pri_map_file_to( const WCHAR *pri_path, const BYTE **out_data, DWORD *out_size );
 struct uwp_rd_entry *rd_bucket_upsert( struct uwp_rd_bucket *b, const WCHAR *key );

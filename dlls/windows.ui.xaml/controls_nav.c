@@ -190,12 +190,14 @@ const void *uwp_navview_vtbl[112] =
      * own[0]=IsPaneOpen(56), own[6]=FooterMenuItems(62),
      * own[46]=SelectionChanged(102), own[48]=ItemInvoked(104). */
     [56] = uwp_nav_get_IsPaneOpen,
+    [57] = uwp_generic_noop,
     [62] = uwp_nav_get_FooterMenuItems,
-    [64 ... 111] = uwp_generic_noop,
+    [63 ... 101] = uwp_generic_noop,
     [102] = uwp_ui_add_SelectionChanged,
     [103] = uwp_ui_remove_SelectionChanged,
     [104] = uwp_ui_add_ItemInvoked,
     [105] = uwp_ui_remove_ItemInvoked,
+    [106 ... 111] = uwp_generic_noop,
 };
 
 const void *uwp_fe3_vtbl[16] =
@@ -218,13 +220,16 @@ const void *uwp_ctrl_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 63] = uwp_generic_noop,
     [6] = uwp_ctrl_get_FontSize,
     [7] = uwp_ctrl_put_FontSize,
+    [8 ... 21] = uwp_generic_noop,
     [22] = uwp_ctrl_get_IsEnabled,
     [23] = uwp_ctrl_put_IsEnabled,
+    [24 ... 43] = uwp_generic_noop,
     [44] = uwp_ctrl_ApplyTemplate,
+    [45] = uwp_generic_noop,
     [46] = uwp_ctrl_Focus,
+    [47 ... 63] = uwp_generic_noop,
 };
 
 const void *uwp_ctrl_prot_vtbl[16] =
@@ -235,8 +240,9 @@ const void *uwp_ctrl_prot_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 15] = uwp_generic_noop,
+    [6 ... 7] = uwp_generic_noop,
     [8] = uwp_ctrl_prot_GetTemplateChild,
+    [9 ... 15] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_flyout_get_Items( void *iface, void **out )
@@ -412,17 +418,23 @@ const void *uwp_flyout_vtbl[128] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 127] = uwp_generic_noop,
     [6] = uwp_flyout_slot6,
     [7] = uwp_flyout_slot7,
     [8] = uwp_flyout_slot8,
+    [9] = uwp_generic_noop,
     [10] = uwp_flyout_add_Closed,
+    [11] = uwp_generic_noop,
     [12] = uwp_flyout_add_Opening,
+    [13 ... 33] = uwp_generic_noop,
     [34] = uwp_flyout_get_Items,
+    [35 ... 44] = uwp_generic_noop,
     [45] = uwp_flyout_get_SelectedIndex,
+    [46] = uwp_generic_noop,
     [47] = uwp_tabview_get_SelectedItem,
     [48] = uwp_tabview_put_SelectedItem,
+    [49 ... 50] = uwp_generic_noop,
     [51] = uwp_tabview_add_SelectionChanged,
+    [52 ... 127] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_selector_get_SelectedIndex( void *iface, INT32 *out )
@@ -488,12 +500,13 @@ const void *uwp_selector_vtbl[20] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 19] = uwp_generic_noop,
     [6] = uwp_selector_get_SelectedIndex,
     [7] = uwp_selector_put_SelectedIndex,
     [8] = uwp_selector_get_SelectedItem,
     [9] = uwp_selector_put_SelectedItem,
+    [10 ... 15] = uwp_generic_noop,
     [16] = uwp_selector_add_SelectionChanged,
+    [17 ... 19] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_items_ctrl_get_Items( void *iface, void **out )
@@ -513,8 +526,9 @@ const void *uwp_items_ctrl_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
+    [6 ... 7] = uwp_generic_noop,
     [8] = uwp_items_ctrl_get_Items,
+    [9 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_key_args_QI( void *iface, REFIID iid, void **out )
@@ -727,7 +741,6 @@ const void *uwp_ka_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = uwp_ka_get_Key,
     [7] = uwp_ka_put_Key,
     [8] = uwp_ka_get_Modifiers,
@@ -737,6 +750,7 @@ const void *uwp_ka_vtbl[32] =
     [12] = uwp_ka_get_ScopeOwner,
     [13] = uwp_ka_put_ScopeOwner,
     [14] = uwp_ka_add_Invoked,
+    [15 ... 31] = uwp_generic_noop,
 };
 
 struct uwp_exec_req_args
@@ -815,11 +829,13 @@ const void *uwp_xaml_cmd_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
+    [6 ... 9] = uwp_generic_noop,
     [10] = uwp_ui7_get_KeyboardAccelerators,
+    [11 ... 14] = uwp_generic_noop,
     [15] = uwp_btn_get_Command,
     [16] = uwp_btn_put_Command,
     [17] = uwp_xaml_cmd_add_ExecuteRequested,
+    [18 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_icmd_CanExecute( void *iface, void *param, boolean *out )
@@ -871,9 +887,10 @@ const void *uwp_icmd_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 15] = uwp_generic_noop,
+    [6 ... 7] = uwp_generic_noop,
     [8] = uwp_icmd_CanExecute,
     [9] = uwp_icmd_Execute,
+    [10 ... 15] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_mfi_get_Text( void *iface, HSTRING *out )
@@ -899,7 +916,6 @@ const void *uwp_mfi_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = uwp_mfi_get_Text,
     [7] = uwp_mfi_put_Text,
     [8] = uwp_btn_get_Command,
@@ -907,6 +923,7 @@ const void *uwp_mfi_vtbl[32] =
     [10] = uwp_btn_get_CommandParameter,
     [11] = uwp_btn_put_CommandParameter,
     [12] = uwp_btn_add_Click,
+    [13 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_mfi3_get_AccelText( void *iface, HSTRING *out )
@@ -1357,7 +1374,7 @@ static HRESULT WINAPI uwp_cd_ShowAsync( void *iface, void **out )
 
     if (!cls_reg)
     {
-        WNDCLASSEXW wc = { sizeof(wc) };
+        WNDCLASSEXW wc = { .cbSize = sizeof(wc) };
         wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = uwp_cd_popup_wndproc;
         wc.hInstance = GetModuleHandleW( NULL );
@@ -1390,28 +1407,41 @@ const void *uwp_cd_vtbl[48] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 47] = uwp_generic_noop,
     [6] = uwp_cd_get_Title,
     [7] = uwp_cd_put_Title,
     [8] = uwp_cd_get_NullOut,
+    [9] = uwp_generic_noop,
     [10] = uwp_cd_get_BoolFalse,
+    [11] = uwp_generic_noop,
     [12] = uwp_cd_get_PrimaryButtonText,
     [13] = uwp_cd_put_PrimaryButtonText,
     [14] = uwp_cd_get_SecondaryButtonText,
     [15] = uwp_cd_put_SecondaryButtonText,
     [16] = uwp_cd_get_NullOut,
+    [17] = uwp_generic_noop,
     [18] = uwp_cd_get_NullOut,
+    [19] = uwp_generic_noop,
     [20] = uwp_cd_get_NullOut,
+    [21] = uwp_generic_noop,
     [22] = uwp_cd_get_NullOut,
+    [23] = uwp_generic_noop,
     [24] = uwp_cd_get_BoolTrue,
+    [25] = uwp_generic_noop,
     [26] = uwp_cd_get_BoolTrue,
+    [27] = uwp_generic_noop,
     [28] = uwp_ui_event_add,
+    [29] = uwp_generic_noop,
     [30] = uwp_flyout_add_Closed,
+    [31] = uwp_generic_noop,
     [32] = uwp_ui_event_add,
+    [33] = uwp_generic_noop,
     [34] = uwp_ui_event_add,
+    [35] = uwp_generic_noop,
     [36] = uwp_ui_event_add,
+    [37] = uwp_generic_noop,
     [38] = uwp_cd_Hide,
     [39] = uwp_cd_ShowAsync,
+    [40 ... 47] = uwp_generic_noop,
 };
 
 const void *uwp_asb_vtbl[32] =
@@ -1422,19 +1452,29 @@ const void *uwp_asb_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
+    [6 ... 7] = uwp_generic_noop,
     [8] = uwp_cd_get_BoolFalse,
+    [9] = uwp_generic_noop,
     [10] = uwp_tb_get_Text,
+    [11] = uwp_generic_noop,
     [12] = uwp_tb_get_Text,
     [13] = uwp_tb_put_Text,
     [14] = uwp_cd_get_BoolTrue,
+    [15] = uwp_generic_noop,
     [16] = uwp_tb_get_Text,
+    [17] = uwp_generic_noop,
     [18] = uwp_cd_get_NullOut,
+    [19] = uwp_generic_noop,
     [20] = uwp_cd_get_BoolTrue,
+    [21] = uwp_generic_noop,
     [22] = uwp_cd_get_NullOut,
+    [23] = uwp_generic_noop,
     [24] = uwp_ui_event_add,
+    [25] = uwp_generic_noop,
     [26] = uwp_ui_event_add,
+    [27] = uwp_generic_noop,
     [28] = uwp_ui_event_add,
+    [29 ... 31] = uwp_generic_noop,
 };
 
 const void *uwp_cd2_vtbl[24] =
@@ -1445,16 +1485,21 @@ const void *uwp_cd2_vtbl[24] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 23] = uwp_generic_noop,
     [6] = uwp_cd2_get_CloseButtonText,
     [7] = uwp_cd2_put_CloseButtonText,
     [8] = uwp_cd_get_NullOut,
+    [9] = uwp_generic_noop,
     [10] = uwp_cd_get_NullOut,
+    [11] = uwp_generic_noop,
     [12] = uwp_cd_get_BoolTrue,
+    [13] = uwp_generic_noop,
     [14] = uwp_ui_event_add,
+    [15] = uwp_generic_noop,
     [16] = uwp_cd_get_NullOut,
+    [17] = uwp_generic_noop,
     [18] = uwp_cd2_get_DefaultButton,
     [19] = uwp_cd2_put_DefaultButton,
+    [20 ... 23] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_tt_get_IsOpen( void *iface, boolean *out )
@@ -1560,11 +1605,14 @@ const void *uwp_teachingtip_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 63] = uwp_generic_noop,
+    [6 ... 9] = uwp_generic_noop,
     [10] = uwp_tt_get_IsOpen,
     [11] = uwp_tt_put_IsOpen,
+    [12 ... 50] = uwp_generic_noop,
     [51] = uwp_tt_add_Closing,
+    [52] = uwp_generic_noop,
     [53] = uwp_tt_add_Closed,
+    [54 ... 63] = uwp_generic_noop,
 };
 
 const void *uwp_grid_vtbl[32] =
@@ -1575,9 +1623,9 @@ const void *uwp_grid_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = uwp_grid_get_RowDefinitions,
     [7] = uwp_grid_get_ColumnDefinitions,
+    [8 ... 31] = uwp_generic_noop,
 };
 
 const void *uwp_tb_vtbl[64] =
@@ -1588,11 +1636,12 @@ const void *uwp_tb_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 63] = uwp_generic_noop,
     [6] = uwp_ctrl_get_FontSize,
     [7] = uwp_ctrl_put_FontSize,
+    [8 ... 25] = uwp_generic_noop,
     [26] = uwp_tb_get_Text,
     [27] = uwp_tb_put_Text,
+    [28 ... 63] = uwp_generic_noop,
 };
 
 const void *uwp_rowcol_vtbl[32] =
@@ -1603,16 +1652,16 @@ const void *uwp_rowcol_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = uwp_rowcol_get_Length,
     [7] = uwp_rowcol_put_Length,
+    [8 ... 31] = uwp_generic_noop,
 };
 
 HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result );
 struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth )
 {
     if (!el || depth > 6) return NULL;
-    if (el->class_name && wcsstr( el->class_name, L".Controls.NavigationViewItem" ) &&
+    if (el->class_name[0] && wcsstr( el->class_name, L".Controls.NavigationViewItem" ) &&
         !wcsstr( el->class_name, L"ViewItemInvoked" ))
         return el;
     if (el->content)
@@ -1996,7 +2045,7 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
 
     if (!cls_reg)
     {
-        WNDCLASSEXW wc = { sizeof(wc) };
+        WNDCLASSEXW wc = { .cbSize = sizeof(wc) };
         wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = uwp_popup_wndproc;
         wc.hInstance = GetModuleHandleW( NULL );
@@ -2111,7 +2160,7 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
                                   : MonitorFromPoint( (POINT){ screen_x, screen_y }, MONITOR_DEFAULTTONEAREST );
         if (mon)
         {
-            MONITORINFO mi = { sizeof(mi) };
+            MONITORINFO mi = { .cbSize = sizeof(mi) };
             if (GetMonitorInfoW( mon, &mi )) work = mi.rcWork;
         }
         if (screen_x + pop_w > work.right - 4) screen_x = max( work.left + 4, work.right - pop_w - 4 );

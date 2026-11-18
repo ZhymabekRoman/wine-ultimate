@@ -100,8 +100,6 @@ static const GUID IID_IContentControl_WinUI =
     { 0x07e81761, 0x11b2, 0x52ae, { 0x8f, 0x8b, 0x4d, 0x53, 0xd2, 0xb5, 0x90, 0x0a } };
 static const GUID IID_IDependencyObject_WinUI =
     { 0xe7beaee7, 0x160e, 0x50f7, { 0x87, 0x89, 0xd6, 0x34, 0x63, 0xf9, 0x79, 0xfa } };
-static const GUID IID_IUIElementCollection =
-    { 0x23050cb1, 0xdb88, 0x54ed, { 0x90, 0x83, 0x5e, 0xcf, 0xb1, 0x25, 0x12, 0xfd } };
 static const GUID IID_IImage =
     { 0x220d3d8d, 0x66de, 0x53a1, { 0xa2, 0x15, 0xba, 0x9c, 0x16, 0x55, 0x65, 0xab } };
 static const GUID IID_IUIElementOverrides =
@@ -517,7 +515,7 @@ static HRESULT WINAPI frame_do_SetValue( void *iface, void *dp, IInspectable *va
             return S_OK;
         }
     }
-    if (impl->prop_count < ARRAY_SIZE(impl->props))
+    if (impl->prop_count < (int)ARRAY_SIZE(impl->props))
     {
         impl->props[impl->prop_count].dp = dp;
         impl->props[impl->prop_count].value = value;
@@ -814,6 +812,7 @@ static struct frame_factory frame_factory_obj =
     {(const struct IActivationFactoryVtbl *)frame_factory_vtbl},
     {(const struct IInspectableVtbl *)composable_factory_vtbl},
     1,
+    { NULL },
 };
 
 IActivationFactory *frame_factory = &frame_factory_obj.IActivationFactory_iface;
@@ -1382,11 +1381,11 @@ static const void *iterator_vtbl[256] =
     [3] = iterator_GetIids,                /* 3: GetIids */
     [4] = iterator_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = iterator_GetTrustLevel,          /* 5: GetTrustLevel */
-    [6 ... 255] = frame_generic_slot,
     [6] = iterator_MoveNext,               /* 6: MoveNext (IIterator untracked layout) */
     [7] = iterator_get_Current,            /* 7: get_Current */
     [8] = iterator_get_HasCurrent,         /* 8: get_HasCurrent */
     [9] = iterator_GetMany,                /* 9: GetMany */
+    [10 ... 255] = frame_generic_slot,
 };
 
 /* IIterable<RowDefinition> view: slot 6 = First() -> fresh IIterator enumerator */
@@ -1414,8 +1413,8 @@ static const void *iterable_vtbl[256] =
     [3] = iterator_GetIids,
     [4] = iterator_GetRuntimeClassName,
     [5] = iterator_GetTrustLevel,
-    [6 ... 255] = frame_generic_slot,
     [6] = iterable_First,                  /* IIterable: First */
+    [7 ... 255] = frame_generic_slot,
 };
 
 static HRESULT collection_iterable_view( struct xaml_collection *coll, void **out )
@@ -1447,27 +1446,6 @@ static HRESULT WINAPI collection_RemoveAt( void *iface, unsigned int index );
 static HRESULT WINAPI collection_Append( void *iface, void *item );
 static HRESULT WINAPI collection_Clear( void *iface );
 static HRESULT WINAPI collection_GetMany( void *iface, unsigned int start, unsigned int count, void **items, unsigned int *actual );
-
-static const void *iterator_vector_vtbl[256] =
-{
-    [0] = iterator_QueryInterface,
-    [1] = iterator_AddRef,
-    [2] = iterator_Release,
-    [3] = iterator_GetIids,
-    [4] = iterator_GetRuntimeClassName,
-    [5] = iterator_GetTrustLevel,
-    [6 ... 255] = frame_generic_slot,
-    [6] = collection_GetAt,                /* IVector: GetAt */
-    [7] = collection_get_Size,             /* IVector: get_Size */
-    [8] = collection_GetView,              /* IVector: GetView */
-    [9] = collection_IndexOf,              /* IVector: IndexOf */
-    [10] = collection_SetAt,               /* IVector: SetAt */
-    [11] = collection_InsertAt,            /* IVector: InsertAt */
-    [12] = collection_RemoveAt,            /* IVector: RemoveAt */
-    [13] = collection_Append,              /* IVector: Append */
-    [15] = collection_Clear,               /* IVector: Clear */
-    [16] = collection_GetMany,             /* IVector: GetMany */
-};
 
 static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **item )
 {
@@ -1649,15 +1627,17 @@ static const void *collection_view_vtbl[256] =
     [3] = collection_GetIids,
     [4] = collection_GetRuntimeClassName,
     [5] = collection_GetTrustLevel,
-    [6 ... 255] = frame_generic_slot,
     [6] = collection_GetAt,
     [7] = collection_get_Size,
     [8] = collection_GetView,
     [9] = collection_IndexOf,
     [10] = collection_GetMany_view,
+    [11 ... 12] = frame_generic_slot,
     [13] = collection_Append,
+    [14] = frame_generic_slot,
     [15] = collection_Clear,
     [16] = collection_GetMany,
+    [17 ... 255] = frame_generic_slot,
 };
 
 static const void *collection_vtbl[256] =
@@ -1668,7 +1648,6 @@ static const void *collection_vtbl[256] =
     [3] = collection_GetIids,                /* 3: GetIids */
     [4] = collection_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = collection_GetTrustLevel,          /* 5: GetTrustLevel */
-    [6 ... 255] = frame_generic_slot,
     [6] = collection_GetAt,                  /* 6: First */
     [7] = collection_get_Size,               /* 7: get_Size */
     [8] = collection_GetView,                /* 8: GetView */
@@ -1680,6 +1659,7 @@ static const void *collection_vtbl[256] =
     [14] = frame_generic_slot,               /* 14: RemoveAtEnd */
     [15] = collection_Clear,                 /* 15: Clear */
     [16] = collection_GetMany,               /* 16: GetMany */
+    [17 ... 255] = frame_generic_slot,
 };
 
 static HRESULT collection_create( void **instance )
@@ -1706,10 +1686,6 @@ extern struct xaml_element *impl_from_element( void *iface )
 {
     return CONTAINING_RECORD( iface, struct xaml_element, IInspectable_iface );
 }
-static inline struct xaml_element *impl_from_IGrid( void *iface )
-{
-    return CONTAINING_RECORD( iface, struct xaml_element, IGrid_iface );
-}
 static inline struct xaml_element *impl_from_IUIElement( void *iface )
 {
     return CONTAINING_RECORD( iface, struct xaml_element, IUIElement_iface );
@@ -1717,18 +1693,6 @@ static inline struct xaml_element *impl_from_IUIElement( void *iface )
 static inline struct xaml_element *impl_from_IPanel( void *iface )
 {
     return CONTAINING_RECORD( iface, struct xaml_element, IPanel_iface );
-}
-static inline struct xaml_element *impl_from_IContentControl( void *iface )
-{
-    return CONTAINING_RECORD( iface, struct xaml_element, IContentControl_iface );
-}
-static inline struct xaml_element *impl_from_IRowDefinition( void *iface )
-{
-    return CONTAINING_RECORD( iface, struct xaml_element, IRowDefinition_iface );
-}
-static inline struct xaml_element *impl_from_IColumnDefinition( void *iface )
-{
-    return CONTAINING_RECORD( iface, struct xaml_element, IColumnDefinition_iface );
 }
 extern struct xaml_element *impl_from_IDependencyObject( void *iface )
 {
@@ -1739,22 +1703,6 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
 HRESULT WINAPI element_GetRuntimeClassName( IInspectable *iface, HSTRING *name );
 ULONG WINAPI element_AddRef( IInspectable *iface );
 ULONG WINAPI element_Release( IInspectable *iface );
-
-static HRESULT WINAPI element_grid_QueryInterface( IInspectable *iface, REFIID iid, void **out )
-{
-    struct xaml_element *impl = impl_from_IGrid( iface );
-    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
-}
-static ULONG WINAPI element_grid_AddRef( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IGrid( iface );
-    return element_AddRef( &impl->IInspectable_iface );
-}
-static ULONG WINAPI element_grid_Release( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IGrid( iface );
-    return element_Release( &impl->IInspectable_iface );
-}
 
 static HRESULT WINAPI element_panel_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
@@ -1769,54 +1717,6 @@ static ULONG WINAPI element_panel_AddRef( IInspectable *iface )
 static ULONG WINAPI element_panel_Release( IInspectable *iface )
 {
     struct xaml_element *impl = impl_from_IPanel( iface );
-    return element_Release( &impl->IInspectable_iface );
-}
-
-static HRESULT WINAPI element_content_QueryInterface( IInspectable *iface, REFIID iid, void **out )
-{
-    struct xaml_element *impl = impl_from_IContentControl( iface );
-    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
-}
-static ULONG WINAPI element_content_AddRef( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IContentControl( iface );
-    return element_AddRef( &impl->IInspectable_iface );
-}
-static ULONG WINAPI element_content_Release( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IContentControl( iface );
-    return element_Release( &impl->IInspectable_iface );
-}
-
-static HRESULT WINAPI element_row_QueryInterface( IInspectable *iface, REFIID iid, void **out )
-{
-    struct xaml_element *impl = impl_from_IRowDefinition( iface );
-    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
-}
-static ULONG WINAPI element_row_AddRef( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IRowDefinition( iface );
-    return element_AddRef( &impl->IInspectable_iface );
-}
-static ULONG WINAPI element_row_Release( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IRowDefinition( iface );
-    return element_Release( &impl->IInspectable_iface );
-}
-
-static HRESULT WINAPI element_col_QueryInterface( IInspectable *iface, REFIID iid, void **out )
-{
-    struct xaml_element *impl = impl_from_IColumnDefinition( iface );
-    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
-}
-static ULONG WINAPI element_col_AddRef( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IColumnDefinition( iface );
-    return element_AddRef( &impl->IInspectable_iface );
-}
-static ULONG WINAPI element_col_Release( IInspectable *iface )
-{
-    struct xaml_element *impl = impl_from_IColumnDefinition( iface );
     return element_Release( &impl->IInspectable_iface );
 }
 
@@ -1852,31 +1752,6 @@ ULONG WINAPI element_wv22_Release( IInspectable *iface )
     return element_Release( &impl->IInspectable_iface );
 }
 
-static HRESULT WINAPI element_grid_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{
-    struct xaml_element *impl = impl_from_IGrid( iface );
-    return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
-}
-static HRESULT WINAPI element_panel_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{
-    struct xaml_element *impl = impl_from_IPanel( iface );
-    return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
-}
-static HRESULT WINAPI element_content_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{
-    struct xaml_element *impl = impl_from_IContentControl( iface );
-    return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
-}
-static HRESULT WINAPI element_row_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{
-    struct xaml_element *impl = impl_from_IRowDefinition( iface );
-    return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
-}
-static HRESULT WINAPI element_col_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{
-    struct xaml_element *impl = impl_from_IColumnDefinition( iface );
-    return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
-}
 HRESULT WINAPI element_wv2_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
     struct xaml_element *impl = impl_from_IWebView2( iface );
@@ -2167,80 +2042,6 @@ static HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface )
     return S_OK;
 }
 
-struct xaml_weakref
-{
-    IWeakReference IWeakReference_iface;
-    LONG ref;
-    struct xaml_element *element;
-};
-
-static inline struct xaml_weakref *impl_from_IWeakReference( IWeakReference *iface )
-{
-    return CONTAINING_RECORD( iface, struct xaml_weakref, IWeakReference_iface );
-}
-
-static ULONG WINAPI weakref_AddRef( IWeakReference *iface );
-
-static HRESULT WINAPI weakref_QueryInterface( IWeakReference *iface, REFIID iid, void **out )
-{
-    if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IWeakReference ) || IsEqualGUID( iid, &IID_IUnknown ))
-    {
-        *out = iface;
-        weakref_AddRef( iface );
-        return S_OK;
-    }
-    *out = NULL;
-    return E_NOINTERFACE;
-}
-
-static ULONG WINAPI weakref_AddRef( IWeakReference *iface )
-{
-    struct xaml_weakref *impl = impl_from_IWeakReference( iface );
-    return InterlockedIncrement( &impl->ref );
-}
-
-static ULONG WINAPI weakref_Release( IWeakReference *iface )
-{
-    struct xaml_weakref *impl = impl_from_IWeakReference( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref)
-    {
-        IInspectable_Release( &impl->element->IInspectable_iface );
-        free( impl );
-    }
-    return ref;
-}
-
-static HRESULT WINAPI weakref_Resolve( IWeakReference *iface, REFIID iid, IInspectable **out )
-{
-    struct xaml_weakref *impl = impl_from_IWeakReference( iface );
-    return element_QueryInterface( &impl->element->IInspectable_iface, iid, (void **)out );
-}
-
-static const IWeakReferenceVtbl weakref_vtbl =
-{
-    weakref_QueryInterface,
-    weakref_AddRef,
-    weakref_Release,
-    weakref_Resolve,
-};
-
-static HRESULT WINAPI element_GetWeakReference( IInspectable *iface, IWeakReference **out )
-{
-    struct xaml_weakref *impl;
-
-    if (!out) return E_POINTER;
-    impl = calloc( 1, sizeof(*impl) );
-    if (!impl) return E_OUTOFMEMORY;
-    impl->IWeakReference_iface.lpVtbl = &weakref_vtbl;
-    impl->ref = 1;
-    impl->element = impl_from_element( (void *)iface );
-    IInspectable_AddRef( &impl->element->IInspectable_iface );
-    *out = &impl->IWeakReference_iface;
-    return S_OK;
-}
-
 static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
 {
     struct tracker_entry *e = tracker_lookup( iface, 0 );
@@ -2248,8 +2049,6 @@ static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
         memset( &tracker_map[e->idx], 0, sizeof(tracker_map[e->idx]) );
     return S_OK;
 }
-
-static IInspectable *loaded_target;
 
 HRESULT WINAPI element_add_Loaded( void *iface, void *handler, EventRegistrationToken *token )
 {
@@ -2441,22 +2240,16 @@ static const void *grid_vtbl[256] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [6] = element_grid_get_RowDefinitions,
+    [7] = element_grid_get_ColumnDefinitions,
+    [8] = element_generic_slot,
     [9] = xaml_ConnectFromTrackerSource,
     [10] = element_grid_get_RowDefinitions_abi3,  /* IV2 94ea2b94 WinUI3 view: RowDefinitions(HSTRING, vec**) */
     [11] = element_grid_get_ColumnDefinitions_abi3,
-    [6] = element_grid_get_RowDefinitions,
-    [7] = element_grid_get_ColumnDefinitions,
     [12] = element_grid_get_ColumnDefinitions,
     [13] = wv2_probe57, [14] = wv2_probe58, [15] = wv2_probe59,
     [16] = element_get_Content, [17] = wv2_probe61, [18] = wv2_probe62,
-    [19] = wv2_probe63, [20] = wv2_probe0,
-    [23] = wv2_probe1, [24] = wv2_probe2, [25] = wv2_probe3,
-    [26] = wv2_probe4, [27] = wv2_probe5, [28] = wv2_probe6,
-    [29] = wv2_probe7, [30] = wv2_probe8, [31] = wv2_probe9,
-    [32] = wv2_probe10, [33] = wv2_probe11, [34] = wv2_probe12,
-    [35] = wv2_probe13, [36] = wv2_probe14, [37] = wv2_probe15,
-    [38] = wv2_probe16, [39] = wv2_probe17, [40] = wv2_probe18,
+    [19] = wv2_probe63,
     [20] = wv2_probe0,  [21] = wv2_probe1,  [22] = wv2_probe2,  [23] = wv2_probe3,
     [24] = wv2_probe4,  [25] = wv2_probe5,  [26] = wv2_probe6,  [27] = wv2_probe7,
     [28] = wv2_probe8,  [29] = wv2_probe9,  [30] = wv2_probe10, [31] = wv2_probe11,
@@ -2470,7 +2263,7 @@ static const void *grid_vtbl[256] =
     [60] = wv2_probe40, [61] = element_add_Loaded, [62] = element_remove_Loaded, [63] = wv2_probe43,
     [64] = wv2_probe44, [65] = wv2_probe45, [66] = wv2_probe46, [67] = wv2_probe47,
     [68] = wv2_probe48, [69] = wv2_probe49, [70] = wv2_probe50, [71] = wv2_probe51,
-    [72] = wv2_probe52,
+    [72] = element_add_Loaded,
     [73] = element_remove_Loaded,
     [74] = wv2_probe53, [75] = wv2_probe54, [76] = wv2_probe55, [77] = wv2_probe56,
     [78] = wv2_probe57, [79] = wv2_probe58, [80] = wv2_probe59, [81] = wv2_probe60,
@@ -2479,10 +2272,10 @@ static const void *grid_vtbl[256] =
     [89] = wv2_probe4,  [90] = wv2_probe5,  [91] = wv2_probe6,  [92] = wv2_probe7,
     [93] = wv2_probe8,  [94] = wv2_probe9,  [95] = wv2_probe10, [96] = wv2_probe11,
     [97] = wv2_probe12, [98] = wv2_probe13, [99] = wv2_probe14, [100] = wv2_probe15,
-    [72] = element_add_Loaded,
-    [73] = element_remove_Loaded,
+    [101 ... 126] = element_generic_slot,
     [127] = element_get_Content,
     [128] = element_put_Content,
+    [129 ... 255] = element_generic_slot,
 };
 
 static const void *panel_vtbl[256] =
@@ -2493,16 +2286,19 @@ static const void *panel_vtbl[256] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
     [6] = element_panel_get_Children,
     [7] = xaml_AddRefFromTrackerSource,
     [8] = xaml_ReleaseFromTrackerSource,
     [9] = element_panel_get_Children,
+    [10 ... 12] = element_generic_slot,
     [13] = element_panel_get_Children,
+    [14 ... 74] = element_generic_slot,
     [75] = element_add_Loaded,
     [76] = element_remove_Loaded,
+    [77 ... 129] = element_generic_slot,
     [130] = element_get_Content,
     [131] = element_put_Content,
+    [132 ... 255] = element_generic_slot,
 };
 
 static const void *content_control_vtbl[256] =
@@ -2513,18 +2309,21 @@ static const void *content_control_vtbl[256] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
     [6] = xaml_ConnectFromTrackerSource,
     [7] = xaml_AddRefFromTrackerSource,
     [8] = xaml_ReleaseFromTrackerSource,
     [9] = element_get_Content,
     [10] = element_put_Content,
+    [11 ... 16] = element_generic_slot,
     [17] = element_add_Loaded,
     [18] = element_remove_Loaded,
+    [19 ... 74] = element_generic_slot,
     [75] = element_add_Loaded,
     [76] = element_remove_Loaded,
+    [77 ... 129] = element_generic_slot,
     [130] = element_get_Content,
     [131] = element_put_Content,
+    [132 ... 255] = element_generic_slot,
 };
 
 /* WinUI3 IRowDefinition ABI: [6]get_Height(GridLength) [8]get_MaxHeight [10]get_MinHeight
@@ -2545,11 +2344,6 @@ static HRESULT WINAPI rowdef_get_max( void *iface, double *out )
 static HRESULT WINAPI rowdef_get_min( void *iface, double *out )
 {
     if (out) *out = 0.0;
-    return S_OK;
-}
-static HRESULT WINAPI rowdef_get_priority( void *iface, int *out )
-{
-    if (out) *out = 5;
     return S_OK;
 }
 static HRESULT WINAPI rowdef_get_actual( void *iface, double *out )
@@ -2581,7 +2375,6 @@ static const void *row_def_vtbl[256] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
     /* CsWinRT IRowDefinition: 6 ActualHeight, 7 get_Height, 8 set_Height,
      * 9 get_MaxHeight, 10 set_MaxHeight, 11 get_MinHeight, 12 set_MinHeight. */
     [6] = rowdef_get_actual,
@@ -2591,8 +2384,10 @@ static const void *row_def_vtbl[256] =
     [10] = rowdef_set_max,
     [11] = rowdef_get_min,
     [12] = rowdef_set_min,
+    [13 ... 129] = element_generic_slot,
     [130] = element_get_Content,
     [131] = element_put_Content,
+    [132 ... 255] = element_generic_slot,
 };
 
 static const void *col_def_vtbl[256] =
@@ -2603,7 +2398,6 @@ static const void *col_def_vtbl[256] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
     /* CsWinRT IColumnDefinition: 6 ActualWidth, 7 get_Width, 8 set_Width,
      * 9 get_MaxWidth, 10 set_MaxWidth, 11 get_MinWidth, 12 set_MinWidth. */
     [6] = rowdef_get_actual,
@@ -2613,8 +2407,10 @@ static const void *col_def_vtbl[256] =
     [10] = rowdef_set_max,
     [11] = rowdef_get_min,
     [12] = rowdef_set_min,
+    [13 ... 129] = element_generic_slot,
     [130] = element_get_Content,
     [131] = element_put_Content,
+    [132 ... 255] = element_generic_slot,
 };
 
 static const void *element_vtbl[256] =
@@ -2625,7 +2421,6 @@ static const void *element_vtbl[256] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
     [6] = xaml_ConnectFromTrackerSource,
     [7] = xaml_AddRefFromTrackerSource,
     [8] = xaml_ReleaseFromTrackerSource,
@@ -2641,10 +2436,13 @@ static const void *element_vtbl[256] =
     [18] = element_put_double,
     [19] = element_get_height_double,
     [20] = element_put_double,
+    [21 ... 74] = element_generic_slot,
     [75] = element_add_Loaded,
     [76] = element_remove_Loaded,
+    [77 ... 129] = element_generic_slot,
     [130] = element_get_Content,
     [131] = element_put_Content,
+    [132 ... 255] = element_generic_slot,
 };
 
 
@@ -2800,16 +2598,6 @@ HRESULT xaml_async_action_create( IAsyncAction **out )
     return xaml_async_action_create_ex( TRUE, NULL, out );
 }
 
-static void xaml_async_action_complete( struct xaml_async_action *impl, HRESULT hr )
-{
-    if (!impl || impl->completed) return;
-    impl->hr = hr;
-    impl->completed = TRUE;
-    if (impl->handler)
-        IAsyncActionCompletedHandler_Invoke( impl->handler, &impl->IAsyncAction_iface,
-                FAILED( hr ) ? 3 /* Error */ : 1 /* Completed */ );
-}
-
 
 
 
@@ -2913,12 +2701,14 @@ static const void *uielement_vtbl[64] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 63] = element_generic_slot,
+    [6 ... 7] = element_generic_slot,
     [8] = uie_get_ptr,   /* GetValue */
+    [9] = element_generic_slot,
     [10] = uie_set_visibility,
     [11] = uie_get_visibility,
     [12] = uie_get_ptr,  /* ReadLocalValue */
     [13] = uie_get_ptr,  /* GetAnimationBaseValue */
+    [14 ... 63] = element_generic_slot,
 };
 
 HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
@@ -3007,7 +2797,7 @@ static HRESULT WINAPI grid_factory_CreateInstance( void *iface, void *outer, voi
 static HRESULT WINAPI rowdef_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
     HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.RowDefinition", (void **)instance );
-    ERR( "rowdef_factory_ActivateInstance -> %p hr %08x\n", (void *)*instance, hr );
+    ERR( "rowdef_factory_ActivateInstance -> %p hr %08lx\n", (void *)*instance, hr );
     return hr;
 }
 
@@ -3020,14 +2810,14 @@ static HRESULT WINAPI rowdef_factory_CreateInstance( void *iface, void *outer, v
         if (inner) { *inner = (void *)impl; IInspectable_AddRef( (IInspectable *)*inner ); }
         *instance = (void *)impl;
     }
-    ERR( "rowdef_factory_CreateInstance outer %p -> %p hr %08x\n", outer, (void *)impl, hr );
+    ERR( "rowdef_factory_CreateInstance outer %p -> %p hr %08lx\n", outer, (void *)impl, hr );
     return hr;
 }
 
 static HRESULT WINAPI coldef_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
     HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.ColumnDefinition", (void **)instance );
-    ERR( "coldef_factory_ActivateInstance -> %p hr %08x\n", (void *)*instance, hr );
+    ERR( "coldef_factory_ActivateInstance -> %p hr %08lx\n", (void *)*instance, hr );
     return hr;
 }
 
@@ -3040,7 +2830,7 @@ static HRESULT WINAPI coldef_factory_CreateInstance( void *iface, void *outer, v
         if (inner) { *inner = (void *)impl; IInspectable_AddRef( (IInspectable *)*inner ); }
         *instance = (void *)impl;
     }
-    ERR( "coldef_factory_CreateInstance outer %p -> %p hr %08x\n", outer, (void *)impl, hr );
+    ERR( "coldef_factory_CreateInstance outer %p -> %p hr %08lx\n", outer, (void *)impl, hr );
     return hr;
 }
 
@@ -3113,6 +2903,7 @@ static struct frame_factory grid_factory_obj =
     {(const struct IActivationFactoryVtbl *)grid_factory_vtbl},
     {(const struct IInspectableVtbl *)grid_composable_vtbl},
     1,
+    { NULL },
 };
 IActivationFactory *grid_factory = &grid_factory_obj.IActivationFactory_iface;
 
@@ -3169,6 +2960,7 @@ static struct frame_factory row_def_factory_obj =
     {(const struct IActivationFactoryVtbl *)row_def_factory_vtbl},
     {(const struct IInspectableVtbl *)row_def_composable_vtbl},
     1,
+    { NULL },
 };
 IActivationFactory *row_def_factory = &row_def_factory_obj.IActivationFactory_iface;
 
@@ -3177,6 +2969,7 @@ static struct frame_factory col_def_factory_obj =
     {(const struct IActivationFactoryVtbl *)col_def_factory_vtbl},
     {(const struct IInspectableVtbl *)col_def_composable_vtbl},
     1,
+    { NULL },
 };
 IActivationFactory *col_def_factory = &col_def_factory_obj.IActivationFactory_iface;
 
@@ -3400,6 +3193,7 @@ static struct frame_factory content_control_factory_obj =
     {(const struct IActivationFactoryVtbl *)content_control_factory_vtbl},
     {(const struct IInspectableVtbl *)content_control_composable_vtbl},
     1,
+    { NULL },
 };
 IActivationFactory *content_control_factory = &content_control_factory_obj.IActivationFactory_iface;
 
@@ -3458,6 +3252,7 @@ static struct frame_factory element_factory_obj =
     {(const struct IActivationFactoryVtbl *)element_factory_vtbl},
     {(const struct IInspectableVtbl *)element_composable_vtbl},
     1,
+    { NULL },
 };
 IActivationFactory *element_factory = &element_factory_obj.IActivationFactory_iface;
 
@@ -3632,6 +3427,7 @@ static struct frame_factory user_control_factory_obj =
     {(const struct IActivationFactoryVtbl *)user_control_factory_vtbl},
     {(const struct IInspectableVtbl *)user_control_composable_vtbl},
     1,
+    { NULL },
 };
 IActivationFactory *user_control_factory = &user_control_factory_obj.IActivationFactory_iface;
 
@@ -3694,6 +3490,7 @@ static struct frame_factory coll_factory_obj =
     {(const struct IActivationFactoryVtbl *)coll_factory_vtbl},
     {(const struct IInspectableVtbl *)coll_composable_vtbl},
     1,
+    { NULL },
 };
 IActivationFactory *coll_factory = &coll_factory_obj.IActivationFactory_iface;
 

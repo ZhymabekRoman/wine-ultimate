@@ -905,7 +905,6 @@ struct uwp_element *g_last_created_page = NULL;
 struct uwp_element *g_navigated_page_el = NULL;
 
 void uwp_invalidate_window( void );
-static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *want );
 struct uwp_element *uwp_elem_from_any( void *ptr );
 BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *node );
 void uwp_invoke_button( struct uwp_element *btn );
@@ -2105,7 +2104,7 @@ static const void *vsm_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory vsm_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)vsm_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)vsm_vtbl}, L"Windows.UI.Xaml.VisualStateManager" };
+    { {(const struct IActivationFactoryVtbl *)vsm_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)vsm_vtbl}, L"Windows.UI.Xaml.VisualStateManager", { NULL } };
 
 /* VisualTreeHelperStatics */
 static HRESULT WINAPI vth_FindPoint( void *iface, double x, double y, void *subtree, void **out )
@@ -2206,7 +2205,7 @@ static const void *vth_vtbl[16] =
     [14 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory vth_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)vth_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)vth_vtbl}, L"Windows.UI.Xaml.Media.VisualTreeHelper" };
+    { {(const struct IActivationFactoryVtbl *)vth_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)vth_vtbl}, L"Windows.UI.Xaml.Media.VisualTreeHelper", { NULL } };
 
 /* AutomationProperties / ToolTipService / GridStatics attached property helpers */
 static HRESULT WINAPI attached_prop_get_dp( void *iface, void **out )
@@ -2221,19 +2220,27 @@ static const void *attached_statics_vtbl[64] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6 ... 63] = uwp_generic_noop,
     [6] = attached_prop_get_dp,
+    [7 ... 8] = uwp_generic_noop,
     [9] = attached_prop_get_dp,
+    [10 ... 11] = uwp_generic_noop,
     [12] = attached_prop_get_dp,
+    [13 ... 14] = uwp_generic_noop,
     [15] = attached_prop_get_dp,
+    [16 ... 17] = uwp_generic_noop,
     [18] = attached_prop_get_dp,
+    [19 ... 20] = uwp_generic_noop,
     [21] = attached_prop_get_dp,
+    [22 ... 23] = uwp_generic_noop,
     [24] = attached_prop_get_dp,
+    [25 ... 26] = uwp_generic_noop,
     [27] = attached_prop_get_dp,
+    [28 ... 29] = uwp_generic_noop,
     [30] = attached_prop_get_dp,
+    [31 ... 63] = uwp_generic_noop,
 };
 struct uwp_class_factory auto_props_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, L"Windows.UI.Xaml.Automation.AutomationProperties" };
+    { {(const struct IActivationFactoryVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, L"Windows.UI.Xaml.Automation.AutomationProperties", { NULL } };
 
 static HRESULT WINAPI feap_CreatePeerForElement( void *iface, void *el, void **out )
 {
@@ -2253,7 +2260,7 @@ static const void *feap_statics_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory feap_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer" };
+    { {(const struct IActivationFactoryVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer", { NULL } };
 
 static HRESULT WINAPI th_FromLengths( void *iface, double left, double top, double right, double bottom, double *out )
 {
@@ -2283,7 +2290,7 @@ static const void *th_statics_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory th_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)th_statics_vtbl}, {(const struct IInspectableVtbl *)th_statics_vtbl}, {(const struct IInspectableVtbl *)th_statics_vtbl}, L"Windows.UI.Xaml.ThicknessHelper" };
+    { {(const struct IActivationFactoryVtbl *)th_statics_vtbl}, {(const struct IInspectableVtbl *)th_statics_vtbl}, {(const struct IInspectableVtbl *)th_statics_vtbl}, L"Windows.UI.Xaml.ThicknessHelper", { NULL } };
 
 /*
  * Static class -> factory map for the UWP/XAML activation factory.  The classes below
@@ -2329,7 +2336,7 @@ BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_i
 
     if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IPropertyValue_g, (void **)&pv )) && pv)
     {
-        HRESULT hr = IPropertyValue_get_Type( pv, &pt );
+        IPropertyValue_get_Type( pv, &pt );
         IPropertyValue_Release( pv );
             return FALSE;
     }

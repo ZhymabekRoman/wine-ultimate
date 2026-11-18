@@ -56,10 +56,7 @@ static const GUID IID_IWeakReferenceSource_local =
  * them are served by our own combase-side code and Calculator's .NET Native RCW projection,
  * whose vtables follow the WinRT ABI. Naming each slot we call lets callers use typed calls;
  * earlier, uncalled slots stay as void * placeholders. */
-struct xaml_metadata_provider
-{
-    const struct xaml_metadata_provider_vtbl *lpVtbl;
-};
+struct xaml_metadata_provider;
 
 
 
@@ -245,10 +242,6 @@ static const GUID IID_ISolidColorBrush_UWP =
     { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
 static const GUID IID_INavigationViewItem_UWP =
     { 0xeb24c20b, 0x9816, 0x4ac7, { 0x8c, 0xff, 0x36, 0xf6, 0x7a, 0x11, 0x8f, 0x4e } };
-static const GUID IID_IReferenceTracker_QI_UWP =
-    { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
-static const GUID IID_IPropertyValue_probe_UWP =
-    { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
 static const GUID IID_IFrameProj_UWP =
     { 0x3f367f87, 0x9f5a, 0x4b04, { 0xb8, 0x18, 0xb5, 0x54, 0xc0, 0x69, 0x59, 0x7a } };
 static const GUID IID_IRoutedEventArgs_QI_UWP =
@@ -287,8 +280,6 @@ static const GUID IID_IVisualStateGroup_UWP =
     { 0xe4f9d9a4, 0xe028, 0x44de, { 0x9b, 0x15, 0x49, 0x29, 0xae, 0x0a, 0x26, 0xc2 } };
 static const GUID IID_IVisualState_UWP =
     { 0x6320affc, 0xc31a, 0x4450, { 0xaf, 0xde, 0xf6, 0xea, 0x7b, 0xd1, 0xf5, 0x86 } };
-static const GUID IID_IVisualStateManagerStatics_UWP =
-    { 0x0194e4c5, 0x4f70, 0x34c3, { 0xae, 0xb9, 0x60, 0x3f, 0x4b, 0xf5, 0x32, 0x12 } };
 static const GUID IID_IStateTriggerBase_UWP =
     { 0x48b20698, 0xaf06, 0x466c, { 0x80, 0x52, 0x93, 0x66, 0x6d, 0xde, 0x0e, 0x49 } };
 static const GUID IID_IStateTriggerBaseProtected_UWP =
@@ -315,8 +306,6 @@ const GUID IID_ICommand_UWP2 =
     { 0xe5af3542, 0xca67, 0x4081, { 0x99, 0x5b, 0x70, 0x9d, 0xd1, 0x37, 0x92, 0xdf } };
 const GUID IID_IPropertyValue_g =
     { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
-static const GUID IID_IPropertyValueStatics_g =
-    { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
 const GUID IID_IDependencyPropertyChangedEventArgs_UWP =
     { 0x81212c2b, 0x24d0, 0x4957, { 0xab, 0xc3, 0x22, 0x44, 0x70, 0xa9, 0x3a, 0x4e } };
 static const GUID IID_IDataContextChangedEventArgs_UWP =
@@ -329,8 +318,6 @@ const GUID IID_IUriRuntimeClass_g =
     { 0x9e365e57, 0x48b2, 0x4160, { 0x95, 0x6f, 0xc7, 0x38, 0x51, 0x20, 0xbb, 0xfc } };
 
 /* CalculatorApp / MCG additional discovered interface IIDs */
-static const GUID IID_IGrid_Calc =
-    { 0x280335ae, 0x5570, 0x46c7, { 0x8e, 0x0b, 0x60, 0x2b, 0xe7, 0x12, 0x29, 0xa2 } };
 static const GUID IID_IUIElement_Calc2 =
     { 0x33d1299d, 0x8d6e, 0x4290, { 0xbf, 0x22, 0x90, 0x5c, 0xcc, 0xd0, 0x4d, 0x31 } };
 static const GUID IID_INavigationView_UWP =
@@ -1091,7 +1078,7 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
     }
 
     /* Single fallback call site when IXamlMetadataProvider is unavailable */
-    if (out_type_name && max_chars && !out_type_name[0] && xaml_get_app_caps()->vm_type)
+    if (out_type_name && max_chars && !out_type_name[0] && xaml_get_app_caps()->vm_type[0])
         lstrcpynW( out_type_name, xaml_get_app_caps()->vm_type, (int)max_chars );
 }
 
@@ -1878,7 +1865,17 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IBrush_iface;
     else if (IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ))
         *out = &impl->ISolidColorBrush_iface;
-    else if ((IsEqualGUID( iid, &IID_IRoutedEventArgs_QI_UWP ) ||
+    else
+    {
+        static const GUID IID_IXamlCompositionBrushBaseProtected_UWP =
+            { 0x1513f3d8, 0x0457, 0x4e1c, { 0xad, 0x77, 0x11, 0xc1, 0xd9, 0x87, 0x97, 0x43 } };
+        static const GUID IID_IXamlCompositionBrushBase_UWP =
+            { 0x410b99e7, 0x9d63, 0x4449, { 0xa3, 0x58, 0x49, 0x62, 0xfd, 0x93, 0x5f, 0x39 } };
+        if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBaseProtected_UWP ) ||
+            IsEqualGUID( iid, &IID_IXamlCompositionBrushBase_UWP ))
+            *out = &impl->IStyle_iface;
+    }
+    if (!*out && (IsEqualGUID( iid, &IID_IRoutedEventArgs_QI_UWP ) ||
               IsEqualGUID( iid, &IID_IRoutedEventArgs_Clone_UWP ) ||
               IsEqualGUID( iid, &IID_IRoutedEventArgs2_UWP )))
         *out = &impl->IInspectable_iface;
@@ -1934,16 +1931,18 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                  IsEqualGUID( iid, &IID_IItemsControl_UWP2 ))
             *out = &impl->IItemsControl_iface;
     }
-    if (!*out) if (IsEqualGUID( iid, &IID_IDispatcherTimer_UWP ))
-        *out = &impl->IInspectable_iface;
-    else if (IsEqualGUID( iid, &IID_IStateTriggerBase_UWP ) ||
-             IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ) ||
-             IsEqualGUID( iid, &IID_IMarkupExtension_UWP ) ||
-             IsEqualGUID( iid, &IID_IMarkupExtensionOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement10_UWP ) ||
-             IsEqualGUID( iid, &IID_IXamlRoot_UWP ))
-        *out = &impl->IStateTrigger_iface;
-    else
+    if (!*out)
+    {
+        if (IsEqualGUID( iid, &IID_IDispatcherTimer_UWP ))
+            *out = &impl->IInspectable_iface;
+        else if (IsEqualGUID( iid, &IID_IStateTriggerBase_UWP ) ||
+                 IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ) ||
+                 IsEqualGUID( iid, &IID_IMarkupExtension_UWP ) ||
+                 IsEqualGUID( iid, &IID_IMarkupExtensionOverrides_UWP ) ||
+                 IsEqualGUID( iid, &IID_IUIElement10_UWP ) ||
+                 IsEqualGUID( iid, &IID_IXamlRoot_UWP ))
+            *out = &impl->IStateTrigger_iface;
+        else
     {
         static const GUID IID_IObservableVector_DO =
             { 0xfac6f4d2, 0x96fd, 0x5ceb, { 0x80, 0xbf, 0x46, 0xac, 0x65, 0x29, 0xfc, 0x65 } };
@@ -1985,6 +1984,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                 }
             }
         }
+    }
     }
     if (!*out && (IsEqualGUID( iid, &IID_IDCompositionVisual ) ||
                   IsEqualGUID( iid, &IID_IDCompositionVisual2 )))
@@ -2179,7 +2179,7 @@ static HRESULT WINAPI uwp_ui_ReleasePointerCaptures( void *iface )
 }
 
 /* --- IFrameworkElement --- */
-static void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
+void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
 void uwp_fire_loaded_tree( struct uwp_element *el );
 
 HRESULT WINAPI uwp_fe_get_Resources( void *iface, void **out )
@@ -3582,14 +3582,15 @@ static const void *uwp_ui_vtbl[128] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 127] = uwp_generic_noop,
     [6] = uwp_ui_get_DesiredSize,
+    [7 ... 18] = uwp_generic_noop,
     [19] = uwp_ui_get_IsHitTestVisible,
     [20] = uwp_ui_put_IsHitTestVisible,
     [21] = uwp_ui_get_Visibility,
     [22] = uwp_ui_put_Visibility,
     [23] = uwp_ui_get_RenderSize,
-    [41 ... 85] = uwp_ui_event_add,
+    [24 ... 40] = uwp_generic_noop,
+    [41 ... 56] = uwp_ui_event_add,
     [57] = uwp_ui_add_PointerPressed,
     [58] = uwp_ui_remove_PointerPressed,
     [59] = uwp_ui_add_PointerMoved,
@@ -3606,10 +3607,13 @@ static const void *uwp_ui_vtbl[128] =
     [70] = uwp_ui_remove_PointerCanceled,
     [71] = uwp_ui_add_PointerWheelChanged,
     [72] = uwp_ui_remove_PointerWheelChanged,
+    [73 ... 85] = uwp_ui_event_add,
+    [86 ... 92] = uwp_generic_noop,
     [93] = uwp_ui_CapturePointer,
     [94] = uwp_ui_ReleasePointerCapture,
     [95] = uwp_ui_ReleasePointerCaptures,
     [96] = uwp_ui_AddHandler,
+    [97 ... 127] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_fe_get_FlowDirection( void *iface, int *dir )
@@ -3630,71 +3634,71 @@ static HRESULT WINAPI uwp_fe_get_BaseUri( void *iface, void **uri )
 /* INavigationView own-method getters, ABI slots 56/62 on the FE face
  * (INavigationView : IFrameworkElement, 3 + 53 IFE = base 56):
  * own[0] = get_IsPaneOpen, own[6] = get_FooterMenuItems. */
-HRESULT WINAPI uwp_fe_probe6( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 6 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe11( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 11 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe12( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 12 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe27( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 27 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe28( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 28 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe29( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 29 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe30( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 30 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe38( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 38 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe39( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 39 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe44( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 44 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe48( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 48 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe52( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 52 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe53( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 53 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe54( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 54 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe55( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 55 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe57( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 57 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe58( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 58 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe59( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 59 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe60( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 60 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe61( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 61 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe63( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 63 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe64( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 64 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe65( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 65 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe66( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 66 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe67( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 67 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe68( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 68 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe69( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 69 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe70( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 70 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe71( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 71 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe72( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 72 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe73( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 73 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe74( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 74 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe75( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 75 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe76( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 76 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe77( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 77 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe78( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 78 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe79( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 79 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe80( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 80 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe81( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 81 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe82( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 82 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe83( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 83 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe84( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 84 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe85( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 85 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe86( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 86 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe87( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 87 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe88( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 88 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe89( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 89 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe90( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 90 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe91( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 91 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe92( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 92 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe93( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 93 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe94( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 94 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe95( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 95 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe96( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 96 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe97( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 97 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe98( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 98 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe99( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 99 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe100( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 100 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe101( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 101 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe106( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 106 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe107( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 107 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe108( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 108 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe109( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 109 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe110( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 110 hit on NavView\n" ); return S_OK; }
-HRESULT WINAPI uwp_fe_probe111( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 111 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe6( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 6 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe11( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 11 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe12( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 12 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe27( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 27 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe28( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 28 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe29( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 29 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe30( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 30 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe38( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 38 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe39( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 39 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe44( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 44 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe48( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 48 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe52( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 52 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe53( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 53 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe54( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 54 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe55( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 55 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe57( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 57 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe58( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 58 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe59( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 59 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe60( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 60 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe61( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 61 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe63( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 63 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe64( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 64 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe65( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 65 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe66( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 66 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe67( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 67 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe68( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 68 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe69( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 69 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe70( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 70 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe71( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 71 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe72( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 72 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe73( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 73 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe74( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 74 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe75( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 75 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe76( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 76 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe77( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 77 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe78( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 78 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe79( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 79 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe80( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 80 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe81( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 81 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe82( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 82 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe83( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 83 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe84( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 84 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe85( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 85 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe86( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 86 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe87( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 87 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe88( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 88 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe89( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 89 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe90( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 90 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe91( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 91 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe92( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 92 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe93( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 93 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe94( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 94 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe95( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 95 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe96( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 96 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe97( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 97 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe98( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 98 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe99( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 99 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe100( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 100 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe101( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 101 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe106( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 106 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe107( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 107 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe108( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 108 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe109( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 109 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe110( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 110 hit on NavView\n" ); return S_OK; }
+HRESULT WINAPI uwp_fe_probe111( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 111 hit on NavView\n" ); return S_OK; }
 
 static const void *uwp_fe_vtbl[112] =
 {
@@ -3804,9 +3808,10 @@ static const void *uwp_xamlroot_vtbl[128] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 127] = uwp_generic_noop,
     [6] = uwp_xamlroot_get_Content,
+    [7] = uwp_generic_noop,
     [8] = uwp_xamlroot_get_XamlRoot,
+    [9 ... 127] = uwp_generic_noop,
 };
 
 static const void *uwp_noop_vtbl[128] =
@@ -3817,7 +3822,6 @@ static const void *uwp_noop_vtbl[128] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 40] = uwp_generic_noop,
     /* INavigationView ABI events (disasm-confirmed slots over Control's 24):
      * 56/57 = ItemInvoked, 62/63 = SelectionChanged. */
     [6 ... 55] = uwp_generic_noop,
@@ -3837,9 +3841,9 @@ static const void *uwp_cc_vtbl[128] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 127] = uwp_generic_noop,
     [6] = uwp_cc_get_Content,
     [7] = uwp_cc_put_Content,
+    [8 ... 127] = uwp_generic_noop,
 };
 
 static const void *uwp_border_vtbl[32] =
@@ -3850,9 +3854,10 @@ static const void *uwp_border_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
+    [6 ... 15] = uwp_generic_noop,
     [16] = uwp_cc_get_Content,
     [17] = uwp_cc_put_Content,
+    [18 ... 31] = uwp_generic_noop,
 };
 
 static const void *uwp_btn_vtbl[32] =
@@ -3863,12 +3868,13 @@ static const void *uwp_btn_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
+    [6 ... 9] = uwp_generic_noop,
     [10] = uwp_btn_get_Command,
     [11] = uwp_btn_put_Command,
     [12] = uwp_btn_get_CommandParameter,
     [13] = uwp_btn_put_CommandParameter,
     [14] = uwp_btn_add_Click,
+    [15 ... 31] = uwp_generic_noop,
 };
 
 static const void *uwp_tbtn_vtbl[32] =
@@ -3879,12 +3885,15 @@ static const void *uwp_tbtn_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = uwp_tbtn_get_IsChecked,
     [7] = uwp_tbtn_put_IsChecked,
+    [8 ... 9] = uwp_generic_noop,
     [10] = uwp_ui_event_add,
+    [11] = uwp_generic_noop,
     [12] = uwp_ui_event_add,
+    [13] = uwp_generic_noop,
     [14] = uwp_ui_event_add,
+    [15 ... 31] = uwp_generic_noop,
 };
 
 static const void *uwp_panel_vtbl[32] =
@@ -3895,8 +3904,8 @@ static const void *uwp_panel_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = uwp_panel_get_Children,
+    [7 ... 31] = uwp_generic_noop,
 };
 
 /* --- IUIElement7, IKeyboardAccelerator, IXamlUICommand, ICommand, IMenuFlyoutItem, ITeachingTip --- */
@@ -3931,10 +3940,11 @@ static const void *uwp_ui7_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = uwp_ui7_get_KeyboardAccelerators,
+    [7 ... 10] = uwp_generic_noop,
     [11] = uwp_ui7_add_PreviewKeyDown,
     [12] = uwp_ui7_remove_PreviewKeyDown,
+    [13 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_ui4_get_ContextFlyout( void *iface, void **out )
@@ -4006,15 +4016,20 @@ static const void *uwp_frame_vtbl[48] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 47] = uwp_generic_noop,
     [6] = uwp_cc_get_Content,
     [7] = uwp_cc_put_Content,
+    [8 ... 11] = uwp_generic_noop,
     [12] = uwp_ui_event_add,
+    [13] = uwp_generic_noop,
     [14] = uwp_ui_event_add,
+    [15] = uwp_generic_noop,
     [16] = uwp_ui_event_add,
+    [17] = uwp_generic_noop,
     [18] = uwp_ui_event_add,
+    [19 ... 22] = uwp_generic_noop,
     [23] = uwp_frame_Navigate,
     [24] = uwp_frame_NavigateWithParam,
+    [25 ... 47] = uwp_generic_noop,
 };
 
 static const void *uwp_sv_vtbl[64] =
@@ -4025,9 +4040,10 @@ static const void *uwp_sv_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 63] = uwp_generic_noop,
+    [6 ... 49] = uwp_generic_noop,
     [50] = uwp_ui_event_add, /* add_ViewChanged */
     [51] = uwp_generic_noop, /* remove_ViewChanged */
+    [52 ... 63] = uwp_generic_noop,
 };
 
 enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
@@ -4265,12 +4281,12 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
 
     if (inner)
     {
+        void *ui = NULL;
+        HRESULT qi_hr = E_FAIL;
         *inner = &impl->nondelegating_iface;
         /* Delegation mode is a property of the outer object, not the app: an outer
          * that answers IUIElement is a real app-side element, so the element's
          * lifetime rides on it; otherwise the element owns its own refcount. */
-        void *ui = NULL;
-        HRESULT qi_hr = E_FAIL;
         if (outer &&
             !IsBadReadPtr( outer, sizeof(void *) ) &&
             !IsBadReadPtr( *(void **)outer, 2 * sizeof(void *) ))
@@ -4515,7 +4531,7 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
     /* NavigationView raises SelectionChanged/ItemInvoked once after its own
      * Loaded handlers so the app's navigation handler populates the content
      * Frame (ContentFrame1.Navigate in Clock's MainPage) before we recurse. */
-    if (!el->nav_fired && el->class_name && wcsstr( el->class_name, L".Controls.NavigationView" ))
+    if (!el->nav_fired && el->class_name[0] && wcsstr( el->class_name, L".Controls.NavigationView" ))
     {
         struct uwp_element *item = uwp_nav_find_item( el, 0 );
         IInspectable *item_obj = item ? (item->outer ? item->outer : &item->IInspectable_iface) : NULL;
@@ -4541,33 +4557,8 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
     }
 }
 
-static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *want )
-{
-    struct uwp_vec_view *v;
-    unsigned int k;
-    if (!el || !want) return NULL;
-    if (el->name[0] && !wcscmp( el->name, want )) return el;
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *r;
-        if (ch && ch != el && (r = uwp_find_named( ch, want ))) return r;
-    }
-    if (el->children_coll)
-    {
-        v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        for (k = 0; k < v->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-            struct uwp_element *r;
-            if (ch && ch != el && (r = uwp_find_named( ch, want ))) return r;
-        }
-    }
-    return NULL;
-}
-
 static void uwp_seed_synthetic_calculator( struct uwp_element *holder );
-static void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
+void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
 void uwp_vsm_invalidate_eval_chain( struct uwp_element *el );
 void uwp_realize_empty_panel_defers( struct uwp_element *root )
 {
@@ -4905,261 +4896,6 @@ static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
     }
     TRACE( "uwp_seed_synthetic_calculator: seeded display + keypad(20) into %s\n",
            debugstr_w(holder->name) );
-}
-
-static void store_split_identity( const WCHAR *full, WCHAR *name, size_t name_len, WCHAR *ver, size_t ver_len )
-{
-    const WCHAR *u1 = wcschr( full, L'_' );
-    if (!u1)
-    {
-        lstrcpynW( name, full, name_len );
-        if (ver_len) ver[0] = 0;
-        return;
-    }
-    {
-        size_t len = min( (size_t)(u1 - full), name_len - 1 );
-        memcpy( name, full, len * sizeof(WCHAR) );
-        name[len] = 0;
-    }
-    if (ver_len)
-    {
-        const WCHAR *u2 = wcschr( u1 + 1, L'_' );
-        size_t vlen = u2 ? (size_t)(u2 - (u1 + 1)) : wcslen( u1 + 1 );
-        vlen = min( vlen, ver_len - 1 );
-        memcpy( ver, u1 + 1, vlen * sizeof(WCHAR) );
-        ver[vlen] = 0;
-    }
-}
-
-static void store_query_reg_display_info( HMODULE reg_mod, const WCHAR *full_name, WCHAR *disp_name, size_t disp_len, BOOL *is_fw )
-{
-    p_RegOpenKeyExW_t p_open;
-    p_RegQueryValueExW_t p_query;
-    p_RegCloseKey_t p_close;
-    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
-    static const WCHAR *prefixes[] = {
-        L"Software\\Classes\\AppModel\\Repository\\Packages\\",
-        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\",
-    };
-    size_t r, p;
-
-    if (!reg_mod) return;
-    p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
-    p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
-    p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
-    if (!p_open || !p_query || !p_close) return;
-
-    for (r = 0; r < ARRAY_SIZE(roots); r++)
-    {
-        for (p = 0; p < ARRAY_SIZE(prefixes); p++)
-        {
-            WCHAR sub[512];
-            HKEY hk = NULL;
-            DWORD type = 0, cb;
-            lstrcpynW( sub, prefixes[p], ARRAY_SIZE(sub) - 256 );
-            lstrcatW( sub, full_name );
-            if (p_open( roots[r], sub, 0, KEY_READ, &hk ) != ERROR_SUCCESS) continue;
-
-            if (disp_name && !disp_name[0])
-            {
-                WCHAR buf[128] = {0};
-                cb = sizeof(buf);
-                if (p_query( hk, L"DisplayName", NULL, &type, (BYTE *)buf, &cb ) == ERROR_SUCCESS &&
-                    type == REG_SZ && buf[0] && wcsncmp( buf, L"ms-resource:", 12 ) != 0)
-                {
-                    lstrcpynW( disp_name, buf, disp_len );
-                }
-            }
-            if (is_fw)
-            {
-                DWORD fw = 0;
-                cb = sizeof(fw);
-                if (p_query( hk, L"Framework", NULL, &type, (BYTE *)&fw, &cb ) == ERROR_SUCCESS && type == REG_DWORD)
-                    *is_fw = (fw != 0);
-            }
-            p_close( hk );
-        }
-    }
-}
-
-static void store_add_catalog_item( struct store_catalog_item **items, int *count, int *cap,
-                                    const WCHAR *full_name, const WCHAR *disp_name,
-                                    const WCHAR *pkg_name, const WCHAR *ver_str, BOOL is_fw )
-{
-    int i;
-    struct store_catalog_item *arr, *it;
-    const WCHAR *title;
-
-    if (!full_name || !full_name[0] || !wcschr( full_name, L'_' )) return;
-
-    for (i = 0; i < *count; i++)
-    {
-        if (!wcsicmp( (*items)[i].full_name, full_name )) return;
-    }
-    if (*count >= *cap)
-    {
-        int new_cap = *cap ? (*cap * 2) : 16;
-        arr = realloc( *items, new_cap * sizeof(*arr) );
-        if (!arr) return;
-        *items = arr;
-        *cap = new_cap;
-    }
-
-    it = &(*items)[(*count)++];
-    memset( it, 0, sizeof(*it) );
-    lstrcpynW( it->full_name, full_name, ARRAY_SIZE(it->full_name) );
-    it->is_framework = is_fw;
-
-    title = (disp_name && disp_name[0]) ? disp_name : (pkg_name && pkg_name[0] ? pkg_name : full_name);
-    lstrcpynW( it->name, title, ARRAY_SIZE(it->name) );
-    lstrcpynW( it->cat, is_fw ? L"Framework" : L"Installed App", ARRAY_SIZE(it->cat) );
-    store_make_icon_monogram( it->name, it->icon, ARRAY_SIZE(it->icon) );
-    if (ver_str && ver_str[0])
-        swprintf( it->rating, ARRAY_SIZE(it->rating), L"v%s", ver_str );
-    else
-        lstrcpynW( it->rating, L"Installed", ARRAY_SIZE(it->rating) );
-    lstrcpynW( it->btn, is_fw ? L"Installed" : L"Open", ARRAY_SIZE(it->btn) );
-}
-
-static void store_query_installed_packages( struct store_catalog_item **out_items, int *out_count )
-{
-    static const GUID IID_IPackageManager_local =
-        { 0x9a7d4b65, 0x5e8f, 0x4fc7, { 0xa2, 0xe5, 0x7f, 0x69, 0x25, 0xcb, 0x8b, 0x53 } };
-    struct store_catalog_item *items = NULL;
-    int count = 0, cap = 0;
-    HMODULE reg_mod;
-    HSTRING pm_cls = NULL;
-    IInspectable *pm_insp = NULL;
-    IPackageManager *pm = NULL;
-    IIterable_Package *iterable = NULL;
-    IIterator_Package *iter = NULL;
-    HRESULT hr;
-
-    *out_items = NULL;
-    *out_count = 0;
-
-    reg_mod = GetModuleHandleW( L"kernelbase.dll" );
-    if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
-
-    /* 1. Query via Windows.Management.Deployment.IPackageManager::FindPackagesForUser */
-    if (SUCCEEDED(WindowsCreateString( L"Windows.Management.Deployment.PackageManager", 44, &pm_cls )) && pm_cls)
-    {
-        if (SUCCEEDED(RoActivateInstance( pm_cls, &pm_insp )) && pm_insp)
-        {
-            if (SUCCEEDED(IInspectable_QueryInterface( pm_insp, &IID_IPackageManager_local, (void **)&pm )) && pm)
-            {
-                hr = IPackageManager_FindPackagesByUserSecurityId( pm, NULL, &iterable );
-                if (FAILED(hr) || !iterable)
-                    hr = IPackageManager_FindPackages( pm, &iterable );
-                if (SUCCEEDED(hr) && iterable)
-                {
-                    if (SUCCEEDED(IIterable_Package_First( iterable, &iter )) && iter)
-                    {
-                        boolean has_cur = FALSE;
-                        while (SUCCEEDED(IIterator_Package_get_HasCurrent( iter, &has_cur )) && has_cur)
-                        {
-                            __x_ABI_CWindows_CApplicationModel_CIPackage *pkg = NULL;
-                            if (SUCCEEDED(IIterator_Package_get_Current( iter, &pkg )) && pkg)
-                            {
-                                __x_ABI_CWindows_CApplicationModel_CIPackageId *pkg_id = NULL;
-                                boolean is_fw = FALSE;
-                                __x_ABI_CWindows_CApplicationModel_CIPackage_get_IsFramework( pkg, &is_fw );
-                                if (SUCCEEDED(__x_ABI_CWindows_CApplicationModel_CIPackage_get_Id( pkg, &pkg_id )) && pkg_id)
-                                {
-                                    HSTRING hfull = NULL;
-                                    WCHAR disp[128] = {0}, name_buf[128] = {0}, ver_str[32] = {0};
-                                    const WCHAR *full_s = NULL;
-                                    BOOL fw_reg = is_fw;
-
-                                    __x_ABI_CWindows_CApplicationModel_CIPackageId_get_FullName( pkg_id, &hfull );
-                                    full_s = hfull ? WindowsGetStringRawBuffer( hfull, NULL ) : NULL;
-                                    if (full_s)
-                                    {
-                                        store_split_identity( full_s, name_buf, ARRAY_SIZE(name_buf), ver_str, ARRAY_SIZE(ver_str) );
-                                        store_query_reg_display_info( reg_mod, full_s, disp, ARRAY_SIZE(disp), &fw_reg );
-                                        store_add_catalog_item( &items, &count, &cap, full_s, disp, name_buf, ver_str, fw_reg );
-                                    }
-                                    if (hfull) WindowsDeleteString( hfull );
-                                    __x_ABI_CWindows_CApplicationModel_CIPackageId_Release( pkg_id );
-                                }
-                                __x_ABI_CWindows_CApplicationModel_CIPackage_Release( pkg );
-                            }
-                            if (FAILED(IIterator_Package_MoveNext( iter, &has_cur )) || !has_cur)
-                                break;
-                        }
-                        IIterator_Package_Release( iter );
-                    }
-                    IIterable_Package_Release( iterable );
-                }
-                IPackageManager_Release( pm );
-            }
-            IInspectable_Release( pm_insp );
-        }
-        WindowsDeleteString( pm_cls );
-    }
-
-    /* 2. Supplement / fallback from AppModel package registry keys */
-    if (reg_mod)
-    {
-        p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
-        p_RegEnumKeyExW_t p_enum = (p_RegEnumKeyExW_t)GetProcAddress( reg_mod, "RegEnumKeyExW" );
-        p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
-        if (p_open && p_enum && p_close)
-        {
-            static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
-            static const WCHAR *paths[] = {
-                L"Software\\Classes\\AppModel\\Repository\\Packages",
-                L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages",
-            };
-            size_t r, p;
-            for (r = 0; r < ARRAY_SIZE(roots); r++)
-            {
-                for (p = 0; p < ARRAY_SIZE(paths); p++)
-                {
-                    HKEY hk = NULL;
-                    DWORD idx = 0;
-                    if (p_open( roots[r], paths[p], 0, KEY_READ, &hk ) != ERROR_SUCCESS) continue;
-                    for (;; idx++)
-                    {
-                        WCHAR full[256], name[128], ver[32], disp[128] = {0};
-                        DWORD cch = ARRAY_SIZE(full);
-                        BOOL is_fw = FALSE;
-                        if (p_enum( hk, idx, full, &cch, NULL, NULL, NULL, NULL ) != ERROR_SUCCESS) break;
-                        store_split_identity( full, name, ARRAY_SIZE(name), ver, ARRAY_SIZE(ver) );
-                        store_query_reg_display_info( reg_mod, full, disp, ARRAY_SIZE(disp), &is_fw );
-                        store_add_catalog_item( &items, &count, &cap, full, disp, name, ver, is_fw );
-                    }
-                    p_close( hk );
-                }
-            }
-        }
-    }
-
-    /* Order non-framework apps before framework packages */
-    if (count > 1)
-    {
-        int i, j;
-        for (i = 0; i < count; i++)
-        {
-            if (items[i].is_framework)
-            {
-                for (j = i + 1; j < count; j++)
-                {
-                    if (!items[j].is_framework)
-                    {
-                        struct store_catalog_item tmp = items[i];
-                        items[i] = items[j];
-                        items[j] = tmp;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    TRACE( "store_query_installed_packages: discovered %d packages\n", count );
-    *out_items = items;
-    *out_count = count;
 }
 
 struct uwp_element *g_focused_textbox = NULL;
@@ -6219,10 +5955,11 @@ static const void *xbh_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
     [6] = xaml_reader_Load,  /* IXamlReaderStatics::Load(HSTRING, object**) */
     [7] = xaml_reader_Load,  /* IXamlReaderStatics::LoadWithInitialTemplateValidation(HSTRING, object**) */
+    [8 ... 10] = uwp_generic_noop,
     [11] = xbh_ConvertValue, /* slot 11: ConvertValue(TypeName, object, object**) */
+    [12 ... 31] = uwp_generic_noop,
 };
 struct xbh_factory_obj_s { const void *vtbl; } xbh_factory_obj = { xbh_vtbl };
 
