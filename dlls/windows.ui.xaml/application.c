@@ -87,6 +87,10 @@ static const GUID IID_IApplicationOverrides_WinUI =
     { 0xa33e81ef, 0xc665, 0x503b, { 0x88, 0x27, 0xd2, 0x7e, 0xf1, 0x72, 0x0a, 0x06 } };
 static const GUID IID_IApplicationOverrides_UWP =
     { 0x25f99ff7, 0x9347, 0x459a, { 0x9f, 0xac, 0xb2, 0xd0, 0xe1, 0x1c, 0x1a, 0x0f } };
+static const GUID IID_IXamlMetadataProvider_WinUI =
+    { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
+static const GUID IID_IXamlMetadataProvider_UWP =
+    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
 static const GUID IID_IWindowStatics_WinUI =
     { 0x8cc985e3, 0xa41a, 0x5df4, { 0xb5, 0x31, 0xd3, 0xa1, 0x78, 0x8d, 0x86, 0xc5 } };
 static const GUID IID_IWindowFactory_WinUI =
@@ -108,6 +112,7 @@ struct xaml_window
 {
     IInspectable IInspectable_iface;
     IInspectable IWindow2_iface;
+    IInspectable uwp_IWindow2_iface;
     IInspectable IWindow3_iface;
     IInspectable IWindowPrivate_iface;
     IInspectable ms_IWindow_iface;
@@ -2084,16 +2089,15 @@ static const GUID IID_IWindow2 =
     { 0x74b861a1, 0x7487, 0x46a9, { 0x9a, 0x6e, 0xc7, 0x8b, 0x51, 0x27, 0x26, 0xc5 } };
 static const GUID IID_IWindow2_WinUI =
     { 0x42febaa5, 0x1c32, 0x522a, { 0xa5, 0x91, 0x57, 0x61, 0x8c, 0x6f, 0x66, 0x5d } };
-static const GUID IID_IApplication_751b =
+/* Windows.UI.Xaml.IApplicationInitializationCallbackParams. */
+static const GUID IID_IApplicationInitializationCallbackParams_Mcg =
     { 0x751b792e, 0x5772, 0x4488, { 0x8b, 0x87, 0xf5, 0x47, 0xfa, 0xa6, 0x44, 0x74 } };
-static const GUID IID_IApplication_0191 =
+/* Mcg binder face for FrameworkElement; a mangled IFrameworkElement2
+ * ({f19104be-422a-4904-a52f-ee72010429e5}) GUID. Apps QI this exact value. */
+static const GUID IID_IFrameworkElement2_Mcg =
     { 0x019104be, 0x522a, 0x5904, { 0xf5, 0x2f, 0xde, 0x72, 0x01, 0x04, 0x29, 0xe0 } };
 static const GUID IID_IWindow_Mcg =
     { 0xb775ad7c, 0x18b8, 0x45ca, { 0xa1, 0xb0, 0xdc, 0x48, 0x3e, 0x4b, 0x10, 0x28 } };
-static const GUID IID_IWindow_f722dcc2 =
-    { 0xf722dcc2, 0x9827, 0x403d, { 0xaa, 0xed, 0xec, 0xca, 0x9a, 0xc1, 0x73, 0x98 } };
-static const GUID IID_IWindow_96061c05 =
-    { 0x96061c05, 0x2dba, 0x4d08, { 0xb0, 0xbd, 0x2b, 0x30, 0xa1, 0x31, 0xc6, 0xaa } };
 static const GUID IID_IComponentConnector_x =
     { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
 static const GUID IID_IComponentConnector_UWP =
@@ -3006,11 +3010,12 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
         !IsEqualGUID( iid, &IID_IApplication ) &&
         !IsEqualGUID( iid, &IID_IApplication_WinUI ) &&
         !IsEqualGUID( iid, &IID_IApplication_WinUI3 ) &&
-        !IsEqualGUID( iid, &IID_IApplication_751b ) &&
-        !IsEqualGUID( iid, &IID_IApplication_0191 ) &&
+        !IsEqualGUID( iid, &IID_IApplicationInitializationCallbackParams_Mcg ) &&
+        !IsEqualGUID( iid, &IID_IFrameworkElement2_Mcg ) &&
+        !IsEqualGUID( iid, &IID_IApplicationOverrides_WinUI ) &&
+        !IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) &&
+        !IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ) &&
         !IsEqualGUID( iid, &IID_IWindow_Mcg ) &&
-        !IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) &&
-        !IsEqualGUID( iid, &IID_IWindow_96061c05 ) &&
         !IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
         return IInspectable_QueryInterface( impl->outer, iid, out );
 
@@ -3021,7 +3026,8 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ))
+    if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ) ||
+        IsEqualGUID( iid, &IID_IApplicationOverrides_WinUI ))
     {
         *out = &impl->overrides_uwp_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -3033,11 +3039,9 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IApplication ) ||
         IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
-        IsEqualGUID( iid, &IID_IApplication_751b ) ||
-        IsEqualGUID( iid, &IID_IApplication_0191 ) ||
+        IsEqualGUID( iid, &IID_IApplicationInitializationCallbackParams_Mcg ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElement2_Mcg ) ||
         IsEqualGUID( iid, &IID_IWindow_Mcg ) ||
-        IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) ||
-        IsEqualGUID( iid, &IID_IWindow_96061c05 ) ||
         IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
     {
         *out = &impl->IApplication_iface;
@@ -3134,11 +3138,6 @@ static const struct application_extended_vtbl application_vtbl =
     }
 };
 
-static const GUID IID_IXamlMetadataProvider_WinUI =
-    { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
-static const GUID IID_IXamlMetadataProvider_UWP =
-    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
-
 static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REFIID iid, void **out );
 static ULONG WINAPI application_inner_AddRef( IInspectable *iface );
 static ULONG WINAPI application_inner_Release( IInspectable *iface );
@@ -3207,14 +3206,15 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ))
+    if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ) ||
+        IsEqualGUID( iid, &IID_IApplicationOverrides_WinUI ))
     {
         *out = &impl->overrides_uwp_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
 
-    if (!impl->outer && xaml_get_app_caps()->winui3 &&
+    if (xaml_get_app_caps()->winui3 &&
         (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
          IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP )))
     {
@@ -3227,11 +3227,9 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IApplication ) ||
         IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
-        IsEqualGUID( iid, &IID_IApplication_751b ) ||
-        IsEqualGUID( iid, &IID_IApplication_0191 ) ||
+        IsEqualGUID( iid, &IID_IApplicationInitializationCallbackParams_Mcg ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElement2_Mcg ) ||
         IsEqualGUID( iid, &IID_IWindow_Mcg ) ||
-        IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) ||
-        IsEqualGUID( iid, &IID_IWindow_96061c05 ) ||
         IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
     {
         *out = &impl->inner_iface;
@@ -3530,9 +3528,7 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IWindow ) ||
         IsEqualGUID( iid, &IID_IWindow_Alt ) ||
-        IsEqualGUID( iid, &IID_IWindow_Mcg ) ||
-        IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) ||
-        IsEqualGUID( iid, &IID_IWindow_96061c05 ))
+        IsEqualGUID( iid, &IID_IWindow_Mcg ))
     {
         *out = &impl->IInspectable_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -3568,15 +3564,13 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         }
     }
 
-    /* Windows.UI.Xaml.Window v2 (titlebar/Compositor contract, {d384759f-...}):
-     * TitleBar..ctor QIs Window.Current for it and casts the result to
-     * Windows.UI.Xaml.Window, so the returned face must answer that QI too. */
+    /* Windows.UI.Xaml.Window v2 (IWindow2: {d384759f-...}, slot 6 = SetTitleBar) */
     {
         static const GUID IID_IWindow_v2 =
             { 0xd384759f, 0x34f6, 0x4482, { 0x84, 0x35, 0xf5, 0x52, 0xf9, 0xb2, 0x4c, 0xc8 } };
         if (IsEqualGUID( iid, &IID_IWindow_v2 ))
         {
-            *out = &impl->ms_IWindow_iface;
+            *out = &impl->uwp_IWindow2_iface;
             IInspectable_AddRef( (IInspectable *)*out );
             return S_OK;
         }
@@ -5936,6 +5930,19 @@ static const void *xaml_window3_vtbl[] =
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 12..15 */
 };
 
+static HRESULT WINAPI xaml_window_setter_noop( void *iface, void *a2 );
+static const void *uwp_xaml_window2_vtbl[] =
+{
+    xaml_window3_QueryInterface,     /* 0 */
+    xaml_window3_AddRef,             /* 1 */
+    xaml_window3_Release,            /* 2 */
+    xaml_window2_GetIids,            /* 3 */
+    xaml_window2_GetRuntimeClassName,/* 4 */
+    xaml_window2_GetTrustLevel,      /* 5 */
+    xaml_window_setter_noop,         /* 6: SetTitleBar */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out,
+};
+
 static const void *xaml_window2_vtbl[] =
 {
     xaml_window2_QueryInterface,     /* 0 */
@@ -6354,6 +6361,7 @@ static struct xaml_window global_xaml_window =
 {
     .IInspectable_iface = {(const struct IInspectableVtbl *)&xaml_window_vtbl},
     .IWindow2_iface = {(const struct IInspectableVtbl *)xaml_window2_vtbl},
+    .uwp_IWindow2_iface = {(const struct IInspectableVtbl *)uwp_xaml_window2_vtbl},
     .IWindow3_iface = {(const struct IInspectableVtbl *)xaml_window3_vtbl},
     .IWindowPrivate_iface = {(const struct IInspectableVtbl *)xaml_window_private_vtbl},
     .ms_IWindow_iface = {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
@@ -6544,8 +6552,7 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
      * the same ActivateInstance creates, so the caller's Resources/Run slots
      * dispatch on the right vtable. */
     if (IsEqualGUID( iid, &IID_IApplication ) ||
-        IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
-        IsEqualGUID( iid, &IID_IApplication_751b ))
+        IsEqualGUID( iid, &IID_IApplication_WinUI ))
         return IActivationFactory_ActivateInstance( &impl->IActivationFactory_iface, (IInspectable **)out );
 
     if (IsEqualGUID( iid, &IID_IApplicationStatics ))
