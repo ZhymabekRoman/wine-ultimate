@@ -27,12 +27,15 @@
 #include "winnls.h"
 #include "wincontypes.h"
 #include "winternl.h"
+#include "ddk/wdm.h"
 
 #include "kernelbase.h"
 #include "wine/debug.h"
 #include "wine/condrv.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(process);
+
+static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
 static DWORD shutdown_flags = 0;
 static DWORD shutdown_priority = 0x280;
@@ -1286,6 +1289,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryInformationJobObject( HANDLE job, JOBOBJECTIN
  */
 BOOL WINAPI DECLSPEC_HOTPATCH IsProcessorFeaturePresent ( DWORD feature )
 {
+    if (feature < PROCESSOR_FEATURE_MAX) return !!user_shared_data->ProcessorFeatures[feature];
     return RtlIsProcessorFeaturePresent( feature );
 }
 

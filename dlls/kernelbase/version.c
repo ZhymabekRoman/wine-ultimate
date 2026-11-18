@@ -171,6 +171,7 @@ static const struct
  *
  */
 static RTL_OSVERSIONINFOEXW current_version;
+static DWORD cached_packed_version;  /* GetVersion() result, filled by init_current_version() */
 
 static BOOL CALLBACK init_current_version(PINIT_ONCE init_once, PVOID parameter, PVOID *context)
 {
@@ -257,6 +258,13 @@ done:
         current_version.dwMinorVersion = ver->minor;
         current_version.dwBuildNumber  = ver->build;
     }
+
+    /* cache the packed GetVersion() value once the manifest version-lie is applied */
+    cached_packed_version = MAKELONG( MAKEWORD( current_version.dwMajorVersion, current_version.dwMinorVersion ),
+                                      (current_version.dwPlatformId ^ 2) << 14 );
+    if (current_version.dwPlatformId == VER_PLATFORM_WIN32_NT)
+        cached_packed_version |= LOWORD( current_version.dwBuildNumber ) << 16;
+
     return TRUE;
 }
 
@@ -1460,7 +1468,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetProductInfo( DWORD os_major, DWORD os_minor,
 /***********************************************************************
  *         GetVersion   (kernelbase.@)
  */
-DWORD WINAPI GetVersion(void)
+static DWORD DECLSPEC_NOINLINE get_version_slow(void)
 {
     OSVERSIONINFOEXW info;
     DWORD result;
@@ -1474,6 +1482,14 @@ DWORD WINAPI GetVersion(void)
     if (info.dwPlatformId == VER_PLATFORM_WIN32_NT)
         result |= LOWORD(info.dwBuildNumber) << 16;
     return result;
+}
+
+DWORD WINAPI GetVersion(void)
+{
+    DWORD result = ReadNoFence( (const volatile LONG *)&cached_packed_version );
+
+    if (result) return result;
+    return get_version_slow();
 }
 
 
@@ -3328,9 +3344,11 @@ LONG WINAPI GetPackageApplicationIds( const WCHAR *family_name, GUID package_enu
 /***********************************************************************
  *         IsMrtResourceRedirectionEnabled   (kernelbase.@)
  */
-BOOL WINAPI IsMrtResourceRedirectionEnabled(void)
+HRESULT WINAPI IsMrtResourceRedirectionEnabled( const WCHAR *package_full_name, BOOL *enabled )
 {
-    return FALSE;
+    TRACE( "(%s, %p)\n", debugstr_w(package_full_name), enabled );
+    if (enabled) *enabled = TRUE;
+    return S_OK;
 }
 
 /***********************************************************************

@@ -216,7 +216,7 @@ static void *host_addr_space_limit;  /* top of the host virtual address space */
 static struct file_view *arm64ec_view;
 
 ULONG_PTR user_space_wow_limit = 0;
-struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
+struct _KUSER_SHARED_DATA *(user_shared_data) = (void *)0x7ffe0000;
 struct _KUSER_SHARED_DATA *user_shared_data_rw = NULL;
 
 /* TEB allocation blocks */

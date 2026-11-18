@@ -24,6 +24,9 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __x86_64__
+#include <emmintrin.h>
+#endif
 
 #include "ntstatus.h"
 #include "winsock2.h"
@@ -157,6 +160,38 @@ void WINAPI RtlCopyString( STRING *dst, const STRING *src )
 }
 
 
+#ifdef __x86_64__
+/* Fast path for the short strings that dominate string-heavy startup code.
+ *
+ * The probe uses 16-byte aligned loads, which never straddle a page boundary, so
+ * it cannot fault on a string ending close to the end of a page. It covers 32
+ * wide characters before handing over to the generic libc strlen implementation.
+ */
+static SIZE_T wcslen_probe( PCWSTR str )
+{
+    const __m128i zero = _mm_setzero_si128();
+    const char *base = (const char *)((ULONG_PTR)str & ~(ULONG_PTR)15);
+    SIZE_T lead = (SIZE_T)((ULONG_PTR)str & 15) / sizeof(WCHAR);
+    unsigned int block;
+
+    for (block = 0; block < 4; block++)
+    {
+        const __m128i v = _mm_load_si128( (const __m128i *)(base + 16 * block) );
+
+        if (_mm_movemask_epi8( _mm_cmpeq_epi8( v, zero )))
+        {
+            const WCHAR *w = (const WCHAR *)(base + 16 * block);
+            SIZE_T idx = block ? 0 : lead;
+
+            while (idx < 8 && w[idx]) idx++;
+            if (idx < 8) return (SIZE_T)block * 8 + idx - lead;  /* found the terminator */
+        }
+    }
+    return (SIZE_T)-1;  /* longer than the probe window */
+}
+#endif
+
+
 /**************************************************************************
  *      RtlInitUnicodeString   (NTDLL.@)
  *
@@ -176,7 +211,15 @@ void WINAPI RtlInitUnicodeString(
 {
     if ((target->Buffer = (PWSTR) source))
     {
-        unsigned int length = wcslen(source) * sizeof(WCHAR);
+        SIZE_T chars = 0;
+        unsigned int length;
+
+#ifdef __x86_64__
+        if ((chars = wcslen_probe( source )) == (SIZE_T)-1)
+#endif
+            chars = wcslen( source );
+
+        length = (unsigned int)(chars * sizeof(WCHAR));
         if (length > 0xfffc)
             length = 0xfffc;
         target->Length = length;
@@ -444,11 +487,44 @@ BOOLEAN WINAPI RtlEqualString( const STRING *s1, const STRING *s2, BOOLEAN CaseI
  *
  * Unicode version of RtlEqualString.
  */
+#ifdef __x86_64__
+/* Compare the byte counts that fit in a single vector/word load. Reading exactly
+ * Length bytes is page safe, so unaligned 16-byte loads are fine here.
+ */
+static inline BOOL equal_short_string( const WCHAR *a, const WCHAR *b, unsigned int bytes )
+{
+    switch (bytes)
+    {
+    case 0:  return TRUE;
+    case 2:  return *(const UINT16 *)a == *(const UINT16 *)b;
+    case 4:  return *(const UINT32 *)a == *(const UINT32 *)b;
+    case 8:  return *(const UINT64 *)a == *(const UINT64 *)b;
+    case 16: return _mm_movemask_epi8( _mm_cmpeq_epi8( _mm_loadu_si128( (const __m128i *)a ),
+                                                       _mm_loadu_si128( (const __m128i *)b ))) == 0xffff;
+    default: return !memcmp( a, b, bytes );
+    }
+}
+#endif
+
+
+/**************************************************************************
+ *	RtlEqualUnicodeString   (NTDLL.@)
+ *
+ * Unicode version of RtlEqualString.
+ */
 BOOLEAN WINAPI RtlEqualUnicodeString( const UNICODE_STRING *s1, const UNICODE_STRING *s2,
                                       BOOLEAN CaseInsensitive )
 {
     if (s1->Length != s2->Length) return FALSE;
     if (s1->Buffer == s2->Buffer) return TRUE;
+#ifdef __x86_64__
+    if (s1->Length <= 16)
+    {
+        if (equal_short_string( s1->Buffer, s2->Buffer, s1->Length )) return TRUE;
+        if (!CaseInsensitive) return FALSE;
+        return !RtlCompareUnicodeString( s1, s2, CaseInsensitive );
+    }
+#endif
     if (!CaseInsensitive) return !memcmp( s1->Buffer, s2->Buffer, s1->Length );
     if (!memcmp( s1->Buffer, s2->Buffer, s1->Length )) return TRUE;
     return !RtlCompareUnicodeString( s1, s2, CaseInsensitive );

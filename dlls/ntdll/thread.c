@@ -35,6 +35,8 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 WINE_DECLARE_DEBUG_CHANNEL(pid);
 WINE_DECLARE_DEBUG_CHANNEL(timestamp);
 
+/* parenthesized declarator: keep the global alive next to the user_shared_data macro */
+#undef user_shared_data
 struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
 
 struct debug_info

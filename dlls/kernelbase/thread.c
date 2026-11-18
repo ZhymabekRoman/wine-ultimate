@@ -801,29 +801,30 @@ LPVOID WINAPI DECLSPEC_HOTPATCH TlsGetValue( DWORD index )
 /**********************************************************************
  *           TlsSetValue   (kernelbase.@)
  */
+/* cold path: lazily create the expansion slot array for indices >= 64 */
+static BOOL DECLSPEC_NOINLINE tls_set_value_expand( DWORD index, LPVOID value )
+{
+    index -= TLS_MINIMUM_AVAILABLE;
+    if (index >= 8 * sizeof(NtCurrentTeb()->Peb->TlsExpansionBitmapBits))
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (!NtCurrentTeb()->TlsExpansionSlots &&
+        !(NtCurrentTeb()->TlsExpansionSlots = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY,
+                     8 * sizeof(NtCurrentTeb()->Peb->TlsExpansionBitmapBits) * sizeof(void*) )))
+    {
+        SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+        return FALSE;
+    }
+    NtCurrentTeb()->TlsExpansionSlots[index] = value;
+    return TRUE;
+}
+
 BOOL WINAPI DECLSPEC_HOTPATCH TlsSetValue( DWORD index, LPVOID value )
 {
-    if (index < TLS_MINIMUM_AVAILABLE)
-    {
-        NtCurrentTeb()->TlsSlots[index] = value;
-    }
-    else
-    {
-        index -= TLS_MINIMUM_AVAILABLE;
-        if (index >= 8 * sizeof(NtCurrentTeb()->Peb->TlsExpansionBitmapBits))
-        {
-            SetLastError( ERROR_INVALID_PARAMETER );
-            return FALSE;
-        }
-        if (!NtCurrentTeb()->TlsExpansionSlots &&
-            !(NtCurrentTeb()->TlsExpansionSlots = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY,
-                         8 * sizeof(NtCurrentTeb()->Peb->TlsExpansionBitmapBits) * sizeof(void*) )))
-        {
-            SetLastError( ERROR_NOT_ENOUGH_MEMORY );
-            return FALSE;
-        }
-        NtCurrentTeb()->TlsExpansionSlots[index] = value;
-    }
+    if (index < TLS_MINIMUM_AVAILABLE) NtCurrentTeb()->TlsSlots[index] = value;
+    else if (!tls_set_value_expand( index, value )) return FALSE;
     return TRUE;
 }
 

@@ -34,7 +34,6 @@
 #include "wine/debug.h"
 #include "wine/list.h"
 #include "ntdll_misc.h"
-#include "inline_patch.h"
 #include "ddk/ntddk.h"
 #include "ddk/wdm.h"
 
@@ -1311,14 +1310,6 @@ static BOOL import_dll( WINE_MODREF *wm, const IMAGE_IMPORT_DESCRIPTOR *descr, L
         {
             IMAGE_IMPORT_BY_NAME *pe_name;
             pe_name = get_rva( module, (DWORD)import_list->u1.AddressOfData );
-#ifdef __x86_64__
-            if (is_module_eligible_for_inline_patch( wm->ldr.BaseDllName.Buffer, module ))
-                thunk_list->u1.Function = get_fast_iat_trampoline( (const char *)pe_name->Name );
-            else
-                thunk_list->u1.Function = 0;
-
-            if (!thunk_list->u1.Function)
-#endif
             thunk_list->u1.Function = (ULONG_PTR)find_named_export( imp_mod, exports, exp_size,
                                                                     (const char*)pe_name->Name,
                                                                     pe_name->Hint, load_path, wm, FALSE );
@@ -2201,13 +2192,6 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
                           : find_ordinal_export( module, exports, exp_size, ord - exports->Base, NULL, wm, TRUE );
         if (proc)
         {
-#ifdef __x86_64__
-            if (name && is_module_eligible_for_inline_patch( wm->ldr.BaseDllName.Buffer, module ))
-            {
-                ULONG_PTR fast_tramp = get_fast_iat_trampoline( name->Buffer );
-                if (fast_tramp) proc = (void *)fast_tramp;
-            }
-#endif
             *address = proc;
             ret = STATUS_SUCCESS;
             TRACE( "%s (ordinal %lu) found in %s -> %p\n", debugstr_a( name ? name->Buffer : NULL ),
@@ -4869,19 +4853,6 @@ void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIP
     pINT = get_rva(base, desc->ImportNameTableRVA);
     name = get_rva(base, desc->DllNameRVA);
     id = addr - pIAT;
-
-#ifdef __x86_64__
-    if (!IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal))
-    {
-        const IMAGE_IMPORT_BY_NAME* iibn = get_rva(base, pINT[id].u1.AddressOfData);
-        ULONG_PTR fast_tramp = get_fast_iat_trampoline((const char *)iibn->Name);
-        if (fast_tramp)
-        {
-            pIAT[id].u1.Function = fast_tramp;
-            return (void *)fast_tramp;
-        }
-    }
-#endif
 
     if (!*phmod)
     {

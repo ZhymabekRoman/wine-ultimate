@@ -99,7 +99,11 @@ extern const WCHAR windows_dir[];
 
 extern void (FASTCALL *pBaseThreadInitThunk)(DWORD,LPTHREAD_START_ROUTINE,void *);
 
-extern struct _KUSER_SHARED_DATA *user_shared_data;
+/* Shared user data is a fixed address; using a literal pointer lets the compiler
+ * fold the memory operands into rip-relative displacements and drop the load of
+ * the global variable from every access. Keep the definition in thread.c for the
+ * translation units that take the address of the variable itself. */
+#define user_shared_data ((const volatile struct _KUSER_SHARED_DATA *)0x7ffe0000)
 
 #ifdef _WIN64
 static inline TEB64 *NtCurrentTeb64(void) { return NULL; }

@@ -465,8 +465,8 @@ NTSTATUS WINAPI RtlLeaveCriticalSection( RTL_CRITICAL_SECTION *crit )
 /******************************************************************
  *              RtlRunOnceExecuteOnce (NTDLL.@)
  */
-DWORD WINAPI RtlRunOnceExecuteOnce( RTL_RUN_ONCE *once, PRTL_RUN_ONCE_INIT_FN func,
-                                    void *param, void **context )
+static DWORD DECLSPEC_NOINLINE run_once_execute_slow( RTL_RUN_ONCE *once, PRTL_RUN_ONCE_INIT_FN func,
+                                                      void *param, void **context )
 {
     DWORD ret = RtlRunOnceBeginInitialize( once, 0, context );
 
@@ -479,6 +479,20 @@ DWORD WINAPI RtlRunOnceExecuteOnce( RTL_RUN_ONCE *once, PRTL_RUN_ONCE_INIT_FN fu
     }
 
     return RtlRunOnceComplete( once, 0, context ? *context : NULL );
+}
+
+DWORD WINAPI RtlRunOnceExecuteOnce( RTL_RUN_ONCE *once, PRTL_RUN_ONCE_INIT_FN func,
+                                    void *param, void **context )
+{
+    ULONG_PTR val = (ULONG_PTR)ReadPointerAcquire( &once->Ptr );
+
+    if ((val & 3) == 2)  /* already completed, no server round trip and no waiter list */
+    {
+        if (context) *context = (void *)(val & ~3);
+        return STATUS_SUCCESS;
+    }
+
+    return run_once_execute_slow( once, func, param, context );
 }
 
 struct srw_lock

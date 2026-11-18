@@ -380,6 +380,14 @@ LONGLONG WINAPI RtlGetSystemTimePrecise( void )
 }
 
 /******************************************************************************
+ *  RtlQueryPerformanceCounter fallback (server round trip) slow helper.
+ */
+static void DECLSPEC_NOINLINE qpc_query_fallback( LARGE_INTEGER *counter )
+{
+    NtQueryPerformanceCounter( counter, NULL );
+}
+
+/******************************************************************************
  *  RtlQueryPerformanceCounter   [NTDLL.@]
  */
 BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter )
@@ -403,7 +411,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter
         return TRUE;
     }
 #endif
-    NtQueryPerformanceCounter( counter, NULL );
+    qpc_query_fallback( counter );
     return TRUE;
 }
 

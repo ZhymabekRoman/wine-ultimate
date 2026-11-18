@@ -643,6 +643,15 @@ DWORD WINAPI GetActiveProcessorCount(WORD group)
 
     TRACE("(0x%x)\n", group);
 
+    if (group == 0 || group == ALL_PROCESSOR_GROUPS)
+    {
+        ULONG active = user_shared_data->ActiveProcessorCount;
+
+        if (group == 0) return active;
+        /* a group holds at most 64 CPUs, so a larger total means more than one group */
+        if (active && active <= 64) return active;
+    }
+
     if (!(info = get_logical_processor_info())) return 0;
 
     if (group == ALL_PROCESSOR_GROUPS)

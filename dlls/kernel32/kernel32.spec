@@ -1217,8 +1217,8 @@
 @ stdcall -import QueryMemoryResourceNotification(ptr ptr)
 @ stub QueryNumberOfEventLogRecords
 @ stub QueryOldestEventLogRecord
-@ stdcall -import QueryPerformanceCounter(ptr)
-@ stdcall -import QueryPerformanceFrequency(ptr)
+@ stdcall QueryPerformanceCounter(ptr) RtlQueryPerformanceCounter
+@ stdcall QueryPerformanceFrequency(ptr) RtlQueryPerformanceFrequency
 # @ stub QueryProcessAffinityUpdateMode
 @ stdcall -import QueryProcessCycleTime(long ptr)
 @ stdcall -import QueryThreadCycleTime(long ptr)

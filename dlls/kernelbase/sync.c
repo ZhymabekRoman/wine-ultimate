@@ -1782,10 +1782,24 @@ BOOL WINAPI DECLSPEC_HOTPATCH InitOnceComplete( INIT_ONCE *once, DWORD flags, vo
 /***********************************************************************
  *           InitOnceExecuteOnce    (kernelbase.@)
  */
+static BOOL DECLSPEC_NOINLINE init_once_execute_slow( INIT_ONCE *once, PINIT_ONCE_FN func,
+                                                      void *param, void **context )
+{
+    return !RtlRunOnceExecuteOnce( once, (PRTL_RUN_ONCE_INIT_FN)func, param, context );
+}
+
 BOOL WINAPI DECLSPEC_HOTPATCH InitOnceExecuteOnce( INIT_ONCE *once, PINIT_ONCE_FN func,
                                                    void *param, void **context )
 {
-    return !RtlRunOnceExecuteOnce( once, (PRTL_RUN_ONCE_INIT_FN)func, param, context );
+    ULONG_PTR val = (ULONG_PTR)ReadPointerAcquire( &once->Ptr );
+
+    if ((val & 3) == 2)  /* already completed, no call into ntdll needed */
+    {
+        if (context) *context = (void *)(val & ~3);
+        return TRUE;
+    }
+
+    return init_once_execute_slow( once, func, param, context );
 }
 
 #ifdef __i386__
