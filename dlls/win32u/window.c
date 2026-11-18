@@ -3515,6 +3515,36 @@ static BOOL apply_window_pos( HWND hwnd, HWND insert_after, UINT swp_flags, stru
 
     release_win_ptr( win );
 
+    /* Content bridges and other children pinned to the parent's client origin
+     * follow the parent client rect, the way island windows do on Windows. */
+    if (ret && !(swp_flags & SWP_HIDEWINDOW))
+    {
+        HWND parent = NtUserGetAncestor( hwnd, GA_PARENT );
+
+        if (parent)
+        {
+            RECT pclient;
+            struct window_rects sr;
+            LONG w, h;
+            HWND sib;
+
+            get_client_rect_rel( parent, COORDS_CLIENT, &pclient, get_thread_dpi() );
+            w = pclient.right - pclient.left;
+            h = pclient.bottom - pclient.top;
+            for (sib = hwnd; sib; sib = NtUserGetWindowRelative( sib, GW_HWNDNEXT ))
+            {
+                get_window_rects( sib, COORDS_CLIENT, &sr, get_thread_dpi() );
+                if (sr.window.left == pclient.left && sr.window.top == pclient.top &&
+                    (sr.window.right - sr.window.left < w || sr.window.bottom - sr.window.top < h))
+                {
+                    TRACE( "fill sib %p of parent %p to %ldx%ld\n", sib, parent, w, h );
+                    NtUserSetWindowPos( sib, 0, pclient.left, pclient.top, w, h,
+                                        SWP_NOZORDER | SWP_NOACTIVATE );
+                }
+            }
+        }
+    }
+
     if (ret)
     {
         TRACE( "win %p surface %p -> %p\n", hwnd, old_surface, new_surface );
@@ -5204,6 +5234,34 @@ BOOL set_window_pos( WINDOWPOS *winpos, int parent_x, int parent_y )
         goto done;
     }
     if (surface) window_surface_release( surface );
+
+    /* Windows sends WM_SIZE and WM_MOVE from SetWindowPos on every geometry
+     * change, not only from the initial show; custom window procs that don't
+     * chain through DefWindowProc rely on receiving them directly. */
+    if (!(winpos->flags & SWP_HIDEWINDOW))
+    {
+        if (!(winpos->flags & SWP_NOSIZE) &&
+            (old_rects.client.right - old_rects.client.left != new_rects.client.right - new_rects.client.left ||
+             old_rects.client.bottom - old_rects.client.top != new_rects.client.bottom - new_rects.client.top))
+        {
+            UINT style = get_window_long( winpos->hwnd, GWL_STYLE );
+            WPARAM wp = SIZE_RESTORED;
+            LPARAM lp = MAKELPARAM( new_rects.client.right - new_rects.client.left,
+                                    new_rects.client.bottom - new_rects.client.top );
+            if (style & WS_MAXIMIZE) wp = SIZE_MAXIMIZED;
+            else if (style & WS_MINIMIZE) { wp = SIZE_MINIMIZED; lp = 0; }
+            fprintf( stderr, "XWID wmsize hwnd=%p %ldx%ld flags=%08x\n", winpos->hwnd,
+                     new_rects.client.right - new_rects.client.left,
+                     new_rects.client.bottom - new_rects.client.top, winpos->flags );
+            NtUserPostMessage( winpos->hwnd, WM_SIZE, wp, lp );
+        }
+        if (!(winpos->flags & SWP_NOMOVE) &&
+            (old_rects.window.left != new_rects.window.left ||
+             old_rects.window.top != new_rects.window.top))
+            send_message( winpos->hwnd, WM_MOVE, 0,
+                          MAKELPARAM( new_rects.client.left, new_rects.client.top ));
+
+    }
 
     if (winpos->flags & SWP_HIDEWINDOW)
     {

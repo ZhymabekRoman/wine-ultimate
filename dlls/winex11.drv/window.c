@@ -1601,6 +1601,8 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
     UINT old_state = data->pending_state.wm_state;
     HWND foreground = NtUserGetForegroundWindow();
 
+    fprintf(stderr, "XWID state hwnd=%p old=%u new=%u managed=%u whole=%08lx\n",
+            data->hwnd, old_state, new_state, data->managed, data->whole_window );
     data->desired_state.wm_state = new_state;
     data->desired_state.activate = activate;
     if (!data->whole_window) return; /* no window, nothing to update */
@@ -2500,6 +2502,8 @@ static void create_whole_window( struct x11drv_win_data *data )
 
     XSaveContext( data->display, data->whole_window, winContext, (char *)data->hwnd );
     NtUserSetProp( data->hwnd, whole_window_prop, (HANDLE)data->whole_window );
+    fprintf(stderr, "XWID whole hwnd=%p whole=%08lx managed=%u\n",
+            data->hwnd, data->whole_window, data->managed );
 
     /* set the window text */
     if (!NtUserInternalGetWindowText( data->hwnd, text, ARRAY_SIZE( text ))) text[0] = 0;
@@ -2529,6 +2533,8 @@ done:
 static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_destroyed )
 {
     TRACE( "win %p xwin %lx/%lx\n", data->hwnd, data->whole_window, data->client_window );
+    fprintf(stderr, "XWID destroy hwnd=%p whole=%08lx client=%08lx\n",
+            data->hwnd, data->whole_window, data->client_window );
 
     if (!data->whole_window)
     {
@@ -2887,7 +2893,7 @@ static struct x11drv_win_data *X11DRV_create_win_data( HWND hwnd, const struct w
     struct x11drv_win_data *data;
     HWND parent;
 
-    if (!(parent = NtUserGetAncestor( hwnd, GA_PARENT ))) return NULL;  /* desktop */
+    if (!(parent = NtUserGetAncestor( hwnd, GA_PARENT ))) parent = NtUserGetDesktopWindow();
 
     /* don't create win data for HWND_MESSAGE windows */
     if (parent != NtUserGetDesktopWindow() && !NtUserGetAncestor( parent, GA_PARENT )) return NULL;
@@ -3309,9 +3315,14 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     struct window_rects old_rects;
     BOOL is_managed, was_fullscreen, activate = !(swp_flags & SWP_NOACTIVATE), fullscreen = !!(swp_flags & WINE_SWP_FULLSCREEN);
 
+    fprintf(stderr, "XWID wpc hwnd=%p managed=%u swp=%08x style=%08x ex=%08x parent=%p data=%p w=%ldx%ld\n",
+            hwnd, is_managed, swp_flags, NtUserGetWindowLongW( hwnd, GWL_STYLE ),
+            NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ), NtUserGetAncestor( hwnd, GA_PARENT ),
+            get_win_data( hwnd ), new_rects ? new_rects->window.right - new_rects->window.left : 0,
+            new_rects ? new_rects->window.bottom - new_rects->window.top : 0 );
     if ((is_managed = is_window_managed( hwnd, swp_flags, fullscreen ))) make_owner_managed( hwnd );
 
-    if (!(data = get_win_data( hwnd ))) return;
+    if (!(data = get_win_data( hwnd )) && !(data = X11DRV_create_win_data( hwnd, new_rects ))) return;
     if (is_managed) window_set_managed( data, TRUE );
 
     old_rects = data->rects;
@@ -3343,8 +3354,14 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 
     if (!data->whole_window)
     {
-        release_win_data( data );
-        return;
+        /* window became a toplevel after its win data was created (SetParent-less
+           promote, e.g. an MFC frame recreated as child): create the X window now */
+        if (!NtUserGetAncestor( hwnd, GA_PARENT )) create_whole_window( data );
+        else
+        {
+            release_win_data( data );
+            return;
+        }
     }
 
     /* don't change position if we are about to minimize or maximize a managed window */
