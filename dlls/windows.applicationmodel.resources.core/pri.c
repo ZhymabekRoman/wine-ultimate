@@ -128,8 +128,8 @@ struct pri_index
     BYTE *value_types;            /* decoded resource value type table */
     UINT32 value_type_count;
 
-    WORD *item_decision;          /* [item index] -> decision, 0xffff = none */
-    WORD *item_firstcand;         /* [item index] -> first candidate index */
+    DWORD *item_decision;         /* [item index] -> decision, 0xffffffff = none */
+    DWORD *item_firstcand;        /* [item index] -> first candidate index */
 
     struct pri_qualinfo *quals;
     UINT32 qual_count;
@@ -550,12 +550,13 @@ static BOOL parse_resmap( pri_index *idx )
         return FALSE;
     if (!(idx->item_decision = HeapAlloc( GetProcessHeap(), 0, idx->item_count * sizeof(*idx->item_decision) )))
         return FALSE;
-    for (i = 0; i < idx->item_count; i++) idx->item_decision[i] = idx->item_firstcand[i] = 0xffff;
+    for (i = 0; i < idx->item_count; i++) idx->item_decision[i] = idx->item_firstcand[i] = 0xffffffff;
 
     {
         const BYTE *i2g  = d + pos;
         const BYTE *grp  = i2g + n2g * 4;
         const BYTE *info = grp + ngrp * 4;
+        DWORD large_sz = get32( d + 28 );
         for (i = 0; i < n2g; i++)
         {
             WORD first_item = get16( i2g + i * 4 );
@@ -573,7 +574,60 @@ static BOOL parse_resmap( pri_index *idx )
                 idx->item_firstcand[item] = get16( info + ii * 4 + 2 );
             }
         }
-        pos += n2g * 4 + ngrp * 4 + ninfo * 4 + get32( d + 28 );
+        pos += n2g * 4 + ngrp * 4 + ninfo * 4;
+        if (large_sz >= 12)
+        {
+            const BYTE *ld = d + pos;
+            DWORD ln2g = get32( ld );
+            DWORD lngrp = get32( ld + 4 );
+            DWORD lninfo = get32( ld + 8 );
+            if (12 + (UINT64)ln2g * 8 + (UINT64)lngrp * 8 + (UINT64)lninfo * 8 <= large_sz)
+            {
+                const BYTE *li2g = ld + 12;
+                const BYTE *lgrp = li2g + ln2g * 8;
+                const BYTE *linfo = lgrp + lngrp * 8;
+                for (i = 0; i < ln2g; i++)
+                {
+                    DWORD first_item = get32( li2g + i * 8 );
+                    DWORD gidx = get32( li2g + i * 8 + 4 );
+                    DWORD gsize, gfirst, j;
+                    if (gidx >= ngrp && gidx - ngrp < lngrp)
+                    {
+                        gsize = get32( lgrp + (gidx - ngrp) * 8 );
+                        gfirst = get32( lgrp + (gidx - ngrp) * 8 + 4 );
+                    }
+                    else if (gidx < ngrp)
+                    {
+                        gsize = get16( grp + gidx * 4 );
+                        gfirst = get16( grp + gidx * 4 + 2 );
+                    }
+                    else
+                    {
+                        gsize = 1;
+                        gfirst = gidx - ngrp - lngrp;
+                    }
+                    for (j = 0; j < gsize; j++)
+                    {
+                        DWORD item = first_item + j;
+                        DWORD ii = gfirst + j;
+                        if (item >= idx->item_count) continue;
+                        if (ii >= ninfo && ii - ninfo < lninfo)
+                        {
+                            idx->item_decision[item]  = get32( linfo + (ii - ninfo) * 8 );
+                            idx->item_firstcand[item] = get32( linfo + (ii - ninfo) * 8 + 4 );
+                        }
+                        else if (ii < ninfo)
+                        {
+                            WORD d16 = get16( info + ii * 4 );
+                            WORD c16 = get16( info + ii * 4 + 2 );
+                            idx->item_decision[item]  = (d16 == 0xffff) ? 0xffffffff : d16;
+                            idx->item_firstcand[item] = (c16 == 0xffff) ? 0xffffffff : c16;
+                        }
+                    }
+                }
+            }
+        }
+        pos += large_sz;
     }
 
     if (ncand && !(idx->cands = HeapAlloc( GetProcessHeap(), 0, ncand * sizeof(*idx->cands) ))) return FALSE;
@@ -897,12 +951,25 @@ static BOOL better_cand( pri_index *idx, WORD qs_a, WORD qs_b, const pri_qual *c
     return FALSE;
 }
 
+static BOOL pri_name_eq( const WCHAR *a, const WCHAR *b )
+{
+    while (*a && *b)
+    {
+        WCHAR ca = (*a == '/') ? '\\' : towlower( *a );
+        WCHAR cb = (*b == '/') ? '\\' : towlower( *b );
+        if (ca != cb) return FALSE;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
 static WORD find_item_by_name( pri_index *idx, const WCHAR *key )
 {
     UINT32 i;
 
     for (i = 0; i < idx->item_count; i++)
-        if (!wcsicmp( idx->items[i]->fullname, key )) return (WORD)i;
+        if (pri_name_eq( idx->items[i]->fullname, key )) return (WORD)i;
     return 0xffff;
 }
 
@@ -910,7 +977,8 @@ static BOOL resolve_item( pri_index *idx, WORD item, const pri_qual *ctx, UINT32
                           WCHAR *name_buf, DWORD name_len, WCHAR **value_out,
                           pri_qual **quals_out, UINT32 *qcount_out )
 {
-    WORD dec, fc, best = 0xffff, best_qs = 0xffff, j, k;
+    WORD best = 0xffff, best_qs = 0xffff, j, k;
+    DWORD dec, fc;
     const struct pri_cand *c;
     pri_qual *qs = NULL;
     WCHAR *value = NULL;
@@ -924,7 +992,7 @@ static BOOL resolve_item( pri_index *idx, WORD item, const pri_qual *ctx, UINT32
 
     dec = idx->item_decision[item];
     fc  = idx->item_firstcand[item];
-    if (dec == 0xffff || dec >= idx->dec_count || fc == 0xffff) return FALSE;
+    if (dec == 0xffffffff || dec >= idx->dec_count || fc == 0xffffffff) return FALSE;
 
     for (j = 0; j < idx->dec_n[dec]; j++)
     {

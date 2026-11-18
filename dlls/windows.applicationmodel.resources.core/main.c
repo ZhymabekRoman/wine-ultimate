@@ -3493,6 +3493,7 @@ static HRESULT WINAPI mapview_HasKey( void *iface, HSTRING key, boolean *found )
     }
     else if (builtin_find( full[0] ? full : raw ))
         *found = TRUE;
+    TRACE( "mapview_HasKey: full=%s found=%d (idx=%p)\n", debugstr_w(full), *found, the_index );
     key_release( tmp, owned );
     return S_OK;
 }

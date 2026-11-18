@@ -907,6 +907,58 @@ static const void *sprite_visual2_vtbl[] =
     sprite_visual2_put_Shadow,
 };
 
+static HRESULT WINAPI visual3_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual3_iface );
+    return visual_QueryInterface( &impl->IVisual_iface, iid, out );
+}
+static ULONG WINAPI visual3_AddRef( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual3_iface );
+    return visual_AddRef( &impl->IVisual_iface );
+}
+static ULONG WINAPI visual3_Release( void *iface )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual3_iface );
+    return visual_Release( &impl->IVisual_iface );
+}
+static HRESULT WINAPI visual3_GetIids( void *iface, ULONG *c, IID **i )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual3_iface );
+    return visual_GetIids( &impl->IVisual_iface, c, i );
+}
+static HRESULT WINAPI visual3_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual3_iface );
+    return visual_GetRuntimeClassName( &impl->IVisual_iface, n );
+}
+static HRESULT WINAPI visual3_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    struct visual *impl = CONTAINING_RECORD( iface, struct visual, IVisual3_iface );
+    return visual_GetTrustLevel( &impl->IVisual_iface, l );
+}
+static HRESULT WINAPI visual3_stub( void *iface )
+{
+    return S_OK;
+}
+static const void *visual3_vtbl[] =
+{
+    visual3_QueryInterface,
+    visual3_AddRef,
+    visual3_Release,
+    visual3_GetIids,
+    visual3_GetRuntimeClassName,
+    visual3_GetTrustLevel,
+    visual3_stub,
+    visual3_stub,
+    visual3_stub,
+    visual3_stub,
+    visual3_stub,
+    visual3_stub,
+    visual3_stub,
+    visual3_stub,
+};
+
 static HRESULT WINAPI visual_obj2_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct visual *impl = CONTAINING_RECORD( iface, struct visual, ICompositionObject2_iface );
@@ -992,7 +1044,7 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
     impl->IShapeVisual_iface.lpVtbl = (const struct IInspectableVtbl *)shape_visual_vtbl;
     impl->IRedirectVisual_iface.lpVtbl = (const struct IInspectableVtbl *)redirect_visual_vtbl;
     impl->IVisual2_iface.lpVtbl = (const struct IInspectableVtbl *)visual2_vtbl;
-    impl->IVisual3_iface.lpVtbl = (const struct IInspectableVtbl *)visual2_vtbl;
+    impl->IVisual3_iface.lpVtbl = (const struct IInspectableVtbl *)visual3_vtbl;
     impl->ISpriteVisual2_iface.lpVtbl = (const struct IInspectableVtbl *)sprite_visual2_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &visual_object_vtbl;
     impl->ICompositionObject2_iface.lpVtbl = (const struct IInspectableVtbl *)visual_obj2_vtbl;

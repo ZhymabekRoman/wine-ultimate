@@ -266,7 +266,7 @@ static struct { const void **vtbl; } cpath_factory_obj = { cpath_factory_vtbl };
 
 HRESULT WINAPI DllCanUnloadNow( void )
 {
-    return S_OK;
+    return S_FALSE;
 }
 
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
