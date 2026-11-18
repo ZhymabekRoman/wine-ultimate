@@ -1377,8 +1377,8 @@ static BOOL win_tree_shm_build_hwnd_list( HDESK desktop, HWND hwnd, BOOL childre
 
 /* Resolve a FindWindowEx class name to a server class atom without a round trip.
  * Integral atoms (both int resources and "#NNNN" strings) are known client side;
- * plain string names have to be looked up in the server atom table, so they need
- * the get_class_windows request. */
+ * plain string names are matched via win_tree_atom_cache populated on demand
+ * from get_user_atom_name. */
 static BOOL win_tree_shm_class_atom( UNICODE_STRING *class, atom_t *atom )
 {
     const WCHAR *ptr, *end;
@@ -1396,13 +1396,14 @@ static BOOL win_tree_shm_class_atom( UNICODE_STRING *class, atom_t *atom )
 
     end = class->Buffer + class->Length / sizeof(WCHAR);
     ptr = class->Buffer;
-    if (*ptr != '#') return FALSE; /* string name, needs the server */
+    if (*ptr != '#') return FALSE; /* string name */
     ptr++;
     if (ptr >= end) return FALSE;
     while (ptr < end)
     {
         if (*ptr < '0' || *ptr > '9') return FALSE;
         value = value * 10 + (*ptr - '0');
+        if (value >= MAXINTATOM) return FALSE;
         ptr++;
     }
     if (!value) return FALSE;
@@ -1410,94 +1411,231 @@ static BOOL win_tree_shm_class_atom( UNICODE_STRING *class, atom_t *atom )
     return TRUE;
 }
 
-/* Filter a list of child windows by class atom, mirroring the get_class_windows
- * server request on the shared memory copy of the window tree. Returns FALSE
- * when the snapshot cannot answer the query and the caller must use the RPC. */
+#define WIN_TREE_ATOM_HASH_SIZE 256
+
+struct win_tree_atom_entry
+{
+    struct win_tree_atom_entry *next;
+    uint32_t atom;
+    uint32_t hash;
+    USHORT   len;
+    WCHAR    name[1];
+};
+
+static struct win_tree_atom_entry *win_tree_atom_buckets[WIN_TREE_ATOM_HASH_SIZE];
+static pthread_rwlock_t win_tree_atom_lock = PTHREAD_RWLOCK_INITIALIZER;
+
+static inline uint32_t win_tree_hash_wstr( const WCHAR *str, USHORT len )
+{
+    uint32_t h = 2166136261U;
+    USHORT i;
+
+    for (i = 0; i < len; i++)
+    {
+        WCHAR c = str[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        else if (c >= 0x80) c = RtlDowncaseUnicodeChar( c );
+        h ^= (uint32_t)c;
+        h *= 16777619U;
+    }
+    return h;
+}
+
+static const struct win_tree_atom_entry *win_tree_atom_lookup_locked( uint32_t atom )
+{
+    const struct win_tree_atom_entry *e = win_tree_atom_buckets[atom & (WIN_TREE_ATOM_HASH_SIZE - 1)];
+
+    while (e)
+    {
+        if (e->atom == atom) return e;
+        e = e->next;
+    }
+    return NULL;
+}
+
+static BOOL win_tree_atom_fetch( const uint32_t *atoms, int count )
+{
+    int i;
+
+    for (i = 0; i < count; i++)
+    {
+        WCHAR buf[256];
+        unsigned int size = 0;
+        USHORT len;
+        struct win_tree_atom_entry *entry;
+
+        SERVER_START_REQ( get_user_atom_name )
+        {
+            req->atom = atoms[i];
+            wine_server_set_reply( req, buf, sizeof(buf) - sizeof(WCHAR) );
+            if (!wine_server_call( req )) size = wine_server_reply_size( reply );
+        }
+        SERVER_END_REQ;
+
+        if (!size) return FALSE;
+        len = size / sizeof(WCHAR);
+        if (!(entry = malloc( offsetof(struct win_tree_atom_entry, name[len + 1]) ))) return FALSE;
+        entry->atom = atoms[i];
+        entry->len  = len;
+        entry->hash = win_tree_hash_wstr( buf, len );
+        memcpy( entry->name, buf, len * sizeof(WCHAR) );
+        entry->name[len] = 0;
+
+        pthread_rwlock_wrlock( &win_tree_atom_lock );
+        if (!win_tree_atom_lookup_locked( atoms[i] ))
+        {
+            uint32_t b = atoms[i] & (WIN_TREE_ATOM_HASH_SIZE - 1);
+            entry->next = win_tree_atom_buckets[b];
+            win_tree_atom_buckets[b] = entry;
+            entry = NULL;
+        }
+        pthread_rwlock_unlock( &win_tree_atom_lock );
+        free( entry );
+    }
+    return TRUE;
+}
+
+static inline BOOL win_tree_shm_match_class( const struct win_tree_shm_node *node, atom_t atom,
+                                             const UNICODE_STRING *class_name,
+                                             uint32_t target_hash, USHORT target_len,
+                                             uint32_t *missing, int *missing_count )
+{
+    if (!class_name) return TRUE;
+    if (atom) return node->class_atom == atom;
+    if (node->class_atom < MAXINTATOM) return FALSE;
+
+    {
+        const struct win_tree_atom_entry *ae = win_tree_atom_lookup_locked( node->class_atom );
+        if (!ae)
+        {
+            int k;
+            for (k = 0; k < *missing_count; k++)
+                if (missing[k] == node->class_atom) return FALSE;
+            if (*missing_count < 32) missing[(*missing_count)++] = node->class_atom;
+            return FALSE;
+        }
+        return ae->hash == target_hash && ae->len == target_len &&
+               !wcsnicmp( ae->name, class_name->Buffer, target_len );
+    }
+}
+
+/* Filter a list of child windows by class atom or class name, mirroring the
+ * get_class_windows server request on the shared memory copy of the window tree.
+ * Returns FALSE when the snapshot cannot answer the query and the caller must
+ * use the RPC. */
 static BOOL win_tree_shm_get_class_windows( HWND parent, HWND child, atom_t atom,
+                                            const UNICODE_STRING *class_name,
                                             user_handle_t *buffer, ULONG max, ULONG *total )
 {
     const struct win_tree_shm *shm = get_win_tree_shm();
     uint32_t p_h = wine_server_user_handle( parent );
     uint32_t c_h = wine_server_user_handle( child );
     uint32_t desk_h = wine_server_user_handle( get_desktop_window() );
-    int retry;
+    USHORT target_len = 0;
+    uint32_t target_hash = 0;
+    int retry = 0, fetch_rounds = 0;
 
     if (!shm || !desk_h) return FALSE;
+    if (class_name && !atom)
+    {
+        target_len = class_name->Length / sizeof(WCHAR);
+        if (!target_len || target_len >= 256) return FALSE;
+        target_hash = win_tree_hash_wstr( class_name->Buffer, target_len );
+    }
 
-    for (retry = 0; retry < 64; retry++)
+    while (retry < 64)
     {
         uint64_t s1 = __atomic_load_n( &shm->seq, __ATOMIC_ACQUIRE );
         uint32_t count, idx;
+        uint32_t missing[32];
+        int missing_count = 0;
         ULONG n = 0;
         BOOL ok = FALSE;
 
-        if (s1 & 1) continue;
+        if (s1 & 1) { retry++; continue; }
         if (shm->overflow || (count = shm->count) > WIN_TREE_SHM_MAX_NODES) return FALSE;
         if (shm->desktop_hwnd != desk_h) return FALSE;
+
+        if (class_name && !atom) pthread_rwlock_rdlock( &win_tree_atom_lock );
 
         if (c_h) /* siblings of a given window, starting after it */
         {
             idx = win_tree_shm_find_node( shm, c_h, count );
-            if (idx >= count) return FALSE;
-            if (shm->nodes[idx].parent_idx >= count) return FALSE;
-            if (shm->nodes[shm->nodes[idx].parent_idx].hwnd != (p_h ? p_h : desk_h)) return FALSE;
-            for (idx = shm->nodes[idx].next_sib_idx; idx < count; idx = shm->nodes[idx].next_sib_idx)
+            if (idx < count && shm->nodes[idx].parent_idx < count &&
+                shm->nodes[shm->nodes[idx].parent_idx].hwnd == (p_h ? p_h : desk_h))
             {
-                const struct win_tree_shm_node *node = &shm->nodes[idx];
-                if (!atom || node->class_atom == atom)
+                for (idx = shm->nodes[idx].next_sib_idx; idx < count; idx = shm->nodes[idx].next_sib_idx)
                 {
-                    if (n < max) buffer[n] = node->hwnd;
-                    n++;
+                    const struct win_tree_shm_node *node = &shm->nodes[idx];
+                    if (win_tree_shm_match_class( node, atom, class_name, target_hash, target_len,
+                                                  missing, &missing_count ))
+                    {
+                        if (n < max) buffer[n] = node->hwnd;
+                        n++;
+                    }
                 }
+                ok = TRUE;
             }
-            ok = TRUE;
         }
         else if (p_h) /* children of a given window */
         {
             idx = win_tree_shm_find_node( shm, p_h, count );
-            if (idx >= count) return FALSE;
-            for (idx = shm->nodes[idx].first_child_idx; idx < count; idx = shm->nodes[idx].next_sib_idx)
+            if (idx < count)
             {
-                const struct win_tree_shm_node *node = &shm->nodes[idx];
-                if (!atom || node->class_atom == atom)
+                for (idx = shm->nodes[idx].first_child_idx; idx < count; idx = shm->nodes[idx].next_sib_idx)
                 {
-                    if (n < max) buffer[n] = node->hwnd;
-                    n++;
+                    const struct win_tree_shm_node *node = &shm->nodes[idx];
+                    if (win_tree_shm_match_class( node, atom, class_name, target_hash, target_len,
+                                                  missing, &missing_count ))
+                    {
+                        if (n < max) buffer[n] = node->hwnd;
+                        n++;
+                    }
                 }
+                ok = TRUE;
             }
-            ok = TRUE;
         }
         else /* top-level windows of the current desktop, then message windows */
         {
             uint32_t roots[2], i;
             roots[0] = shm->desktop_hwnd;
             roots[1] = shm->msg_hwnd;
+            ok = TRUE;
             for (i = 0; i < 2; i++)
             {
                 if (!roots[i]) continue;
                 idx = win_tree_shm_find_node( shm, roots[i], count );
-                if (idx >= count) return FALSE;
+                if (idx >= count) { ok = FALSE; break; }
                 for (idx = shm->nodes[idx].first_child_idx; idx < count;
                      idx = shm->nodes[idx].next_sib_idx)
                 {
                     const struct win_tree_shm_node *node = &shm->nodes[idx];
-                    if (!atom || node->class_atom == atom)
+                    if (win_tree_shm_match_class( node, atom, class_name, target_hash, target_len,
+                                                  missing, &missing_count ))
                     {
                         if (n < max) buffer[n] = node->hwnd;
                         n++;
                     }
                 }
             }
-            ok = TRUE;
         }
+
+        if (class_name && !atom) pthread_rwlock_unlock( &win_tree_atom_lock );
 
         __atomic_thread_fence( __ATOMIC_ACQUIRE );
         if (s1 == __atomic_load_n( &shm->seq, __ATOMIC_RELAXED ))
         {
             if (!ok) return FALSE;
+            if (missing_count > 0)
+            {
+                if (++fetch_rounds > 16 || !win_tree_atom_fetch( missing, missing_count ))
+                    return FALSE;
+                continue;
+            }
             *total = n;
             return TRUE;
         }
+        retry++;
     }
     return FALSE;
 }
@@ -4528,14 +4666,13 @@ HWND WINAPI NtUserFindWindowEx( HWND parent, HWND child, UNICODE_STRING *class, 
     int i = 0, size = 128, title_len;
     NTSTATUS status = 0;
     atom_t atom = 0;
-    BOOL shm_class;
 
     /* empty class is not the same as NULL class */
     if (class && !class->Length && !IS_INTRESOURCE(class->Buffer)) return 0;
 
     if (parent == HWND_MESSAGE) parent = get_hwnd_message_parent();
 
-    shm_class = win_tree_shm_class_atom( class, &atom );
+    win_tree_shm_class_atom( class, &atom );
 
     for (;;)
     {
@@ -4543,7 +4680,7 @@ HWND WINAPI NtUserFindWindowEx( HWND parent, HWND child, UNICODE_STRING *class, 
 
         if (!(list = malloc( size * sizeof(*list) ))) return 0;
 
-        if (shm_class && win_tree_shm_get_class_windows( parent, child, atom, list, size, &total ))
+        if (win_tree_shm_get_class_windows( parent, child, atom, class, list, size, &total ))
         {
             if (!total) { free( list ); return 0; }
             if (total > (ULONG)size) { free( list ); size = total; continue; }
