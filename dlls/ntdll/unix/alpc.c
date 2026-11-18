@@ -1067,6 +1067,10 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                                             ALPC_MESSAGE_ATTRIBUTES *recv_msg_attr,
                                             LARGE_INTEGER *timeout )
 {
+    ERR( "WDBG swrp port %p flags %x send %p sattr %p recv %p rsize %p rattr %p caller %p\n",
+         port_handle, (unsigned int)flags, send_msg, send_msg_attr, recv_msg,
+         recv_buffer_size, recv_msg_attr, __builtin_return_address(0) );
+
     unsigned int ret = STATUS_SUCCESS;
     HANDLE wait_handle = NULL;
     struct alpc_async *async;

@@ -66,6 +66,15 @@ struct unwind_builtin_dll_params
     CONTEXT                    *context;
 };
 
+struct anon_mmap_fixed_params
+{
+    void  *start;
+    size_t size;
+    int    prot;
+    int    flags;
+    void  *ret;
+};
+
 enum ntdll_unix_funcs
 {
     unix_load_so_dll,
@@ -78,6 +87,7 @@ enum ntdll_unix_funcs
     unix_system_time_precise,
     unix_flight_recorder_log,
     unix_relocate_cached_image,
+    unix_anon_mmap_fixed,
 };
 
 extern unixlib_handle_t __wine_unixlib_handle;

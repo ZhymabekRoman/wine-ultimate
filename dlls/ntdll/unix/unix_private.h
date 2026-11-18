@@ -429,6 +429,7 @@ extern NTSTATUS unixcall_wine_server_fd_to_handle( void *args );
 extern NTSTATUS unixcall_wine_server_handle_to_fd( void *args );
 extern NTSTATUS unixcall_wine_spawnvp( void *args );
 extern NTSTATUS unixcall_relocate_cached_image( void *args );
+extern NTSTATUS unixcall_anon_mmap_fixed( void *args );
 #ifdef _WIN64
 extern NTSTATUS wow64_wine_dbg_write( void *args );
 extern NTSTATUS wow64_flight_recorder_log( void *args );
@@ -437,6 +438,7 @@ extern NTSTATUS wow64_wine_server_fd_to_handle( void *args );
 extern NTSTATUS wow64_wine_server_handle_to_fd( void *args );
 extern NTSTATUS wow64_wine_spawnvp( void *args );
 extern NTSTATUS wow64_relocate_cached_image( void *args );
+extern NTSTATUS wow64_anon_mmap_fixed( void *args );
 #endif
 
 extern void dbg_init(void);

@@ -4767,6 +4767,18 @@ NTSTATUS virtual_relocate_module( void *module )
 
 
 /***********************************************************************
+ *           unixcall_anon_mmap_fixed
+ */
+NTSTATUS unixcall_anon_mmap_fixed( void *args )
+{
+    struct anon_mmap_fixed_params *params = args;
+
+    params->ret = anon_mmap_fixed( params->start, params->size, params->prot, params->flags );
+    return STATUS_SUCCESS;
+}
+
+
+/***********************************************************************
  *           unixcall_relocate_cached_image
  */
 NTSTATUS unixcall_relocate_cached_image( void *args )
@@ -4936,6 +4948,21 @@ done:
 }
 
 #ifdef _WIN64
+NTSTATUS wow64_anon_mmap_fixed( void *args )
+{
+    struct anon_mmap_fixed_params32
+    {
+        ULONG  start;
+        ULONG  size;
+        INT    prot;
+        INT    flags;
+        ULONG  ret;
+    } *params = args;
+    void *p = anon_mmap_fixed( UlongToPtr( params->start ), params->size, params->prot, params->flags );
+    params->ret = PtrToUlong( p );
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS wow64_relocate_cached_image( void *args )
 {
     return unixcall_relocate_cached_image( args );

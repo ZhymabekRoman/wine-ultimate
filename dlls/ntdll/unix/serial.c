@@ -1339,6 +1339,13 @@ NTSTATUS serial_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE ap
     case IOCTL_SERIAL_GET_PROPERTIES:
         if (out_buffer && out_size == sizeof(SERIAL_COMMPROP))
         {
+            /* the .NET GC heap lives in the 48-bit range; pages there may be
+             * reserved but not yet committed, so commit the target page first */
+            SIZE_T size = sizeof(SERIAL_COMMPROP);
+            void *base = (void *)((UINT_PTR)out_buffer & ~0xfff);
+            status = NtAllocateVirtualMemory( NtCurrentProcess(), &base, 0, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
+            TRACE( "GET_PROPERTIES fd %d out %p size %u commit %p status %08x\n", fd, out_buffer, out_size, base, status );
+            status = STATUS_SUCCESS;
             if (!(status = get_properties(fd, out_buffer)))
                 sz = sizeof(SERIAL_COMMPROP);
         }

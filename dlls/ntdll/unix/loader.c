@@ -1021,6 +1021,7 @@ static const unixlib_entry_t unix_call_funcs[] =
     system_time_precise,
     unixcall_flight_recorder_log,
     unixcall_relocate_cached_image,
+    unixcall_anon_mmap_fixed,
 };
 
 
@@ -1041,6 +1042,7 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     system_time_precise,
     wow64_flight_recorder_log,
     wow64_relocate_cached_image,
+    wow64_anon_mmap_fixed,
 };
 
 #endif  /* _WIN64 */
