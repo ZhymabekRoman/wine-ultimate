@@ -1326,7 +1326,7 @@ struct uwp_rtt_target_vtbl
     HRESULT (WINAPI *GetStrongValue)( IInspectable *, IInspectable ** );
 };
 
-inline struct xaml_element *impl_from_element( void *iface );
+struct xaml_element *impl_from_element( void *iface );
 
 BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr );
 

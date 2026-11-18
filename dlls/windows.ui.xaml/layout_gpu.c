@@ -543,9 +543,15 @@ const void *uwp_timer_vtbl[16] =
  * usable ITypeInfo.  A single self-describing type entry is enough. */
 static const TYPEATTR uwp_disp_typeattr =
 {
-    { 0xc82e1a4c, 0x91a4, 0x4d16, { 0xa7, 0x9f, 0x3a, 0xf4, 0x1d, 0x6c, 0x9b, 0x21 } },
-    0x0409, 0, DISPID_CONSTRUCTOR, DISPID_DESTRUCTOR, NULL,
-    0, TKIND_INTERFACE, 1, 0, 1, 0, 0, 0, 1, 0, { 0 }, { 0 }
+    .guid = { 0xc82e1a4c, 0x91a4, 0x4d16, { 0xa7, 0x9f, 0x3a, 0xf4, 0x1d, 0x6c, 0x9b, 0x21 } },
+    .lcid = 0x0409,
+    .memidConstructor = DISPID_CONSTRUCTOR,
+    .memidDestructor = DISPID_DESTRUCTOR,
+    .cbSizeInstance = 0,
+    .typekind = TKIND_INTERFACE,
+    .cFuncs = 1,
+    .cImplTypes = 1,
+    .cbSizeVft = sizeof(void *),
 };
 static HRESULT WINAPI uwp_disp_ti_GetTypeAttr( ITypeInfo *iface, TYPEATTR **attr )
 {

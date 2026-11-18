@@ -1366,11 +1366,16 @@ static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface );
 /* Per-instance vtbl: .NET ComWrappers writes the RCW managed pointer into
  * slot 6 (SetManagedReference), so a shared static vtbl array gets clobbered
  * for every object using it. Give each object its own copy. */
-void **vtbl_dup( const void *src )
+static void **vtbl_dup_n( const void *src, size_t count )
 {
     void **d = calloc( 256, sizeof(*d) );
-    if (d) memcpy( d, src, 256 * sizeof(*d) );
+    if (d) memcpy( d, src, count * sizeof(*d) );
     return d;
+}
+
+void **vtbl_dup( const void *src )
+{
+    return vtbl_dup_n( src, 256 );
 }
 
 static const void *iterator_vtbl[256] =
@@ -2724,8 +2729,8 @@ HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instan
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( col_def_vtbl );
     impl->IWebView2_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv2_vtbl );
     impl->IWebView22_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv22_vtbl );
-    impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( uielement_vtbl );
-    impl->IDependencyObject_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv2_do_vtbl );
+    impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( uielement_vtbl, 64 );
+    impl->IDependencyObject_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( wv2_do_vtbl, 64 );
     impl->class_name = L"Windows.UI.Xaml.Controls.Grid";
     impl->ref = 1;
     impl->outer = outer;
