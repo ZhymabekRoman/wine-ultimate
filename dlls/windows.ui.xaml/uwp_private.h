@@ -1,5 +1,6 @@
 #ifndef UWP_PRIVATE_H
 #define UWP_PRIVATE_H
+#include "private.h"
 #include "weakreference.h"
 extern const GUID IID_IPropertyValue_g;
 typedef struct IWeakReference IWeakReference;
