@@ -3494,6 +3494,201 @@ static struct guid_helper_factory guid_helper_factory_obj =
     guid_helper_statics_vtbl,
 };
 
+/* =========================================================================
+ * Windows.Foundation.Deferral
+ * ========================================================================= */
+static const GUID IID_IDeferral_local =
+    { 0xd6269732, 0x3b7f, 0x46a7, { 0xb4, 0x0b, 0x4f, 0xdc, 0xa2, 0xa2, 0xc6, 0x93 } };
+static const GUID IID_IDeferralFactory_local =
+    { 0x65a1ecc5, 0x3fb5, 0x4832, { 0x8c, 0xa9, 0xf0, 0x61, 0xb2, 0x81, 0xd1, 0x3a } };
+static const GUID IID_IClosable_local =
+    { 0x30d5a829, 0x7fa4, 0x4026, { 0x83, 0xbb, 0xd7, 0x5b, 0xae, 0x4e, 0xa9, 0x9e } };
+
+struct deferral_handler_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(void *iface, REFIID iid, void **out);
+    ULONG (WINAPI *AddRef)(void *iface);
+    ULONG (WINAPI *Release)(void *iface);
+    HRESULT (WINAPI *Invoke)(void *iface);
+};
+
+struct deferral_obj
+{
+    const void **vtbl;
+    const void **vtbl_closable;
+    LONG ref;
+    LONG completed;
+    IUnknown *handler;
+};
+
+static inline struct deferral_obj *deferral_from_closable(void *iface)
+{
+    return CONTAINING_RECORD(iface, struct deferral_obj, vtbl_closable);
+}
+
+static HRESULT WINAPI deferral_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    struct deferral_obj *impl = iface;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID(iid, &IID_IUnknown) ||
+        IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IAgileObject) ||
+        IsEqualGUID(iid, &IID_IDeferral_local))
+        *out = &impl->vtbl;
+    else if (IsEqualGUID(iid, &IID_IClosable_local))
+        *out = &impl->vtbl_closable;
+    else
+        return E_NOINTERFACE;
+    InterlockedIncrement(&impl->ref);
+    return S_OK;
+}
+
+static ULONG WINAPI deferral_AddRef(void *iface)
+{
+    struct deferral_obj *impl = iface;
+    return InterlockedIncrement(&impl->ref);
+}
+
+static ULONG WINAPI deferral_Release(void *iface)
+{
+    struct deferral_obj *impl = iface;
+    ULONG ref = InterlockedDecrement(&impl->ref);
+    if (!ref)
+    {
+        if (impl->handler) IUnknown_Release(impl->handler);
+        free(impl);
+    }
+    return ref;
+}
+
+static HRESULT WINAPI deferral_GetIids(void *iface, ULONG *count, IID **iids)
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 2;
+    *iids = CoTaskMemAlloc(2 * sizeof(IID));
+    if (!*iids) return E_OUTOFMEMORY;
+    (*iids)[0] = IID_IDeferral_local;
+    (*iids)[1] = IID_IClosable_local;
+    return S_OK;
+}
+
+static HRESULT WINAPI deferral_GetRuntimeClassName(void *iface, HSTRING *name)
+{
+    return WindowsCreateString(L"Windows.Foundation.Deferral", 27, name);
+}
+
+static HRESULT WINAPI deferral_GetTrustLevel(void *iface, TrustLevel *level)
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI deferral_Complete(void *iface)
+{
+    struct deferral_obj *impl = iface;
+    IUnknown *handler;
+    if (InterlockedExchange(&impl->completed, 1)) return S_OK;
+    handler = impl->handler;
+    impl->handler = NULL;
+    if (handler)
+    {
+        const struct deferral_handler_vtbl *vtbl = *(const struct deferral_handler_vtbl **)handler;
+        HRESULT hr = vtbl->Invoke(handler);
+        IUnknown_Release(handler);
+        return hr;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI deferral_closable_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    return deferral_QueryInterface(deferral_from_closable(iface), iid, out);
+}
+
+static ULONG WINAPI deferral_closable_AddRef(void *iface)
+{
+    return deferral_AddRef(deferral_from_closable(iface));
+}
+
+static ULONG WINAPI deferral_closable_Release(void *iface)
+{
+    return deferral_Release(deferral_from_closable(iface));
+}
+
+static HRESULT WINAPI deferral_closable_Close(void *iface)
+{
+    return deferral_Complete(deferral_from_closable(iface));
+}
+
+static const void *deferral_vtbl[] =
+{
+    deferral_QueryInterface,
+    deferral_AddRef,
+    deferral_Release,
+    deferral_GetIids,
+    deferral_GetRuntimeClassName,
+    deferral_GetTrustLevel,
+    deferral_Complete,
+};
+
+static const void *deferral_closable_vtbl[] =
+{
+    deferral_closable_QueryInterface,
+    deferral_closable_AddRef,
+    deferral_closable_Release,
+    deferral_GetIids,
+    deferral_GetRuntimeClassName,
+    deferral_GetTrustLevel,
+    deferral_closable_Close,
+};
+
+static HRESULT WINAPI deferral_factory_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID(iid, &IID_IUnknown) ||
+        IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IAgileObject) ||
+        IsEqualGUID(iid, &IID_IActivationFactory) ||
+        IsEqualGUID(iid, &IID_IDeferralFactory_local))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI deferral_factory_Create(void *iface, IUnknown *handler, void **out)
+{
+    struct deferral_obj *impl;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!handler) return E_POINTER;
+    impl = calloc(1, sizeof(*impl));
+    if (!impl) return E_OUTOFMEMORY;
+    impl->vtbl = deferral_vtbl;
+    impl->vtbl_closable = deferral_closable_vtbl;
+    impl->ref = 1;
+    impl->handler = handler;
+    IUnknown_AddRef(handler);
+    *out = &impl->vtbl;
+    return S_OK;
+}
+
+static const void *deferral_factory_vtbl[] =
+{
+    deferral_factory_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    deferral_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    deferral_factory_Create,
+};
+
+static struct { const void **vtbl; } deferral_factory_obj = { deferral_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer(classid, NULL);
@@ -3527,6 +3722,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         *factory = (IActivationFactory *)&logging_options_factory_obj.vtbl_factory;
     if (!wcscmp(buffer, L"Windows.Foundation.GuidHelper"))
         *factory = (IActivationFactory *)&guid_helper_factory_obj.vtbl_factory;
+    if (!wcscmp(buffer, L"Windows.Foundation.Deferral"))
+        *factory = (IActivationFactory *)&deferral_factory_obj;
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

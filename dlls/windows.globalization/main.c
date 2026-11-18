@@ -1713,11 +1713,13 @@ struct decimal_formatter
     const void *vtbl_options;    /* +8: INumberFormatterOptions */
     const void *vtbl_parser;     /* +16: INumberParser */
     const void *vtbl_sigdigits;  /* +24: ISignificantDigitsOption */
+    const void *vtbl_rounder_opt;/* +32: INumberRounderOption */
     LONG ref;
     INT32 fraction_digits;
     INT32 integer_digits;
     INT32 significant_digits;
     BOOLEAN is_grouping_enabled;
+    IUnknown *number_rounder;
 };
 
 static inline struct decimal_formatter *impl_from_formatter( void *iface )
@@ -1735,6 +1737,10 @@ static inline struct decimal_formatter *impl_from_parser( void *iface )
 static inline struct decimal_formatter *impl_from_sigdigits( void *iface )
 {
     return CONTAINING_RECORD( iface, struct decimal_formatter, vtbl_sigdigits );
+}
+static inline struct decimal_formatter *impl_from_rounder_opt( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct decimal_formatter, vtbl_rounder_opt );
 }
 
 static HRESULT WINAPI decimal_formatter_QueryInterface( void *iface, REFIID iid, void **out )
@@ -1761,10 +1767,13 @@ static HRESULT WINAPI decimal_formatter_QueryInterface( void *iface, REFIID iid,
     {
         *out = (void *)&impl->vtbl_formatter;
     }
-    else if (IsEqualGUID( iid, &IID_INumberFormatterOptions ) ||
-             IsEqualGUID( iid, &IID_INumberRounderOption ))
+    else if (IsEqualGUID( iid, &IID_INumberFormatterOptions ))
     {
         *out = (void *)&impl->vtbl_options;
+    }
+    else if (IsEqualGUID( iid, &IID_INumberRounderOption ))
+    {
+        *out = (void *)&impl->vtbl_rounder_opt;
     }
     else if (IsEqualGUID( iid, &IID_INumberParser ))
     {
@@ -1796,7 +1805,11 @@ static ULONG WINAPI decimal_formatter_Release( void *iface )
 {
     struct decimal_formatter *impl = impl_from_formatter( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        if (impl->number_rounder) IUnknown_Release( impl->number_rounder );
+        free( impl );
+    }
     return ref;
 }
 
@@ -2110,6 +2123,47 @@ static const void *sigdigits_vtbl[] =
     decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
 };
 
+static HRESULT WINAPI rounder_opt_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return decimal_formatter_QueryInterface( &impl_from_rounder_opt( iface )->vtbl_formatter, iid, out );
+}
+static ULONG WINAPI rounder_opt_AddRef( void *iface )
+{
+    return decimal_formatter_AddRef( &impl_from_rounder_opt( iface )->vtbl_formatter );
+}
+static ULONG WINAPI rounder_opt_Release( void *iface )
+{
+    return decimal_formatter_Release( &impl_from_rounder_opt( iface )->vtbl_formatter );
+}
+static HRESULT WINAPI rounder_opt_get_NumberRounder( void *iface, IUnknown **value )
+{
+    struct decimal_formatter *impl = impl_from_rounder_opt( iface );
+    if (!value) return E_POINTER;
+    *value = impl->number_rounder;
+    if (*value) IUnknown_AddRef( *value );
+    return S_OK;
+}
+static HRESULT WINAPI rounder_opt_put_NumberRounder( void *iface, IUnknown *value )
+{
+    struct decimal_formatter *impl = impl_from_rounder_opt( iface );
+    if (value) IUnknown_AddRef( value );
+    if (impl->number_rounder) IUnknown_Release( impl->number_rounder );
+    impl->number_rounder = value;
+    return S_OK;
+}
+
+static const void *rounder_opt_vtbl[] =
+{
+    rounder_opt_QueryInterface,
+    rounder_opt_AddRef,
+    rounder_opt_Release,
+    decimal_formatter_GetIids,
+    decimal_formatter_GetRuntimeClassName,
+    decimal_formatter_GetTrustLevel,
+    rounder_opt_get_NumberRounder,
+    rounder_opt_put_NumberRounder,
+};
+
 static HRESULT decimal_formatter_create( void **instance )
 {
     struct decimal_formatter *impl = calloc( 1, sizeof(*impl) );
@@ -2118,6 +2172,7 @@ static HRESULT decimal_formatter_create( void **instance )
     impl->vtbl_options = options_vtbl;
     impl->vtbl_parser = parser_vtbl;
     impl->vtbl_sigdigits = sigdigits_vtbl;
+    impl->vtbl_rounder_opt = rounder_opt_vtbl;
     impl->ref = 1;
     impl->integer_digits = 1;
     impl->fraction_digits = 0;
@@ -2712,6 +2767,256 @@ static const void *dt_factory_stat_vtbl[] =
     dt_statics_get_ShortTime,
 };
 
+/* =========================================================================
+ * Windows.Globalization.NumberFormatting.IncrementNumberRounder
+ * ========================================================================= */
+static const GUID IID_INumberRounder =
+    { 0x5473c375, 0x38ed, 0x4631, { 0xb8, 0x0c, 0xef, 0x34, 0xfc, 0x48, 0xb7, 0xf5 } };
+static const GUID IID_IIncrementNumberRounder =
+    { 0x70a64ff8, 0x66ab, 0x4155, { 0x9d, 0xa1, 0x73, 0x9e, 0x46, 0x76, 0x45, 0x43 } };
+
+struct increment_rounder
+{
+    const void *vtbl_rounder;
+    const void *vtbl_incr;
+    LONG ref;
+    INT32 algorithm;
+    double increment;
+};
+
+static inline struct increment_rounder *rounder_from_incr( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct increment_rounder, vtbl_incr );
+}
+
+static HRESULT WINAPI increment_rounder_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct increment_rounder *impl = iface;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_INumberRounder ))
+        *out = &impl->vtbl_rounder;
+    else if (IsEqualGUID( iid, &IID_IIncrementNumberRounder ))
+        *out = &impl->vtbl_incr;
+    else
+        return E_NOINTERFACE;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static ULONG WINAPI increment_rounder_AddRef( void *iface )
+{
+    struct increment_rounder *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI increment_rounder_Release( void *iface )
+{
+    struct increment_rounder *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI increment_rounder_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 2;
+    *iids = CoTaskMemAlloc( 2 * sizeof(IID) );
+    if (!*iids) return E_OUTOFMEMORY;
+    (*iids)[0] = IID_INumberRounder;
+    (*iids)[1] = IID_IIncrementNumberRounder;
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Globalization.NumberFormatting.IncrementNumberRounder", 60, name );
+}
+
+static HRESULT WINAPI increment_rounder_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static double round_by_increment( struct increment_rounder *impl, double value )
+{
+    double inc = impl->increment;
+    if (inc <= 0.0) return value;
+    return round( value / inc ) * inc;
+}
+
+static HRESULT WINAPI increment_rounder_RoundInt32( void *iface, INT32 value, INT32 *result )
+{
+    struct increment_rounder *impl = iface;
+    if (!result) return E_POINTER;
+    *result = (INT32)round_by_increment( impl, (double)value );
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_RoundUInt32( void *iface, UINT32 value, UINT32 *result )
+{
+    struct increment_rounder *impl = iface;
+    if (!result) return E_POINTER;
+    *result = (UINT32)round_by_increment( impl, (double)value );
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_RoundInt64( void *iface, INT64 value, INT64 *result )
+{
+    struct increment_rounder *impl = iface;
+    if (!result) return E_POINTER;
+    *result = (INT64)round_by_increment( impl, (double)value );
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_RoundUInt64( void *iface, UINT64 value, UINT64 *result )
+{
+    struct increment_rounder *impl = iface;
+    if (!result) return E_POINTER;
+    *result = (UINT64)round_by_increment( impl, (double)value );
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_RoundSingle( void *iface, float value, float *result )
+{
+    struct increment_rounder *impl = iface;
+    if (!result) return E_POINTER;
+    *result = (float)round_by_increment( impl, (double)value );
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_RoundDouble( void *iface, double value, double *result )
+{
+    struct increment_rounder *impl = iface;
+    if (!result) return E_POINTER;
+    *result = round_by_increment( impl, value );
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_incr_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return increment_rounder_QueryInterface( rounder_from_incr( iface ), iid, out );
+}
+
+static ULONG WINAPI increment_rounder_incr_AddRef( void *iface )
+{
+    return increment_rounder_AddRef( rounder_from_incr( iface ) );
+}
+
+static ULONG WINAPI increment_rounder_incr_Release( void *iface )
+{
+    return increment_rounder_Release( rounder_from_incr( iface ) );
+}
+
+static HRESULT WINAPI increment_rounder_get_RoundingAlgorithm( void *iface, INT32 *value )
+{
+    struct increment_rounder *impl = rounder_from_incr( iface );
+    if (!value) return E_POINTER;
+    *value = impl->algorithm;
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_put_RoundingAlgorithm( void *iface, INT32 value )
+{
+    struct increment_rounder *impl = rounder_from_incr( iface );
+    impl->algorithm = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_get_Increment( void *iface, double *value )
+{
+    struct increment_rounder *impl = rounder_from_incr( iface );
+    if (!value) return E_POINTER;
+    *value = impl->increment;
+    return S_OK;
+}
+
+static HRESULT WINAPI increment_rounder_put_Increment( void *iface, double value )
+{
+    struct increment_rounder *impl = rounder_from_incr( iface );
+    if (value <= 0.0) return E_INVALIDARG;
+    impl->increment = value;
+    return S_OK;
+}
+
+static const void *increment_rounder_vtbl[] =
+{
+    increment_rounder_QueryInterface,
+    increment_rounder_AddRef,
+    increment_rounder_Release,
+    increment_rounder_GetIids,
+    increment_rounder_GetRuntimeClassName,
+    increment_rounder_GetTrustLevel,
+    increment_rounder_RoundInt32,
+    increment_rounder_RoundUInt32,
+    increment_rounder_RoundInt64,
+    increment_rounder_RoundUInt64,
+    increment_rounder_RoundSingle,
+    increment_rounder_RoundDouble,
+};
+
+static const void *increment_rounder_incr_vtbl[] =
+{
+    increment_rounder_incr_QueryInterface,
+    increment_rounder_incr_AddRef,
+    increment_rounder_incr_Release,
+    increment_rounder_GetIids,
+    increment_rounder_GetRuntimeClassName,
+    increment_rounder_GetTrustLevel,
+    increment_rounder_get_RoundingAlgorithm,
+    increment_rounder_put_RoundingAlgorithm,
+    increment_rounder_get_Increment,
+    increment_rounder_put_Increment,
+};
+
+static HRESULT WINAPI increment_rounder_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI increment_rounder_factory_ActivateInstance( void *iface, IInspectable **out )
+{
+    struct increment_rounder *impl;
+    if (!out) return E_POINTER;
+    impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return E_OUTOFMEMORY;
+    impl->vtbl_rounder = increment_rounder_vtbl;
+    impl->vtbl_incr = increment_rounder_incr_vtbl;
+    impl->ref = 1;
+    impl->algorithm = 4; /* RoundHalfUp */
+    impl->increment = 1.0;
+    *out = (IInspectable *)&impl->vtbl_rounder;
+    return S_OK;
+}
+
+static const void *increment_rounder_factory_vtbl[] =
+{
+    increment_rounder_factory_QueryInterface,
+    cal_id_AddRef,
+    cal_id_Release,
+    cal_id_GetIids,
+    increment_rounder_GetRuntimeClassName,
+    cal_id_GetTrustLevel,
+    increment_rounder_factory_ActivateInstance,
+};
+
+static struct { const void **vtbl; } increment_rounder_factory_obj = { increment_rounder_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     const WCHAR *name = WindowsGetStringRawBuffer(classid, NULL);
@@ -2758,6 +3063,10 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
              !wcscmp(name, L"Windows.Globalization.NumberFormatting.PercentFormatter"))
     {
         *factory = (IActivationFactory *)&decimal_formatter_factory_inst.vtbl_activation;
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.IncrementNumberRounder"))
+    {
+        *factory = (IActivationFactory *)&increment_rounder_factory_obj;
     }
     else if (!wcscmp(name, L"Windows.Globalization.DateTimeFormatting.DateTimeFormatter"))
     {

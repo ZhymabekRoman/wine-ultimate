@@ -263,64 +263,109 @@ static HRESULT WINAPI factory_ActivateInstance( void *iface, IInspectable **inst
     return create_waveform( L"Simple", (void **)instance );
 }
 
-static HRESULT WINAPI statics_get_Basic( void *iface, void **value )
+static HRESULT WINAPI statics_get_Basic( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"Basic", value );
+    *value = 1;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics_get_HalfBeat( void *iface, void **value )
+static HRESULT WINAPI statics_get_HalfBeat( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"HalfBeat", value );
+    *value = 2;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics_get_ImpactLight( void *iface, void **value )
+static HRESULT WINAPI statics_get_ImpactLight( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"ImpactLight", value );
+    *value = 3;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics_get_ImpactMedium( void *iface, void **value )
+static HRESULT WINAPI statics_get_ImpactMedium( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"ImpactMedium", value );
+    *value = 4;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics_get_ImpactHeavy( void *iface, void **value )
+static HRESULT WINAPI statics_get_ImpactHeavy( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"ImpactHeavy", value );
+    *value = 5;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics_get_Simple( void *iface, void **value )
+static HRESULT WINAPI statics_get_Simple( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"Simple", value );
+    *value = 6;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics2_get_Cello( void *iface, void **value )
+static HRESULT WINAPI statics2_get_Cello( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"Cello", value );
+    *value = 7;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics2_get_Triple( void *iface, void **value )
+static HRESULT WINAPI statics2_get_Triple( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"Triple", value );
+    *value = 8;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics2_get_VibrationContinuous( void *iface, void **value )
+static HRESULT WINAPI statics2_get_VibrationContinuous( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"VibrationContinuous", value );
+    *value = 9;
+    return S_OK;
 }
 
-static HRESULT WINAPI statics2_get_VibrationShort( void *iface, void **value )
+static HRESULT WINAPI statics2_get_VibrationShort( void *iface, UINT16 *value )
 {
     if (!value) return E_POINTER;
-    return create_waveform( L"VibrationShort", value );
+    *value = 10;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics2_get_GalaxyPenContinuous( void *iface, UINT16 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 11;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics2_get_Hover( void *iface, UINT16 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 12;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics2_get_InkContinuous( void *iface, UINT16 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 13;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics2_get_MarkerContinuous( void *iface, UINT16 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 14;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics2_get_PencilContinuous( void *iface, UINT16 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 15;
+    return S_OK;
 }
 
 static const WCHAR * const waveform_names[] =
@@ -528,11 +573,15 @@ static const void *waveform_statics2_vtbl[] =
     waveform_GetIids,
     waveform_GetRuntimeClassName,
     waveform_GetTrustLevel,
-    statics2_get_Cello,                 /* 6 */
-    statics2_get_Triple,
-    statics2_get_VibrationContinuous,
-    statics2_get_VibrationShort,
-    statics_get_All,            /* 10 — IWaveformStatics2::get_All */
+    statics2_get_Cello,                 /* 6: BrushContinuous */
+    statics2_get_Triple,                /* 7: ChiselMarkerContinuous */
+    statics2_get_VibrationContinuous,   /* 8: EraserContinuous */
+    statics2_get_VibrationShort,        /* 9: Error */
+    statics2_get_GalaxyPenContinuous,   /* 10: GalaxyPenContinuous */
+    statics2_get_Hover,                 /* 11: Hover */
+    statics2_get_InkContinuous,         /* 12: InkContinuous */
+    statics2_get_MarkerContinuous,      /* 13: MarkerContinuous */
+    statics2_get_PencilContinuous,      /* 14: PencilContinuous */
 };
 
 static const void *waveform_statics_reference_vtbl[] =
