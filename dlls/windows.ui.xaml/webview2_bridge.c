@@ -385,7 +385,7 @@ static const void *cwv2_settings_vtbl[256] =
     [3] = cwv2_settings_GetIids,
     [4] = cwv2_settings_GetRuntimeClassName,
     [5] = cwv2_settings_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [24 ... 255] = element_generic_slot,
     [6] = cwv2_settings_get_IsScriptEnabled,
     [7] = cwv2_settings_put_IsScriptEnabled,
     [8] = cwv2_settings_get_IsWebMessageEnabled,
@@ -414,7 +414,7 @@ static const void *cwv2_settings2_vtbl[256] =
     [3] = cwv2_settings_GetIids,
     [4] = cwv2_settings_GetRuntimeClassName,
     [5] = cwv2_settings_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [8 ... 255] = element_generic_slot,
     [6] = cwv2_settings2_get_UserAgent,
     [7] = cwv2_settings2_put_UserAgent,
 };
@@ -1421,7 +1421,9 @@ static const void *cwv2_profile_vtbl[256] =
     [3] = profile_GetIids,
     [4] = profile_GetRuntimeClassName,
     [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = profile_generic_slot,
+    [6] = profile_generic_slot,
+
+    [9 ... 255] = profile_generic_slot,
     [7] = profile_ClearBrowsingDataAllAsync,
     [8] = profile_AddBrowserExtension,   /* WinRT class: 6 BrowserExtensions, 7 DefaultBackgroundColor/ClearBrowsingDataAsync, 8 AddBrowserExtension */
 };
@@ -1632,10 +1634,8 @@ static HRESULT WINAPI cwv2_PostWebMessageAsString( void *iface, HSTRING msg )
 static HRESULT WINAPI cwv2_CallDevToolsProtocolMethodAsync( void *iface, HSTRING method, HSTRING params, void **op )
 {
     struct core_webview2 *impl = impl_from_cwv2( iface );
-    struct cwv2_asyncop *aop = NULL;
     const WCHAR *m = method ? WindowsGetStringRawBuffer( method, NULL ) : L"";
     const WCHAR *p = params ? WindowsGetStringRawBuffer( params, NULL ) : L"{}";
-    HRESULT hr;
     ERR( "cwv2_CallDevToolsProtocolMethodAsync %s %s\n", debugstr_w( m ), debugstr_w( p ) );
     if (!op) return E_POINTER;
     if (impl->loader_core && impl->real_loader)
@@ -1643,15 +1643,8 @@ static HRESULT WINAPI cwv2_CallDevToolsProtocolMethodAsync( void *iface, HSTRING
         HRESULT (WINAPI *fn)( void *, LPCWSTR, LPCWSTR, void * ) = wv2_slot_fn( impl->loader_core, TRUE, 36, -1 );
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
         {
-            struct cwv2_com_str_handler *ch;
-            if (FAILED( hr = cwv2_asyncop_create_ex( NULL, FALSE, &aop ) )) return hr;
-            ch = cwv2_com_str_handler_create( aop );
-            if (!ch) { asyncop_Release( &aop->IInspectable_iface ); return E_OUTOFMEMORY; }
-            hr = fn( impl->loader_core, m, p, ch );
-            com_str_h_Release( ch );
-            if (FAILED( hr )) { aop->hr = hr; aop->completed = TRUE; }
-            *op = &aop->IInspectable_iface;
-            return S_OK;
+            fn( impl->loader_core, m, p, NULL );
+            return cwv2_asyncop_create( NULL, op );
         }
     }
     cwv2_queue_op( impl, CWV2_OP_DEVTOOLS, 0, FALSE, m, p, NULL, NULL, NULL );
@@ -1804,6 +1797,7 @@ static HRESULT WINAPI evargs_QueryInterface( IInspectable *iface, REFIID iid, vo
         IInspectable_AddRef( iface );
         return S_OK;
     }
+    ERR( "evargs_QueryInterface: unknown iid %s (winrt=%s)\n", debugstr_guid( iid ), debugstr_guid( &impl->winrt_iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1904,14 +1898,20 @@ static const void *cwv2_navstart_args_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
     [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [9] = element_generic_slot,
+
+    [13 ... 255] = element_generic_slot,
     [6] = navstart_get_Uri, [7] = navstart_get_IsUserInitiated, [8] = navstart_get_IsRedirected,
     [10] = navstart_get_Cancel, [11] = navstart_put_Cancel, [12] = navstart_get_NavigationId,
 };
 
 /* NavigationCompletedEventArgs: 6=get_IsSuccess, 7=get_WebErrorStatus, 8=get_NavigationId (COM 3..5) */
 static HRESULT WINAPI navcomp_get_IsSuccess( void *iface, boolean *out )
-{ return evargs_get_bool( impl_from_evargs( iface ), 3, out ); }
+{
+    HRESULT hr = evargs_get_bool( impl_from_evargs( iface ), 3, out );
+    ERR( "navcomp_get_IsSuccess hr=%#lx success=%d\n", hr, out ? *out : -1 );
+    return hr;
+}
 static HRESULT WINAPI navcomp_get_WebErrorStatus( void *iface, int *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
@@ -1931,7 +1931,7 @@ static const void *cwv2_navcomp_args_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
     [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [9 ... 255] = element_generic_slot,
     [6] = navcomp_get_IsSuccess, [7] = navcomp_get_WebErrorStatus, [8] = navcomp_get_NavigationId,
 };
 
@@ -1947,7 +1947,7 @@ static const void *cwv2_webmsg_args_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
     [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [9 ... 255] = element_generic_slot,
     [6] = webmsg_get_Source, [7] = webmsg_get_WebMessageAsJson, [8] = webmsg_TryGetWebMessageAsString,
 };
 
@@ -1959,7 +1959,7 @@ static const void *cwv2_domloaded_args_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
     [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [7 ... 255] = element_generic_slot,
     [6] = domloaded_get_NavigationId,
 };
 
@@ -1968,20 +1968,153 @@ static const GUID IID_ICoreWebView2WebResourceRequest_rt =
     { 0x5c742259, 0x67d2, 0x5df2, { 0x83, 0x82, 0x0f, 0x20, 0x1b, 0x4d, 0x71, 0x97 } };
 
 static HRESULT WINAPI wrr_req_get_Uri( void *iface, HSTRING *out )
-{ return evargs_get_str( impl_from_evargs( iface ), 3, out ); }
+{
+    HRESULT hr = evargs_get_str( impl_from_evargs( iface ), 3, out );
+    ERR( "wrr_req_get_Uri hr=%#lx uri=%s\n", hr, out ? debugstr_hstring( *out ) : "(null)" );
+    return hr;
+}
 static HRESULT WINAPI wrr_req_get_Method( void *iface, HSTRING *out )
-{ return evargs_get_str( impl_from_evargs( iface ), 5, out ); }
+{
+    HRESULT hr = evargs_get_str( impl_from_evargs( iface ), 5, out );
+    ERR( "wrr_req_get_Method hr=%#lx\n", hr );
+    return hr;
+}
+static HRESULT WINAPI wrr_req_get_Content( void *iface, void **out )
+{
+    ERR( "wrr_req_get_Content\n" );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI wrr_headers_GetHeader( void *iface, HSTRING name, HSTRING *out )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
+    LPWSTR raw = NULL;
+    HRESULT hr = E_FAIL;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, LPCWSTR, LPWSTR * ) = (*(void ***)impl->com_args)[3];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            hr = fn( impl->com_args, n, &raw );
+    }
+    if (SUCCEEDED( hr ) && raw)
+    {
+        hr = WindowsCreateString( raw, lstrlenW( raw ), out );
+        CoTaskMemFree( raw );
+        return hr;
+    }
+    if (raw) CoTaskMemFree( raw );
+    return hr;
+}
+static HRESULT WINAPI wrr_headers_Contains( void *iface, HSTRING name, boolean *out )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
+    BOOL b = FALSE;
+    HRESULT hr = S_OK;
+    if (!out) return E_POINTER;
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, LPCWSTR, BOOL * ) = (*(void ***)impl->com_args)[5];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            hr = fn( impl->com_args, n, &b );
+    }
+    *out = !!b;
+    return hr;
+}
+static HRESULT WINAPI wrr_headers_SetHeader( void *iface, HSTRING name, HSTRING val )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
+    const WCHAR *v = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    ERR( "wrr_headers_SetHeader %s=%s\n", debugstr_w( n ), debugstr_w( v ) );
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, LPCWSTR, LPCWSTR ) = (*(void ***)impl->com_args)[6];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            return fn( impl->com_args, n, v );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI wrr_headers_RemoveHeader( void *iface, HSTRING name )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, LPCWSTR ) = (*(void ***)impl->com_args)[7];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            return fn( impl->com_args, n );
+    }
+    return S_OK;
+}
+static const GUID IID_ICoreWebView2HttpRequestHeaders_rt =
+    { 0xdc2226c7, 0x3515, 0x55bb, { 0xbc, 0xb2, 0x57, 0xb7, 0x8f, 0x86, 0xb9, 0x1d } };
+static const void *cwv2_wrr_headers_vtbl[256] =
+{
+    [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
+    [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
+    [7] = element_generic_slot,
+
+    [11 ... 255] = element_generic_slot,
+    [6] = wrr_headers_GetHeader,
+    [8] = wrr_headers_Contains,
+    [9] = wrr_headers_SetHeader,
+    [10] = wrr_headers_RemoveHeader,
+};
+static HRESULT WINAPI wrr_req_get_Headers( void *iface, void **out )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    void *com_hdr = NULL;
+    struct cwv2_event_args *wrap;
+    HRESULT hr = E_FAIL;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void *, void ** ) = (*(void ***)impl->com_args)[9];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            hr = fn( impl->com_args, &com_hdr );
+    }
+    ERR( "wrr_req_get_Headers hr=%#lx com_hdr=%p\n", hr, com_hdr );
+    if (FAILED( hr ) || !com_hdr) return SUCCEEDED( hr ) ? E_FAIL : hr;
+    wrap = calloc( 1, sizeof(*wrap) );
+    if (!wrap)
+    {
+        ((IUnknown *)com_hdr)->lpVtbl->Release( com_hdr );
+        return E_OUTOFMEMORY;
+    }
+    wrap->IInspectable_iface.lpVtbl = (const IInspectableVtbl *)cwv2_wrr_headers_vtbl;
+    wrap->ref = 1;
+    wrap->winrt_iid = IID_ICoreWebView2HttpRequestHeaders_rt;
+    wrap->com_args = com_hdr;
+    *out = &wrap->IInspectable_iface;
+    return S_OK;
+}
 
 static const void *cwv2_wrr_req_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
     [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [7] = element_generic_slot,
+
+    [9] = element_generic_slot,
+
+    [11] = element_generic_slot,
+
+    [13 ... 255] = element_generic_slot,
     [6] = wrr_req_get_Uri,
     [8] = wrr_req_get_Method,
+    [10] = wrr_req_get_Content,
+    [12] = wrr_req_get_Headers,
 };
 
-/* WebResourceRequestedEventArgs: 6=get_Request (COM 3), 7=get_Response, 9=get_ResourceContext (COM 7) */
+/* WebResourceRequestedEventArgs: 6=get_Request (COM 3), 7=get_Response (COM 4),
+ * 8=put_Response (COM 5), 9=GetDeferral (COM 6), 10=get_ResourceContext (COM 7) */
 static HRESULT WINAPI wrr_evargs_get_Request( void *iface, void **out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
@@ -2009,17 +2142,63 @@ static HRESULT WINAPI wrr_evargs_get_Request( void *iface, void **out )
     wrap->winrt_iid = IID_ICoreWebView2WebResourceRequest_rt;
     wrap->com_args = com_req;
     *out = &wrap->IInspectable_iface;
+    ERR( "wrr_evargs_get_Request -> %p (com=%p)\n", *out, com_req );
     return S_OK;
 }
 static HRESULT WINAPI wrr_evargs_get_Response( void *iface, void **out )
 {
+    ERR( "wrr_evargs_get_Response\n" );
     if (!out) return E_POINTER;
     *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI wrr_evargs_put_Response( void *iface, void *resp )
+{
+    ERR( "wrr_evargs_put_Response resp=%p\n", resp );
+    return S_OK;
+}
+static HRESULT WINAPI wrr_deferral_Complete( void *iface )
+{
+    struct cwv2_event_args *impl = impl_from_evargs( iface );
+    ERR( "wrr_deferral_Complete com=%p\n", impl->com_args );
+    if (impl->com_args && *(void ***)impl->com_args)
+    {
+        HRESULT (WINAPI *fn)( void * ) = (*(void ***)impl->com_args)[3];
+        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+            return fn( impl->com_args );
+    }
+    return S_OK;
+}
+static const GUID IID_ICoreWebView2Deferral_rt =
+    { 0x8d5284e5, 0x3376, 0x5c3c, { 0x9c, 0x05, 0x3d, 0x85, 0x3f, 0x99, 0x5b, 0x3a } };
+static const void *cwv2_deferral_vtbl[256] =
+{
+    [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
+    [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
+    [7 ... 255] = element_generic_slot,
+    [6] = wrr_deferral_Complete,
+};
+static HRESULT WINAPI wrr_evargs_GetDeferral( void *iface, void **out )
+{
+    struct cwv2_event_args *wrap;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    /* Diagnostic: do not hold browser-side deferral open if app never calls Complete() */
+    ERR( "wrr_evargs_GetDeferral (non-blocking)\n" );
+    wrap = calloc( 1, sizeof(*wrap) );
+    if (!wrap) return E_OUTOFMEMORY;
+    wrap->IInspectable_iface.lpVtbl = (const IInspectableVtbl *)cwv2_deferral_vtbl;
+    wrap->ref = 1;
+    wrap->winrt_iid = IID_ICoreWebView2Deferral_rt;
+    wrap->com_args = NULL;
+    *out = &wrap->IInspectable_iface;
     return S_OK;
 }
 static HRESULT WINAPI wrr_evargs_get_ResourceContext( void *iface, int *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    ERR( "wrr_evargs_get_ResourceContext iface=%p out=%p\n", iface, out );
     if (!out) return E_POINTER;
     *out = 0;
     if (impl->com_args && *(void ***)impl->com_args)
@@ -2035,10 +2214,12 @@ static const void *cwv2_wrr_evargs_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
     [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [11 ... 255] = element_generic_slot,
     [6] = wrr_evargs_get_Request,
     [7] = wrr_evargs_get_Response,
-    [9] = wrr_evargs_get_ResourceContext,
+    [8] = wrr_evargs_put_Response,
+    [9] = wrr_evargs_GetDeferral,
+    [10] = wrr_evargs_get_ResourceContext,
 };
 
 /* ProcessFailedEventArgs: 6=get_ProcessFailedKind (COM 3) */
@@ -2057,7 +2238,7 @@ static HRESULT WINAPI procfail_get_ProcessFailedKind( void *iface, int *out )
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             hr = fn( impl->com_args, out );
     }
-    TRACE( "procfail_get_ProcessFailedKind hr=%#lx kind=%d\n", hr, *out );
+    ERR( "procfail_get_ProcessFailedKind hr=%#lx kind=%d\n", hr, *out );
     return hr;
 }
 
@@ -2065,7 +2246,7 @@ static const void *cwv2_procfail_args_vtbl[256] =
 {
     [0] = evargs_QueryInterface, [1] = evargs_AddRef, [2] = evargs_Release,
     [3] = cwv2_GetIids, [4] = cwv2_GetRuntimeClassName, [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [7 ... 255] = element_generic_slot,
     [6] = procfail_get_ProcessFailedKind,
 };
 
@@ -2119,6 +2300,7 @@ static HRESULT WINAPI evbridge_Invoke( void *t, void *com_sender, void *com_args
     struct cwv2_event_args *ea = NULL;
     HRESULT hr = S_OK;
     if (!wh || !b->owner) return S_OK;
+    ERR( "evbridge_Invoke: slot=%d iid=%s com_args=%p\n", 0, debugstr_guid( &b->args_iid ), com_args );
     if (com_args && (ea = calloc( 1, sizeof(*ea) )))
     {
         ea->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( b->args_vtbl ? b->args_vtbl : cwv2_generic_evargs_vtbl );
@@ -2128,6 +2310,7 @@ static HRESULT WINAPI evbridge_Invoke( void *t, void *com_sender, void *com_args
         ((IUnknown *)com_args)->lpVtbl->AddRef( com_args );
     }
     hr = wh->lpVtbl->Invoke( wh, &b->owner->IInspectable_iface, ea ? &ea->IInspectable_iface : NULL );
+    ERR( "evbridge_Invoke: done iid=%s hr=%#lx\n", debugstr_guid( &b->args_iid ), hr );
     if (ea) evargs_Release( &ea->IInspectable_iface );
     return hr;
 }
@@ -2304,7 +2487,11 @@ static const void *cwv2_vtbl[256] =
     [3] = cwv2_GetIids,
     [4] = cwv2_GetRuntimeClassName,
     [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = cwv2_generic_slot,
+    [50] = cwv2_generic_slot,
+
+    [57] = cwv2_generic_slot,
+
+    [64 ... 255] = cwv2_generic_slot,
     [6] = cwv2_get_Settings,
     [7] = cwv2_get_Source,
     [8] = cwv2_get_BrowserProcessId,
@@ -2371,7 +2558,9 @@ static const void *cwv2_2_vtbl[256] =
     [3] = cwv2_GetIids,
     [4] = cwv2_GetRuntimeClassName,
     [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = cwv2_generic_slot,
+    [6] = cwv2_generic_slot,
+
+    [13 ... 255] = cwv2_generic_slot,
     [7] = cwv2_2_get_Environment,
     [8] = cwv2_2_add_WebResourceResponseReceived,
     [9] = cwv2_2_remove_WebResourceResponseReceived,
@@ -2399,7 +2588,7 @@ static const void *cwv2_11_vtbl[256] =
     [3] = cwv2_GetIids,
     [4] = cwv2_GetRuntimeClassName,
     [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = cwv2_generic_slot,
+    [9 ... 255] = cwv2_generic_slot,
     [6] = cwv2_11_add_ContextMenuRequested,
     [7] = cwv2_11_remove_ContextMenuRequested,
     [8] = cwv2_11_CallDevToolsProtocolMethodForSessionAsync,
@@ -2413,7 +2602,7 @@ static const void *cwv2_13_vtbl[256] =
     [3] = cwv2_GetIids,
     [4] = cwv2_GetRuntimeClassName,
     [5] = cwv2_GetTrustLevel,
-    [6 ... 255] = cwv2_generic_slot,
+    [7 ... 255] = cwv2_generic_slot,
     [6] = cwv2_get_Profile,
 };
 
@@ -2483,7 +2672,7 @@ static const void *cwv2_args_vtbl[256] =
     [3] = cwv2_args_GetIids,
     [4] = cwv2_args_GetRuntimeClassName,
     [5] = cwv2_args_GetTrustLevel,
-    [6 ... 255] = element_generic_slot,
+    [7 ... 255] = element_generic_slot,
     [6] = cwv2_args_get_Exception,    /* 6: get_Exception */
 };
 
@@ -2719,6 +2908,15 @@ static HRESULT wv2_sta_send_character_input( struct xaml_element *impl, HWND hos
 
 static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
+    if (msg == WM_TIMER && wparam == 0x5757)
+    {
+        static int sync_ticks;
+        if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
+            wv2_sync_child_hwnds( NULL, 0, 0 );
+        if (++sync_ticks >= 15)
+            KillTimer( hwnd, 0x5757 );
+        return 0;
+    }
     if (msg == WM_APP_WV2_WHEEL && g_active_wv2_impl)
     {
         HWND host = g_active_wv2_impl->parent_hwnd ? g_active_wv2_impl->parent_hwnd : g_wv2_core_hwnd;
@@ -3111,9 +3309,24 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
     DWORD pid = 0;
 
     GetWindowThreadProcessId( hwnd, &pid );
-    if (pid != GetCurrentProcessId()) return TRUE;
-
     GetClassNameW( hwnd, cls, ARRAY_SIZE( cls ) );
+    if (pid != GetCurrentProcessId())
+    {
+        if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl &&
+            wcsstr( cls, L"Chrome_WidgetWin" ) && IsWindowVisible( hwnd ))
+        {
+            RECT wr;
+            if (GetWindowRect( hwnd, &wr ) && wr.left > -2000)
+            {
+                ERR( "wv2_sync_top_cb: moving foreign %p (%s) pid=%lu offscreen\n", hwnd, debugstr_w( cls ), pid );
+                SetWindowPos( hwnd, HWND_BOTTOM, -4000, -4000, 0, 0,
+                              SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
+                ShowWindowAsync( hwnd, SW_HIDE );
+            }
+        }
+        return TRUE;
+    }
+
     TRACE( "wv2_sync_top_cb: seen hwnd %p class %s\n", hwnd, debugstr_w(cls) );
     if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
         wcsstr( cls, L"RenderWidget" ))
@@ -3497,7 +3710,10 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                 {
                     HRESULT hr_rv = comp_ctrl->lpVtbl->put_RootVisualTarget( comp_ctrl, (IUnknown *)vis );
                     if (SUCCEEDED( hr_rv ))
+                    {
                         h->impl->has_comp_ctrl = TRUE;
+                        xaml_dcomp_commit();
+                    }
                     ERR( "wv2_ctrl_handler_Invoke: put_RootVisualTarget hr=%#lx\n", hr_rv );
                 }
                 h->impl->loader_comp_ctrl = comp_ctrl;
@@ -3536,6 +3752,8 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             wv2_ensure_sta_hwnd();
             wv2_ensure_host_subclass( parent );
             wv2_sync_child_hwnds( parent, rc.right, rc.bottom );
+            if (g_wv2_sta_hwnd && h->impl->has_comp_ctrl)
+                SetTimer( g_wv2_sta_hwnd, 0x5757, 1000, NULL );
 
             if (core && !h->impl->loader_core)
             {
@@ -3663,7 +3881,12 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                     ERR( "wv2_ctrl_handler_Invoke: replayed %d queued core_webview2 ops\n", replayed );
                 }
                 wv2_navigate_once( h->impl );
-                trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
+                if (h->impl->core_webview2)
+                {
+                    struct core_webview2 *cwv = impl_from_cwv2( h->impl->core_webview2 );
+                    cwv->loader_core = h->impl->loader_core;
+                    cwv->real_loader = h->impl->real_loader;
+                }
             }
             return S_OK;
         }
@@ -3718,8 +3941,9 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
     {
         /* s430: prefer the synchronous loader export: one call, no handler vtbl hops */
         HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
+        void *(WINAPI *p_sync)( HWND, HRESULT * );
         if (!loader) loader = LoadLibraryW( L"webview2loader.dll" );
-        void *(WINAPI *p_sync)( HWND, HRESULT * ) = (void *)GetProcAddress( loader, "CreateCoreWebView2ControllerSync" );
+        p_sync = (void *)GetProcAddress( loader, "CreateCoreWebView2ControllerSync" );
         if (p_sync)
         {
             HRESULT hr2 = S_OK;
@@ -4264,7 +4488,7 @@ static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl
         if (o->args[0]) lstrcatW( o->args, L" " );
         lstrcatW( o->args, sf_arg );
     }
-    ERR( "wv2_create_env_options: ver=%s args=%s dpi=%u cy=%d desktop=%d sf=%s\n",
+    ERR( "wv2_create_env_options: ver=%s args=%s dpi=%u cy=%ld desktop=%ld sf=%s\n",
          debugstr_w( o->target_version ), debugstr_w( o->args ), dpi, sz.cy, desktop_h,
          debugstr_w( sf_txt ) );
     return o;
@@ -4514,7 +4738,9 @@ const void *wv2_do_vtbl[64] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [6 ... 63] = element_generic_slot,
+    [8] = element_generic_slot,
+
+    [11 ... 63] = element_generic_slot,
     [6] = wv2_do_GetValue,
     [7] = wv2_do_SetValue,
     [9] = wv2_do_GetValue,
@@ -4529,7 +4755,21 @@ const void *wv2_vtbl[256] =
     [3] = element_GetIids,                    /* 3: GetIids */
     [4] = element_wv2_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = element_GetTrustLevel,              /* 5: GetTrustLevel */
-    [6 ... 255] = element_generic_slot,
+    [8] = element_generic_slot,
+
+    [11] = element_generic_slot,
+
+    [14 ... 19] = element_generic_slot,
+
+    [21 ... 26] = element_generic_slot,
+
+    [29] = element_generic_slot,
+
+    [32] = element_generic_slot,
+
+    [35 ... 74] = element_generic_slot,
+
+    [77 ... 255] = element_generic_slot,
     [6] = wv2_get_CoreWebView2,               /* 6: get_CoreWebView2 */
     [7] = wv2_EnsureCoreWebView2Async,        /* 7: EnsureCoreWebView2Async */
     [9] = wv2_get_Source,                     /* 9: get_Source */
@@ -4555,7 +4795,7 @@ const void *wv22_vtbl[256] =
     [3] = element_GetIids,                    /* 3: GetIids */
     [4] = element_wv22_GetRuntimeClassName,   /* 4: GetRuntimeClassName */
     [5] = element_GetTrustLevel,              /* 5: GetTrustLevel */
-    [6 ... 255] = element_generic_slot,
+    [70 ... 255] = element_generic_slot,
     [6] = wv22_EnsureCoreWebView2Async,   [7] = wv22_EnsureCoreWebView2AsyncWithOptions,   [8] = wv2_probe2,   [9] = wv2_probe3,
     [10] = element_grid_get_RowDefinitions_abi3,  /* IV1 c3c01020 slot10 = RowDefinitions(this, HSTRING, vec**) */
     [11] = wv2_probe5,  [12] = wv2_probe6,  [13] = wv2_probe7,
