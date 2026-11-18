@@ -1176,10 +1176,11 @@ static HRESULT WINAPI storage_item2_folder_GetTrustLevel( IStorageItem2 *iface, 
     if (l) *l = BaseTrust;
     return S_OK;
 }
+static HRESULT WINAPI storage_folder_GetParentAsync( IStorageFolder *iface, IAsyncOperation_StorageFolder **result );
 static HRESULT WINAPI storage_item2_folder_GetParentAsync( IStorageItem2 *iface, IAsyncOperation_IStorageItem **result )
 {
     struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
-    return IStorageFolder_GetParentAsync( &impl->IStorageFolder_iface, (IAsyncOperation_StorageFolder **)result );
+    return storage_folder_GetParentAsync( &impl->IStorageFolder_iface, (IAsyncOperation_StorageFolder **)result );
 }
 static HRESULT WINAPI storage_item2_folder_IsEqual( IStorageItem2 *iface, IStorageItem *item, boolean *result )
 {
@@ -1795,7 +1796,6 @@ static const struct IStorageFolderVtbl storage_folder_vtbl =
     storage_folder_GetIids,
     storage_folder_GetRuntimeClassName,
     storage_folder_GetTrustLevel,
-    storage_folder_GetParentAsync,
     storage_folder_CreateFileAsyncOverloadDefaultOptions,
     storage_folder_CreateFileAsync,
     storage_folder_CreateFolderAsyncOverloadDefaultOptions,
@@ -2111,8 +2111,6 @@ STORAGE_FACTORY_STUB( storage_folder_def_GetFolderAsync, ( IStorageFolder *iface
     __FIAsyncOperation_1_Windows__CStorage__CStorageFolder **operation ) )
 STORAGE_FACTORY_STUB( storage_folder_def_GetItemAsync, ( IStorageFolder *iface, HSTRING name,
     __FIAsyncOperation_1_Windows__CStorage__CIStorageItem **operation ) )
-STORAGE_FACTORY_STUB( storage_folder_def_GetParentAsync, ( IStorageFolder *iface,
-    __FIAsyncOperation_1_Windows__CStorage__CStorageFolder **operation ) )
 STORAGE_FACTORY_STUB( storage_folder_def_GetFilesAsyncOverloadDefaultOptionsStartAndCount, ( IStorageFolder *iface,
     __FIAsyncOperation_1___FIVectorView_1_Windows__CStorage__CStorageFile **operation ) )
 STORAGE_FACTORY_STUB( storage_folder_def_GetFoldersAsyncOverloadDefaultOptionsStartAndCount, ( IStorageFolder *iface,
@@ -2128,7 +2126,6 @@ static const struct IStorageFolderVtbl storage_folder_def_vtbl =
     storage_folder_def_GetIids,
     storage_folder_def_GetRuntimeClassName,
     storage_folder_def_GetTrustLevel,
-    storage_folder_def_GetParentAsync,
     storage_folder_def_CreateFileAsyncOverloadDefaultOptions,
     storage_folder_def_CreateFileAsync,
     storage_folder_def_CreateFolderAsyncOverloadDefaultOptions,
