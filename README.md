@@ -1,6 +1,8 @@
 # wine-ultimate — WinUI 3 / Windows App SDK stack for Wine
 
 > **Honest disclaimer:** `wine-ultimate` is an experimental AI-assisted Wine fork ("AI-slop" by traditional Wine upstream standards — large, rapidly-iterated C/ASM subsystems built and verified with automated profiling, Wine test suites, and live WinUI 3 / UWP app gates, not upstream-reviewed patches). It is **not** clean upstream Wine and should be evaluated by its measured benchmarks, Wine test results, and clean-room legality below.
+>
+> **Models used:** `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.8-flash`, and a local custom `strata` model (`heretic-v2-iq4_xs-plus`, `IQ4_XS` 4-bit quantization with `k8v4` KV cache).
 
 ## Why `wine-ultimate` is Legal (Clean-Room Builtin Implementation)
 
