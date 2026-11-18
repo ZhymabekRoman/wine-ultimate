@@ -394,6 +394,15 @@ struct uwp_element
     void *binding_connector;
     IInspectable *selected_item;
     IInspectable *sel_changed_handler;
+    IInspectable *tab_items_source;
+    IInspectable *tab_add_cmd;
+    IInspectable *tab_add_cmd_param;
+    IInspectable **tab_add_handlers;
+    int tab_add_cnt;
+    int tab_add_cap;
+    IInspectable **tab_close_handlers;
+    int tab_close_cnt;
+    int tab_close_cap;
     struct xaml_event_registry ptr_pressed_reg;
     struct xaml_event_registry ptr_moved_reg;
     struct xaml_event_registry ptr_released_reg;
@@ -997,6 +1006,12 @@ HRESULT WINAPI element_grid_get_RowDefinitions_abi3( void *iface, void *count, v
 HRESULT WINAPI element_remove_Loaded( void *iface, EventRegistrationToken token );
 ULONG WINAPI element_wv22_AddRef( IInspectable *iface );
 HRESULT WINAPI element_wv22_GetRuntimeClassName( IInspectable *iface, HSTRING *name );
+int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int max_items );
+void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len );
+void uwp_tabview_compute_rects( const RECT *trc, int count, int idx, RECT *pill_rc, RECT *close_rc, RECT *add_rc );
+void uwp_tabview_fire_add_tab( struct uwp_element *tv );
+void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item );
+void uwp_tabview_select_item( struct uwp_element *tv, IInspectable *item );
 HRESULT WINAPI element_wv22_QueryInterface( IInspectable *iface, REFIID iid, void **out );
 ULONG WINAPI element_wv22_Release( IInspectable *iface );
 ULONG WINAPI element_wv2_AddRef( IInspectable *iface );

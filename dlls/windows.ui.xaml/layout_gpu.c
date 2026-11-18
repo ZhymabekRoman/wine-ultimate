@@ -839,41 +839,45 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
         }
         if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
         {
-            static const GUID IID_ITabItemViewModel_local =
-                { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
             RECT trc = el->bounds;
-            WCHAR tab_title[128] = {0};
-            if (el->selected_item)
+            IInspectable *items[64];
+            int count = uwp_tabview_get_items( el, items, ARRAY_SIZE(items) );
+            int i;
+            if (count == 0)
             {
-                void *vm = NULL;
-                if (SUCCEEDED(IInspectable_QueryInterface( el->selected_item, &IID_ITabItemViewModel_local, &vm )) && vm)
+                RECT pill, close_rc, add_rc;
+                uwp_tabview_compute_rects( &trc, 1, 0, &pill, &close_rc, &add_rc );
+                if (el->text[0])
                 {
-                    HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)vm)[6];
-                    HSTRING hname = NULL;
-                    if (get_name && SUCCEEDED(get_name( vm, &hname )) && hname)
-                    {
-                        const WCHAR *s = WindowsGetStringRawBuffer( hname, NULL );
-                        if (s && s[0]) lstrcpynW( tab_title, s, ARRAY_SIZE(tab_title) );
-                        WindowsDeleteString( hname );
-                    }
-                    IUnknown_Release( (IUnknown *)vm );
+                    xaml_gpu_push_rect( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
+                                        0.0f, cr_to_argb( RGB( 44, 44, 44 ) ), 0, 0.0f, 1.0f );
+                    pill.left += 10;
+                    pill.right = max( pill.left, close_rc.left - 2 );
+                    xaml_gpu_push_text( ctx, el->text, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, RGB( 255, 255, 255 ), 1.0f );
+                    xaml_gpu_push_text( ctx, L"\x00d7", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &close_rc, NULL, RGB( 185, 185, 185 ), 1.0f );
                 }
-            }
-            if (!tab_title[0] && el->text[0])
-                lstrcpynW( tab_title, el->text, ARRAY_SIZE(tab_title) );
-            if (tab_title[0])
-            {
-                RECT pill = { trc.left + 4, trc.top + 3, min( trc.right - 34, trc.left + 190 ), trc.bottom };
-                RECT close_rc = { pill.right - 22, pill.top + 2, pill.right - 4, pill.bottom - 2 };
-                RECT add_rc = { pill.right + 6, trc.top + 4, min( trc.right - 2, pill.right + 30 ), trc.bottom - 2 };
-                xaml_gpu_push_rect( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
-                                    0.0f, cr_to_argb( RGB( 44, 44, 44 ) ), 0, 0.0f, 1.0f );
-                pill.left += 10;
-                pill.right = max( pill.left, close_rc.left - 2 );
-                xaml_gpu_push_text( ctx, tab_title, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, RGB( 255, 255, 255 ), 1.0f );
-                xaml_gpu_push_text( ctx, L"\x00d7", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &close_rc, NULL, RGB( 185, 185, 185 ), 1.0f );
                 if (add_rc.right > add_rc.left + 12)
                     xaml_gpu_push_text( ctx, L"+", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &add_rc, NULL, RGB( 210, 210, 210 ), 1.0f );
+                return;
+            }
+            for (i = 0; i < count; i++)
+            {
+                WCHAR tab_title[128] = {0};
+                RECT pill, close_rc, add_rc;
+                BOOL is_sel = el->selected_item ? (items[i] == el->selected_item) : (i == 0);
+                COLORREF bg = is_sel ? RGB( 44, 44, 44 ) : RGB( 28, 28, 28 );
+                COLORREF fg = is_sel ? RGB( 255, 255, 255 ) : RGB( 195, 195, 195 );
+                uwp_tabview_get_item_title( items[i], tab_title, ARRAY_SIZE(tab_title) );
+                uwp_tabview_compute_rects( &trc, count, i, &pill, &close_rc, &add_rc );
+                xaml_gpu_push_rect( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
+                                    0.0f, cr_to_argb( bg ), is_sel ? 0 : cr_to_argb( RGB( 54, 54, 54 ) ), is_sel ? 0.0f : 1.0f, 1.0f );
+                pill.left += 10;
+                pill.right = max( pill.left, close_rc.left - 2 );
+                xaml_gpu_push_text( ctx, tab_title, 13, is_sel ? FW_SEMIBOLD : FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, fg, 1.0f );
+                xaml_gpu_push_text( ctx, L"\x00d7", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &close_rc, NULL, RGB( 185, 185, 185 ), 1.0f );
+                if (i == count - 1 && add_rc.right > add_rc.left + 12)
+                    xaml_gpu_push_text( ctx, L"+", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &add_rc, NULL, RGB( 210, 210, 210 ), 1.0f );
+                IInspectable_Release( items[i] );
             }
             return;
         }

@@ -1148,55 +1148,62 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         }
         if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
         {
-            static const GUID IID_ITabItemViewModel_local =
-                { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
             RECT trc = el->bounds;
-            WCHAR tab_title[128] = {0};
-            if (el->selected_item)
+            IInspectable *items[64];
+            int count = uwp_tabview_get_items( el, items, ARRAY_SIZE(items) );
+            int i;
+            HFONT font = CreateFontW( -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            HGDIOBJ old_font = SelectObject( hdc, font );
+            SetBkMode( hdc, TRANSPARENT );
+            if (count == 0)
             {
-                void *vm = NULL;
-                if (SUCCEEDED(IInspectable_QueryInterface( el->selected_item, &IID_ITabItemViewModel_local, &vm )) && vm)
+                RECT pill, close_rc, add_rc;
+                uwp_tabview_compute_rects( &trc, 1, 0, &pill, &close_rc, &add_rc );
+                if (el->text[0])
                 {
-                    HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)vm)[6];
-                    HSTRING hname = NULL;
-                    if (get_name && SUCCEEDED(get_name( vm, &hname )) && hname)
-                    {
-                        const WCHAR *s = WindowsGetStringRawBuffer( hname, NULL );
-                        if (s && s[0]) lstrcpynW( tab_title, s, ARRAY_SIZE(tab_title) );
-                        WindowsDeleteString( hname );
-                    }
-                    IUnknown_Release( (IUnknown *)vm );
+                    HBRUSH tbr = CreateSolidBrush( RGB( 44, 44, 44 ) );
+                    FillRect( hdc, &pill, tbr );
+                    DeleteObject( tbr );
+                    SetTextColor( hdc, RGB( 255, 255, 255 ) );
+                    pill.left += 10;
+                    pill.right = max( pill.left, close_rc.left - 2 );
+                    DrawTextW( hdc, el->text, -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
+                    SetTextColor( hdc, RGB( 185, 185, 185 ) );
+                    DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 }
-            }
-            if (!tab_title[0] && el->text[0])
-                lstrcpynW( tab_title, el->text, ARRAY_SIZE(tab_title) );
-            if (tab_title[0])
-            {
-                RECT pill = { trc.left + 4, trc.top + 3, min( trc.right - 34, trc.left + 190 ), trc.bottom };
-                RECT close_rc = { pill.right - 22, pill.top + 2, pill.right - 4, pill.bottom - 2 };
-                RECT add_rc = { pill.right + 6, trc.top + 4, min( trc.right - 2, pill.right + 30 ), trc.bottom - 2 };
-                HBRUSH tbr = CreateSolidBrush( RGB( 44, 44, 44 ) );
-                HFONT font = CreateFontW( -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                          CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-                HGDIOBJ old_font = SelectObject( hdc, font );
-                FillRect( hdc, &pill, tbr );
-                DeleteObject( tbr );
-                SetTextColor( hdc, RGB( 255, 255, 255 ) );
-                SetBkMode( hdc, TRANSPARENT );
-                pill.left += 10;
-                pill.right = max( pill.left, close_rc.left - 2 );
-                DrawTextW( hdc, tab_title, -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
-                SetTextColor( hdc, RGB( 185, 185, 185 ) );
-                DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 if (add_rc.right > add_rc.left + 12)
                 {
                     SetTextColor( hdc, RGB( 210, 210, 210 ) );
                     DrawTextW( hdc, L"+", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 }
-                SelectObject( hdc, old_font );
-                DeleteObject( font );
             }
+            for (i = 0; i < count; i++)
+            {
+                WCHAR tab_title[128] = {0};
+                RECT pill, close_rc, add_rc;
+                BOOL is_sel = el->selected_item ? (items[i] == el->selected_item) : (i == 0);
+                HBRUSH tbr = CreateSolidBrush( is_sel ? RGB( 44, 44, 44 ) : RGB( 28, 28, 28 ) );
+                uwp_tabview_get_item_title( items[i], tab_title, ARRAY_SIZE(tab_title) );
+                uwp_tabview_compute_rects( &trc, count, i, &pill, &close_rc, &add_rc );
+                FillRect( hdc, &pill, tbr );
+                DeleteObject( tbr );
+                SetTextColor( hdc, is_sel ? RGB( 255, 255, 255 ) : RGB( 195, 195, 195 ) );
+                pill.left += 10;
+                pill.right = max( pill.left, close_rc.left - 2 );
+                DrawTextW( hdc, tab_title, -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
+                SetTextColor( hdc, RGB( 185, 185, 185 ) );
+                DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                if (i == count - 1 && add_rc.right > add_rc.left + 12)
+                {
+                    SetTextColor( hdc, RGB( 210, 210, 210 ) );
+                    DrawTextW( hdc, L"+", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                }
+                IInspectable_Release( items[i] );
+            }
+            SelectObject( hdc, old_font );
+            DeleteObject( font );
             return;
         }
         if (wcsstr( el->class_name, L"PivotItem" ) && el->text[0])

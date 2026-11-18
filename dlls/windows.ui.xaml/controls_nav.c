@@ -307,10 +307,429 @@ static HRESULT WINAPI uwp_flyout_slot8( void *iface, void *arg1, EventRegistrati
     return S_OK;
 }
 
-static HRESULT WINAPI uwp_flyout_get_SelectedIndex( void *iface, int *out )
+static HRESULT WINAPI uwp_tabview_put_SelectedItem( void *iface, void *item );
+
+static HRESULT WINAPI uwp_tabview_get_SelectedIndex( void *iface, INT32 *out )
 {
-    if (out) *out = 0;
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    IInspectable *items[64];
+    int n, i, idx = 0;
+    if (!out) return E_POINTER;
+    if (impl && impl->selected_item)
+    {
+        n = uwp_tabview_get_items( impl, items, ARRAY_SIZE(items) );
+        for (i = 0; i < n; i++)
+        {
+            if (items[i] == impl->selected_item) idx = i;
+            IInspectable_Release( items[i] );
+        }
+    }
+    *out = idx;
     return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_put_SelectedIndex( void *iface, INT32 idx )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    IInspectable *items[64];
+    int n, i;
+    if (!impl) return S_OK;
+    n = uwp_tabview_get_items( impl, items, ARRAY_SIZE(items) );
+    if (idx >= 0 && idx < n)
+        uwp_tabview_select_item( impl, items[idx] );
+    for (i = 0; i < n; i++)
+        IInspectable_Release( items[i] );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_get_AddTabButtonCommand( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->tab_add_cmd : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_put_AddTabButtonCommand( void *iface, void *cmd )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!impl) return S_OK;
+    if (impl->tab_add_cmd) IInspectable_Release( impl->tab_add_cmd );
+    impl->tab_add_cmd = (IInspectable *)cmd;
+    if (impl->tab_add_cmd) IInspectable_AddRef( impl->tab_add_cmd );
+    TRACE( "ITabView::put_AddTabButtonCommand -> %p\n", cmd );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_get_AddTabButtonCommandParameter( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->tab_add_cmd_param : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_put_AddTabButtonCommandParameter( void *iface, void *param )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!impl) return S_OK;
+    if (impl->tab_add_cmd_param) IInspectable_Release( impl->tab_add_cmd_param );
+    impl->tab_add_cmd_param = (IInspectable *)param;
+    if (impl->tab_add_cmd_param) IInspectable_AddRef( impl->tab_add_cmd_param );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_add_TabCloseRequested( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->tab_close_handlers, &impl->tab_close_cap,
+                       impl->tab_close_cnt + 1, sizeof(*impl->tab_close_handlers), 4 ))
+    {
+        impl->tab_close_handlers[impl->tab_close_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->tab_close_cnt;
+    }
+    TRACE( "ITabView::add_TabCloseRequested -> %p (cnt=%d)\n", handler, impl->tab_close_cnt );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_remove_TabCloseRequested( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    int idx = (int)tok.value - 1;
+    if (impl && idx >= 0 && idx < impl->tab_close_cnt && impl->tab_close_handlers[idx])
+    {
+        IUnknown_Release( (IUnknown *)impl->tab_close_handlers[idx] );
+        impl->tab_close_handlers[idx] = NULL;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_add_AddTabButtonClick( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->tab_add_handlers, &impl->tab_add_cap,
+                       impl->tab_add_cnt + 1, sizeof(*impl->tab_add_handlers), 4 ))
+    {
+        impl->tab_add_handlers[impl->tab_add_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        if (tok) tok->value = impl->tab_add_cnt;
+    }
+    TRACE( "ITabView::add_AddTabButtonClick -> %p (cnt=%d)\n", handler, impl->tab_add_cnt );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_remove_AddTabButtonClick( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    int idx = (int)tok.value - 1;
+    if (impl && idx >= 0 && idx < impl->tab_add_cnt && impl->tab_add_handlers[idx])
+    {
+        IUnknown_Release( (IUnknown *)impl->tab_add_handlers[idx] );
+        impl->tab_add_handlers[idx] = NULL;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_get_TabItemsSource( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->tab_items_source : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_tabview_put_TabItemsSource( void *iface, void *src )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (!impl) return S_OK;
+    if (impl->tab_items_source) IInspectable_Release( impl->tab_items_source );
+    impl->tab_items_source = (IInspectable *)src;
+    if (impl->tab_items_source) IInspectable_AddRef( impl->tab_items_source );
+    TRACE( "ITabView::put_TabItemsSource -> %p\n", src );
+    uwp_invalidate_window();
+    return S_OK;
+}
+
+struct uwp_tab_close_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    IInspectable *item;
+    IInspectable *tab;
+};
+
+static HRESULT WINAPI uwp_tab_close_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = iface;
+    InterlockedIncrement( &((struct uwp_tab_close_args *)iface)->ref );
+    return S_OK;
+}
+static ULONG WINAPI uwp_tab_close_args_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_tab_close_args *)iface)->ref );
+}
+static ULONG WINAPI uwp_tab_close_args_Release( void *iface )
+{
+    struct uwp_tab_close_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r)
+    {
+        if (a->item) IInspectable_Release( a->item );
+        if (a->tab) IInspectable_Release( a->tab );
+        free( a );
+    }
+    return r;
+}
+static HRESULT WINAPI uwp_tab_close_args_get_Item( void *iface, void **out )
+{
+    struct uwp_tab_close_args *a = iface;
+    if (!out) return E_POINTER;
+    *out = a->item;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tab_close_args_get_Tab( void *iface, void **out )
+{
+    struct uwp_tab_close_args *a = iface;
+    if (!out) return E_POINTER;
+    *out = a->tab ? a->tab : a->item;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static const void *uwp_tab_close_args_vtbl[12] =
+{
+    [0] = uwp_tab_close_args_QI,
+    [1] = uwp_tab_close_args_AddRef,
+    [2] = uwp_tab_close_args_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_tab_close_args_get_Item,
+    [7] = uwp_tab_close_args_get_Tab,
+    [8 ... 11] = uwp_generic_noop,
+};
+
+int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int max_items )
+{
+    static const GUID IID_IVector_Insp_local =
+        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
+    static const GUID IID_IVectorView_Insp_local =
+        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
+    static const GUID IID_IBindableVector_local =
+        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
+    static const GUID IID_IIterable_Insp_local =
+        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
+    int count = 0;
+
+    if (!tv || !out_items || max_items <= 0) return 0;
+
+    if (tv->tab_items_source && (ULONG_PTR)tv->tab_items_source >= 0x10000)
+    {
+        void *vec = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVector_Insp_local, &vec )) ||
+            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVectorView_Insp_local, &vec )) ||
+            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IBindableVector_local, &vec )))
+        {
+            HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
+            HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
+            unsigned int sz = 0, i;
+            if (get_sz && SUCCEEDED(get_sz( vec, &sz )))
+            {
+                for (i = 0; i < sz && count < max_items; i++)
+                {
+                    void *it = NULL;
+                    if (get_at && SUCCEEDED(get_at( vec, i, &it )) && it)
+                        out_items[count++] = (IInspectable *)it;
+                }
+            }
+            IUnknown_Release( (IUnknown *)vec );
+        }
+        else if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IIterable_Insp_local, &vec )) && vec)
+        {
+            HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
+            void *iter = NULL;
+            if (first && SUCCEEDED(first( vec, &iter )) && iter)
+            {
+                HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
+                HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
+                HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
+                boolean has = FALSE;
+                while (count < max_items && has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
+                {
+                    void *it = NULL;
+                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
+                        out_items[count++] = (IInspectable *)it;
+                    has = FALSE;
+                    if (!move_next || FAILED(move_next( iter, &has )) || !has) break;
+                }
+                IUnknown_Release( (IUnknown *)iter );
+            }
+            IUnknown_Release( (IUnknown *)vec );
+        }
+    }
+
+    if (count == 0 && tv->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( tv->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count && count < max_items; i++)
+        {
+            if (v->items[i])
+            {
+                out_items[count] = v->items[i];
+                IInspectable_AddRef( out_items[count] );
+                count++;
+            }
+        }
+    }
+
+    if (count == 0 && tv->selected_item)
+    {
+        out_items[0] = tv->selected_item;
+        IInspectable_AddRef( out_items[0] );
+        count = 1;
+    }
+
+    return count;
+}
+
+void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len )
+{
+    static const GUID IID_ITabItemViewModel_local =
+        { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
+    if (!buf || buf_len <= 0) return;
+    buf[0] = 0;
+    if (item && (ULONG_PTR)item >= 0x10000)
+    {
+        void *vm = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_ITabItemViewModel_local, &vm )) && vm)
+        {
+            HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)vm)[6];
+            HSTRING hname = NULL;
+            if (get_name && SUCCEEDED(get_name( vm, &hname )) && hname)
+            {
+                const WCHAR *s = WindowsGetStringRawBuffer( hname, NULL );
+                if (s && s[0]) lstrcpynW( buf, s, buf_len );
+                WindowsDeleteString( hname );
+            }
+            IUnknown_Release( (IUnknown *)vm );
+        }
+        if (!buf[0])
+        {
+            struct uwp_element *el = uwp_elem_from_any( item );
+            if (el && el->text[0])
+                lstrcpynW( buf, el->text, buf_len );
+        }
+    }
+    if (!buf[0])
+        lstrcpynW( buf, L"Untitled", buf_len );
+}
+
+void uwp_tabview_compute_rects( const RECT *trc, int count, int idx, RECT *pill_rc, RECT *close_rc, RECT *add_rc )
+{
+    int avail_w = max( 80, (int)(trc->right - trc->left) - 42 );
+    int n = max( 1, count );
+    int tw = min( 186, max( 72, (avail_w - (n - 1) * 2) / n ) );
+    int x0 = trc->left + 4 + idx * (tw + 2);
+    if (pill_rc) SetRect( pill_rc, x0, trc->top + 3, min( trc->right - 34, x0 + tw ), trc->bottom );
+    if (close_rc && pill_rc) SetRect( close_rc, pill_rc->right - 22, pill_rc->top + 2, pill_rc->right - 4, pill_rc->bottom - 2 );
+    if (add_rc)
+    {
+        int ax = trc->left + 4 + n * (tw + 2) + 4;
+        SetRect( add_rc, ax, trc->top + 4, min( trc->right - 2, ax + 28 ), trc->bottom - 2 );
+    }
+}
+
+void uwp_tabview_fire_add_tab( struct uwp_element *tv )
+{
+    int i;
+    if (!tv) return;
+    TRACE( "uwp_tabview_fire_add_tab: cnt=%d cmd=%p\n", tv->tab_add_cnt, tv->tab_add_cmd );
+    for (i = 0; i < tv->tab_add_cnt; i++)
+    {
+        if (tv->tab_add_handlers[i])
+        {
+            __TRY
+            {
+                IInspectable *sender = tv->outer ? tv->outer : &tv->IInspectable_iface;
+                struct xaml_event_handler *h = (struct xaml_event_handler *)tv->tab_add_handlers[i];
+                h->lpVtbl->Invoke( h, sender, NULL );
+            }
+            __EXCEPT_ALL
+            {
+                TRACE( "uwp_tabview_fire_add_tab: handler %d faulted\n", i );
+            }
+            __ENDTRY;
+        }
+    }
+    if (tv->tab_add_cmd)
+    {
+        __TRY
+        {
+            void *cmd_iface = NULL;
+            if ((SUCCEEDED(IInspectable_QueryInterface( tv->tab_add_cmd, &IID_ICommand_UWP, &cmd_iface )) ||
+                 SUCCEEDED(IInspectable_QueryInterface( tv->tab_add_cmd, &IID_ICommand_UWP2, &cmd_iface ))) && cmd_iface)
+            {
+                struct command_iface *cmd = (struct command_iface *)cmd_iface;
+                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, tv->tab_add_cmd_param );
+                IUnknown_Release( (IUnknown *)cmd_iface );
+            }
+        }
+        __EXCEPT_ALL
+        {
+            TRACE( "uwp_tabview_fire_add_tab: ICommand::Execute faulted\n" );
+        }
+        __ENDTRY;
+    }
+    uwp_invalidate_window();
+}
+
+void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item )
+{
+    struct uwp_tab_close_args *args;
+    int i;
+    if (!tv || !item) return;
+    TRACE( "uwp_tabview_fire_close_tab: cnt=%d item=%p\n", tv->tab_close_cnt, item );
+    args = calloc( 1, sizeof(*args) );
+    if (!args) return;
+    args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tab_close_args_vtbl;
+    args->ref = 1;
+    args->item = item;
+    IInspectable_AddRef( item );
+    for (i = 0; i < tv->tab_close_cnt; i++)
+    {
+        if (tv->tab_close_handlers[i])
+        {
+            __TRY
+            {
+                IInspectable *sender = tv->outer ? tv->outer : &tv->IInspectable_iface;
+                struct xaml_event_handler *h = (struct xaml_event_handler *)tv->tab_close_handlers[i];
+                h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
+            }
+            __EXCEPT_ALL
+            {
+                TRACE( "uwp_tabview_fire_close_tab: handler %d faulted\n", i );
+            }
+            __ENDTRY;
+        }
+    }
+    IInspectable_Release( &args->IInspectable_iface );
+    uwp_invalidate_window();
+}
+
+void uwp_tabview_select_item( struct uwp_element *tv, IInspectable *item )
+{
+    if (!tv || !item) return;
+    uwp_tabview_put_SelectedItem( &tv->IFlyout_iface, item );
 }
 
 static HRESULT WINAPI uwp_sel_args_QI( void *iface, REFIID iid, void **out )
@@ -380,6 +799,17 @@ static HRESULT WINAPI uwp_tabview_add_SelectionChanged( void *iface, void *handl
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_tabview_remove_SelectionChanged( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
+    if (impl && impl->sel_changed_handler)
+    {
+        IInspectable_Release( impl->sel_changed_handler );
+        impl->sel_changed_handler = NULL;
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_flyout_add_Closed( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -425,16 +855,29 @@ const void *uwp_flyout_vtbl[128] =
     [10] = uwp_flyout_add_Closed,
     [11] = uwp_generic_noop,
     [12] = uwp_flyout_add_Opening,
-    [13 ... 33] = uwp_generic_noop,
+    [13 ... 19] = uwp_generic_noop,
+    [20] = uwp_tabview_get_AddTabButtonCommand,
+    [21] = uwp_tabview_put_AddTabButtonCommand,
+    [22] = uwp_tabview_get_AddTabButtonCommandParameter,
+    [23] = uwp_tabview_put_AddTabButtonCommandParameter,
+    [24] = uwp_tabview_add_TabCloseRequested,
+    [25] = uwp_tabview_remove_TabCloseRequested,
+    [26 ... 27] = uwp_generic_noop,
+    [28] = uwp_tabview_add_AddTabButtonClick,
+    [29] = uwp_tabview_remove_AddTabButtonClick,
+    [30 ... 31] = uwp_generic_noop,
+    [32] = uwp_tabview_get_TabItemsSource,
+    [33] = uwp_tabview_put_TabItemsSource,
     [34] = uwp_flyout_get_Items,
     [35 ... 44] = uwp_generic_noop,
-    [45] = uwp_flyout_get_SelectedIndex,
-    [46] = uwp_generic_noop,
+    [45] = uwp_tabview_get_SelectedIndex,
+    [46] = uwp_tabview_put_SelectedIndex,
     [47] = uwp_tabview_get_SelectedItem,
     [48] = uwp_tabview_put_SelectedItem,
     [49 ... 50] = uwp_generic_noop,
     [51] = uwp_tabview_add_SelectionChanged,
-    [52 ... 127] = uwp_generic_noop,
+    [52] = uwp_tabview_remove_SelectionChanged,
+    [53 ... 127] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_selector_get_SelectedIndex( void *iface, INT32 *out )

@@ -363,6 +363,7 @@ struct dependency_property
     IDependencyProperty IDependencyProperty_iface;
     LONG ref;
     IPropertyMetadata *metadata;
+    WCHAR name[64];
 };
 
 static const GUID IID_IDependencyProperty_WinUI =
@@ -574,9 +575,16 @@ static HRESULT WINAPI dp_statics_Register(
     IPropertyMetadata *type_metadata,
     IDependencyProperty **result )
 {
+    HRESULT hr;
     TRACE( "iface %p, name %s, metadata %p, result %p\n",
            iface, debugstr_hstring( name ), type_metadata, result );
-    return dependency_property_create( type_metadata, result );
+    hr = dependency_property_create( type_metadata, result );
+    if (SUCCEEDED(hr) && result && *result && (ULONG_PTR)name >= 0x10000)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
+        if (raw) lstrcpynW( impl_from_IDependencyProperty( *result )->name, raw, 64 );
+    }
+    return hr;
 }
 
 static HRESULT WINAPI dp_statics_RegisterAttached(
@@ -587,9 +595,16 @@ static HRESULT WINAPI dp_statics_RegisterAttached(
     IPropertyMetadata *default_metadata,
     IDependencyProperty **result )
 {
+    HRESULT hr;
     TRACE( "iface %p, name %s, metadata %p, result %p\n",
            iface, debugstr_hstring( name ), default_metadata, result );
-    return dependency_property_create( default_metadata, result );
+    hr = dependency_property_create( default_metadata, result );
+    if (SUCCEEDED(hr) && result && *result && (ULONG_PTR)name >= 0x10000)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
+        if (raw) lstrcpynW( impl_from_IDependencyProperty( *result )->name, raw, 64 );
+    }
+    return hr;
 }
 
 static const struct __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStaticsVtbl dp_statics_vtbl =

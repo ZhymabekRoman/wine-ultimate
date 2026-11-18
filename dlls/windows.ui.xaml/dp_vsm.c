@@ -1197,6 +1197,7 @@ struct dp_internal_layout
     IDependencyProperty IDependencyProperty_iface;
     LONG ref;
     IPropertyMetadata *metadata;
+    WCHAR name[64];
 };
 struct pm_internal_layout
 {
@@ -1265,21 +1266,54 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             uwp_invalidate_window();
         }
     }
-    if (val && (ULONG_PTR)val >= 0x10000 &&
-        wcsstr( impl->class_name, L"TabView" ) && !wcsstr( impl->class_name, L"TabViewItem" ))
+    if (wcsstr( impl->class_name, L"TabView" ) && !wcsstr( impl->class_name, L"TabViewItem" ))
     {
-        static const GUID IID_ITabItemViewModel_dp =
-            { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
-        void *vm = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel_dp, &vm )) && vm)
+        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+        const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
+        TRACE( "TabView SetValue dp=%s val=%p\n", debugstr_w(dpname), val );
+        if (!wcscmp( dpname, L"TabItemsSource" ))
         {
-            IUnknown_Release( (IUnknown *)vm );
-            if (impl->selected_item != val)
+            if (impl->tab_items_source != val)
             {
-                if (impl->selected_item) IInspectable_Release( impl->selected_item );
-                impl->selected_item = val;
-                IInspectable_AddRef( impl->selected_item );
+                if (impl->tab_items_source) IInspectable_Release( impl->tab_items_source );
+                impl->tab_items_source = val;
+                if (impl->tab_items_source) IInspectable_AddRef( impl->tab_items_source );
                 uwp_invalidate_window();
+            }
+        }
+        else if (!wcscmp( dpname, L"AddTabButtonCommand" ))
+        {
+            if (impl->tab_add_cmd != val)
+            {
+                if (impl->tab_add_cmd) IInspectable_Release( impl->tab_add_cmd );
+                impl->tab_add_cmd = val;
+                if (impl->tab_add_cmd) IInspectable_AddRef( impl->tab_add_cmd );
+            }
+        }
+        else if (!wcscmp( dpname, L"AddTabButtonCommandParameter" ))
+        {
+            if (impl->tab_add_cmd_param != val)
+            {
+                if (impl->tab_add_cmd_param) IInspectable_Release( impl->tab_add_cmd_param );
+                impl->tab_add_cmd_param = val;
+                if (impl->tab_add_cmd_param) IInspectable_AddRef( impl->tab_add_cmd_param );
+            }
+        }
+        else if (val && (ULONG_PTR)val >= 0x10000)
+        {
+            static const GUID IID_ITabItemViewModel_dp =
+                { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
+            void *vm = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel_dp, &vm )) && vm)
+            {
+                IUnknown_Release( (IUnknown *)vm );
+                if (impl->selected_item != val)
+                {
+                    if (impl->selected_item) IInspectable_Release( impl->selected_item );
+                    impl->selected_item = val;
+                    IInspectable_AddRef( impl->selected_item );
+                    uwp_invalidate_window();
+                }
             }
         }
     }

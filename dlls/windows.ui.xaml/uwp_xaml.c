@@ -5315,7 +5315,43 @@ void uwp_invoke_button( struct uwp_element *btn )
     uwp_invalidate_window();
 }
 
+static struct uwp_element *uwp_hit_test_tabview( struct uwp_element *el, int x, int y )
+{
+    if (!el || !el->has_bounds || el->visibility != 0) return NULL;
+    if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
+    {
+        if (x >= el->bounds.left && x < el->bounds.right &&
+            y >= el->bounds.top && y < el->bounds.bottom)
+            return el;
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el)
+        {
+            struct uwp_element *hit = uwp_hit_test_tabview( ch, x, y );
+            if (hit) return hit;
+        }
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el)
+            {
+                struct uwp_element *hit = uwp_hit_test_tabview( ch, x, y );
+                if (hit) return hit;
+            }
+        }
+    }
+    return NULL;
+}
+
 static struct uwp_element *g_pressed_btn = NULL;
+static struct uwp_element *g_pressed_tabview = NULL;
 static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
                                       const struct xaml_pointer_info *info, BOOL bubble );
 
@@ -5338,8 +5374,14 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
 
     if (msg == WM_LBUTTONDOWN)
     {
-        struct uwp_element *btn = uwp_hit_test_button( root_el, x, y );
-        struct uwp_element *tb = btn ? NULL : uwp_hit_test_textbox( root_el, x, y );
+        struct uwp_element *tv = uwp_hit_test_tabview( root_el, x, y );
+        struct uwp_element *btn = tv ? NULL : uwp_hit_test_button( root_el, x, y );
+        struct uwp_element *tb = (tv || btn) ? NULL : uwp_hit_test_textbox( root_el, x, y );
+        if (tv)
+        {
+            g_pressed_tabview = tv;
+            return TRUE;
+        }
         if (tb)
         {
             g_focused_textbox = tb;
@@ -5425,6 +5467,47 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
     }
     else if (msg == WM_LBUTTONUP)
     {
+        if (g_pressed_tabview)
+        {
+            struct uwp_element *tv = g_pressed_tabview;
+            struct uwp_element *hit = uwp_hit_test_tabview( root_el, x, y );
+            g_pressed_tabview = NULL;
+            if (hit == tv)
+            {
+                IInspectable *items[64];
+                int count = uwp_tabview_get_items( tv, items, ARRAY_SIZE(items) );
+                int n = max( 1, count ), i;
+                POINT pt = { x, y };
+                RECT pill, close_rc, add_rc;
+                uwp_tabview_compute_rects( &tv->bounds, n, 0, &pill, &close_rc, &add_rc );
+                if (PtInRect( &add_rc, pt ))
+                {
+                    uwp_tabview_fire_add_tab( tv );
+                }
+                else
+                {
+                    for (i = 0; i < count; i++)
+                    {
+                        uwp_tabview_compute_rects( &tv->bounds, n, i, &pill, &close_rc, &add_rc );
+                        if (PtInRect( &close_rc, pt ))
+                        {
+                            uwp_tabview_fire_close_tab( tv, items[i] );
+                            break;
+                        }
+                        if (PtInRect( &pill, pt ))
+                        {
+                            uwp_tabview_select_item( tv, items[i] );
+                            break;
+                        }
+                    }
+                }
+                for (i = 0; i < count; i++)
+                    IInspectable_Release( items[i] );
+            }
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return TRUE;
+        }
         if (g_pressed_btn)
         {
             struct uwp_element *btn = g_pressed_btn;
