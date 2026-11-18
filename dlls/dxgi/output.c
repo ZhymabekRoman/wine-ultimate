@@ -1132,9 +1132,15 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_GetDesc1(IDXGIOutput6 *iface,
 static HRESULT STDMETHODCALLTYPE dxgi_output_CheckHardwareCompositionSupport(IDXGIOutput6 *iface,
         UINT *flags)
 {
-    FIXME("iface %p, flags %p stub!\n", iface, flags);
+    TRACE("iface %p, flags %p.\n", iface, flags);
 
-    return E_NOTIMPL;
+    if (!flags)
+        return E_INVALIDARG;
+
+    *flags = DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_FULLSCREEN
+            | DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_WINDOWED
+            | DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_CURSOR_STRETCHED;
+    return S_OK;
 }
 
 static const struct IDXGIOutput6Vtbl dxgi_output_vtbl =
