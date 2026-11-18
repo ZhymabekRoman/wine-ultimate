@@ -45,8 +45,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(reg);
 #define MAX_VALUE_LENGTH (16383 * sizeof(WCHAR))
 
 #define REG_SHM_MAGIC          0x52475348u
-#define REG_SHM_VERSION        2u
-#define REG_SHM_VAL_BUCKETS    1024u
+#define REG_SHM_VERSION        3u
+#define REG_SHM_VAL_BUCKETS    2048u
 #define REG_SHM_VAL_WAYS       4u
 #define REG_SHM_VAL_SLOTS      (REG_SHM_VAL_BUCKETS * REG_SHM_VAL_WAYS)
 #define REG_SHM_HANDLE_BUCKETS 1024u
@@ -66,7 +66,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(reg);
 #define REG_SHM_ENUM_MAX_DATA  1024u
 #define REG_SHM_ENUM_MAX_VALS  3072u
 #define REG_SHM_ENUM_MAX_SUBKEYS 24u
-#define REG_SHM_KEY_BUCKETS    1024u
+#define REG_SHM_KEY_BUCKETS    2048u
 #define REG_SHM_KEY_WAYS       4u
 #define REG_SHM_KEY_SLOTS      (REG_SHM_KEY_BUCKETS * REG_SHM_KEY_WAYS)
 #define REG_SHM_ENUM_FLAG_VALS    0x01u
@@ -133,6 +133,8 @@ struct reg_shm_key_slot
     uint32_t tree_epoch;
     uint32_t pad;
     uint64_t key_id;
+    uint64_t val_bloom;
+    uint64_t subkey_bloom;
 };
 
 struct reg_shm_enum_slot
@@ -353,8 +355,15 @@ static inline const struct reg_shm_enum_slot *reg_shm_find_enum( const struct re
     return NULL;
 }
 
-static inline int reg_shm_key_epochs( const struct reg_shm *shm, uint64_t key_id,
-                                      uint32_t *val_epoch, uint32_t *tree_epoch )
+static inline uint64_t reg_shm_bloom_mask( const WCHAR *str, uint32_t len_bytes )
+{
+    uint64_t h = reg_shm_hash_name_icase( 0x517cc1b727220a95ULL, str, len_bytes );
+    return (1ULL << (h & 63)) | (1ULL << ((h >> 6) & 63));
+}
+
+static inline int reg_shm_key_info( const struct reg_shm *shm, uint64_t key_id,
+                                    uint32_t *val_epoch, uint32_t *tree_epoch,
+                                    uint64_t *val_bloom, uint64_t *subkey_bloom )
 {
     uint64_t h = key_id * 0x9e3779b97f4a7c15ULL;
     uint32_t bucket = (uint32_t)(h & (REG_SHM_KEY_BUCKETS - 1)) * REG_SHM_KEY_WAYS;
@@ -363,19 +372,31 @@ static inline int reg_shm_key_epochs( const struct reg_shm *shm, uint64_t key_id
 
     for (i = 0; i < REG_SHM_KEY_WAYS; i++)
     {
+        int tries;
         slot = &shm->key_table[bucket + i];
         if (__atomic_load_n( &slot->key_id, __ATOMIC_RELAXED ) != key_id) continue;
-        do
+        for (tries = 0; tries < 8; tries++)
         {
             s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+            if (s1 & 1) continue;
             __atomic_thread_fence( __ATOMIC_ACQUIRE );
-            *val_epoch = slot->val_epoch;
-            *tree_epoch = slot->tree_epoch;
+            if (slot->key_id != key_id) break;
+            if (val_epoch) *val_epoch = slot->val_epoch;
+            if (tree_epoch) *tree_epoch = slot->tree_epoch;
+            if (val_bloom) *val_bloom = slot->val_bloom;
+            if (subkey_bloom) *subkey_bloom = slot->subkey_bloom;
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
             s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
-        } while (s1 != s2 || (s1 & 1));
-        return 1;
+            if (s1 == s2) return 1;
+        }
     }
     return 0;
+}
+
+static inline int reg_shm_key_epochs( const struct reg_shm *shm, uint64_t key_id,
+                                      uint32_t *val_epoch, uint32_t *tree_epoch )
+{
+    return reg_shm_key_info( shm, key_id, val_epoch, tree_epoch, NULL, NULL );
 }
 
 
@@ -492,6 +513,39 @@ NTSTATUS WINAPI NtOpenKeyEx( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
         {
             TRACE("<- neg_open_cache hit (STATUS_OBJECT_NAME_NOT_FOUND)\n");
             return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+        if (shm && attr->RootDirectory && attr->ObjectName && attr->ObjectName->Buffer &&
+            attr->ObjectName->Length > 0 && attr->ObjectName->Buffer[0] != '\\' &&
+            !is_wow64() && !(access & KEY_WOW64_32KEY))
+        {
+            uint64_t parent_key_id = reg_shm_lookup_handle( shm, attr->RootDirectory, NULL );
+            uint64_t sbloom;
+            if (parent_key_id && reg_shm_key_info( shm, parent_key_id, NULL, NULL, NULL, &sbloom ))
+            {
+                if (sbloom == 0)
+                {
+                    TRACE("<- subkey_bloom empty hit (STATUS_OBJECT_NAME_NOT_FOUND)\n");
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+                if (sbloom != ~0ULL)
+                {
+                    uint32_t i, count = attr->ObjectName->Length / sizeof(WCHAR);
+                    int has_sep = 0;
+                    for (i = 0; i < count; i++)
+                    {
+                        if (attr->ObjectName->Buffer[i] == '\\') { has_sep = 1; break; }
+                    }
+                    if (!has_sep)
+                    {
+                        uint64_t mask = reg_shm_bloom_mask( attr->ObjectName->Buffer, attr->ObjectName->Length );
+                        if ((sbloom & mask) != mask)
+                        {
+                            TRACE("<- subkey_bloom hit (STATUS_OBJECT_NAME_NOT_FOUND)\n");
+                            return STATUS_OBJECT_NAME_NOT_FOUND;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1112,64 +1166,74 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (name->Length <= REG_SHM_VAL_MAX_NAME)
     {
         const struct reg_shm *shm = get_reg_shm();
-        uint32_t can_query = 0;
+        uint32_t can_query = 0, kve = 0;
+        uint64_t vbloom = ~0ULL;
         uint64_t key_id = shm ? reg_shm_lookup_handle( shm, handle, &can_query ) : 0;
 
-        if (key_id && can_query)
+        if (key_id && can_query && reg_shm_key_info( shm, key_id, &kve, NULL, &vbloom, NULL ))
         {
-            uint64_t epoch = __atomic_load_n( &shm->val_epoch, __ATOMIC_ACQUIRE );
-            uint64_t h = reg_shm_hash_name_icase( key_id, name->Buffer, name->Length );
-            uint32_t bucket = (uint32_t)(h & (REG_SHM_VAL_BUCKETS - 1)) * REG_SHM_VAL_WAYS;
-            uint32_t i;
-
-            for (i = 0; i < REG_SHM_VAL_WAYS; i++)
+            if (vbloom != ~0ULL)
             {
-                const struct reg_shm_val_slot *slot = &shm->val_table[bucket + i];
-                int tries;
-                for (tries = 0; tries < 4; tries++)
+                uint64_t mask = reg_shm_bloom_mask( name->Buffer, name->Length );
+                if ((vbloom & mask) != mask)
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            if (name->Length <= REG_SHM_VAL_MAX_NAME && kve)
+            {
+                uint64_t bulk_epoch = __atomic_load_n( &shm->val_epoch, __ATOMIC_ACQUIRE );
+                uint64_t epoch = ((uint64_t)(uint32_t)bulk_epoch << 32) | kve;
+                uint64_t h = reg_shm_hash_name_icase( key_id, name->Buffer, name->Length );
+                uint32_t bucket = (uint32_t)(h & (REG_SHM_VAL_BUCKETS - 1)) * REG_SHM_VAL_WAYS;
+                uint32_t i;
+
+                for (i = 0; i < REG_SHM_VAL_WAYS; i++)
                 {
-                    uint32_t s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
-                    uint32_t sstatus, stype, snamelen, sdatalen, s2;
-                    uint64_t skey_id, sepoch;
-                    WCHAR sname[REG_SHM_VAL_MAX_NAME / sizeof(WCHAR)];
-                    BYTE sdata[REG_SHM_VAL_MAX_DATA];
-
-                    if (s1 & 1) continue;
-                    sstatus = slot->status;
-                    skey_id = slot->key_id;
-                    sepoch = slot->epoch;
-                    stype = slot->type;
-                    snamelen = slot->name_len;
-                    sdatalen = slot->data_len;
-                    if (snamelen > REG_SHM_VAL_MAX_NAME) break;
-                    if (snamelen) memcpy( sname, slot->name, snamelen );
-                    if (sstatus == STATUS_SUCCESS && sdatalen && info_class != KeyValueBasicInformation && length > fixed_size)
-                        memcpy( sdata, slot->data, min( sdatalen, REG_SHM_VAL_MAX_DATA ) );
-                    __atomic_thread_fence( __ATOMIC_ACQUIRE );
-                    s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
-                    if (s1 != s2) continue;
-
-                    if (sepoch == epoch && skey_id == key_id && snamelen == name->Length &&
-                        (!snamelen || reg_shm_eq_icase( sname, name->Buffer, snamelen )))
+                    const struct reg_shm_val_slot *slot = &shm->val_table[bucket + i];
+                    int tries;
+                    for (tries = 0; tries < 4; tries++)
                     {
-                        if (sstatus == STATUS_OBJECT_NAME_NOT_FOUND)
-                            return STATUS_OBJECT_NAME_NOT_FOUND;
-                        if (sstatus == STATUS_SUCCESS &&
-                            (info_class == KeyValueBasicInformation || length <= fixed_size || sdatalen <= REG_SHM_VAL_MAX_DATA))
+                        uint32_t s1 = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+                        uint32_t sstatus, stype, snamelen, sdatalen, s2;
+                        uint64_t skey_id, sepoch;
+                        WCHAR sname[REG_SHM_VAL_MAX_NAME / sizeof(WCHAR)];
+                        BYTE sdata[REG_SHM_VAL_MAX_DATA];
+
+                        if (s1 & 1) continue;
+                        sstatus = slot->status;
+                        skey_id = slot->key_id;
+                        sepoch = slot->epoch;
+                        stype = slot->type;
+                        snamelen = slot->name_len;
+                        sdatalen = slot->data_len;
+                        if (snamelen > REG_SHM_VAL_MAX_NAME) break;
+                        if (snamelen) memcpy( sname, slot->name, snamelen );
+                        if (sstatus == STATUS_SUCCESS && sdatalen && info_class != KeyValueBasicInformation && length > fixed_size)
+                            memcpy( sdata, slot->data, min( sdatalen, REG_SHM_VAL_MAX_DATA ) );
+                        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+                        s2 = __atomic_load_n( &slot->seq, __ATOMIC_RELAXED );
+                        if (s1 != s2) continue;
+
+                        if (sepoch == epoch && skey_id == key_id && snamelen == name->Length &&
+                            (!snamelen || reg_shm_eq_icase( sname, name->Buffer, snamelen )))
                         {
-                            copy_key_value_info( info_class, info, length, stype, name->Length, sdatalen );
-                            *result_len = fixed_size + (info_class == KeyValueBasicInformation ? 0 : sdatalen);
-                            if (length < min_size) return STATUS_BUFFER_TOO_SMALL;
-                            if (length > fixed_size && data_ptr && sdatalen)
-                                memcpy( data_ptr, sdata, min( length - fixed_size, sdatalen ) );
-                            if (length < *result_len) return STATUS_BUFFER_OVERFLOW;
-                            return STATUS_SUCCESS;
+                            if (sstatus == STATUS_OBJECT_NAME_NOT_FOUND)
+                                return STATUS_OBJECT_NAME_NOT_FOUND;
+                            if (sstatus == STATUS_SUCCESS &&
+                                (info_class == KeyValueBasicInformation || length <= fixed_size || sdatalen <= REG_SHM_VAL_MAX_DATA))
+                            {
+                                copy_key_value_info( info_class, info, length, stype, name->Length, sdatalen );
+                                *result_len = fixed_size + (info_class == KeyValueBasicInformation ? 0 : sdatalen);
+                                if (length < min_size) return STATUS_BUFFER_TOO_SMALL;
+                                if (length > fixed_size && data_ptr && sdatalen)
+                                    memcpy( data_ptr, sdata, min( length - fixed_size, sdatalen ) );
+                                if (length < *result_len) return STATUS_BUFFER_OVERFLOW;
+                                return STATUS_SUCCESS;
+                            }
                         }
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -1209,8 +1273,8 @@ NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryValueKey( HANDLE handle, const
                                                             DWORD length, DWORD *result_len )
 {
     const struct reg_shm *shm;
-    uint32_t can_query = 0;
-    uint64_t key_id, epoch, h;
+    uint32_t can_query = 0, kve = 0;
+    uint64_t key_id, epoch, h, vbloom = ~0ULL;
     uint32_t bucket, i;
     UCHAR *data_ptr;
     unsigned int fixed_size, min_size;
@@ -1252,8 +1316,23 @@ NTSTATUS __attribute__((ms_abi)) fast_leaf_NtQueryValueKey( HANDLE handle, const
 
     key_id = reg_shm_lookup_handle( shm, handle, &can_query );
     if (!key_id || !can_query) return STATUS_FAST_LEAF_FALLBACK;
+    if (!reg_shm_key_info( shm, key_id, &kve, NULL, &vbloom, NULL ) || !kve)
+        return STATUS_FAST_LEAF_FALLBACK;
 
-    epoch = __atomic_load_n( &shm->val_epoch, __ATOMIC_ACQUIRE );
+    if (vbloom != ~0ULL)
+    {
+        uint64_t mask = reg_shm_bloom_mask( name->Buffer, name->Length );
+        if ((vbloom & mask) != mask)
+        {
+            if (info_class == KeyValueBasicInformation && min_size < length)
+                reg_fast_memcpy( ((KEY_VALUE_BASIC_INFORMATION *)info)->Name, name->Buffer, min( length - min_size, name->Length ) );
+            else if (info_class == KeyValueFullInformation && min_size < length)
+                reg_fast_memcpy( ((KEY_VALUE_FULL_INFORMATION *)info)->Name, name->Buffer, min( length - min_size, name->Length ) );
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+    }
+
+    epoch = ((uint64_t)(uint32_t)__atomic_load_n( &shm->val_epoch, __ATOMIC_ACQUIRE ) << 32) | kve;
     h = reg_shm_hash_name_icase( key_id, name->Buffer, name->Length );
     bucket = (uint32_t)(h & (REG_SHM_VAL_BUCKETS - 1)) * REG_SHM_VAL_WAYS;
 
