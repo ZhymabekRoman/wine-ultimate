@@ -570,12 +570,145 @@ BOOL WINAPI NtGdiPatBlt( HDC hdc, INT left, INT top, INT width, INT height, DWOR
 }
 
 
+/* Fast path for SRCCOPY bit blits between memory DCs with a 32 bpp DIB selected.
+ * Both DCs must use the identity transform with a simple clip, and the rectangles
+ * must be fully inside the device areas. In that case the copy is a straight scanline
+ * memcpy and the whole stretch blt machinery (two update_dc calls, visible rectangle
+ * computation and physdev dispatch) can be skipped. Returns FALSE if not applicable. */
+static inline BOOL is_identity_mem_dc( DC *dc )
+{
+    if (dc->is_display) return FALSE;
+    if (!find_dc_driver( dc, &dib_driver )) return FALSE;
+    if (dc->attr->map_mode != MM_TEXT) return FALSE;
+    if (dc->attr->layout & LAYOUT_RTL) return FALSE;
+    if (dc->xformWorld2Vport.eM11 != 1.0f || dc->xformWorld2Vport.eM22 != 1.0f ||
+        dc->xformWorld2Vport.eM12 != 0.0f || dc->xformWorld2Vport.eM21 != 0.0f ||
+        dc->xformWorld2Vport.eDx != 0.0f || dc->xformWorld2Vport.eDy != 0.0f) return FALSE;
+    return TRUE;
+}
+
+static inline BOOL get_fast_path_dib( DC *dc, BYTE **bits, int *width, int *height, int *stride )
+{
+    BITMAPOBJ *bmp;
+    const BITMAPINFOHEADER *info;
+    BOOL ok = FALSE;
+
+    if (!dc->hBitmap) return FALSE;
+    if (!(bmp = GDI_GetObjPtr( dc->hBitmap, NTGDI_OBJ_BITMAP ))) return FALSE;
+    if (!is_bitmapobj_dib( bmp )) goto done;
+
+    info = &bmp->dib.dsBmih;
+    if (info->biBitCount != 32 || info->biCompression != BI_RGB) goto done;
+    if (!bmp->dib.dsBm.bmBits || info->biWidth <= 0 || !info->biHeight) goto done;
+    if (bmp->dib.dsBm.bmWidthBytes < info->biWidth * 4) goto done;
+
+    *bits = bmp->dib.dsBm.bmBits;
+    *width = info->biWidth;
+    *height = info->biHeight;
+    *stride = bmp->dib.dsBm.bmWidthBytes;
+    ok = TRUE;
+
+done:
+    GDI_ReleaseObj( dc->hBitmap );
+    return ok;
+}
+
+static BOOL fast_mem_bitblt( DC *dc_dst, DC *dc_src, INT x_dst, INT y_dst,
+                             INT x_src, INT y_src, INT width, INT height )
+{
+    int src_w, src_h, dst_w, dst_h, src_stride, dst_stride;
+    int src_rows, dst_rows, row, src_step, dst_step;
+    BYTE *src_bits = NULL, *dst_bits = NULL, *dst;
+    const BYTE *src;
+
+    if (width <= 0 || height <= 0) return FALSE;
+    if (!is_identity_mem_dc( dc_src ) || !is_identity_mem_dc( dc_dst )) return FALSE;
+
+    /* the visible region must be the whole device area for the copy to be unclipped */
+    if (get_dc_region( dc_dst ) || get_dc_region( dc_src )) return FALSE;
+
+    if (!get_fast_path_dib( dc_src, &src_bits, &src_w, &src_h, &src_stride )) return FALSE;
+    if (!get_fast_path_dib( dc_dst, &dst_bits, &dst_w, &dst_h, &dst_stride )) return FALSE;
+
+    src_rows = abs( src_h );
+    dst_rows = abs( dst_h );
+    if (x_src < 0 || y_src < 0 || x_dst < 0 || y_dst < 0) return FALSE;
+    if (x_src + width > src_w || y_src + height > src_rows) return FALSE;
+    if (x_dst + width > dst_w || y_dst + height > dst_rows) return FALSE;
+    if (x_src + width > dc_src->device_rect.right || y_src + height > dc_src->device_rect.bottom) return FALSE;
+    if (x_dst + width > dc_dst->device_rect.right || y_dst + height > dc_dst->device_rect.bottom) return FALSE;
+
+    if (dc_src == dc_dst && y_dst > y_src) return FALSE; /* overlapping self-blit downwards */
+
+    src_step = src_stride;
+    dst_step = dst_stride;
+    src = src_bits;
+    dst = dst_bits;
+
+    if (src_h > 0) /* bottom-up */
+    {
+        src += (SIZE_T)(src_rows - 1 - y_src) * src_stride;
+        src_step = -src_step;
+    }
+    else src += (SIZE_T)y_src * src_stride;
+
+    if (dst_h > 0) /* bottom-up */
+    {
+        dst += (SIZE_T)(dst_rows - 1 - y_dst) * dst_stride;
+        dst_step = -dst_step;
+    }
+    else dst += (SIZE_T)y_dst * dst_stride;
+
+    src += (SIZE_T)x_src * 4;
+    dst += (SIZE_T)x_dst * 4;
+
+    for (row = 0; row < height; row++)
+    {
+        if (dc_src == dc_dst) memmove( dst, src, (SIZE_T)width * 4 );
+        else memcpy( dst, src, (SIZE_T)width * 4 );
+        src += src_step;
+        dst += dst_step;
+    }
+
+    if (dc_dst->bounds_enabled)
+    {
+        RECT rect = { x_dst, y_dst, x_dst + width, y_dst + height };
+        add_bounds_rect( &dc_dst->bounds, &rect );
+    }
+    return TRUE;
+}
+
+
 /***********************************************************************
  *           NtGdiBitBlt    (win32u.@)
  */
 BOOL WINAPI NtGdiBitBlt( HDC hdc_dst, INT x_dst, INT y_dst, INT width, INT height,
                          HDC hdc_src, INT x_src, INT y_src, DWORD rop, DWORD bk_color, FLONG fl )
 {
+    if (rop == SRCCOPY && !fl)
+    {
+        DC *dc_dst, *dc_src;
+
+        if ((dc_dst = get_dc_ptr( hdc_dst )))
+        {
+            if ((dc_src = get_dc_ptr( hdc_src )))
+            {
+                BOOL handled;
+
+                update_dc( dc_src );
+                update_dc( dc_dst );
+                handled = fast_mem_bitblt( dc_dst, dc_src, x_dst, y_dst, x_src, y_src, width, height );
+                release_dc_ptr( dc_src );
+                if (handled)
+                {
+                    release_dc_ptr( dc_dst );
+                    return TRUE;
+                }
+            }
+            release_dc_ptr( dc_dst );
+        }
+    }
+
     return NtGdiStretchBlt( hdc_dst, x_dst, y_dst, width, height,
                             hdc_src, x_src, y_src, width, height, rop, bk_color );
 }

@@ -348,7 +348,7 @@ static unsigned int get_window_dpi( struct window *win )
 }
 
 #define WIN_TREE_SHM_MAGIC      0x57545245U /* "WTRE" */
-#define WIN_TREE_SHM_VERSION    1
+#define WIN_TREE_SHM_VERSION    2
 #define WIN_TREE_SHM_MAX_NODES  4096
 #define WIN_TREE_SHM_HASH_SIZE  8192
 #define WIN_TREE_SHM_INVALID    0xffffffffU
@@ -386,6 +386,8 @@ struct win_tree_shm_node
     struct win_tree_shm_rect window_rect;
     struct win_tree_shm_rect visible_rect;
     struct win_tree_shm_rect client_rect;
+    atom_t   class_atom;  /* class atom, same value as the get_class_windows filter */
+    atom_t   pad;
 };
 
 struct win_tree_shm
@@ -483,6 +485,8 @@ static uint32_t win_tree_shm_add_subtree( struct window *win, uint32_t parent_id
                             (is_linked ? WIN_TREE_NODE_LINKED : 0) |
                             (is_msg_win ? WIN_TREE_NODE_MSG_WIN : 0);
     node->reserved        = 0;
+    node->class_atom      = win->class ? get_class_atom( win->class ) : 0;
+    node->pad             = 0;
     node->window_rect.left   = win->window_rect.left;
     node->window_rect.top    = win->window_rect.top;
     node->window_rect.right  = win->window_rect.right;

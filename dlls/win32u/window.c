@@ -1023,7 +1023,7 @@ HWND WINAPI NtUserSetParent( HWND hwnd, HWND parent )
 }
 
 #define WIN_TREE_SHM_MAGIC      0x57545245U /* "WTRE" */
-#define WIN_TREE_SHM_VERSION    1
+#define WIN_TREE_SHM_VERSION    2
 #define WIN_TREE_SHM_MAX_NODES  4096
 #define WIN_TREE_SHM_HASH_SIZE  8192
 #define WIN_TREE_SHM_INVALID    0xffffffffU
@@ -1061,6 +1061,8 @@ struct win_tree_shm_node
     struct win_tree_shm_rect window_rect;
     struct win_tree_shm_rect visible_rect;
     struct win_tree_shm_rect client_rect;
+    uint32_t class_atom;  /* class atom, same value as the get_class_windows filter */
+    uint32_t pad;
 };
 
 struct win_tree_shm
@@ -1367,6 +1369,133 @@ static BOOL win_tree_shm_build_hwnd_list( HDESK desktop, HWND hwnd, BOOL childre
             }
             buffer[total] = HWND_BOTTOM;
             *status_out = STATUS_SUCCESS;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* Resolve a FindWindowEx class name to a server class atom without a round trip.
+ * Integral atoms (both int resources and "#NNNN" strings) are known client side;
+ * plain string names have to be looked up in the server atom table, so they need
+ * the get_class_windows request. */
+static BOOL win_tree_shm_class_atom( UNICODE_STRING *class, atom_t *atom )
+{
+    const WCHAR *ptr, *end;
+    atom_t value = 0;
+
+    if (!class) return TRUE; /* no class filter */
+    if (IS_INTRESOURCE( class->Buffer ))
+    {
+        value = LOWORD( class->Buffer );
+        if (!value || value >= MAXINTATOM) return FALSE;
+        *atom = value;
+        return TRUE;
+    }
+    if (!class->Length) return FALSE;
+
+    end = class->Buffer + class->Length / sizeof(WCHAR);
+    ptr = class->Buffer;
+    if (*ptr != '#') return FALSE; /* string name, needs the server */
+    ptr++;
+    if (ptr >= end) return FALSE;
+    while (ptr < end)
+    {
+        if (*ptr < '0' || *ptr > '9') return FALSE;
+        value = value * 10 + (*ptr - '0');
+        ptr++;
+    }
+    if (!value) return FALSE;
+    *atom = value;
+    return TRUE;
+}
+
+/* Filter a list of child windows by class atom, mirroring the get_class_windows
+ * server request on the shared memory copy of the window tree. Returns FALSE
+ * when the snapshot cannot answer the query and the caller must use the RPC. */
+static BOOL win_tree_shm_get_class_windows( HWND parent, HWND child, atom_t atom,
+                                            user_handle_t *buffer, ULONG max, ULONG *total )
+{
+    const struct win_tree_shm *shm = get_win_tree_shm();
+    uint32_t p_h = wine_server_user_handle( parent );
+    uint32_t c_h = wine_server_user_handle( child );
+    uint32_t desk_h = wine_server_user_handle( get_desktop_window() );
+    int retry;
+
+    if (!shm || !desk_h) return FALSE;
+
+    for (retry = 0; retry < 64; retry++)
+    {
+        uint64_t s1 = __atomic_load_n( &shm->seq, __ATOMIC_ACQUIRE );
+        uint32_t count, idx;
+        ULONG n = 0;
+        BOOL ok = FALSE;
+
+        if (s1 & 1) continue;
+        if (shm->overflow || (count = shm->count) > WIN_TREE_SHM_MAX_NODES) return FALSE;
+        if (shm->desktop_hwnd != desk_h) return FALSE;
+
+        if (c_h) /* siblings of a given window, starting after it */
+        {
+            idx = win_tree_shm_find_node( shm, c_h, count );
+            if (idx >= count) return FALSE;
+            if (shm->nodes[idx].parent_idx >= count) return FALSE;
+            if (shm->nodes[shm->nodes[idx].parent_idx].hwnd != (p_h ? p_h : desk_h)) return FALSE;
+            for (idx = shm->nodes[idx].next_sib_idx; idx < count; idx = shm->nodes[idx].next_sib_idx)
+            {
+                const struct win_tree_shm_node *node = &shm->nodes[idx];
+                if (!atom || node->class_atom == atom)
+                {
+                    if (n < max) buffer[n] = node->hwnd;
+                    n++;
+                }
+            }
+            ok = TRUE;
+        }
+        else if (p_h) /* children of a given window */
+        {
+            idx = win_tree_shm_find_node( shm, p_h, count );
+            if (idx >= count) return FALSE;
+            for (idx = shm->nodes[idx].first_child_idx; idx < count; idx = shm->nodes[idx].next_sib_idx)
+            {
+                const struct win_tree_shm_node *node = &shm->nodes[idx];
+                if (!atom || node->class_atom == atom)
+                {
+                    if (n < max) buffer[n] = node->hwnd;
+                    n++;
+                }
+            }
+            ok = TRUE;
+        }
+        else /* top-level windows of the current desktop, then message windows */
+        {
+            uint32_t roots[2], i;
+            roots[0] = shm->desktop_hwnd;
+            roots[1] = shm->msg_hwnd;
+            for (i = 0; i < 2; i++)
+            {
+                if (!roots[i]) continue;
+                idx = win_tree_shm_find_node( shm, roots[i], count );
+                if (idx >= count) return FALSE;
+                for (idx = shm->nodes[idx].first_child_idx; idx < count;
+                     idx = shm->nodes[idx].next_sib_idx)
+                {
+                    const struct win_tree_shm_node *node = &shm->nodes[idx];
+                    if (!atom || node->class_atom == atom)
+                    {
+                        if (n < max) buffer[n] = node->hwnd;
+                        n++;
+                    }
+                }
+            }
+            ok = TRUE;
+        }
+
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        if (s1 == __atomic_load_n( &shm->seq, __ATOMIC_RELAXED ))
+        {
+            if (!ok) return FALSE;
+            *total = n;
             return TRUE;
         }
     }
@@ -4397,16 +4526,30 @@ HWND WINAPI NtUserFindWindowEx( HWND parent, HWND child, UNICODE_STRING *class, 
     user_handle_t *list;
     HWND retvalue = 0;
     int i = 0, size = 128, title_len;
-    NTSTATUS status;
+    NTSTATUS status = 0;
+    atom_t atom = 0;
+    BOOL shm_class;
 
     /* empty class is not the same as NULL class */
     if (class && !class->Length && !IS_INTRESOURCE(class->Buffer)) return 0;
 
     if (parent == HWND_MESSAGE) parent = get_hwnd_message_parent();
 
+    shm_class = win_tree_shm_class_atom( class, &atom );
+
     for (;;)
     {
+        ULONG total;
+
         if (!(list = malloc( size * sizeof(*list) ))) return 0;
+
+        if (shm_class && win_tree_shm_get_class_windows( parent, child, atom, list, size, &total ))
+        {
+            if (!total) { free( list ); return 0; }
+            if (total > (ULONG)size) { free( list ); size = total; continue; }
+            size = total;
+            break;
+        }
 
         SERVER_START_REQ( get_class_windows )
         {
