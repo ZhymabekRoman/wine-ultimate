@@ -24,6 +24,10 @@
 #include "compressapi.h"
 #include "wine/test.h"
 
+#ifndef COMPRESS_RAW
+#define COMPRESS_RAW 0x20000000
+#endif
+
 static LONG alloc_count;
 static LONG free_count;
 
@@ -134,10 +138,136 @@ static void test_decompressor( void )
 
     ret = CloseDecompressor( handle );
     ok( ret, "CloseDecompressor failed, err=%lu\n", GetLastError() );
-    ok( free_count == 1, "expected free_count 1, got %ld\n", free_count );
+    ok( alloc_count == free_count, "expected alloc_count %ld == free_count %ld\n", alloc_count, free_count );
+    ok( free_count >= 1, "expected at least one free, got %ld\n", free_count );
+}
+
+static void roundtrip( DWORD algorithm, const BYTE *payload, SIZE_T size )
+{
+    COMPRESSOR_HANDLE chandle = NULL;
+    DECOMPRESSOR_HANDLE dhandle = NULL;
+    BYTE *comp, *out;
+    SIZE_T csize = 0, osize = 0;
+    BOOL ret;
+
+    comp = malloc( size + 4096 );
+    out = malloc( size );
+
+    ret = CreateCompressor( algorithm, NULL, &chandle );
+    ok( ret && chandle != NULL, "CreateCompressor(%#lx) failed, err=%lu\n", algorithm, GetLastError() );
+
+    /* Size query first, then compress with the reported size. */
+    ret = Compress( chandle, payload, size, NULL, 0, &csize );
+    ok( !ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+        "expected ERROR_INSUFFICIENT_BUFFER, got ret=%d err=%lu\n", ret, GetLastError() );
+    ok( csize > 0, "expected nonzero compressed size, got %Iu\n", csize );
+
+    ret = Compress( chandle, payload, size, comp, csize - 1, &csize );
+    ok( !ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+        "expected ERROR_INSUFFICIENT_BUFFER, got ret=%d err=%lu\n", ret, GetLastError() );
+
+    csize = 0;
+    ret = Compress( chandle, payload, size, comp, size + 4096, &csize );
+    ok( ret, "Compress(%Iu) failed, err=%lu\n", size, GetLastError() );
+    ok( csize > 0 && csize <= size + 4096, "bogus compressed size %Iu\n", csize );
+
+    ret = CloseCompressor( chandle );
+    ok( ret, "CloseCompressor failed, err=%lu\n", GetLastError() );
+
+    ret = CreateDecompressor( algorithm, NULL, &dhandle );
+    ok( ret && dhandle != NULL, "CreateDecompressor(%#lx) failed, err=%lu\n", algorithm, GetLastError() );
+
+    osize = 0;
+    ret = Decompress( dhandle, comp, csize, NULL, 0, &osize );
+    ok( !ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+        "expected ERROR_INSUFFICIENT_BUFFER, got ret=%d err=%lu\n", ret, GetLastError() );
+    ok( osize == size, "expected decompressed size %Iu, got %Iu\n", size, osize );
+
+    osize = 0;
+    ret = Decompress( dhandle, comp, csize, out, size, &osize );
+    ok( ret, "Decompress(%Iu) failed, err=%lu\n", size, GetLastError() );
+    ok( osize == size, "expected decompressed size %Iu, got %Iu\n", size, osize );
+    ok( !memcmp( out, payload, size ), "round-trip payload mismatch (size %Iu, algo %#lx)\n", size, algorithm );
+
+    ret = CloseDecompressor( dhandle );
+    ok( ret, "CloseDecompressor failed, err=%lu\n", GetLastError() );
+
+    free( comp );
+    free( out );
+}
+
+static void test_compressor( void )
+{
+    COMPRESS_ALLOCATION_ROUTINES routines = { test_alloc, test_free, NULL };
+    static BYTE payload[100000];
+    COMPRESSOR_HANDLE chandle = NULL;
+    DECOMPRESSOR_HANDLE dhandle = NULL;
+    SIZE_T csize = 0, i;
+    BOOL ret;
+
+    SetLastError( 0xdeadbeef );
+    ret = CreateCompressor( COMPRESS_ALGORITHM_MSZIP, NULL, NULL );
+    ok( !ret && GetLastError() == ERROR_INVALID_PARAMETER,
+        "expected ERROR_INVALID_PARAMETER, got ret=%d err=%lu\n", ret, GetLastError() );
+
+    SetLastError( 0xdeadbeef );
+    ret = CreateCompressor( COMPRESS_ALGORITHM_INVALID, NULL, &chandle );
+    ok( !ret && GetLastError() == ERROR_NOT_SUPPORTED,
+        "expected ERROR_NOT_SUPPORTED, got ret=%d err=%lu\n", ret, GetLastError() );
+
+    for (i = 0; i < sizeof(payload); i++) payload[i] = (BYTE)(i * 7 + (i >> 8));
+
+    /* Single chunk, multi chunk (> 32 KiB, cross-block dictionary), raw stream. */
+    roundtrip( COMPRESS_ALGORITHM_MSZIP, payload, 1461 );
+    roundtrip( COMPRESS_ALGORITHM_MSZIP, payload, sizeof(payload) );
+    roundtrip( COMPRESS_ALGORITHM_MSZIP | COMPRESS_RAW, payload, sizeof(payload) );
+
+    /* Compressor handle routed through the custom allocator, zero leaks. */
+    alloc_count = free_count = 0;
+    ret = CreateCompressor( COMPRESS_ALGORITHM_MSZIP, &routines, &chandle );
+    ok( ret && chandle != NULL, "CreateCompressor with routines failed, err=%lu\n", GetLastError() );
+    ok( alloc_count == 1, "expected alloc_count 1, got %ld\n", alloc_count );
+
+    ret = Compress( chandle, payload, 512, NULL, 0, &csize );
+    ok( !ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+        "expected ERROR_INSUFFICIENT_BUFFER, got ret=%d err=%lu\n", ret, GetLastError() );
+    ok( alloc_count > 1, "expected routed zlib allocs, got %ld\n", alloc_count );
+    ok( free_count == alloc_count - 1,
+        "Compress should balance all allocs except the live handle, got alloc %ld free %ld\n",
+        alloc_count, free_count );
+
+    ret = CloseCompressor( chandle );
+    ok( ret, "CloseCompressor failed, err=%lu\n", GetLastError() );
+    ok( alloc_count == free_count, "expected alloc_count %ld == free_count %ld\n",
+        alloc_count, free_count );
+
+    /* Full pipeline through the custom allocator: decompress alloc == free. */
+    alloc_count = free_count = 0;
+    ret = CreateCompressor( COMPRESS_ALGORITHM_MSZIP, &routines, &chandle );
+    ok( ret, "CreateCompressor with routines failed, err=%lu\n", GetLastError() );
+
+    {
+        BYTE *comp = malloc( sizeof( payload ) + 4096 ), *out = malloc( sizeof( payload ) );
+        csize = 0;
+        ret = Compress( chandle, payload, sizeof(payload), comp, sizeof(payload) + 4096, &csize );
+        ok( ret, "Compress failed, err=%lu\n", GetLastError() );
+        CloseCompressor( chandle );
+
+        ret = CreateDecompressor( COMPRESS_ALGORITHM_MSZIP, &routines, &dhandle );
+        ok( ret, "CreateDecompressor with routines failed, err=%lu\n", GetLastError() );
+        ret = Decompress( dhandle, comp, csize, out, sizeof(payload), &csize );
+        ok( ret, "Decompress failed, err=%lu\n", GetLastError() );
+        CloseDecompressor( dhandle );
+        ok( alloc_count == free_count, "expected alloc_count %ld == free_count %ld\n",
+            alloc_count, free_count );
+        ok( alloc_count >= 2, "expected routed zlib allocs, got %ld\n", alloc_count );
+        free( comp );
+        free( out );
+    }
 }
 
 START_TEST(compressapi)
 {
     test_decompressor();
+    test_compressor();
 }
