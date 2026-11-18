@@ -36,6 +36,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #ifdef HAVE_SYS_TIMES_H
 # include <sys/times.h>
 #endif
@@ -482,20 +483,54 @@ static BOOL is_unix_console_handle( HANDLE handle )
 /***********************************************************************
  *           spawn_process
  */
-struct zygote_req
+/* Request sent to the persistent prefix-wide wine-zygote daemon.
+ * Must stay in sync with the definition in loader/zygote.c. */
+#define ZYGOTE_MAGIC   0x5a475946  /* 'F','Y','G','Z' */
+#define ZYGOTE_VERSION 1
+
+#define ZYGOTE_FLAG_DETACHED   0x01  /* setsid() + /dev/null stdio */
+#define ZYGOTE_FLAG_UNIX       0x02  /* execv() a Unix binary instead of __wine_main() */
+#define ZYGOTE_FLAG_HAS_SOCKET 0x04  /* wineserver connection fd attached */
+#define ZYGOTE_FLAG_HAS_CWD    0x08  /* unix cwd dir fd attached */
+#define ZYGOTE_FLAG_HAS_STDIN  0x10  /* stdin fd attached */
+#define ZYGOTE_FLAG_HAS_STDOUT 0x20  /* stdout fd attached */
+
+struct zygote_request
 {
-    struct pe_image_info pe_info;
-    ULONG cmdline_len;
-    ULONG winedebug_len;
-    BOOL  detached;
-    BOOL  has_unixdir;
-    BOOL  has_stdin;
-    BOOL  has_stdout;
+    ULONG magic;         /* ZYGOTE_MAGIC */
+    ULONG version;       /* ZYGOTE_VERSION */
+    ULONG flags;         /* ZYGOTE_FLAG_* */
+    ULONG argv_len;      /* size of NUL separated argv block (terminated by empty string) */
+    ULONG env_len;       /* size of NUL separated envp block (terminated by empty string) */
+    ULONG reserve_len;   /* size of WINEPRELOADRESERVE value, including NUL */
+    ULONG winedebug_len; /* size of WINEDEBUG value, including NUL */
+};
+
+struct zygote_reply
+{
+    NTSTATUS status;
+    pid_t    pid;
+};
+
+struct zygote_spawn_params
+{
+    char       *argv_block;   /* NUL separated argv, terminated by empty string */
+    unsigned int argv_len;
+    char       *env_block;    /* NUL separated envp, terminated by empty string */
+    unsigned int env_len;
+    const char *reserve;      /* WINEPRELOADRESERVE value or NULL */
+    const char *winedebug;    /* WINEDEBUG value or NULL */
+    int         socket_fd;    /* wineserver connection for the child, or -1 */
+    int         cwd_fd;       /* dir fd to chdir to, or -1 */
+    int         stdin_fd;
+    int         stdout_fd;
+    BOOL        detached;
+    BOOL        is_unix;
 };
 
 static pthread_mutex_t zygote_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int zygote_sock = -1;
-static pid_t zygote_pid = -1;
+static char *zygote_socket_path;
 
 static int read_exact( int fd, void *buf, size_t len )
 {
@@ -532,210 +567,351 @@ static int write_exact( int fd, const void *buf, size_t len )
     return 0;
 }
 
-static void DECLSPEC_NORETURN zygote_loop( int sock )
+/***********************************************************************
+ *           Persistent prefix-wide zygote client
+ *
+ * Ask the wine-zygote daemon (started lazily on <server_dir>/zygote.sock) to
+ * fork() the child.  The daemon already has the wine loader plus ntdll.so and
+ * win32u.so mapped, so the child skips execve(wineloader) and the whole ELF
+ * bootstrap.  Any mismatch falls back to the classic fork + exec path.
+ */
+static int zygote_disabled;
+static int zygote_checked;
+
+static int zygote_usable( const struct pe_image_info *pe_info )
 {
-    for (;;)
+    if (!zygote_checked)
     {
-        struct zygote_req req;
-        char cbuf[CMSG_SPACE( sizeof(int) * 4 )];
-        struct iovec iov = { &req, sizeof(req) };
-        struct msghdr msg = { 0 };
-        struct cmsghdr *cmsg;
-        int fds[4] = { -1, -1, -1, -1 };
-        int nfds = 0, idx = 0;
-        int z_socketfd = -1, z_unixdir = -1, z_stdin_fd = -1, z_stdout_fd = -1;
-        WCHAR *cmdline_buf = NULL;
-        char *winedebug_buf = NULL;
-        ssize_t r;
-        pid_t pid;
-        NTSTATUS ack;
-
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cbuf;
-        msg.msg_controllen = sizeof(cbuf);
-
-        do {
-            r = recvmsg( sock, &msg, 0 );
-        } while (r < 0 && errno == EINTR);
-
-        if (r <= 0) break;
-        if ((size_t)r < sizeof(req))
-        {
-            if (read_exact( sock, (char *)&req + r, sizeof(req) - r ) < 0) break;
-        }
-
-        for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
-        {
-            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
-            {
-                int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-                if (count > 4) count = 4;
-                memcpy( fds, CMSG_DATA(cmsg), count * sizeof(int) );
-                nfds = count;
-                break;
-            }
-        }
-
-        if (idx < nfds) z_socketfd = fds[idx++];
-        if (req.has_unixdir && idx < nfds) z_unixdir = fds[idx++];
-        if (req.has_stdin && idx < nfds) z_stdin_fd = fds[idx++];
-        if (req.has_stdout && idx < nfds) z_stdout_fd = fds[idx++];
-
-        if (req.cmdline_len)
-        {
-            if (!(cmdline_buf = malloc( req.cmdline_len ))) break;
-            if (read_exact( sock, cmdline_buf, req.cmdline_len ) < 0) { free( cmdline_buf ); break; }
-        }
-        if (req.winedebug_len)
-        {
-            if (!(winedebug_buf = malloc( req.winedebug_len ))) { free( cmdline_buf ); break; }
-            if (read_exact( sock, winedebug_buf, req.winedebug_len ) < 0) { free( cmdline_buf ); free( winedebug_buf ); break; }
-        }
-
-        if (!(pid = fork()))
-        {
-            if (!(pid = vfork()))
-            {
-                UNICODE_STRING cmd_us;
-                char **argv;
-
-                close( sock );
-                if (req.detached)
-                {
-                    setsid();
-                    set_stdio_fd( -1, -1 );
-                }
-                else set_stdio_fd( z_stdin_fd, z_stdout_fd );
-
-                if (z_stdin_fd != -1 && z_stdin_fd != 0) close( z_stdin_fd );
-                if (z_stdout_fd != -1 && z_stdout_fd != 1) close( z_stdout_fd );
-
-                if (winedebug_buf) putenv( winedebug_buf );
-                if (z_unixdir != -1)
-                {
-                    fchdir( z_unixdir );
-                    close( z_unixdir );
-                }
-                cmd_us.Length = cmd_us.MaximumLength = req.cmdline_len;
-                cmd_us.Buffer = cmdline_buf;
-                argv = build_argv( &cmd_us, 2 );
-
-                exec_wineloader( argv, z_socketfd, &req.pe_info );
-                _exit(1);
-            }
-            _exit(pid == -1);
-        }
-
-        if (z_socketfd != -1) close( z_socketfd );
-        if (z_unixdir != -1) close( z_unixdir );
-        if (z_stdin_fd != -1) close( z_stdin_fd );
-        if (z_stdout_fd != -1) close( z_stdout_fd );
-        free( cmdline_buf );
-        free( winedebug_buf );
-
-        if (pid != -1)
-        {
-            pid_t wret;
-            do {
-                wret = waitpid( pid, NULL, 0 );
-            } while (wret < 0 && errno == EINTR);
-            ack = STATUS_SUCCESS;
-        }
-        else ack = STATUS_NO_MEMORY;
-
-        if (write_exact( sock, &ack, sizeof(ack) ) < 0) break;
+        zygote_disabled = (getenv( "WINE_NO_ZYGOTE" ) != NULL);
+        zygote_checked = 1;
     }
-    _exit(0);
+    if (zygote_disabled) return 0;
+    if (getenv( "LD_PRELOAD" ) || getenv( "WINELOADER" )) return 0;  /* loader overrides differ */
+    if (peb->BeingDebugged) return 0;
+    if (pe_info && is_machine_64bit( pe_info->machine ) != is_win64) return 0;
+    return 1;
 }
 
-static int start_zygote( void )
+/* build the <server_dir>/zygote.sock path, server_dir as computed in server.c */
+static char *zygote_get_socket_path( void )
 {
-    int sv[2];
+    const char *path;
+    char *prefix;
+    struct stat st;
+
+    if (zygote_socket_path) return zygote_socket_path;
+    if ((path = getenv( "WINEZYGOTESOCKET" )))
+        return zygote_socket_path = strdup( path );
+    if (!(path = getenv( "WINEPREFIX" )))
+    {
+        const char *home = getenv( "HOME" );
+        if (!home) return NULL;
+        if (asprintf( &prefix, "%s/.wine", home ) == -1) return NULL;
+    }
+    else if (!(prefix = strdup( path ))) return NULL;
+
+    if (stat( prefix, &st ) == -1)
+    {
+        free( prefix );
+        return NULL;
+    }
+    free( prefix );
+    if (asprintf( &zygote_socket_path, "/tmp/.wine-%u/server-%llx-%llx/zygote.sock",
+                  (unsigned int)getuid(), (unsigned long long)st.st_dev,
+                  (unsigned long long)st.st_ino ) == -1) return NULL;
+    return zygote_socket_path;
+}
+
+static int zygote_start_daemon( const char *sock_path )
+{
+    char *prog, *p;
+    char *argv[2];
     pid_t pid;
 
-    if (socketpair( PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv ) == -1) return -1;
-    pid = fork();
-    if (pid == -1)
+    if (!wineloader) return -1;
+    if (!(prog = malloc( strlen( wineloader ) + 16 ))) return -1;
+    strcpy( prog, wineloader );
+    if ((p = strrchr( prog, '/' ))) *p = 0;
+    strcat( prog, "/wine-zygote" );
+
+    if ((pid = fork()) == -1)
     {
-        close( sv[0] );
-        close( sv[1] );
+        free( prog );
         return -1;
     }
-    if (pid == 0)
+    if (!pid)
     {
-        close( sv[0] );
-        zygote_loop( sv[1] );
+        if (!fork())
+        {
+            int null_fd = open( "/dev/null", O_RDWR );
+            setsid();  /* outlive the requesting process */
+            if (null_fd != -1)
+            {
+                dup2( null_fd, 0 );
+                dup2( null_fd, 1 );
+                dup2( null_fd, 2 );
+                if (null_fd > 2) close( null_fd );
+            }
+            setenv( "WINEZYGOTESOCKET", sock_path, 1 );
+            argv[0] = (char *)"wine-zygote";
+            argv[1] = NULL;
+            execv( prog, argv );
+        }
+        _exit( 0 );
     }
-    close( sv[1] );
-    zygote_sock = sv[0];
-    zygote_pid = pid;
+    waitpid( pid, NULL, 0 );
+    free( prog );
     return 0;
 }
 
-static int zygote_spawn( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
-                         int unixdir, int stdin_fd, int stdout_fd, BOOL detached,
-                         const char *winedebug, const struct pe_image_info *pe_info, NTSTATUS *out_status )
+static int zygote_try_connect( const char *path )
 {
-    struct zygote_req req;
+    struct sockaddr_un addr;
+    int fd;
+
+    if ((fd = socket( PF_UNIX, SOCK_STREAM, 0 )) == -1) return -1;
+    fcntl( fd, F_SETFD, FD_CLOEXEC );
+    addr.sun_family = AF_UNIX;
+    snprintf( addr.sun_path, sizeof(addr.sun_path), "%s", path );
+    if (connect( fd, (struct sockaddr *)&addr, sizeof(addr) ) == 0) return fd;
+    close( fd );
+    return -1;
+}
+
+static int zygote_connect( void )
+{
+    char *path;
+    int fd, i;
+
+    if (zygote_sock != -1) return zygote_sock;
+    if (!(path = zygote_get_socket_path())) return -1;
+
+    /* Fast path: daemon already listening */
+    if ((fd = zygote_try_connect( path )) != -1)
+    {
+        zygote_sock = fd;
+        return fd;
+    }
+
+    if (zygote_start_daemon( path ) < 0) return -1;
+    for (i = 0; i < 200; i++)
+    {
+        if ((fd = zygote_try_connect( path )) != -1)
+        {
+            zygote_sock = fd;
+            return fd;
+        }
+        if (errno != ENOENT && errno != ECONNREFUSED && errno != EAGAIN) break;
+        usleep( 5000 );
+    }
+    return -1;
+}
+
+static char *build_env_block( unsigned int *ret_len )
+{
+    extern char **environ;
+    size_t total = 1;
+    unsigned int i;
+    char *block, *p;
+
+    for (i = 0; environ[i]; i++) total += strlen( environ[i] ) + 1;
+    total++;
+    if (!(block = malloc( total ))) return NULL;
+    p = block;
+    for (i = 0; environ[i]; i++)
+    {
+        strcpy( p, environ[i] );
+        p += strlen( p ) + 1;
+    }
+    *p++ = 0;
+    *ret_len = p - block;
+    return block;
+}
+
+static char *build_argv_block( char **argv, unsigned int *ret_len )
+{
+    size_t total = 1;
+    unsigned int i;
+    char *block, *p;
+
+    for (i = 0; argv[i]; i++) total += strlen( argv[i] ) + 1;
+    total++;
+    if (!(block = malloc( total ))) return NULL;
+    p = block;
+    for (i = 0; argv[i]; i++)
+    {
+        strcpy( p, argv[i] );
+        p += strlen( p ) + 1;
+    }
+    *p++ = 0;
+    *ret_len = p - block;
+    return block;
+}
+
+/* send one spawn request, return 0 on success (child forked by the daemon) */
+static int zygote_spawn( const struct zygote_spawn_params *params, NTSTATUS *out_status )
+{
+    struct zygote_request req;
+    struct zygote_reply reply;
     char cbuf[CMSG_SPACE( sizeof(int) * 4 )];
+    char reserve[64];
     struct iovec iov = { &req, sizeof(req) };
     struct msghdr msg = { 0 };
     struct cmsghdr *cmsg;
-    int fds[4];
-    int nfds = 0;
+    int fds[4], nfds = 0;
     ssize_t r;
 
+    if (!zygote_usable( NULL )) return -1;
+
     pthread_mutex_lock( &zygote_mutex );
-    if (zygote_sock == -1 && start_zygote() < 0)
+    if (zygote_sock == -1 && zygote_connect() == -1)
     {
         pthread_mutex_unlock( &zygote_mutex );
         return -1;
     }
 
     memset( &req, 0, sizeof(req) );
-    req.pe_info       = *pe_info;
-    req.cmdline_len   = params->CommandLine.Length;
-    req.winedebug_len = winedebug ? strlen( winedebug ) + 1 : 0;
-    req.detached      = detached;
-    req.has_unixdir   = (unixdir != -1);
-    req.has_stdin     = (!detached && stdin_fd != -1);
-    req.has_stdout    = (!detached && stdout_fd != -1);
+    req.magic   = ZYGOTE_MAGIC;
+    req.version = ZYGOTE_VERSION;
+    if (params->detached) req.flags |= ZYGOTE_FLAG_DETACHED;
+    if (params->is_unix) req.flags |= ZYGOTE_FLAG_UNIX;
+    if (params->socket_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_SOCKET;
+    if (params->cwd_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_CWD;
+    if (!params->detached && params->stdin_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_STDIN;
+    if (!params->detached && params->stdout_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_STDOUT;
+    req.argv_len = params->argv_len;
+    req.env_len  = params->env_len;
+    if (params->reserve)
+    {
+        req.reserve_len = strlen( params->reserve ) + 1;
+        snprintf( reserve, sizeof(reserve), "%s", params->reserve );
+    }
+    if (params->winedebug) req.winedebug_len = strlen( params->winedebug ) + 1;
 
-    fds[nfds++] = socketfd;
-    if (req.has_unixdir) fds[nfds++] = unixdir;
-    if (req.has_stdin) fds[nfds++] = stdin_fd;
-    if (req.has_stdout) fds[nfds++] = stdout_fd;
+    if (req.flags & ZYGOTE_FLAG_HAS_SOCKET) fds[nfds++] = params->socket_fd;
+    if (req.flags & ZYGOTE_FLAG_HAS_CWD) fds[nfds++] = params->cwd_fd;
+    if (req.flags & ZYGOTE_FLAG_HAS_STDIN) fds[nfds++] = params->stdin_fd;
+    if (req.flags & ZYGOTE_FLAG_HAS_STDOUT) fds[nfds++] = params->stdout_fd;
 
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cbuf;
-    msg.msg_controllen = CMSG_SPACE( sizeof(int) * nfds );
-    cmsg = CMSG_FIRSTHDR( &msg );
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN( sizeof(int) * nfds );
-    memcpy( CMSG_DATA(cmsg), fds, sizeof(int) * nfds );
+    if (nfds)
+    {
+        msg.msg_control = cbuf;
+        msg.msg_controllen = CMSG_SPACE( sizeof(int) * nfds );
+        cmsg = CMSG_FIRSTHDR( &msg );
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN( sizeof(int) * nfds );
+        memcpy( CMSG_DATA(cmsg), fds, sizeof(int) * nfds );
+    }
 
     do {
         r = sendmsg( zygote_sock, &msg, MSG_NOSIGNAL );
     } while (r < 0 && errno == EINTR);
 
     if (r != sizeof(req) ||
-        (req.cmdline_len && write_exact( zygote_sock, params->CommandLine.Buffer, req.cmdline_len ) < 0) ||
-        (req.winedebug_len && write_exact( zygote_sock, winedebug, req.winedebug_len ) < 0) ||
-        read_exact( zygote_sock, out_status, sizeof(*out_status) ) < 0)
+        (req.argv_len && write_exact( zygote_sock, params->argv_block, req.argv_len ) < 0) ||
+        (req.env_len && write_exact( zygote_sock, params->env_block, req.env_len ) < 0) ||
+        (req.reserve_len && write_exact( zygote_sock, reserve, req.reserve_len ) < 0) ||
+        (req.winedebug_len && write_exact( zygote_sock, params->winedebug, req.winedebug_len ) < 0) ||
+        read_exact( zygote_sock, &reply, sizeof(reply) ) < 0 || reply.status)
     {
         close( zygote_sock );
-        if (zygote_pid > 0) waitpid( zygote_pid, NULL, WNOHANG );
         zygote_sock = -1;
-        zygote_pid = -1;
         pthread_mutex_unlock( &zygote_mutex );
         return -1;
     }
 
+    *out_status = reply.status;
+    TRACE( "zygote forked child %d\n", reply.pid );
     pthread_mutex_unlock( &zygote_mutex );
     return 0;
+}
+/* ask the zygote daemon to fork a new wineloader process; 0 == handled */
+static int zygote_spawn_loader( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd, int unixdir,
+                                char *winedebug, const struct pe_image_info *pe_info,
+                                int stdin_fd, int stdout_fd, BOOL detached, NTSTATUS *out_status )
+{
+    struct zygote_spawn_params p = { 0 };
+    ULONGLONG res_start = pe_info->base, res_end = pe_info->base + pe_info->map_size;
+    char reserve[64], *argv_block = NULL;
+    char **argv;
+    unsigned int argv_len = 0, env_len = 0;
+    int ret = -1;
+
+    if (!zygote_usable( pe_info )) return -1;
+    if (pe_info->wine_fakedll) res_start = res_end = 0;
+    if (!(argv = build_argv( &params->CommandLine, 0 ))) return -1;
+    if (!(argv_block = build_argv_block( argv, &argv_len ))) goto done;
+    if (!(p.env_block = build_env_block( &env_len ))) goto done;
+
+    p.argv_block = argv_block;
+    p.argv_len = argv_len;
+    p.env_len = env_len;
+    p.reserve = reserve;
+    snprintf( reserve, sizeof(reserve), "%x%08x-%x%08x", (UINT)(res_start >> 32), (UINT)res_start,
+              (UINT)(res_end >> 32), (UINT)res_end );
+    p.winedebug = winedebug;
+    p.socket_fd = socketfd;
+    p.cwd_fd = unixdir;
+    p.stdin_fd = stdin_fd;
+    p.stdout_fd = stdout_fd;
+    p.detached = detached;
+    p.is_unix = FALSE;
+    ret = zygote_spawn( &p, out_status );
+
+done:
+    free( argv );
+    free( argv_block );
+    free( p.env_block );
+    return ret;
+}
+
+/* ask the zygote daemon to fork a Unix binary process; 0 == handled */
+static int zygote_spawn_unix( const char *unix_name, const RTL_USER_PROCESS_PARAMETERS *params,
+                              int unixdir, int stdin_fd, int stdout_fd, BOOL detached,
+                              NTSTATUS *out_status )
+{
+    struct zygote_spawn_params p = { 0 };
+    char **argv, *block, *p_block;
+    unsigned int total;
+    int i, ret = -1;
+
+    if (!zygote_usable( NULL )) return -1;
+    if (!(argv = build_argv( &params->CommandLine, 0 ))) return -1;
+
+    /* the block is: exec path, then the argv vector of the child */
+    total = strlen( unix_name ) + 1;
+    for (i = 0; argv[i]; i++) total += strlen( argv[i] ) + 1;
+    total++;
+    if (!(block = malloc( total ))) goto done;
+    p_block = block;
+    strcpy( p_block, unix_name );
+    p_block += strlen( p_block ) + 1;
+    for (i = 0; argv[i]; i++)
+    {
+        strcpy( p_block, argv[i] );
+        p_block += strlen( p_block ) + 1;
+    }
+    *p_block++ = 0;
+    p.argv_block = block;
+    p.argv_len = p_block - block;
+
+    if (!(p.env_block = build_env_block( &p.env_len ))) goto done;
+    p.cwd_fd = unixdir;
+    p.stdin_fd = stdin_fd;
+    p.stdout_fd = stdout_fd;
+    p.socket_fd = -1;
+    p.detached = detached;
+    p.is_unix = TRUE;
+    ret = zygote_spawn( &p, out_status );
+
+done:
+    free( argv );
+    free( block );
+    free( p.env_block );
+    return ret;
 }
 
 static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
@@ -765,7 +941,8 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
             stdout_fd = 1;
     }
 
-    if (zygote_spawn( params, socketfd, unixdir, stdin_fd, stdout_fd, detached, winedebug, pe_info, &status ) == 0)
+    if (zygote_spawn_loader( params, socketfd, unixdir, winedebug, pe_info,
+                             stdin_fd, stdout_fd, detached, &status ) == 0)
     {
         if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
         if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
@@ -888,6 +1065,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
     pid_t pid;
     int fd[2], stdin_fd = -1, stdout_fd = -1;
     char **argv;
+    BOOL detached;
     NTSTATUS status = STATUS_SUCCESS;
 
 #ifdef HAVE_PIPE2
@@ -907,16 +1085,27 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
         isatty(1) && is_unix_console_handle( params->hStdOutput ))
         stdout_fd = 1;
 
+    detached = (peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
+               params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
+               params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
+               params->ConsoleHandle == NULL;
+
+    if (zygote_spawn_unix( unix_name, params, unixdir, stdin_fd, stdout_fd, detached, &status ) == 0)
+    {
+        close( fd[0] );
+        close( fd[1] );
+        if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
+        if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+        return status;
+    }
+
     if (!(pid = fork()))  /* child */
     {
         if (!(pid = vfork()))  /* grandchild */
         {
             close( fd[0] );
 
-            if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
-                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
-                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
-                params->ConsoleHandle == NULL)
+            if (detached)
             {
                 setsid();
                 set_stdio_fd( -1, -1 );  /* close stdin and stdout */

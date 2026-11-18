@@ -2,12 +2,13 @@ SOURCES = \
 	main.c \
 	preloader.c \
 	preloader_mac.c \
+	zygote.c \
 	wine.desktop \
 	wine.inf.in \
 	wine_info.plist.in
 
-PROGRAMS = $(WINELOADER_PROGRAMS)
-INSTALL_LIB = $(WINELOADER_PROGRAMS)
+PROGRAMS = $(WINELOADER_PROGRAMS) wine-zygote
+INSTALL_LIB = $(WINELOADER_PROGRAMS) wine-zygote
 UNIX_CFLAGS = -fPIE
 
 preloader_EXTRADEFS = -fno-builtin
@@ -15,6 +16,10 @@ preloader_EXTRADEFS = -fno-builtin
 wine_OBJS = main.o
 wine_DEPS = $(WINELOADER_DEPENDS)
 wine_LDFLAGS = $(WINELOADER_LDFLAGS) $(LDEXECFLAGS) $(PTHREAD_LIBS)
+
+wine_zygote_OBJS = zygote.o
+wine_zygote_DEPS = $(WINELOADER_DEPENDS)
+wine_zygote_LDFLAGS = $(WINELOADER_LDFLAGS) $(LDEXECFLAGS) $(PTHREAD_LIBS)
 
 wine_preloader_OBJS = preloader.o preloader_mac.o
 wine_preloader_DEPS = $(WINELOADER_DEPENDS)
