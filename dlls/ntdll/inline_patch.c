@@ -115,6 +115,7 @@ __ASM_GLOBAL_FUNC( fast_GetSystemTimeAsFileTime,
 extern void * WINAPI fast_TlsGetValue(DWORD index);
 __ASM_GLOBAL_FUNC( fast_TlsGetValue,
                    ".p2align 4, 0x90\n\t"
+                   "movl $0,%gs:0x68\n\t"
                    "cmpl $64,%ecx\n\t"
                    "jae 1f\n\t"
                    "movl %ecx,%eax\n\t"
@@ -122,7 +123,7 @@ __ASM_GLOBAL_FUNC( fast_TlsGetValue,
                    "ret\n\t"
                    "1:\n\t"
                    "cmpl $1088,%ecx\n\t"
-                   "jae 2f\n\t"
+                   "jae 3f\n\t"
                    "movq %gs:0x1780,%rax\n\t"
                    "testq %rax,%rax\n\t"
                    "jz 2f\n\t"
@@ -131,6 +132,10 @@ __ASM_GLOBAL_FUNC( fast_TlsGetValue,
                    "movq (%rax,%rdx,8),%rax\n\t"
                    "ret\n\t"
                    "2:\n\t"
+                   "xorq %rax,%rax\n\t"
+                   "ret\n\t"
+                   "3:\n\t"
+                   "movl $87,%gs:0x68\n\t"
                    "xorq %rax,%rax\n\t"
                    "ret" )
 
@@ -507,14 +512,15 @@ static BOOL is_fast_trampoline_enabled(void)
     static int enabled = -1;
     if (enabled == -1)
     {
-        UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_NO_INLINE_PATCH" );
+        UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_INLINE_PATCH" );
         UNICODE_STRING val;
         WCHAR buf[16];
         val.Buffer = buf;
         val.Length = 0;
         val.MaximumLength = sizeof(buf);
 
-        enabled = (RtlQueryEnvironmentVariable_U( NULL, &name, &val ) == STATUS_SUCCESS) ? 0 : 1;
+        enabled = (RtlQueryEnvironmentVariable_U( NULL, &name, &val ) == STATUS_SUCCESS &&
+                   val.Length == sizeof(WCHAR) && buf[0] == '1') ? 1 : 0;
     }
     return enabled;
 }

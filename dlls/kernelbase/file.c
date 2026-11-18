@@ -44,6 +44,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
 
+static const volatile struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
+
 /* info structure for FindFirstFile handle */
 typedef struct
 {
@@ -4360,7 +4362,16 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetSystemTimeAdjustment( DWORD *adjust, DWORD *inc
  */
 void WINAPI DECLSPEC_HOTPATCH GetSystemTimeAsFileTime( FILETIME *time )
 {
-    NtQuerySystemTime( (LARGE_INTEGER *)time );
+    ULONG high, low;
+
+    do
+    {
+        high = user_shared_data->SystemTime.High1Time;
+        low = user_shared_data->SystemTime.LowPart;
+    }
+    while (high != user_shared_data->SystemTime.High2Time);
+    time->dwLowDateTime = low;
+    time->dwHighDateTime = high;
 }
 
 
