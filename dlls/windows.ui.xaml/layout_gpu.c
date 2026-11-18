@@ -63,6 +63,124 @@ const void *uwp_brush_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 
+/* Ensure the w x h 32bpp top-down BGRA DIB backing st->dc exists, (re)allocating
+ * it on size change.  Shared by the CPU renderer and the GPU readback blit. */
+static BOOL uwp_island_ensure_dib( struct uwp_island_state *st, HDC hdc, int w, int h )
+{
+    BITMAPINFO bmi;
+    void *bits = NULL;
+
+    if (st->dc && st->bmp && st->w == w && st->h == h) return TRUE;
+
+    if (st->dc)
+    {
+        if (st->old_bmp) SelectObject( st->dc, st->old_bmp );
+        if (st->bmp) DeleteObject( st->bmp );
+        DeleteDC( st->dc );
+        st->dc = NULL;
+        st->bmp = NULL;
+        st->old_bmp = NULL;
+        st->bits = NULL;
+    }
+    st->dc = CreateCompatibleDC( hdc );
+    memset( &bmi, 0, sizeof(bmi) );
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    st->bmp = CreateDIBSection( st->dc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0 );
+    st->bits = bits;
+    st->old_bmp = st->bmp ? (HBITMAP)SelectObject( st->dc, st->bmp ) : NULL;
+    st->w = w;
+    st->h = h;
+    return st->dc && st->bmp;
+}
+
+/* WS_CHILD islands live under the X11 dummy parent, so their HWND swap chain
+ * presents offscreen.  Render them into a w x h render-target texture and keep a
+ * staging copy around for the CPU readback that feeds the child window's DC. */
+static BOOL uwp_island_ensure_offscreen( struct uwp_island_state *st, int w, int h )
+{
+    D3D11_TEXTURE2D_DESC desc = {0};
+    HRESULT hr;
+
+    if (st->rt_tex && st->rtv && st->staging_tex && st->gpu_w == w && st->gpu_h == h)
+        return TRUE;
+
+    xaml_gpu_release_rtv();
+    if (st->rtv) { ID3D11RenderTargetView_Release( st->rtv ); st->rtv = NULL; }
+    if (st->rt_tex) { ID3D11Texture2D_Release( st->rt_tex ); st->rt_tex = NULL; }
+    if (st->staging_tex) { ID3D11Texture2D_Release( st->staging_tex ); st->staging_tex = NULL; }
+
+    desc.Width = (UINT)w;
+    desc.Height = (UINT)h;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    hr = ID3D11Device_CreateTexture2D( g_island_d3d11_dev, &desc, NULL, &st->rt_tex );
+    if (FAILED(hr) || !st->rt_tex)
+    {
+        WARN( "uwp_island_ensure_offscreen: RT texture %dx%d failed hr=%#lx\n", w, h, hr );
+        st->gpu_failed = TRUE;
+        return FALSE;
+    }
+    hr = ID3D11Device_CreateRenderTargetView( g_island_d3d11_dev, (ID3D11Resource *)st->rt_tex, NULL, &st->rtv );
+    if (FAILED(hr) || !st->rtv)
+    {
+        WARN( "uwp_island_ensure_offscreen: RTV failed hr=%#lx\n", hr );
+        st->gpu_failed = TRUE;
+        return FALSE;
+    }
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D( g_island_d3d11_dev, &desc, NULL, &st->staging_tex );
+    if (FAILED(hr) || !st->staging_tex)
+    {
+        WARN( "uwp_island_ensure_offscreen: staging texture failed hr=%#lx\n", hr );
+        st->gpu_failed = TRUE;
+        return FALSE;
+    }
+    st->gpu_w = w;
+    st->gpu_h = h;
+    return TRUE;
+}
+
+/* RT -> staging -> st->bits, ready for the caller's BitBlt onto the child DC. */
+static BOOL uwp_island_download_gpu( struct uwp_island_state *st, HDC hdc, int w, int h )
+{
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    HRESULT hr;
+
+    if (!st->staging_tex || !st->rt_tex || !g_island_d3d11_ctx) return FALSE;
+    if (!uwp_island_ensure_dib( st, hdc, w, h )) return FALSE;
+
+    ID3D11DeviceContext_CopyResource( g_island_d3d11_ctx, (ID3D11Resource *)st->staging_tex,
+                                      (ID3D11Resource *)st->rt_tex );
+    hr = ID3D11DeviceContext_Map( g_island_d3d11_ctx, (ID3D11Resource *)st->staging_tex,
+                                  0, D3D11_MAP_READ, 0, &mapped );
+    if (FAILED(hr))
+    {
+        WARN( "uwp_island_download_gpu: Map failed hr=%#lx\n", hr );
+        return FALSE;
+    }
+    if (mapped.RowPitch >= (UINT)(w * 4))
+    {
+        const BYTE *src = (const BYTE *)mapped.pData;
+        BYTE *dst = (BYTE *)st->bits;
+        int y;
+        for (y = 0; y < h; y++)
+            memcpy( dst + (size_t)y * w * 4, src + (size_t)y * mapped.RowPitch, (size_t)w * 4 );
+    }
+    ID3D11DeviceContext_Unmap( g_island_d3d11_ctx, (ID3D11Resource *)st->staging_tex, 0 );
+    return TRUE;
+}
+
 static BOOL uwp_island_ensure_gpu( HWND hwnd, struct uwp_island_state *st, int w, int h )
 {
     static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
@@ -72,6 +190,7 @@ static BOOL uwp_island_ensure_gpu( HWND hwnd, struct uwp_island_state *st, int w
     HRESULT hr;
 
     if (st->gpu_failed || g_island_d3d11_failed || w <= 0 || h <= 0) return FALSE;
+    st->is_child = (GetWindowLongW( hwnd, GWL_STYLE ) & WS_CHILD) != 0;
     if (!g_island_d3d11_dev)
     {
         D3D_FEATURE_LEVEL fl;
@@ -90,6 +209,7 @@ static BOOL uwp_island_ensure_gpu( HWND hwnd, struct uwp_island_state *st, int w
             return FALSE;
         }
     }
+    if (st->is_child) return uwp_island_ensure_offscreen( st, w, h );
     if (!st->swapchain)
     {
         DXGI_SWAP_CHAIN_DESC1 desc = {0};
@@ -162,6 +282,14 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
                 xaml_gpu_release_rtv();
                 IDXGISwapChain1_Release( st->swapchain );
             }
+            if (st->rtv)
+            {
+                if (st->is_child) xaml_gpu_release_rtv();
+                ID3D11RenderTargetView_Release( st->rtv );
+                st->rtv = NULL;
+            }
+            if (st->rt_tex) { ID3D11Texture2D_Release( st->rt_tex ); st->rt_tex = NULL; }
+            if (st->staging_tex) { ID3D11Texture2D_Release( st->staging_tex ); st->staging_tex = NULL; }
             if (st->dc)
             {
                 if (st->old_bmp) SelectObject( st->dc, st->old_bmp );
@@ -201,14 +329,34 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
             if (w > 0 && h > 0)
             {
                 BOOL gpu_ok = FALSE;
+                BOOL is_child = FALSE;
+
                 if (st && uwp_island_ensure_gpu( hwnd, st, w, h ))
                 {
-                    gpu_ok = xaml_layout_render_gpu( hwnd, w, h, impl->content,
-                                                     g_island_d3d11_dev, g_island_d3d11_ctx, st->swapchain );
+                    is_child = st->is_child;
+                    if (!is_child)
+                    {
+                        gpu_ok = xaml_layout_render_gpu( hwnd, w, h, impl->content,
+                                                         g_island_d3d11_dev, g_island_d3d11_ctx, st->swapchain );
+                    }
+                    else if (g_layout_dirty || !st->valid || w != st->w || h != st->h)
+                    {
+                        /* Offscreen GPU frame -> staging -> DIB -> BitBlt below. */
+                        gpu_ok = xaml_layout_render_gpu_rtv( hwnd, w, h, impl->content,
+                                                             g_island_d3d11_dev, g_island_d3d11_ctx, st->rtv )
+                                 && uwp_island_download_gpu( st, hdc, w, h );
+                    }
+                    else
+                    {
+                        /* Static frame: reuse the DIB, skip D3D11 entirely. */
+                        gpu_ok = TRUE;
+                    }
                     if (gpu_ok)
                     {
                         g_layout_dirty = FALSE;
                         st->valid = TRUE;
+                        if (is_child && st->dc)
+                            BitBlt( hdc, 0, 0, w, h, st->dc, 0, 0, SRCCOPY );
                     }
                     else
                     {
@@ -219,30 +367,7 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
                 {
                     if (st && (g_layout_dirty || !st->valid || w != st->w || h != st->h))
                     {
-                        if (!st->dc || w != st->w || h != st->h)
-                        {
-                            BITMAPINFO bmi;
-                            void *bits = NULL;
-                            if (st->dc)
-                            {
-                                if (st->old_bmp) SelectObject( st->dc, st->old_bmp );
-                                if (st->bmp) DeleteObject( st->bmp );
-                                DeleteDC( st->dc );
-                            }
-                            st->dc = CreateCompatibleDC( hdc );
-                            memset( &bmi, 0, sizeof(bmi) );
-                            bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-                            bmi.bmiHeader.biWidth = w;
-                            bmi.bmiHeader.biHeight = -h;
-                            bmi.bmiHeader.biPlanes = 1;
-                            bmi.bmiHeader.biBitCount = 32;
-                            bmi.bmiHeader.biCompression = BI_RGB;
-                            st->bmp = CreateDIBSection( st->dc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0 );
-                            st->old_bmp = st->bmp ? (HBITMAP)SelectObject( st->dc, st->bmp ) : NULL;
-                            st->w = w;
-                            st->h = h;
-                        }
-                        if (st->dc && st->bmp)
+                        if (uwp_island_ensure_dib( st, hdc, w, h ))
                         {
                             xaml_layout_render( hwnd, st->dc, w, h, impl->content );
                             g_layout_dirty = FALSE;
@@ -945,8 +1070,9 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
     }
 }
 
-BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *content,
-                             ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain )
+static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IInspectable *content,
+                                           ID3D11Device *dev, ID3D11DeviceContext *ctx,
+                                           IDXGISwapChain1 *swapchain, ID3D11RenderTargetView *rtv )
 {
     RECT rc;
     struct uwp_element *root_el, *bg_scope;
@@ -954,7 +1080,7 @@ BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *con
     double eval_w, eval_h;
     UINT inst_cnt = 0, hits = 0, misses = 0;
 
-    if (width <= 0 || height <= 0 || !dev || !ctx || !swapchain) return FALSE;
+    if (width <= 0 || height <= 0 || !dev || !ctx || (!swapchain && !rtv)) return FALSE;
     uwp_ensure_app_resources_loaded();
     xaml_get_layout_metrics( hwnd, NULL, &g_layout_scale );
     SetRect( &rc, 0, 0, width, height );
@@ -983,7 +1109,8 @@ BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *con
                                            RGB( 31, 31, 31 ), RGB( 31, 31, 31 ) );
     g_paint_page_bg = page_bg;
 
-    if (!xaml_gpu_begin_frame( dev, ctx, swapchain, (UINT)width, (UINT)height, page_bg ))
+    if (rtv ? !xaml_gpu_begin_frame_rtv( dev, ctx, rtv, (UINT)width, (UINT)height, page_bg )
+            : !xaml_gpu_begin_frame( dev, ctx, swapchain, (UINT)width, (UINT)height, page_bg ))
         return FALSE;
 
     if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
@@ -1000,7 +1127,8 @@ BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *con
         uwp_gpu_paint_element( ctx, root_el );
     }
 
-    if (!xaml_gpu_end_frame( ctx, swapchain, &inst_cnt, &hits, &misses ))
+    if (rtv ? !xaml_gpu_end_frame_rtv( ctx, &inst_cnt, &hits, &misses )
+            : !xaml_gpu_end_frame( ctx, swapchain, &inst_cnt, &hits, &misses ))
         return FALSE;
 
     TRACE( "xaml_layout_render_gpu: %ux%u instances=%u atlas_hits=%u atlas_misses=%u\n",
@@ -1016,6 +1144,18 @@ BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *con
         }
     }
     return TRUE;
+}
+
+BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *content,
+                             ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain )
+{
+    return xaml_layout_render_gpu_target( hwnd, width, height, content, dev, ctx, swapchain, NULL );
+}
+
+BOOL xaml_layout_render_gpu_rtv( HWND hwnd, int width, int height, IInspectable *content,
+                                 ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv )
+{
+    return xaml_layout_render_gpu_target( hwnd, width, height, content, dev, ctx, NULL, rtv );
 }
 
 BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr )

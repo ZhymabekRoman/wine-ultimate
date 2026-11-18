@@ -20,6 +20,8 @@
 
 #include "private.h"
 #include <d3dcompiler.h>
+#include "weakreference.h"
+#include "uwp_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -570,6 +572,44 @@ BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwa
     return TRUE;
 }
 
+/* Same as xaml_gpu_begin_frame() but targeting a caller-owned offscreen render
+ * target (WS_CHILD islands have no on-screen X11 window to present to). */
+BOOL xaml_gpu_begin_frame_rtv( ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv,
+                               UINT width, UINT height, COLORREF clear_color )
+{
+    float clear_rgba[4];
+
+    if (!dev || !ctx || !rtv || width == 0 || height == 0)
+        return FALSE;
+    if (!xaml_gpu_init( dev ))
+        return FALSE;
+
+    if (g_gpu.rtv != rtv)
+    {
+        xaml_gpu_release_rtv();
+        ID3D11RenderTargetView_AddRef( rtv );
+        g_gpu.rtv = rtv;
+        g_gpu.rtv_swapchain = NULL;
+        g_gpu.rtv_width = width;
+        g_gpu.rtv_height = height;
+    }
+
+    clear_rgba[0] = (float)GetRValue( clear_color ) / 255.0f;
+    clear_rgba[1] = (float)GetGValue( clear_color ) / 255.0f;
+    clear_rgba[2] = (float)GetBValue( clear_color ) / 255.0f;
+    clear_rgba[3] = 1.0f;
+
+    ID3D11DeviceContext_OMSetRenderTargets( ctx, 1, &g_gpu.rtv, NULL );
+    ID3D11DeviceContext_ClearRenderTargetView( ctx, g_gpu.rtv, clear_rgba );
+
+    g_gpu.instance_count = 0;
+    g_gpu.frame_width = width;
+    g_gpu.frame_height = height;
+    g_gpu.atlas_hits = 0;
+    g_gpu.atlas_misses = 0;
+    return TRUE;
+}
+
 void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
                          float radius, UINT32 fill_argb, UINT32 border_argb,
                          float border_thickness, float opacity )
@@ -874,8 +914,7 @@ void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *
     inst->params[3] = 0.0f;
 }
 
-BOOL xaml_gpu_end_frame( ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
-                         UINT *out_instances, UINT *out_hits, UINT *out_misses )
+static BOOL xaml_gpu_draw_batch( ID3D11DeviceContext *ctx )
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
     D3D11_VIEWPORT vp;
@@ -884,7 +923,7 @@ BOOL xaml_gpu_end_frame( ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
     float blend_factor[4] = { 0, 0, 0, 0 };
     HRESULT hr;
 
-    if (!g_gpu.initialized || !ctx || !swapchain)
+    if (!g_gpu.initialized || !ctx)
         return FALSE;
 
     if (g_gpu.instance_count > 0)
@@ -927,8 +966,34 @@ BOOL xaml_gpu_end_frame( ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
 
         ID3D11DeviceContext_DrawInstanced( ctx, 4, g_gpu.instance_count, 0, 0 );
     }
+    return TRUE;
+}
+
+BOOL xaml_gpu_end_frame( ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
+                         UINT *out_instances, UINT *out_hits, UINT *out_misses )
+{
+    if (!swapchain)
+        return FALSE;
+    if (!xaml_gpu_draw_batch( ctx ))
+        return FALSE;
 
     IDXGISwapChain1_Present( swapchain, 0, 0 );
+
+    if (out_instances) *out_instances = g_gpu.instance_count;
+    if (out_hits) *out_hits = g_gpu.atlas_hits;
+    if (out_misses) *out_misses = g_gpu.atlas_misses;
+    return TRUE;
+}
+
+/* Flush the instanced batch into the offscreen render target set by
+ * xaml_gpu_begin_frame_rtv(); no present — the caller reads the pixels back. */
+BOOL xaml_gpu_end_frame_rtv( ID3D11DeviceContext *ctx, UINT *out_instances,
+                             UINT *out_hits, UINT *out_misses )
+{
+    if (!xaml_gpu_draw_batch( ctx ))
+        return FALSE;
+
+    ID3D11DeviceContext_Flush( ctx );
 
     if (out_instances) *out_instances = g_gpu.instance_count;
     if (out_hits) *out_hits = g_gpu.atlas_hits;

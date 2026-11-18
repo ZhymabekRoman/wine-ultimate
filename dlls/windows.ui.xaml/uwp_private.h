@@ -753,6 +753,14 @@ struct uwp_island_state
     int gpu_w;
     int gpu_h;
     BOOL gpu_failed;
+    /* WS_CHILD islands have no X11 whole_window, so an HWND swap chain lands on an
+     * offscreen dummy parent.  Render into an offscreen render target instead and
+     * blit the CPU-readable staging copy onto the child window's DC. */
+    ID3D11Texture2D *rt_tex;
+    ID3D11RenderTargetView *rtv;
+    ID3D11Texture2D *staging_tex;
+    void *bits;                 /* DIB pixel block backing dc/bmp */
+    BOOL is_child;
 };
 
 struct xbf_rd_table
@@ -2336,6 +2344,12 @@ extern struct uwp_element *g_hovered_elem;
 extern ID3D11DeviceContext *g_island_d3d11_ctx;
 extern ID3D11Device *g_island_d3d11_dev;
 extern BOOL g_island_d3d11_failed;
+/* Offscreen render-target frame pair + layout pass for WS_CHILD islands. */
+BOOL xaml_gpu_begin_frame_rtv( ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv,
+                               UINT width, UINT height, COLORREF clear_color );
+BOOL xaml_gpu_end_frame_rtv( ID3D11DeviceContext *ctx, UINT *out_instances, UINT *out_hits, UINT *out_misses );
+BOOL xaml_layout_render_gpu_rtv( HWND hwnd, int width, int height, IInspectable *content,
+                                 ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv );
 extern int g_island_hwnd_cnt;
 extern HWND g_island_hwnds[16];
 extern struct uwp_element *g_last_closed_flyout;
