@@ -750,7 +750,7 @@ static HRESULT WINAPI package_get_InstalledLocationD( void *iface, void **value 
 {
     TRACE( "package_get_InstalledLocationD\n" );
     source_package_path();
-    if (!dstr_folder_obj) dstr_folder_obj = create_dstr_folder( source_package_full_name );
+    if (!dstr_folder_obj) dstr_folder_obj = create_dstr_folder( source_package_path() );
     InterlockedIncrement( dstr_ref( dstr_folder_obj ) );
     *value = dstr_folder_obj;
     return S_OK;
