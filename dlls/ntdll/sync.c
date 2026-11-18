@@ -354,14 +354,9 @@ NTSTATUS WINAPI RtlpUnWaitCriticalSection( RTL_CRITICAL_SECTION *crit )
 /******************************************************************************
  *      RtlEnterCriticalSection   (NTDLL.@)
  */
-NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+static NTSTATUS DECLSPEC_NOINLINE crit_enter_slow( RTL_CRITICAL_SECTION *crit )
 {
-    if (InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1)
-    {
-        crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
-        crit->RecursionCount = 1;
-        return STATUS_SUCCESS;
-    }
+    HANDLE tid = ULongToHandle(GetCurrentThreadId());
 
     if (crit->SpinCount)
     {
@@ -383,7 +378,7 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
     {
         NTSTATUS status;
 
-        if (crit->OwningThread == ULongToHandle(GetCurrentThreadId()))
+        if (crit->OwningThread == tid)
         {
             crit->RecursionCount++;
             return STATUS_SUCCESS;
@@ -393,9 +388,21 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
         if ((status = RtlpWaitForCriticalSection( crit ))) RtlRaiseStatus( status );
     }
 done:
-    crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
+    crit->OwningThread   = tid;
     crit->RecursionCount = 1;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+{
+    if (InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1)
+    {
+        crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
+        crit->RecursionCount = 1;
+        return STATUS_SUCCESS;
+    }
+
+    return crit_enter_slow( crit );
 }
 
 
@@ -443,12 +450,22 @@ BOOL WINAPI RtlIsCriticalSectionLockedByThread( RTL_CRITICAL_SECTION *crit )
 /******************************************************************************
  *      RtlLeaveCriticalSection   (NTDLL.@)
  */
+static void DECLSPEC_NOINLINE crit_leave_not_acquired( RTL_CRITICAL_SECTION *crit )
+{
+    ERR( "section %p %s is not acquired\n", crit, debugstr_a( crit_section_get_name( crit )));
+}
+
+static void DECLSPEC_NOINLINE crit_leave_unwait( RTL_CRITICAL_SECTION *crit )
+{
+    RtlpUnWaitCriticalSection( crit );
+}
+
 NTSTATUS WINAPI RtlLeaveCriticalSection( RTL_CRITICAL_SECTION *crit )
 {
     if (--crit->RecursionCount)
     {
         if (crit->RecursionCount > 0) InterlockedDecrement( &crit->LockCount );
-        else ERR( "section %p %s is not acquired\n", crit, debugstr_a( crit_section_get_name( crit )));
+        else crit_leave_not_acquired( crit );
     }
     else
     {
@@ -456,7 +473,7 @@ NTSTATUS WINAPI RtlLeaveCriticalSection( RTL_CRITICAL_SECTION *crit )
         if (InterlockedDecrement( &crit->LockCount ) >= 0)
         {
             /* someone is waiting */
-            RtlpUnWaitCriticalSection( crit );
+            crit_leave_unwait( crit );
         }
     }
     return STATUS_SUCCESS;
