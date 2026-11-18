@@ -365,6 +365,11 @@ static void dispatcher_queue_destroy_wake( struct dispatcher_queue *queue )
 }
 
 static const GUID IID_IMicrosoftDispatcherQueue = {0xf6ebf8fa, 0xbe1c, 0x5bf6, {0xa4, 0x67, 0x73, 0xda, 0x28, 0x73, 0x8a, 0xe8}};
+/* IDispatcherQueueStatics under the Microsoft.UI.Dispatching projection (Windows App SDK
+ * generated IID).  The XAML island service map QIs the queue instance for it. */
+static const GUID IID_IMicrosoftUiDispatcherQueueStatics = {0x14a7a175, 0x5c27, 0x5a35, {0xb0, 0x79, 0x21, 0x96, 0x0c, 0xf7, 0x64, 0xa8}};
+
+static void *dispatcher_queue_statics_iface( void );
 
 static HRESULT WINAPI dispatcher_queue_QueryInterface( IDispatcherQueue *iface, REFIID iid, void **out )
 {
@@ -389,6 +394,11 @@ static HRESULT WINAPI dispatcher_queue_QueryInterface( IDispatcherQueue *iface, 
     {
         *out = &impl->IDispatcherQueue2_iface;
         IDispatcherQueue2_AddRef( *out );
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_IMicrosoftUiDispatcherQueueStatics ))
+    {
+        *out = dispatcher_queue_statics_iface();
         return S_OK;
     }
     FIXME( "%s not implemented.\n", debugstr_guid( iid ) );
@@ -1591,7 +1601,8 @@ static HRESULT WINAPI dispatcher_queue_statics_QueryInterface( void *iface, REFI
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IDispatcherQueueStatics ) ||
-        IsEqualGUID( iid, &IID_IMicrosoftDispatcherQueueStatics ))
+        IsEqualGUID( iid, &IID_IMicrosoftDispatcherQueueStatics ) ||
+        IsEqualGUID( iid, &IID_IMicrosoftUiDispatcherQueueStatics ))
     {
         *out = iface;
         return S_OK;
@@ -1644,6 +1655,8 @@ static const void *dispatcher_queue_statics_vtbl[] =
 };
 
 static struct { const void *vtbl; } dispatcher_queue_statics = { dispatcher_queue_statics_vtbl };
+
+static void *dispatcher_queue_statics_iface( void ) { return (void *)&dispatcher_queue_statics; }
 
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {

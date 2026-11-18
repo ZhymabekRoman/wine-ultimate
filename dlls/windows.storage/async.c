@@ -213,6 +213,26 @@ static HRESULT WINAPI async_op_GetResults_Inspectable( IInspectable *iface, IIns
     return impl->hr;
 }
 
+/* Win11 projection twin of GetResults on IAsyncOperationWithProgress<IBuffer*,UINT32>:
+ * returns the number of bytes/units produced (buffer Length) instead of the object. */
+static HRESULT WINAPI async_op_GetResults_count( IInspectable *iface, UINT32 *results )
+{
+    struct async_op *impl = impl_from_IInspectable( iface );
+
+    if (!results) return E_POINTER;
+    *results = 0;
+    if (impl->kind == ASYNC_PROGRESS_BUFFER && impl->result.inspectable)
+    {
+        IBuffer *buf = (IBuffer *)impl->result.inspectable;
+        IBuffer_get_Length( buf, results );
+    }
+    else if (impl->kind == ASYNC_PROGRESS_UINT32 || impl->kind == ASYNC_UINT32)
+    {
+        *results = impl->result.u32;
+    }
+    return impl->hr;
+}
+
 static HRESULT WINAPI async_op_GetResults_Action( IInspectable *iface )
 {
     struct async_op *impl = impl_from_IInspectable( iface );
@@ -408,6 +428,9 @@ static const void *async_op_vtbl_boolean[] =
     async_op_GetResults_Boolean,
 };
 
+/* Win11 C++/WinRT coroutines in WPM virtual-call projection helpers well past
+ * the declared IAsyncOperationWithProgress slots (awaiters use 8/10, the
+ * buffered-pipe pump calls 21, the CLog formatter slot 39); polyfill. */
 static const void *async_op_vtbl_progress_buffer[] =
 {
     async_op_QueryInterface,
@@ -416,11 +439,40 @@ static const void *async_op_vtbl_progress_buffer[] =
     async_op_GetIids,
     async_op_GetRuntimeClassName,
     async_op_GetTrustLevel,
-    async_op_put_Progress,
+    async_op_put_Progress,              /* 6 */
     async_op_get_Progress,
-    async_op_put_Completed,
+    async_op_put_Completed,             /* 8 awaiter put_Completed */
     async_op_get_Completed,
-    async_op_GetResults_Inspectable,
+    async_op_GetResults_Inspectable,    /* 10 awaiter GetResults(IBuffer*) */
+    async_op_GetResults_Inspectable,    /* 11 projection GetResults twin */
+    async_op_put_Progress,              /* 12 */
+    async_op_get_Progress,              /* 13 */
+    async_op_GetResults_Inspectable,    /* 14 WithProgress GetResults */
+    async_op_put_Progress,              /* 15 */
+    async_op_GetResults_Inspectable,    /* 16 */
+    async_op_QueryInterface,            /* 17 */
+    async_op_AddRef,                    /* 18 */
+    async_op_Release,                   /* 19 */
+    async_op_QueryInterface,            /* 20 */
+    async_op_GetResults_count,          /* 21 Win11 projection GetResults (UINT32) */
+    async_op_QueryInterface,            /* 22-32 fillers */
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_GetResults_Inspectable,    /* 33 */
+    async_op_GetResults_count,          /* 34 */
+    async_op_GetResults_Inspectable,    /* 35 */
+    async_op_GetResults_count,          /* 36 */
+    async_op_QueryInterface,            /* 37-39 */
+    async_op_QueryInterface,
+    async_op_QueryInterface,
 };
 
 static const void *async_op_vtbl_progress_uint32[] =
@@ -431,11 +483,40 @@ static const void *async_op_vtbl_progress_uint32[] =
     async_op_GetIids,
     async_op_GetRuntimeClassName,
     async_op_GetTrustLevel,
-    async_op_put_Progress,
+    async_op_put_Progress,              /* 6 */
     async_op_get_Progress,
-    async_op_put_Completed,
+    async_op_put_Completed,             /* 8 */
     async_op_get_Completed,
-    async_op_GetResults_UInt32,
+    async_op_GetResults_UInt32,         /* 10 */
+    async_op_GetResults_UInt32,         /* 11 */
+    async_op_put_Progress,              /* 12 */
+    async_op_get_Progress,              /* 13 */
+    async_op_GetResults_UInt32,         /* 14 */
+    async_op_put_Progress,              /* 15 */
+    async_op_GetResults_UInt32,         /* 16 */
+    async_op_QueryInterface,            /* 17 */
+    async_op_AddRef,                    /* 18 */
+    async_op_Release,                   /* 19 */
+    async_op_QueryInterface,            /* 20 */
+    async_op_GetResults_count,          /* 21 */
+    async_op_QueryInterface,            /* 22-32 fillers */
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_QueryInterface,
+    async_op_GetResults_UInt32,         /* 33 */
+    async_op_GetResults_count,          /* 34 */
+    async_op_GetResults_UInt32,         /* 35 */
+    async_op_GetResults_count,          /* 36 */
+    async_op_QueryInterface,            /* 37-39 */
+    async_op_QueryInterface,
+    async_op_QueryInterface,
 };
 
 static struct async_op *async_op_alloc( const GUID *iid, const WCHAR *class_name, enum async_kind kind, const void *vtbl )

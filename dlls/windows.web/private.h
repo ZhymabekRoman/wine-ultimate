@@ -39,6 +39,15 @@
 
 #include "cjson/cJSON.h"
 
+/* streams.c: in-memory IBuffer + DataReader (Windows.Storage.Streams) */
+HRESULT create_mem_buffer_from_hstring( HSTRING str, void **out );
+HRESULT create_mem_buffer_from_bytes( const void *data, unsigned long len, void **out );
+HRESULT create_empty_mem_buffer( unsigned long cap, void **out );
+HRESULT create_ras_stream_from_buffer( void *buffer, void **out );
+void *create_data_reader_factory( void );
+void *create_buffer_factory( void );
+HRESULT create_async_http_op_obj( void *result_obj, void **out );
+
 extern IActivationFactory *json_array_factory;
 extern IActivationFactory *json_object_factory;
 extern IActivationFactory *json_value_factory;
@@ -47,6 +56,7 @@ extern IActivationFactory *http_client_factory;
 extern IActivationFactory *http_request_factory;
 extern IActivationFactory *http_response_factory;
 extern IActivationFactory *http_string_content_factory;
+extern IActivationFactory *http_stream_content_factory;
 extern IActivationFactory *http_method_factory;
 extern IActivationFactory *http_base_protocol_filter_factory;
 

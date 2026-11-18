@@ -95,11 +95,59 @@ static const struct IClassFactoryVtbl classfactory_vtbl =
     classfactory_LockServer,
 };
 
+extern const GUID CLSID_AppxFactory;
+extern const GUID CLSID_AppxBundleFactory;
+HRESULT appx_factory_create( REFIID riid, void **out );
+HRESULT appx_bundle_factory_create( REFIID riid, void **out );
+
+struct appx_packaging_classfactory
+{
+    IClassFactory IClassFactory_iface;
+    BOOL is_bundle;
+};
+
+static HRESULT WINAPI packaging_cf_QueryInterface( IClassFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IClassFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI packaging_cf_AddRef( IClassFactory *iface ) { return 2; }
+static ULONG WINAPI packaging_cf_Release( IClassFactory *iface ) { return 1; }
+static HRESULT WINAPI packaging_cf_CreateInstance( IClassFactory *iface, IUnknown *outer, REFIID riid, void **out )
+{
+    struct appx_packaging_classfactory *cf = CONTAINING_RECORD( iface, struct appx_packaging_classfactory, IClassFactory_iface );
+    if (outer) return CLASS_E_NOAGGREGATION;
+    if (!out) return E_INVALIDARG;
+    return cf->is_bundle ? appx_bundle_factory_create( riid, out ) : appx_factory_create( riid, out );
+}
+static HRESULT WINAPI packaging_cf_LockServer( IClassFactory *iface, BOOL lock ) { return S_OK; }
+
+static const struct IClassFactoryVtbl packaging_cf_vtbl =
+{
+    packaging_cf_QueryInterface,
+    packaging_cf_AddRef,
+    packaging_cf_Release,
+    packaging_cf_CreateInstance,
+    packaging_cf_LockServer,
+};
+
+static struct appx_packaging_classfactory appx_cf = { { &packaging_cf_vtbl }, FALSE };
+static struct appx_packaging_classfactory appx_bundle_cf = { { &packaging_cf_vtbl }, TRUE };
+
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
 {
     TRACE( "clsid %s, riid %s, out %p.\n", debugstr_guid(clsid), debugstr_guid(riid), out );
 
     *out = NULL;
+    if (IsEqualGUID( clsid, &CLSID_AppxFactory ))
+        return IClassFactory_QueryInterface( &appx_cf.IClassFactory_iface, riid, out );
+    if (IsEqualGUID( clsid, &CLSID_AppxBundleFactory ))
+        return IClassFactory_QueryInterface( &appx_bundle_cf.IClassFactory_iface, riid, out );
     if (!IsEqualGUID( clsid, &CLSID_PackageManager )) return CLASS_E_CLASSNOTAVAILABLE;
     classfactory.IClassFactory_iface.lpVtbl = &classfactory_vtbl;
     return IClassFactory_QueryInterface( &classfactory.IClassFactory_iface, riid, out );

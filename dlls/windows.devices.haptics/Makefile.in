@@ -1,0 +1,6 @@
+MODULE  = windows.devices.haptics.dll
+IMPORTS = combase kernelbase uuid
+
+SOURCES = \
+	classes.idl \
+	main.c

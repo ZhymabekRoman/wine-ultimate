@@ -1,8 +1,10 @@
 MODULE  = appxdeploymentclient.dll
 IMPORTLIB = appxdeploymentclient
-IMPORTS = combase advapi32 kernel32 kernelbase xmllite ole32 crypt32 user32
+IMPORTS = $(ZLIB_PE_LIBS) combase advapi32 kernel32 kernelbase xmllite ole32 crypt32 user32
+EXTRAINCL = $(ZLIB_PE_CFLAGS)
 
 SOURCES = \
+	appx_packaging.c \
 	classes.idl \
 	main.c \
 	manifest.c \

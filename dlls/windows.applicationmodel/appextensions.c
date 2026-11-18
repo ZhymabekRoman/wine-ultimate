@@ -53,7 +53,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(appextensions);
 #define heap_free(p) HeapFree( GetProcessHeap(), 0, p )
 
 static const WCHAR source_package_name[] = L"Microsoft.Winget.Source";
-static const WCHAR source_package_full_name[] = L"Microsoft.Winget.Source_8wekyb3d8bbwe";
+static WCHAR source_package_full_name[256] = L"Microsoft.Winget.Source_8wekyb3d8bbwe";
 static const WCHAR source_publisher_id[] = L"8wekyb3d8bbwe";
 static const WCHAR source_extension_id[] = L"IndexDB";
 
@@ -66,7 +66,7 @@ struct version_abi
     UINT16 minor;
     UINT16 build;
 };
-static const struct version_abi source_version = { 0, 2, 0, 0 }; /* 2.0.0.0 */
+static struct version_abi source_version = { 0, 2, 0, 0 }; /* 2.0.0.0 */
 
 /* Installed location of the source package (directory containing Public\index.db
  * and Index\<version>\Main\index.db).  Registry seed first, like the rest of the
@@ -81,19 +81,47 @@ static const WCHAR *source_package_path( void )
 
     if (path[0]) return path;
 
-    lstrcpyW( full, subkey );
-    lstrcatW( full, source_package_full_name );
     for (i = 0; i < ARRAY_SIZE(roots); i++)
     {
         HKEY key;
-        DWORD type, size = sizeof(path);
-        if (!RegOpenKeyExW( roots[i], full, 0, KEY_READ, &key ))
+        DWORD type, size;
+        if (!RegOpenKeyExW( roots[i], L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages", 0, KEY_READ, &key ))
         {
-            if (!RegQueryValueExW( key, L"PackagePath", 0, &type, (BYTE *)path, &size )
-                && type == REG_SZ && size)
+            DWORD idx = 0, klen;
+            WCHAR kname[256];
+            for (;;)
             {
-                RegCloseKey( key );
-                return path;
+                klen = ARRAY_SIZE(kname);
+                if (RegEnumKeyExW( key, idx++, kname, &klen, NULL, NULL, NULL, NULL )) break;
+                if (!wcsnicmp( kname, L"Microsoft.Winget.Source_", 24 ))
+                {
+                    HKEY sub;
+                    if (!RegOpenKeyExW( key, kname, 0, KEY_READ, &sub ))
+                    {
+                        size = sizeof(path);
+                        if (!RegQueryValueExW( sub, L"PackagePath", 0, &type, (BYTE *)path, &size )
+                            && type == REG_SZ && size)
+                        {
+                            const WCHAR *u = wcschr( kname, L'_' );
+                            lstrcpynW( source_package_full_name, kname, ARRAY_SIZE(source_package_full_name) );
+                            if (u)
+                            {
+                                UINT16 a = 0, b = 0, c = 0, d = 0;
+                                if (swscanf( u + 1, L"%hu.%hu.%hu.%hu", &a, &b, &c, &d ) == 4)
+                                {
+                                    source_version.major = a;
+                                    source_version.minor = b;
+                                    source_version.build = c;
+                                    source_version.revision = d;
+                                }
+                            }
+                            RegCloseKey( sub );
+                            RegCloseKey( key );
+                            return path;
+                        }
+                        RegCloseKey( sub );
+                    }
+                }
             }
             RegCloseKey( key );
         }
@@ -227,13 +255,16 @@ static HRESULT WINAPI pkgid_GetTrustLevel( void *iface, TrustLevel *level )
 }
 static HRESULT WINAPI pkgid_get_FullName( void *iface, HSTRING *value )
 {
-    TRACE( "pkgid_get_FullName\n" );
-    return WindowsCreateString( source_package_full_name, ARRAY_SIZE(source_package_full_name) - 1, value );
+    source_package_path();
+    TRACE( "pkgid_get_FullName %s\n", debugstr_w( source_package_full_name ) );
+    return WindowsCreateString( source_package_full_name, lstrlenW( source_package_full_name ), value );
 }
 static HRESULT WINAPI pkgid_get_PackageFamilyName( void *iface, HSTRING *value )
 {
+    static const WCHAR fam[] = L"Microsoft.Winget.Source_8wekyb3d8bbwe";
+    source_package_path();
     TRACE( "pkgid_get_PackageFamilyName\n" );
-    return WindowsCreateString( source_package_full_name, ARRAY_SIZE(source_package_full_name) - 1, value );
+    return WindowsCreateString( fam, ARRAY_SIZE(fam) - 1, value );
 }
 static HRESULT WINAPI pkgid_get_PublisherId( void *iface, HSTRING *value )
 {
@@ -247,8 +278,11 @@ static HRESULT WINAPI pkgid_get_Version( void *iface, void **value )
 {
     struct source_pkgid *impl = pkgid_impl( iface );
     TRACE( "iface %p, value %p\n", impl, value );
+    /* PackageVersion {Major, Minor, Build, Revision} is an 8-byte ABI struct
+     * written straight through the out pointer; older projections that read
+     * it as an IReference<PackageVersion> object still work, the struct fits. */
+    *(struct version_abi *)value = source_version;
     InterlockedIncrement( &version_ref_obj.ref );
-    *value = &version_ref_obj;
     return S_OK;
 }
 static const void *pkgid_vtbl[] =
@@ -352,6 +386,7 @@ static HRESULT src_get_folder( IStorageFolder **out )
 
     if (src_folder_obj)
     {
+        IStorageFolder_AddRef( src_folder_obj );
         *out = src_folder_obj;
         return S_OK;
     }
@@ -386,6 +421,7 @@ static HRESULT src_get_folder( IStorageFolder **out )
             IStorageFolder_Release( result );
             if (SUCCEEDED(hr))
             {
+                IStorageFolder_AddRef( src_folder_obj );
                 *out = src_folder_obj;
                 goto done;
             }
@@ -402,6 +438,44 @@ done:
     return S_OK;
 }
 
+static HRESULT WINAPI pkg8_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI pkg8_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI pkg8_Release( void *iface ) { return 1; }
+static HRESULT WINAPI pkg8_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI pkg8_GetRuntimeClassName( void *iface, HSTRING *n ) { return WindowsCreateString( L"Windows.ApplicationModel.Package", 32, n ); }
+static HRESULT WINAPI pkg8_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI pkg8_get_Uint32( void *iface, UINT32 *out )
+{
+    if (!out) return E_POINTER;
+    *out = 2;
+    return S_OK;
+}
+static HRESULT WINAPI pkg8_get_Location( void *iface, IStorageFolder **out ) { return src_get_folder( out ); }
+static HRESULT WINAPI pkg8_get_Path( void *iface, HSTRING *out )
+{
+    const WCHAR *p = source_package_path();
+    return WindowsCreateString( p, lstrlenW( p ), out );
+}
+static const void *pkg8_vtbl[] =
+{
+    pkg8_QueryInterface,
+    pkg8_AddRef,
+    pkg8_Release,
+    pkg8_GetIids,
+    pkg8_GetRuntimeClassName,
+    pkg8_GetTrustLevel,
+    pkg8_get_Uint32,   /* 6 returns UINT32 (avoid 8-byte write over 4-byte stack out) */
+    pkg8_get_Location, /* 7 */
+    pkg8_get_Path,     /* 8 get_InstalledPath / Path */
+    pkg8_get_Path,     /* 9 */
+    pkg8_get_Path,     /* 10 */
+};
+static const void *pkg8_obj = pkg8_vtbl;
+
 static HRESULT WINAPI dstr_QueryInterface( void *iface, REFIID iid, void **out )
 {
     static const GUID IID_IPackage2 =
@@ -412,9 +486,7 @@ static HRESULT WINAPI dstr_QueryInterface( void *iface, REFIID iid, void **out )
     TRACE( "dstr QI %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IPackage2 ))
     {
-        if (SUCCEEDED(src_get_folder( (IStorageFolder **)out ))) return S_OK;
-        InterlockedIncrement( &version_ref_obj.ref );
-        *out = &version_ref_obj;
+        *out = (void *)&pkg8_obj;
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IPackage ))
@@ -462,10 +534,8 @@ static HRESULT WINAPI dstr_get_Name( void *iface, HSTRING *value )
 static struct dstr_folder *dstr_path_obj;
 static HRESULT WINAPI dstr_get_Path( void *iface, HSTRING *value )
 {
-    if (!dstr_path_obj) dstr_path_obj = create_dstr_folder( source_package_path() );
-    InterlockedIncrement( dstr_ref( dstr_path_obj ) );
-    *value = (HSTRING)dstr_path_obj;
-    return S_OK;
+    const WCHAR *p = source_package_path();
+    return WindowsCreateString( p, lstrlenW( p ), value );
 }
 /* slot 6: projections that treat InstalledLocation as Id-carrier */
 static HRESULT WINAPI dstr_get_Id( void *iface, void **value )
@@ -537,7 +607,17 @@ static HRESULT WINAPI dstr_get_InstallPath( void *iface, HSTRING *value )
 
 /* Build the dstring folder: allocate the vtable page at (len << 32) so the
  * high dword of the vtable pointer reads as the string length. */
-static void *dstr_vtbl_page[16];
+static struct async_op *create_async_op( void );
+static HRESULT WINAPI dstr_GetAppListEntries( void *iface, void **op )
+{
+    struct async_op *a;
+    TRACE( "dstr_GetAppListEntries\n" );
+    if (!op) return E_POINTER;
+    if (!(a = create_async_op())) return E_OUTOFMEMORY;
+    *op = a;
+    return S_OK;
+}
+static void *dstr_vtbl_page[19];
 static struct dstr_folder *create_dstr_folder( const WCHAR *str )
 {
     struct dstr_folder *obj;
@@ -570,6 +650,11 @@ static struct dstr_folder *create_dstr_folder( const WCHAR *str )
     dstr_vtbl_page[10] = dstr_get_InstallPath;
     for (i = 11; i < ARRAY_SIZE(dstr_vtbl_page); i++)
         dstr_vtbl_page[i] = dstr_get_Path;
+    /* [16] = GetParentAsync once the idl reorders IStorageFolder. */
+    dstr_vtbl_page[16] = dstr_get_Path;
+    dstr_vtbl_page[17] = dstr_get_Path;
+    /* 19045 IPackage3 merged layout: slot 18 = GetAppListEntriesAsync. */
+    dstr_vtbl_page[18] = dstr_GetAppListEntries;
 
     if (base) memcpy( base, dstr_vtbl_page, sizeof(dstr_vtbl_page) );
     obj->vtbl = base ? base : dstr_vtbl_page;
@@ -659,13 +744,12 @@ static HRESULT WINAPI package_get_Id( void *iface, void **value )
 static HRESULT WINAPI package_get_InstalledLocation( void *iface, void **value )
 {
     TRACE( "package_get_InstalledLocation\n" );
-    InterlockedIncrement( &folder_obj.ref );
-    *value = &folder_obj;
-    return S_OK;
+    return src_get_folder( (IStorageFolder **)value );
 }
 static HRESULT WINAPI package_get_InstalledLocationD( void *iface, void **value )
 {
     TRACE( "package_get_InstalledLocationD\n" );
+    source_package_path();
     if (!dstr_folder_obj) dstr_folder_obj = create_dstr_folder( source_package_full_name );
     InterlockedIncrement( dstr_ref( dstr_folder_obj ) );
     *value = dstr_folder_obj;
@@ -708,13 +792,16 @@ static const void *package_vtbl[] =
     package_get_Id,                   /* 6 */
     package_get_InstalledLocation,    /* 7 */
     dstr_IsFramework,                 /* 8 */
-    package_get_InstalledLocationD,   /* 9 - the slot the v1.29 projection uses */
+    package_get_InstalledLocationD,   /* 9 - dual dstring */
     dstr_IsResource,                  /* 10 - Status */
     dstr_IsFramework,                 /* 11 - DeployPackage stub */
     dstr_IsResource,                  /* 12 - IsResourcePackage */
     package_get_DisplayName,          /* 13 */
     package_get_Description,          /* 14 */
     package_get_Logo,                 /* 15 - IPackage v6 (22H2) */
+    package_get_Logo,                 /* 16 - Resources pad */
+    package_get_Logo,                 /* 17 - ContentUri pad */
+    dstr_GetAppListEntries,           /* 18 - IPackage3::GetAppListEntriesAsync (19045) */
 };
 static struct source_package source_package_obj = { package_vtbl, 1 };
 

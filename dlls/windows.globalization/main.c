@@ -18,6 +18,7 @@
  */
 
 #include "initguid.h"
+
 #include <math.h>
 #include "private.h"
 
@@ -406,6 +407,31 @@ struct com_interface_entry
 /* Defined further below; referenced by the cached GetIids pair array. */
 static const struct IActivationFactoryVtbl application_languages_activation_factory_vtbl;
 static const struct IApplicationLanguagesStaticsVtbl application_languages_statics_vtbl;
+static const struct IApplicationLanguagesVtbl application_languages_instance_vtbl;
+
+typedef struct IApplicationLanguagesVtbl IApplicationLanguages;
+typedef struct IApplicationLanguagesVtbl
+{
+    const struct IApplicationLanguagesVtbl *lpVtbl;
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IApplicationLanguages *This, REFIID riid, void **ppvObject);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IApplicationLanguages *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IApplicationLanguages *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IApplicationLanguages *This, ULONG *iid_count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IApplicationLanguages *This, HSTRING *class_name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IApplicationLanguages *This, TrustLevel *trust_level);
+    HRESULT (STDMETHODCALLTYPE *get_ManagedLanguages)(IApplicationLanguages *This, IVectorView_HSTRING **value);
+    HRESULT (STDMETHODCALLTYPE *get_LayoutLanguages)(IApplicationLanguages *This, IVectorView_HSTRING **value);
+    HRESULT (STDMETHODCALLTYPE *get_StandardLanguages)(IApplicationLanguages *This, IVectorView_HSTRING **value);
+    HRESULT (STDMETHODCALLTYPE *add_LanguageProfileChanged)(IApplicationLanguages *This, IUnknown *handler,
+                                                           EventRegistrationToken *cookie);
+    HRESULT (STDMETHODCALLTYPE *remove_LanguageProfileChanged)(IApplicationLanguages *This, EventRegistrationToken cookie);
+} IApplicationLanguages;
+
+#define IApplicationLanguages_QueryInterface(self,riid,ppv) (self)->lpVtbl->QueryInterface(self,riid,ppv)
+#define IApplicationLanguages_AddRef(self) (self)->lpVtbl->AddRef(self)
+#define IApplicationLanguages_Release(self) (self)->lpVtbl->Release(self)
+
+
 
 struct application_languages
 {
@@ -1180,11 +1206,33 @@ static HRESULT STDMETHODCALLTYPE application_languages_activation_factory_GetTru
     return E_NOTIMPL;
 }
 
+struct language_profile_changed_entry
+{
+    EventRegistrationToken token;
+    IUnknown *handler;
+};
+
+struct application_languages_instance
+{
+    IApplicationLanguages IApplicationLanguages_iface;
+    LONG ref;
+    ULONG64 next_token;
+    struct language_profile_changed_entry entries[16];
+};
+
 static HRESULT STDMETHODCALLTYPE application_languages_activation_factory_ActivateInstance(
         IActivationFactory *iface, IInspectable **instance)
 {
-    FIXME("iface %p, instance %p stub!\n", iface, instance);
-    return E_NOTIMPL;
+    struct application_languages_instance *impl;
+
+    TRACE("iface %p, instance %p.\n", iface, instance);
+
+    if (!(impl = LocalAlloc(LPTR, sizeof(*impl)))) return E_OUTOFMEMORY;
+    impl->IApplicationLanguages_iface.lpVtbl = &application_languages_instance_vtbl;
+    impl->ref = 1;
+    impl->next_token = 1;
+    *instance = (IInspectable *)&impl->IApplicationLanguages_iface;
+    return S_OK;
 }
 
 static const struct IActivationFactoryVtbl application_languages_activation_factory_vtbl =
@@ -1275,6 +1323,196 @@ static const struct IApplicationLanguagesStaticsVtbl application_languages_stati
     application_languages_statics_put_PrimaryLanguageOverride,
     application_languages_statics_get_Languages,
     application_languages_statics_get_ManifestLanguages
+};
+
+/*
+ *
+ * IApplicationLanguages (instance face, served by ActivateInstance)
+ *
+ */
+
+static const GUID IID_IApplicationLanguages_glob =
+    { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
+
+typedef struct IApplicationLanguagesVtbl IApplicationLanguagesVtbl;
+struct language_profile_changed_entry
+{
+    EventRegistrationToken token;
+    IUnknown *handler;
+};
+
+struct application_languages_instance
+{
+    IApplicationLanguages IApplicationLanguages_iface;
+    LONG ref;
+    ULONG64 next_token;
+    struct language_profile_changed_entry entries[16];
+};
+
+static inline struct application_languages_instance *application_languages_instance_from_IApplicationLanguages(
+        IApplicationLanguages *iface)
+{
+    return CONTAINING_RECORD(iface, struct application_languages_instance, IApplicationLanguages_iface);
+}
+
+static HRESULT WINAPI application_languages_instance_QueryInterface(
+        IApplicationLanguages *iface, REFIID iid, void **out)
+{
+    struct application_languages_instance *impl = application_languages_instance_from_IApplicationLanguages(iface);
+
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &IID_IUnknown) ||
+        IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IAgileObject) ||
+        IsEqualGUID(iid, &IID_IApplicationLanguages_glob))
+    {
+        IApplicationLanguages_AddRef(iface);
+        *out = impl;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI application_languages_instance_AddRef(IApplicationLanguages *iface)
+{
+    struct application_languages_instance *impl = application_languages_instance_from_IApplicationLanguages(iface);
+    return InterlockedIncrement(&impl->ref);
+}
+
+static ULONG WINAPI application_languages_instance_Release(IApplicationLanguages *iface)
+{
+    struct application_languages_instance *impl = application_languages_instance_from_IApplicationLanguages(iface);
+    ULONG ref = InterlockedDecrement(&impl->ref);
+
+    if (!ref)
+    {
+        unsigned int i;
+        for (i = 0; i < ARRAYSIZE(impl->entries); i++)
+            if (impl->entries[i].handler) IUnknown_Release(impl->entries[i].handler);
+        LocalFree(impl);
+    }
+    return ref;
+}
+
+static HRESULT WINAPI application_languages_instance_GetIids(
+        IApplicationLanguages *iface, ULONG *iid_count, IID **iids)
+{
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_languages_instance_GetRuntimeClassName(
+        IApplicationLanguages *iface, HSTRING *class_name)
+{
+    return WindowsCreateString(L"Windows.Globalization.ApplicationLanguages",
+                               ARRAYSIZE(L"Windows.Globalization.ApplicationLanguages"), class_name);
+}
+
+static HRESULT WINAPI application_languages_instance_GetTrustLevel(
+        IApplicationLanguages *iface, TrustLevel *trust_level)
+{
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT application_languages_instance_get_languages(IApplicationLanguages *iface, IVectorView_HSTRING **value)
+{
+    WCHAR locale[LOCALE_NAME_MAX_LENGTH];
+    HSTRING hstring;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    if (!GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) || !locale[0])
+        wcscpy(locale, L"en-US");
+    if (FAILED(hr = WindowsCreateString(locale, wcslen(locale), &hstring)))
+        return hr;
+    return hstring_vector_create(&hstring, 1, value);
+}
+
+static HRESULT WINAPI application_languages_instance_get_ManagedLanguages(
+        IApplicationLanguages *iface, IVectorView_HSTRING **value)
+{
+    TRACE("iface %p, value %p.\n", iface, value);
+    return application_languages_instance_get_languages(iface, value);
+}
+
+static HRESULT WINAPI application_languages_instance_get_LayoutLanguages(
+        IApplicationLanguages *iface, IVectorView_HSTRING **value)
+{
+    TRACE("iface %p, value %p.\n", iface, value);
+    return application_languages_instance_get_languages(iface, value);
+}
+
+static HRESULT WINAPI application_languages_instance_get_StandardLanguages(
+        IApplicationLanguages *iface, IVectorView_HSTRING **value)
+{
+    TRACE("iface %p, value %p.\n", iface, value);
+    return application_languages_instance_get_languages(iface, value);
+}
+
+static HRESULT WINAPI application_languages_instance_add_LanguageProfileChanged(
+        IApplicationLanguages *iface, IUnknown *handler, EventRegistrationToken *cookie)
+{
+    struct application_languages_instance *impl = application_languages_instance_from_IApplicationLanguages(iface);
+    unsigned int i;
+
+    TRACE("iface %p, handler %p, cookie %p.\n", iface, handler, cookie);
+
+    if (!cookie) return E_POINTER;
+    for (i = 0; i < ARRAYSIZE(impl->entries); i++)
+    {
+        if (!impl->entries[i].handler)
+        {
+            impl->entries[i].handler = handler;
+            if (handler) IUnknown_AddRef(handler);
+            cookie->value = impl->next_token++;
+            impl->entries[i].token.value = cookie->value;
+            return S_OK;
+        }
+    }
+    return E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI application_languages_instance_remove_LanguageProfileChanged(
+        IApplicationLanguages *iface, EventRegistrationToken cookie)
+{
+    struct application_languages_instance *impl = application_languages_instance_from_IApplicationLanguages(iface);
+    unsigned int i;
+
+    TRACE("iface %p, cookie %s.\n", iface, wine_dbgstr_longlong(cookie.value));
+
+    for (i = 0; i < ARRAYSIZE(impl->entries); i++)
+    {
+        if (impl->entries[i].handler && impl->entries[i].token.value == cookie.value)
+        {
+            IUnknown_Release(impl->entries[i].handler);
+            impl->entries[i].handler = NULL;
+            break;
+        }
+    }
+    return S_OK;
+}
+
+static const struct IApplicationLanguagesVtbl application_languages_instance_vtbl =
+{
+    0, /* lpVtbl */
+    /* IUnknown methods */
+    application_languages_instance_QueryInterface,
+    application_languages_instance_AddRef,
+    application_languages_instance_Release,
+    /* IInspectable methods */
+    application_languages_instance_GetIids,
+    application_languages_instance_GetRuntimeClassName,
+    application_languages_instance_GetTrustLevel,
+    /* IApplicationLanguages methods */
+    application_languages_instance_get_ManagedLanguages,
+    application_languages_instance_get_LayoutLanguages,
+    application_languages_instance_get_StandardLanguages,
+    application_languages_instance_add_LanguageProfileChanged,
+    application_languages_instance_remove_LanguageProfileChanged
 };
 
 static struct application_languages application_languages =

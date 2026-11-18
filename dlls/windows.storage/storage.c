@@ -1134,6 +1134,7 @@ struct storage_folder
 {
     IStorageFolder IStorageFolder_iface;
     IStorageItem IStorageItem_iface;
+    IStorageItem2 IStorageItem2_iface;
     LONG ref;
 
     WCHAR path[STORAGE_MAX_PATH];
@@ -1144,6 +1145,75 @@ static inline struct storage_folder *impl_from_IStorageFolder( IStorageFolder *i
 {
     return CONTAINING_RECORD( iface, struct storage_folder, IStorageFolder_iface );
 }
+
+static inline struct storage_folder *impl_from_IStorageItem2_Folder( IStorageItem2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct storage_folder, IStorageItem2_iface );
+}
+
+static HRESULT WINAPI storage_item2_folder_QueryInterface( IStorageItem2 *iface, REFIID iid, void **out )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
+    return IStorageFolder_QueryInterface( &impl->IStorageFolder_iface, iid, out );
+}
+static ULONG WINAPI storage_item2_folder_AddRef( IStorageItem2 *iface )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
+    return IStorageFolder_AddRef( &impl->IStorageFolder_iface );
+}
+static ULONG WINAPI storage_item2_folder_Release( IStorageItem2 *iface )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
+    return IStorageFolder_Release( &impl->IStorageFolder_iface );
+}
+static HRESULT WINAPI storage_item2_folder_GetIids( IStorageItem2 *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI storage_item2_folder_GetRuntimeClassName( IStorageItem2 *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Storage.StorageFolder", 29, n );
+}
+static HRESULT WINAPI storage_item2_folder_GetTrustLevel( IStorageItem2 *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI storage_item2_folder_GetParentAsync( IStorageItem2 *iface, IAsyncOperation_IStorageItem **result )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
+    return IStorageFolder_GetParentAsync( &impl->IStorageFolder_iface, (IAsyncOperation_StorageFolder **)result );
+}
+static HRESULT WINAPI storage_item2_folder_IsEqual( IStorageItem2 *iface, IStorageItem *item, boolean *result )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
+    HSTRING str = NULL;
+    if (!result) return E_POINTER;
+    *result = false;
+    if (!item) return S_OK;
+    if (SUCCEEDED( IStorageItem_get_Path( item, &str ) ) && str)
+    {
+        const WCHAR *p = WindowsGetStringRawBuffer( str, NULL );
+        if (p && !wcsicmp( p, impl->path )) *result = true;
+        WindowsDeleteString( str );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI storage_item2_folder_GetAttributesAsync( IStorageItem2 *iface, IAsyncOperation_FileAttributes **result )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
+    FileAttributes attr = file_attributes_from_win32( GetFileAttributesW( impl->path ) );
+    return async_operation_fileattributes_create( attr, result );
+}
+static const struct IStorageItem2Vtbl storage_item2_folder_vtbl =
+{
+    storage_item2_folder_QueryInterface,
+    storage_item2_folder_AddRef,
+    storage_item2_folder_Release,
+    storage_item2_folder_GetIids,
+    storage_item2_folder_GetRuntimeClassName,
+    storage_item2_folder_GetTrustLevel,
+    storage_item2_folder_GetParentAsync,
+    storage_item2_folder_IsEqual,
+    storage_item2_folder_GetAttributesAsync,
+};
 
 static HRESULT WINAPI storage_folder_QueryInterface( IStorageFolder *iface, REFIID iid, void **out )
 {
@@ -1164,6 +1234,13 @@ static HRESULT WINAPI storage_folder_QueryInterface( IStorageFolder *iface, REFI
     if (IsEqualGUID( iid, &IID_IStorageItem ))
     {
         *out = &impl->IStorageItem_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IStorageItem2 ))
+    {
+        *out = &impl->IStorageItem2_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -1268,6 +1345,30 @@ static void folder_build_unique_path( const WCHAR *dir, const WCHAR *name, WCHAR
             return;
         }
     }
+}
+
+static HRESULT WINAPI storage_folder_GetParentAsync( IStorageFolder *iface, IAsyncOperation_StorageFolder **result )
+{
+    struct storage_folder *impl = impl_from_IStorageFolder( iface );
+    WCHAR parent[STORAGE_MAX_PATH], *slash;
+    IStorageFolder *folder = NULL;
+    HRESULT hr;
+
+    if (!result) return E_POINTER;
+
+    lstrcpyW( parent, impl->path );
+    if (!(slash = wcsrchr( parent, '\\' )) && !(slash = wcsrchr( parent, '/' ))) return E_FAIL;
+    *slash = 0;
+    if (!*parent) lstrcpyW( parent, L"\\" );
+
+    if (FAILED(hr = storage_folder_create( parent, &folder )))
+        return hr;
+
+    hr = async_operation_inspectable_create( &IID_IAsyncOperation_StorageFolder,
+            L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.StorageFolder>",
+            (IInspectable *)folder, (void **)result );
+    IStorageFolder_Release( folder );
+    return hr;
 }
 
 static HRESULT WINAPI storage_folder_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name,
@@ -1529,11 +1630,156 @@ static HRESULT WINAPI storage_folder_GetFilesAsyncOverloadDefaultOptionsStartAnd
     return hr;
 }
 
+/* IVectorView<StorageFolder> over an owned array of folders. */
+struct folder_vector_view
+{
+    IVectorView_StorageFolder IVectorView_StorageFolder_iface;
+    LONG ref;
+    IStorageFolder **items;
+    UINT32 count;
+};
+
+DEFINE_IINSPECTABLE_( folder_view, IVectorView_StorageFolder, struct folder_vector_view, impl_from,
+                      IVectorView_StorageFolder_iface, &impl->IVectorView_StorageFolder_iface )
+
+static HRESULT WINAPI folder_view_GetAt( IVectorView_StorageFolder *iface, UINT32 index, IStorageFolder **item )
+{
+    struct folder_vector_view *impl = impl_from( iface );
+
+    if (index >= impl->count) return E_BOUNDS;
+    if (!item) return E_POINTER;
+    *item = impl->items[index];
+    IStorageFolder_AddRef( *item );
+    return S_OK;
+}
+
+static HRESULT WINAPI folder_view_get_Size( IVectorView_StorageFolder *iface, UINT32 *size )
+{
+    struct folder_vector_view *impl = impl_from( iface );
+    if (!size) return E_POINTER;
+    *size = impl->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI folder_view_IndexOf( IVectorView_StorageFolder *iface, IStorageFolder *item,
+                                           UINT32 *index, boolean *found )
+{
+    struct folder_vector_view *impl = impl_from( iface );
+    UINT32 i;
+
+    if (!index || !found) return E_POINTER;
+    for (i = 0; i < impl->count; ++i)
+    {
+        if (impl->items[i] == item)
+        {
+            *index = i;
+            *found = true;
+            return S_OK;
+        }
+    }
+    *index = 0;
+    *found = false;
+    return S_OK;
+}
+
+static HRESULT WINAPI folder_view_GetMany( IVectorView_StorageFolder *iface, UINT32 start, UINT32 size,
+                                           IStorageFolder **items, UINT32 *count )
+{
+    struct folder_vector_view *impl = impl_from( iface );
+    UINT32 n = 0;
+
+    if (!count) return E_POINTER;
+    while (n < size && start + n < impl->count)
+    {
+        if (!items) return E_POINTER;
+        items[n] = impl->items[start + n];
+        IStorageFolder_AddRef( items[n] );
+        ++n;
+    }
+    *count = n;
+    return S_OK;
+}
+
+static const struct IVectorView_StorageFolderVtbl folder_view_vtbl =
+{
+    folder_view_QueryInterface,
+    folder_view_AddRef,
+    folder_view_Release,
+    folder_view_GetIids,
+    folder_view_GetRuntimeClassName,
+    folder_view_GetTrustLevel,
+    folder_view_GetAt,
+    folder_view_get_Size,
+    folder_view_IndexOf,
+    folder_view_GetMany,
+};
+
+static HRESULT folder_vector_view_create( IStorageFolder **items, UINT32 count, IVectorView_StorageFolder **out )
+{
+    struct folder_vector_view *impl = calloc( 1, sizeof(*impl) );
+
+    if (!impl)
+    {
+        UINT32 i;
+        for (i = 0; i < count; ++i) IStorageFolder_Release( items[i] );
+        free( items );
+        return E_OUTOFMEMORY;
+    }
+    impl->IVectorView_StorageFolder_iface.lpVtbl = &folder_view_vtbl;
+    impl->ref = 1;
+    impl->items = items;
+    impl->count = count;
+    *out = &impl->IVectorView_StorageFolder_iface;
+    return S_OK;
+}
+
 static HRESULT WINAPI storage_folder_GetFoldersAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface,
                                                                                         IAsyncOperation_IVectorView_StorageFolder **operation )
 {
-    FIXME( "stub!\n" );
-    return E_NOTIMPL;
+    struct storage_folder *impl = impl_from_IStorageFolder( iface );
+    WCHAR pattern[STORAGE_MAX_PATH];
+    IStorageFolder **folders = NULL;
+    IVectorView_StorageFolder *view = NULL;
+    HANDLE find;
+    WIN32_FIND_DATAW data;
+    UINT32 count = 0, cap = 0;
+    HRESULT hr;
+
+    folder_join_path( impl->path, L"*", pattern, ARRAY_SIZE(pattern) );
+    if ((find = FindFirstFileW( pattern, &data )) != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            WCHAR path[STORAGE_MAX_PATH];
+            IStorageFolder *folder = NULL;
+
+            if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (!wcscmp( data.cFileName, L"." ) || !wcscmp( data.cFileName, L".." )) continue;
+            if (count == cap)
+            {
+                IStorageFolder **grown;
+                cap = cap ? cap * 2 : 16;
+                if (!(grown = realloc( folders, cap * sizeof(*folders) ))) { free( folders ); return E_OUTOFMEMORY; }
+                folders = grown;
+            }
+            folder_join_path( impl->path, data.cFileName, path, ARRAY_SIZE(path) );
+            if (SUCCEEDED(storage_folder_create( path, &folder )))
+                folders[count++] = folder;
+        }
+        while (FindNextFileW( find, &data ));
+        FindClose( find );
+    }
+
+    if (!(folders = realloc( folders, (count ? count : 1) * sizeof(*folders) ))) return E_OUTOFMEMORY;
+
+    hr = folder_vector_view_create( folders, count, &view );
+    if (FAILED(hr)) return hr;
+
+    hr = async_operation_inspectable_create( &IID_IAsyncOperation_IVectorView_StorageFolder,
+            L"Windows.Foundation.IAsyncOperation`1<Windows.Foundation.Collections.IVectorView`1<Windows.Storage.StorageFolder>>",
+            (IInspectable *)view, (void **)operation );
+    IVectorView_StorageFolder_Release( view );
+    return hr;
 }
 
 static HRESULT WINAPI storage_folder_GetItemsAsyncOverloadDefaultStartAndCount( IStorageFolder *iface,
@@ -1551,6 +1797,7 @@ static const struct IStorageFolderVtbl storage_folder_vtbl =
     storage_folder_GetIids,
     storage_folder_GetRuntimeClassName,
     storage_folder_GetTrustLevel,
+    storage_folder_GetParentAsync,
     storage_folder_CreateFileAsyncOverloadDefaultOptions,
     storage_folder_CreateFileAsync,
     storage_folder_CreateFolderAsyncOverloadDefaultOptions,
@@ -1687,6 +1934,7 @@ HRESULT storage_folder_create( const WCHAR *path, IStorageFolder **out )
 
     impl->IStorageFolder_iface.lpVtbl = &storage_folder_vtbl;
     impl->IStorageItem_iface.lpVtbl = &storage_item_folder_vtbl;
+    impl->IStorageItem2_iface.lpVtbl = &storage_item2_folder_vtbl;
     impl->ref = 1;
 
     lstrcpynW( impl->path, path, ARRAY_SIZE(impl->path) );
@@ -1865,6 +2113,8 @@ STORAGE_FACTORY_STUB( storage_folder_def_GetFolderAsync, ( IStorageFolder *iface
     __FIAsyncOperation_1_Windows__CStorage__CStorageFolder **operation ) )
 STORAGE_FACTORY_STUB( storage_folder_def_GetItemAsync, ( IStorageFolder *iface, HSTRING name,
     __FIAsyncOperation_1_Windows__CStorage__CIStorageItem **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_GetParentAsync, ( IStorageFolder *iface,
+    __FIAsyncOperation_1_Windows__CStorage__CStorageFolder **operation ) )
 STORAGE_FACTORY_STUB( storage_folder_def_GetFilesAsyncOverloadDefaultOptionsStartAndCount, ( IStorageFolder *iface,
     __FIAsyncOperation_1___FIVectorView_1_Windows__CStorage__CStorageFile **operation ) )
 STORAGE_FACTORY_STUB( storage_folder_def_GetFoldersAsyncOverloadDefaultOptionsStartAndCount, ( IStorageFolder *iface,
@@ -1880,6 +2130,7 @@ static const struct IStorageFolderVtbl storage_folder_def_vtbl =
     storage_folder_def_GetIids,
     storage_folder_def_GetRuntimeClassName,
     storage_folder_def_GetTrustLevel,
+    storage_folder_def_GetParentAsync,
     storage_folder_def_CreateFileAsyncOverloadDefaultOptions,
     storage_folder_def_CreateFileAsync,
     storage_folder_def_CreateFolderAsyncOverloadDefaultOptions,

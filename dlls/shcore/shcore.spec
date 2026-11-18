@@ -2,7 +2,7 @@
 @ stdcall CommandLineToArgvW(wstr ptr)
 @ stub CreateRandomAccessStreamOnFile
 @ stdcall CreateRandomAccessStreamOverStream(ptr long ptr ptr)
-@ stub CreateStreamOverRandomAccessStream
+@ stdcall CreateStreamOverRandomAccessStream(ptr ptr ptr)
 @ stdcall -private DllCanUnloadNow()
 @ stub DllGetActivationFactory
 @ stub DllGetClassObject

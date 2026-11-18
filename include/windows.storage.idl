@@ -673,6 +673,7 @@ namespace Windows.Storage {
     interface IStorageFolder : IInspectable
         requires Windows.Storage.IStorageItem
     {
+        HRESULT GetParentAsync([out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFolder *> **operation);
         [overload("CreateFileAsync")]
         HRESULT CreateFileAsyncOverloadDefaultOptions(
             [in] HSTRING name,

@@ -1076,7 +1076,7 @@
 # @ stub PackageRelativeApplicationIdFromProductId
 # @ stub PackageSidFromFamilyName
 # @ stub PackageSidFromProductId
-@ stdcall ParseApplicationUserModelId(long wstr ptr wstr)
+@ stdcall ParseApplicationUserModelId(wstr ptr wstr ptr wstr)
 @ stdcall ParseURLA(str ptr)
 @ stdcall ParseURLW(wstr ptr)
 @ stdcall PathAddBackslashA(str)

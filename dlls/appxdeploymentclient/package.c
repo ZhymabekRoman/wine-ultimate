@@ -458,6 +458,44 @@ static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *ifa
     while (len && (path[len - 1] == L'\\' || path[len - 1] == L'/')) path[--len] = 0;  /* tolerate a trailing separator */
     if (!path[0]) return E_INVALIDARG;
 
+    if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES)
+    {
+        HSTRING raw = NULL;
+        if (SUCCEEDED( IUriRuntimeClass_get_RawUri( uri, &raw ) ) && raw)
+        {
+            const WCHAR *rb = WindowsGetStringRawBuffer( raw, NULL );
+            TRACE( "RawUri=%s\n", debugstr_w( rb ) );
+            if (rb && !wcsnicmp( rb, L"file:///", 8 ))
+            {
+                SIZE_T k;
+                lstrcpynW( path, rb + 8, ARRAY_SIZE(path) );
+                for (k = 0; path[k]; k++) if (path[k] == L'/') path[k] = L'\\';
+            }
+            WindowsDeleteString( raw );
+        }
+        if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES && path[0] == L'\\' && path[1] != L'\\')
+        {
+            WCHAR cpath[512];
+            swprintf( cpath, ARRAY_SIZE(cpath), L"C:%s", path );
+            if (GetFileAttributesW( cpath ) != INVALID_FILE_ATTRIBUTES)
+                lstrcpynW( path, cpath, ARRAY_SIZE(path) );
+        }
+    }
+
+    {
+        DWORD attrs = GetFileAttributesW( path );
+        TRACE( "resolved path=%s attrs=%08lx\n", debugstr_w(path), attrs );
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            WCHAR extracted[512];
+            HRESULT appx_extract_msix_to_windowsapps( const WCHAR *msix_path, WCHAR *out_dir, SIZE_T out_cap );
+            HRESULT ehr = appx_extract_msix_to_windowsapps( path, extracted, ARRAY_SIZE(extracted) );
+            TRACE( "extract hr=%08lx out=%s\n", ehr, debugstr_w(extracted) );
+            if (SUCCEEDED( ehr ))
+                lstrcpynW( path, extracted, ARRAY_SIZE(path) );
+        }
+    }
+
     if (FAILED( (hr = register_staged_package( path ) ) )) return hr;
     TRACE( "registered package from %s\n", debugstr_w(path) );
     return register_async_op_create( operation );
@@ -469,6 +507,8 @@ static HRESULT find_package_by_full_name( const WCHAR *full_name, IPackage **pac
 
 static const GUID IID_IPackageManager3 =
     { 0xdaad9948, 0x36f1, 0x41a7, { 0x91, 0x88, 0xbc, 0x26, 0x3e, 0x0d, 0xcb, 0x72 } };
+static const GUID IID_IPackageManager9 =
+    { 0x0847e909, 0x53cd, 0x4e4f, { 0x83, 0x2e, 0x57, 0xd1, 0x80, 0xf6, 0xe4, 0x47 } };
 
 struct package_manager
 {
@@ -477,6 +517,7 @@ struct package_manager
     IInspectable IPackageManager3_iface;
     IPackageManager4 IPackageManager4_iface;
     IPackageManager5 IPackageManager5_iface;
+    IInspectable IPackageManager9_iface;
     LONG ref;
 };
 
@@ -525,6 +566,13 @@ static HRESULT WINAPI package_manager_QueryInterface( IPackageManager *iface, RE
     if (IsEqualGUID( iid, &IID_IPackageManager5 ))
     {
         *out = &impl->IPackageManager5_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IPackageManager9 ))
+    {
+        *out = &impl->IPackageManager9_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -2239,6 +2287,8 @@ static HRESULT WINAPI package_folder_GetTrustLevel( IStorageFolder *iface, Trust
 }
 
 #define FOLDER_METHODS( pfx ) \
+    static HRESULT WINAPI pfx##_GetParentAsync( IStorageFolder *iface, \
+            IAsyncOperation_StorageFolder **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, \
             IAsyncOperation_StorageFile **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFileAsync( IStorageFolder *iface, HSTRING name, \
@@ -2270,6 +2320,7 @@ static const struct IStorageFolderVtbl package_folder_vtbl =
     package_folder_GetIids,
     package_folder_GetRuntimeClassName,
     package_folder_GetTrustLevel,
+    package_folder_GetParentAsync,
     package_folder_CreateFileAsyncOverloadDefaultOptions,
     package_folder_CreateFileAsync,
     package_folder_CreateFolderAsyncOverloadDefaultOptions,
@@ -3551,6 +3602,75 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
 }
 
 /* One PackageManager instance: stateless, every call reads the registration. */
+static inline struct package_manager *impl_from_IPackageManager9( IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_manager, IPackageManager9_iface );
+}
+static HRESULT WINAPI package_manager9_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    return package_manager_QueryInterface( &impl_from_IPackageManager9( iface )->IPackageManager_iface, iid, out );
+}
+static ULONG WINAPI package_manager9_AddRef( IInspectable *iface )
+{
+    return package_manager_AddRef( &impl_from_IPackageManager9( iface )->IPackageManager_iface );
+}
+static ULONG WINAPI package_manager9_Release( IInspectable *iface )
+{
+    return package_manager_Release( &impl_from_IPackageManager9( iface )->IPackageManager_iface );
+}
+static HRESULT WINAPI package_manager9_GetIids( IInspectable *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI package_manager9_GetRuntimeClassName( IInspectable *iface, HSTRING *n ) { return E_NOTIMPL; }
+static HRESULT WINAPI package_manager9_GetTrustLevel( IInspectable *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI package_manager9_slot6( IInspectable *iface, void *arg1, void **op_out )
+{
+    IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *op;
+    HRESULT hr;
+    TRACE( "iface %p, arg1 %p, op_out %p\n", iface, arg1, op_out );
+    if (!op_out) return E_POINTER;
+    *op_out = NULL;
+    if (FAILED( (hr = register_async_op_create( &op )) )) return hr;
+    *op_out = op;
+    return S_OK;
+}
+static HRESULT WINAPI package_manager9_slot9( IInspectable *iface, void *a1, void *a2, UINT64 a3, void *a4, void *a5, void *a6, void *a7, void **op_out )
+{
+    struct package_manager *impl = impl_from_IPackageManager9( iface );
+    TRACE( "iface %p, uri %p, op_out %p\n", iface, a1, op_out );
+    return package_manager_RegisterPackageAsync( &impl->IPackageManager_iface, (IUriRuntimeClass *)a1, NULL, 0,
+                                                 (IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **)op_out );
+}
+static HRESULT WINAPI package_manager9_slot11( IInspectable *iface, void *a1, void *a2, UINT64 a3, void *a4, void *a5, void *a6, void **op_out )
+{
+    struct package_manager *impl = impl_from_IPackageManager9( iface );
+    TRACE( "iface %p, uri %p, op_out %p\n", iface, a1, op_out );
+    return package_manager_RegisterPackageAsync( &impl->IPackageManager_iface, (IUriRuntimeClass *)a1, NULL, 0,
+                                                 (IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **)op_out );
+}
+static HRESULT WINAPI package_manager9_stub( IInspectable *iface )
+{
+    FIXME( "stub iface %p\n", iface );
+    return E_NOTIMPL;
+}
+static const void *package_manager9_vtbl[] =
+{
+    package_manager9_QueryInterface,
+    package_manager9_AddRef,
+    package_manager9_Release,
+    package_manager9_GetIids,
+    package_manager9_GetRuntimeClassName,
+    package_manager9_GetTrustLevel,
+    package_manager9_slot6,
+    package_manager9_stub,
+    package_manager9_stub,
+    package_manager9_slot9,
+    package_manager9_stub,
+    package_manager9_slot11,
+    package_manager9_stub,
+    package_manager9_stub,
+    package_manager9_stub,
+    package_manager9_stub,
+};
+
 HRESULT package_manager_create( IPackageManager **out )
 {
     struct package_manager *impl;
@@ -3563,6 +3683,7 @@ HRESULT package_manager_create( IPackageManager **out )
     impl->IPackageManager3_iface.lpVtbl = (const struct IInspectableVtbl *)package_manager3_vtbl;
     impl->IPackageManager4_iface.lpVtbl = &package_manager4_vtbl;
     impl->IPackageManager5_iface.lpVtbl = &package_manager5_vtbl;
+    impl->IPackageManager9_iface.lpVtbl = (const struct IInspectableVtbl *)package_manager9_vtbl;
     impl->ref = 1;
     *out = &impl->IPackageManager_iface;
     return S_OK;

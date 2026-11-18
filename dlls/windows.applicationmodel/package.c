@@ -348,6 +348,12 @@ static HRESULT WINAPI storage_folder_GetTrustLevel( IStorageFolder *iface, Trust
     return E_NOTIMPL;
 }
 
+static HRESULT WINAPI storage_folder_GetParentAsync( IStorageFolder *iface, IAsyncOperation_StorageFolder **operation )
+{
+    FIXME( "iface %p, operation %p stub!\n", iface, operation );
+    return E_NOTIMPL;
+}
+
 static HRESULT WINAPI storage_folder_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name,
                                                                             IAsyncOperation_StorageFile **operation )
 {
@@ -431,6 +437,7 @@ static const struct IStorageFolderVtbl storage_folder_vtbl =
     storage_folder_GetRuntimeClassName,
     storage_folder_GetTrustLevel,
     /* IStorageFolder methods */
+    storage_folder_GetParentAsync,
     storage_folder_CreateFileAsyncOverloadDefaultOptions,
     storage_folder_CreateFileAsync,
     storage_folder_CreateFolderAsyncOverloadDefaultOptions,

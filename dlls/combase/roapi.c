@@ -404,6 +404,7 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         { L"Windows.Storage.PathIO",                                    L"windows.storage.dll" },
         { L"Windows.System.Profile.EducationSettings",                  L"windows.system.profile.dll" },
         { L"Windows.Devices.Input.PenDevice",                           L"windows.devices.input.dll" },
+        { L"Windows.Devices.Haptics.KnownSimpleHapticsControllerWaveforms",  L"windows.devices.haptics.dll" },
         { L"Windows.System.User",                                       L"windows.system.dll" },
         { L"Windows.Management.Policies.NamedPolicy",                   L"windows.system.dll" },
         { L"Windows.System.DispatcherQueue",                            L"coremessaging.dll" },

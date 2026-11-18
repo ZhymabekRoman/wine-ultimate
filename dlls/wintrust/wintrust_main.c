@@ -284,6 +284,18 @@ static LONG WINTRUST_DefaultVerify(HWND hwnd, GUID *actionID,
     numSteps = WINTRUST_AddTrustStepsFromFunctions(verifySteps,
      provData->psPfns);
     err = WINTRUST_ExecuteSteps(verifySteps, numSteps, provData);
+    if (err == TRUST_E_SUBJECT_FORM_UNKNOWN && data->dwUnionChoice == WTD_CHOICE_FILE &&
+        data->pFile && data->pFile->pcwszFilePath)
+    {
+        const WCHAR *ext = wcsrchr(data->pFile->pcwszFilePath, '.');
+        if (ext && (!wcsicmp(ext, L".msix") || !wcsicmp(ext, L".appx") ||
+                    !wcsicmp(ext, L".msixbundle") || !wcsicmp(ext, L".appxbundle")))
+        {
+            TRACE("bypassing TRUST_E_SUBJECT_FORM_UNKNOWN for package %s\n",
+                  debugstr_w(data->pFile->pcwszFilePath));
+            err = ERROR_SUCCESS;
+        }
+    }
     goto done;
 
 error:
@@ -472,6 +484,18 @@ static LONG WINTRUST_CertVerify(HWND hwnd, GUID *actionID,
     numSteps = WINTRUST_AddTrustStepsFromFunctions(verifySteps,
      provData->psPfns);
     err = WINTRUST_ExecuteSteps(verifySteps, numSteps, provData);
+    if (err == TRUST_E_SUBJECT_FORM_UNKNOWN && data->dwUnionChoice == WTD_CHOICE_FILE &&
+        data->pFile && data->pFile->pcwszFilePath)
+    {
+        const WCHAR *ext = wcsrchr(data->pFile->pcwszFilePath, '.');
+        if (ext && (!wcsicmp(ext, L".msix") || !wcsicmp(ext, L".appx") ||
+                    !wcsicmp(ext, L".msixbundle") || !wcsicmp(ext, L".appxbundle")))
+        {
+            TRACE("bypassing TRUST_E_SUBJECT_FORM_UNKNOWN for package %s\n",
+                  debugstr_w(data->pFile->pcwszFilePath));
+            err = ERROR_SUCCESS;
+        }
+    }
     goto done;
 
 error:

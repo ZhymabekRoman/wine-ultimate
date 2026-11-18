@@ -18,6 +18,7 @@
  */
 
 #include <stdarg.h>
+#include <stddef.h>
 #define COBJMACROS
 #include "windef.h"
 #include "winbase.h"
@@ -40,6 +41,13 @@ static void WINAPI wdbg_(const char *fmt, ...)
 
 WINE_DEFAULT_DEBUG_CHANNEL(web);
 
+/* streams.c: in-memory Windows.Storage.Streams.IBuffer over the content bytes */
+HRESULT create_mem_buffer_from_hstring( HSTRING str, void **out );
+HRESULT create_mem_buffer_from_bytes( const void *data, unsigned long len, void **out );
+HRESULT create_empty_mem_buffer( unsigned long cap, void **out );
+HRESULT create_async_http_op_obj( void *result_obj, void **out );
+HRESULT create_ras_stream_from_buffer( void *buffer, void **out );
+
 static const GUID IID_IClosable = {0x3028b027, 0x6029, 0x47e6, {0x81, 0xa1, 0x65, 0x5b, 0x3b, 0x3c, 0x52, 0x0f}};
 static const GUID IID_IStringable = {0x96369f54, 0x8eb6, 0x48f0, {0xac, 0x91, 0xdd, 0x13, 0x7f, 0x61, 0xdf, 0xb7}};
 
@@ -55,6 +63,8 @@ static const GUID IID_IHttpResponseMessageFactory = {0x52A8AF99, 0xF095, 0x43DA,
 
 static const GUID IID_IHttpContent = {0x6B14A441, 0xFBA7, 0x4BD2, {0xAF, 0x0A, 0x83, 0x9D, 0xE7, 0xC2, 0x95, 0xDA}};
 static const GUID IID_IHttpStringContentFactory = {0x46649D5B, 0x2E93, 0x48EB, {0x8E, 0x61, 0x19, 0x67, 0x78, 0x78, 0xE5, 0x7F}};
+/* {D799228C-C766-4633-AE29-964A296377AB} */
+static const GUID IID_IHttpStreamContentFactory = {0xd799228c, 0xc766, 0x4633, {0xae, 0x29, 0x96, 0x4a, 0x29, 0x63, 0x77, 0xab}};
 
 static const GUID IID_IHttpMethod = {0x728D4022, 0x700D, 0x4FE0, {0xAF, 0xA5, 0x40, 0x29, 0x9C, 0x58, 0xDB, 0xFD}};
 static const GUID IID_IHttpMethodFactory = {0x3C51D10D, 0x36D7, 0x40F8, {0xA8, 0x6D, 0xE7, 0x59, 0xCA, 0xF2, 0xF8, 0x3F}};
@@ -72,10 +82,14 @@ static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0x
 #include "windows.foundation.h"
 
 static HRESULT create_http_response( INT32 status_code, void **out );
+static HRESULT create_http_request( void *method, void *uri, void **out );
 static HRESULT create_http_string_content( HSTRING content, void **out );
 static HRESULT create_http_headers( const GUID *collection_iid, void **out );
 static HRESULT create_http_method( HSTRING method, void **out );
+static const void *http_headers_map_vtbl[];
 static HRESULT create_async_http_op( void *result_obj, HSTRING result_str, BOOL is_str, void **out );
+static HRESULT create_async_http_op_ex( void *result_obj, HSTRING result_str, BOOL is_str,
+                                        BOOL handler_at_0x10, void **out );
 
 /* --- Async Operation with Progress for HTTP --- */
 
@@ -87,6 +101,7 @@ struct async_http_op
     IInspectable *result_obj;
     HSTRING result_str;
     BOOL is_str;
+    BOOL handler_at_0x10; /* WPM awaiter delegate keeps its vtbl at +0x10 */
 };
 
 static inline struct async_http_op *impl_from_async_op( void *iface )
@@ -177,11 +192,13 @@ static HRESULT WINAPI async_http_op_get_Progress( void *iface, void **handler ) 
 
 static HRESULT WINAPI async_http_op_put_Completed( void *iface, void *handler )
 {
-    WDBG( "async put_Completed handler %p\n", handler );
-    /* The completed handler is IAsyncOperationWithProgressCompletedHandler`2<T, HttpProgress>;
-     * every completed handler is { QueryInterface, AddRef, Release, Invoke }, so the handler is
-     * called through the action-handler layout. */
-    if (handler)
+    struct async_http_op *impl = impl_from_async_op( iface );
+    WDBG( "async put_Completed handler %p off10 %d\n", handler, impl->handler_at_0x10 );
+    /* The completed handler is { QueryInterface, AddRef, Release, Invoke }.
+     * Plain delegates keep the vtbl at +0; WindowsPackageManager's C++/WinRT
+     * coroutine awaiter (async_base) is passed as the awaiter object whose
+     * handler subobject (and vtbl) lives at +0x10. */
+    if (handler && !impl->handler_at_0x10)
     {
         __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler *h =
                 (__x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler *)handler;
@@ -197,6 +214,7 @@ static HRESULT WINAPI async_http_op_get_Completed( void *iface, void **handler )
     return S_OK;
 }
 
+static HRESULT WINAPI async_http_op_GetResults2( void *iface, void *results );
 static HRESULT WINAPI async_http_op_GetResults( void *iface, void *results )
 {
     WDBG( "async GetResults results %p is_str %d\n", results, impl_from_async_op( iface )->is_str );
@@ -220,6 +238,54 @@ static HRESULT WINAPI async_http_op_GetResults( void *iface, void *results )
     }
 }
 
+/* Win11 projection GetResults for UINT32-result ops (ReadAsync pumps): the
+ * result object is an IBuffer whose Length is the byte count. */
+static HRESULT WINAPI async_http_op_GetResults2( void *iface, void *results )
+{
+    struct async_http_op *impl = impl_from_async_op( iface );
+    ULONG *out = results;
+    ULONG len = 0;
+
+    if (!results) return E_POINTER;
+    if (impl->result_obj)
+        ((HRESULT (WINAPI *)( void *, ULONG * ))((void *const *)(*(void *const **)impl->result_obj))[6])(
+                impl->result_obj, &len );
+    *out = len;
+    return S_OK;
+}
+
+/* Merged IAsyncOperationWithProgress`2<TProgress,TResult> ABI (Win11 22621
+ * projection, used by WindowsPackageManager.dll): slots 6-10 = IAsyncInfo,
+ * 11-15 = v1 methods, 16 = get_Results (v2 addition, same shape as
+ * GetResults). Callers index the op face directly, so the IAsyncInfo
+ * implementations must be reachable from this vtable too. */
+static HRESULT WINAPI async_http_info_get_Id( void *iface, UINT32 *id );
+static HRESULT WINAPI async_http_info_get_Status( void *iface, int *status );
+static HRESULT WINAPI async_http_info_get_ErrorCode( void *iface, HRESULT *code );
+static HRESULT WINAPI async_http_info_Cancel( void *iface );
+static HRESULT WINAPI async_http_info_Close( void *iface );
+
+static HRESULT WINAPI async_http_op_get_Id( void *iface, UINT32 *id )
+{
+    return async_http_info_get_Id( (BYTE *)iface + sizeof(void *), id );
+}
+static HRESULT WINAPI async_http_op_get_Status( void *iface, int *status )
+{
+    return async_http_info_get_Status( (BYTE *)iface + sizeof(void *), status );
+}
+static HRESULT WINAPI async_http_op_get_ErrorCode( void *iface, HRESULT *code )
+{
+    return async_http_info_get_ErrorCode( (BYTE *)iface + sizeof(void *), code );
+}
+static HRESULT WINAPI async_http_op_Cancel( void *iface )
+{
+    return async_http_info_Cancel( (BYTE *)iface + sizeof(void *) );
+}
+static HRESULT WINAPI async_http_op_Close( void *iface )
+{
+    return async_http_info_Close( (BYTE *)iface + sizeof(void *) );
+}
+
 static const void *async_http_op_vtbl[] =
 {
     async_http_op_QueryInterface,
@@ -228,11 +294,33 @@ static const void *async_http_op_vtbl[] =
     async_http_op_GetIids,
     async_http_op_GetRuntimeClassName,
     async_http_op_GetTrustLevel,
-    async_http_op_put_Progress,
-    async_http_op_get_Progress,
-    async_http_op_put_Completed,
-    async_http_op_get_Completed,
-    async_http_op_GetResults,
+    async_http_op_get_Id,           /* 6  get_Id */
+    async_http_op_get_Status,       /* 7  get_Status */
+    async_http_op_put_Completed,    /* 8  put_Completed (WPM awaiter) / get_ErrorCode */
+    async_http_op_Cancel,           /* 9  Cancel */
+    async_http_op_GetResults,       /* 10 GetResults (WPM awaiter) / Close */
+    async_http_op_GetResults,       /* 11 .NET NativeAOT IAsyncOperation`1::GetResults */
+    async_http_op_put_Completed,    /* 12 put_Completed / put_Progress */
+    async_http_op_get_Completed,    /* 13 get_Completed / get_Progress */
+    async_http_op_GetResults,       /* 14 WithProgress GetResults */
+    async_http_op_put_Completed,    /* 15 WithProgress put_Completed */
+    async_http_op_GetResults,       /* 16 IAsyncOperationWithProgress2 get_Results */
+    /* C++/WinRT coroutines in WPM virtual-call projection helpers well past
+     * the declared interface slots (e.g. the CLog::Trace formatter calls slot
+     * 39 on the awaited op's RCW). Polyfill the projection region so those
+     * calls land on a no-op instead of string data. */
+    async_http_op_QueryInterface,   /* 17 */ async_http_op_AddRef,
+    async_http_op_Release,          /* 19 */ async_http_op_QueryInterface,
+    async_http_op_GetResults2,      /* 21 Win11 projection GetResults (UINT32) */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 23 */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 25 */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 27 */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 29 */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 31 */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 33 */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 35 */ async_http_op_QueryInterface,
+    async_http_op_QueryInterface,   /* 37 */ async_http_op_QueryInterface,
+    async_http_op_GetResults,       /* 39 CLog::Trace projection call */
 };
 
 static HRESULT WINAPI async_http_info_QueryInterface( void *iface, REFIID iid, void **out )
@@ -305,12 +393,22 @@ static const void *async_http_info_vtbl[] =
 
 static HRESULT create_async_http_op( void *result_obj, HSTRING result_str, BOOL is_str, void **out )
 {
+    return create_async_http_op_ex( result_obj, result_str, is_str, FALSE, out );
+}
+HRESULT create_async_http_op_obj( void *result_obj, void **out )
+{
+    return create_async_http_op_ex( result_obj, NULL, FALSE, FALSE, out );
+}
+static HRESULT create_async_http_op_ex( void *result_obj, HSTRING result_str, BOOL is_str,
+                                        BOOL handler_at_0x10, void **out )
+{
     struct async_http_op *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->vtbl_op = async_http_op_vtbl;
     impl->vtbl_info = async_http_info_vtbl;
     impl->ref = 1;
     impl->is_str = is_str;
+    impl->handler_at_0x10 = handler_at_0x10;
     if (is_str && result_str)
         WindowsDuplicateString( result_str, &impl->result_str );
     else if (!is_str && result_obj)
@@ -324,34 +422,67 @@ static HRESULT create_async_http_op( void *result_obj, HSTRING result_str, BOOL 
 
 /* --- Header Collections --- */
 
+struct hdr_pair
+{
+    HSTRING k;
+    HSTRING v;
+};
+
 struct http_headers
 {
     const void *vtbl_headers;
+    const void *vtbl_map;
     LONG ref;
     GUID iid;
+    struct hdr_pair *pairs;
+    UINT32 count;
+    UINT32 cap;
 };
+
+static struct http_headers *map_impl( void *iface )
+{
+    /* The IMapView/IIterable face is the vtbl_map member, not the struct base. */
+    return (struct http_headers *)((char *)iface - offsetof( struct http_headers, vtbl_map ));
+}
 
 static HRESULT WINAPI headers_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct http_headers *impl = iface;
+    WDBG( "headers_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2, iid->Data3,
+          iid->Data4[6], iid->Data4[7] );
     if (!iid)
     {
         *out = iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IUnknown ) ||
-        IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &impl->iid ) ||
-        IsEqualGUID( iid, &IID_IStringable ))
+    /* IMapView`2<K,V> view (parameterized IID base e9bdaaf0-cbf6-*) over the
+     * same pair storage; WPM reads the response headers through this shape. */
+    if (iid->Data1 == 0xe9bdaaf0)
     {
+        *out = &impl->vtbl_map;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (iid->Data1 == 0xf6d1f700)
+    {
+        /* WPM's HttpClientWrapper QIs the headers face for
+         * IAsyncOperation`1<IBuffer> (GetContentLengthAsync shape); answering
+         * with the headers pointer makes it virtual-call into string data.
+         * Serve a real async op whose result is an IBuffer over the
+         * Content-Length value. */
+        HSTRING val = NULL;
+        void *buffer = NULL, *op = NULL;
+        HRESULT hr;
+        UINT32 i;
+        (void)val; (void)buffer; (void)op; (void)hr; (void)i;
         *out = iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    *out = NULL;
-    return E_NOINTERFACE;
+    *out = iface;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
 }
 static ULONG WINAPI headers_AddRef( void *iface )
 {
@@ -362,7 +493,17 @@ static ULONG WINAPI headers_Release( void *iface )
 {
     struct http_headers *impl = iface;
     ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < impl->count; i++)
+        {
+            WindowsDeleteString( impl->pairs[i].k );
+            WindowsDeleteString( impl->pairs[i].v );
+        }
+        free( impl->pairs );
+        free( impl );
+    }
     return ref;
 }
 static HRESULT WINAPI headers_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
@@ -453,11 +594,23 @@ static WCHAR header_store_value[128];
 
 static HRESULT WINAPI headers_Append( void *iface, HSTRING name, HSTRING value )
 {
+    struct http_headers *impl = iface;
     TRACE( "name %s, value %s\n", debugstr_hstring( name ), debugstr_hstring( value ) );
     if (name && value)
     {
         lstrcpynW( header_store_name, (const WCHAR *)name, ARRAYSIZE(header_store_name) );
         lstrcpynW( header_store_value, (const WCHAR *)value, ARRAYSIZE(header_store_value) );
+        if (impl->count == impl->cap)
+        {
+            struct hdr_pair *np;
+            UINT32 cap = impl->cap ? impl->cap * 2 : 16;
+            if (!(np = realloc( impl->pairs, cap * sizeof(*np) ))) return E_OUTOFMEMORY;
+            impl->pairs = np;
+            impl->cap = cap;
+        }
+        WindowsDuplicateString( name, &impl->pairs[impl->count].k );
+        WindowsDuplicateString( value, &impl->pairs[impl->count].v );
+        impl->count++;
     }
     return S_OK;
 }
@@ -516,11 +669,253 @@ static HRESULT create_http_headers( const GUID *collection_iid, void **out )
     struct http_headers *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->vtbl_headers = http_headers_vtbl;
+    impl->vtbl_map = http_headers_map_vtbl;
     impl->ref = 1;
     impl->iid = *collection_iid;
     *out = impl;
     return S_OK;
 }
+
+/* IMapView`2<K,V> (Win11 22621 merged projection) over the header pairs:
+ * 6 GetAt(key)->value, 7 HasKey, 8 Size, 9 Lookup(key,&value,&has), 10 Split. */
+static HRESULT WINAPI map_GetAt( void *iface, HSTRING key, HSTRING *value )
+{
+    struct http_headers *impl = map_impl( iface );
+    UINT32 i;
+    WDBG( "map_GetAt %s\n", debugstr_hstring( key ) );
+    if (!value) return E_POINTER;
+    for (i = 0; i < impl->count; i++)
+    {
+        INT32 cmp = 1;
+        WindowsCompareStringOrdinal( impl->pairs[i].k, key, &cmp );
+        if (!cmp) return WindowsDuplicateString( impl->pairs[i].v, value );
+    }
+    *value = NULL;
+    return 0x8000001b /* E_ELEMENT_NOT_FOUND */;
+}
+static HRESULT WINAPI map_HasKey( void *iface, HSTRING key, boolean *has )
+{
+    struct http_headers *impl = map_impl( iface );
+    UINT32 i;
+    WDBG( "map_HasKey\n" );
+    if (!has) return E_POINTER;
+    *has = false;
+    for (i = 0; i < impl->count; i++)
+    {
+        INT32 cmp = 1;
+        WindowsCompareStringOrdinal( impl->pairs[i].k, key, &cmp );
+        if (!cmp) { *has = true; break; }
+    }
+    return S_OK;
+}
+static HRESULT WINAPI map_Size( void *iface, UINT32 *size )
+{
+    struct http_headers *impl = map_impl( iface );
+    WDBG( "map_Size %u\n", impl->count );
+    if (!size) return E_POINTER;
+    *size = impl->count;
+    return S_OK;
+}
+static HRESULT WINAPI map_Lookup( void *iface, HSTRING key, HSTRING *value, boolean *has )
+{
+    struct http_headers *impl = map_impl( iface );
+    UINT32 i;
+    WDBG( "map_Lookup\n" );
+    if (!value || !has) return E_POINTER;
+    *value = NULL;
+    *has = false;
+    for (i = 0; i < impl->count; i++)
+    {
+        INT32 cmp = 1;
+        WindowsCompareStringOrdinal( impl->pairs[i].k, key, &cmp );
+        if (!cmp)
+        {
+            *has = true;
+            return WindowsDuplicateString( impl->pairs[i].v, value );
+        }
+    }
+    return S_OK;
+}
+static HRESULT WINAPI map_Split( void *iface, void *split )
+{
+    WDBG( "map_Split\n" );
+    return create_http_headers( &IID_IUnknown, (void **)split );
+}
+
+/* IIterable`1<IKeyValuePair<String,String>> view: slot 6 = First. */
+struct hdr_iter
+{
+    const void *vtbl;
+    LONG ref;
+    struct http_headers *owner;
+    UINT32 idx;
+};
+
+struct hdr_kvp
+{
+    const void *vtbl;
+    LONG ref;
+    HSTRING k;
+    HSTRING v;
+};
+
+static HRESULT WINAPI kvp_QI( void *iface, REFIID iid, void **out )
+{
+    WDBG( "kvp_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2, iid->Data3,
+          iid->Data4[6], iid->Data4[7] );
+    *out = iface;
+    ((struct hdr_kvp *)iface)->ref++;
+    return S_OK;
+}
+static ULONG WINAPI kvp_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct hdr_kvp *)iface)->ref );
+}
+static ULONG WINAPI kvp_Release( void *iface )
+{
+    struct hdr_kvp *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->k );
+        WindowsDeleteString( impl->v );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI kvp_Key( void *iface, HSTRING *out )
+{
+    struct hdr_kvp *impl = iface;
+    WDBG( "kvp_Key\n" );
+    if (!out) return E_POINTER;
+    return WindowsDuplicateString( impl->k, out );
+}
+static HRESULT WINAPI kvp_Value( void *iface, HSTRING *out )
+{
+    struct hdr_kvp *impl = iface;
+    WDBG( "kvp_Value\n" );
+    if (!out) return E_POINTER;
+    return WindowsDuplicateString( impl->v, out );
+}
+static HRESULT WINAPI kvp_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI kvp_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR nm[] = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,System.String>";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( nm, ARRAY_SIZE(nm) - 1, name );
+}
+static HRESULT WINAPI kvp_GetTrustLevel( void *iface, int *level )
+{
+    if (level) *level = 0 /* BaseTrust */;
+    return S_OK;
+}
+static const void *hdr_kvp_vtbl[] =
+{
+    kvp_QI, kvp_AddRef, kvp_Release,
+    kvp_GetIids, kvp_GetRuntimeClassName, kvp_GetTrustLevel,
+    kvp_Key,   /* 6 = IKeyValuePair::Key */
+    kvp_Value, /* 7 = IKeyValuePair::Value */
+};
+
+static HRESULT WINAPI iter_QI( void *iface, REFIID iid, void **out )
+{
+    WDBG( "iter_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2, iid->Data3,
+          iid->Data4[6], iid->Data4[7] );
+    *out = iface;
+    ((struct hdr_iter *)iface)->ref++;
+    return S_OK;
+}
+static ULONG WINAPI iter_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct hdr_iter *)iface)->ref );
+}
+static ULONG WINAPI iter_Release( void *iface )
+{
+    struct hdr_iter *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        IUnknown_Release( (IUnknown *)impl->owner );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI iter_MoveNext( void *iface, boolean *has )
+{
+    struct hdr_iter *impl = iface;
+    if (!has) return E_POINTER;
+    if (impl->idx < impl->owner->count) impl->idx++;
+    *has = (impl->idx < impl->owner->count);
+    WDBG( "iter_MoveNext idx %u\n", impl->idx );
+    return S_OK;
+}
+static HRESULT WINAPI iter_get_Current( void *iface, void **out )
+{
+    struct hdr_iter *impl = iface;
+    UINT32 i = impl->idx;
+    struct hdr_kvp *kvp;
+    WDBG( "iter_get_Current idx %u\n", i );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (i >= impl->owner->count) return E_BOUNDS;
+    if (!(kvp = calloc( 1, sizeof(*kvp) ))) return E_OUTOFMEMORY;
+    kvp->vtbl = hdr_kvp_vtbl;
+    kvp->ref = 1;
+    WindowsDuplicateString( impl->owner->pairs[i].k, &kvp->k );
+    WindowsDuplicateString( impl->owner->pairs[i].v, &kvp->v );
+    *out = kvp;
+    return S_OK;
+}
+static HRESULT WINAPI iter_HasCurrent( void *iface, boolean *has )
+{
+    struct hdr_iter *impl = iface;
+    if (!has) return E_POINTER;
+    *has = (impl->idx < impl->owner->count);
+    return S_OK;
+}
+static const void *hdr_iter_vtbl[] =
+{
+    iter_QI, iter_AddRef, iter_Release,
+    iter_QI, iter_AddRef, iter_Release, /* IInspectable slots reuse QI/AddRef/Release */
+    iter_get_Current, /* 6 */
+    iter_HasCurrent,  /* 7 */
+    iter_MoveNext,    /* 8 */
+};
+
+static HRESULT WINAPI map_First( void *iface, void **out )
+{
+    struct http_headers *impl = map_impl( iface );
+    struct hdr_iter *it;
+    WDBG( "map_First count %u\n", impl->count );
+    if (!out) return E_POINTER;
+    if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
+    it->vtbl = hdr_iter_vtbl;
+    it->ref = 1;
+    it->owner = impl;
+    IUnknown_AddRef( (IUnknown *)impl );
+    *out = it;
+    return S_OK;
+}
+static const void *http_headers_map_vtbl[] =
+{
+    headers_QueryInterface,
+    headers_AddRef,
+    headers_Release,
+    headers_GetIids,
+    headers_GetRuntimeClassName,
+    headers_GetTrustLevel,
+    map_First,
+    map_HasKey,
+    map_Size,
+    map_Lookup,
+    map_Split,
+};
 
 /* --- HttpMethod --- */
 
@@ -669,6 +1064,8 @@ struct http_string_content
     LONG ref;
     HSTRING content;
     void *headers;
+    BYTE *raw_bytes;
+    ULONG raw_len;
 };
 
 static inline struct http_string_content *impl_from_content( void *iface )
@@ -725,6 +1122,7 @@ static ULONG WINAPI content_Release( void *iface )
     {
         if (impl->content) WindowsDeleteString( impl->content );
         if (impl->headers) IUnknown_Release( (IUnknown *)impl->headers );
+        free( impl->raw_bytes );
         free( impl );
     }
     return ref;
@@ -740,18 +1138,35 @@ static HRESULT WINAPI content_GetTrustLevel( void *iface, TrustLevel *l ) { if (
 
 static HRESULT WINAPI content_BufferAllAsync( void *iface, void **op )
 {
+    struct http_string_content *impl = impl_from_content( iface );
     WDBG( "content_BufferAllAsync\n" );
-    return create_async_http_op( NULL, NULL, FALSE, op );
+    /* WPM's 8.1-era caller polls this op and hands the result straight to its
+     * string parsing; an IBuffer result object destabilises the trace path. */
+    return create_async_http_op_ex( impl->content, NULL, TRUE, TRUE, op );
 }
 static HRESULT WINAPI content_ReadAsBufferAsync( void *iface, void **op )
 {
     WDBG( "content_ReadAsBufferAsync\n" );
-    return create_async_http_op( NULL, NULL, FALSE, op );
+    return content_BufferAllAsync( iface, op );
 }
 static HRESULT WINAPI content_ReadAsInputStreamAsync( void *iface, void **op )
 {
+    struct http_string_content *impl = impl_from_content( iface );
+    void *buffer = NULL, *ras = NULL;
+    HRESULT hr;
+
     WDBG( "content_ReadAsInputStreamAsync\n" );
-    return create_async_http_op( NULL, NULL, FALSE, op );
+    if (impl->raw_bytes)
+        hr = create_mem_buffer_from_bytes( impl->raw_bytes, impl->raw_len, &buffer );
+    else
+        hr = create_mem_buffer_from_hstring( impl->content, &buffer );
+    if (FAILED( hr )) return hr;
+    hr = create_ras_stream_from_buffer( buffer, &ras );
+    IUnknown_Release( (IUnknown *)buffer );
+    if (FAILED( hr )) return hr;
+    hr = create_async_http_op( ras, NULL, FALSE, op );
+    IUnknown_Release( (IUnknown *)ras );
+    return hr;
 }
 static HRESULT WINAPI content_ReadAsStringAsync( void *iface, void **op )
 {
@@ -797,6 +1212,29 @@ static HRESULT WINAPI content_get_Headers( void *iface, void **headers )
     return S_OK;
 }
 
+/* 19045 SDK IHttpContent ABI: ContentType, ContentLength, Headers, GetBuffer,
+ * TryComputeSize, ReadAsInputStream, ReadAsString, WriteToStream (slots 6-14).
+ * WPM (NativeAOT, 19045) calls ReadAsStringAsync at slot 13. */
+static HRESULT WINAPI content_get_ContentType( void *iface, HSTRING *value )
+{
+    WDBG( "content_get_ContentType\n" );
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"application/json", 16, value );
+}
+static HRESULT WINAPI content_put_ContentType( void *iface, HSTRING value )
+{
+    WDBG( "content_put_ContentType\n" );
+    return S_OK;
+}
+static HRESULT WINAPI content_get_ContentLength( void *iface, UINT64 *value )
+{
+    struct http_string_content *impl = impl_from_content( iface );
+    WDBG( "content_get_ContentLength\n" );
+    if (!value) return E_POINTER;
+    *value = impl->content ? WindowsGetStringLen( impl->content ) : 0;
+    return S_OK;
+}
+
 static const void *http_content_vtbl[] =
 {
     content_QueryInterface,
@@ -805,13 +1243,28 @@ static const void *http_content_vtbl[] =
     content_GetIids,
     content_GetRuntimeClassName,
     content_GetTrustLevel,
-    content_BufferAllAsync,
-    content_ReadAsBufferAsync,
-    content_ReadAsInputStreamAsync,
-    content_ReadAsStringAsync,
-    content_TryComputeLength,
-    content_WriteToStreamAsync,
-    content_get_Headers,
+    /* Windows 8.1-era IHttpContent ABI (as consumed by WindowsPackageManager):
+     * methods first, properties (ContentLength/ContentType/Headers) last. */
+    content_BufferAllAsync,            /* 6  GetBufferAsync */
+    content_TryComputeLength,          /* 7  TryComputeLength */
+    content_ReadAsInputStreamAsync,    /* 8  ReadAsInputStreamAsync */
+    content_ReadAsStringAsync,         /* 9  ReadAsStringAsync */
+    content_WriteToStreamAsync,        /* 10 WriteToStreamAsync */
+    content_get_ContentLength,         /* 11 ContentLength */
+    content_get_ContentType,           /* 12 ContentType */
+    content_get_Headers,               /* 13 Headers */
+    /* Projection-region fill: WPM virtual-calls IHttpContent helper slots
+     * past the 8.1 declared face (formatter path). */
+    content_get_ContentLength, content_ReadAsStringAsync, content_BufferAllAsync,
+    content_TryComputeLength,  content_get_ContentLength, content_ReadAsStringAsync,
+    content_BufferAllAsync,    content_TryComputeLength,  content_get_ContentLength,
+    content_ReadAsStringAsync, content_BufferAllAsync,    content_TryComputeLength,
+    content_get_ContentLength, content_ReadAsStringAsync, content_BufferAllAsync,
+    content_TryComputeLength,  content_get_ContentLength, content_ReadAsStringAsync,
+    content_BufferAllAsync,    content_TryComputeLength,  content_get_ContentLength,
+    content_ReadAsStringAsync, content_BufferAllAsync,    content_TryComputeLength,
+    content_get_ContentLength, content_ReadAsStringAsync,
+    /* 39 */
 };
 
 static HRESULT WINAPI content_closable_QueryInterface( void *iface, REFIID iid, void **out )
@@ -898,6 +1351,380 @@ static HRESULT create_http_string_content( HSTRING content, void **out )
     *out = &impl->vtbl_content;
     return S_OK;
 }
+
+/* --- HttpStreamContent (IHttpContent over an IRandomAccessStream) ---
+ * WPM's request bodies for source updates are HttpStreamContent over a
+ * WinRT stream; the send path pumps it via the Win11 projection slots
+ * (positioned ReadAsync / GetResults) on the content's stream. */
+
+struct http_stream_content
+{
+    const void *vtbl_content;
+    const void *vtbl_closable;
+    const void *reserved;
+    LONG ref;
+    void *stream;   /* IInspectable* over IRandomAccessStream(WithContentType) */
+    void *headers;
+    BYTE *cached;
+    ULONG cached_len;
+};
+
+static inline struct http_stream_content *impl_from_stream_content( void *iface )
+{
+    return (struct http_stream_content *)iface;
+}
+static inline struct http_stream_content *impl_from_stream_content_closable( void *iface )
+{
+    return (struct http_stream_content *)((BYTE *)iface - sizeof(void *));
+}
+
+static HRESULT streamc_get_size( void *s, UINT64 *size )
+{
+    return ((HRESULT (WINAPI *)( void *, UINT64 * ))((void *const *)(*(void *const **)s))[6])( s, size );
+}
+static HRESULT streamc_read_at( void *s, void *buf, UINT64 pos, ULONG count, void **op )
+{
+    return ((HRESULT (WINAPI *)( void *, void *, UINT64, ULONG, void ** ))
+            ((void *const *)(*(void *const **)s))[21])( s, buf, pos, count, op );
+}
+static HRESULT streamc_read( void *s, void *buf, ULONG count, void **op )
+{
+    return ((HRESULT (WINAPI *)( void *, void *, ULONG, INT32, void ** ))
+            ((void *const *)(*(void *const **)s))[30])( s, buf, count, 0, op );
+}
+static HRESULT streamc_op_count( void *op, ULONG *n )
+{
+    return ((HRESULT (WINAPI *)( void *, ULONG * ))((void *const *)(*(void *const **)op))[21])( op, n );
+}
+static HRESULT streamc_buf_start( void *b, BYTE **p )
+{
+    return ((HRESULT (WINAPI *)( void *, BYTE ** ))((void *const *)(*(void *const **)b))[8])( b, p );
+}
+static HRESULT streamc_write( void *t, void *buf, void **op )
+{
+    return ((HRESULT (WINAPI *)( void *, void *, void ** ))((void *const *)(*(void *const **)t))[17])( t, buf, op );
+}
+
+static HRESULT streamc_pump( struct http_stream_content *impl, BYTE **out, ULONG *out_len )
+{
+    UINT64 size = 0;
+    HRESULT hr;
+    ULONG pos = 0;
+
+    if (impl->cached)
+    {
+        *out = impl->cached;
+        *out_len = impl->cached_len;
+        return S_OK;
+    }
+    if (FAILED( (hr = streamc_get_size( impl->stream, &size )) )) return hr;
+    if (!size)
+    {
+        *out = NULL;
+        *out_len = 0;
+        return S_OK;
+    }
+    if (!(impl->cached = HeapAlloc( GetProcessHeap(), 0, (SIZE_T)size ))) return E_OUTOFMEMORY;
+    while ((UINT64)pos < size)
+    {
+        ULONG chunk = (UINT64)(size - pos) > 65536 ? 65536 : (ULONG)(size - pos);
+        ULONG got = 0;
+        void *buf = NULL, *op = NULL;
+        BYTE *p = NULL;
+
+        if (FAILED( (hr = create_empty_mem_buffer( chunk, &buf )) )) return hr;
+        hr = streamc_read_at( impl->stream, buf, pos, chunk, &op );
+        if (FAILED(hr))
+        {
+            IUnknown_Release( (IUnknown *)buf );
+            buf = NULL;
+            if (FAILED( (hr = create_empty_mem_buffer( chunk, &buf )) )) return hr;
+            if (FAILED( (hr = streamc_read( impl->stream, buf, chunk, &op )) ))
+            {
+                IUnknown_Release( (IUnknown *)buf );
+                return hr;
+            }
+        }
+        streamc_op_count( op, &got );
+        IUnknown_Release( (IUnknown *)op );
+        streamc_buf_start( buf, &p );
+        if (p && got && pos + got <= (ULONG)size) memcpy( impl->cached + pos, p, got );
+        IUnknown_Release( (IUnknown *)buf );
+        pos += got;
+        if (!got) break;
+    }
+    impl->cached_len = pos;
+    *out = impl->cached;
+    *out_len = pos;
+    return S_OK;
+}
+
+static HRESULT WINAPI streamc_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    WDBG( "streamc_QI\n" );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IHttpContent ))
+    {
+        *out = &impl->vtbl_content;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IClosable ))
+    {
+        *out = &impl->vtbl_closable;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI streamc_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_stream_content( iface )->ref );
+}
+static ULONG WINAPI streamc_Release( void *iface )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->stream) IUnknown_Release( (IUnknown *)impl->stream );
+        if (impl->headers) IUnknown_Release( (IUnknown *)impl->headers );
+        if (impl->cached) HeapFree( GetProcessHeap(), 0, impl->cached );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI streamc_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI streamc_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR class_name[] = L"Windows.Web.Http.HttpStreamContent";
+    if (!n) return E_POINTER;
+    return WindowsCreateString( class_name, ARRAY_SIZE( class_name ) - 1, n );
+}
+static HRESULT WINAPI streamc_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI streamc_BufferAllAsync( void *iface, void **op )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    BYTE *data = NULL;
+    ULONG len = 0;
+    void *buf = NULL;
+    HRESULT hr;
+
+    WDBG( "streamc_BufferAllAsync\n" );
+    if (FAILED( (hr = streamc_pump( impl, &data, &len )) )) return hr;
+    if (FAILED( (hr = create_mem_buffer_from_bytes( data, len, &buf )) )) return hr;
+    hr = create_async_http_op_obj( buf, op );
+    IUnknown_Release( (IUnknown *)buf );
+    return hr;
+}
+static HRESULT WINAPI streamc_TryComputeLength( void *iface, UINT64 *length, boolean *succeeded )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    UINT64 size = 0;
+
+    WDBG( "streamc_TryComputeLength\n" );
+    if (length) *length = 0;
+    if (succeeded) *succeeded = FALSE;
+    if (FAILED( streamc_get_size( impl->stream, &size ) )) return S_OK;
+    if (length) *length = size;
+    if (succeeded) *succeeded = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI streamc_ReadAsInputStreamAsync( void *iface, void **op )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+
+    WDBG( "streamc_ReadAsInputStreamAsync\n" );
+    return create_async_http_op_obj( impl->stream, op );
+}
+static HRESULT WINAPI streamc_ReadAsStringAsync( void *iface, void **op )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    BYTE *data = NULL;
+    ULONG len = 0;
+    WCHAR *w = NULL;
+    HSTRING str = NULL;
+    int wn;
+    HRESULT hr;
+
+    WDBG( "streamc_ReadAsStringAsync\n" );
+    if (FAILED( (hr = streamc_pump( impl, &data, &len )) )) return hr;
+    wn = MultiByteToWideChar( CP_UTF8, 0, (const char *)data, len, NULL, 0 );
+    if (wn < 0) wn = 0;
+    if (!(w = HeapAlloc( GetProcessHeap(), 0, (wn + 1) * sizeof(WCHAR) ))) return E_OUTOFMEMORY;
+    MultiByteToWideChar( CP_UTF8, 0, (const char *)data, len, w, wn );
+    w[wn] = 0;
+    hr = WindowsCreateString( w, wn, &str );
+    HeapFree( GetProcessHeap(), 0, w );
+    if (FAILED( hr )) return hr;
+    hr = create_async_http_op( NULL, str, TRUE, op );
+    WindowsDeleteString( str );
+    return hr;
+}
+static HRESULT WINAPI streamc_WriteToStreamAsync( void *iface, void *target, void **op )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    BYTE *data = NULL;
+    ULONG len = 0, pos = 0;
+    HRESULT hr;
+
+    WDBG( "streamc_WriteToStreamAsync\n" );
+    if (FAILED( (hr = streamc_pump( impl, &data, &len )) )) return hr;
+    while (pos < len)
+    {
+        ULONG chunk = len - pos > 65536 ? 65536 : len - pos;
+        void *buf = NULL, *wop = NULL;
+
+        if (FAILED( (hr = create_mem_buffer_from_bytes( data + pos, chunk, &buf )) )) return hr;
+        hr = streamc_write( target, buf, &wop );
+        IUnknown_Release( (IUnknown *)buf );
+        if (SUCCEEDED( hr ) && wop) IUnknown_Release( (IUnknown *)wop );
+        if (FAILED( hr )) return hr;
+        pos += chunk;
+    }
+    return create_async_http_op_obj( NULL, op );
+}
+static HRESULT WINAPI streamc_get_ContentLength( void *iface, UINT64 *value )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    if (!value) return E_POINTER;
+    *value = impl->cached_len;
+    streamc_get_size( impl->stream, value );
+    return S_OK;
+}
+static HRESULT WINAPI streamc_get_ContentType( void *iface, HSTRING *value )
+{
+    static const WCHAR ct[] = L"application/octet-stream";
+    if (!value) return E_POINTER;
+    return WindowsCreateString( ct, ARRAY_SIZE( ct ) - 1, value );
+}
+static HRESULT WINAPI streamc_put_ContentType( void *iface, HSTRING value ) { return S_OK; }
+static HRESULT WINAPI streamc_get_Headers( void *iface, void **headers )
+{
+    struct http_stream_content *impl = impl_from_stream_content( iface );
+    if (!headers) return E_POINTER;
+    if (!impl->headers) create_http_headers( &IID_IHttpContentHeaderCollection, &impl->headers );
+    IUnknown_AddRef( (IUnknown *)impl->headers );
+    *headers = impl->headers;
+    return S_OK;
+}
+
+static const void *http_stream_content_vtbl[] =
+{
+    streamc_QueryInterface,
+    streamc_AddRef,
+    streamc_Release,
+    streamc_GetIids,
+    streamc_GetRuntimeClassName,
+    streamc_GetTrustLevel,
+    streamc_BufferAllAsync,        /* 6  GetBufferAsync/BufferAllAsync */
+    streamc_TryComputeLength,      /* 7 */
+    streamc_ReadAsInputStreamAsync,/* 8 */
+    streamc_ReadAsStringAsync,     /* 9 */
+    streamc_WriteToStreamAsync,    /* 10 */
+    streamc_get_ContentLength,     /* 11 */
+    streamc_get_ContentType,       /* 12 */
+    streamc_get_Headers,           /* 13 */
+    /* projection-region fill (same cyclic map as HttpStringContent) */
+    streamc_get_ContentLength, streamc_ReadAsStringAsync, streamc_BufferAllAsync,
+    streamc_TryComputeLength,  streamc_get_ContentLength, streamc_ReadAsStringAsync,
+    streamc_BufferAllAsync,    streamc_TryComputeLength,  streamc_get_ContentLength,
+    streamc_ReadAsStringAsync, streamc_BufferAllAsync,    streamc_TryComputeLength,
+    streamc_get_ContentLength, streamc_ReadAsStringAsync, streamc_BufferAllAsync,
+    streamc_TryComputeLength,  streamc_get_ContentLength, streamc_ReadAsStringAsync,
+    streamc_BufferAllAsync,    streamc_TryComputeLength,  streamc_get_ContentLength,
+    streamc_ReadAsStringAsync, streamc_BufferAllAsync,    streamc_TryComputeLength,
+    streamc_get_ContentLength, streamc_ReadAsStringAsync,
+    /* 39 */
+};
+
+static const void *http_stream_content_closable_vtbl[] =
+{
+    content_closable_QueryInterface,
+    content_closable_AddRef,
+    content_closable_Release,
+    content_closable_GetIids,
+    content_closable_GetRuntimeClassName,
+    content_closable_GetTrustLevel,
+    content_closable_Close,
+};
+
+static HRESULT create_http_stream_content( void *stream, void **out )
+{
+    struct http_stream_content *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl_content = http_stream_content_vtbl;
+    impl->vtbl_closable = http_stream_content_closable_vtbl;
+    impl->ref = 1;
+    impl->stream = stream;
+    if (stream) IUnknown_AddRef( (IUnknown *)stream );
+    *out = &impl->vtbl_content;
+    return S_OK;
+}
+
+/* IHttpStreamContentFactory + IActivationFactory share one vtable:
+ * 6 CreateInstance(), 7 get_Compressor, 8 put_Compressor, 9 CreateInstance(stream). */
+static HRESULT WINAPI http_stream_content_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IHttpStreamContentFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI http_stream_content_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI http_stream_content_factory_Release( void *iface ) { return 1; }
+static HRESULT WINAPI http_stream_content_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI http_stream_content_factory_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR class_name[] = L"Windows.Web.Http.HttpStreamContent";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
+}
+static HRESULT WINAPI http_stream_content_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI http_stream_content_factory_ActivateInstance( void *iface, IInspectable **instance )
+{
+    WDBG( "stream_content_ActivateInstance\n" );
+    return create_http_stream_content( NULL, (void **)instance );
+}
+static HRESULT WINAPI http_stream_content_factory_GetCompressor( void *iface, void **value )
+{
+    if (value) *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI http_stream_content_factory_PutCompressor( void *iface, void *value ) { return S_OK; }
+static HRESULT WINAPI http_stream_content_factory_CreateInstanceWithStream( void *iface, void *stream, void **instance )
+{
+    WDBG( "stream_content_CreateWithStream stream %p\n", stream );
+    return create_http_stream_content( stream, instance );
+}
+
+static const void *http_stream_content_factory_vtbl[] =
+{
+    http_stream_content_factory_QueryInterface,
+    http_stream_content_factory_AddRef,
+    http_stream_content_factory_Release,
+    http_stream_content_factory_GetIids,
+    http_stream_content_factory_GetRuntimeClassName,
+    http_stream_content_factory_GetTrustLevel,
+    http_stream_content_factory_ActivateInstance,
+    http_stream_content_factory_GetCompressor,
+    http_stream_content_factory_PutCompressor,
+    http_stream_content_factory_CreateInstanceWithStream,
+};
+static const void *http_stream_content_factory_obj = http_stream_content_factory_vtbl;
+IActivationFactory *http_stream_content_factory = (IActivationFactory *)&http_stream_content_factory_obj;
 
 /* --- HttpResponseMessage --- */
 
@@ -1086,6 +1913,9 @@ static HRESULT WINAPI resp_set_StatusCode( void *iface, INT32 code )
 static HRESULT WINAPI resp_get_Version( void *iface, INT32 *ver ) { if (ver) *ver = 1 /* Http11 */; return S_OK; }
 static HRESULT WINAPI resp_set_Version( void *iface, INT32 ver ) { return S_OK; }
 
+/* Slot order must match the Windows.Web.Http 19045 SDK IHttpResponseMessage ABI:
+ * Content leads, EnsureSuccessStatusCode follows, and there is no set_Content
+ * slot (the ctor takes the content).  WPM (NativeAOT, 19045) calls by slot. */
 static const void *http_response_vtbl[] =
 {
     resp_QueryInterface,
@@ -1094,21 +1924,29 @@ static const void *http_response_vtbl[] =
     resp_GetIids,
     resp_GetRuntimeClassName,
     resp_GetTrustLevel,
-    resp_EnsureSuccessStatusCode,
-    resp_get_Content,
-    resp_set_Content,
-    resp_get_Headers,
-    resp_get_IsSuccessStatusCode,
-    resp_get_ReasonPhrase,
-    resp_set_ReasonPhrase,
-    resp_get_RequestMessage,
-    resp_set_RequestMessage,
-    resp_get_Source,
-    resp_set_Source,
-    resp_get_StatusCode,
-    resp_set_StatusCode,
-    resp_get_Version,
-    resp_set_Version,
+    resp_get_Content,             /* 6  */
+    resp_EnsureSuccessStatusCode, /* 7  */
+    resp_get_Headers,             /* 8  */
+    resp_get_IsSuccessStatusCode, /* 9  */
+    resp_get_ReasonPhrase,        /* 10 */
+    resp_set_ReasonPhrase,        /* 11 */
+    resp_get_RequestMessage,      /* 12 */
+    resp_set_RequestMessage,      /* 13 */
+    resp_get_Source,              /* 14 */
+    resp_set_Source,              /* 15 */
+    resp_get_StatusCode,          /* 16 */
+    resp_set_StatusCode,          /* 17 */
+    resp_get_Version,             /* 18 */
+    resp_set_Version,             /* 19 */
+    /* WPM's HttpClientWrapper coroutine states virtual-call projection helper
+     * slots beyond IHttpResponseMessage (the CLog::Trace formatter uses slot
+     * 39); fill the projection region so calls land on real accessors. */
+    resp_get_StatusCode, resp_get_ReasonPhrase, resp_get_Content, resp_get_Headers,
+    resp_get_StatusCode, resp_get_ReasonPhrase, resp_get_Content, resp_get_Headers,
+    resp_get_StatusCode, resp_get_ReasonPhrase, resp_get_Content, resp_get_Headers,
+    resp_get_StatusCode, resp_get_ReasonPhrase, resp_get_Content, resp_get_Headers,
+    resp_get_StatusCode, resp_get_ReasonPhrase, resp_get_Content, resp_get_Headers,
+    /* 39 */
 };
 
 static HRESULT WINAPI resp_closable_QueryInterface( void *iface, REFIID iid, void **out )
@@ -1152,6 +1990,9 @@ static HRESULT create_http_response( INT32 status_code, void **out )
     impl->status_code = status_code ? status_code : 200;
     impl->source = 2;
     impl->version = 1;
+    /* WPM's HttpClientWrapper reads response.RequestMessage and keeps using it;
+     * a fresh request message keeps that chain non-null. */
+    create_http_request( NULL, NULL, &impl->request_message );
     *out = &impl->vtbl_response;
     return S_OK;
 }
@@ -1161,6 +2002,7 @@ static BOOL is_hstring( const void *p );
 static HRESULT store_string_arg( void *arg, HSTRING *dst, const WCHAR *fallback )
 {
     HRESULT hr;
+    BOOL ok = FALSE;
     WDBG( "store_string_arg arg %p dst %p fb %s\n", arg, dst, debugstr_w( fallback ) );
     *dst = NULL;
     if (!arg) goto fallback;
@@ -1168,22 +2010,25 @@ static HRESULT store_string_arg( void *arg, HSTRING *dst, const WCHAR *fallback 
     {
         if (is_hstring( arg ))
         {
-            if (SUCCEEDED( WindowsDuplicateString( (HSTRING)arg, dst ) ) && *dst) return S_OK;
-            goto fallback;
+            if (SUCCEEDED( WindowsDuplicateString( (HSTRING)arg, dst ) ) && *dst) ok = TRUE;
         }
-        void **vtbl = *(void ***)arg;
-        HRESULT (STDMETHODCALLTYPE *get_string)( void *, HSTRING * ) = (void *)vtbl[6];
-        HSTRING s = NULL;
-        hr = get_string( arg, &s );
-        if (SUCCEEDED( hr ) && s)
+        else
         {
-            WindowsDuplicateString( s, dst );
-            WindowsDeleteString( s );
-            if (*dst) return S_OK;
+            void **vtbl = *(void ***)arg;
+            HRESULT (STDMETHODCALLTYPE *get_string)( void *, HSTRING * ) = (void *)vtbl[6];
+            HSTRING s = NULL;
+            hr = get_string( arg, &s );
+            if (SUCCEEDED( hr ) && s)
+            {
+                WindowsDuplicateString( s, dst );
+                WindowsDeleteString( s );
+                if (*dst) ok = TRUE;
+            }
         }
     }
-    __EXCEPT_ALL { /* fall through */ }
+    __EXCEPT_ALL { ok = FALSE; }
     __ENDTRY
+    if (ok) return S_OK;
 fallback:
     return WindowsCreateString( fallback, lstrlenW( fallback ), dst );
 }
@@ -1612,7 +2457,8 @@ static HRESULT WINAPI client_PutAsync( void *iface, void *uri, void *content, vo
 }
 
 /* Perform the HTTP exchange for a request message via winhttp. */
-static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri, void **out )
+static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri,
+                                       const void *body_data, DWORD body_len, void **out )
 {
     static const WCHAR ua[] = L"WinGet/1.29";
     URL_COMPONENTS uc = { sizeof(uc) };
@@ -1665,7 +2511,8 @@ static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri, vo
             WinHttpAddRequestHeaders( req, hdr, -1, WINHTTP_ADDREQ_FLAG_ADD );
         }
     }
-    if (!WinHttpSendRequest( req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0 ))
+    if (!WinHttpSendRequest( req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                             body_data ? (void *)body_data : WINHTTP_NO_REQUEST_DATA, body_len, body_len, 0 ))
     {
         WDBG( "send_request failed err %u attempt %u\n", GetLastError(), attempt );
         goto retry;
@@ -1709,9 +2556,93 @@ retry:
     if (FAILED( hr )) goto done;
     hr = create_http_response( status, &resp );
     if (FAILED( hr )) goto done;
+    {
+        void *hdrs = NULL;
+        DWORD idx = 0, rawsize = 1024;
+        WCHAR raw[512];
+        UINT32 nhdr = 0;
+        if (SUCCEEDED( resp_get_Headers( resp, &hdrs ) ) && hdrs)
+        {
+            while (nhdr < 64 && WinHttpQueryHeaders( req, WINHTTP_QUERY_RAW_HEADERS,
+                        WINHTTP_HEADER_NAME_BY_INDEX, raw, &rawsize, &idx ))
+            {
+                nhdr++;
+                WCHAR *colon = raw;
+                while (*colon && *colon != L':') colon++;
+                if (*colon == L':')
+                {
+                    HSTRING k = NULL, v = NULL;
+                    WCHAR *vs = colon + 1;
+                    *colon = 0;
+                    while (*vs == L' ' || *vs == L'\t') vs++;
+                    if (SUCCEEDED( WindowsCreateString( raw, lstrlenW( raw ), &k ) ))
+                    {
+                        if (SUCCEEDED( WindowsCreateString( vs, lstrlenW( vs ), &v ) ))
+                            headers_Append( hdrs, k, v );
+                        WindowsDeleteString( k );
+                    }
+                    WindowsDeleteString( v );
+                }
+                idx++;
+                rawsize = sizeof(raw);
+            }
+            IUnknown_Release( (IUnknown *)hdrs );
+        }
+    }
     hr = create_http_string_content( bodyH, &content );
     if (SUCCEEDED( hr ))
     {
+        if (body && total)
+        {
+            struct http_string_content *sc = impl_from_content( content );
+            sc->raw_bytes = (BYTE *)body;
+            sc->raw_len = total;
+            body = NULL;
+        }
+        {
+            WCHAR raw[4096];
+            DWORD rawsize = sizeof(raw);
+            if (WinHttpQueryHeaders( req, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
+                                     raw, &rawsize, WINHTTP_NO_HEADER_INDEX ))
+            {
+                void *rhdrs = NULL, *chdrs = NULL;
+                WCHAR *line = raw;
+                resp_get_Headers( resp, &rhdrs );
+                content_get_Headers( content, &chdrs );
+                while (line && *line)
+                {
+                    WCHAR *eol = wcsstr( line, L"\r\n" );
+                    WCHAR *colon;
+                    if (eol) *eol = 0;
+                    colon = wcschr( line, L':' );
+                    if (colon)
+                    {
+                        HSTRING k = NULL, v = NULL;
+                        WCHAR *vs = colon + 1;
+                        *colon = 0;
+                        while (*vs == L' ' || *vs == L'\t') vs++;
+                        if (SUCCEEDED( WindowsCreateString( line, lstrlenW( line ), &k ) ) &&
+                            SUCCEEDED( WindowsCreateString( vs, lstrlenW( vs ), &v ) ))
+                        {
+                            if (!_wcsnicmp( line, L"Content-", 8 ))
+                            {
+                                if (chdrs) headers_Append( chdrs, k, v );
+                            }
+                            else
+                            {
+                                if (rhdrs) headers_Append( rhdrs, k, v );
+                            }
+                        }
+                        if (k) WindowsDeleteString( k );
+                        if (v) WindowsDeleteString( v );
+                    }
+                    if (!eol) break;
+                    line = eol + 2;
+                }
+                if (rhdrs) IUnknown_Release( (IUnknown *)rhdrs );
+                if (chdrs) IUnknown_Release( (IUnknown *)chdrs );
+            }
+        }
         resp_set_Content( resp, content );
         IUnknown_Release( (IUnknown *)content );
     }
@@ -1724,11 +2655,7 @@ done:
     free( body );
     free( bodyW );
     if (bodyH) WindowsDeleteString( bodyH );
-    if (SUCCEEDED( hr ))
-    {
-        *out = resp;
-        IUnknown_Release( (IUnknown *)resp );
-    }
+    if (SUCCEEDED( hr )) *out = resp; /* the create reference transfers to the caller */
     return hr;
 }
 
@@ -1737,6 +2664,8 @@ static HRESULT send_request( void *req, void **op )
     struct http_request_message *r = impl_from_request( req );
     const WCHAR *method, *uri;
     void *resp = NULL;
+    BYTE *body_data = NULL;
+    ULONG body_len = 0;
     HRESULT hr;
 
     method = r->method ? WindowsGetStringRawBuffer( (HSTRING)r->method, NULL ) : NULL;
@@ -1744,10 +2673,46 @@ static HRESULT send_request( void *req, void **op )
     if (!(method && *method)) method = L"GET";
     if (!(uri && *uri)) uri = L"https://cdn.winget.microsoft.com/cache/index.db";
 
-    if (FAILED( (hr = http_fetch_to_response( method, uri, &resp ) ) ))
+    if (r->content)
     {
-        if (FAILED( (hr = create_http_response( 200, &resp ) ) )) return hr;
+        /* IHttpContent slot 9 ReadAsStringAsync works for both HttpStringContent
+         * and HttpStreamContent (streams are pumped to UTF-8), op slot 10
+         * GetResults returns the HSTRING. */
+        HRESULT (WINAPI *read_str)( void *, void ** ) =
+            (void *)((void *const *)(*(void *const **)r->content))[9];
+        void *c_op = NULL;
+        HSTRING str = NULL;
+
+        if (SUCCEEDED( read_str( r->content, &c_op ) ) && c_op)
+        {
+            HRESULT (WINAPI *op_res)( void *, HSTRING * ) =
+                (void *)((void *const *)(*(void *const **)c_op))[10];
+            op_res( c_op, &str );
+            IUnknown_Release( (IUnknown *)c_op );
+        }
+        if (str)
+        {
+            UINT wlen = WindowsGetStringLen( str );
+            const WCHAR *w = WindowsGetStringRawBuffer( str, NULL );
+            int n = WideCharToMultiByte( CP_UTF8, 0, w, wlen, NULL, 0, NULL, NULL );
+            if (n > 0 && (body_data = HeapAlloc( GetProcessHeap(), 0, n )))
+            {
+                WideCharToMultiByte( CP_UTF8, 0, w, wlen, (char *)body_data, n, NULL, NULL );
+                body_len = n;
+            }
+        }
+        WDBG( "send_request content pump len %u\n", body_len );
     }
+
+    if (FAILED( (hr = http_fetch_to_response( method, uri, body_data, body_len, &resp ) ) ))
+    {
+        if (FAILED( (hr = create_http_response( 200, &resp ) ) ))
+        {
+            if (body_data) HeapFree( GetProcessHeap(), 0, body_data );
+            return hr;
+        }
+    }
+    if (body_data) HeapFree( GetProcessHeap(), 0, body_data );
     return create_async_http_op( resp, NULL, FALSE, op );
 }
 
@@ -2142,17 +3107,29 @@ static const void *http_string_content_factory_obj = http_string_content_factory
 IActivationFactory *http_string_content_factory = (IActivationFactory *)&http_string_content_factory_obj;
 
 /* HttpMethod factory */
+static const void *http_method_activation_obj;
+static const void *http_method_factory_obj;
+static const void *http_method_statics_obj;
+
 static HRESULT WINAPI http_method_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (iid) WDBG( "method_factory_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2, iid->Data3, iid->Data4[0], iid->Data4[1] );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IHttpMethodFactory ) ||
-        IsEqualGUID( iid, &IID_IHttpMethodStatics ))
+        IsEqualGUID( iid, &IID_IActivationFactory ))
     {
-        *out = iface;
+        *out = &http_method_activation_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpMethodFactory ))
+    {
+        *out = &http_method_factory_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpMethodStatics ))
+    {
+        *out = &http_method_statics_obj;
         return S_OK;
     }
     *out = NULL;
@@ -2203,6 +3180,16 @@ static HRESULT WINAPI http_method_factory_get_Patch( void *iface, void **val ) {
 static HRESULT WINAPI http_method_factory_get_Post( void *iface, void **val ) { return http_method_factory_get_named( L"POST", val ); }
 static HRESULT WINAPI http_method_factory_get_Put( void *iface, void **val ) { return http_method_factory_get_named( L"PUT", val ); }
 
+static const void *http_method_activation_vtbl[] =
+{
+    http_method_factory_QueryInterface,
+    http_method_factory_AddRef,
+    http_method_factory_Release,
+    http_method_factory_GetIids,
+    http_method_factory_GetRuntimeClassName,
+    http_method_factory_GetTrustLevel,
+    http_method_factory_ActivateInstance,
+};
 static const void *http_method_factory_vtbl[] =
 {
     http_method_factory_QueryInterface,
@@ -2212,6 +3199,15 @@ static const void *http_method_factory_vtbl[] =
     http_method_factory_GetRuntimeClassName,
     http_method_factory_GetTrustLevel,
     http_method_factory_Create,
+};
+static const void *http_method_statics_vtbl[] =
+{
+    http_method_factory_QueryInterface,
+    http_method_factory_AddRef,
+    http_method_factory_Release,
+    http_method_factory_GetIids,
+    http_method_factory_GetRuntimeClassName,
+    http_method_factory_GetTrustLevel,
     http_method_factory_get_Delete,
     http_method_factory_get_Get,
     http_method_factory_get_Head,
@@ -2220,8 +3216,10 @@ static const void *http_method_factory_vtbl[] =
     http_method_factory_get_Post,
     http_method_factory_get_Put,
 };
+static const void *http_method_activation_obj = http_method_activation_vtbl;
 static const void *http_method_factory_obj = http_method_factory_vtbl;
-IActivationFactory *http_method_factory = (IActivationFactory *)&http_method_factory_obj;
+static const void *http_method_statics_obj = http_method_statics_vtbl;
+IActivationFactory *http_method_factory = (IActivationFactory *)&http_method_activation_obj;
 
 /* HttpBaseProtocolFilter implementation */
 static const GUID IID_IHttpBaseProtocolFilter =

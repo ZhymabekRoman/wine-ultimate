@@ -2626,7 +2626,7 @@ static DWORD send_request( struct request *request, const WCHAR *headers, DWORD 
     TRACE("full request: %s\n", debugstr_a(wire_req));
 
     request->state = REQUEST_STATE_SENDING_REQUEST;
-    send_callback( &request->hdr, WINHTTP_CALLBACK_STATUS_SENDING_REQUEST, NULL, 0 );
+    send_callback( &request->hdr, WINHTTP_CALLBACK_STATUS_SENDING_REQUEST, wire_req, len );
 
     ret = netconn_send( request->netconn, wire_req, len, &bytes_sent, NULL );
     free( wire_req );

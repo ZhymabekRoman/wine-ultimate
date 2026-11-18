@@ -8,4 +8,5 @@ SOURCES = \
 	json_array.c \
 	json_object.c \
 	json_value.c \
-	main.c
+	main.c \
+	streams.c

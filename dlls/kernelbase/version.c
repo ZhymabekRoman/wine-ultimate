@@ -2362,30 +2362,42 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *le
 /***********************************************************************
  *         ParseApplicationUserModelId   (kernelbase.@)
  *
- * Splits "FamilyName!AdditionalUserModelId": the family is implicit in the
- * caller's input, so the API only hands back the part after the '!'.
+ * Splits "PackageFamilyName!PRAID" into the package family name (which
+ * includes the trailing '!') and the package relative application id.
+ * Length parameters are in/out, in WCHARs including the null-terminator.
  */
-HRESULT WINAPI ParseApplicationUserModelId( UINT32 app_user_model_id_len, const WCHAR *app_user_model_id,
-                                            UINT32 *extra_user_model_id_len, WCHAR *extra_user_model_id )
+HRESULT WINAPI ParseApplicationUserModelId( const WCHAR *app_user_model_id, UINT32 *family_name_len,
+                                            WCHAR *family_name, UINT32 *praid_len, WCHAR *praid )
 {
     const WCHAR *p;
-    UINT32 len;
+    UINT32 flen, plen;
 
-    TRACE( "(%u %s %p %p)\n", app_user_model_id_len, debugstr_w( app_user_model_id ),
-           extra_user_model_id_len, extra_user_model_id );
+    TRACE( "(%s %p %p %p %p)\n", debugstr_w( app_user_model_id ),
+           family_name_len, family_name, praid_len, praid );
 
     if (!app_user_model_id) return E_POINTER;
-    if (!extra_user_model_id_len) return E_INVALIDARG;
     if (!(p = wcschr( app_user_model_id, L'!' ))) return E_INVALIDARG;
 
-    len = wcslen( p + 1 ) + 1;
-    if (!extra_user_model_id || *extra_user_model_id_len < len)
-    {
-        *extra_user_model_id_len = len;
+    flen = (UINT32)(p - app_user_model_id) + 1;  /* up to and including '!' + nul */
+    plen = (UINT32)wcslen( p + 1 ) + 1;
+
+    if (family_name_len && (!family_name || *family_name_len < flen)) *family_name_len = flen;
+    if (praid_len && (!praid || *praid_len < plen)) *praid_len = plen;
+    if (family_name_len && (!family_name || *family_name_len < flen))
         return HRESULT_FROM_WIN32( ERROR_INSUFFICIENT_BUFFER );
+    if (praid_len && (!praid || *praid_len < plen))
+        return HRESULT_FROM_WIN32( ERROR_INSUFFICIENT_BUFFER );
+
+    if (family_name)
+    {
+        memcpy( family_name, app_user_model_id, flen * sizeof(WCHAR) );
+        *family_name_len = flen;
     }
-    memcpy( extra_user_model_id, p + 1, len * sizeof(WCHAR) );
-    *extra_user_model_id_len = len;
+    if (praid)
+    {
+        memcpy( praid, p + 1, plen * sizeof(WCHAR) );
+        *praid_len = plen;
+    }
     return S_OK;
 }
 

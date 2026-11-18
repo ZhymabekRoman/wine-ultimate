@@ -20,11 +20,14 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "private.h"
 #include "objbase.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(storage);
+
+#define PTRACE(...) fprintf( stderr, "ST8 " __VA_ARGS__ )
 
 /* -------------------------------------------------------------------------- */
 /* Buffer Implementation                                                      */
@@ -582,6 +585,74 @@ static inline struct in_memory_stream *impl_from_IRandomAccessStream( IRandomAcc
     return CONTAINING_RECORD( iface, struct in_memory_stream, IRandomAccessStream_iface );
 }
 
+/* Win11 (26100) C++/WinRT projection streams the IRandomAccessStream face itself:
+ * slot 21 ReadAsync(buffer, position, count, &op), slot 30 ReadAsync(buffer, &op),
+ * slot 32 GetResults(&result). WPM's HTTP body pump calls these directly. */
+static HRESULT in_memory_stream_read_at( struct in_memory_stream *impl, IBuffer *buffer,
+                                         UINT64 pos, UINT32 count,
+                                         IAsyncOperationWithProgress_IBuffer_UINT32 **operation )
+{
+    IBufferByteAccess *access = NULL;
+    BYTE *dest = NULL;
+    UINT32 cap = 0, to_read = 0;
+    HRESULT hr;
+
+    if (!buffer || !operation) return E_POINTER;
+    *operation = NULL;
+    if (impl->closed) return RO_E_CLOSED;
+    IBuffer_get_Capacity( buffer, &cap );
+
+    EnterCriticalSection( &impl->content->cs );
+    if (pos < impl->content->size)
+    {
+        UINT64 avail = impl->content->size - pos;
+        to_read = (avail < count) ? (UINT32)avail : count;
+        if (to_read > cap) to_read = cap;
+        if (to_read && SUCCEEDED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access )))
+        {
+            if (SUCCEEDED( IBufferByteAccess_Buffer( access, &dest )) && dest)
+                memcpy( dest, impl->content->buffer + pos, to_read );
+            IBufferByteAccess_Release( access );
+        }
+        impl->position = pos + to_read;
+    }
+    IBuffer_put_Length( buffer, to_read );
+    LeaveCriticalSection( &impl->content->cs );
+
+    return async_operation_progress_buffer_create( buffer, operation );
+}
+
+static HRESULT WINAPI in_memory_stream_ReadAsync( IRandomAccessStream *iface, IBuffer *buffer,
+                                                  IAsyncOperationWithProgress_IBuffer_UINT32 **operation )
+{
+    struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
+    UINT32 cap = 0;
+
+    if (buffer) IBuffer_get_Capacity( buffer, &cap );
+    PTRACE( "stream_ReadAsync impl %p cap %u pos %llu size %llu\n", impl, cap,
+            impl->position, impl->content->size );
+    return in_memory_stream_read_at( impl, buffer, impl->position, cap, operation );
+}
+
+/* Win11 projection slot 21: ReadAsync(op**, IBuffer* dest, UINT32 count) —
+ * sequential continuation of slot 30 from the stream position. */
+static HRESULT WINAPI in_memory_stream_ReadAsyncAt( IRandomAccessStream *iface,
+                                                    IAsyncOperationWithProgress_IBuffer_UINT32 **operation,
+                                                    IBuffer *buffer, UINT32 count )
+{
+    struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
+
+    PTRACE( "stream_ReadAsyncAt impl %p count %u pos %llu size %llu\n", impl, count,
+            impl->position, impl->content->size );
+    return in_memory_stream_read_at( impl, buffer, impl->position, count, operation );
+}
+
+static HRESULT WINAPI in_memory_stream_StreamGetResults( IRandomAccessStream *iface, void **result )
+{
+    if (result) *result = NULL;
+    return S_OK;
+}
+
 static HRESULT WINAPI in_memory_stream_QueryInterface( IRandomAccessStream *iface, REFIID iid, void **out )
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
@@ -722,6 +793,7 @@ static HRESULT WINAPI in_memory_stream_get_Size( IRandomAccessStream *iface, UIN
     EnterCriticalSection( &impl->content->cs );
     *value = impl->content->size;
     LeaveCriticalSection( &impl->content->cs );
+    PTRACE( "get_Size impl %p size %llu\n", impl, *value );
     return S_OK;
 }
 
@@ -766,6 +838,7 @@ static HRESULT WINAPI in_memory_stream_GetInputStreamAt( IRandomAccessStream *if
     *stream = NULL;
     if (impl->closed) return RO_E_CLOSED;
 
+    PTRACE( "GetInputStreamAt impl %p pos %llu size %llu\n", impl, position, impl->content->size );
     if (FAILED(hr = in_memory_stream_clone_at( impl, position, &clone )))
         return hr;
 
@@ -807,6 +880,7 @@ static HRESULT WINAPI in_memory_stream_Seek( IRandomAccessStream *iface, UINT64 
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
     if (impl->closed) return RO_E_CLOSED;
+    PTRACE( "Seek impl %p pos %llu size %llu\n", impl, position, impl->content->size );
     EnterCriticalSection( &impl->content->cs );
     impl->position = position;
     LeaveCriticalSection( &impl->content->cs );
@@ -848,23 +922,47 @@ static HRESULT WINAPI in_memory_stream_get_CanWrite( IRandomAccessStream *iface,
     return S_OK;
 }
 
-static const struct IRandomAccessStreamVtbl in_memory_stream_vtbl =
+static const void *in_memory_stream_vtbl[] =
 {
-    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,      /* 0 */
     in_memory_stream_AddRef,
     in_memory_stream_Release,
     in_memory_stream_GetIids,
     in_memory_stream_GetRuntimeClassName,
     in_memory_stream_GetTrustLevel,
-    in_memory_stream_get_Size,
+    in_memory_stream_get_Size,            /* 6 */
     in_memory_stream_put_Size,
     in_memory_stream_GetInputStreamAt,
     in_memory_stream_GetOutputStreamAt,
-    in_memory_stream_get_Position,
+    in_memory_stream_get_Position,        /* 10 */
     in_memory_stream_Seek,
     in_memory_stream_CloneStream,
     in_memory_stream_get_CanRead,
-    in_memory_stream_get_CanWrite,
+    in_memory_stream_get_CanWrite,        /* 14 */
+    in_memory_stream_QueryInterface,      /* 15-20 projection fillers */
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,      /* 21-29 projection fillers */
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
+    in_memory_stream_ReadAsync,           /* 30 ReadAsync(buffer) */
+    in_memory_stream_ReadAsyncAt,         /* 31 ReadAsyncAt(op**, buffer, count) */
+    in_memory_stream_StreamGetResults,    /* 32 GetResults */
+    in_memory_stream_StreamGetResults,    /* 33 */
+    in_memory_stream_StreamGetResults,    /* 34 */
+    in_memory_stream_StreamGetResults,    /* 35 */
+    in_memory_stream_StreamGetResults,    /* 36 */
+    in_memory_stream_QueryInterface,      /* 37-39 */
+    in_memory_stream_QueryInterface,
+    in_memory_stream_QueryInterface,
 };
 
 /* IInputStream for InMemoryRandomAccessStream */
@@ -884,7 +982,8 @@ static HRESULT WINAPI in_memory_stream_input_ReadAsync( IInputStream *iface, IBu
     *operation = NULL;
     if (impl->closed) return RO_E_CLOSED;
 
-    TRACE( "PUMPTID input_ReadAsync impl %p count %u.\n", impl, count );
+    PTRACE( "input_ReadAsync impl %p count %u pos %llu size %llu\n", impl, count,
+            impl->position, impl->content->size );
 
     IBuffer_get_Capacity( buffer, &cap );
 
@@ -979,7 +1078,7 @@ static HRESULT WINAPI in_memory_stream_output_WriteAsync( IOutputStream *iface, 
     if (impl->read_only) return E_ACCESSDENIED;
 
     IBuffer_get_Length( buffer, &len );
-    TRACE( "PUMPTID output_WriteAsync impl %p len %u.\n", impl, len );
+    PTRACE( "output_WriteAsync impl %p len %u pos %llu\n", impl, len, impl->position );
 
     if (len)
     {
@@ -1140,25 +1239,63 @@ static HRESULT WINAPI in_memory_stream_wct_get_CanWrite( IRandomAccessStreamWith
 {
     WCT_IMPL; return WCT_RAS( in_memory_stream_get_CanWrite, value );
 }
-
-static const struct in_memory_stream_wct_vtbl in_memory_stream_wct_vtbl =
+static HRESULT WINAPI in_memory_stream_wct_ReadAsync( IRandomAccessStreamWithContentType *iface, IBuffer *buffer,
+                                                      IAsyncOperationWithProgress_IBuffer_UINT32 **operation )
 {
-    in_memory_stream_wct_QueryInterface,
+    WCT_IMPL; return WCT_RAS( in_memory_stream_ReadAsync, buffer, operation );
+}
+static HRESULT WINAPI in_memory_stream_wct_ReadAsyncAt( IRandomAccessStreamWithContentType *iface,
+                                                        IAsyncOperationWithProgress_IBuffer_UINT32 **operation,
+                                                        IBuffer *buffer, UINT32 count )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_ReadAsyncAt, operation, buffer, count );
+}
+static HRESULT WINAPI in_memory_stream_wct_GetResults( IRandomAccessStreamWithContentType *iface, void **result )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_StreamGetResults, result );
+}
+
+static const void *in_memory_stream_wct_vtbl[] =
+{
+    in_memory_stream_wct_QueryInterface,  /* 0 */
     in_memory_stream_wct_AddRef,
     in_memory_stream_wct_Release,
     in_memory_stream_wct_GetIids,
     in_memory_stream_wct_GetRuntimeClassName,
     in_memory_stream_wct_GetTrustLevel,
-    in_memory_stream_wct_get_Size,
+    in_memory_stream_wct_get_Size,        /* 6 */
     in_memory_stream_wct_put_Size,
     in_memory_stream_wct_GetInputStreamAt,
     in_memory_stream_wct_GetOutputStreamAt,
-    in_memory_stream_wct_get_Position,
+    in_memory_stream_wct_get_Position,    /* 10 */
     in_memory_stream_wct_Seek,
     in_memory_stream_wct_CloneStream,
     in_memory_stream_wct_get_CanRead,
     in_memory_stream_wct_get_CanWrite,
-    in_memory_stream_wct_get_ContentType,
+    in_memory_stream_wct_get_ContentType, /* 15 */
+    in_memory_stream_wct_QueryInterface,  /* 16-20 projection fillers */
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,  /* 21-29 projection fillers */
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_ReadAsync,       /* 30 ReadAsync(buffer) */
+    in_memory_stream_wct_ReadAsyncAt,     /* 31 ReadAsyncAt(op**, buffer, count) */
+    in_memory_stream_wct_GetResults,      /* 32 GetResults */
+    in_memory_stream_wct_GetResults,      /* 33 */
+    in_memory_stream_wct_GetResults,      /* 34 */
+    in_memory_stream_wct_GetResults,      /* 35 */
+    in_memory_stream_wct_GetResults,      /* 36 */
+    in_memory_stream_wct_QueryInterface,  /* 37-39 */
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_QueryInterface,
 };
 
 static const struct IClosableVtbl in_memory_stream_closable_vtbl =
@@ -1182,9 +1319,10 @@ HRESULT in_memory_stream_create( IRandomAccessStream **out )
     if (!(impl = calloc( 1, sizeof(*impl) )))
         return E_OUTOFMEMORY;
 
-    impl->IRandomAccessStream_iface.lpVtbl = &in_memory_stream_vtbl;
+    impl->IRandomAccessStream_iface.lpVtbl =
+            (CONST_VTBL struct IRandomAccessStreamVtbl *)in_memory_stream_vtbl;
     impl->IRandomAccessStreamWithContentType_iface.lpVtbl =
-            (CONST_VTBL struct IRandomAccessStreamWithContentTypeVtbl *)&in_memory_stream_wct_vtbl;
+            (CONST_VTBL struct IRandomAccessStreamWithContentTypeVtbl *)in_memory_stream_wct_vtbl;
     impl->IInputStream_iface.lpVtbl = &in_memory_stream_input_vtbl;
     impl->IOutputStream_iface.lpVtbl = &in_memory_stream_output_vtbl;
     impl->IContentTypeProvider_iface.lpVtbl = &in_memory_stream_content_type_vtbl;

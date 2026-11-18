@@ -2679,13 +2679,18 @@ struct logging_fields
     LONG ref;
 };
 
+static const GUID IID_ILoggingFields2 =
+    { 0xd7f6b7af, 0x762d, 0x4579, { 0x83, 0xbd, 0x52, 0xc2, 0x3b, 0xc3, 0x33, 0xbc } };
+
 static HRESULT WINAPI logging_fields_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct logging_fields *impl = CONTAINING_RECORD( iface, struct logging_fields, vtbl );
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_ILoggingFields ))
+        IsEqualGUID( iid, &IID_ILoggingFields ) ||
+        IsEqualGUID( iid, &IID_ILoggingFields2 ))
     {
         *out = &impl->vtbl;
         InterlockedIncrement( &impl->ref );
@@ -2932,14 +2937,19 @@ static const GUID IID_ILoggingChannelFactory2 =
 static const GUID IID_ILoggingTarget =
     { 0xe9a50343, 0x11d7, 0x4f01, { 0xb5, 0xca, 0xcf, 0x49, 0x52, 0x78, 0xc0, 0xa8 } };
 
+static const GUID IID_ILoggingChannel3 =
+    { 0x65f16c35, 0xe388, 0x4e26, { 0xb1, 0x7a, 0xf5, 0x1c, 0xd3, 0xa8, 0x39, 0x16 } };
+
 static HRESULT WINAPI logging_channel_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IClosable ) ||
-        IsEqualGUID( iid, &IID_ILoggingTarget ))
+        IsEqualGUID( iid, &IID_ILoggingTarget ) ||
+        IsEqualGUID( iid, &IID_ILoggingChannel3 ))
     {
         *out = iface;
         return S_OK;
@@ -2963,6 +2973,7 @@ static const void *logging_channel_vtbl[] =
     async_causality_tracer_GetIids,
     logging_channel_GetRuntimeClassName,
     async_causality_tracer_GetTrustLevel,
+    logging_channel_stub_ok, logging_channel_stub_ok,
     logging_channel_stub_ok, logging_channel_stub_ok,
     logging_channel_stub_ok, logging_channel_stub_ok,
     logging_channel_stub_ok, logging_channel_stub_ok,
@@ -3088,6 +3099,7 @@ static HRESULT WINAPI logging_options_QueryInterface( void *iface, REFIID iid, v
 {
     struct logging_options *impl = impl_from_logging_options( iface );
 
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -3361,8 +3373,8 @@ static const void *logging_options_options_factory_vtbl[] =
     async_causality_tracer_GetIids,
     logging_options_GetRuntimeClassName,
     async_causality_tracer_GetTrustLevel,
-    logging_options_factory_CreateLoggingOptions,
-    logging_options_factory_CreateWithKeywords,
+    logging_options_factory_CreateWithKeywords, /* 6 — ILoggingOptionsFactory::CreateWithKeywords */
+    logging_options_factory_CreateLoggingOptions, /* 7 — ILoggingOptionsFactory::CreateLoggingOptions */
 };
 
 static struct logging_options_factory logging_options_factory_obj =

@@ -34,6 +34,10 @@
 #include "appmodel.h"
 #define WINSHLWAPI
 #include "shlwapi.h"
+#include "ole2.h"
+#include "winstring.h"
+#include "windows.foundation.h"
+#include "roapi.h"
 
 #include "wine/debug.h"
 
@@ -584,14 +588,14 @@ struct shstream
     } u;
 };
 
-static inline struct shstream *impl_from_IStream(IStream *iface)
+static inline struct shstream *ras_over_from_IStream(IStream *iface)
 {
     return CONTAINING_RECORD(iface, struct shstream, IStream_iface);
 }
 
 static HRESULT WINAPI shstream_QueryInterface(IStream *iface, REFIID riid, void **out)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
 
     TRACE("(%p)->(%s, %p)\n", stream, debugstr_guid(riid), out);
 
@@ -611,7 +615,7 @@ static HRESULT WINAPI shstream_QueryInterface(IStream *iface, REFIID riid, void 
 
 static ULONG WINAPI shstream_AddRef(IStream *iface)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     ULONG refcount = InterlockedIncrement(&stream->refcount);
 
     TRACE("%p, refcount %lu.\n", iface, refcount);
@@ -621,7 +625,7 @@ static ULONG WINAPI shstream_AddRef(IStream *iface)
 
 static ULONG WINAPI memstream_Release(IStream *iface)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     ULONG refcount = InterlockedDecrement(&stream->refcount);
 
     TRACE("%p, refcount %lu.\n", iface, refcount);
@@ -637,7 +641,7 @@ static ULONG WINAPI memstream_Release(IStream *iface)
 
 static HRESULT WINAPI memstream_Read(IStream *iface, void *buff, ULONG buff_size, ULONG *read_len)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     DWORD length;
 
     TRACE("%p, %p, %lu, %p.\n", iface, buff, buff_size, read_len);
@@ -664,7 +668,7 @@ static HRESULT WINAPI memstream_Read(IStream *iface, void *buff, ULONG buff_size
 
 static HRESULT WINAPI memstream_Write(IStream *iface, const void *buff, ULONG buff_size, ULONG *written)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     DWORD length = stream->u.mem.position + buff_size;
 
     TRACE("%p, %p, %lu, %p.\n", iface, buff, buff_size, written);
@@ -692,7 +696,7 @@ static HRESULT WINAPI memstream_Write(IStream *iface, const void *buff, ULONG bu
 
 static HRESULT WINAPI memstream_Seek(IStream *iface, LARGE_INTEGER move, DWORD origin, ULARGE_INTEGER*new_pos)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     LARGE_INTEGER tmp;
 
     TRACE("%p, %s, %ld, %p.\n", iface, wine_dbgstr_longlong(move.QuadPart), origin, new_pos);
@@ -719,7 +723,7 @@ static HRESULT WINAPI memstream_Seek(IStream *iface, LARGE_INTEGER move, DWORD o
 
 static HRESULT WINAPI memstream_SetSize(IStream *iface, ULARGE_INTEGER new_size)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     DWORD length;
     BYTE *buffer;
 
@@ -740,7 +744,7 @@ static HRESULT WINAPI memstream_SetSize(IStream *iface, ULARGE_INTEGER new_size)
 static HRESULT WINAPI shstream_CopyTo(IStream *iface, IStream *dest, ULARGE_INTEGER size,
         ULARGE_INTEGER *read_len, ULARGE_INTEGER *written)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     ULARGE_INTEGER total_read, total_written;
     HRESULT hr = S_OK;
     BYTE buffer[0x400];
@@ -797,7 +801,7 @@ static HRESULT WINAPI shstream_Commit(IStream *iface, DWORD flags)
 
 static HRESULT WINAPI shstream_Revert(IStream *iface)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
 
     TRACE("(%p)\n", stream);
 
@@ -807,7 +811,7 @@ static HRESULT WINAPI shstream_Revert(IStream *iface)
 
 static HRESULT WINAPI shstream_LockRegion(IStream *iface, ULARGE_INTEGER offset, ULARGE_INTEGER size, DWORD lock_type)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
 
     TRACE("(%p)\n", stream);
 
@@ -817,7 +821,7 @@ static HRESULT WINAPI shstream_LockRegion(IStream *iface, ULARGE_INTEGER offset,
 
 static HRESULT WINAPI shstream_UnlockRegion(IStream *iface, ULARGE_INTEGER offset, ULARGE_INTEGER size, DWORD lock_type)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
 
     TRACE("(%p)\n", stream);
 
@@ -827,7 +831,7 @@ static HRESULT WINAPI shstream_UnlockRegion(IStream *iface, ULARGE_INTEGER offse
 
 static HRESULT WINAPI memstream_Stat(IStream *iface, STATSTG *statstg, DWORD flags)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
 
     TRACE("%p, %p, %#lx.\n", iface, statstg, flags);
 
@@ -841,7 +845,7 @@ static HRESULT WINAPI memstream_Stat(IStream *iface, STATSTG *statstg, DWORD fla
 
 static HRESULT WINAPI shstream_Clone(IStream *iface, IStream **dest)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
 
     TRACE("(%p, %p)\n", stream, dest);
 
@@ -920,7 +924,7 @@ IStream * WINAPI SHCreateMemStream(const BYTE *data, UINT data_len)
 
 static ULONG WINAPI filestream_Release(IStream *iface)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     ULONG refcount = InterlockedDecrement(&stream->refcount);
 
     TRACE("%p, refcount %lu.\n", iface, refcount);
@@ -937,7 +941,7 @@ static ULONG WINAPI filestream_Release(IStream *iface)
 
 static HRESULT WINAPI filestream_Read(IStream *iface, void *buff, ULONG size, ULONG *read_len)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     DWORD read = 0;
 
     TRACE("%p, %p, %lu, %p.\n", iface, buff, size, read_len);
@@ -956,7 +960,7 @@ static HRESULT WINAPI filestream_Read(IStream *iface, void *buff, ULONG size, UL
 
 static HRESULT WINAPI filestream_Write(IStream *iface, const void *buff, ULONG size, ULONG *written)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     DWORD written_len = 0;
 
     TRACE("%p, %p, %lu, %p.\n", iface, buff, size, written);
@@ -981,7 +985,7 @@ static HRESULT WINAPI filestream_Write(IStream *iface, const void *buff, ULONG s
 
 static HRESULT WINAPI filestream_Seek(IStream *iface, LARGE_INTEGER move, DWORD origin, ULARGE_INTEGER *new_pos)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     LARGE_INTEGER position;
 
     TRACE("%p, %s, %ld, %p.\n", iface, wine_dbgstr_longlong(move.QuadPart), origin, new_pos);
@@ -997,7 +1001,7 @@ static HRESULT WINAPI filestream_Seek(IStream *iface, LARGE_INTEGER move, DWORD 
 
 static HRESULT WINAPI filestream_SetSize(IStream *iface, ULARGE_INTEGER size)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     LARGE_INTEGER origin, move;
 
     TRACE("(%p, %s)\n", stream, wine_dbgstr_longlong(size.QuadPart));
@@ -1024,7 +1028,7 @@ static HRESULT WINAPI filestream_SetSize(IStream *iface, ULARGE_INTEGER size)
 static HRESULT WINAPI filestream_CopyTo(IStream *iface, IStream *dest, ULARGE_INTEGER size,
         ULARGE_INTEGER *read_len, ULARGE_INTEGER *written)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     HRESULT hr = S_OK;
     char buff[1024];
 
@@ -1073,7 +1077,7 @@ static HRESULT WINAPI filestream_Commit(IStream *iface, DWORD flags)
 
 static HRESULT WINAPI filestream_Stat(IStream *iface, STATSTG *statstg, DWORD flags)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     BY_HANDLE_FILE_INFORMATION fi;
 
     TRACE("%p, %p, %#lx.\n", iface, statstg, flags);
@@ -1252,7 +1256,7 @@ HRESULT WINAPI SHCreateStreamOnFileA(const char *path, DWORD mode, IStream **str
 
 static ULONG WINAPI regstream_Release(IStream *iface)
 {
-    struct shstream *stream = impl_from_IStream(iface);
+    struct shstream *stream = ras_over_from_IStream(iface);
     ULONG refcount = InterlockedDecrement(&stream->refcount);
 
     TRACE("%p, refcount %lu.\n", iface, refcount);
@@ -2584,6 +2588,330 @@ HRESULT WINAPI CreateRandomAccessStreamOverStream(IStream *stream, BSOS_OPTIONS 
 {
     FIXME("(%p, %d, %s, %p) stub\n", stream, options, debugstr_guid(riid), ppv);
     return E_NOTIMPL;
+}
+
+/* Contract with the in-memory IRandomAccessStream face served by
+ * dlls/windows.web/streams.c (WindowsPackageManager msix download path):
+ *   ras face:   6 get_Size(UINT64*), 7 put_Size(UINT64), 8 GetInputStreamAt(UINT64, void**),
+ *               10 get_Position(UINT64*), 11 Seek(UINT64), 12 CloneStream(void**),
+ *               15 ReadAsync(IBuffer*, UINT32, INT32 options, op**)
+ *   buffer face: 6 get_Length(ULONG*), 10 rdc(BYTE* dst, ULONG off, ULONG len)
+ *   async op face: 10 GetResults(void**)
+ * All faces share the leading IInspectable slots (QI/AddRef/Release = 0/1/2). */
+
+struct ras_over_stream
+{
+    const IStreamVtbl *lpVtbl;
+    LONG ref;
+    void *ras;
+    UINT64 pos;
+};
+
+static inline struct ras_over_stream *rasstream_from_IStream( IStream *iface )
+{
+    return CONTAINING_RECORD( iface, struct ras_over_stream, lpVtbl );
+}
+
+#define VT_SLOT( obj, slot ) ((void *const *)(*(void *const **)(obj)))[slot]
+#define RAS_CALL( obj, slot, ... ) \
+    ((HRESULT (STDMETHODCALLTYPE *)( void *, ... ))(VT_SLOT( obj, slot )))( obj, __VA_ARGS__ )
+#define VT_ADDREF( obj ) ((void (STDMETHODCALLTYPE *)(void *))(VT_SLOT( obj, 1 )))( obj )
+#define VT_RELEASE( obj ) ((void (STDMETHODCALLTYPE *)(void *))(VT_SLOT( obj, 2 )))( obj )
+
+static HRESULT WINAPI rasstream_QueryInterface( IStream *iface, REFIID riid, void **ppv )
+{
+    if (!ppv) return E_POINTER;
+    if (!riid || IsEqualGUID( riid, &IID_IStream ))
+    {
+        *ppv = iface;
+        IStream_AddRef( iface );
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI rasstream_AddRef( IStream *iface )
+{
+    return InterlockedIncrement( &rasstream_from_IStream( iface )->ref );
+}
+
+static ULONG WINAPI rasstream_Release( IStream *iface )
+{
+    struct ras_over_stream *impl = rasstream_from_IStream( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->ras) VT_RELEASE( impl->ras );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT create_winrt_buffer( ULONG capacity, void **out )
+{
+    static const WCHAR cls[] = L"Windows.Storage.Streams.Buffer";
+    static const GUID iid_buffer_factory =
+        { 0x71af914d, 0xc10f, 0x484b, { 0xbc, 0x50, 0x14, 0xbc, 0x62, 0x3b, 0x3a, 0x27 } };
+    IActivationFactory *factory;
+    HSTRING hs;
+    HRESULT hr;
+
+    *out = NULL;
+    if (FAILED( (hr = WindowsCreateString( cls, ARRAY_SIZE( cls ) - 1, &hs )) )) return hr;
+    hr = RoGetActivationFactory( hs, &iid_buffer_factory, (void **)&factory );
+    WindowsDeleteString( hs );
+    if (SUCCEEDED( hr ))
+    {
+        hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, ULONG, void ** ))VT_SLOT( factory, 6 ))( factory, capacity, out );
+        IActivationFactory_Release( factory );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI rasstream_Read( IStream *iface, void *pv, ULONG cb, ULONG *got )
+{
+    static const GUID iid_buffer_byte_access =
+        { 0x905a0fef, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+    static const GUID iid_input_stream =
+        { 0x905a0fe2, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+    static const GUID iid_async_info =
+        { 0x00000036, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    struct ras_over_stream *impl = rasstream_from_IStream( iface );
+    void *buffer = NULL, *in = NULL, *op = NULL, *res = NULL;
+    BOOL used_qi_input = FALSE;
+    HRESULT hr;
+
+    TRACE( "%p pv %p cb %lu\n", iface, pv, cb );
+    if (got) *got = 0;
+    if (!pv) return E_POINTER;
+    if (!cb) return S_OK;
+    if (FAILED( (hr = create_winrt_buffer( cb, &buffer )) )) { TRACE( "create_winrt_buffer hr=%08lx\n", hr ); return hr; }
+
+    hr = RAS_CALL( impl->ras, 8, (UINT64)impl->pos, &in );              /* GetInputStreamAt */
+    if (SUCCEEDED( hr ) && in)
+    {
+        hr = RAS_CALL( in, 15, buffer, cb, (INT32)1, &op );             /* ReadAsync(buffer, cb, Options) */
+    }
+    else
+    {
+        hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, REFIID, void ** ))VT_SLOT( impl->ras, 0 ))( impl->ras, &iid_input_stream, &in );
+        TRACE( "QI IInputStream hr=%08lx in=%p\n", hr, in );
+        if (SUCCEEDED( hr ) && in)
+        {
+            used_qi_input = TRUE;
+            RAS_CALL( impl->ras, 11, (UINT64)impl->pos );               /* Seek */
+            hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, void *, UINT32, INT32, void ** ))VT_SLOT( in, 6 ))( in, buffer, cb, 1, &op );
+            TRACE( "IInputStream::ReadAsync hr=%08lx op=%p\n", hr, op );
+        }
+    }
+    if (SUCCEEDED( hr ) && op && used_qi_input)
+    {
+        void *ai = NULL;
+        HRESULT qi_ai = ((HRESULT (STDMETHODCALLTYPE *)( void *, REFIID, void ** ))VT_SLOT( op, 0 ))( op, &iid_async_info, &ai );
+        TRACE( "QI IAsyncInfo hr=%08lx ai=%p\n", qi_ai, ai );
+        if (SUCCEEDED( qi_ai ) && ai)
+        {
+            INT32 st = -1;
+            HRESULT ec = 0;
+            int spin = 0;
+            while (SUCCEEDED( ((HRESULT (STDMETHODCALLTYPE *)( void *, INT32 * ))VT_SLOT( ai, 7 ))( ai, &st ) ) && st == 0 && spin++ < 3000)
+                Sleep( 1 );
+            ((HRESULT (STDMETHODCALLTYPE *)( void *, HRESULT * ))VT_SLOT( ai, 8 ))( ai, &ec );
+            TRACE( "IAsyncInfo st=%d ec=%08lx spin=%d\n", st, ec, spin );
+            VT_RELEASE( ai );
+        }
+    }
+    if (SUCCEEDED( hr ) && op)
+    {
+        hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, void ** ))VT_SLOT( op, 10 ))( op, &res ); /* GetResults */
+        TRACE( "GetResults hr=%08lx res=%p\n", hr, res );
+    }
+    if (SUCCEEDED( hr ) && res)
+    {
+        ULONG len = 0;
+        void *ba = NULL;
+        if (SUCCEEDED( ((HRESULT (STDMETHODCALLTYPE *)( void *, REFIID, void ** ))VT_SLOT( res, 0 ))( res, &iid_buffer_byte_access, &ba ) ) && ba)
+        {
+            BYTE *ptr = NULL;
+            hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, ULONG * ))VT_SLOT( res, 7 ))( res, &len ); /* IBuffer::get_Length */
+            if (SUCCEEDED( hr ))
+                hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, BYTE ** ))VT_SLOT( ba, 3 ))( ba, &ptr ); /* IBufferByteAccess::Buffer */
+            if (SUCCEEDED( hr ) && len)
+            {
+                if (len > cb) len = cb;
+                memcpy( pv, ptr, len );
+            }
+            VT_RELEASE( ba );
+        }
+        else
+        {
+            hr = RAS_CALL( res, 10, (BYTE *)pv, (ULONG)0, cb );         /* mem_buffer rdc(dst, off, len) */
+            if (SUCCEEDED( hr ))
+                hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, ULONG * ))VT_SLOT( res, 6 ))( res, &len );
+        }
+        if (SUCCEEDED( hr ))
+        {
+            impl->pos += len;
+            if (got) *got = len;
+        }
+        VT_RELEASE( res );
+    }
+    if (op) VT_RELEASE( op );
+    if (in) VT_RELEASE( in );
+    if (buffer) VT_RELEASE( buffer );
+    return hr;
+}
+
+static HRESULT WINAPI rasstream_Seek( IStream *iface, LARGE_INTEGER offset, DWORD origin, ULARGE_INTEGER *pos )
+{
+    struct ras_over_stream *impl = rasstream_from_IStream( iface );
+    UINT64 base;
+
+    switch (origin)
+    {
+    case 0: /* STREAM_SET */
+        base = offset.QuadPart;
+        break;
+    case 1: /* STREAM_SETCUR */
+        base = impl->pos + offset.QuadPart;
+        break;
+    case 2: /* STREAM_SETEOF */
+        {
+            UINT64 size = 0;
+            HRESULT hr = RAS_CALL( impl->ras, 6, &size );               /* get_Size */
+            if (FAILED( hr )) return hr;
+            base = size + offset.QuadPart;
+        }
+        break;
+    default:
+        return STG_E_INVALIDFUNCTION;
+    }
+    impl->pos = base;
+    RAS_CALL( impl->ras, 11, base );                                    /* Seek (keep face in sync) */
+    if (pos) pos->QuadPart = base;
+    return S_OK;
+}
+
+static HRESULT WINAPI rasstream_SetSize( IStream *iface, ULARGE_INTEGER size )
+{
+    struct ras_over_stream *impl = rasstream_from_IStream( iface );
+    return RAS_CALL( impl->ras, 7, (UINT64)size.QuadPart );             /* put_Size */
+}
+
+static HRESULT WINAPI rasstream_CopyTo( IStream *iface, IStream *dest, ULARGE_INTEGER cb,
+                                        ULARGE_INTEGER *read, ULARGE_INTEGER *written )
+{
+    struct ras_over_stream *impl = rasstream_from_IStream( iface );
+    BYTE *tmp;
+    ULONG got = 0, put = 0, total = 0;
+    HRESULT hr;
+
+    if (!dest) return E_POINTER;
+    if (cb.QuadPart == ~0ull) cb.QuadPart = 1 << 20;
+    if (!(tmp = malloc( cb.QuadPart ? cb.QuadPart : 1 ))) return E_OUTOFMEMORY;
+    while (cb.QuadPart)
+    {
+        ULONG chunk = (ULONG)min( cb.QuadPart, (ULONGLONG)(1 << 20) );
+        if (FAILED( (hr = IStream_Read( iface, tmp, chunk, &got )) )) break;
+        if (!got) { hr = S_OK; break; }
+        if (FAILED( (hr = IStream_Write( dest, tmp, got, &put )) )) break;
+        cb.QuadPart -= got;
+        total += got;
+        if (got < chunk) { hr = S_OK; break; }
+    }
+    if (read) read->QuadPart = total;
+    if (written) written->QuadPart = total;
+    (void)impl;
+    free( tmp );
+    return hr;
+}
+
+static HRESULT WINAPI rasstream_Commit( IStream *iface, DWORD flags ) { return S_OK; }
+static HRESULT WINAPI rasstream_Revert( IStream *iface ) { return S_OK; }
+static HRESULT WINAPI rasstream_LockRegion( IStream *iface, ULARGE_INTEGER off, ULARGE_INTEGER len, DWORD mode ) { return S_OK; }
+static HRESULT WINAPI rasstream_UnlockRegion( IStream *iface, ULARGE_INTEGER off, ULARGE_INTEGER len, DWORD mode ) { return S_OK; }
+
+static HRESULT WINAPI rasstream_Stat( IStream *iface, STATSTG *stat, DWORD flags )
+{
+    struct ras_over_stream *impl = rasstream_from_IStream( iface );
+    UINT64 size = 0;
+    HRESULT hr;
+
+    if (!stat) return E_POINTER;
+    memset( stat, 0, sizeof(*stat) );
+    hr = RAS_CALL( impl->ras, 6, &size );                               /* get_Size */
+    if (FAILED( hr )) return hr;
+    stat->type = STGTY_STREAM;
+    stat->cbSize.QuadPart = size;
+    return S_OK;
+}
+
+static HRESULT WINAPI rasstream_Clone( IStream *iface, IStream **cloned )
+{
+    struct ras_over_stream *impl = rasstream_from_IStream( iface );
+    struct ras_over_stream *clone;
+    void *ras = NULL;
+    HRESULT hr;
+
+    if (!cloned) return E_POINTER;
+    *cloned = NULL;
+    if (FAILED( (hr = RAS_CALL( impl->ras, 12, &ras )) )) return hr;    /* CloneStream */
+    if (!(clone = calloc( 1, sizeof(*clone) )))
+    {
+        VT_RELEASE( ras );
+        return E_OUTOFMEMORY;
+    }
+    clone->lpVtbl = impl->lpVtbl;
+    clone->ref = 1;
+    clone->ras = ras;
+    *cloned = (IStream *)clone;
+    return S_OK;
+}
+
+static HRESULT WINAPI rasstream_Write( IStream *iface, const void *pv, ULONG cb, ULONG *written )
+{
+    if (written) *written = cb;
+    return S_OK;
+}
+
+static const IStreamVtbl rasstream_vtbl =
+{
+    rasstream_QueryInterface,
+    rasstream_AddRef,
+    rasstream_Release,
+    rasstream_Read,
+    rasstream_Write,
+    rasstream_Seek,
+    rasstream_SetSize,
+    rasstream_CopyTo,
+    rasstream_Commit,
+    rasstream_Revert,
+    rasstream_LockRegion,
+    rasstream_UnlockRegion,
+    rasstream_Stat,
+    rasstream_Clone,
+};
+
+/*************************************************************************
+ * CreateStreamOverRandomAccessStream        [SHCORE.@]
+ */
+HRESULT WINAPI CreateStreamOverRandomAccessStream( void *random_access_stream, REFIID riid, void **ppv )
+{
+    struct ras_over_stream *impl;
+    HRESULT hr;
+
+    TRACE( "%p %s %p\n", random_access_stream, debugstr_guid( riid ), ppv );
+    if (!ppv) return E_POINTER;
+    *ppv = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->lpVtbl = &rasstream_vtbl;
+    impl->ref = 1;
+    impl->ras = random_access_stream;
+    if (random_access_stream) VT_ADDREF( random_access_stream );
+    hr = IStream_QueryInterface( (IStream *)impl, riid, ppv );
+    IStream_Release( (IStream *)impl );
+    return hr;
 }
 
 /*************************************************************************
