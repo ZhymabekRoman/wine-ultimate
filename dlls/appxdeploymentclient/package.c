@@ -25,6 +25,14 @@
 #include "winreg.h"
 #include "objbase.h"
 #include "appmodel.h"
+#include "weakreference.h"
+
+static const GUID IID_IWeakReference_local =
+    { 0x00000037, 0x0000, 0x0000, {0xc0,0x00,0x00,0x00,0x00,0x00,0x00,0x46} };
+static const GUID IID_IWeakReferenceSource_local =
+    { 0x00000038, 0x0000, 0x0000, {0xc0,0x00,0x00,0x00,0x00,0x00,0x00,0x46} };
+static const GUID IID_IPackage4_local =
+    { 0x65aed1ae, 0xb95b, 0x450c, {0x88,0x2b,0x62,0x55,0x18,0x7f,0x39,0x7e} };
 
 WINE_DEFAULT_DEBUG_CHANNEL(appx);
 
@@ -1822,11 +1830,14 @@ static void split_full_name( const WCHAR *full, WCHAR *name, DWORD cch_name,
     end = wcschr( p, L'_' );
     if (end)
     {
-        if (!wcsncmp( p, L"x86", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_X86;
-        else if (!wcsncmp( p, L"x64", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_X64;
-        else if (!wcsncmp( p, L"arm64", 5 ) && (end - p == 5 )) *arch = ProcessorArchitecture_Arm64;
-        else if (!wcsncmp( p, L"arm", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_Arm;
-        else if (!wcsncmp( p, L"neutral", 7 ) && (end - p == 7 )) *arch = ProcessorArchitecture_Neutral;
+        if (arch)
+        {
+            if (!wcsncmp( p, L"x86", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_X86;
+            else if (!wcsncmp( p, L"x64", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_X64;
+            else if (!wcsncmp( p, L"arm64", 5 ) && (end - p == 5 )) *arch = ProcessorArchitecture_Arm64;
+            else if (!wcsncmp( p, L"arm", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_Arm;
+            else if (!wcsncmp( p, L"neutral", 7 ) && (end - p == 7 )) *arch = ProcessorArchitecture_Neutral;
+        }
         if (!*end) return;
         p = end + 1;  /* the neutral arch token is empty: 'Name_Version__Publisher' */
         if (!*p)
@@ -1843,6 +1854,7 @@ struct package
 {
     IPackage IPackage_iface;
     IPackage3 IPackage3_iface;
+    const void **IPackage4_vtbl;
     IPackageId IPackageId_iface;
     IStorageFolder IStorageFolder_iface;
     IStorageItem IStorageItem_iface;
@@ -1874,6 +1886,10 @@ static HRESULT WINAPI package_QueryInterface( IPackage *iface, REFIID iid, void 
     else if (IsEqualGUID( iid, &IID_IPackage3 ))
     {
         *out = &impl->IPackage3_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IPackage4_local ))
+    {
+        *out = &impl->IPackage4_vtbl;
     }
     else if (IsEqualGUID( iid, &IID_IPackageId ))
     {
@@ -2652,6 +2668,44 @@ static const struct IPackage3Vtbl package3_vtbl =
     package_GetAppListEntriesAsync,
 };
 
+static HRESULT WINAPI package4_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IPackage4_vtbl );
+    return package_QueryInterface( &impl->IPackage_iface, iid, out );
+}
+static ULONG WINAPI package4_AddRef( void *iface )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IPackage4_vtbl );
+    return package_AddRef( &impl->IPackage_iface );
+}
+static ULONG WINAPI package4_Release( void *iface )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IPackage4_vtbl );
+    return package_Release( &impl->IPackage_iface );
+}
+static HRESULT WINAPI package4_GetIids( void *iface, ULONG *c, IID **i ) { *c = 0; *i = NULL; return S_OK; }
+static HRESULT WINAPI package4_GetRCN( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.Package", 32, n );
+}
+static HRESULT WINAPI package4_GetTL( void *iface, TrustLevel *l ) { *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI package4_get_SignatureKind( void *iface, INT32 *value ) { *value = 3; /* Store */ return S_OK; }
+static HRESULT WINAPI package4_get_IsOptional( void *iface, boolean *value ) { *value = FALSE; return S_OK; }
+static HRESULT WINAPI package4_VerifyContentIntegrityAsync( void *iface, void **op ) { return E_NOTIMPL; }
+
+static const void *package4_vtbl[] =
+{
+    package4_QueryInterface,
+    package4_AddRef,
+    package4_Release,
+    package4_GetIids,
+    package4_GetRCN,
+    package4_GetTL,
+    package4_get_SignatureKind,
+    package4_get_IsOptional,
+    package4_VerifyContentIntegrityAsync,
+};
+
 static HRESULT package_create( const struct package_record *rec, struct package **ret )
 {
     struct package *impl;
@@ -2659,6 +2713,7 @@ static HRESULT package_create( const struct package_record *rec, struct package 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IPackage_iface.lpVtbl = &package_vtbl;
     impl->IPackage3_iface.lpVtbl = &package3_vtbl;
+    impl->IPackage4_vtbl = package4_vtbl;
     impl->IPackageId_iface.lpVtbl = &packageid_vtbl;
     impl->IStorageFolder_iface.lpVtbl = &package_folder_vtbl;
     impl->IStorageItem_iface.lpVtbl = &package_item_vtbl;
@@ -3716,17 +3771,82 @@ struct package_catalog_event
     LONG64 token;
 };
 
+struct pkg_cat_weak_ref
+{
+    IWeakReference IWeakReference_iface;
+    IUnknown *object;
+    LONG ref_strong;
+    LONG ref_weak;
+};
+
 struct package_catalog
 {
     IPackageCatalog IPackageCatalog_iface;
     IPackageCatalog2 IPackageCatalog2_iface;
     IPackageCatalog3 IPackageCatalog3_iface;
+    IWeakReferenceSource IWeakReferenceSource_iface;
+    struct pkg_cat_weak_ref *weak_ref;
     LONG ref;
     IPackage *package;
     CRITICAL_SECTION cs;
     struct package_catalog_event *events;
     ULONG event_count;
     ULONG event_capacity;
+};
+
+static inline struct pkg_cat_weak_ref *weak_from_iface( IWeakReference *iface )
+{
+    return CONTAINING_RECORD( iface, struct pkg_cat_weak_ref, IWeakReference_iface );
+}
+
+static HRESULT WINAPI pkg_cat_weak_QueryInterface( IWeakReference *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IWeakReference_local ))
+    {
+        *out = iface;
+        IWeakReference_AddRef( iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI pkg_cat_weak_AddRef( IWeakReference *iface )
+{
+    return InterlockedIncrement( &weak_from_iface( iface )->ref_weak );
+}
+
+static ULONG WINAPI pkg_cat_weak_Release( IWeakReference *iface )
+{
+    struct pkg_cat_weak_ref *impl = weak_from_iface( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref_weak );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI pkg_cat_weak_Resolve( IWeakReference *iface, REFIID iid, IInspectable **out )
+{
+    struct pkg_cat_weak_ref *impl = weak_from_iface( iface );
+    HRESULT hr;
+    LONG ref;
+
+    *out = NULL;
+    do
+    {
+        if (!(ref = ReadNoFence( &impl->ref_strong ))) return S_OK;
+    } while (ref != InterlockedCompareExchange( &impl->ref_strong, ref + 1, ref ));
+
+    hr = IUnknown_QueryInterface( impl->object, iid, (void **)out );
+    IUnknown_Release( impl->object );
+    return hr;
+}
+
+static const struct IWeakReferenceVtbl pkg_cat_weak_vtbl =
+{
+    pkg_cat_weak_QueryInterface,
+    pkg_cat_weak_AddRef,
+    pkg_cat_weak_Release,
+    pkg_cat_weak_Resolve,
 };
 
 static inline struct package_catalog *impl_from_IPackageCatalog( IPackageCatalog *iface )
@@ -3764,6 +3884,13 @@ static HRESULT WINAPI package_catalog_QueryInterface( IPackageCatalog *iface, RE
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
+    {
+        *out = &impl->IWeakReferenceSource_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -3773,6 +3900,7 @@ static ULONG WINAPI package_catalog_AddRef( IPackageCatalog *iface )
 {
     struct package_catalog *impl = impl_from_IPackageCatalog( iface );
     ULONG ref = InterlockedIncrement( &impl->ref );
+    if (impl->weak_ref) InterlockedIncrement( &impl->weak_ref->ref_strong );
     TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
     return ref;
 }
@@ -3781,6 +3909,11 @@ static ULONG WINAPI package_catalog_Release( IPackageCatalog *iface )
 {
     struct package_catalog *impl = impl_from_IPackageCatalog( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
+    if (impl->weak_ref)
+    {
+        if (!InterlockedDecrement( &impl->weak_ref->ref_strong ))
+            IWeakReference_Release( &impl->weak_ref->IWeakReference_iface );
+    }
     TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
     if (!ref)
     {
@@ -4023,14 +4156,54 @@ static const struct IPackageCatalog3Vtbl package_catalog3_vtbl =
     package_catalog3_RemoveOptionalPackagesAsync,
 };
 
+static HRESULT WINAPI pkg_cat_wrs_QueryInterface( IWeakReferenceSource *iface, REFIID iid, void **out )
+{
+    struct package_catalog *impl = CONTAINING_RECORD( iface, struct package_catalog, IWeakReferenceSource_iface );
+    return package_catalog_QueryInterface( &impl->IPackageCatalog_iface, iid, out );
+}
+static ULONG WINAPI pkg_cat_wrs_AddRef( IWeakReferenceSource *iface )
+{
+    struct package_catalog *impl = CONTAINING_RECORD( iface, struct package_catalog, IWeakReferenceSource_iface );
+    return package_catalog_AddRef( &impl->IPackageCatalog_iface );
+}
+static ULONG WINAPI pkg_cat_wrs_Release( IWeakReferenceSource *iface )
+{
+    struct package_catalog *impl = CONTAINING_RECORD( iface, struct package_catalog, IWeakReferenceSource_iface );
+    return package_catalog_Release( &impl->IPackageCatalog_iface );
+}
+static HRESULT WINAPI pkg_cat_wrs_GetWeakReference( IWeakReferenceSource *iface, IWeakReference **weak_ref )
+{
+    struct package_catalog *impl = CONTAINING_RECORD( iface, struct package_catalog, IWeakReferenceSource_iface );
+    *weak_ref = &impl->weak_ref->IWeakReference_iface;
+    IWeakReference_AddRef( *weak_ref );
+    return S_OK;
+}
+static const struct IWeakReferenceSourceVtbl pkg_cat_wrs_vtbl =
+{
+    pkg_cat_wrs_QueryInterface,
+    pkg_cat_wrs_AddRef,
+    pkg_cat_wrs_Release,
+    pkg_cat_wrs_GetWeakReference,
+};
+
 static HRESULT package_catalog_create( IPackage *package, IPackageCatalog **out )
 {
     struct package_catalog *impl;
 
     if (!out) return E_INVALIDARG;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    if (!(impl->weak_ref = calloc( 1, sizeof(*impl->weak_ref) )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    impl->weak_ref->IWeakReference_iface.lpVtbl = &pkg_cat_weak_vtbl;
+    impl->weak_ref->object = (IUnknown *)&impl->IPackageCatalog_iface;
+    impl->weak_ref->ref_strong = 1;
+    impl->weak_ref->ref_weak = 1;
     if (!(impl->events = calloc( 16, sizeof(*impl->events) )))
     {
+        free( impl->weak_ref );
         free( impl );
         return E_OUTOFMEMORY;
     }
@@ -4040,6 +4213,7 @@ static HRESULT package_catalog_create( IPackage *package, IPackageCatalog **out 
     impl->IPackageCatalog_iface.lpVtbl = &package_catalog_vtbl;
     impl->IPackageCatalog2_iface.lpVtbl = &package_catalog2_vtbl;
     impl->IPackageCatalog3_iface.lpVtbl = &package_catalog3_vtbl;
+    impl->IWeakReferenceSource_iface.lpVtbl = &pkg_cat_wrs_vtbl;
     impl->ref = 1;
     if (package)
     {
