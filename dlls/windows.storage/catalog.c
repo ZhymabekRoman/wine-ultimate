@@ -205,7 +205,7 @@ static HRESULT WINAPI catalog_remove_StorageLibraryChanged(IStorageLibraryChange
 static HRESULT WINAPI catalog_RequestServerDeregistration(IStorageLibraryChangeListener *iface,
         uint32_t reserved)
 {
-    TRACE("iface %p, reserved %#lx.\n", iface, reserved);
+    TRACE("iface %p, reserved %#x.\n", iface, reserved);
     return S_OK;
 }
 

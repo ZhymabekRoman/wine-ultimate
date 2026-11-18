@@ -1186,12 +1186,12 @@ static HRESULT WINAPI storage_item2_folder_IsEqual( IStorageItem2 *iface, IStora
     struct storage_folder *impl = impl_from_IStorageItem2_Folder( iface );
     HSTRING str = NULL;
     if (!result) return E_POINTER;
-    *result = false;
+    *result = FALSE;
     if (!item) return S_OK;
     if (SUCCEEDED( IStorageItem_get_Path( item, &str ) ) && str)
     {
         const WCHAR *p = WindowsGetStringRawBuffer( str, NULL );
-        if (p && !wcsicmp( p, impl->path )) *result = true;
+        if (p && !wcsicmp( p, impl->path )) *result = TRUE;
         WindowsDeleteString( str );
     }
     return S_OK;
@@ -1575,7 +1575,7 @@ static HRESULT WINAPI storage_folder_GetFilesAsyncOverloadDefaultOptionsStartAnd
     IVectorView_StorageFile *view = NULL;
     HANDLE find;
     WIN32_FIND_DATAW data;
-    UINT32 count = 0, cap = 0, valid = 0;
+    UINT32 count = 0, cap = 0;
     HRESULT hr;
 
     folder_join_path( impl->path, L"*", pattern, ARRAY_SIZE(pattern) );
@@ -1603,8 +1603,6 @@ static HRESULT WINAPI storage_folder_GetFilesAsyncOverloadDefaultOptionsStartAnd
             if (SUCCEEDED(storage_file_create( path, &file )))
             {
                 files[count++] = file;
-                if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                ++valid;
             }
         }
         while (FindNextFileW( find, &data ));
@@ -1673,12 +1671,12 @@ static HRESULT WINAPI folder_view_IndexOf( IVectorView_StorageFolder *iface, ISt
         if (impl->items[i] == item)
         {
             *index = i;
-            *found = true;
+            *found = TRUE;
             return S_OK;
         }
     }
     *index = 0;
-    *found = false;
+    *found = FALSE;
     return S_OK;
 }
 
