@@ -17,7 +17,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -3027,7 +3026,7 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
     }
 
     if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ) ||
-        IsEqualGUID( iid, &IID_IApplicationOverrides_WinUI ))
+        (xaml_get_app_caps()->winui3 && IsEqualGUID( iid, &IID_IApplicationOverrides_WinUI )))
     {
         *out = &impl->overrides_uwp_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -3207,7 +3206,7 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
     }
 
     if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ) ||
-        IsEqualGUID( iid, &IID_IApplicationOverrides_WinUI ))
+        (xaml_get_app_caps()->winui3 && IsEqualGUID( iid, &IID_IApplicationOverrides_WinUI )))
     {
         *out = &impl->overrides_uwp_iface;
         IInspectable_AddRef( (IInspectable *)*out );

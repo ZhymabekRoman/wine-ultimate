@@ -1311,6 +1311,17 @@ static HRESULT WINAPI settings_values_Insert( IPropertySet *iface, HSTRING key, 
     struct settings_values *impl = impl_from_IPropertySet( iface );
     HRESULT hr;
 
+    if (!value)
+    {
+        boolean has = FALSE;
+        settings_inner_vt( impl )->HasKey( impl->inner, key, &has );
+        if (has) settings_inner_vt( impl )->Remove( impl->inner, key );
+        if (impl->hkey) RegDeleteValueW( impl->hkey, WindowsGetStringRawBuffer( key, NULL ) );
+        if (replaced) *replaced = has;
+        if (impl->owner) application_data_fire_data_changed( impl->owner );
+        return S_OK;
+    }
+
     if (!(hr = settings_inner_vt( impl )->Insert( impl->inner, key, value, replaced )))
     {
         if (impl->hkey) reg_store_value( impl->hkey, key, value );
