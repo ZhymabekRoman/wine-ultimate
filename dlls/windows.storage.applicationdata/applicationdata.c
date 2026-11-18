@@ -1126,7 +1126,9 @@ struct settings_values
     IMap_HSTRING_IInspectable IMap_iface;
     IIterable_IKeyValuePair_HSTRING_IInspectable IIterable_iface;
     IObservableMap_HSTRING_IInspectable IObservableMap_iface;
+    IApplicationDataContainerMethods IApplicationDataContainerMethods_iface;
     LONG ref;
+    ApplicationDataLocality locality;
     IPropertySet *inner;
     HKEY hkey;
     struct application_data *owner;
@@ -1181,6 +1183,7 @@ static const struct settings_vtbl *settings_inner_vt( struct settings_values *im
 
 static HRESULT WINAPI settings_values_QueryInterface( IPropertySet *iface, REFIID iid, void **out )
 {
+    TRACE( "%s\n", debugstr_a(__func__) );
     struct settings_values *impl = impl_from_IPropertySet( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
@@ -1212,6 +1215,12 @@ static HRESULT WINAPI settings_values_QueryInterface( IPropertySet *iface, REFII
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
+    {
+        *out = &impl->IApplicationDataContainerMethods_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -1239,26 +1248,31 @@ static ULONG WINAPI settings_values_Release( IPropertySet *iface )
 }
 
 static const struct settings_vtbl settings_values_vtbl;
+static const struct IApplicationDataContainerMethodsVtbl settings_methods_vtbl;
 
 static HRESULT WINAPI settings_values_GetIids( IPropertySet *iface, ULONG *count, IID **iids )
 {
     struct settings_values *impl = impl_from_IPropertySet( iface );
 
-    /* Stable per-object pair block, see application_data_GetIids (xamlwave9). */
-    if (!impl->iids_cache)
+    TRACE( "iface %p, count %p, iids %p.\n", iface, count, iids );
+
+    /* Fresh Guid** array per call (empty_map_view precedent): the CoreCLR
+     * shader frees the probe array before consuming the next, so a cached
+     * block goes dangling — the dangling read produced a zero-length
+     * ComVirtualMethodData and the methods-face get_Values consumer crashed
+     * in CreateVirtualMethodData (failfast 0x1007, Store SplashPage). */
     {
-        static const struct com_interface_entry entries[] =
+        static const IID *entries[] =
         {
-            { (void **)&settings_values_vtbl, (IID *)&IID_IPropertySet },
+            &IID_IPropertySet,
         };
-        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        const IID **array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof( entries ) );
-        impl->iids_cache = array;
-        impl->iids_count = ARRAY_SIZE( entries );
+        /* Small count pointers (null-page scratch, see container_GetIids). */
+        if (count && (uintptr_t)count >= 0x10000) *count = ARRAY_SIZE( entries );
+        if (iids) *iids = (IID *)array;
     }
-    if (count) *count = impl->iids_count;
-    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 
@@ -1276,6 +1290,7 @@ static HRESULT WINAPI settings_values_GetTrustLevel( IPropertySet *iface, TrustL
 
 static HRESULT WINAPI settings_values_Lookup( IPropertySet *iface, HSTRING key, IInspectable **value )
 {
+    TRACE( "%s\n", debugstr_a(__func__) );
     struct settings_values *impl = impl_from_IPropertySet( iface );
     HRESULT hr = settings_inner_vt( impl )->Lookup( impl->inner, key, value );
     if (hr == E_BOUNDS && value)
@@ -1288,6 +1303,7 @@ static HRESULT WINAPI settings_values_Lookup( IPropertySet *iface, HSTRING key, 
 
 static HRESULT WINAPI settings_values_get_Size( IPropertySet *iface, unsigned int *size )
 {
+    TRACE( "%s\n", debugstr_a(__func__) );
     struct settings_values *impl = impl_from_IPropertySet( iface );
     HRESULT hr = settings_inner_vt( impl )->get_Size( impl->inner, size );
     TRACE( "map %p get_Size hr %#lx size %u\n", impl, hr, size ? *size : 0 );
@@ -1296,18 +1312,21 @@ static HRESULT WINAPI settings_values_get_Size( IPropertySet *iface, unsigned in
 
 static HRESULT WINAPI settings_values_HasKey( IPropertySet *iface, HSTRING key, boolean *found )
 {
+    TRACE( "%s\n", debugstr_a(__func__) );
     struct settings_values *impl = impl_from_IPropertySet( iface );
     return settings_inner_vt( impl )->HasKey( impl->inner, key, found );
 }
 
 static HRESULT WINAPI settings_values_GetView( IPropertySet *iface, IMapView_HSTRING_IInspectable **view )
 {
+    TRACE( "%s\n", debugstr_a(__func__) );
     struct settings_values *impl = impl_from_IPropertySet( iface );
     return settings_inner_vt( impl )->GetView( impl->inner, view );
 }
 
 static HRESULT WINAPI settings_values_Insert( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced )
 {
+    TRACE( "%s\n", debugstr_a(__func__) );
     struct settings_values *impl = impl_from_IPropertySet( iface );
     HRESULT hr;
 
@@ -1332,6 +1351,7 @@ static HRESULT WINAPI settings_values_Insert( IPropertySet *iface, HSTRING key, 
 
 static HRESULT WINAPI settings_values_Remove( IPropertySet *iface, HSTRING key )
 {
+    TRACE( "%s\n", debugstr_a(__func__) );
     struct settings_values *impl = impl_from_IPropertySet( iface );
     HRESULT hr;
 
@@ -1578,7 +1598,131 @@ static const struct IObservableMap_HSTRING_IInspectableVtbl settings_observable_
     settings_observable_remove_MapChanged,
 };
 
-static HRESULT settings_values_create( struct application_data *owner, const WCHAR *subkey, IPropertySet **out )
+static HRESULT container_create( ApplicationDataLocality locality, struct application_data *owner,
+                                 IApplicationDataContainer **out );
+static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IPropertySet **value );
+static HRESULT WINAPI container_get_Containers( IApplicationDataContainer *iface,
+                                                IMapView_HSTRING_ApplicationDataContainer **value );
+static HRESULT WINAPI container_CreateContainer( IApplicationDataContainer *iface, HSTRING name,
+                                                 ApplicationDataCreateDisposition disposition,
+                                                 IApplicationDataContainer **container );
+static HRESULT WINAPI container_DeleteContainer( IApplicationDataContainer *iface, HSTRING name );
+
+/* Windows projects IApplicationDataContainerMethods ({11d3b13a-...}, slot 6 =
+ * GetAllContains) onto the PropertySet class too: the Store app QIs the
+ * LocalSettings.Values object for it and calls GetAllContains. Without the
+ * face the CsWinRT/CoreRT caller sees E_NOINTERFACE and the splash page
+ * awaits a data-bound collection that never fills. */
+static inline struct settings_values *impl_from_IApplicationDataContainerMethods(
+        IApplicationDataContainerMethods *iface )
+{
+    return CONTAINING_RECORD( iface, struct settings_values, IApplicationDataContainerMethods_iface );
+}
+
+static HRESULT WINAPI settings_methods_QueryInterface( IApplicationDataContainerMethods *iface, REFIID iid, void **out )
+{
+    return settings_values_QueryInterface( &impl_from_IApplicationDataContainerMethods( iface )->IPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI settings_methods_AddRef( IApplicationDataContainerMethods *iface )
+{
+    return settings_values_AddRef( &impl_from_IApplicationDataContainerMethods( iface )->IPropertySet_iface );
+}
+
+static ULONG WINAPI settings_methods_Release( IApplicationDataContainerMethods *iface )
+{
+    return settings_values_Release( &impl_from_IApplicationDataContainerMethods( iface )->IPropertySet_iface );
+}
+
+static HRESULT WINAPI settings_methods_GetIids( IApplicationDataContainerMethods *iface, ULONG *count, IID **iids )
+{
+    return settings_values_GetIids( &impl_from_IApplicationDataContainerMethods( iface )->IPropertySet_iface, count, iids );
+}
+
+static HRESULT WINAPI settings_methods_GetRuntimeClassName( IApplicationDataContainerMethods *iface, HSTRING *name )
+{
+    return settings_values_GetRuntimeClassName( &impl_from_IApplicationDataContainerMethods( iface )->IPropertySet_iface, name );
+}
+
+static HRESULT WINAPI settings_methods_GetTrustLevel( IApplicationDataContainerMethods *iface, TrustLevel *level )
+{
+    return settings_values_GetTrustLevel( &impl_from_IApplicationDataContainerMethods( iface )->IPropertySet_iface, level );
+}
+
+static HRESULT WINAPI settings_methods_GetAllContains( IApplicationDataContainerMethods *iface,
+                                                      IApplicationDataContainer **container )
+{
+    struct settings_values *impl = impl_from_IApplicationDataContainerMethods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
+    return container_create( ApplicationDataLocality_Local, impl->owner, container );
+}
+
+static HRESULT WINAPI settings_methods_get_Values( IApplicationDataContainerMethods *iface, IPropertySet **value )
+{
+    struct settings_values *impl = impl_from_IApplicationDataContainerMethods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
+    IPropertySet *self = &impl->IPropertySet_iface;
+    IPropertySet_AddRef( self );
+    *value = self;
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_methods_get_Containers( IApplicationDataContainerMethods *iface,
+                                                      IMapView_HSTRING_ApplicationDataContainer **value )
+{
+    struct settings_values *impl = impl_from_IApplicationDataContainerMethods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
+    IApplicationDataContainer *snap;
+    HRESULT hr = container_create( impl->locality, impl->owner, &snap );
+    if (FAILED( hr )) return hr;
+    hr = container_get_Containers( snap, value );
+    IApplicationDataContainer_Release( snap );
+    return hr;
+}
+
+static HRESULT WINAPI settings_methods_CreateContainer( IApplicationDataContainerMethods *iface, HSTRING name,
+                                                       ApplicationDataCreateDisposition disposition,
+                                                       IApplicationDataContainer **container )
+{
+    struct settings_values *impl = impl_from_IApplicationDataContainerMethods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
+    IApplicationDataContainer *snap;
+    HRESULT hr = container_create( impl->locality, impl->owner, &snap );
+    if (FAILED( hr )) return hr;
+    hr = container_CreateContainer( snap, name, disposition, container );
+    IApplicationDataContainer_Release( snap );
+    return hr;
+}
+
+static HRESULT WINAPI settings_methods_DeleteContainer( IApplicationDataContainerMethods *iface, HSTRING name )
+{
+    struct settings_values *impl = impl_from_IApplicationDataContainerMethods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
+    IApplicationDataContainer *snap;
+    HRESULT hr = container_create( impl->locality, impl->owner, &snap );
+    if (FAILED( hr )) return hr;
+    hr = container_DeleteContainer( snap, name );
+    IApplicationDataContainer_Release( snap );
+    return hr;
+}
+
+static const struct IApplicationDataContainerMethodsVtbl settings_methods_vtbl =
+{
+    settings_methods_QueryInterface,
+    settings_methods_AddRef,
+    settings_methods_Release,
+    settings_methods_GetIids,
+    settings_methods_GetRuntimeClassName,
+    settings_methods_GetTrustLevel,
+        settings_methods_get_Values,
+    settings_methods_get_Containers,
+    settings_methods_CreateContainer,
+    settings_methods_DeleteContainer,
+settings_methods_GetAllContains,
+};
+
+static HRESULT settings_values_create( struct application_data *owner, const WCHAR *subkey,
+                                       ApplicationDataLocality locality, IPropertySet **out )
 {
     static const WCHAR class_name[] = L"Windows.Foundation.Collections.PropertySet";
     struct settings_values *impl;
@@ -1590,7 +1734,9 @@ static HRESULT settings_values_create( struct application_data *owner, const WCH
     impl->IMap_iface.lpVtbl = &settings_map_vtbl;
     impl->IIterable_iface.lpVtbl = &settings_iterable_vtbl;
     impl->IObservableMap_iface.lpVtbl = &settings_observable_vtbl;
+    impl->IApplicationDataContainerMethods_iface.lpVtbl = &settings_methods_vtbl;
     impl->ref = 1;
+    impl->locality = locality;
     impl->owner = owner;
 
     if (FAILED(hr = WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &class_id )))
@@ -1635,7 +1781,7 @@ static inline struct application_data_container *impl_from_IApplicationDataConta
     return CONTAINING_RECORD( iface, struct application_data_container, IApplicationDataContainer_iface );
 }
 
-static inline struct application_data_container *impl_from_IApplicationDataContainerMethods( IApplicationDataContainerMethods *iface )
+static inline struct application_data_container *impl_from_container_methods( IApplicationDataContainerMethods *iface )
 {
     return CONTAINING_RECORD( iface, struct application_data_container, IApplicationDataContainerMethods_iface );
 }
@@ -1649,6 +1795,12 @@ static HRESULT WINAPI container_qi_impl( IApplicationDataContainer *iface, REFII
         IsEqualGUID( iid, &IID_IApplicationDataContainer ))
     {
         *out = &impl->IApplicationDataContainer_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
+    {
+        *out = &impl->IApplicationDataContainerMethods_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -1687,29 +1839,33 @@ static ULONG WINAPI container_Release( IApplicationDataContainer *iface )
  * chain. */
 static const struct IApplicationDataContainerVtbl container_vtbl;
 static const struct IApplicationDataContainerMethodsVtbl container_methods_vtbl;
-static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl empty_map_view_vtbl;
+struct empty_observable_map_view_vtbl;
+static const struct empty_observable_map_view_vtbl empty_map_view_vtbl;
 
 static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG *count, IID **iids )
 {
     struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
 
-    /* Stable per-object pair block, see application_data_GetIids (xamlwave9). */
     TRACE( "iface %p, count %p, iids %p.\n", iface, count, iids );
 
-    if (!impl->iids_cache)
+    /* Fresh Guid** array per call: the shader frees the probe array before
+     * consuming the next, so a cached block goes dangling (zero-length
+     * ComVirtualMethodData, Store failfast 0x1007). */
     {
-        static const struct com_interface_entry entries[] =
+        static const IID *entries[] =
         {
-            { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
+            &IID_IApplicationDataContainer,
         };
-        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        const IID **array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof( entries ) );
-        impl->iids_cache = array;
-        impl->iids_count = ARRAY_SIZE( entries );
+        /* Store's XAML shader passes its count out-slot as a low null-page
+         * scratch value (0x14C/0x150 across runs); writing through it faults
+         * the RCW call wrapper into a failfast. Tolerate it — the iids array
+         * is what the shader consumes. */
+        if (count && (uintptr_t)count >= 0x10000) *count = ARRAY_SIZE( entries );
+        if (iids) *iids = (IID *)array;
     }
-    if (count) *count = impl->iids_count;
-    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 static HRESULT WINAPI container_GetRuntimeClassName( IApplicationDataContainer *iface, HSTRING *name )
@@ -1748,7 +1904,7 @@ static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IP
      * a previous process run) are visible. The container keeps one ref on the
      * last instance it handed out, mirroring the cached-map shape callers
      * expect. */
-    if (FAILED(hr = settings_values_create( impl->owner, impl->subkey, &values ))) return hr;
+    if (FAILED(hr = settings_values_create( impl->owner, impl->subkey, impl->locality, &values ))) return hr;
 
     if (impl->values) IPropertySet_Release( impl->values );
     impl->values = values;
@@ -1759,11 +1915,21 @@ static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IP
     return S_OK;
 }
 
+/* Instantiated GUIDs computed by CsWinRT (SHA1 of the projection signature);
+ * the Store's NativeAOT shader resolves GetIids entries against these, not the
+ * widl-computed IID___FIMapView_2_... values. */
+static const IID IID_IMapView_String_ApplicationDataContainer =
+    { 0x25d7260e, 0x3699, 0x7def, { 0x3f, 0x32, 0x3e, 0xc9, 0x10, 0x89, 0x5f, 0x6d } };
+static const IID IID_IObservableMap_String_ApplicationDataContainer =
+    { 0x47109dbf, 0x1ceb, 0xd4a8, { 0xb1, 0xd5, 0x21, 0xb3, 0x2f, 0xf7, 0x0c, 0xda } };
+
 static HRESULT WINAPI empty_map_view_QueryInterface( IMapView_HSTRING_ApplicationDataContainer *iface, REFIID iid, void **out )
 {
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_HSTRING_ApplicationDataContainer ))
+        IsEqualGUID( iid, &IID_IMapView_HSTRING_ApplicationDataContainer ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_ApplicationDataContainer ) ||
+        IsEqualGUID( iid, &IID_IObservableMap_String_ApplicationDataContainer ))
     {
         *out = iface;
         return S_OK;
@@ -1787,15 +1953,17 @@ static ULONG WINAPI empty_map_view_AddRef( IMapView_HSTRING_ApplicationDataConta
 static ULONG WINAPI empty_map_view_Release( IMapView_HSTRING_ApplicationDataContainer *iface ) { return 1; }
 static HRESULT WINAPI empty_map_view_GetIids( IMapView_HSTRING_ApplicationDataContainer *iface, ULONG *c, IID **i )
 {
-    struct com_interface_entry entries[] =
+    TRACE( "%s\n", debugstr_a(__func__) );
+    const IID *entries[] =
     {
-        { (void **)&empty_map_view_vtbl, (IID *)&IID_IMapView_HSTRING_ApplicationDataContainer },
+        &IID_IMapView_String_ApplicationDataContainer,
+        &IID_IObservableMap_String_ApplicationDataContainer,
     };
 
-    if (c) *c = ARRAY_SIZE( entries );
+    if (c && (uintptr_t)c >= 0x10000) *c = ARRAY_SIZE( entries );
     if (i)
     {
-        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        const IID **array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof( entries ) );
         *i = (IID *)array;
@@ -1804,35 +1972,91 @@ static HRESULT WINAPI empty_map_view_GetIids( IMapView_HSTRING_ApplicationDataCo
 }
 static HRESULT WINAPI empty_map_view_GetRuntimeClassName( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2", 40, n );
+    /* CoreRT registers the generic instantiation from this name; the bare
+     * "IMapView`2" (no type args) fails ComImport registration (failfast
+     * 0x1007) when Store wraps the get_Containers view. */
+    static const WCHAR cls[] =
+        L"Windows.Foundation.Collections.IMapView`2<System.String,Windows.Storage.ApplicationDataContainer>";
+    return WindowsCreateString( cls, ARRAY_SIZE( cls ) - 1, n );
 }
 static HRESULT WINAPI empty_map_view_GetTrustLevel( IMapView_HSTRING_ApplicationDataContainer *iface, TrustLevel *l )
 {
     if (l) *l = BaseTrust; return S_OK;
 }
-static HRESULT WINAPI empty_map_view_Lookup( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, IApplicationDataContainer **value )
+/* Real Windows IMapView<HSTRING,V> slot layout: GetMatch, GetCount,
+ * GetLookup, GetKeyAtIndex, GetValueAtIndex (6-10). Wine's idl shape
+ * (Lookup/Size/HasKey/GetView/Split) mismatched the Store projection:
+ * GetLookup@8 hit HasKey, the boolean was consumed as a container
+ * pointer (failfast 0x1007 on the XAML resource container walk). */
+static HRESULT WINAPI empty_map_view_GetMatch( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                               HSTRING key, UINT32 *index, IApplicationDataContainer **value )
 {
+    if (index) *index = 0;
     if (value) *value = NULL;
     return 0x8000000b; /* E_BOUNDS */
 }
-static HRESULT WINAPI empty_map_view_get_Size( IMapView_HSTRING_ApplicationDataContainer *iface, unsigned int *size )
+static HRESULT WINAPI empty_map_view_GetCount( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 *size )
 {
     if (size) *size = 0;
     return S_OK;
 }
-static HRESULT WINAPI empty_map_view_HasKey( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, boolean *found )
+static HRESULT WINAPI empty_map_view_GetLookup( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                                HSTRING key, IApplicationDataContainer **value )
 {
-    if (found) *found = FALSE;
-    return S_OK;
+    if (value) *value = NULL;
+    return 0x8000000b; /* E_BOUNDS */
 }
-static HRESULT WINAPI empty_map_view_Split( IMapView_HSTRING_ApplicationDataContainer *iface, IMapView_HSTRING_ApplicationDataContainer **first, IMapView_HSTRING_ApplicationDataContainer **second )
+static HRESULT WINAPI empty_map_view_GetKeyAtIndex( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                                    UINT32 index, HSTRING *key )
 {
-    if (first) *first = NULL;
-    if (second) *second = NULL;
+    if (key) *key = NULL;
+    return 0x8000000b; /* E_BOUNDS */
+}
+static HRESULT WINAPI empty_map_view_GetValueAtIndex( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                                      UINT32 index, IApplicationDataContainer **value )
+{
+    if (value) *value = NULL;
+    return 0x8000000b; /* E_BOUNDS */
+}
+
+static HRESULT WINAPI empty_map_view_add_MapChanged( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                                     IUnknown *handler,
+                                                     EventRegistrationToken *token )
+{
+    if (token) token->value = 0;
     return S_OK;
 }
 
-static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl empty_map_view_vtbl =
+static HRESULT WINAPI empty_map_view_remove_MapChanged( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                                        EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+/* Real Windows IMapView<HSTRING,V> + IObservableMap<HSTRING,V> layout:
+ * GetMatch, GetCount, GetLookup, GetKeyAtIndex, GetValueAtIndex (6-10),
+ * add/remove_MapChanged (11-12) = 13 slots. Wine's idl shape
+ * (Lookup/Size/HasKey/GetView/Split) is offset-by-one against the Store
+ * projection: GetLookup@8 hit HasKey and the boolean decoded as a
+ * container pointer (failfast 0x1007 on the XAML resource containers). */
+struct empty_observable_map_view_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IMapView_HSTRING_ApplicationDataContainer *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IMapView_HSTRING_ApplicationDataContainer *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IMapView_HSTRING_ApplicationDataContainer *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IMapView_HSTRING_ApplicationDataContainer *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IMapView_HSTRING_ApplicationDataContainer *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *GetMatch)( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, UINT32 *index, IApplicationDataContainer **value );
+    HRESULT (STDMETHODCALLTYPE *GetCount)( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 *size );
+    HRESULT (STDMETHODCALLTYPE *GetLookup)( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, IApplicationDataContainer **value );
+    HRESULT (STDMETHODCALLTYPE *GetKeyAtIndex)( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 index, HSTRING *key );
+    HRESULT (STDMETHODCALLTYPE *GetValueAtIndex)( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 index, IApplicationDataContainer **value );
+    HRESULT (STDMETHODCALLTYPE *add_MapChanged)( IMapView_HSTRING_ApplicationDataContainer *iface, IUnknown *handler, EventRegistrationToken *token );
+    HRESULT (STDMETHODCALLTYPE *remove_MapChanged)( IMapView_HSTRING_ApplicationDataContainer *iface, EventRegistrationToken token );
+};
+
+static const struct empty_observable_map_view_vtbl empty_map_view_vtbl =
 {
     empty_map_view_QueryInterface,
     empty_map_view_AddRef,
@@ -1840,10 +2064,13 @@ static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataCon
     empty_map_view_GetIids,
     empty_map_view_GetRuntimeClassName,
     empty_map_view_GetTrustLevel,
-    empty_map_view_Lookup,
-    empty_map_view_get_Size,
-    empty_map_view_HasKey,
-    empty_map_view_Split,
+    empty_map_view_GetMatch,
+    empty_map_view_GetCount,
+    empty_map_view_GetLookup,
+    empty_map_view_GetKeyAtIndex,
+    empty_map_view_GetValueAtIndex,
+    empty_map_view_add_MapChanged,
+    empty_map_view_remove_MapChanged,
 };
 
 static IMapView_HSTRING_ApplicationDataContainer empty_map_view = { (void *)&empty_map_view_vtbl };
@@ -1895,25 +2122,29 @@ static const struct IApplicationDataContainerVtbl container_vtbl =
  * and the Values RCW chain AV-storms (s220-s223, 33M first-chance lines). */
 static HRESULT WINAPI container_methods_QueryInterface( IApplicationDataContainerMethods *iface, REFIID iid, void **out )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return IApplicationDataContainer_QueryInterface( &impl->IApplicationDataContainer_iface, iid, out );
 }
 
 static ULONG WINAPI container_methods_AddRef( IApplicationDataContainerMethods *iface )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return IApplicationDataContainer_AddRef( &impl->IApplicationDataContainer_iface );
 }
 
 static ULONG WINAPI container_methods_Release( IApplicationDataContainerMethods *iface )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return IApplicationDataContainer_Release( &impl->IApplicationDataContainer_iface );
 }
 
 static HRESULT WINAPI container_methods_GetIids( IApplicationDataContainerMethods *iface, ULONG *count, IID **iids )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return IApplicationDataContainer_GetIids( &impl->IApplicationDataContainer_iface, count, iids );
 }
 
@@ -1928,28 +2159,40 @@ static HRESULT WINAPI container_methods_GetTrustLevel( IApplicationDataContainer
     return S_OK;
 }
 
+static HRESULT WINAPI container_methods_GetAllContains( IApplicationDataContainerMethods *iface,
+                                                       IApplicationDataContainer **container )
+{
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
+    return container_create( impl->locality, impl->owner, container );
+}
+
 static HRESULT WINAPI container_methods_get_Values( IApplicationDataContainerMethods *iface, IPropertySet **value )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return container_get_Values( &impl->IApplicationDataContainer_iface, value );
 }
 
 static HRESULT WINAPI container_methods_get_Containers( IApplicationDataContainerMethods *iface, IMapView_HSTRING_ApplicationDataContainer **value )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return container_get_Containers( &impl->IApplicationDataContainer_iface, value );
 }
 
 static HRESULT WINAPI container_methods_CreateContainer( IApplicationDataContainerMethods *iface, HSTRING name,
                                                         ApplicationDataCreateDisposition disposition, IApplicationDataContainer **container )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return container_CreateContainer( &impl->IApplicationDataContainer_iface, name, disposition, container );
 }
 
 static HRESULT WINAPI container_methods_DeleteContainer( IApplicationDataContainerMethods *iface, HSTRING name )
 {
-    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    struct application_data_container *impl = impl_from_container_methods( iface );
+    TRACE( "%s\n", debugstr_a(__func__) );
     return container_DeleteContainer( &impl->IApplicationDataContainer_iface, name );
 }
 
@@ -1961,10 +2204,11 @@ static const struct IApplicationDataContainerMethodsVtbl container_methods_vtbl 
     container_methods_GetIids,
     container_methods_GetRuntimeClassName,
     container_methods_GetTrustLevel,
-    container_methods_get_Values,
+        container_methods_get_Values,
     container_methods_get_Containers,
     container_methods_CreateContainer,
     container_methods_DeleteContainer,
+container_methods_GetAllContains,
 };
 
 static HRESULT container_create( ApplicationDataLocality locality, struct application_data *owner,
@@ -2071,10 +2315,37 @@ static const struct IApplicationDataMethodsVtbl application_data_methods_vtbl =
     application_data_methods_CreateCompositeStream,
 };
 
+/* Windows.Storage.IStorageFolder2 is commented out in our windows.storage.idl,
+ * so declare the interface locally. {e827e6b9-08d9-0aae-a0ac-fe5ed3cbbbd3} */
+interface IStorageFolder2;
+typedef interface IStorageFolder2 IStorageFolder2;
+struct IStorageFolder2Vtbl;
+interface IStorageFolder2
+{
+    const struct IStorageFolder2Vtbl *lpVtbl;
+};
+typedef struct IStorageFolder2Vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IStorageFolder2 *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IStorageFolder2 *iface );
+    ULONG (WINAPI *Release)( IStorageFolder2 *iface );
+    HRESULT (WINAPI *GetIids)( IStorageFolder2 *iface, ULONG *iid_count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IStorageFolder2 *iface, HSTRING *class_name );
+    HRESULT (WINAPI *GetTrustLevel)( IStorageFolder2 *iface, TrustLevel *trust_level );
+    HRESULT (WINAPI *TryGetItemAsync)( IStorageFolder2 *iface, HSTRING name,
+                                       IAsyncOperation_IStorageItem **result );
+} IStorageFolder2Vtbl;
+
+static const IID IID_IStorageFolder2 =
+{ 0xe827e6b9, 0x08d9, 0x4aae, { 0xa0, 0xac, 0xfe, 0x5e, 0xd3, 0xcb, 0xbb, 0xd3 } };
+
 struct storage_folder
 {
     IStorageFolder IStorageFolder_iface;
     IStorageItem IStorageItem_iface;
+    IStorageItem2 IStorageItem2_iface;
+    IStorageFolder2 IStorageFolder2_iface;
+    IApplicationDataContainerMethods IApplicationDataContainerMethods_iface;
     LONG ref;
     WCHAR path[MAX_PATH];
 };
@@ -2088,6 +2359,123 @@ static inline struct storage_folder *impl_from_IStorageItem( IStorageItem *iface
 {
     return CONTAINING_RECORD( iface, struct storage_folder, IStorageItem_iface );
 }
+
+static inline struct storage_folder *impl_from_IStorageItem2( IStorageItem2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct storage_folder, IStorageItem2_iface );
+}
+
+static inline struct storage_folder *impl_from_IStorageFolder2( IStorageFolder2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct storage_folder, IStorageFolder2_iface );
+}
+
+static inline struct storage_folder *folder_impl_from_IApplicationDataContainerMethods(
+        IApplicationDataContainerMethods *iface )
+{
+    return CONTAINING_RECORD( iface, struct storage_folder, IApplicationDataContainerMethods_iface );
+}
+
+static HRESULT WINAPI storage_folder_QueryInterface( IStorageFolder *iface, REFIID iid, void **out );
+static ULONG WINAPI storage_folder_AddRef( IStorageFolder *iface );
+static ULONG WINAPI storage_folder_Release( IStorageFolder *iface );
+static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *count, IID **iids );
+static HRESULT WINAPI storage_folder_GetRuntimeClassName( IStorageFolder *iface, HSTRING *name );
+static HRESULT WINAPI storage_folder_GetTrustLevel( IStorageFolder *iface, TrustLevel *level );
+
+static HRESULT WINAPI folder_methods_QueryInterface( IApplicationDataContainerMethods *iface, REFIID iid, void **out )
+{
+    return storage_folder_QueryInterface( &folder_impl_from_IApplicationDataContainerMethods( iface )->IStorageFolder_iface, iid, out );
+}
+
+static ULONG WINAPI folder_methods_AddRef( IApplicationDataContainerMethods *iface )
+{
+    return storage_folder_AddRef( &folder_impl_from_IApplicationDataContainerMethods( iface )->IStorageFolder_iface );
+}
+
+static ULONG WINAPI folder_methods_Release( IApplicationDataContainerMethods *iface )
+{
+    return storage_folder_Release( &folder_impl_from_IApplicationDataContainerMethods( iface )->IStorageFolder_iface );
+}
+
+static HRESULT WINAPI folder_methods_GetIids( IApplicationDataContainerMethods *iface, ULONG *count, IID **iids )
+{
+    return storage_folder_GetIids( &folder_impl_from_IApplicationDataContainerMethods( iface )->IStorageFolder_iface, count, iids );
+}
+
+static HRESULT WINAPI folder_methods_GetRuntimeClassName( IApplicationDataContainerMethods *iface, HSTRING *name )
+{
+    return storage_folder_GetRuntimeClassName( &folder_impl_from_IApplicationDataContainerMethods( iface )->IStorageFolder_iface, name );
+}
+
+static HRESULT WINAPI folder_methods_GetTrustLevel( IApplicationDataContainerMethods *iface, TrustLevel *level )
+{
+    return storage_folder_GetTrustLevel( &folder_impl_from_IApplicationDataContainerMethods( iface )->IStorageFolder_iface, level );
+}
+
+static HRESULT WINAPI folder_methods_GetAllContains( IApplicationDataContainerMethods *iface,
+                                                    IApplicationDataContainer **container )
+{
+    return container_create( ApplicationDataLocality_Local, NULL, container );
+}
+
+static HRESULT WINAPI folder_methods_get_Values( IApplicationDataContainerMethods *iface, IPropertySet **value )
+{
+    IApplicationDataContainer *snap;
+    HRESULT hr = container_create( ApplicationDataLocality_Local, NULL, &snap );
+    if (FAILED( hr )) return hr;
+    hr = container_get_Values( snap, value );
+    IApplicationDataContainer_Release( snap );
+    return hr;
+}
+
+static HRESULT WINAPI folder_methods_get_Containers( IApplicationDataContainerMethods *iface,
+                                                    IMapView_HSTRING_ApplicationDataContainer **value )
+{
+    IApplicationDataContainer *snap;
+    HRESULT hr = container_create( ApplicationDataLocality_Local, NULL, &snap );
+    if (FAILED( hr )) return hr;
+    hr = container_get_Containers( snap, value );
+    IApplicationDataContainer_Release( snap );
+    return hr;
+}
+
+static HRESULT WINAPI folder_methods_CreateContainer( IApplicationDataContainerMethods *iface, HSTRING name,
+                                                     ApplicationDataCreateDisposition disposition,
+                                                     IApplicationDataContainer **container )
+{
+    IApplicationDataContainer *snap;
+    HRESULT hr = container_create( ApplicationDataLocality_Local, NULL, &snap );
+    if (FAILED( hr )) return hr;
+    hr = container_CreateContainer( snap, name, disposition, container );
+    IApplicationDataContainer_Release( snap );
+    return hr;
+}
+
+static HRESULT WINAPI folder_methods_DeleteContainer( IApplicationDataContainerMethods *iface, HSTRING name )
+{
+    IApplicationDataContainer *snap;
+    HRESULT hr = container_create( ApplicationDataLocality_Local, NULL, &snap );
+    if (FAILED( hr )) return hr;
+    hr = container_DeleteContainer( snap, name );
+    IApplicationDataContainer_Release( snap );
+    return hr;
+}
+
+static const struct IApplicationDataContainerMethodsVtbl storage_folder_methods_vtbl =
+{
+    folder_methods_QueryInterface,
+    folder_methods_AddRef,
+    folder_methods_Release,
+    folder_methods_GetIids,
+    folder_methods_GetRuntimeClassName,
+    folder_methods_GetTrustLevel,
+        folder_methods_get_Values,
+    folder_methods_get_Containers,
+    folder_methods_CreateContainer,
+    folder_methods_DeleteContainer,
+folder_methods_GetAllContains,
+};
 
 static HRESULT WINAPI storage_folder_QueryInterface( IStorageFolder *iface, REFIID iid, void **out )
 {
@@ -2104,6 +2492,24 @@ static HRESULT WINAPI storage_folder_QueryInterface( IStorageFolder *iface, REFI
     if (IsEqualGUID( iid, &IID_IStorageItem ))
     {
         *out = &impl->IStorageItem_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IStorageItem2 ))
+    {
+        *out = &impl->IStorageItem2_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IStorageFolder2 ))
+    {
+        *out = &impl->IStorageFolder2_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
+    {
+        *out = &impl->IApplicationDataContainerMethods_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -2127,7 +2533,26 @@ static ULONG WINAPI storage_folder_Release( IStorageFolder *iface )
 }
 
 static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *count, IID **iids )
-{ FIXME( "stub\n" ); return E_NOTIMPL; }
+{
+    /* Same shader contract as container_GetIids: fresh Guid** array per
+     * call, null-page count slot tolerated. The LocalFolder RCW build
+     * (MemoryMappedFileSadRecordPersistentStorage) consumes this array to
+     * seed the ComVirtualMethodData composite; E_NOTIMPL left the pair
+     * array empty and the slot fetch AV'd in TryGetOrCreateObjectForComInstance. */
+    static const IID *entries[] =
+    {
+        &IID_IStorageFolder,
+        &IID_IStorageItem,
+        &IID_IStorageItem2,
+        &IID_IStorageFolder2,
+    };
+    const IID **array = CoTaskMemAlloc( sizeof( entries ) );
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, entries, sizeof( entries ) );
+    if (count && (uintptr_t)count >= 0x10000) *count = ARRAY_SIZE( entries );
+    if (iids) *iids = (IID *)array;
+    return S_OK;
+}
 static HRESULT WINAPI storage_folder_GetRuntimeClassName( IStorageFolder *iface, HSTRING *name )
 { return WindowsCreateString( L"Windows.Storage.StorageFolder", 29, name ); }
 static HRESULT WINAPI storage_folder_GetTrustLevel( IStorageFolder *iface, TrustLevel *level )
@@ -2172,6 +2597,106 @@ static const struct IStorageFolderVtbl storage_folder_vtbl =
     storage_folder_GetFilesAsyncOverloadDefaultOptionsStartAndCount,
     storage_folder_GetFoldersAsyncOverloadDefaultOptionsStartAndCount,
     storage_folder_GetItemsAsyncOverloadDefaultStartAndCount,
+};
+
+/* IStorageItem2 (WinAppSDK layout: GetParentAsync, IsEqual, GetAttributesAsync)
+ * and IStorageFolder2 (TryGetItemAsync) faces: the LocalFolder RCW projection
+ * (StorageFolder CCW) casts to both; without them CoreCLR's vtable generator
+ * throws MissingMethodException 0x80131506 in
+ * TryGetOrCreateObjectForComInstanceInternal. Forwarding mirrors
+ * dlls/windows.storage/storage.c storage_item2_folder_vtbl. */
+static HRESULT WINAPI storage_item2_QueryInterface( IStorageItem2 *iface, REFIID iid, void **out )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2( iface );
+    return IStorageFolder_QueryInterface( &impl->IStorageFolder_iface, iid, out );
+}
+static ULONG WINAPI storage_item2_AddRef( IStorageItem2 *iface )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2( iface );
+    return IStorageFolder_AddRef( &impl->IStorageFolder_iface );
+}
+static ULONG WINAPI storage_item2_Release( IStorageItem2 *iface )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2( iface );
+    return IStorageFolder_Release( &impl->IStorageFolder_iface );
+}
+static HRESULT WINAPI storage_item2_GetIids( IStorageItem2 *iface, ULONG *count, IID **iids )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2( iface );
+    return IStorageFolder_GetIids( &impl->IStorageFolder_iface, count, iids );
+}
+static HRESULT WINAPI storage_item2_GetRuntimeClassName( IStorageItem2 *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.Storage.StorageFolder", 29, name ); }
+static HRESULT WINAPI storage_item2_GetTrustLevel( IStorageItem2 *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI storage_item2_GetParentAsync( IStorageItem2 *iface, IAsyncOperation_IStorageItem **result )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI storage_item2_IsEqual( IStorageItem2 *iface, IStorageItem *item, boolean *result )
+{
+    struct storage_folder *impl = impl_from_IStorageItem2( iface );
+    HSTRING str = NULL;
+    if (!result) return E_POINTER;
+    *result = FALSE;
+    if (!item) return S_OK;
+    if (SUCCEEDED( IStorageItem_get_Path( item, &str ) ) && str)
+    {
+        const WCHAR *p = WindowsGetStringRawBuffer( str, NULL );
+        if (p && !wcsicmp( p, impl->path )) *result = TRUE;
+        WindowsDeleteString( str );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI storage_item2_GetAttributesAsync( IStorageItem2 *iface, IAsyncOperation_FileAttributes **result )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static const struct IStorageItem2Vtbl storage_item2_vtbl =
+{
+    storage_item2_QueryInterface,
+    storage_item2_AddRef,
+    storage_item2_Release,
+    storage_item2_GetIids,
+    storage_item2_GetRuntimeClassName,
+    storage_item2_GetTrustLevel,
+    storage_item2_GetParentAsync,
+    storage_item2_IsEqual,
+    storage_item2_GetAttributesAsync,
+};
+
+static HRESULT WINAPI storage_folder2_QueryInterface( IStorageFolder2 *iface, REFIID iid, void **out )
+{
+    struct storage_folder *impl = impl_from_IStorageFolder2( iface );
+    return IStorageFolder_QueryInterface( &impl->IStorageFolder_iface, iid, out );
+}
+static ULONG WINAPI storage_folder2_AddRef( IStorageFolder2 *iface )
+{
+    struct storage_folder *impl = impl_from_IStorageFolder2( iface );
+    return IStorageFolder_AddRef( &impl->IStorageFolder_iface );
+}
+static ULONG WINAPI storage_folder2_Release( IStorageFolder2 *iface )
+{
+    struct storage_folder *impl = impl_from_IStorageFolder2( iface );
+    return IStorageFolder_Release( &impl->IStorageFolder_iface );
+}
+static HRESULT WINAPI storage_folder2_GetIids( IStorageFolder2 *iface, ULONG *count, IID **iids )
+{
+    struct storage_folder *impl = impl_from_IStorageFolder2( iface );
+    return IStorageFolder_GetIids( &impl->IStorageFolder_iface, count, iids );
+}
+static HRESULT WINAPI storage_folder2_GetRuntimeClassName( IStorageFolder2 *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.Storage.StorageFolder", 29, name ); }
+static HRESULT WINAPI storage_folder2_GetTrustLevel( IStorageFolder2 *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI storage_folder2_TryGetItemAsync( IStorageFolder2 *iface, HSTRING name,
+                                                       IAsyncOperation_IStorageItem **result )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static const struct IStorageFolder2Vtbl storage_folder2_vtbl =
+{
+    storage_folder2_QueryInterface,
+    storage_folder2_AddRef,
+    storage_folder2_Release,
+    storage_folder2_GetIids,
+    storage_folder2_GetRuntimeClassName,
+    storage_folder2_GetTrustLevel,
+    storage_folder2_TryGetItemAsync,
 };
 
 static HRESULT WINAPI storage_item_QueryInterface( IStorageItem *iface, REFIID iid, void **out )
@@ -2247,6 +2772,9 @@ static HRESULT storage_folder_create( const WCHAR *path, IStorageFolder **out )
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IStorageFolder_iface.lpVtbl = &storage_folder_vtbl;
     impl->IStorageItem_iface.lpVtbl = &storage_item_vtbl;
+    impl->IStorageItem2_iface.lpVtbl = &storage_item2_vtbl;
+    impl->IStorageFolder2_iface.lpVtbl = &storage_folder2_vtbl;
+    impl->IApplicationDataContainerMethods_iface.lpVtbl = &storage_folder_methods_vtbl;
     impl->ref = 1;
     lstrcpynW( impl->path, path, ARRAY_SIZE(impl->path) );
     for (p = impl->path + 3; *p; p++)
@@ -2617,6 +3145,19 @@ void application_data_preseed( void )
     /* propertyset (values) provider block at +0xc0: seeded by wintypes
      * heap_prewarm via propertyset_pair_array_seed (same-DLL symbols; the
      * cross-DLL import was not worth a spec export). */
+    /* LocalFolder provider block at +0x100 (4th composite in heap-head
+     * order after factory/appdata/container/propertyset): the StorageFolder
+     * RCW build consumes this pair array; unseeded, the shader's slot fetch
+     * threw MissingMethodException 0x80131506 in
+     * TryGetOrCreateObjectForComInstanceInternal (sad-record ctor wall). */
+    base[32] = (void **)&storage_folder_vtbl;
+    base[33] = (void *)&IID_IStorageFolder;
+    base[34] = (void **)&storage_item_vtbl;
+    base[35] = (void *)&IID_IStorageItem;
+    base[36] = (void **)&storage_item2_vtbl;
+    base[37] = (void *)&IID_IStorageItem2;
+    base[38] = (void **)&storage_folder2_vtbl;
+    base[39] = (void *)&IID_IStorageFolder2;
 }
 
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )

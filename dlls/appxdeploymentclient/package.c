@@ -20,6 +20,8 @@
 #include "private.h"
 #include "wine/debug.h"
 
+#include <stdio.h>
+
 #include "winreg.h"
 #include "objbase.h"
 #include "appmodel.h"
@@ -513,8 +515,6 @@ static HRESULT find_package_by_full_name( const WCHAR *full_name, IPackage **pac
 
 static const GUID IID_IPackageManager3 =
     { 0xdaad9948, 0x36f1, 0x41a7, { 0x91, 0x88, 0xbc, 0x26, 0x3e, 0x0d, 0xcb, 0x72 } };
-static const GUID IID_IPackageManager6 =
-    { 0x0847e909, 0x53cd, 0x4e4f, { 0x83, 0x2e, 0x57, 0xd1, 0x80, 0xf6, 0xe4, 0x47 } };
 static const GUID IID_IPackageManager9 =
     { 0x0847e909, 0x53cd, 0x4e4f, { 0x83, 0x2e, 0x57, 0xd1, 0x80, 0xf6, 0xe4, 0x47 } };
 
@@ -578,8 +578,7 @@ static HRESULT WINAPI package_manager_QueryInterface( IPackageManager *iface, RE
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IPackageManager6 ) ||
-        IsEqualGUID( iid, &IID_IPackageManager9 ))
+    if (IsEqualGUID( iid, &IID_IPackageManager9 ))
     {
         *out = &impl->IPackageManager9_iface;
         IInspectable_AddRef( *out );
@@ -2304,6 +2303,8 @@ static HRESULT WINAPI package_folder_GetTrustLevel( IStorageFolder *iface, Trust
 }
 
 #define FOLDER_METHODS( pfx ) \
+    static HRESULT WINAPI pfx##_GetParentAsync( IStorageFolder *iface, \
+            IAsyncOperation_StorageFolder **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, \
             IAsyncOperation_StorageFile **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFileAsync( IStorageFolder *iface, HSTRING name, \
@@ -2335,6 +2336,7 @@ static const struct IStorageFolderVtbl package_folder_vtbl =
     package_folder_GetIids,
     package_folder_GetRuntimeClassName,
     package_folder_GetTrustLevel,
+    package_folder_GetParentAsync,
     package_folder_CreateFileAsyncOverloadDefaultOptions,
     package_folder_CreateFileAsync,
     package_folder_CreateFolderAsyncOverloadDefaultOptions,

@@ -417,6 +417,7 @@ namespace Windows.Storage {
             [out, retval] Windows.Storage.ApplicationDataContainer **container
         );
         HRESULT DeleteContainer([in] HSTRING name);
+        HRESULT GetAllContains([out, retval] Windows.Storage.ApplicationDataContainer **container);
     }
 
     [
@@ -1100,6 +1101,40 @@ namespace Windows.Storage {
     ]
     runtimeclass PathIO
     {
+    }
+
+    [
+        uuid(39f4579a-2a08-4941-b132-403fcda26440),
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    interface IAppDataPaths : IInspectable
+    {
+        [propget] HRESULT Local([out, retval] Windows.Storage.IStorageItem **value);
+        [propget] HRESULT Roaming([out, retval] Windows.Storage.IStorageItem **value);
+        [propget] HRESULT Temp([out, retval] Windows.Storage.IStorageItem **value);
+        [propget] HRESULT LocalCache([out, retval] Windows.Storage.IStorageItem **value);
+        [propget] HRESULT RoamingCertificateStores([out, retval] Windows.Storage.IStorageItem **value);
+        [propget] HRESULT RoamingApplicationData([out, retval] Windows.Storage.IStorageItem **value);
+    }
+
+    [
+        uuid(d92c84ad-0ae4-4ff2-9465-4f0fa3216c26),
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    interface IAppDataPathsStatics : IInspectable
+    {
+        HRESULT GetCurrent([out, retval] Windows.Storage.IAppDataPaths **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Storage.IAppDataPathsStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass AppDataPaths
+    {
+        [default] interface Windows.Storage.IAppDataPaths;
     }
 #endif
 }
