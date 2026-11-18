@@ -2092,7 +2092,7 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
         source = real_source;
     }
 
-    if ((options & DUPLICATE_CLOSE_SOURCE) && source_process != NtCurrentProcess())
+    if (((options & DUPLICATE_CLOSE_SOURCE) || is_local_sync_handle( source )) && source_process != NtCurrentProcess())
     {
         union apc_call call;
         union apc_result result;
