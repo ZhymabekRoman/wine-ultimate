@@ -242,6 +242,13 @@ static HRESULT WINAPI uri_QueryInterface( IUriRuntimeClass *iface, REFIID iid, v
 
     static const GUID IID_Uri_RuntimeClass =
         { 0x44a9796f, 0x723e, 0x4fdf, { 0xa2, 0x18, 0x03, 0x3e, 0x75, 0xb0, 0xc0, 0x84 } };
+    /* Windows 10 IID for IUriRuntimeClassWithAbsoluteCanonicalUri, requested by
+     * WinUI3/XAML consumers; the IDL-derived IID_IUriRuntimeClassWithAbsoluteCanonicalUri
+     * carries the legacy Win8 value, so match both forms. */
+    static const GUID IID_Uri_With_Absolute_Canonical_Uri =
+        { 0x0c881986, 0x86e1, 0x40b3, { 0x96, 0x42, 0x9e, 0x50, 0x90, 0xa8, 0xa6, 0xb0 } };
+    static const GUID IID_Stringable =
+        { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -253,13 +260,15 @@ static HRESULT WINAPI uri_QueryInterface( IUriRuntimeClass *iface, REFIID iid, v
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IUriRuntimeClassWithAbsoluteCanonicalUri ))
+    if (IsEqualGUID( iid, &IID_IUriRuntimeClassWithAbsoluteCanonicalUri ) ||
+        IsEqualGUID( iid, &IID_Uri_With_Absolute_Canonical_Uri ))
     {
         IInspectable_AddRef( (*out = &impl->IUriRuntimeClassWithAbsoluteCanonicalUri_iface) );
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IStringable ))
+    if (IsEqualGUID( iid, &IID_IStringable ) ||
+        IsEqualGUID( iid, &IID_Stringable ))
     {
         IInspectable_AddRef( (*out = &impl->IStringable_iface) );
         return S_OK;

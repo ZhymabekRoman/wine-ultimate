@@ -111,7 +111,17 @@ HRESULT dxgi_get_output_from_window(IWineDXGIFactory *factory, HWND window, IDXG
 
     if (!(monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)))
     {
-        WARN("Failed to get monitor from window.\n");
+        WARN("Failed to get monitor from window; trying adapter 0 output 0.\n");
+        if (SUCCEEDED(IWineDXGIFactory_EnumAdapters(factory, 0, &adapter)))
+        {
+            if (SUCCEEDED(IDXGIAdapter_EnumOutputs(adapter, 0, &output)))
+            {
+                *dxgi_output = output;
+                IDXGIAdapter_Release(adapter);
+                return S_OK;
+            }
+            IDXGIAdapter_Release(adapter);
+        }
         return DXGI_ERROR_INVALID_CALL;
     }
 
@@ -143,6 +153,18 @@ HRESULT dxgi_get_output_from_window(IWineDXGIFactory *factory, HWND window, IDXG
 
     if (hr != DXGI_ERROR_NOT_FOUND)
         WARN("Failed to enumerate outputs, hr %#lx.\n", hr);
+
+    if (SUCCEEDED(IWineDXGIFactory_EnumAdapters(factory, 0, &adapter)))
+    {
+        if (SUCCEEDED(IDXGIAdapter_EnumOutputs(adapter, 0, &output)))
+        {
+            WARN("Monitor %p not matched; falling back to adapter 0 output 0.\n", monitor);
+            *dxgi_output = output;
+            IDXGIAdapter_Release(adapter);
+            return S_OK;
+        }
+        IDXGIAdapter_Release(adapter);
+    }
 
     WARN("Output could not be found.\n");
     return DXGI_ERROR_NOT_FOUND;

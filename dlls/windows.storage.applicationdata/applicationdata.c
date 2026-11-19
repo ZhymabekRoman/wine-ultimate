@@ -1215,12 +1215,6 @@ static HRESULT WINAPI settings_values_QueryInterface( IPropertySet *iface, REFII
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
-    {
-        *out = &impl->IApplicationDataContainerMethods_iface;
-        InterlockedIncrement( &impl->ref );
-        return S_OK;
-    }
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -1795,12 +1789,6 @@ static HRESULT WINAPI container_qi_impl( IApplicationDataContainer *iface, REFII
         IsEqualGUID( iid, &IID_IApplicationDataContainer ))
     {
         *out = &impl->IApplicationDataContainer_iface;
-        InterlockedIncrement( &impl->ref );
-        return S_OK;
-    }
-    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
-    {
-        *out = &impl->IApplicationDataContainerMethods_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -2588,12 +2576,6 @@ static HRESULT WINAPI storage_folder_QueryInterface( IStorageFolder *iface, REFI
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
-    {
-        *out = &impl->IApplicationDataContainerMethods_iface;
-        InterlockedIncrement( &impl->ref );
-        return S_OK;
-    }
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -2615,12 +2597,18 @@ static ULONG WINAPI storage_folder_Release( IStorageFolder *iface )
 
 static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *count, IID **iids )
 {
-    /* Same shader contract as container_GetIids: fresh Guid** array per
-     * call, null-page count slot tolerated. The LocalFolder RCW build
-     * (MemoryMappedFileSadRecordPersistentStorage) consumes this array to
-     * seed the ComVirtualMethodData composite; E_NOTIMPL left the pair
-     * array empty and the slot fetch AV'd in TryGetOrCreateObjectForComInstance. */
-    return E_NOTIMPL;
+    IID *array;
+
+    if (!count || !iids) return E_INVALIDARG;
+    array = CoTaskMemAlloc( 4 * sizeof(IID) );
+    if (!array) return E_OUTOFMEMORY;
+    array[0] = IID_IStorageFolder;
+    array[1] = IID_IStorageItem;
+    array[2] = IID_IStorageItem2;
+    array[3] = IID_IStorageFolder2;
+    *count = 4;
+    *iids = array;
+    return S_OK;
 }
 static HRESULT WINAPI storage_folder_GetRuntimeClassName( IStorageFolder *iface, HSTRING *name )
 { return WindowsCreateString( L"Windows.Storage.StorageFolder", 29, name ); }

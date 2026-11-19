@@ -1796,6 +1796,105 @@ static void mdmp_write_at( int fd, ULONG32 rva, const void *buf, size_t len )
     }
 }
 
+#define MAX_MDMP_MODULES 256
+#define MAX_MDMP_RANGES   96
+#define MAX_MDMP_MODULE_HITS 8
+#define MAX_MDMP_RET_ADDRS  16
+
+struct mod_item
+{
+    ULONG64 base;
+    ULONG32 size;
+    ULONG32 timestamp;
+    ULONG32 checksum;
+    WCHAR   name[260];
+    ULONG32 name_len;
+};
+
+struct mdmp_range
+{
+    ULONG64 start;
+    ULONG32 size;
+    ULONG32 rva;
+};
+
+static void mdmp_add_range( struct mdmp_range *ranges, ULONG32 *num, ULONG64 start, ULONG32 size )
+{
+    ULONG32 i;
+    ULONG64 end = start + size;
+
+    if (!size || *num >= MAX_MDMP_RANGES) return;
+    for (i = 0; i < *num; i++)
+    {
+        if (start >= ranges[i].start && end <= ranges[i].start + ranges[i].size) return; /* contained */
+        if (start <= ranges[i].start && end >= ranges[i].start + ranges[i].size)
+        {
+            ranges[i].start = start; /* replace with covering range */
+            ranges[i].size = size;
+            return;
+        }
+    }
+    ranges[*num].start = start;
+    ranges[*num].size = size;
+    (*num)++;
+}
+
+static int mdmp_is_readable( ULONG64 addr, ULONG32 size )
+{
+    char c;
+
+    if (!size) return 0;
+    if (virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)addr, &c, 1 ) != 1) return 0;
+    if (size > 1 &&
+        virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)(addr + size - 1), &c, 1 ) != 1) return 0;
+    return 1;
+}
+
+static ULONG32 mdmp_find_module( struct mod_item *mods, ULONG32 n_mods, ULONG64 addr )
+{
+    ULONG32 i;
+
+    if (!mods) return n_mods;
+    for (i = 0; i < n_mods; i++)
+        if (addr >= mods[i].base && addr - mods[i].base < mods[i].size) return i;
+    return n_mods;
+}
+
+static void mdmp_add_module_ranges( struct mod_item *mods, ULONG32 idx,
+                                    struct mdmp_range *ranges, ULONG32 *num )
+{
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS64 nth;
+    IMAGE_DATA_DIRECTORY *dd;
+    ULONG64 start;
+    ULONG32 size;
+
+    if (idx >= MAX_MDMP_MODULES) return;
+    mdmp_add_range( ranges, num, mods[idx].base, 0x1000 ); /* PE headers */
+    if (virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)mods[idx].base, &dos, sizeof(dos) ) != sizeof(dos) ||
+        dos.e_magic != IMAGE_DOS_SIGNATURE) return;
+    if (virtual_uninterrupted_read_memory( (const char *)(ULONG_PTR)mods[idx].base + dos.e_lfanew, &nth, sizeof(nth) ) != sizeof(nth) ||
+        nth.Signature != IMAGE_NT_SIGNATURE) return;
+    dd = &nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (!dd->VirtualAddress || !dd->Size) return;
+    start = mods[idx].base + dd->VirtualAddress;
+    size = min( dd->Size, (ULONG32)0x40000 ); /* cap .pdata snapshot at 256 KB */
+    if (mdmp_is_readable( start, size )) mdmp_add_range( ranges, num, start, size );
+}
+
+static void mdmp_add_module_hit( struct mod_item *mods, ULONG32 idx, ULONG32 *hits, ULONG32 *n_hits,
+                                 struct mdmp_range *ranges, ULONG32 *num )
+{
+    ULONG32 i;
+
+    if (idx >= MAX_MDMP_MODULES) return;
+    for (i = 0; i < *n_hits; i++)
+        if (hits[i] == idx) return;
+    if (*n_hits >= MAX_MDMP_MODULE_HITS) return;
+    hits[(*n_hits)++] = idx;
+    mdmp_add_module_ranges( mods, idx, ranges, num );
+}
+
 void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context )
 {
     static LONG dump_written;
@@ -1822,6 +1921,8 @@ void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context )
     ULONG32 ctx_rva, stack_rva = 0, instr_rva = 0;
     ULONG32 csd_len = 0;
     WCHAR csd_zero = 0;
+    struct mod_item *mods = NULL;
+    ULONG32 n_mods = 0;
     unsigned int i;
 
     if (InterlockedCompareExchange( &dump_written, 1, 0 ) != 0) return;
@@ -2019,26 +2120,20 @@ void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context )
 
     /* Stream 4: ModuleListStream (4) */
     {
-        struct mod_item
-        {
-            ULONG64 base;
-            ULONG32 size;
-            ULONG32 timestamp;
-            ULONG32 checksum;
-            WCHAR   name[260];
-            ULONG32 name_len;
-        } mods[64];
-        ULONG32 n_mods = 0;
         ULONG32 mod_list_rva = rva;
         PEB_LDR_DATA *ldr = NULL;
 
-        if (peb && virtual_uninterrupted_read_memory( &peb->LdrData, &ldr, sizeof(ldr) ) == sizeof(ldr) && ldr)
+        mods = mmap( NULL, MAX_MDMP_MODULES * sizeof(struct mod_item), PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 );
+        if (mods == MAP_FAILED) mods = NULL;
+
+        if (mods && peb && virtual_uninterrupted_read_memory( &peb->LdrData, &ldr, sizeof(ldr) ) == sizeof(ldr) && ldr)
         {
             LIST_ENTRY *head = &ldr->InLoadOrderModuleList;
             LIST_ENTRY *curr = NULL;
             if (virtual_uninterrupted_read_memory( &head->Flink, &curr, sizeof(curr) ) == sizeof(curr))
             {
-                while (curr && curr != head && n_mods < ARRAY_SIZE(mods))
+                while (curr && curr != head && n_mods < MAX_MDMP_MODULES)
                 {
                     LDR_DATA_TABLE_ENTRY entry;
                     if (virtual_uninterrupted_read_memory( CONTAINING_RECORD( curr, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks ),
@@ -2112,39 +2207,92 @@ void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context )
 
     /* Stream 5: MemoryListStream (5) */
     {
-        ULONG32 num_ranges = instr_size ? 2 : 1;
-        struct mdmp_memory_desc mdesc[2];
+        struct mdmp_range ranges[MAX_MDMP_RANGES];
+        struct mdmp_memory_desc mdesc[MAX_MDMP_RANGES];
+        ULONG32 num_ranges = 0;
         ULONG32 mem_list_rva = rva;
-        BYTE buf[1024];
-        ULONG32 pos;
+        ULONG64 regval[15];
+        ULONG64 retaddrs[MAX_MDMP_RET_ADDRS];
+        ULONG32 mod_hits[MAX_MDMP_MODULE_HITS];
+        ULONG32 n_ret = 0, n_hits = 0;
+        ULONG64 scan_addr, scan_end, val, page;
+        ULONG32 k, m, pos, chunk, rip_idx;
+        BYTE buf[4096];
+
+        /* crashing thread stack (range 0, referenced by ThreadListStream) */
+        mdmp_add_range( ranges, &num_ranges, stack_start, stack_size );
+
+        /* 2 KB code window around the faulting instruction */
+        if (context->Rip >= 0x400)
+        {
+            instr_start = context->Rip - 0x400;
+            instr_size  = 0x800;
+            if (mdmp_is_readable( instr_start, instr_size ))
+                mdmp_add_range( ranges, &num_ranges, instr_start, instr_size );
+            else
+                instr_size = 0;
+        }
+
+        /* module containing Rip: PE headers + .pdata for unwinding */
+        rip_idx = mdmp_find_module( mods, n_mods, context->Rip );
+        if (rip_idx < n_mods) mdmp_add_module_hit( mods, rip_idx, mod_hits, &n_hits, ranges, &num_ranges );
+
+        /* heap/object/vtable pages referenced by the general-purpose registers */
+        regval[0]  = context->Rax; regval[1]  = context->Rbx; regval[2]  = context->Rcx;
+        regval[3]  = context->Rdx; regval[4]  = context->Rsi; regval[5]  = context->Rdi;
+        regval[6]  = context->Rbp; regval[7]  = context->R8;  regval[8]  = context->R9;
+        regval[9]  = context->R10; regval[10] = context->R11; regval[11] = context->R12;
+        regval[12] = context->R13; regval[13] = context->R14; regval[14] = context->R15;
+        for (k = 0; k < ARRAY_SIZE(regval); k++)
+        {
+            ULONG64 ptr = regval[k];
+            if (ptr < 0x10000 || ptr >= 0x7ffffffff000ULL) continue;
+            page = ptr & ~0xfffULL;
+            if (mdmp_is_readable( page, 0x1000 )) mdmp_add_range( ranges, &num_ranges, page, 0x1000 );
+        }
+
+        /* scan the saved stack for return addresses inside loaded modules,
+         * capture a small code window around each and the module headers/.pdata */
+        scan_end = min( stack_end, stack_start + 0x4000 );
+        for (scan_addr = stack_start; scan_addr + 8 <= scan_end && n_ret < MAX_MDMP_RET_ADDRS; scan_addr += 8)
+        {
+            ULONG64 addr = scan_addr;
+            if (virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)addr, &val, sizeof(val) ) != sizeof(val))
+                continue;
+            if (val < 0x10000 || val >= 0x7ffffffff000ULL) continue;
+            k = mdmp_find_module( mods, n_mods, val );
+            if (k >= n_mods) continue;
+            for (m = 0; m < n_ret; m++)
+                if (retaddrs[m] == val) break;
+            if (m < n_ret) continue;
+            retaddrs[n_ret++] = val;
+            if (val >= 0x40 && mdmp_is_readable( val - 0x40, 0x80 ))
+                mdmp_add_range( ranges, &num_ranges, val - 0x40, 0x80 );
+            mdmp_add_module_hit( mods, k, mod_hits, &n_hits, ranges, &num_ranges );
+        }
 
         rva += sizeof(num_ranges) + num_ranges * sizeof(struct mdmp_memory_desc);
 
-        stack_rva = rva;
-        mdesc[0].StartOfMemoryRange = stack_start;
-        mdesc[0].Memory.DataSize    = stack_size;
-        mdesc[0].Memory.Rva         = stack_rva;
-        for (pos = 0; pos < stack_size; pos += sizeof(buf))
+        for (k = 0; k < num_ranges; k++)
         {
-            ULONG32 chunk = min( stack_size - pos, (ULONG32)sizeof(buf) );
-            memset( buf, 0, chunk );
-            virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)(stack_start + pos), buf, chunk );
-            mdmp_write_at( fd, rva + pos, buf, chunk );
-        }
-        rva += stack_size;
-
-        if (instr_size)
-        {
-            instr_rva = rva;
-            mdesc[1].StartOfMemoryRange = instr_start;
-            mdesc[1].Memory.DataSize    = instr_size;
-            mdesc[1].Memory.Rva         = instr_rva;
-            memset( buf, 0, instr_size );
-            virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)instr_start, buf, instr_size );
-            mdmp_write_at( fd, rva, buf, instr_size );
-            rva += instr_size;
+            ranges[k].rva = rva;
+            for (pos = 0; pos < ranges[k].size; pos += sizeof(buf))
+            {
+                chunk = min( ranges[k].size - pos, (ULONG32)sizeof(buf) );
+                memset( buf, 0, chunk );
+                virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)(ranges[k].start + pos), buf, chunk );
+                mdmp_write_at( fd, rva + pos, buf, chunk );
+            }
+            rva += ranges[k].size;
+            if (k == 0) stack_rva = ranges[0].rva;
         }
 
+        for (k = 0; k < num_ranges; k++)
+        {
+            mdesc[k].StartOfMemoryRange = ranges[k].start;
+            mdesc[k].Memory.DataSize    = ranges[k].size;
+            mdesc[k].Memory.Rva         = ranges[k].rva;
+        }
         mdmp_write_at( fd, mem_list_rva, &num_ranges, sizeof(num_ranges) );
         mdmp_write_at( fd, mem_list_rva + sizeof(num_ranges), mdesc, num_ranges * sizeof(mdesc[0]) );
 
@@ -2179,6 +2327,8 @@ void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context )
     }
     ERR_(seh)( "Crash minidump written to %s (code=%08x rip=%p rsp=%p)\n",
                dump_path, (unsigned int)rec->ExceptionCode, (void *)context->Rip, (void *)context->Rsp );
+
+    if (mods) munmap( mods, MAX_MDMP_MODULES * sizeof(struct mod_item) );
 }
 
 

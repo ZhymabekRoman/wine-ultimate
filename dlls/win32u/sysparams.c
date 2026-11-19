@@ -170,8 +170,33 @@ BOOL decorated_mode = TRUE;
 UINT64 thunk_lock_callback = 0;
 
 #define VIRTUAL_HMONITOR ((HMONITOR)(UINT_PTR)(0x10000 + 1))
+static struct gpu virtual_gpu =
+{
+    .refcount = 1,
+};
+static DEVMODEW virtual_mode =
+{
+    .dmSize = sizeof(DEVMODEW),
+    .dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY,
+    .dmBitsPerPel = 32,
+    .dmPelsWidth = 1024,
+    .dmPelsHeight = 768,
+    .dmDisplayFrequency = 60,
+};
+static struct source virtual_source =
+{
+    .refcount = 1,
+    .gpu = &virtual_gpu,
+    .dpi = 96,
+    .state_flags = DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE | DISPLAY_DEVICE_ACTIVE,
+    .monitor_count = 1,
+    .mode_count = 1,
+    .modes = &virtual_mode,
+};
 static struct monitor virtual_monitor =
 {
+    .refcount = 1,
+    .source = &virtual_source,
     .handle = VIRTUAL_HMONITOR,
     .rc_work.right = 1024,
     .rc_work.bottom = 768,
@@ -818,6 +843,8 @@ static void clear_display_devices(void)
     if (list_head( &monitors ) == &virtual_monitor.entry)
     {
         list_init( &monitors );
+        list_init( &sources );
+        list_init( &gpus );
         return;
     }
 
@@ -2881,8 +2908,16 @@ static BOOL lock_display_devices( BOOL force )
 
     if (!ret)
     {
-        ERR( "Failed to read display config.\n" );
-        pthread_mutex_unlock( &display_lock );
+        ERR( "Failed to read display config; falling back to virtual monitor.\n" );
+        clear_display_devices();
+        if (!virtual_gpu.name[0]) asciiz_to_unicode( virtual_gpu.name, "Wine Virtual Display" );
+        virtual_source.current = virtual_mode;
+        virtual_source.physical = virtual_mode;
+        list_add_tail( &gpus, &virtual_gpu.entry );
+        list_add_tail( &sources, &virtual_source.entry );
+        list_add_tail( &monitors, &virtual_monitor.entry );
+        set_winstation_monitors( TRUE );
+        return TRUE;
     }
     return ret;
 }

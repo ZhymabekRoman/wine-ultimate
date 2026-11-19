@@ -200,6 +200,8 @@ static unsigned int dq_priority_index( DispatcherQueuePriority priority )
 
 static const struct IDispatcherQueueVtbl dispatcher_queue_vtbl;
 static const struct IDispatcherQueue2Vtbl dispatcher_queue2_vtbl;
+static const void *const dispatcher_queue3_vtbl[];
+static const void *const dispatcher_queue_internal_vtbl[];
 
 struct dispatcher_queue_item
 {
@@ -221,6 +223,8 @@ struct dispatcher_queue
 {
     IDispatcherQueue IDispatcherQueue_iface;
     IDispatcherQueue2 IDispatcherQueue2_iface;
+    IInspectable IMicrosoftUiDispatcherQueue3_iface;
+    IInspectable IMicrosoftUiDispatcherQueueInternal_iface;
     LONG ref;
     DWORD tid;
     struct list tid_entry;
@@ -256,6 +260,14 @@ static inline struct dispatcher_queue *impl_from_IDispatcherQueue( IDispatcherQu
 static inline struct dispatcher_queue *impl_from_IDispatcherQueue2( IDispatcherQueue2 *iface )
 {
     return CONTAINING_RECORD( iface, struct dispatcher_queue, IDispatcherQueue2_iface );
+}
+static inline struct dispatcher_queue *impl_from_IMicrosoftUiDispatcherQueue3( IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct dispatcher_queue, IMicrosoftUiDispatcherQueue3_iface );
+}
+static inline struct dispatcher_queue *impl_from_IMicrosoftUiDispatcherQueueInternal( IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct dispatcher_queue, IMicrosoftUiDispatcherQueueInternal_iface );
 }
 
 static struct dispatcher_queue *dispatcher_queue_from_thread( DWORD tid )
@@ -365,11 +377,9 @@ static void dispatcher_queue_destroy_wake( struct dispatcher_queue *queue )
 }
 
 static const GUID IID_IMicrosoftDispatcherQueue = {0xf6ebf8fa, 0xbe1c, 0x5bf6, {0xa4, 0x67, 0x73, 0xda, 0x28, 0x73, 0x8a, 0xe8}};
-/* IDispatcherQueueStatics under the Microsoft.UI.Dispatching projection (Windows App SDK
- * generated IID).  The XAML island service map QIs the queue instance for it. */
-static const GUID IID_IMicrosoftUiDispatcherQueueStatics = {0x14a7a175, 0x5c27, 0x5a35, {0xb0, 0x79, 0x21, 0x96, 0x0c, 0xf7, 0x64, 0xa8}};
-
-static void *dispatcher_queue_statics_iface( void );
+/* Microsoft.UI.Dispatching.IDispatcherQueue3 (Windows App SDK generated IID). */
+static const GUID IID_IMicrosoftUiDispatcherQueue3 = {0x14a7a175, 0x5c27, 0x5a35, {0xb0, 0x79, 0x21, 0x96, 0x0c, 0xf7, 0x64, 0xa8}};
+static const GUID IID_IMicrosoftUiDispatcherQueueInternal = {0x7f3c9b24, 0xefc1, 0x53a2, {0xa2, 0xa9, 0x88, 0x28, 0x0f, 0x24, 0x1a, 0xc0}};
 
 static HRESULT WINAPI dispatcher_queue_QueryInterface( IDispatcherQueue *iface, REFIID iid, void **out )
 {
@@ -396,9 +406,16 @@ static HRESULT WINAPI dispatcher_queue_QueryInterface( IDispatcherQueue *iface, 
         IDispatcherQueue2_AddRef( *out );
         return S_OK;
     }
-    else if (IsEqualGUID( iid, &IID_IMicrosoftUiDispatcherQueueStatics ))
+    else if (IsEqualGUID( iid, &IID_IMicrosoftUiDispatcherQueue3 ))
     {
-        *out = dispatcher_queue_statics_iface();
+        *out = &impl->IMicrosoftUiDispatcherQueue3_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_IMicrosoftUiDispatcherQueueInternal ))
+    {
+        *out = &impl->IMicrosoftUiDispatcherQueueInternal_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
     FIXME( "%s not implemented.\n", debugstr_guid( iid ) );
@@ -1087,6 +1104,8 @@ static struct dispatcher_queue *dispatcher_queue_alloc(void)
     if (!(queue = calloc( 1, sizeof(*queue) ))) return NULL;
     queue->IDispatcherQueue_iface.lpVtbl = &dispatcher_queue_vtbl;
     queue->IDispatcherQueue2_iface.lpVtbl = &dispatcher_queue2_vtbl;
+    queue->IMicrosoftUiDispatcherQueue3_iface.lpVtbl = (const IInspectableVtbl *)dispatcher_queue3_vtbl;
+    queue->IMicrosoftUiDispatcherQueueInternal_iface.lpVtbl = (const IInspectableVtbl *)dispatcher_queue_internal_vtbl;
     queue->ref = 1;
     queue->tid = 0;
     queue->hwnd = NULL;
@@ -1338,6 +1357,166 @@ static const struct IDispatcherQueue2Vtbl dispatcher_queue2_vtbl =
     dispatcher_queue2_GetRuntimeClassName,
     dispatcher_queue2_GetTrustLevel,
     dispatcher_queue2_get_HasThreadAccess,
+};
+
+static HRESULT WINAPI dispatcher_queue3_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    return IDispatcherQueue_QueryInterface( &impl->IDispatcherQueue_iface, iid, out );
+}
+static ULONG WINAPI dispatcher_queue3_AddRef( IInspectable *iface )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    return IDispatcherQueue_AddRef( &impl->IDispatcherQueue_iface );
+}
+static ULONG WINAPI dispatcher_queue3_Release( IInspectable *iface )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    return IDispatcherQueue_Release( &impl->IDispatcherQueue_iface );
+}
+static HRESULT WINAPI dispatcher_queue3_GetIids( IInspectable *iface, ULONG *c, IID **i )
+{
+    return dispatcher_queue_fill_iids( dispatcher_queue_iids, ARRAY_SIZE( dispatcher_queue_iids ), c, i );
+}
+static HRESULT WINAPI dispatcher_queue3_GetRuntimeClassName( IInspectable *iface, HSTRING *n )
+{
+    return WindowsCreateString( RuntimeClass_Windows_System_DispatcherQueue,
+                                ARRAY_SIZE( RuntimeClass_Windows_System_DispatcherQueue ) - 1, n );
+}
+static HRESULT WINAPI dispatcher_queue3_GetTrustLevel( IInspectable *iface, TrustLevel *l )
+{
+    if (!l) return E_POINTER;
+    *l = FullTrust;
+    return S_OK;
+}
+static HRESULT WINAPI dispatcher_queue3_EnqueueEventLoopExit( IInspectable *iface )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    TRACE( "iface %p\n", iface );
+    if (impl->tid) PostThreadMessageW( impl->tid, WM_QUIT, 0, 0 );
+    return S_OK;
+}
+static HRESULT WINAPI dispatcher_queue3_EnsureSystemDispatcherQueue( IInspectable *iface )
+{
+    TRACE( "iface %p\n", iface );
+    return S_OK;
+}
+static HRESULT WINAPI dispatcher_queue3_RunEventLoop( IInspectable *iface )
+{
+    MSG msg;
+    TRACE( "iface %p\n", iface );
+    while (GetMessageW( &msg, NULL, 0, 0 ) > 0)
+    {
+        TranslateMessage( &msg );
+        DispatchMessageW( &msg );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI dispatcher_queue3_RunEventLoopWithOptions( IInspectable *iface, UINT32 options, void *reserved )
+{
+    TRACE( "iface %p options %u\n", iface, options );
+    return dispatcher_queue3_RunEventLoop( iface );
+}
+static HRESULT WINAPI dispatcher_queue3_add_FrameworkShutdownStarting( IInspectable *iface,
+        IUnknown *handler, EventRegistrationToken *token )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    TRACE( "iface %p handler %p token %p\n", iface, handler, token );
+    return dispatcher_queue_add_handler( impl, &impl->shutdown_starting, handler, token );
+}
+static HRESULT WINAPI dispatcher_queue3_remove_FrameworkShutdownStarting( IInspectable *iface,
+        EventRegistrationToken token )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    return dispatcher_queue_remove_handler( impl, &impl->shutdown_starting, token );
+}
+static HRESULT WINAPI dispatcher_queue3_add_FrameworkShutdownCompleted( IInspectable *iface,
+        IUnknown *handler, EventRegistrationToken *token )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    TRACE( "iface %p handler %p token %p\n", iface, handler, token );
+    return dispatcher_queue_add_handler( impl, &impl->shutdown_completed, handler, token );
+}
+static HRESULT WINAPI dispatcher_queue3_remove_FrameworkShutdownCompleted( IInspectable *iface,
+        EventRegistrationToken token )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueue3( iface );
+    return dispatcher_queue_remove_handler( impl, &impl->shutdown_completed, token );
+}
+
+static const void *const dispatcher_queue3_vtbl[] =
+{
+    dispatcher_queue3_QueryInterface,
+    dispatcher_queue3_AddRef,
+    dispatcher_queue3_Release,
+    dispatcher_queue3_GetIids,
+    dispatcher_queue3_GetRuntimeClassName,
+    dispatcher_queue3_GetTrustLevel,
+    dispatcher_queue3_EnqueueEventLoopExit,
+    dispatcher_queue3_EnsureSystemDispatcherQueue,
+    dispatcher_queue3_RunEventLoop,
+    dispatcher_queue3_RunEventLoopWithOptions,
+    dispatcher_queue3_add_FrameworkShutdownStarting,
+    dispatcher_queue3_remove_FrameworkShutdownStarting,
+    dispatcher_queue3_add_FrameworkShutdownCompleted,
+    dispatcher_queue3_remove_FrameworkShutdownCompleted,
+};
+
+static HRESULT WINAPI dispatcher_queue_internal_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueueInternal( iface );
+    return IDispatcherQueue_QueryInterface( &impl->IDispatcherQueue_iface, iid, out );
+}
+static ULONG WINAPI dispatcher_queue_internal_AddRef( IInspectable *iface )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueueInternal( iface );
+    return IDispatcherQueue_AddRef( &impl->IDispatcherQueue_iface );
+}
+static ULONG WINAPI dispatcher_queue_internal_Release( IInspectable *iface )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueueInternal( iface );
+    return IDispatcherQueue_Release( &impl->IDispatcherQueue_iface );
+}
+static HRESULT WINAPI dispatcher_queue_internal_GetIids( IInspectable *iface, ULONG *c, IID **i )
+{
+    return dispatcher_queue_fill_iids( dispatcher_queue_iids, ARRAY_SIZE( dispatcher_queue_iids ), c, i );
+}
+static HRESULT WINAPI dispatcher_queue_internal_GetRuntimeClassName( IInspectable *iface, HSTRING *n )
+{
+    return WindowsCreateString( RuntimeClass_Windows_System_DispatcherQueue,
+                                ARRAY_SIZE( RuntimeClass_Windows_System_DispatcherQueue ) - 1, n );
+}
+static HRESULT WINAPI dispatcher_queue_internal_GetTrustLevel( IInspectable *iface, TrustLevel *l )
+{
+    if (!l) return E_POINTER;
+    *l = FullTrust;
+    return S_OK;
+}
+static HRESULT WINAPI dispatcher_queue_internal_add_Shutdown( IInspectable *iface,
+        IUnknown *handler, EventRegistrationToken *token )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueueInternal( iface );
+    TRACE( "iface %p handler %p token %p\n", iface, handler, token );
+    return dispatcher_queue_add_handler( impl, &impl->shutdown_starting, handler, token );
+}
+static HRESULT WINAPI dispatcher_queue_internal_remove_Shutdown( IInspectable *iface,
+        EventRegistrationToken token )
+{
+    struct dispatcher_queue *impl = impl_from_IMicrosoftUiDispatcherQueueInternal( iface );
+    TRACE( "iface %p token %I64d\n", iface, token.value );
+    return dispatcher_queue_remove_handler( impl, &impl->shutdown_starting, token );
+}
+
+static const void *const dispatcher_queue_internal_vtbl[] =
+{
+    dispatcher_queue_internal_QueryInterface,
+    dispatcher_queue_internal_AddRef,
+    dispatcher_queue_internal_Release,
+    dispatcher_queue_internal_GetIids,
+    dispatcher_queue_internal_GetRuntimeClassName,
+    dispatcher_queue_internal_GetTrustLevel,
+    dispatcher_queue_internal_add_Shutdown,
+    dispatcher_queue_internal_remove_Shutdown,
 };
 
 static HRESULT dispatcher_queue_create_current( struct dispatcher_queue **out )
@@ -1601,8 +1780,7 @@ static HRESULT WINAPI dispatcher_queue_statics_QueryInterface( void *iface, REFI
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IDispatcherQueueStatics ) ||
-        IsEqualGUID( iid, &IID_IMicrosoftDispatcherQueueStatics ) ||
-        IsEqualGUID( iid, &IID_IMicrosoftUiDispatcherQueueStatics ))
+        IsEqualGUID( iid, &IID_IMicrosoftDispatcherQueueStatics ))
     {
         *out = iface;
         return S_OK;
@@ -1656,8 +1834,6 @@ static const void *dispatcher_queue_statics_vtbl[] =
 
 static struct { const void *vtbl; } dispatcher_queue_statics = { dispatcher_queue_statics_vtbl };
 
-static void *dispatcher_queue_statics_iface( void ) { return (void *)&dispatcher_queue_statics; }
-
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *name = WindowsGetStringRawBuffer( classid, NULL );
@@ -1675,6 +1851,26 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;
+}
+
+/* Raw apiset entry for Microsoft.UI.Dispatching: return the calling thread's
+ * dispatcher queue, creating one bound to this thread when it has none (native
+ * GetDispatcherQueueForCurrentThread lazily creates the queue, so mirror that).
+ * The activatable-class statics path already does this; the bare export was a
+ * stub, which left the caller's out-pointer uninitialised. */
+HRESULT WINAPI GetDispatcherQueueForCurrentThread( IDispatcherQueue **dispatcher_queue )
+{
+    struct dispatcher_queue *queue;
+    HRESULT hr;
+
+    if (!dispatcher_queue) return E_POINTER;
+    if (!(queue = dispatcher_queue_from_thread( GetCurrentThreadId() )))
+    {
+        if (FAILED( hr = dispatcher_queue_create_current( &queue ) )) return hr;
+    }
+    *dispatcher_queue = &queue->IDispatcherQueue_iface;
+    IDispatcherQueue_AddRef( *dispatcher_queue );
+    return S_OK;
 }
 
 HRESULT WINAPI CreateDispatcherQueueController( DispatcherQueueOptions options, PDISPATCHERQUEUECONTROLLER *queue_controller )

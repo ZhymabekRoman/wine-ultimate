@@ -23,7 +23,7 @@
 @ stdcall -private DllGetActivationFactory(ptr ptr)
 @ stdcall -private DllMain(ptr long ptr)
 @ stub DllGetClassObject
-@ stub GetDispatcherQueueForCurrentThread
+@ stdcall GetDispatcherQueueForCurrentThread(ptr)
 @ stub MsgBlobCreateShared
 @ stub MsgBlobCreateStack
 @ stub MsgBufferShare
