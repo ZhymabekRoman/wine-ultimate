@@ -1853,6 +1853,7 @@ static void split_full_name( const WCHAR *full, WCHAR *name, DWORD cch_name,
 struct package
 {
     IPackage IPackage_iface;
+    IPackage2 IPackage2_iface;
     IPackage3 IPackage3_iface;
     const void **IPackage4_vtbl;
     IPackageId IPackageId_iface;
@@ -1878,10 +1879,16 @@ static HRESULT WINAPI package_QueryInterface( IPackage *iface, REFIID iid, void 
 {
     struct package *impl = impl_from_IPackage( iface );
 
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackage ))
     {
         *out = &impl->IPackage_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IPackage2 ))
+    {
+        *out = &impl->IPackage2_iface;
     }
     else if (IsEqualGUID( iid, &IID_IPackage3 ))
     {
@@ -2130,7 +2137,17 @@ static HRESULT WINAPI packageid_QueryInterface( IPackageId *iface, REFIID iid, v
 {
     struct package *impl = impl_from_IPackageId( iface );
 
-    return IPackage_QueryInterface( &impl->IPackage_iface, iid, out );
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackageId ))
+    {
+        *out = &impl->IPackageId_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 
 static ULONG WINAPI packageid_AddRef( IPackageId *iface )
@@ -2280,8 +2297,62 @@ static const struct IPackageIdVtbl packageid_vtbl =
         return ref;                                                                                   \
     }
 
-DEFINE_PACKAGE_QI( package_folder, IStorageFolder, IStorageFolder_iface )
-DEFINE_PACKAGE_QI( package_item, IStorageItem, IStorageItem_iface )
+static HRESULT WINAPI package_folder_QueryInterface( IStorageFolder *iface, REFIID iid, void **out )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageFolder_iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IStorageFolder ))
+    {
+        *out = &impl->IStorageFolder_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IStorageItem ))
+    {
+        *out = &impl->IStorageItem_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_folder_AddRef( IStorageFolder *iface )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageFolder_iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_folder_Release( IStorageFolder *iface )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageFolder_iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI package_item_QueryInterface( IStorageItem *iface, REFIID iid, void **out )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageItem_iface );
+    return package_folder_QueryInterface( &impl->IStorageFolder_iface, iid, out );
+}
+
+static ULONG WINAPI package_item_AddRef( IStorageItem *iface )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageItem_iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_item_Release( IStorageItem *iface )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageItem_iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
 
 static HRESULT WINAPI package_folder_GetIids( IStorageFolder *iface, ULONG *count, IID **iids )
 {
@@ -2303,8 +2374,6 @@ static HRESULT WINAPI package_folder_GetTrustLevel( IStorageFolder *iface, Trust
 }
 
 #define FOLDER_METHODS( pfx ) \
-    static HRESULT WINAPI pfx##_GetParentAsync( IStorageFolder *iface, \
-            IAsyncOperation_StorageFolder **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, \
             IAsyncOperation_StorageFile **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFileAsync( IStorageFolder *iface, HSTRING name, \
@@ -2336,7 +2405,6 @@ static const struct IStorageFolderVtbl package_folder_vtbl =
     package_folder_GetIids,
     package_folder_GetRuntimeClassName,
     package_folder_GetTrustLevel,
-    package_folder_GetParentAsync,
     package_folder_CreateFileAsyncOverloadDefaultOptions,
     package_folder_CreateFileAsync,
     package_folder_CreateFolderAsyncOverloadDefaultOptions,
@@ -2614,6 +2682,95 @@ static HRESULT create_empty_vectorview_async( void **operation )
     return S_OK;
 }
 
+DEFINE_PACKAGE_QI( package2, IPackage2, IPackage2_iface )
+
+static HRESULT WINAPI package2_GetIids( IPackage2 *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package2_GetRuntimeClassName( IPackage2 *iface, HSTRING *name )
+{
+    return package_GetRuntimeClassName( &CONTAINING_RECORD( iface, struct package, IPackage2_iface )->IPackage_iface, name );
+}
+
+static HRESULT WINAPI package2_GetTrustLevel( IPackage2 *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package2_get_DisplayName( IPackage2 *iface, HSTRING *value )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IPackage2_iface );
+    WCHAR name[256];
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    split_full_name( impl->rec.full_name, name, ARRAY_SIZE(name), NULL, NULL, NULL, 0 );
+    return packageid_str( impl, name, value );
+}
+
+static HRESULT WINAPI package2_get_PublisherDisplayName( IPackage2 *iface, HSTRING *value )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IPackage2_iface );
+    WCHAR publisher[256];
+
+    split_full_name( impl->rec.full_name, NULL, 0, NULL, NULL, publisher, ARRAY_SIZE(publisher) );
+    return packageid_str( impl, publisher, value );
+}
+
+static HRESULT WINAPI package2_get_Description( IPackage2 *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"", 0, value );
+}
+
+static HRESULT WINAPI package2_get_Logo( IPackage2 *iface, IUriRuntimeClass **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package2_get_IsResourcePackage( IPackage2 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI package2_get_IsBundle( IPackage2 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI package2_get_IsDevelopmentMode( IPackage2 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static const struct IPackage2Vtbl package2_vtbl =
+{
+    package2_QueryInterface,
+    package2_AddRef,
+    package2_Release,
+    package2_GetIids,
+    package2_GetRuntimeClassName,
+    package2_GetTrustLevel,
+    package2_get_DisplayName,
+    package2_get_PublisherDisplayName,
+    package2_get_Description,
+    package2_get_Logo,
+    package2_get_IsResourcePackage,
+    package2_get_IsBundle,
+    package2_get_IsDevelopmentMode,
+};
+
 DEFINE_PACKAGE_QI( package3, IPackage3, IPackage3_iface )
 
 static HRESULT WINAPI package3_GetIids( IPackage3 *iface, ULONG *count, IID **iids )
@@ -2712,6 +2869,7 @@ static HRESULT package_create( const struct package_record *rec, struct package 
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IPackage_iface.lpVtbl = &package_vtbl;
+    impl->IPackage2_iface.lpVtbl = &package2_vtbl;
     impl->IPackage3_iface.lpVtbl = &package3_vtbl;
     impl->IPackage4_vtbl = package4_vtbl;
     impl->IPackageId_iface.lpVtbl = &packageid_vtbl;
@@ -2764,6 +2922,8 @@ static inline struct package_iterator *impl_from_IIterator_Package( IIterator_Pa
 static HRESULT WINAPI package_iterator_QueryInterface( IIterator_Package *iface, REFIID iid, void **out )
 {
     struct package_iterator *impl = impl_from_IIterator_Package( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_Package ))
@@ -2838,6 +2998,7 @@ static HRESULT WINAPI package_iterator_MoveNext( IIterator_Package *iface, boole
 
     if (impl->pos < impl->coll->count) impl->pos++;
     *value = impl->pos < impl->coll->count;
+    TRACE( "iface %p, pos %lu/%lu, has_next %d.\n", iface, impl->pos, impl->coll->count, *value );
     return S_OK;
 }
 
@@ -2879,6 +3040,8 @@ static HRESULT WINAPI package_collection_QueryInterface( IIterable_Package *ifac
     struct package_collection *impl = impl_from_IIterable_Package( iface );
     static const GUID IID_IVectorView_AppListEntry =
         { 0x6f73e9e4, 0x7065, 0x5c2e, { 0x86, 0x26, 0x60, 0x61, 0x05, 0x74, 0x9b, 0x05 } };
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -2941,6 +3104,8 @@ static HRESULT WINAPI package_collection_First( IIterable_Package *iface, IItera
 {
     struct package_collection *impl = impl_from_IIterable_Package( iface );
     struct package_iterator *it;
+
+    TRACE( "iface %p, count %lu, iterator %p.\n", iface, impl->count, iterator );
 
     if (!iterator) return E_INVALIDARG;
     if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
@@ -3543,6 +3708,7 @@ static HRESULT find_packages( const WCHAR *family, const WCHAR *name, const WCHA
     }
     if (FAILED( (hr = package_collection_create( items, n, &iterable ) ) )) goto done;
     *packages = iterable;
+    TRACE( "returning %lu packages (reg.count=%lu, types=%u), iterable %p.\n", n, reg.count, types, iterable );
     hr = S_OK;
 done:
     for (i = 0; i < n; i++) IPackage_Release( &items[i]->IPackage_iface );

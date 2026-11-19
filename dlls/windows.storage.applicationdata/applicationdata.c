@@ -1918,64 +1918,68 @@ static const IID IID_IIterable_String_ApplicationDataContainer =
     { 0xc3ea4300, 0xf00c, 0x7f69, { 0x0f, 0xbd, 0x8e, 0xa0, 0xba, 0xe1, 0xb3, 0xd7 } };
 
 
+static struct empty_map_view_obj
+{
+    const IMapView_HSTRING_ApplicationDataContainerVtbl *vtbl;
+    LONG ref;
+};
+
 static HRESULT WINAPI empty_map_view_QueryInterface( IMapView_HSTRING_ApplicationDataContainer *iface, REFIID iid, void **out )
 {
-    fprintf( stderr, "VIEWQI %p %s\n", iface, debugstr_guid(iid) );
+    struct empty_map_view_obj *obj = (struct empty_map_view_obj *)iface;
     TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid(iid), out );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_HSTRING_ApplicationDataContainer ) ||
-        IsEqualGUID( iid, &IID_IMapView_String_ApplicationDataContainer ) ||
-        IsEqualGUID( iid, &IID_IObservableMap_String_ApplicationDataContainer ) ||
-        IsEqualGUID( iid, &IID_IIterable_String_ApplicationDataContainer ) ||
-        IsEqualGUID( iid, &IID_IIterable_HSTRING_IInspectable_g ) ||
-        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IJupiterObject_g ))
+        IsEqualGUID( iid, &IID_IMapView_HSTRING_ApplicationDataContainer ))
     {
-        *out = iface;
+        *out = &obj->vtbl;
+        InterlockedIncrement( &obj->ref );
         return S_OK;
-    }
-    /* CoreCLR's TrackerObjectManager walks the ComWrappers v1 chunk of every
-     * QI'd face of the LocalSettings decode, calling slot7
-     * (AddRefFromTrackerSource) per interface; without a face here the walk
-     * dispatches into the windowscodecs iid-pair pool (DllRegisterServer
-     * region, NULL-BSTR write) and feeds the 35-cycle AV storm.  Answer with
-     * the shared 10-slot appdata tracker face, as on the container and the
-     * wintypes propertyset singleton. */
-    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
-    {
-        *out = NULL;
-        return E_NOINTERFACE;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI empty_map_view_AddRef( IMapView_HSTRING_ApplicationDataContainer *iface ) { return 2; }
-static ULONG WINAPI empty_map_view_Release( IMapView_HSTRING_ApplicationDataContainer *iface ) { return 1; }
+static ULONG WINAPI empty_map_view_AddRef( IMapView_HSTRING_ApplicationDataContainer *iface )
+{
+    return InterlockedIncrement( &((struct empty_map_view_obj *)iface)->ref );
+}
+static ULONG WINAPI empty_map_view_Release( IMapView_HSTRING_ApplicationDataContainer *iface )
+{
+    struct empty_map_view_obj *obj = (struct empty_map_view_obj *)iface;
+    ULONG ref = InterlockedDecrement( &obj->ref );
+    if (!ref) CoTaskMemFree( obj );
+    return ref;
+}
 static HRESULT WINAPI empty_map_view_GetIids( IMapView_HSTRING_ApplicationDataContainer *iface, ULONG *c, IID **i )
 {
-    fprintf( stderr, "VIEWGETIIDS\n" );
     TRACE( "%s\n", debugstr_a(__func__) );
-    const IID *entries[] =
+static const IID entries[] =
     {
-        &IID_IIterable_String_ApplicationDataContainer,
-        &IID_IMapView_String_ApplicationDataContainer,
-        &IID_IObservableMap_String_ApplicationDataContainer,
-        &IID_IIterable_HSTRING_IInspectable_g,
-        &IID_IMapView_HSTRING_IInspectable,
-        &IID_IObservableMap_HSTRING_IInspectable,
+        {0xd675fa43, 0x4ae1, 0x5164, {0x87, 0x13, 0x40, 0x37, 0x9c, 0x47, 0x0e, 0xe0}},
+        {0x25d7260e, 0x3699, 0x7def, {0x3f, 0x32, 0x3e, 0xc9, 0x10, 0x89, 0x5f, 0x6d}},
+        {0x47109dbf, 0x1ceb, 0xd4a8, {0xb1, 0xd5, 0x21, 0xb3, 0x2f, 0xf7, 0x0c, 0xda}},
+        {0xd675fa43, 0x4ae1, 0x5164, {0x87, 0x13, 0x40, 0x37, 0x9c, 0x47, 0x0e, 0xe0}},
+        {0x25d7260e, 0x3699, 0x7def, {0x3f, 0x32, 0x3e, 0xc9, 0x10, 0x89, 0x5f, 0x6d}},
+        {0x47109dbf, 0x1ceb, 0xd4a8, {0xb1, 0xd5, 0x21, 0xb3, 0x2f, 0xf7, 0x0c, 0xda}},
     };
-
     if (c) *c = ARRAY_SIZE( entries );
     if (i)
     {
-        const IID **array = CoTaskMemAlloc( sizeof( entries ) );
+        IID *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof( entries ) );
-        *i = (IID *)array;
+        *i = array;
     }
     return S_OK;
+}
+
+static struct empty_map_view_obj *create_empty_map_view(void)
+{
+    struct empty_map_view_obj *obj = CoTaskMemAlloc( sizeof(*obj) );
+    if (!obj) return NULL;
+    obj->vtbl = (const IMapView_HSTRING_ApplicationDataContainerVtbl *)&empty_map_view_vtbl;
+    obj->ref = 1;
+    return obj;
 }
 static HRESULT WINAPI empty_map_view_GetRuntimeClassName( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING *n )
 {
@@ -2029,16 +2033,26 @@ struct empty_string_iterator_vtbl
     HRESULT (STDMETHODCALLTYPE *QueryInterface)( IUnknown *iface, REFIID iid, void **out );
     ULONG (STDMETHODCALLTYPE *AddRef)( IUnknown *iface );
     ULONG (STDMETHODCALLTYPE *Release)( IUnknown *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IUnknown *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IUnknown *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IUnknown *iface, TrustLevel *level );
     HRESULT (STDMETHODCALLTYPE *get_Current)( IUnknown *iface, HSTRING *current );
     HRESULT (STDMETHODCALLTYPE *get_HasCurrent)( IUnknown *iface, BOOLEAN *has );
     HRESULT (STDMETHODCALLTYPE *MoveNext)( IUnknown *iface, BOOLEAN *has );
     HRESULT (STDMETHODCALLTYPE *GetMany)( IUnknown *iface, UINT32 cap, HSTRING *items, UINT32 *count );
 };
+static HRESULT WINAPI empty_iter_GetIids( IUnknown *iface, ULONG *c, IID **i ) { if (c) *c=0; return S_OK; }
+static HRESULT WINAPI empty_iter_GetRuntimeClassName( IUnknown *iface, HSTRING *n ) { return WindowsCreateString(L"Windows.Foundation.Collections.IIterator`1<System.String>", 57, n); }
+static HRESULT WINAPI empty_iter_GetTrustLevel( IUnknown *iface, TrustLevel *l ) { if (l) *l=BaseTrust; return S_OK; }
+
 static const struct empty_string_iterator_vtbl empty_iter_vtbl =
 {
     empty_iter_QueryInterface,
     empty_iter_AddRef,
     empty_iter_Release,
+    empty_iter_GetIids,
+    empty_iter_GetRuntimeClassName,
+    empty_iter_GetTrustLevel,
     empty_iter_GetCurrent,
     empty_iter_HasCurrent,
     empty_iter_MoveNext,
@@ -2052,34 +2066,30 @@ static HRESULT WINAPI empty_map_view_First( IMapView_HSTRING_ApplicationDataCont
     if (current) *current = &empty_string_iterator;
     return S_OK;
 }
-static HRESULT WINAPI empty_map_view_GetCount( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 *size )
+static HRESULT WINAPI empty_map_view_Lookup( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                             HSTRING key, IApplicationDataContainer **value )
+{
+    if (value) *value = NULL;
+    return 0x8000000b; /* E_BOUNDS */
+}
+static HRESULT WINAPI empty_map_view_get_Size( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 *size )
 {
     if (size) *size = 0;
     return S_OK;
 }
-static IApplicationDataContainer *g_view_owner_container;
-
-static HRESULT WINAPI empty_map_view_GetLookup( IMapView_HSTRING_ApplicationDataContainer *iface,
-                                                HSTRING key, IApplicationDataContainer **value )
+static HRESULT WINAPI empty_map_view_HasKey( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                             HSTRING key, boolean *found )
 {
-    /* The RCW walker's AddRefFromExternal trampoline dispatches through slot 7
-     * (GetLookup); E_BOUNDS made the generated wrapper throw
-     * IndexOutOfRange(non-continuable) -> failfast 0x1007.  Succeed with the
-     * owning container. */
-    if (value) *value = g_view_owner_container;
-    return g_view_owner_container ? S_OK : 0x8000000b; /* E_BOUNDS */
+    if (found) *found = FALSE;
+    return S_OK;
 }
-static HRESULT WINAPI empty_map_view_GetKeyAtIndex( IMapView_HSTRING_ApplicationDataContainer *iface,
-                                                    UINT32 index, HSTRING *key )
+static HRESULT WINAPI empty_map_view_Split( IMapView_HSTRING_ApplicationDataContainer *iface,
+                                            IMapView_HSTRING_ApplicationDataContainer **first,
+                                            IMapView_HSTRING_ApplicationDataContainer **second )
 {
-    if (key) *key = NULL;
-    return 0x8000000b; /* E_BOUNDS */
-}
-static HRESULT WINAPI empty_map_view_GetValueAtIndex( IMapView_HSTRING_ApplicationDataContainer *iface,
-                                                      UINT32 index, IApplicationDataContainer **value )
-{
-    if (value) *value = NULL;
-    return 0x8000000b; /* E_BOUNDS */
+    if (first) *first = NULL;
+    if (second) *second = NULL;
+    return S_OK;
 }
 
 static HRESULT WINAPI empty_map_view_add_MapChanged( IMapView_HSTRING_ApplicationDataContainer *iface,
@@ -2096,12 +2106,8 @@ static HRESULT WINAPI empty_map_view_remove_MapChanged( IMapView_HSTRING_Applica
     return S_OK;
 }
 
-/* Real Windows IMapView<HSTRING,V> + IObservableMap<HSTRING,V> layout:
- * GetCount, GetLookup, GetKeyAtIndex, GetValueAtIndex, First (6-10),
- * add/remove_MapChanged (11-12) = 13 slots. Wine's idl shape
- * (Lookup/Size/HasKey/GetView/Split) is offset-by-one against the Store
- * projection: GetLookup@8 hit HasKey and the boolean decoded as a
- * container pointer (failfast 0x1007 on the XAML resource containers). */
+/* Standard WinRT IMapView<HSTRING,V> layout: Lookup (6), get_Size (7),
+ * HasKey (8), Split (9). */
 struct empty_observable_map_view_vtbl
 {
     HRESULT (STDMETHODCALLTYPE *QueryInterface)( IMapView_HSTRING_ApplicationDataContainer *iface, REFIID iid, void **out );
@@ -2110,10 +2116,10 @@ struct empty_observable_map_view_vtbl
     HRESULT (STDMETHODCALLTYPE *GetIids)( IMapView_HSTRING_ApplicationDataContainer *iface, ULONG *count, IID **iids );
     HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING *name );
     HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IMapView_HSTRING_ApplicationDataContainer *iface, TrustLevel *level );
-    HRESULT (STDMETHODCALLTYPE *GetCount)( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 *size );
-    HRESULT (STDMETHODCALLTYPE *GetLookup)( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, IApplicationDataContainer **value );
-    HRESULT (STDMETHODCALLTYPE *GetKeyAtIndex)( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 index, HSTRING *key );
-    HRESULT (STDMETHODCALLTYPE *GetValueAtIndex)( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 index, IApplicationDataContainer **value );
+    HRESULT (STDMETHODCALLTYPE *Lookup)( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, IApplicationDataContainer **value );
+    HRESULT (STDMETHODCALLTYPE *get_Size)( IMapView_HSTRING_ApplicationDataContainer *iface, UINT32 *size );
+    HRESULT (STDMETHODCALLTYPE *HasKey)( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, boolean *found );
+    HRESULT (STDMETHODCALLTYPE *Split)( IMapView_HSTRING_ApplicationDataContainer *iface, IMapView_HSTRING_ApplicationDataContainer **first, IMapView_HSTRING_ApplicationDataContainer **second );
     HRESULT (STDMETHODCALLTYPE *First)( IMapView_HSTRING_ApplicationDataContainer *iface, IUnknown **current );
     HRESULT (STDMETHODCALLTYPE *add_MapChanged)( IMapView_HSTRING_ApplicationDataContainer *iface, IUnknown *handler, EventRegistrationToken *token );
     HRESULT (STDMETHODCALLTYPE *remove_MapChanged)( IMapView_HSTRING_ApplicationDataContainer *iface, EventRegistrationToken token );
@@ -2127,26 +2133,26 @@ static const struct empty_observable_map_view_vtbl empty_map_view_vtbl =
     empty_map_view_GetIids,
     empty_map_view_GetRuntimeClassName,
     empty_map_view_GetTrustLevel,
-    empty_map_view_GetCount,
-    empty_map_view_GetLookup,
-    empty_map_view_GetKeyAtIndex,
-    empty_map_view_GetValueAtIndex,
+    empty_map_view_Lookup,
+    empty_map_view_get_Size,
+    empty_map_view_HasKey,
+    empty_map_view_Split,
     empty_map_view_First,
     empty_map_view_add_MapChanged,
     empty_map_view_remove_MapChanged,
 };
 
 struct empty_map_view_obj { const IMapView_HSTRING_ApplicationDataContainerVtbl *vtbl; LONG ref; };
-static struct empty_map_view_obj empty_map_view = { (void *)&empty_map_view_vtbl, 1 };
+static struct empty_map_view_obj empty_map_view = { (const IMapView_HSTRING_ApplicationDataContainerVtbl *)&empty_map_view_vtbl, 1 };
 
 static HRESULT WINAPI container_get_Containers( IApplicationDataContainer *iface, IMapView_HSTRING_ApplicationDataContainer **value )
 {
+    struct empty_map_view_obj *obj;
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    g_view_owner_container = iface;
-    struct empty_map_view_obj *obj = CoTaskMemAlloc( sizeof(*obj) );
+    obj = CoTaskMemAlloc( sizeof(*obj) );
     if (!obj) return E_OUTOFMEMORY;
-    obj->vtbl = (void *)&empty_map_view_vtbl;
+    obj->vtbl = (const IMapView_HSTRING_ApplicationDataContainerVtbl *)&empty_map_view_vtbl;
     obj->ref = 1;
     *value = (IMapView_HSTRING_ApplicationDataContainer *)obj;
     return S_OK;

@@ -2699,6 +2699,7 @@ static BOOL g_wv2_alt_down;
 #define WM_APP_WV2_KEY   (WM_APP + 0x5a)
 #define WM_APP_WV2_CHAR  (WM_APP + 0x5b)
 #define WM_APP_WV2_PASTE (WM_APP + 0x5c)
+#define WM_APP_WV2_INIT  (WM_APP + 0x5d)
 
 static BOOL CALLBACK wv2_post_wheel_cb( HWND child, LPARAM lparam )
 {
@@ -3130,6 +3131,12 @@ static void wv2_paste_clipboard_text( HWND hwnd )
 
 static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
+    if (msg == WM_APP_WV2_INIT && lparam)
+    {
+        struct xaml_element *impl = (struct xaml_element *)lparam;
+        trigger_core_webview2_initialized( impl, &impl->IWebView2_iface );
+        return 0;
+    }
     if (msg == WM_MOUSEWHEEL && g_active_wv2_impl)
     {
         if (g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
@@ -3879,6 +3886,13 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                     cwv->loader_core = h->impl->loader_core;
                     cwv->real_loader = h->impl->real_loader;
                 }
+                if (!h->impl->init_triggered)
+                {
+                    if (g_wv2_subclassed_hwnd && IsWindow( g_wv2_subclassed_hwnd ))
+                        PostMessageW( g_wv2_subclassed_hwnd, WM_APP_WV2_INIT, 0, (LPARAM)h->impl );
+                    else
+                        trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
+                }
             }
             return S_OK;
         }
@@ -3972,7 +3986,7 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
     ERR( "wv2_env_handler_Invoke: ch %p vt %p vt3 %p hw %p\n", ch, ch->vtbl,
          ((void **)ch->vtbl)[3], hw );
 
-    if (h->impl->real_loader)
+    if (h->impl->real_loader && !GetEnvironmentVariableW( L"WV2_WINDOWED", NULL, 0 ))
     {
         void *env3 = NULL;
         /* First try ICoreWebView2Environment3::CreateCoreWebView2CompositionController (slot 9) */

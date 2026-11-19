@@ -555,3 +555,15 @@ LRESULT WINAPI ImeWndProcW( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
     if (!imm_ime_wnd_proc) return DefWindowProcW(hwnd, msg, wParam, lParam);
     return imm_ime_wnd_proc( hwnd, msg, wParam, lParam, FALSE );
 }
+
+HANDLE WINAPI InitThreadCoreMessagingIocp2( HANDLE a1, void *a2 )
+{
+    FIXME("(%p, %p) stub\n", a1, a2);
+    return CreateIoCompletionPort( INVALID_HANDLE_VALUE, NULL, 0, 0 );
+}
+
+BOOL WINAPI DrainThreadCoreMessagingCompletions2( HANDLE h )
+{
+    FIXME("(%p) stub\n", h);
+    return TRUE;
+}
