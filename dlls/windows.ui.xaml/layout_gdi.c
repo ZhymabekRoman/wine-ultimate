@@ -333,15 +333,14 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
     if (!el || el->visibility != 0 || depth > 14) return FALSE;
     if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
     if (el->text[0] || el->img_pixels || el->img_loaded) return TRUE;
-    if (wcsstr( el->class_name, L"Spotlight" )) return TRUE;
     if (wcsstr( el->class_name, L"ItemsRepeater" ))
     {
-        if (el->data_context || el->dp_cnt >= 2) return TRUE;
         if (el->children_coll)
         {
             struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
             if (v->count > 0) return TRUE;
         }
+        return FALSE;
     }
     if (el->content)
     {
