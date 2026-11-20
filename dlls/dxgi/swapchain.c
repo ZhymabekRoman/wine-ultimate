@@ -1230,7 +1230,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
         if (sc_hwnd && GetParent(sc_hwnd))
         {
             SetWindowPos(sc_hwnd, HWND_TOP, 0, 48, (int)width, (int)height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
     }
 

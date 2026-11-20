@@ -609,7 +609,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
 
     if (hwnd)
     {
-        HWND child = CreateWindowExW(WS_EX_TRANSPARENT, L"static", NULL,
+        HWND child = CreateWindowExW(0, L"static", NULL,
                 WS_CHILD | WS_CLIPSIBLINGS,
                 0, 48, swapchain_desc.Width > 0 ? swapchain_desc.Width : 1,
                 swapchain_desc.Height > 0 ? swapchain_desc.Height : 1,
