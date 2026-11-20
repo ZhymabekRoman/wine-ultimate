@@ -2700,6 +2700,7 @@ static BOOL g_wv2_alt_down;
 #define WM_APP_WV2_CHAR  (WM_APP + 0x5b)
 #define WM_APP_WV2_PASTE (WM_APP + 0x5c)
 #define WM_APP_WV2_INIT  (WM_APP + 0x5d)
+#define WM_APP_WV2_RESIZE (WM_APP + 0x5e)
 
 static BOOL CALLBACK wv2_post_wheel_cb( HWND child, LPARAM lparam )
 {
@@ -2911,6 +2912,27 @@ static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
             KillTimer( hwnd, 0x5757 );
         return 0;
     }
+    if (msg == WM_APP_WV2_RESIZE && g_active_wv2_impl)
+    {
+        LONG w = LOWORD( lparam ), h = HIWORD( lparam );
+        if (w > 0 && h > 0)
+        {
+            IDCompositionVisual *root = xaml_get_dcomp_root_visual();
+            D2D_RECT_F clip = { 0.0f, 0.0f, (float)w, (float)h };
+            if (root) IDCompositionVisual_SetClip( root, &clip );
+            if (g_active_wv2_impl->visual) IDCompositionVisual_SetClip( g_active_wv2_impl->visual, &clip );
+            if (g_active_wv2_impl->loader_controller && g_active_wv2_impl->real_loader)
+            {
+                ICoreWebView2Controller *ctrl = g_active_wv2_impl->loader_controller;
+                RECT rc = { 0, 0, w, h };
+                ctrl->lpVtbl->put_Bounds( ctrl, rc );
+                ctrl->lpVtbl->NotifyParentWindowPositionChanged( ctrl );
+                wv2_sync_child_hwnds( wv2_get_controller_parent(), (int)w, (int)h );
+            }
+            xaml_dcomp_commit();
+        }
+        return 0;
+    }
     if (msg == WM_APP_WV2_WHEEL && g_active_wv2_impl)
     {
         HWND host = g_active_wv2_impl->parent_hwnd ? g_active_wv2_impl->parent_hwnd : g_wv2_core_hwnd;
@@ -2950,7 +2972,10 @@ static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
         {
             ICoreWebView2CompositionController *comp_ctrl = g_active_wv2_impl->loader_comp_ctrl;
             HRESULT hr_m = comp_ctrl->lpVtbl->SendMouseInput( comp_ctrl, ev_kind, vkeys, 0, pt );
-            if (ev_kind != WM_MOUSEMOVE)
+            if (ev_kind == WM_LBUTTONDOWN || ev_kind == WM_LBUTTONUP)
+                ERR( "wv2_sta_wndproc: SendMouseInput(%#x) pt=%ld,%ld vkeys=%#x hr=%#lx\n",
+                     ev_kind, pt.x, pt.y, vkeys, hr_m );
+            else if (ev_kind != WM_MOUSEMOVE)
                 TRACE( "wv2_sta_wndproc: SendMouseInput(%#x) pt=%ld,%ld vkeys=%#x hr=%#lx\n",
                        ev_kind, pt.x, pt.y, vkeys, hr_m );
         }
@@ -3088,7 +3113,7 @@ static void wv2_paste_clipboard_text( HWND hwnd )
                                    * execCommand round-trip, unbounded clips
                                    * stalled the paste pump */
 
-    TRACE( "wv2_paste_clipboard_text: pasting %zu chars %s\n", len, debugstr_w( buf ) );
+    TRACE( "wv2_paste_clipboard_text: pasting %lu chars %s\n", (unsigned long)len, debugstr_w( buf ) );
     for (i = 0; i < len; i++)
     {
         WCHAR ch = buf[i], ch2 = 0;
@@ -3131,6 +3156,12 @@ static void wv2_paste_clipboard_text( HWND hwnd )
 
 static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
+    if (msg == WM_ERASEBKGND && g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
+        return 1;
+    if (msg == WM_SIZE && g_active_wv2_impl && g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
+    {
+        PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_RESIZE, wparam, lparam );
+    }
     if (msg == WM_APP_WV2_INIT && lparam)
     {
         struct xaml_element *impl = (struct xaml_element *)lparam;
@@ -3207,6 +3238,12 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
     return DefWindowProcW( hwnd, msg, wparam, lparam );
 }
 
+void xaml_wv2_post_resize( UINT width, UINT height )
+{
+    if (g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ) && width > 0 && height > 0)
+        PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_RESIZE, 0, MAKELPARAM( width, height ) );
+}
+
 void wv2_ensure_host_subclass( HWND parent )
 {
     WNDPROC prev;
@@ -3239,14 +3276,7 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
     if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
         wcsstr( cls, L"Edge" ) || wcsstr( cls, L"WebView" ) || wcsstr( cls, L"RenderWidget" ))
     {
-        if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
-        {
-            HWND parent = GetParent( child );
-            int pos = (!parent || parent == wv2_get_controller_parent()) ? -4000 : 0;
-            SetWindowPos( child, HWND_BOTTOM, pos, pos, ctx->width, ctx->height,
-                          SWP_NOACTIVATE );
-        }
-        else
+        if (g_active_wv2_impl && !g_active_wv2_impl->has_comp_ctrl)
         {
             ShowWindow( child, SW_SHOW );
             SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
@@ -3311,42 +3341,22 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
     GetWindowThreadProcessId( hwnd, &pid );
     GetClassNameW( hwnd, cls, ARRAY_SIZE( cls ) );
     if (pid != GetCurrentProcessId())
-    {
-        if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl &&
-            wcsstr( cls, L"Chrome_WidgetWin" ) && IsWindowVisible( hwnd ))
-        {
-            RECT wr;
-            if (GetWindowRect( hwnd, &wr ) && wr.left > -2000)
-            {
-                ERR( "wv2_sync_top_cb: moving foreign %p (%s) pid=%lu offscreen\n", hwnd, debugstr_w( cls ), pid );
-                SetWindowPos( hwnd, HWND_BOTTOM, -4000, -4000, 0, 0,
-                              SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
-            }
-        }
         return TRUE;
-    }
 
     TRACE( "wv2_sync_top_cb: seen hwnd %p class %s\n", hwnd, debugstr_w(cls) );
-    if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
-        wcsstr( cls, L"RenderWidget" ))
+    if (g_active_wv2_impl && !g_active_wv2_impl->has_comp_ctrl &&
+        (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
+         wcsstr( cls, L"RenderWidget" )))
     {
         HWND parent = wv2_get_controller_parent();
         if (parent && IsWindow( parent ) && hwnd != parent)
         {
             SetParent( hwnd, parent );
-            if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
-            {
-                SetWindowPos( hwnd, HWND_BOTTOM, -4000, -4000, ctx->width, ctx->height,
-                              SWP_NOACTIVATE );
-            }
-            else
-            {
-                ShowWindow( hwnd, SW_SHOW );
-                SetWindowPos( hwnd, HWND_TOP, 0, 0, ctx->width, ctx->height,
-                              SWP_SHOWWINDOW | SWP_NOACTIVATE );
-                ERR( "wv2_sync_top_cb: re-parented and positioned child %p (%s) to parent %p %dx%d\n",
-                     hwnd, debugstr_w( cls ), parent, ctx->width, ctx->height );
-            }
+            ShowWindow( hwnd, SW_SHOW );
+            SetWindowPos( hwnd, HWND_TOP, 0, 0, ctx->width, ctx->height,
+                          SWP_SHOWWINDOW | SWP_NOACTIVATE );
+            ERR( "wv2_sync_top_cb: re-parented and positioned child %p (%s) to parent %p %dx%d\n",
+                 hwnd, debugstr_w( cls ), parent, ctx->width, ctx->height );
             EnumChildWindows( hwnd, wv2_sync_child_cb, lparam );
             ctx->count++;
         }
@@ -3357,6 +3367,8 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
 void wv2_sync_child_hwnds( HWND parent, UINT width, UINT height )
 {
     struct wv2_enum_ctx ctx;
+
+    if (!g_active_wv2_impl || g_active_wv2_impl->has_comp_ctrl) return;
 
     if (!parent || !IsWindow( parent )) parent = wv2_get_controller_parent();
     if ((int)width <= 0 || (int)height <= 0)
@@ -4477,7 +4489,7 @@ static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl
              * 1280x1024), where the WhatsApp login page (1600 px design height) only fits above the
              * fold when zoomed out. A real desktop (2560x1440) keeps the native 1.00x. */
             desktop_h = GetSystemMetrics( SM_CYSCREEN );
-            if (desktop_h > 0 && desktop_h <= 1024)
+            if (desktop_h > 0 && desktop_h < 768)
             {
                 sf = (double)desktop_h / 2048.0;
                 if (sf < 0.5) sf = 0.5;
@@ -4722,17 +4734,59 @@ static ULONG WINAPI wv2_do_Release( IInspectable *iface )
 static HRESULT WINAPI wv2_do_GetValue( void *iface, void *dp, IInspectable **out )
 {
     struct xaml_element *impl = impl_from_IDependencyObject( iface );
+    int i;
     if (!out) return E_POINTER;
+    *out = NULL;
     if (dp && dp == wv2_source_dp)
         return wv2_get_Source( &impl->IWebView2_iface, out );
-    *out = NULL;
+    for (i = 0; i < impl->dp_count; i++)
+    {
+        if (impl->dp_store[i].dp == dp)
+        {
+            *out = impl->dp_store[i].val;
+            if (*out) IInspectable_AddRef( *out );
+            return S_OK;
+        }
+    }
+    if (dp)
+        xaml_dp_get_default_value( dp, out );
     return S_OK;
 }
 static HRESULT WINAPI wv2_do_SetValue( void *iface, void *dp, IInspectable *value )
 {
     struct xaml_element *impl = impl_from_IDependencyObject( iface );
+    int i;
     if (dp && dp == wv2_source_dp)
         return wv2_put_Source( &impl->IWebView2_iface, value );
+    for (i = 0; i < impl->dp_count; i++)
+    {
+        if (impl->dp_store[i].dp == dp)
+        {
+            if (value) IInspectable_AddRef( value );
+            if (impl->dp_store[i].val) IInspectable_Release( impl->dp_store[i].val );
+            impl->dp_store[i].val = value;
+            return S_OK;
+        }
+    }
+    if (impl->dp_count < (int)ARRAY_SIZE( impl->dp_store ))
+    {
+        impl->dp_store[impl->dp_count].dp = dp;
+        impl->dp_store[impl->dp_count].val = value;
+        if (value) IInspectable_AddRef( value );
+        impl->dp_count++;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI wv2_do_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token )
+{
+    static LONG next_tok = 100;
+    if (token) *token = InterlockedIncrement( &next_tok );
+    return S_OK;
+}
+
+static HRESULT WINAPI wv2_do_UnregisterPropertyChangedCallback( void *iface, void *dp, INT64 token )
+{
     return S_OK;
 }
 
@@ -4744,13 +4798,16 @@ const void *wv2_do_vtbl[64] =
     [3] = element_GetIids,
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
-    [8] = element_generic_slot,
-
-    [11 ... 63] = element_generic_slot,
     [6] = wv2_do_GetValue,
     [7] = wv2_do_SetValue,
+    [8] = element_generic_slot,
     [9] = wv2_do_GetValue,
     [10] = wv2_do_SetValue,
+    [11] = wv2_do_RegisterPropertyChangedCallback,
+    [12] = wv2_do_UnregisterPropertyChangedCallback,
+    [13] = element_generic_slot,
+    [14] = uwp_do_get_DispatcherQueue,
+    [15 ... 63] = element_generic_slot,
 };
 
 const void *wv2_vtbl[256] =

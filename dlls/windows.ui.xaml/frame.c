@@ -92,6 +92,8 @@ const GUID IID_IWeakReference =
     { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 static const GUID IID_IUIElement_WinUI =
     { 0xc3c01020, 0x320c, 0x5cf6, { 0x9d, 0x24, 0xd3, 0x96, 0xbb, 0xfa, 0x4d, 0x8b } };
+static const GUID IID_IUIElementProtected_WinUI3 =
+    { 0x8f69b9e9, 0x1f00, 0x5834, { 0x9b, 0xf1, 0xa9, 0x25, 0x7b, 0xed, 0x39, 0xf0 } };
 static const GUID IID_IFrameworkElement_WinUI =
     { 0xfe08f13d, 0xdc6a, 0x5495, { 0xad, 0x44, 0xc2, 0xd8, 0xd2, 0x18, 0x63, 0xb0 } };
 static const GUID IID_IControl_WinUI =
@@ -112,6 +114,62 @@ static const GUID IID_IWebView2Factory2 =
     { 0xfb4ec2ce, 0x3074, 0x5c42, { 0xb6, 0x55, 0x64, 0xfb, 0x81, 0xfb, 0xd0, 0x40 } };
 static const GUID IID_IWebView2Statics =
     { 0x7f3226d0, 0xf6d5, 0x5aa7, { 0xb1, 0x75, 0x64, 0x54, 0x51, 0xca, 0x3c, 0x85 } };
+static const GUID IID_IPanelFactory_WinUI3 =
+    { 0xf5e7e21c, 0x4c97, 0x5d20, { 0xbe, 0xe6, 0x3e, 0x4f, 0xc6, 0xab, 0x14, 0xe9 } };
+static const GUID IID_IUIElementStatics_WinUI3 =
+    { 0xd2921d87, 0x3584, 0x5e22, { 0x8a, 0x3a, 0xc2, 0xc7, 0x8d, 0xab, 0x4f, 0x6e } };
+static const GUID IID_ISolidColorBrushFactory_WinUI3 =
+    { 0x7b559384, 0x4daa, 0x54f4, { 0x91, 0xef, 0x33, 0xa2, 0x3f, 0xd8, 0x16, 0xca } };
+
+static HRESULT WINAPI scb_factory_CreateInstanceWithColor( void *iface, UINT32 color, void **out )
+{
+    if (!out) return E_POINTER;
+    return element_create_typed( L"Microsoft.UI.Xaml.Media.SolidColorBrush", out );
+}
+
+static HRESULT WINAPI xaml_dp_token_QI( IInspectable *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI xaml_dp_token_AddRef( IInspectable *iface ) { return 2; }
+static ULONG WINAPI xaml_dp_token_Release( IInspectable *iface ) { return 1; }
+static HRESULT WINAPI xaml_dp_token_GetIids( IInspectable *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI xaml_dp_token_GetName( IInspectable *iface, HSTRING *n ) { return WindowsCreateString( L"Microsoft.UI.Xaml.DependencyProperty", 36, n ); }
+static HRESULT WINAPI xaml_dp_token_GetTrust( IInspectable *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static const void *xaml_dp_token_vtbl[] =
+{
+    xaml_dp_token_QI, xaml_dp_token_AddRef, xaml_dp_token_Release,
+    xaml_dp_token_GetIids, xaml_dp_token_GetName, xaml_dp_token_GetTrust,
+};
+static IInspectable xaml_dp_token_obj = { (const IInspectableVtbl *)xaml_dp_token_vtbl };
+
+static HRESULT WINAPI xaml_uielem_statics_getter( void *iface, void **out )
+{
+    if (out) *out = &xaml_dp_token_obj;
+    return S_OK;
+}
+static const void *xaml_uielem_statics_vtbl[128] =
+{
+    [0] = xaml_dp_token_QI,
+    [1] = xaml_dp_token_AddRef,
+    [2] = xaml_dp_token_Release,
+    [3] = xaml_dp_token_GetIids,
+    [4] = xaml_dp_token_GetName,
+    [5] = xaml_dp_token_GetTrust,
+    [6 ... 127] = xaml_uielem_statics_getter,
+};
+static IInspectable xaml_uielem_statics_obj = { (const IInspectableVtbl *)xaml_uielem_statics_vtbl };
+
+static const void *scb_factory_vtbl[] =
+{
+    xaml_dp_token_QI, xaml_dp_token_AddRef, xaml_dp_token_Release,
+    xaml_dp_token_GetIids, xaml_dp_token_GetName, xaml_dp_token_GetTrust,
+    scb_factory_CreateInstanceWithColor,
+};
+static IInspectable winui_scb_factory_obj = { (const IInspectableVtbl *)scb_factory_vtbl };
+
 static const GUID IID_IUserControlFactory =
     { 0x61ac9074, 0xaab3, 0x50b8, { 0x8b, 0x18, 0xd4, 0xd2, 0x57, 0x3a, 0x52, 0x35 } };
 static const GUID IID_IUserControlStatics =
@@ -158,6 +216,12 @@ static const GUID IID_IBrush_local =
     { 0x8806a321, 0x1e06, 0x422c, { 0xa1, 0xcc, 0x01, 0x69, 0x65, 0x59, 0xe0, 0x21 } };
 static const GUID IID_ISolidColorBrush_local =
     { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
+static const GUID IID_ISolidColorBrush_WinUI3 =
+    { 0xb3865c31, 0x37c8, 0x55c1, { 0x8a, 0x72, 0xd4, 0x1c, 0x67, 0x64, 0x2e, 0x2a } };
+static const GUID IID_IRoutedEventArgs_WinUI3 =
+    { 0x0908c407, 0x1c7d, 0x5de3, { 0x9c, 0x50, 0xd9, 0x71, 0xc6, 0x2e, 0xc8, 0xec } };
+static const GUID IID_IRoutedEventArgsFactory_WinUI3 =
+    { 0x914b02c7, 0x076b, 0x5b89, { 0x98, 0xe7, 0x6c, 0x37, 0x33, 0x79, 0xe9, 0xaf } };
 static const GUID IID_IStyle_local =
     { 0xc4a9f225, 0x9db7, 0x4a7d, { 0xb6, 0xd1, 0xf7, 0x4e, 0xdb, 0x92, 0x93, 0xc2 } };
 
@@ -701,9 +765,25 @@ static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, R
         return E_NOINTERFACE;
     }
 
+    if (IsEqualGUID( iid, &IID_IUIElementStatics_WinUI3 ))
+    {
+        *out = &xaml_uielem_statics_obj;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ISolidColorBrushFactory_WinUI3 ))
+    {
+        *out = &winui_scb_factory_obj;
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IFrameFactory ) ||
         IsEqualGUID( iid, &IID_IPageFactory ) ||
         IsEqualGUID( iid, &IID_IGridFactory ) ||
+        IsEqualGUID( iid, &IID_IPanelFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IPanelFactory_UWP2 ) ||
+        IsEqualGUID( iid, &IID_IPanelFactory_WinUI3 ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgsFactory_WinUI3 ) ||
         IsEqualGUID( iid, &IID_IContentControlFactory ) ||
         IsEqualGUID( iid, &IID_IWebView2Factory ) ||
         IsEqualGUID( iid, &IID_IWebView2Factory2 ) ||
@@ -1773,6 +1853,112 @@ HRESULT WINAPI element_wv22_GetRuntimeClassName( IInspectable *iface, HSTRING *n
     return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
 }
 
+struct xaml_weak_ref
+{
+    IUnknown IWeakReference_iface;
+    LONG ref;
+    IInspectable *target;
+};
+
+static inline struct xaml_weak_ref *impl_from_weak_ref( IUnknown *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_weak_ref, IWeakReference_iface );
+}
+
+static HRESULT WINAPI weak_ref_QueryInterface( IUnknown *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IWeakReference ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = iface;
+        IUnknown_AddRef( iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI weak_ref_AddRef( IUnknown *iface )
+{
+    struct xaml_weak_ref *w = impl_from_weak_ref( iface );
+    return InterlockedIncrement( &w->ref );
+}
+
+static ULONG WINAPI weak_ref_Release( IUnknown *iface )
+{
+    struct xaml_weak_ref *w = impl_from_weak_ref( iface );
+    ULONG ref = InterlockedDecrement( &w->ref );
+    if (!ref) free( w );
+    return ref;
+}
+
+static HRESULT WINAPI weak_ref_Resolve( IUnknown *iface, REFIID iid, IInspectable **out )
+{
+    struct xaml_weak_ref *w = impl_from_weak_ref( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!w->target) return S_OK;
+    return IInspectable_QueryInterface( w->target, iid, (void **)out );
+}
+
+static const void *weak_ref_vtbl[] =
+{
+    weak_ref_QueryInterface,
+    weak_ref_AddRef,
+    weak_ref_Release,
+    weak_ref_Resolve,
+};
+
+static inline struct xaml_element *impl_from_weak_src( IUnknown *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_element, IWeakReferenceSource_iface );
+}
+
+static HRESULT WINAPI weak_src_QueryInterface( IUnknown *iface, REFIID iid, void **out )
+{
+    struct xaml_element *impl = impl_from_weak_src( iface );
+    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+
+static ULONG WINAPI weak_src_AddRef( IUnknown *iface )
+{
+    struct xaml_element *impl = impl_from_weak_src( iface );
+    return element_AddRef( &impl->IInspectable_iface );
+}
+
+static ULONG WINAPI weak_src_Release( IUnknown *iface )
+{
+    struct xaml_element *impl = impl_from_weak_src( iface );
+    return element_Release( &impl->IInspectable_iface );
+}
+
+static HRESULT WINAPI weak_src_GetWeakReference( IUnknown *iface, IUnknown **out )
+{
+    struct xaml_element *impl = impl_from_weak_src( iface );
+    if (!out) return E_POINTER;
+    if (!impl->weak_ref)
+    {
+        struct xaml_weak_ref *w = calloc( 1, sizeof(*w) );
+        if (!w) { *out = NULL; return E_OUTOFMEMORY; }
+        w->IWeakReference_iface.lpVtbl = (const IUnknownVtbl *)weak_ref_vtbl;
+        w->ref = 1;
+        w->target = impl->outer ? impl->outer : &impl->IInspectable_iface;
+        impl->weak_ref = w;
+    }
+    *out = &impl->weak_ref->IWeakReference_iface;
+    IUnknown_AddRef( *out );
+    return S_OK;
+}
+
+static const void *weak_src_vtbl[] =
+{
+    weak_src_QueryInterface,
+    weak_src_AddRef,
+    weak_src_Release,
+    weak_src_GetWeakReference,
+};
+
 HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct xaml_element *impl = impl_from_element( iface );
@@ -1781,10 +1967,24 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
 
     ERR( "element_QueryInterface(%p vt=%p, %s, class=%s)\n", iface, iface->lpVtbl, debugstr_guid( iid ), debugstr_w( impl->class_name ) );
 
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = &impl->IWeakReferenceSource_iface;
+        element_AddRef( iface );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
+    {
+        *out = &impl->IDependencyObject_iface;
+        element_AddRef( iface );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
-        IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
         IsEqualGUID( iid, &IID_IMarshal ))
     {
         *out = NULL;
@@ -1821,7 +2021,8 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
     }
 
     if (IsEqualGUID( iid, &IID_IUIElement_g ) ||
-        IsEqualGUID( iid, &IID_IUIElement_WinUI ))
+        IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
+        IsEqualGUID( iid, &IID_IUIElementProtected_WinUI3 ))
     {
         *out = &impl->IUIElement_iface;
         element_AddRef( &impl->IInspectable_iface );
@@ -1856,8 +2057,6 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
         IsEqualGUID( iid, &IID_IControl_WinUI ) ||
-        IsEqualGUID( iid, &IID_IFrameworkElement ) ||
-        IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_WinUI ) ||
         IsEqualGUID( iid, &IID_IUIElementOverrides ) ||
@@ -1873,9 +2072,19 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IStyle ) ||
         IsEqualGUID( iid, &IID_IBrush_local ) ||
         IsEqualGUID( iid, &IID_ISolidColorBrush_local ) ||
+        IsEqualGUID( iid, &IID_ISolidColorBrush_WinUI3 ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_WinUI3 ) ||
         IsEqualGUID( iid, &IID_IStyle_local ))
     {
         *out = &impl->IInspectable_iface;
+        element_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IFrameworkElement ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ))
+    {
+        *out = &impl->IFrameworkElement_iface;
         element_AddRef( &impl->IInspectable_iface );
         return S_OK;
     }
@@ -2057,6 +2266,59 @@ static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
     struct tracker_entry *e = tracker_lookup( iface, 0 );
     if (e && e->idx < ARRAY_SIZE( tracker_map ))
         memset( &tracker_map[e->idx], 0, sizeof(tracker_map[e->idx]) );
+    return S_OK;
+}
+
+static HRESULT WINAPI element_get_IsLoaded( void *iface, boolean *value )
+{
+    if (value) *value = TRUE;
+    return S_OK;
+}
+
+static float g_winui_actual_w = 0.0f;
+static float g_winui_actual_h = 0.0f;
+
+static HRESULT WINAPI element_get_ActualWidth( void *iface, double *value )
+{
+    SIZE sz = { 1272, 990 };
+    if (value)
+    {
+        if (g_winui_actual_w > 0.0f)
+            *value = (double)g_winui_actual_w;
+        else
+        {
+            xaml_get_layout_metrics( xaml_get_window_hwnd(), &sz, NULL );
+            *value = (double)(sz.cx > 0 ? sz.cx : 1272);
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI element_get_ActualHeight( void *iface, double *value )
+{
+    SIZE sz = { 1272, 990 };
+    if (value)
+    {
+        if (g_winui_actual_h > 0.0f)
+            *value = (double)g_winui_actual_h;
+        else
+        {
+            xaml_get_layout_metrics( xaml_get_window_hwnd(), &sz, NULL );
+            *value = (double)(sz.cy > 0 ? sz.cy : 990);
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI element_add_event_generic( void *iface, void *handler, EventRegistrationToken *token )
+{
+    static LONG next_tok = 10;
+    if (token) token->value = InterlockedIncrement( &next_tok );
+    return S_OK;
+}
+
+static HRESULT WINAPI element_remove_event_generic( void *iface, EventRegistrationToken token )
+{
     return S_OK;
 }
 
@@ -2257,7 +2519,7 @@ static const void *grid_vtbl[256] =
     [10] = element_grid_get_RowDefinitions_abi3,  /* IV2 94ea2b94 WinUI3 view: RowDefinitions(HSTRING, vec**) */
     [11] = element_grid_get_ColumnDefinitions_abi3,
     [12] = element_grid_get_ColumnDefinitions,
-    [13] = wv2_probe57, [14] = wv2_probe58, [15] = wv2_probe59,
+    [13] = element_get_ActualWidth, [14] = element_get_ActualHeight, [15] = wv2_probe59,
     [16] = element_get_Content, [17] = wv2_probe61, [18] = wv2_probe62,
     [19] = wv2_probe63,
     [20] = wv2_probe0,  [21] = wv2_probe1,  [22] = wv2_probe2,  [23] = wv2_probe3,
@@ -2269,13 +2531,17 @@ static const void *grid_vtbl[256] =
     [44] = wv2_probe24, [45] = wv2_probe25, [46] = wv2_probe26, [47] = wv2_probe27,
     [48] = wv2_probe28, [49] = wv2_probe29, [50] = wv2_probe30, [51] = wv2_probe31,
     [52] = wv2_probe32, [53] = wv2_probe33, [54] = wv2_probe34, [55] = wv2_probe35,
-    [56] = wv2_probe36, [57] = element_get_RequestedTheme, [58] = element_put_RequestedTheme, [59] = wv2_probe39,
-    [60] = wv2_probe40, [61] = element_add_Loaded, [62] = element_remove_Loaded, [63] = wv2_probe43,
-    [64] = wv2_probe44, [65] = wv2_probe45, [66] = wv2_probe46, [67] = wv2_probe47,
-    [68] = wv2_probe48, [69] = wv2_probe49, [70] = wv2_probe50, [71] = wv2_probe51,
+    [56] = wv2_probe36, [57] = element_get_RequestedTheme, [58] = element_put_RequestedTheme, [59] = element_get_IsLoaded,
+    [60] = wv2_probe40, [61] = element_add_Loaded, [62] = element_remove_Loaded,
+    [63] = element_add_event_generic, [64] = element_remove_event_generic,
+    [65] = element_add_event_generic, [66] = element_remove_event_generic,
+    [67] = element_add_event_generic, [68] = element_remove_event_generic,
+    [69] = element_add_event_generic, [70] = element_remove_event_generic,
+    [71] = element_add_event_generic,
     [72] = element_add_Loaded,
-    [73] = element_remove_Loaded,
-    [74] = wv2_probe53, [75] = wv2_probe54, [76] = wv2_probe55, [77] = wv2_probe56,
+    [73] = element_add_event_generic, [74] = element_remove_event_generic, /* ActualThemeChanged */
+    [75] = element_add_event_generic, [76] = element_remove_event_generic, /* EffectiveViewportChanged */
+    [77] = wv2_probe56,
     [78] = wv2_probe57, [79] = wv2_probe58, [80] = wv2_probe59, [81] = wv2_probe60,
     [82] = wv2_probe61, [83] = wv2_probe62, [84] = wv2_probe63,
     [85] = wv2_probe0,  [86] = wv2_probe1,  [87] = wv2_probe2,  [88] = wv2_probe3,
@@ -2703,7 +2969,835 @@ static HRESULT WINAPI uie_get_ptr( void *iface, void **out )
     if (out) *out = NULL;
     return S_OK;
 }
-static const void *uielement_vtbl[64] =
+
+static const void *xaml_root_obj;
+static const void *xaml_root2_obj;
+static const void *xaml_root_native_obj;
+static const void *xaml_root_weak_src_obj;
+static const void *xaml_root_weak_ref_obj;
+
+static HRESULT WINAPI xaml_root_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IXamlRoot_WinUI3 =
+        { 0x60cb215a, 0xad15, 0x520a, { 0x8b, 0x01, 0x44, 0x16, 0x82, 0x4f, 0x04, 0x41 } };
+    static const GUID IID_IXamlRoot2_WinUI3 =
+        { 0xbdee0f42, 0x71cb, 0x50c5, { 0x82, 0x9b, 0x46, 0x14, 0xd9, 0x8c, 0x57, 0x94 } };
+    static const GUID IID_IXamlRoot_UWP =
+        { 0x34b50756, 0x1696, 0x5b6d, { 0x8e, 0x9b, 0xc7, 0x14, 0x64, 0xcc, 0xad, 0x5a } };
+    static const GUID IID_IXamlRootNative =
+        { 0xf88a52af, 0x87d6, 0x4f58, { 0x87, 0x58, 0x55, 0xed, 0x42, 0xbd, 0xcc, 0xf3 } };
+    static const GUID IID_IWeakReferenceSource_local =
+        { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IXamlRoot_WinUI3 ) ||
+        IsEqualGUID( iid, &IID_IXamlRoot_UWP ))
+    {
+        *out = (void *)&xaml_root_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IXamlRoot2_WinUI3 ))
+    {
+        *out = (void *)&xaml_root2_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IXamlRootNative ))
+    {
+        *out = (void *)&xaml_root_native_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
+    {
+        *out = (void *)&xaml_root_weak_src_obj;
+        return S_OK;
+    }
+    ERR( "xaml_root_QueryInterface unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI xaml_root_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI xaml_root_Release( void *iface ) { return 1; }
+static HRESULT WINAPI xaml_root_weak_ref_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IWeakReference_local =
+        { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IWeakReference_local ))
+    {
+        *out = (void *)&xaml_root_weak_ref_obj;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI xaml_root_weak_Resolve( void *iface, REFIID iid, IInspectable **out )
+{
+    return xaml_root_QueryInterface( (void *)&xaml_root_obj, iid, (void **)out );
+}
+static const void *xaml_root_weak_ref_vtbl[4] =
+{
+    [0] = xaml_root_weak_ref_QI,
+    [1] = xaml_root_AddRef,
+    [2] = xaml_root_Release,
+    [3] = xaml_root_weak_Resolve,
+};
+static const void *xaml_root_weak_ref_obj = xaml_root_weak_ref_vtbl;
+static HRESULT WINAPI xaml_root_GetWeakReference( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = (void *)&xaml_root_weak_ref_obj;
+    return S_OK;
+}
+static const void *xaml_root_weak_src_vtbl[4] =
+{
+    [0] = xaml_root_QueryInterface,
+    [1] = xaml_root_AddRef,
+    [2] = xaml_root_Release,
+    [3] = xaml_root_GetWeakReference,
+};
+static const void *xaml_root_weak_src_obj = xaml_root_weak_src_vtbl;
+static HRESULT WINAPI xaml_root_native_get_HostWindow( void *iface, HWND *out )
+{
+    if (!out) return E_POINTER;
+    *out = xaml_get_window_hwnd();
+    ERR( "xaml_root_native_get_HostWindow -> %p\n", *out );
+    return S_OK;
+}
+static const void *xaml_root_native_vtbl[4] =
+{
+    [0] = xaml_root_QueryInterface,
+    [1] = xaml_root_AddRef,
+    [2] = xaml_root_Release,
+    [3] = xaml_root_native_get_HostWindow,
+};
+static const void *xaml_root_native_obj = xaml_root_native_vtbl;
+static HRESULT WINAPI xaml_root_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_root_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Microsoft.UI.Xaml.XamlRoot", 26, name );
+}
+static HRESULT WINAPI xaml_root_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_root_get_Content( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_root_get_Size( void *iface, Size *out )
+{
+    SIZE sz = { 1272, 990 };
+    if (out)
+    {
+        if (g_winui_actual_w > 0.0f && g_winui_actual_h > 0.0f)
+        {
+            out->Width = g_winui_actual_w;
+            out->Height = g_winui_actual_h;
+        }
+        else
+        {
+            xaml_get_layout_metrics( xaml_get_window_hwnd(), &sz, NULL );
+            out->Width = (float)(sz.cx > 0 ? sz.cx : 1272);
+            out->Height = (float)(sz.cy > 0 ? sz.cy : 990);
+        }
+    }
+    return S_OK;
+}
+static HRESULT WINAPI xaml_root_get_RasterizationScale( void *iface, double *out )
+{
+    if (out) *out = 1.0;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_root_get_IsHostVisible( void *iface, boolean *out )
+{
+    if (out) *out = TRUE;
+    return S_OK;
+}
+static const void *xaml_root_vtbl[16] =
+{
+    [0] = xaml_root_QueryInterface,
+    [1] = xaml_root_AddRef,
+    [2] = xaml_root_Release,
+    [3] = xaml_root_GetIids,
+    [4] = xaml_root_GetRuntimeClassName,
+    [5] = xaml_root_GetTrustLevel,
+    [6] = xaml_root_get_Content,
+    [7] = xaml_root_get_Size,
+    [8] = xaml_root_get_RasterizationScale,
+    [9] = xaml_root_get_IsHostVisible,
+    [10] = element_add_event_generic,
+    [11] = element_remove_event_generic,
+    [12 ... 15] = element_generic_slot,
+};
+static const void *xaml_root_obj = xaml_root_vtbl;
+
+static HRESULT WINAPI xaml_root2_get_ContentIslandEnvironment( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static const void *xaml_root2_vtbl[8] =
+{
+    [0] = xaml_root_QueryInterface,
+    [1] = xaml_root_AddRef,
+    [2] = xaml_root_Release,
+    [3] = xaml_root_GetIids,
+    [4] = xaml_root_GetRuntimeClassName,
+    [5] = xaml_root_GetTrustLevel,
+    [6] = xaml_root2_get_ContentIslandEnvironment,
+    [7] = element_generic_slot,
+};
+static const void *xaml_root2_obj = xaml_root2_vtbl;
+
+struct uie_vec2 { float x, y; };
+struct uie_vec3 { float x, y, z; };
+
+static HRESULT WINAPI uie_get_ActualOffset( void *iface, struct uie_vec3 *out )
+{
+    if (out) { out->x = 0.0f; out->y = 0.0f; out->z = 0.0f; }
+    return S_OK;
+}
+static HRESULT WINAPI uie_get_ActualSize( void *iface, struct uie_vec2 *out )
+{
+    SIZE sz = { 1272, 990 };
+    if (out)
+    {
+        if (g_winui_actual_w > 0.0f && g_winui_actual_h > 0.0f)
+        {
+            out->x = g_winui_actual_w;
+            out->y = g_winui_actual_h;
+        }
+        else
+        {
+            xaml_get_layout_metrics( xaml_get_window_hwnd(), &sz, NULL );
+            out->x = (float)(sz.cx > 0 ? sz.cx : 1272);
+            out->y = (float)(sz.cy > 0 ? sz.cy : 990);
+        }
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uie_get_XamlRoot( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = (void *)&xaml_root_obj;
+    return S_OK;
+}
+static HRESULT WINAPI uie_get_RasterizationScale( void *iface, double *out )
+{
+    if (out) *out = 1.0;
+    return S_OK;
+}
+static const void *general_transform_obj;
+static HRESULT WINAPI general_transform_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IMarshal )) { *out = NULL; return E_NOINTERFACE; }
+    *out = (void *)&general_transform_obj;
+    return S_OK;
+}
+static HRESULT WINAPI general_transform_TransformPoint( void *iface, Point pt, Point *out )
+{
+    if (out) *out = pt;
+    return S_OK;
+}
+static HRESULT WINAPI general_transform_TryTransform( void *iface, Point in_pt, Point *out_pt, boolean *ret )
+{
+    if (out_pt) *out_pt = in_pt;
+    if (ret) *ret = TRUE;
+    return S_OK;
+}
+static const void *general_transform_vtbl[12] =
+{
+    [0] = general_transform_QI,
+    [1] = xaml_root_AddRef,
+    [2] = xaml_root_Release,
+    [3] = xaml_root_GetIids,
+    [4] = xaml_root_GetRuntimeClassName,
+    [5] = xaml_root_GetTrustLevel,
+    [6] = general_transform_QI, /* get_Inverse */
+    [7] = general_transform_TransformPoint,
+    [8] = general_transform_TryTransform,
+    [9 ... 11] = element_generic_slot,
+};
+static const void *general_transform_obj = general_transform_vtbl;
+
+static HRESULT WINAPI uie_TransformToVisual( void *iface, void *visual, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = (void *)&general_transform_obj;
+    return S_OK;
+}
+
+static HRESULT WINAPI uie_Focus( void *iface, int state, boolean *out )
+{
+    if (out) *out = TRUE;
+    return S_OK;
+}
+
+/* Generic WinUI 3 UIElement / FrameworkElement event registry & dispatch */
+enum xaml_winui_ev_kind
+{
+    WINUI_EV_SIZE_CHANGED = 1,
+    WINUI_EV_EFFECTIVE_VIEWPORT,
+    WINUI_EV_KEY_UP,
+    WINUI_EV_KEY_DOWN,
+    WINUI_EV_GOT_FOCUS,
+    WINUI_EV_LOST_FOCUS,
+    WINUI_EV_POINTER_PRESSED,
+    WINUI_EV_POINTER_MOVED,
+    WINUI_EV_POINTER_RELEASED,
+    WINUI_EV_POINTER_ENTERED,
+    WINUI_EV_POINTER_EXITED,
+    WINUI_EV_POINTER_CAPTURE_LOST,
+    WINUI_EV_POINTER_WHEEL,
+};
+
+struct winui_ev_entry
+{
+    enum xaml_winui_ev_kind kind;
+    IInspectable *sender;
+    void *handler;
+    INT64 token;
+};
+
+static struct winui_ev_entry g_winui_evs[256];
+static int g_winui_ev_count;
+static LONG g_winui_ev_next_tok = 100;
+static SRWLOCK g_winui_ev_lock = SRWLOCK_INIT;
+
+static HRESULT winui_ev_add( enum xaml_winui_ev_kind kind, struct xaml_element *impl,
+                             void *handler, EventRegistrationToken *token )
+{
+    INT64 tok = InterlockedIncrement( &g_winui_ev_next_tok );
+    if (token) token->value = tok;
+    if (!handler) return S_OK;
+    AcquireSRWLockExclusive( &g_winui_ev_lock );
+    if (g_winui_ev_count < (int)ARRAY_SIZE(g_winui_evs))
+    {
+        struct winui_ev_entry *e = &g_winui_evs[g_winui_ev_count++];
+        e->kind = kind;
+        e->sender = (impl && impl->outer) ? impl->outer : (impl ? &impl->IInspectable_iface : NULL);
+        e->handler = handler;
+        e->token = tok;
+        IUnknown_AddRef( (IUnknown *)handler );
+        TRACE( "winui_ev_add kind=%d sender=%p handler=%p tok=%I64d\n", kind, e->sender, handler, tok );
+    }
+    ReleaseSRWLockExclusive( &g_winui_ev_lock );
+    return S_OK;
+}
+
+static HRESULT WINAPI winui_ev_remove( void *iface, EventRegistrationToken token )
+{
+    int i;
+    void *to_release = NULL;
+    AcquireSRWLockExclusive( &g_winui_ev_lock );
+    for (i = 0; i < g_winui_ev_count; i++)
+    {
+        if (g_winui_evs[i].token == token.value)
+        {
+            to_release = g_winui_evs[i].handler;
+            g_winui_evs[i] = g_winui_evs[--g_winui_ev_count];
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive( &g_winui_ev_lock );
+    if (to_release) IUnknown_Release( (IUnknown *)to_release );
+    return S_OK;
+}
+
+static void winui_ev_fire( enum xaml_winui_ev_kind kind, void *args )
+{
+    struct winui_ev_entry snap[64];
+    int n = 0, i;
+    AcquireSRWLockShared( &g_winui_ev_lock );
+    for (i = 0; i < g_winui_ev_count && n < (int)ARRAY_SIZE(snap); i++)
+    {
+        if (g_winui_evs[i].kind == kind && g_winui_evs[i].handler)
+        {
+            snap[n] = g_winui_evs[i];
+            IUnknown_AddRef( (IUnknown *)snap[n].handler );
+            n++;
+        }
+    }
+    ReleaseSRWLockShared( &g_winui_ev_lock );
+    for (i = 0; i < n; i++)
+    {
+        typedef HRESULT (WINAPI *invoke_fn)( void *, void *, void * );
+        invoke_fn fn = (invoke_fn)((void **)((void **)snap[i].handler)[0])[3];
+        HRESULT hr_inv = S_OK;
+        __TRY
+        {
+            hr_inv = fn( snap[i].handler, snap[i].sender, args );
+        }
+        __EXCEPT_ALL { hr_inv = 0xdeadbeef; }
+        __ENDTRY;
+        TRACE( "winui_ev_fire kind=%d sender=%p hr=%#lx\n", kind, snap[i].sender, hr_inv );
+        IUnknown_Release( (IUnknown *)snap[i].handler );
+    }
+}
+
+/* WinUI 3 SizeChangedEventArgs ({fe76324e-6dfb-58b1-9dcd-886ca8f9a2ea}) */
+struct winui_size_args
+{
+    const void *vtbl;
+    LONG ref;
+    Size prev_sz;
+    Size new_sz;
+};
+static HRESULT WINAPI winui_size_args_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_ISizeChangedEventArgs_WinUI3 =
+        { 0xfe76324e, 0x6dfb, 0x58b1, { 0x9d, 0xcd, 0x88, 0x6c, 0xa8, 0xf9, 0xa2, 0xea } };
+    struct winui_size_args *a = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ISizeChangedEventArgs_WinUI3 ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_WinUI3 ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = a;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI winui_size_args_AddRef( void *iface ) { return InterlockedIncrement( &((struct winui_size_args *)iface)->ref ); }
+static ULONG WINAPI winui_size_args_Release( void *iface )
+{
+    struct winui_size_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI winui_size_args_get_PreviousSize( void *iface, Size *out )
+{
+    if (out) *out = ((struct winui_size_args *)iface)->prev_sz;
+    return S_OK;
+}
+static HRESULT WINAPI winui_size_args_get_NewSize( void *iface, Size *out )
+{
+    if (out) *out = ((struct winui_size_args *)iface)->new_sz;
+    return S_OK;
+}
+static const void *winui_size_args_vtbl[8] =
+{
+    [0] = winui_size_args_QI, [1] = winui_size_args_AddRef, [2] = winui_size_args_Release,
+    [3] = xaml_root_GetIids, [4] = xaml_root_GetRuntimeClassName, [5] = xaml_root_GetTrustLevel,
+    [6] = winui_size_args_get_PreviousSize,
+    [7] = winui_size_args_get_NewSize,
+};
+
+/* WinUI 3 EffectiveViewportChangedEventArgs ({636e8159-2d82-538a-8483-cd576e41d0df}) */
+struct winui_vp_args
+{
+    const void *vtbl;
+    LONG ref;
+    Rect vp;
+};
+static HRESULT WINAPI winui_vp_args_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IEffectiveViewportChangedEventArgs_WinUI3 =
+        { 0x636e8159, 0x2d82, 0x538a, { 0x84, 0x83, 0xcd, 0x57, 0x6e, 0x41, 0xd0, 0xdf } };
+    struct winui_vp_args *a = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IEffectiveViewportChangedEventArgs_WinUI3 ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = a;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI winui_vp_args_AddRef( void *iface ) { return InterlockedIncrement( &((struct winui_vp_args *)iface)->ref ); }
+static ULONG WINAPI winui_vp_args_Release( void *iface )
+{
+    struct winui_vp_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI winui_vp_args_get_Viewport( void *iface, Rect *out )
+{
+    if (out) *out = ((struct winui_vp_args *)iface)->vp;
+    return S_OK;
+}
+static HRESULT WINAPI winui_vp_args_get_ZeroDouble( void *iface, double *out )
+{
+    if (out) *out = 0.0;
+    return S_OK;
+}
+static const void *winui_vp_args_vtbl[10] =
+{
+    [0] = winui_vp_args_QI, [1] = winui_vp_args_AddRef, [2] = winui_vp_args_Release,
+    [3] = xaml_root_GetIids, [4] = xaml_root_GetRuntimeClassName, [5] = xaml_root_GetTrustLevel,
+    [6] = winui_vp_args_get_Viewport,
+    [7] = winui_vp_args_get_Viewport,
+    [8] = winui_vp_args_get_ZeroDouble,
+    [9] = winui_vp_args_get_ZeroDouble,
+};
+
+void xaml_winui_fire_size_changed( float old_w, float old_h, float new_w, float new_h )
+{
+    struct winui_size_args *sa;
+    struct winui_vp_args *va;
+    if (new_w > 0.0f && new_h > 0.0f)
+    {
+        g_winui_actual_w = new_w;
+        g_winui_actual_h = new_h;
+    }
+    if ((sa = calloc( 1, sizeof(*sa) )))
+    {
+        sa->vtbl = winui_size_args_vtbl;
+        sa->ref = 1;
+        sa->prev_sz.Width = old_w;
+        sa->prev_sz.Height = old_h;
+        sa->new_sz.Width = new_w;
+        sa->new_sz.Height = new_h;
+        winui_ev_fire( WINUI_EV_SIZE_CHANGED, sa );
+        winui_size_args_Release( sa );
+    }
+    if ((va = calloc( 1, sizeof(*va) )))
+    {
+        va->vtbl = winui_vp_args_vtbl;
+        va->ref = 1;
+        va->vp.X = 0.0f; va->vp.Y = 0.0f;
+        va->vp.Width = new_w; va->vp.Height = new_h;
+        winui_ev_fire( WINUI_EV_EFFECTIVE_VIEWPORT, va );
+        winui_vp_args_Release( va );
+    }
+}
+
+/* WinUI 3 PointerRoutedEventArgs + IPointer + Microsoft.UI.Input.IPointerPoint + IPointerPointProperties */
+struct winui_ptr_args
+{
+    const void *args_vtbl;
+    const void *ptr_vtbl;
+    const void *pt_vtbl;
+    const void *props_vtbl;
+    LONG ref;
+    struct xaml_pointer_info info;
+    boolean handled;
+    UINT64 timestamp;
+};
+static inline struct winui_ptr_args *wptr_from_args( void *p ) { return CONTAINING_RECORD( p, struct winui_ptr_args, args_vtbl ); }
+static inline struct winui_ptr_args *wptr_from_ptr( void *p ) { return CONTAINING_RECORD( p, struct winui_ptr_args, ptr_vtbl ); }
+static inline struct winui_ptr_args *wptr_from_pt( void *p ) { return CONTAINING_RECORD( p, struct winui_ptr_args, pt_vtbl ); }
+static inline struct winui_ptr_args *wptr_from_props( void *p ) { return CONTAINING_RECORD( p, struct winui_ptr_args, props_vtbl ); }
+
+static HRESULT winui_ptr_qi_common( struct winui_ptr_args *a, REFIID iid, void **out )
+{
+    static const GUID IID_IPointerRoutedEventArgs_WinUI3 =
+        { 0x66e78a9a, 0x1bec, 0x5f92, { 0xb1, 0xa1, 0xea, 0x63, 0x34, 0xee, 0x51, 0x1c } };
+    static const GUID IID_IPointer_WinUI3 =
+        { 0x1f9afbf5, 0x11a3, 0x5e68, { 0xaa, 0x1b, 0x72, 0xfe, 0xbf, 0xa0, 0xab, 0x23 } };
+    static const GUID IID_IPointerPoint_WinUI3 =
+        { 0x0d430ee6, 0x252c, 0x59a4, { 0xb2, 0xa2, 0xd4, 0x42, 0x64, 0xdc, 0x6a, 0x40 } };
+    static const GUID IID_IPointerPointProperties_WinUI3 =
+        { 0xd760ed77, 0x4b10, 0x57a5, { 0xb3, 0xcc, 0xd9, 0xbf, 0x34, 0x13, 0xe9, 0x96 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPointerRoutedEventArgs_WinUI3 ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_WinUI3 ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->args_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPointer_WinUI3 ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->ptr_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPointerPoint_WinUI3 ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->pt_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPointerPointProperties_WinUI3 ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->props_vtbl;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG winui_ptr_release_common( struct winui_ptr_args *a )
+{
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI wptr_args_QI( void *i, REFIID id, void **o ) { return winui_ptr_qi_common( wptr_from_args(i), id, o ); }
+static ULONG WINAPI wptr_args_AddRef( void *i ) { return InterlockedIncrement( &wptr_from_args(i)->ref ); }
+static ULONG WINAPI wptr_args_Release( void *i ) { return winui_ptr_release_common( wptr_from_args(i) ); }
+static HRESULT WINAPI wptr_args_get_Pointer( void *i, void **o )
+{
+    struct winui_ptr_args *a = wptr_from_args(i);
+    if (!o) return E_POINTER;
+    InterlockedIncrement( &a->ref );
+    *o = &a->ptr_vtbl;
+    return S_OK;
+}
+static HRESULT WINAPI wptr_args_get_KeyModifiers( void *i, UINT32 *o ) { if (o) *o = wptr_from_args(i)->info.key_modifiers; return S_OK; }
+static HRESULT WINAPI wptr_args_get_Handled( void *i, boolean *o ) { if (o) *o = wptr_from_args(i)->handled; return S_OK; }
+static HRESULT WINAPI wptr_args_put_Handled( void *i, boolean v ) { wptr_from_args(i)->handled = v; return S_OK; }
+static HRESULT WINAPI wptr_args_get_IsGenerated( void *i, boolean *o ) { if (o) *o = FALSE; return S_OK; }
+static HRESULT WINAPI wptr_args_GetCurrentPoint( void *i, void *rel, void **o )
+{
+    struct winui_ptr_args *a = wptr_from_args(i);
+    if (!o) return E_POINTER;
+    InterlockedIncrement( &a->ref );
+    *o = &a->pt_vtbl;
+    return S_OK;
+}
+static HRESULT WINAPI wptr_args_GetIntermediatePoints( void *i, void *rel, void **o ) { if (o) *o = NULL; return S_OK; }
+
+static HRESULT WINAPI wptr_ptr_QI( void *i, REFIID id, void **o ) { return winui_ptr_qi_common( wptr_from_ptr(i), id, o ); }
+static ULONG WINAPI wptr_ptr_AddRef( void *i ) { return InterlockedIncrement( &wptr_from_ptr(i)->ref ); }
+static ULONG WINAPI wptr_ptr_Release( void *i ) { return winui_ptr_release_common( wptr_from_ptr(i) ); }
+static HRESULT WINAPI wptr_ptr_get_PointerId( void *i, UINT32 *o ) { if (o) *o = wptr_from_ptr(i)->info.pointer_id ? wptr_from_ptr(i)->info.pointer_id : 1; return S_OK; }
+static HRESULT WINAPI wptr_ptr_get_PointerDeviceType( void *i, int *o ) { if (o) *o = 2; return S_OK; } /* Mouse */
+static HRESULT WINAPI wptr_ptr_get_IsInContact( void *i, boolean *o ) { if (o) *o = wptr_from_ptr(i)->info.is_in_contact ? TRUE : FALSE; return S_OK; }
+static HRESULT WINAPI wptr_ptr_get_IsInRange( void *i, boolean *o ) { if (o) *o = TRUE; return S_OK; }
+
+static HRESULT WINAPI wptr_pt_QI( void *i, REFIID id, void **o ) { return winui_ptr_qi_common( wptr_from_pt(i), id, o ); }
+static ULONG WINAPI wptr_pt_AddRef( void *i ) { return InterlockedIncrement( &wptr_from_pt(i)->ref ); }
+static ULONG WINAPI wptr_pt_Release( void *i ) { return winui_ptr_release_common( wptr_from_pt(i) ); }
+static HRESULT WINAPI wptr_pt_get_FrameId( void *i, UINT32 *o ) { if (o) *o = 1; return S_OK; }
+static HRESULT WINAPI wptr_pt_get_IsInContact( void *i, boolean *o ) { if (o) *o = wptr_from_pt(i)->info.is_in_contact ? TRUE : FALSE; return S_OK; }
+static HRESULT WINAPI wptr_pt_get_PointerDeviceType( void *i, int *o ) { if (o) *o = 2; return S_OK; }
+static HRESULT WINAPI wptr_pt_get_PointerId( void *i, UINT32 *o ) { if (o) *o = wptr_from_pt(i)->info.pointer_id ? wptr_from_pt(i)->info.pointer_id : 1; return S_OK; }
+static HRESULT WINAPI wptr_pt_get_Position( void *i, Point *o )
+{
+    struct winui_ptr_args *a = wptr_from_pt(i);
+    if (o) { o->X = a->info.x; o->Y = a->info.y; }
+    return S_OK;
+}
+static HRESULT WINAPI wptr_pt_get_Properties( void *i, void **o )
+{
+    struct winui_ptr_args *a = wptr_from_pt(i);
+    if (!o) return E_POINTER;
+    InterlockedIncrement( &a->ref );
+    *o = &a->props_vtbl;
+    return S_OK;
+}
+static HRESULT WINAPI wptr_pt_get_Timestamp( void *i, UINT64 *o ) { if (o) *o = wptr_from_pt(i)->timestamp; return S_OK; }
+static HRESULT WINAPI wptr_pt_GetTransformedPoint( void *i, void *xf, void **o )
+{
+    struct winui_ptr_args *a = wptr_from_pt(i);
+    if (!o) return E_POINTER;
+    InterlockedIncrement( &a->ref );
+    *o = &a->pt_vtbl;
+    return S_OK;
+}
+
+static HRESULT WINAPI wptr_props_QI( void *i, REFIID id, void **o ) { return winui_ptr_qi_common( wptr_from_props(i), id, o ); }
+static ULONG WINAPI wptr_props_AddRef( void *i ) { return InterlockedIncrement( &wptr_from_props(i)->ref ); }
+static ULONG WINAPI wptr_props_Release( void *i ) { return winui_ptr_release_common( wptr_from_props(i) ); }
+static HRESULT WINAPI wptr_props_get_ContactRect( void *i, Rect *o )
+{
+    struct winui_ptr_args *a = wptr_from_props(i);
+    if (o) { o->X = a->info.x; o->Y = a->info.y; o->Width = 1.0f; o->Height = 1.0f; }
+    return S_OK;
+}
+static HRESULT WINAPI wptr_props_false( void *i, boolean *o ) { if (o) *o = FALSE; return S_OK; }
+static HRESULT WINAPI wptr_props_true( void *i, boolean *o ) { if (o) *o = TRUE; return S_OK; }
+static HRESULT WINAPI wptr_props_left( void *i, boolean *o ) { if (o) *o = wptr_from_props(i)->info.is_left ? TRUE : FALSE; return S_OK; }
+static HRESULT WINAPI wptr_props_middle( void *i, boolean *o ) { if (o) *o = wptr_from_props(i)->info.is_middle ? TRUE : FALSE; return S_OK; }
+static HRESULT WINAPI wptr_props_right( void *i, boolean *o ) { if (o) *o = wptr_from_props(i)->info.is_right ? TRUE : FALSE; return S_OK; }
+static HRESULT WINAPI wptr_props_wheel( void *i, INT32 *o ) { if (o) *o = wptr_from_props(i)->info.wheel_delta; return S_OK; }
+static HRESULT WINAPI wptr_props_update_kind( void *i, int *o ) { if (o) *o = (int)wptr_from_props(i)->info.update_kind; return S_OK; }
+static HRESULT WINAPI wptr_props_zero_f( void *i, float *o ) { if (o) *o = 0.0f; return S_OK; }
+static HRESULT WINAPI wptr_props_pressure( void *i, float *o ) { if (o) *o = 0.5f; return S_OK; }
+
+static const void *winui_ptr_args_vtbl[14] =
+{
+    [0] = wptr_args_QI, [1] = wptr_args_AddRef, [2] = wptr_args_Release,
+    [3] = xaml_root_GetIids, [4] = xaml_root_GetRuntimeClassName, [5] = xaml_root_GetTrustLevel,
+    [6] = wptr_args_get_Pointer,
+    [7] = wptr_args_get_KeyModifiers,
+    [8] = wptr_args_get_Handled,
+    [9] = wptr_args_put_Handled,
+    [10] = wptr_args_get_IsGenerated,
+    [11] = wptr_args_GetCurrentPoint,
+    [12] = wptr_args_GetIntermediatePoints,
+    [13] = element_generic_slot,
+};
+static const void *winui_ptr_ptr_vtbl[10] =
+{
+    [0] = wptr_ptr_QI, [1] = wptr_ptr_AddRef, [2] = wptr_ptr_Release,
+    [3] = xaml_root_GetIids, [4] = xaml_root_GetRuntimeClassName, [5] = xaml_root_GetTrustLevel,
+    [6] = wptr_ptr_get_PointerId,
+    [7] = wptr_ptr_get_PointerDeviceType,
+    [8] = wptr_ptr_get_IsInContact,
+    [9] = wptr_ptr_get_IsInRange,
+};
+static const void *winui_ptr_pt_vtbl[14] =
+{
+    [0] = wptr_pt_QI, [1] = wptr_pt_AddRef, [2] = wptr_pt_Release,
+    [3] = xaml_root_GetIids, [4] = xaml_root_GetRuntimeClassName, [5] = xaml_root_GetTrustLevel,
+    [6] = wptr_pt_get_FrameId,
+    [7] = wptr_pt_get_IsInContact,
+    [8] = wptr_pt_get_PointerDeviceType,
+    [9] = wptr_pt_get_PointerId,
+    [10] = wptr_pt_get_Position,
+    [11] = wptr_pt_get_Properties,
+    [12] = wptr_pt_get_Timestamp,
+    [13] = wptr_pt_GetTransformedPoint,
+};
+static const void *winui_ptr_props_vtbl[27] =
+{
+    [0] = wptr_props_QI, [1] = wptr_props_AddRef, [2] = wptr_props_Release,
+    [3] = xaml_root_GetIids, [4] = xaml_root_GetRuntimeClassName, [5] = xaml_root_GetTrustLevel,
+    [6] = wptr_props_get_ContactRect,
+    [7] = wptr_props_false, [8] = wptr_props_false, [9] = wptr_props_false, [10] = wptr_props_false,
+    [11] = wptr_props_true, [12] = wptr_props_false,
+    [13] = wptr_props_left, [14] = wptr_props_middle, [15] = wptr_props_true, [16] = wptr_props_right,
+    [17] = wptr_props_false, [18] = wptr_props_false,
+    [19] = wptr_props_wheel, [20] = wptr_props_zero_f, [21] = wptr_props_update_kind,
+    [22] = wptr_props_pressure, [23] = wptr_props_false,
+    [24] = wptr_props_zero_f, [25] = wptr_props_zero_f, [26] = wptr_props_zero_f,
+};
+
+void xaml_winui_fire_pointer_event( enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info )
+{
+    struct winui_ptr_args *a;
+    enum xaml_winui_ev_kind ev;
+    if (!info) return;
+    switch (kind)
+    {
+    case XAML_PTR_PRESSED:      ev = WINUI_EV_POINTER_PRESSED; break;
+    case XAML_PTR_MOVED:        ev = WINUI_EV_POINTER_MOVED; break;
+    case XAML_PTR_RELEASED:     ev = WINUI_EV_POINTER_RELEASED; break;
+    case XAML_PTR_WHEEL:        ev = WINUI_EV_POINTER_WHEEL; break;
+    case XAML_PTR_ENTERED:      ev = WINUI_EV_POINTER_ENTERED; break;
+    case XAML_PTR_EXITED:       ev = WINUI_EV_POINTER_EXITED; break;
+    case XAML_PTR_CAPTURE_LOST: ev = WINUI_EV_POINTER_CAPTURE_LOST; break;
+    default: return;
+    }
+    if (!(a = calloc( 1, sizeof(*a) ))) return;
+    a->args_vtbl = winui_ptr_args_vtbl;
+    a->ptr_vtbl = winui_ptr_ptr_vtbl;
+    a->pt_vtbl = winui_ptr_pt_vtbl;
+    a->props_vtbl = winui_ptr_props_vtbl;
+    a->ref = 1;
+    a->info = *info;
+    a->timestamp = GetTickCount64() * 1000;
+    winui_ev_fire( ev, &a->args_vtbl );
+    winui_ptr_release_common( a );
+}
+
+/* WinUI 3 KeyRoutedEventArgs ({ee357007-a2d6-5c75-9431-05fd66ec7915}) */
+struct winui_key_args
+{
+    const void *vtbl;
+    LONG ref;
+    UINT32 vk;
+    CorePhysicalKeyStatus status;
+    boolean handled;
+};
+static HRESULT WINAPI wkey_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IKeyRoutedEventArgs_WinUI3 =
+        { 0xee357007, 0xa2d6, 0x5c75, { 0x94, 0x31, 0x05, 0xfd, 0x66, 0xec, 0x79, 0x15 } };
+    struct winui_key_args *a = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IKeyRoutedEventArgs_WinUI3 ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_WinUI3 ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = a;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI wkey_AddRef( void *iface ) { return InterlockedIncrement( &((struct winui_key_args *)iface)->ref ); }
+static ULONG WINAPI wkey_Release( void *iface )
+{
+    struct winui_key_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI wkey_get_Key( void *iface, UINT32 *o ) { if (o) *o = ((struct winui_key_args *)iface)->vk; return S_OK; }
+static HRESULT WINAPI wkey_get_KeyStatus( void *iface, CorePhysicalKeyStatus *o ) { if (o) *o = ((struct winui_key_args *)iface)->status; return S_OK; }
+static HRESULT WINAPI wkey_get_Handled( void *iface, boolean *o ) { if (o) *o = ((struct winui_key_args *)iface)->handled; return S_OK; }
+static HRESULT WINAPI wkey_put_Handled( void *iface, boolean v ) { ((struct winui_key_args *)iface)->handled = v; return S_OK; }
+static HRESULT WINAPI wkey_get_DeviceId( void *iface, HSTRING *o ) { if (o) *o = NULL; return S_OK; }
+static const void *winui_key_args_vtbl[12] =
+{
+    [0] = wkey_QI, [1] = wkey_AddRef, [2] = wkey_Release,
+    [3] = xaml_root_GetIids, [4] = xaml_root_GetRuntimeClassName, [5] = xaml_root_GetTrustLevel,
+    [6] = wkey_get_Key,
+    [7] = wkey_get_KeyStatus,
+    [8] = wkey_get_Handled,
+    [9] = wkey_put_Handled,
+    [10] = wkey_get_Key,
+    [11] = wkey_get_DeviceId,
+};
+
+void xaml_winui_fire_key_event( BOOL is_down, UINT32 vk, LPARAM lparam )
+{
+    struct winui_key_args *a;
+    if (!(a = calloc( 1, sizeof(*a) ))) return;
+    a->vtbl = winui_key_args_vtbl;
+    a->ref = 1;
+    a->vk = vk;
+    a->status.RepeatCount = (UINT32)(lparam & 0xffff);
+    a->status.ScanCode = (UINT32)((lparam >> 16) & 0xff);
+    a->status.IsExtendedKey = (lparam & (1 << 24)) != 0;
+    a->status.IsMenuKeyDown = (lparam & (1 << 29)) != 0;
+    a->status.WasKeyDown = (lparam & (1 << 30)) != 0;
+    a->status.IsKeyReleased = !is_down;
+    winui_ev_fire( is_down ? WINUI_EV_KEY_DOWN : WINUI_EV_KEY_UP, a );
+    wkey_Release( a );
+}
+
+void xaml_winui_fire_focus_event( BOOL got_focus )
+{
+    void *args = NULL;
+    element_create_typed( L"Microsoft.UI.Xaml.RoutedEventArgs", &args );
+    winui_ev_fire( got_focus ? WINUI_EV_GOT_FOCUS : WINUI_EV_LOST_FOCUS, args );
+    if (args) IInspectable_Release( (IInspectable *)args );
+}
+
+#define DEFINE_UIE_EV_ADD( name, kind ) \
+static HRESULT WINAPI uie_add_##name( void *iface, void *handler, EventRegistrationToken *token ) \
+{ \
+    return winui_ev_add( kind, impl_from_IUIElement( iface ), handler, token ); \
+}
+
+DEFINE_UIE_EV_ADD( KeyUp, WINUI_EV_KEY_UP )
+DEFINE_UIE_EV_ADD( KeyDown, WINUI_EV_KEY_DOWN )
+DEFINE_UIE_EV_ADD( GotFocus, WINUI_EV_GOT_FOCUS )
+DEFINE_UIE_EV_ADD( LostFocus, WINUI_EV_LOST_FOCUS )
+DEFINE_UIE_EV_ADD( PointerPressed, WINUI_EV_POINTER_PRESSED )
+DEFINE_UIE_EV_ADD( PointerMoved, WINUI_EV_POINTER_MOVED )
+DEFINE_UIE_EV_ADD( PointerReleased, WINUI_EV_POINTER_RELEASED )
+DEFINE_UIE_EV_ADD( PointerEntered, WINUI_EV_POINTER_ENTERED )
+DEFINE_UIE_EV_ADD( PointerExited, WINUI_EV_POINTER_EXITED )
+DEFINE_UIE_EV_ADD( PointerCaptureLost, WINUI_EV_POINTER_CAPTURE_LOST )
+DEFINE_UIE_EV_ADD( PointerWheelChanged, WINUI_EV_POINTER_WHEEL )
+
+static const void *uielement_vtbl[256] =
 {
     [0] = uie_QueryInterface,
     [1] = uie_AddRef,
@@ -2718,7 +3812,135 @@ static const void *uielement_vtbl[64] =
     [11] = uie_get_visibility,
     [12] = uie_get_ptr,  /* ReadLocalValue */
     [13] = uie_get_ptr,  /* GetAnimationBaseValue */
-    [14 ... 63] = element_generic_slot,
+    [14 ... 22] = element_generic_slot,
+    [23] = uie_get_visibility,
+    [24] = uie_set_visibility,
+    [25 ... 106] = element_generic_slot,
+    [107] = uie_get_ActualOffset,
+    [108] = uie_get_ActualSize,
+    [109] = uie_get_XamlRoot,
+    [110 ... 112] = element_generic_slot,
+    [113] = uie_get_RasterizationScale,
+    [114 ... 129] = element_generic_slot,
+    [130] = uie_add_KeyUp, [131] = winui_ev_remove,
+    [132] = uie_add_KeyDown, [133] = winui_ev_remove,
+    [134] = uie_add_GotFocus, [135] = winui_ev_remove,
+    [136] = uie_add_LostFocus, [137] = winui_ev_remove,
+    [138 ... 143] = element_generic_slot,
+    [144] = element_add_event_generic, [145] = element_remove_event_generic, /* DragEnter */
+    [146] = element_add_event_generic, [147] = element_remove_event_generic, /* DragLeave */
+    [148] = element_add_event_generic, [149] = element_remove_event_generic, /* DragOver */
+    [150] = element_add_event_generic, [151] = element_remove_event_generic, /* Drop */
+    [152] = uie_add_PointerPressed, [153] = winui_ev_remove,
+    [154] = uie_add_PointerMoved, [155] = winui_ev_remove,
+    [156] = uie_add_PointerReleased, [157] = winui_ev_remove,
+    [158] = uie_add_PointerEntered, [159] = winui_ev_remove,
+    [160] = uie_add_PointerExited, [161] = winui_ev_remove,
+    [162] = uie_add_PointerCaptureLost, [163] = winui_ev_remove,
+    [164] = element_add_event_generic, [165] = element_remove_event_generic, /* PointerCanceled */
+    [166] = uie_add_PointerWheelChanged, [167] = winui_ev_remove,
+    [168 ... 203] = element_generic_slot,
+    [204] = element_add_event_generic, [205] = element_remove_event_generic, /* PreviewKeyDown */
+    [206] = element_add_event_generic, [207] = element_remove_event_generic, /* PreviewKeyUp */
+    [208 ... 216] = element_generic_slot,
+    [217] = uie_TransformToVisual,
+    [218 ... 225] = element_generic_slot,
+    [226] = uie_Focus,
+    [227 ... 255] = element_generic_slot,
+};
+
+static inline struct xaml_element *impl_from_IFrameworkElement( void *iface )
+{
+    return CONTAINING_RECORD( (IInspectable *)iface, struct xaml_element, IFrameworkElement_iface );
+}
+static HRESULT WINAPI fe_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI fe_AddRef( void *iface )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI fe_Release( void *iface )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_Release( &impl->IInspectable_iface );
+}
+static HRESULT WINAPI fe_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_GetIids( &impl->IInspectable_iface, count, iids );
+}
+static HRESULT WINAPI fe_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
+}
+static HRESULT WINAPI fe_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_GetTrustLevel( &impl->IInspectable_iface, level );
+}
+static HRESULT WINAPI fe_get_Resources( void *iface, void **out )
+{
+    static IInspectable *g_empty_fe_rd = NULL;
+    if (!out) return E_POINTER;
+    if (!g_empty_fe_rd && resource_dictionary_factory)
+        IActivationFactory_ActivateInstance( resource_dictionary_factory, &g_empty_fe_rd );
+    *out = g_empty_fe_rd;
+    if (g_empty_fe_rd) IInspectable_AddRef( g_empty_fe_rd );
+    return S_OK;
+}
+static HRESULT WINAPI fe_add_Loaded( void *iface, void *handler, EventRegistrationToken *token )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_add_Loaded( &impl->IInspectable_iface, handler, token );
+}
+static HRESULT WINAPI fe_remove_Loaded( void *iface, EventRegistrationToken token )
+{
+    struct xaml_element *impl = impl_from_IFrameworkElement( iface );
+    return element_remove_Loaded( &impl->IInspectable_iface, token );
+}
+static HRESULT WINAPI fe_add_SizeChanged( void *iface, void *handler, EventRegistrationToken *token )
+{
+    return winui_ev_add( WINUI_EV_SIZE_CHANGED, impl_from_IFrameworkElement( iface ), handler, token );
+}
+static HRESULT WINAPI fe_add_EffectiveViewportChanged( void *iface, void *handler, EventRegistrationToken *token )
+{
+    return winui_ev_add( WINUI_EV_EFFECTIVE_VIEWPORT, impl_from_IFrameworkElement( iface ), handler, token );
+}
+
+static const void *framework_element_vtbl[96] =
+{
+    [0] = fe_QueryInterface,
+    [1] = fe_AddRef,
+    [2] = fe_Release,
+    [3] = fe_GetIids,
+    [4] = fe_GetRuntimeClassName,
+    [5] = fe_GetTrustLevel,
+    [6] = element_generic_slot,
+    [7] = fe_get_Resources,
+    [8 ... 12] = element_generic_slot,
+    [13] = element_get_ActualWidth,
+    [14] = element_get_ActualHeight,
+    [15 ... 56] = element_generic_slot,
+    [57] = element_get_RequestedTheme,
+    [58] = element_put_RequestedTheme,
+    [59] = element_get_IsLoaded,
+    [60] = element_generic_slot,
+    [61] = fe_add_Loaded,
+    [62] = fe_remove_Loaded,
+    [63] = element_add_event_generic, [64] = element_remove_event_generic,
+    [65] = element_add_event_generic, [66] = element_remove_event_generic,
+    [67] = fe_add_SizeChanged, [68] = winui_ev_remove,
+    [69] = element_add_event_generic, [70] = element_remove_event_generic,
+    [71] = element_add_event_generic,
+    [72] = fe_add_Loaded,
+    [73] = element_add_event_generic, [74] = element_remove_event_generic,
+    [75] = fe_add_EffectiveViewportChanged, [76] = winui_ev_remove,
+    [77 ... 95] = element_generic_slot,
 };
 
 HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
@@ -2734,8 +3956,10 @@ HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instan
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( col_def_vtbl );
     impl->IWebView2_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv2_vtbl );
     impl->IWebView22_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv22_vtbl );
-    impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( uielement_vtbl, 64 );
+    impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( uielement_vtbl, 256 );
+    impl->IFrameworkElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( framework_element_vtbl, 96 );
     impl->IDependencyObject_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( wv2_do_vtbl, 64 );
+    impl->IWeakReferenceSource_iface.lpVtbl = (const IUnknownVtbl *)weak_src_vtbl;
     impl->class_name = L"Windows.UI.Xaml.Controls.Grid";
     impl->ref = 1;
     impl->outer = outer;

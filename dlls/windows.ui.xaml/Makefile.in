@@ -16,4 +16,6 @@ SOURCES = \
 	swapchain_panel.c \
 	uwp_xaml.c \
 	webview2_bridge.c \
-	xbf_parser.c
+	xbf_aot.c \
+	xbf_decode.c \
+	xbf_instantiate.c

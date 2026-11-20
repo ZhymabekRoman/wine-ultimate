@@ -257,6 +257,17 @@ static void rgba_to_float4( UINT32 argb, float out[4] )
 
 void xaml_gpu_release_rtv( void )
 {
+    if (g_gpu.dev)
+    {
+        ID3D11DeviceContext *ctx = NULL;
+        ID3D11Device_GetImmediateContext( g_gpu.dev, &ctx );
+        if (ctx)
+        {
+            ID3D11DeviceContext_OMSetRenderTargets( ctx, 0, NULL, NULL );
+            ID3D11DeviceContext_Flush( ctx );
+            ID3D11DeviceContext_Release( ctx );
+        }
+    }
     if (g_gpu.rtv)
     {
         ID3D11RenderTargetView_Release( g_gpu.rtv );

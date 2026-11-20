@@ -149,6 +149,134 @@ static IInspectable *box_thickness_value( const double vec4[4] )
     return &impl->IInspectable_iface;
 }
 
+static const GUID IID_IReference_Color_UWP =
+    { 0xab8e5d11, 0xb0c1, 0x5a21, { 0x95, 0xae, 0xf1, 0x6b, 0xf3, 0xa3, 0x76, 0x24 } };
+
+struct uwp_boxed_color
+{
+    IInspectable IInspectable_iface;
+    IInspectable IPropertyValue_iface;
+    LONG ref;
+    BYTE argb[4]; /* A, R, G, B (Windows.UI.Color layout) */
+};
+
+static HRESULT WINAPI uwp_bcol_pv_get_Type( void *iface, INT32 *type )
+{
+    if (type) *type = 20; /* PropertyType_OtherType */
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_bcol_pv_get_IsNumericScalar( void *iface, boolean *val )
+{
+    if (val) *val = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_bcol_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct uwp_boxed_color *impl = CONTAINING_RECORD( iface, struct uwp_boxed_color, IInspectable_iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IReference_Color_UWP ))
+    {
+        *out = &impl->IInspectable_iface;
+        IInspectable_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPropertyValue ))
+    {
+        *out = &impl->IPropertyValue_iface;
+        IInspectable_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI uwp_bcol_pv_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct uwp_boxed_color *impl = CONTAINING_RECORD( iface, struct uwp_boxed_color, IPropertyValue_iface );
+    return uwp_bcol_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+
+static ULONG WINAPI uwp_bcol_AddRef( IInspectable *iface )
+{
+    struct uwp_boxed_color *impl = CONTAINING_RECORD( iface, struct uwp_boxed_color, IInspectable_iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI uwp_bcol_pv_AddRef( IInspectable *iface )
+{
+    struct uwp_boxed_color *impl = CONTAINING_RECORD( iface, struct uwp_boxed_color, IPropertyValue_iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI uwp_bcol_Release( IInspectable *iface )
+{
+    struct uwp_boxed_color *impl = CONTAINING_RECORD( iface, struct uwp_boxed_color, IInspectable_iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static ULONG WINAPI uwp_bcol_pv_Release( IInspectable *iface )
+{
+    struct uwp_boxed_color *impl = CONTAINING_RECORD( iface, struct uwp_boxed_color, IPropertyValue_iface );
+    return uwp_bcol_Release( &impl->IInspectable_iface );
+}
+
+static HRESULT WINAPI uwp_bcol_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.IReference`1<Windows.UI.Color>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI uwp_bcol_get_Value( void *iface, BYTE *out )
+{
+    struct uwp_boxed_color *impl = CONTAINING_RECORD( iface, struct uwp_boxed_color, IInspectable_iface );
+    if (!out) return E_POINTER;
+    memcpy( out, impl->argb, 4 );
+    return S_OK;
+}
+
+static const void *uwp_bcol_vtbl[16] =
+{
+    uwp_bcol_QueryInterface,
+    uwp_bcol_AddRef,
+    uwp_bcol_Release,
+    uwp_bth_GetIids,
+    uwp_bcol_GetRuntimeClassName,
+    uwp_bth_GetTrustLevel,
+    uwp_bcol_get_Value,
+};
+
+static const void *uwp_bcol_pv_vtbl[16] =
+{
+    uwp_bcol_pv_QueryInterface,
+    uwp_bcol_pv_AddRef,
+    uwp_bcol_pv_Release,
+    uwp_bth_GetIids,
+    uwp_bcol_GetRuntimeClassName,
+    uwp_bth_GetTrustLevel,
+    uwp_bcol_pv_get_Type,
+    uwp_bcol_pv_get_IsNumericScalar,
+};
+
+static IInspectable *box_color_value( UINT32 argb )
+{
+    struct uwp_boxed_color *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bcol_vtbl;
+    impl->IPropertyValue_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bcol_pv_vtbl;
+    impl->ref = 1;
+    impl->argb[0] = (BYTE)((argb >> 24) & 0xff); /* A */
+    impl->argb[1] = (BYTE)((argb >> 16) & 0xff); /* R */
+    impl->argb[2] = (BYTE)((argb >>  8) & 0xff); /* G */
+    impl->argb[3] = (BYTE)(argb & 0xff);         /* B */
+    return &impl->IInspectable_iface;
+}
+
 IInspectable *box_string_value( const WCHAR *str )
 {
     IActivationFactory *fac = NULL;
@@ -709,7 +837,7 @@ BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_
     return uwp_theme_default_fallback( key, out_argb );
 }
 
-static IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_entry *e )
+IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_entry *e )
 {
     if (!e) return NULL;
     if (e->value) return e->value;
@@ -719,6 +847,8 @@ static IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct u
         e->value = box_thickness_value( e->vec4 );
     else if (e->kind == UWP_RD_STRING)
         e->value = box_string_value( e->str_val );
+    else if (e->kind == UWP_RD_COLOR)
+        e->value = box_color_value( e->argb );
     else if (e->kind == UWP_RD_BRUSH)
     {
         IInspectable *br = NULL;
@@ -736,9 +866,42 @@ static IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct u
     }
     else if (e->kind == UWP_RD_STYLE)
     {
-        IInspectable *st = NULL;
-        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Style", (void **)&st )) && st)
-            e->value = st;
+        void *st = NULL;
+        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Style", NULL, NULL, &st )) && st)
+        {
+            struct uwp_element *st_el = uwp_elem_from_any( st );
+            if (st_el)
+            {
+                lstrcpynW( st_el->style_based_on, e->str_val, ARRAY_SIZE(st_el->style_based_on) );
+                if (e->setter_cnt > 0 && e->setters)
+                {
+                    st_el->style_setters = malloc( (size_t)e->setter_cnt * sizeof(*e->setters) );
+                    if (st_el->style_setters)
+                    {
+                        memcpy( st_el->style_setters, e->setters, (size_t)e->setter_cnt * sizeof(*e->setters) );
+                        st_el->style_setter_cnt = e->setter_cnt;
+                        st_el->style_setter_cap = e->setter_cnt;
+                    }
+                }
+            }
+            e->value = (IInspectable *)st;
+        }
+    }
+    else if (e->kind == UWP_RD_DATA_TEMPLATE)
+    {
+        IInspectable *dt = NULL;
+        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.DataTemplate", (void **)&dt )) && dt)
+        {
+            struct uwp_element *dt_el = uwp_elem_from_any( dt );
+            if (dt_el && e->template_xbf_data && e->template_xbf_size)
+            {
+                dt_el->template_xbf_data = e->template_xbf_data;
+                dt_el->template_xbf_size = e->template_xbf_size;
+                dt_el->template_sub_idx = e->template_sub_idx;
+                uwp_set_template_owner( &dt_el->template_owner_comp, e->template_owner_comp );
+            }
+            e->value = dt;
+        }
     }
     return e->value;
 }
@@ -778,12 +941,35 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
         }
     }
 
-    /* Documented fallback for system theme brush keys queried via Application.Resources */
+    /* Documented fallback for system theme color/brush keys queried via Application.Resources */
     {
         UINT32 argb = 0;
         if (uwp_theme_default_fallback( key_str, &argb ))
         {
             IInspectable *br = NULL;
+            size_t klen = wcslen( key_str );
+            BOOL is_color_key = (klen >= 5 && !wcscmp( key_str + klen - 5, L"Color" )) ||
+                                (klen >= 6 && !wcsncmp( key_str + klen - 6, L"Color", 5 ) &&
+                                 (key_str[klen - 1] >= '0' && key_str[klen - 1] <= '9'));
+            if (is_color_key)
+            {
+                IInspectable *col = box_color_value( argb );
+                if (col)
+                {
+                    struct uwp_rd_bucket *target = b ? b : get_rd_bucket( rd_key, TRUE );
+                    struct uwp_rd_entry *ne = rd_bucket_upsert( target, key_str );
+                    if (ne)
+                    {
+                        ne->kind = UWP_RD_COLOR;
+                        ne->argb = argb;
+                        ne->has_argb = TRUE;
+                        ne->value = col;
+                        IInspectable_AddRef( col );
+                    }
+                    *out_val = col;
+                    return S_OK;
+                }
+            }
             if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Media.SolidColorBrush", (void **)&br )) && br)
             {
                 struct uwp_rd_bucket *target = b ? b : get_rd_bucket( rd_key, TRUE );
@@ -831,6 +1017,27 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
         {
             uwp_rd_insert( rd_key, key_str, br );
             *out_val = br;
+            return S_OK;
+        }
+    }
+    if (wcsstr( key_str, L"Template" ))
+    {
+        IInspectable *dt = NULL;
+        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.DataTemplate", (void **)&dt )) && dt)
+        {
+            uwp_rd_insert( rd_key, key_str, dt );
+            *out_val = dt;
+            return S_OK;
+        }
+    }
+    if (wcsstr( key_str, L"Layout" ))
+    {
+        IInspectable *ly = NULL;
+        if ((SUCCEEDED(uwp_create_instance_from_provider( L"Microsoft.UI.Xaml.Controls.UniformGridLayout", (void **)&ly )) && ly) ||
+            (SUCCEEDED(uwp_create_instance_from_provider( L"Microsoft.UI.Xaml.Controls.StackLayout", (void **)&ly )) && ly))
+        {
+            uwp_rd_insert( rd_key, key_str, ly );
+            *out_val = ly;
             return S_OK;
         }
     }
@@ -1207,6 +1414,16 @@ struct pm_internal_layout
     IPropertyChangedCallback *callback;
 };
 
+HRESULT xaml_dp_get_default_value( void *dp, IInspectable **out )
+{
+    struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (dpl && dpl->metadata)
+        return IPropertyMetadata_get_DefaultValue( dpl->metadata, out );
+    return S_OK;
+}
+
 /* --- IDependencyObject (slots 6=GetValue, 7=SetValue, 8=ClearValue, 9=ReadLocalValue, 10=GetAnimationBaseValue, 11=get_Dispatcher) --- */
 HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
 {
@@ -1215,6 +1432,11 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
     if (!out) return E_POINTER;
     *out = NULL;
     if (!impl || !dp) return S_OK;
+    {
+        extern BOOL g_in_tap_diag;
+        if (g_in_tap_diag)
+            WARN( "TAP GetValue on %s (%s) dp=%p\n", debugstr_w(impl->class_name), debugstr_w(impl->name), dp );
+    }
 
     for (i = 0; i < impl->dp_cnt; i++)
     {
@@ -1235,6 +1457,90 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
         }
     }
     return S_OK;
+}
+
+static struct uwp_element *uwp_find_named_descendant( struct uwp_element *el, const WCHAR *name, int depth )
+{
+    if (!el || !name || !name[0] || depth > 8) return NULL;
+    if (el->name[0] && !wcscmp( el->name, name )) return el;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        struct uwp_element *r = (ch && ch != el) ? uwp_find_named_descendant( ch, name, depth + 1 ) : NULL;
+        if (r) return r;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            struct uwp_element *r = (ch && ch != el) ? uwp_find_named_descendant( ch, name, depth + 1 ) : NULL;
+            if (r) return r;
+        }
+    }
+    return NULL;
+}
+
+static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
+{
+    const WCHAR *part_name = NULL;
+    struct uwp_element *pres;
+
+    if (!impl || !dpname || !dpname[0]) return;
+    if (!wcscmp( dpname, L"ItemsSource" ) ||
+        !wcscmp( dpname, L"ItemTemplate" ) ||
+        !wcscmp( dpname, L"ItemTemplateSelector" ))
+    {
+        struct uwp_element *rep;
+        const WCHAR *target_dp = !wcscmp( dpname, L"ItemsSource" ) ? L"ItemsSource" : L"ItemTemplate";
+        int j;
+        if (!val) return;
+        rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
+        if (!rep || rep == impl || !wcsstr( rep->class_name, L"ItemsRepeater" )) return;
+        for (j = 0; j < rep->dp_cnt; j++)
+        {
+            struct dp_internal_layout *rdpl = (struct dp_internal_layout *)rep->dp_store[j].dp;
+            if (rdpl && (ULONG_PTR)rdpl >= 0x10000 && !wcscmp( rdpl->name, target_dp ))
+            {
+                if (rep->dp_store[j].value != val)
+                {
+                    WARN( "uwp_sync_template_presenter: forwarding %s -> Repeater.%s val=%p\n",
+                          debugstr_w(dpname), debugstr_w(target_dp), val );
+                    uwp_do_SetValue( &rep->IDependencyObject_iface, rep->dp_store[j].dp, val );
+                }
+                break;
+            }
+        }
+        return;
+    }
+    if (!wcscmp( dpname, L"Header" )) part_name = L"HeaderPresenter";
+    else if (!wcscmp( dpname, L"IslandHeaderContent" )) part_name = L"IslandHeaderPresenter";
+    else if (!wcscmp( dpname, L"IslandContent" )) part_name = L"IslandPresenter";
+    else return;
+
+    pres = uwp_find_named_descendant( impl, part_name, 0 );
+    if (!pres) return;
+    if (pres->content != val)
+    {
+        if (pres->content) IInspectable_Release( pres->content );
+        pres->content = val;
+        if (pres->content) IInspectable_AddRef( pres->content );
+        uwp_invalidate_window();
+    }
+}
+
+void uwp_sync_all_template_presenters( struct uwp_element *impl )
+{
+    int i;
+    if (!impl) return;
+    for (i = 0; i < impl->dp_cnt; i++)
+    {
+        struct dp_internal_layout *dpl = (struct dp_internal_layout *)impl->dp_store[i].dp;
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0])
+            uwp_sync_template_presenter( impl, dpl->name, impl->dp_store[i].value );
+    }
 }
 
 HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
@@ -1341,6 +1647,18 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     /* Fire PropertyMetadata PropertyChangedCallback if present */
     {
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+        if (dpl && dpl->name[0])
+            uwp_sync_template_presenter( impl, dpl->name, val );
+        if (dpl && wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
+        {
+            HSTRING hvc = NULL;
+            if (val) IInspectable_GetRuntimeClassName( val, &hvc );
+            WARN( "TileList_SetValue (%s) dp=%s val=%p (%s) cb=%p\n",
+                  debugstr_w(impl->name), debugstr_w(dpl->name), val,
+                  hvc ? debugstr_w(WindowsGetStringRawBuffer(hvc, NULL)) : "\"null\"",
+                  dpl->metadata ? ((struct pm_internal_layout *)dpl->metadata)->callback : NULL );
+            if (hvc) WindowsDeleteString( hvc );
+        }
         if (dpl && dpl->metadata)
         {
             struct pm_internal_layout *pml = (struct pm_internal_layout *)dpl->metadata;
@@ -1364,8 +1682,19 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                     if (val) IInspectable_AddRef( val );
                     TRACE( "uwp_do_SetValue invoking PropertyChangedCallback=%p sender=%p (%s) dp=%p old=%p new=%p\n",
                            pml->callback, sender, debugstr_w(impl->class_name), dp, old_val, val );
-                    IPropertyChangedCallback_Invoke( pml->callback, (IDependencyObject *)sender,
-                                                     (IDependencyPropertyChangedEventArgs *)args );
+                    {
+                        HRESULT cb_hr = S_OK;
+                        __TRY
+                        {
+                            cb_hr = IPropertyChangedCallback_Invoke( pml->callback, (IDependencyObject *)sender,
+                                                                     (IDependencyPropertyChangedEventArgs *)args );
+                        }
+                        __EXCEPT_ALL { cb_hr = E_FAIL; }
+                        __ENDTRY;
+                        if (FAILED(cb_hr))
+                            WARN( "uwp_do_SetValue PropertyChangedCallback=%p sender=%p (%s) dp=%p -> FAILED hr %#lx\n",
+                                  pml->callback, sender, debugstr_w(impl->class_name), dp, cb_hr );
+                    }
                     {
                         IInspectable *nv = NULL;
                         IDependencyPropertyChangedEventArgs_get_NewValue( (IDependencyPropertyChangedEventArgs *)args, &nv );
@@ -1383,10 +1712,27 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     {
         if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].callback)
         {
-            IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+            void *sender = impl->outer ? (void *)impl->outer : (void *)&impl->IDependencyObject_iface;
             struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dp_cbs[i].callback;
-            h->lpVtbl->Invoke( h, sender, dp );
+            HRESULT cb_hr = S_OK;
+            __TRY
+            {
+                cb_hr = h->lpVtbl->Invoke( h, sender, dp );
+            }
+            __EXCEPT_ALL { cb_hr = E_FAIL; }
+            __ENDTRY;
+            TRACE( "uwp_do_SetValue dp_cb[%d] h=%p sender=%p (%s) dp=%p -> hr %#lx\n",
+                   i, h, sender, debugstr_w(impl->class_name), dp, cb_hr );
+            if (wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
+                WARN( "TileList dp_cb[%d] dp=%p -> hr %#lx\n", i, dp, cb_hr );
         }
+    }
+
+    if (wcsstr( impl->class_name, L"ItemsRepeater" ))
+    {
+        impl->last_measured_w = 0.0f;
+        impl->last_measured_h = 0.0f;
+        uwp_invalidate_window();
     }
 
     if (old_val) IInspectable_Release( old_val );
@@ -1420,25 +1766,57 @@ HRESULT WINAPI uwp_do_get_Dispatcher( void *iface, void **value )
     return S_OK;
 }
 
+static IInspectable *g_cached_ui_dispatcher_queue;
+
 HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value )
 {
-    static const WCHAR name[] = L"Windows.System.DispatcherQueue";
+    static const GUID IID_IDispatcherQueueStatics_UWP =
+        { 0xa96d83d7, 0x9371, 0x4517, { 0x92, 0x45, 0xd0, 0x82, 0x4a, 0xc1, 0x2c, 0x74 } };
+    static const GUID IID_IMicrosoftDispatcherQueueStatics_WinUI3 =
+        { 0xcd3382ea, 0xa455, 0x5124, { 0xb6, 0x3a, 0xca, 0x40, 0xd3, 0x4c, 0xa2, 0x3c } };
+    BOOL is_winui3 = xaml_get_app_caps()->winui3;
+    const WCHAR *name = is_winui3
+        ? L"Microsoft.UI.Dispatching.DispatcherQueue"
+        : L"Windows.System.DispatcherQueue";
+    const GUID *statics_iid = is_winui3
+        ? &IID_IMicrosoftDispatcherQueueStatics_WinUI3
+        : &IID_IDispatcherQueueStatics_UWP;
     HSTRING hstr;
-    IActivationFactory *af = NULL;
+    IInspectable *statics = NULL;
+    IInspectable *dq = NULL;
     HRESULT hr;
 
     if (!value) return E_POINTER;
     *value = NULL;
-    hr = WindowsCreateString( name, ARRAY_SIZE(name) - 1, &hstr );
-    if (FAILED(hr)) return hr;
-    hr = RoGetActivationFactory( hstr, &IID_IActivationFactory, (void **)&af );
-    WindowsDeleteString( hstr );
-    if (SUCCEEDED(hr) && af)
+    if (g_cached_ui_dispatcher_queue)
     {
-        void **vtbl = *(void ***)af;
+        IInspectable_AddRef( g_cached_ui_dispatcher_queue );
+        *value = g_cached_ui_dispatcher_queue;
+        return S_OK;
+    }
+    hr = WindowsCreateString( name, lstrlenW(name), &hstr );
+    if (FAILED(hr)) return hr;
+    hr = RoGetActivationFactory( hstr, statics_iid, (void **)&statics );
+    WindowsDeleteString( hstr );
+    if (SUCCEEDED(hr) && statics)
+    {
+        void **vtbl = *(void ***)statics;
         HRESULT (WINAPI *pGetForCurrentThread)(void *, void **) = (void *)vtbl[6];
-        if (pGetForCurrentThread) hr = pGetForCurrentThread( af, value );
-        IActivationFactory_Release( af );
+        if (pGetForCurrentThread) hr = pGetForCurrentThread( statics, (void **)&dq );
+        IInspectable_Release( statics );
+    }
+    if (dq)
+    {
+        if (!InterlockedCompareExchangePointer( (void **)&g_cached_ui_dispatcher_queue, dq, NULL ))
+            IInspectable_AddRef( dq );
+        *value = dq;
+        return S_OK;
+    }
+    if (g_cached_ui_dispatcher_queue)
+    {
+        IInspectable_AddRef( g_cached_ui_dispatcher_queue );
+        *value = g_cached_ui_dispatcher_queue;
+        return S_OK;
     }
     return hr;
 }
@@ -1449,7 +1827,7 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
 {
     void *provider = NULL, *xaml_type = NULL, *member = NULL, *member_type = NULL, *boxed_val = NULL;
     HSTRING h_prop = NULL, h_val = NULL;
-    HRESULT hr;
+    HRESULT hr = E_FAIL;
 
     if (!app_outer || !owner_type_name || !prop_name || !target_obj || !str_val) return;
     if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
@@ -1469,18 +1847,58 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
                     struct xaml_type *mt = (struct xaml_type *)member_type;
                     if (mt->lpVtbl->CreateFromString && SUCCEEDED(WindowsCreateString( str_val, wcslen(str_val), &h_val )))
                     {
-                        hr = mt->lpVtbl->CreateFromString( mt, h_val, &boxed_val );
+                        boolean is_attachable = FALSE;
+                        BOOL is_bool_type = FALSE;
+                        HSTRING h_tname = NULL;
+                        if (xm->lpVtbl->get_IsAttachable)
+                            xm->lpVtbl->get_IsAttachable( xm, &is_attachable );
+                        if (mt->lpVtbl->get_FullName && SUCCEEDED(mt->lpVtbl->get_FullName( mt, &h_tname )) && h_tname)
+                        {
+                            const WCHAR *tn = WindowsGetStringRawBuffer( h_tname, NULL );
+                            if (tn && (!wcscmp( tn, L"Boolean" ) || !wcscmp( tn, L"System.Boolean" )))
+                                is_bool_type = TRUE;
+                            else if (tn && (!wcscmp( tn, L"Int32" ) || !wcscmp( tn, L"System.Int32" )))
+                            {
+                                boxed_val = box_int32_value( _wtoi( str_val ) );
+                                hr = boxed_val ? S_OK : E_FAIL;
+                            }
+                            else if (tn && (!wcscmp( tn, L"Double" ) || !wcscmp( tn, L"System.Double" )))
+                            {
+                                boxed_val = box_double_value( wcstod( str_val, NULL ) );
+                                hr = boxed_val ? S_OK : E_FAIL;
+                            }
+                            else if (tn && (!wcscmp( tn, L"String" ) || !wcscmp( tn, L"System.String" )))
+                            {
+                                boxed_val = box_string_value( str_val );
+                                hr = boxed_val ? S_OK : E_FAIL;
+                            }
+                            WindowsDeleteString( h_tname );
+                        }
+                        if (boxed_val)
+                        {
+                            /* already boxed directly as primitive */
+                        }
+                        else if (is_bool_type && is_attachable && (!wcsicmp( str_val, L"True" ) || !wcsicmp( str_val, L"False" )))
+                        {
+                            boxed_val = box_bool_value( !wcsicmp( str_val, L"True" ) ? TRUE : FALSE );
+                            hr = boxed_val ? S_OK : E_FAIL;
+                        }
+                        else if (!is_bool_type)
+                        {
+                            hr = mt->lpVtbl->CreateFromString( mt, h_val, &boxed_val );
+                            if (FAILED(hr)) boxed_val = NULL;
+                        }
                         if (SUCCEEDED(hr) && boxed_val && xm->lpVtbl->SetValue)
                         {
-                            __TRY
-                            {
-                                hr = xm->lpVtbl->SetValue( xm, target_obj, boxed_val );
-                            }
-                            __EXCEPT_ALL { hr = E_FAIL; }
-                            __ENDTRY;
-                            TRACE( "IXamlMember::SetValue(%s.%s = %s) -> hr %#lx\n",
-                                   debugstr_w(owner_type_name), debugstr_w(prop_name),
-                                   debugstr_w(str_val), hr );
+                            hr = xm->lpVtbl->SetValue( xm, target_obj, boxed_val );
+                            if (FAILED(hr))
+                                WARN( "IXamlMember::SetValue(%s.%s = %s) -> hr %#lx\n",
+                                      debugstr_w(owner_type_name), debugstr_w(prop_name),
+                                      debugstr_w(str_val), hr );
+                            else
+                                TRACE( "IXamlMember::SetValue(%s.%s = %s) -> hr %#lx\n",
+                                       debugstr_w(owner_type_name), debugstr_w(prop_name),
+                                       debugstr_w(str_val), hr );
                         }
                         if (boxed_val) IInspectable_Release( (IInspectable *)boxed_val );
                         WindowsDeleteString( h_val );
@@ -1494,6 +1912,109 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
         IInspectable_Release( (IInspectable *)xaml_type );
     }
     IInspectable_Release( (IInspectable *)provider );
+}
+
+BOOL uwp_set_custom_xaml_member_obj( void *app_outer, const WCHAR *owner_type_name,
+                                     const WCHAR *prop_name, void *target_obj, void *val_obj )
+{
+    void *provider = NULL, *xaml_type = NULL, *member = NULL;
+    HSTRING h_prop = NULL;
+    HRESULT hr = E_FAIL;
+    BOOL ok = FALSE;
+
+    if (!app_outer || !owner_type_name || !prop_name || !target_obj || !val_obj) return FALSE;
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+        return FALSE;
+
+    xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
+    if (xaml_type)
+    {
+        struct xaml_type *xt = (struct xaml_type *)xaml_type;
+        if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
+        {
+            if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, (struct xaml_member **)&member )) && member)
+            {
+                struct xaml_member *xm = (struct xaml_member *)member;
+                if (xm->lpVtbl->SetValue)
+                {
+                    __TRY
+                    {
+                        hr = xm->lpVtbl->SetValue( xm, target_obj, val_obj );
+                    }
+                    __EXCEPT_ALL { hr = E_FAIL; }
+                    __ENDTRY;
+                    ok = SUCCEEDED(hr);
+                    TRACE( "IXamlMember::SetValueObj(%s.%s) -> hr %#lx\n",
+                           debugstr_w(owner_type_name), debugstr_w(prop_name), hr );
+                }
+                IInspectable_Release( (IInspectable *)member );
+            }
+            WindowsDeleteString( h_prop );
+        }
+        IInspectable_Release( (IInspectable *)xaml_type );
+    }
+    IInspectable_Release( (IInspectable *)provider );
+    return ok;
+}
+
+BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_type_name,
+                                          const WCHAR *prop_name, void *target_obj, void *item_obj )
+{
+    void *provider = NULL, *xaml_type = NULL, *member = NULL, *member_type = NULL;
+    IInspectable *coll = NULL;
+    HSTRING h_prop = NULL;
+    HRESULT hr = E_FAIL;
+    BOOL ok = FALSE;
+
+    if (!app_outer || !owner_type_name || !prop_name || !target_obj || !item_obj) return FALSE;
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+        return FALSE;
+
+    xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
+    if (xaml_type)
+    {
+        struct xaml_type *xt = (struct xaml_type *)xaml_type;
+        if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
+        {
+            if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, (struct xaml_member **)&member )) && member)
+            {
+                struct xaml_member *xm = (struct xaml_member *)member;
+                if (xm->lpVtbl->GetValue && xm->lpVtbl->get_Type)
+                {
+                    __TRY
+                    {
+                        hr = xm->lpVtbl->GetValue( xm, target_obj, &coll );
+                    }
+                    __EXCEPT_ALL { hr = E_FAIL; coll = NULL; }
+                    __ENDTRY;
+                    if (SUCCEEDED(hr) && coll &&
+                        SUCCEEDED(xm->lpVtbl->get_Type( xm, (struct xaml_type **)&member_type )) && member_type)
+                    {
+                        struct xaml_type *mt = (struct xaml_type *)member_type;
+                        if (mt->lpVtbl->AddToVector)
+                        {
+                            __TRY
+                            {
+                                hr = mt->lpVtbl->AddToVector( mt, coll, item_obj );
+                            }
+                            __EXCEPT_ALL { hr = E_FAIL; }
+                            __ENDTRY;
+                            ok = SUCCEEDED(hr);
+                            TRACE( "IXamlMember::AddToVector(%s.%s coll=%p item=%p) -> hr %#lx\n",
+                                   debugstr_w(owner_type_name), debugstr_w(prop_name), coll, item_obj, hr );
+                        }
+                        IInspectable_Release( (IInspectable *)member_type );
+                    }
+                    if (coll) IInspectable_Release( coll );
+                }
+                IInspectable_Release( (IInspectable *)member );
+            }
+            WindowsDeleteString( h_prop );
+        }
+        IInspectable_Release( (IInspectable *)xaml_type );
+    }
+    IInspectable_Release( (IInspectable *)provider );
+    return ok;
 }
 
 
@@ -2125,6 +2646,29 @@ static HRESULT WINAPI vsm_GetVisualStateGroups( void *iface, void *obj, void **o
 {
     return uwp_vec_create( NULL, (IInspectable **)out );
 }
+static HRESULT WINAPI vsm_get_CustomVisualStateManagerProperty( void *iface, void **out )
+{
+    (void)iface;
+    return dependency_property_create( NULL, (IDependencyProperty **)out );
+}
+static HRESULT WINAPI vsm_GetCustomVisualStateManager( void *iface, void *obj, void **out )
+{
+    (void)iface; (void)obj;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI vsm_SetCustomVisualStateManager( void *iface, void *obj, void *val )
+{
+    (void)iface; (void)obj; (void)val;
+    return S_OK;
+}
+/* IVisualStateManagerStatics ({01d0e9e0-d713-414e-a74e-e63ec7ac8c3d}):
+ *   slot 6:  GetVisualStateGroups
+ *   slot 7:  get_CustomVisualStateManagerProperty
+ *   slot 8:  GetCustomVisualStateManager
+ *   slot 9:  SetCustomVisualStateManager
+ *   slot 10: GoToState */
 static const void *vsm_vtbl[16] =
 {
     [0] = uwp_cf_QI,
@@ -2133,14 +2677,54 @@ static const void *vsm_vtbl[16] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6] = vsm_GoToState,
-    [7] = vsm_GetVisualStateGroups,
-    [8 ... 15] = uwp_generic_noop,
+    [6] = vsm_GetVisualStateGroups,
+    [7] = vsm_get_CustomVisualStateManagerProperty,
+    [8] = vsm_GetCustomVisualStateManager,
+    [9] = vsm_SetCustomVisualStateManager,
+    [10] = vsm_GoToState,
+    [11 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory vsm_factory_obj =
     { {(const struct IActivationFactoryVtbl *)vsm_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)vsm_vtbl}, L"Windows.UI.Xaml.VisualStateManager", { NULL } };
 
-/* VisualTreeHelperStatics */
+static HRESULT WINAPI sb_get_hstr_empty( void *iface, void *elem, HSTRING *out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI sb_set_noop( void *iface, void *elem, void *val )
+{
+    return S_OK;
+}
+/* IStoryboardStatics ({d82f07d8-73d5-4379-bd48-7e05184a8bad}):
+ *   slot 6:  get_TargetPropertyProperty
+ *   slot 7:  GetTargetProperty
+ *   slot 8:  SetTargetProperty
+ *   slot 9:  get_TargetNameProperty
+ *   slot 10: GetTargetName
+ *   slot 11: SetTargetName
+ *   slot 12: SetTarget */
+static const void *sb_statics_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = vsm_get_CustomVisualStateManagerProperty,
+    [7] = sb_get_hstr_empty,
+    [8] = sb_set_noop,
+    [9] = vsm_get_CustomVisualStateManagerProperty,
+    [10] = sb_get_hstr_empty,
+    [11] = sb_set_noop,
+    [12] = sb_set_noop,
+    [13 ... 15] = uwp_generic_noop,
+};
+struct uwp_class_factory sb_factory_obj =
+    { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)sb_statics_vtbl}, L"Windows.UI.Xaml.Media.Animation.Storyboard", { NULL } };
+
+    /* VisualTreeHelperStatics */
 static HRESULT WINAPI vth_FindPoint( void *iface, double x, double y, void *subtree, void **out )
 {
     return uwp_vec_create( NULL, (IInspectable **)out );
@@ -2164,11 +2748,21 @@ static HRESULT WINAPI vth_GetChild( void *iface, void *ref, INT32 idx, void **ou
     *out = NULL;
     if (!el || idx < 0) return S_OK;
     if (el->children_coll)
-        return uwp_vec_GetAt( el->children_coll, (unsigned int)idx, out );
+    {
+        void *item = NULL;
+        HRESULT hr = uwp_vec_GetAt( el->children_coll, (unsigned int)idx, &item );
+        if (SUCCEEDED( hr ) && item)
+        {
+            HRESULT qhr = IInspectable_QueryInterface( (IInspectable *)item, &IID_IDependencyObject, out );
+            IInspectable_Release( (IInspectable *)item );
+            return SUCCEEDED( qhr ) ? S_OK : S_OK;
+        }
+        return hr;
+    }
     if (el->content && idx == 0)
     {
-        *out = el->content;
-        IInspectable_AddRef( (IInspectable *)*out );
+        if (FAILED( IInspectable_QueryInterface( (IInspectable *)el->content, &IID_IDependencyObject, out ) ))
+            *out = NULL;
     }
     return S_OK;
 }
@@ -2186,7 +2780,12 @@ static HRESULT WINAPI vth_GetChildrenCount( void *iface, void *ref, INT32 *count
     }
     else if (el->content)
     {
-        *count = 1;
+        void *dep = NULL;
+        if (SUCCEEDED( IInspectable_QueryInterface( (IInspectable *)el->content, &IID_IDependencyObject, &dep ) ) && dep)
+        {
+            IInspectable_Release( (IInspectable *)dep );
+            *count = 1;
+        }
     }
     return S_OK;
 }
@@ -2197,8 +2796,9 @@ static HRESULT WINAPI vth_GetParent( void *iface, void *ref, void **out )
     *out = NULL;
     if (el && el->parent)
     {
-        *out = el->parent->outer ? el->parent->outer : &el->parent->IInspectable_iface;
-        IInspectable_AddRef( (IInspectable *)*out );
+        IInspectable *p = el->parent->outer ? el->parent->outer : &el->parent->IInspectable_iface;
+        if (FAILED( IInspectable_QueryInterface( p, &IID_IDependencyObject, out ) ))
+            *out = NULL;
     }
     return S_OK;
 }
@@ -2281,6 +2881,23 @@ static HRESULT WINAPI feap_CreatePeerForElement( void *iface, void *el, void **o
     if (out) *out = NULL;
     return S_OK;
 }
+static HRESULT WINAPI feap_CreateInstanceWithOwner( void *iface, void *owner, IInspectable *outer,
+        IInspectable **inner, void **instance )
+{
+    return uwp_element_create( L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer",
+                               outer, inner, instance );
+}
+static const void *feap_factory_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = feap_CreateInstanceWithOwner,
+    [7 ... 15] = uwp_generic_noop,
+};
 static const void *feap_statics_vtbl[16] =
 {
     [0] = uwp_cf_QI,
@@ -2294,7 +2911,7 @@ static const void *feap_statics_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory feap_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer", { NULL } };
+    { {(const struct IActivationFactoryVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_factory_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer", { NULL } };
 
 static HRESULT WINAPI th_FromLengths( void *iface, double left, double top, double right, double bottom, double *out )
 {
@@ -2352,6 +2969,8 @@ const struct xaml_static_factory xaml_static_factories[] =
     { L"Microsoft.UI.Xaml.Media.VisualTreeHelper",                       (IActivationFactory *)&vth_factory_obj.IActivationFactory_iface },
     { L"Windows.UI.Xaml.Automation.AutomationProperties",                (IActivationFactory *)&auto_props_factory_obj.IActivationFactory_iface },
     { L"Windows.UI.Xaml.Controls.ToolTipService",                        (IActivationFactory *)&auto_props_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Media.Animation.Storyboard",                     (IActivationFactory *)&sb_factory_obj.IActivationFactory_iface },
+    { L"Microsoft.UI.Xaml.Media.Animation.Storyboard",                   (IActivationFactory *)&sb_factory_obj.IActivationFactory_iface },
 };
 const size_t xaml_static_factories_count = ARRAY_SIZE( xaml_static_factories );
 

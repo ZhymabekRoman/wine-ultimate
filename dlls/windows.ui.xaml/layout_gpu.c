@@ -260,6 +260,46 @@ static BOOL uwp_island_ensure_gpu( HWND hwnd, struct uwp_island_state *st, int w
     return st->swapchain != NULL;
 }
 
+static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
+{
+    int kids = 0;
+    if (!el || depth > 22 || *rem <= 0) return;
+    if (wcsstr( el->class_name, L"HomepageSkeleton" ))
+    {
+        WARN( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
+        return;
+    }
+    if (el->children_coll)
+        kids = (int)CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count;
+    (*rem)--;
+    WARN( "%*s%s (%s) rc=(%ld,%ld,%ld,%ld) hb=%d vis=%d op=%.2f kids=%d txt=%s\n",
+          depth * 2, "", debugstr_w(el->class_name), debugstr_w(el->name),
+          el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom,
+          el->has_bounds, el->visibility, el->opacity, kids,
+          el->text[0] ? debugstr_w(el->text) : "\"\"" );
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el) uwp_debug_dump_tree( ch, depth + 1, rem );
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count && *rem > 0; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el) uwp_debug_dump_tree( ch, depth + 1, rem );
+        }
+    }
+}
+
+void uwp_debug_dump_root( IInspectable *root )
+{
+    int rem = 250;
+    if (root) uwp_debug_dump_tree( uwp_elem_from_any( root ), 0, &rem );
+}
+
 static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
 {
     struct uwp_element *impl = (struct uwp_element *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
@@ -411,8 +451,20 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
                                 rc.right - rc.left, rc.bottom - rc.top, impl->content );
         return 0;
     }
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_F12 && impl && impl->content)
+    {
+        int rem = 250;
+        uwp_debug_dump_tree( uwp_elem_from_any( impl->content ), 0, &rem );
+        return 0;
+    }
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_ESCAPE && uwp_popup_handle_escape())
         return 0;
+    if (msg == WM_CHAR && g_focused_textbox && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
+    {
+        uwp_keyboard_press_char( (WCHAR)wp );
+        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        return 0;
+    }
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && impl && impl->content)
     {
         struct uwp_element *root_el = uwp_elem_from_any( impl->content );
@@ -516,9 +568,125 @@ const void *uwp_dwxs_native_vtbl[16] =
     [6 ... 15] = uwp_generic_noop,
 };
 
+#define MAX_ACTIVE_DISPATCHER_TIMERS 64
+static struct uwp_element *g_active_timers[MAX_ACTIVE_DISPATCHER_TIMERS];
+
+static void CALLBACK uwp_dispatcher_timer_proc( HWND hwnd, UINT msg, UINT_PTR id, DWORD time )
+{
+    struct uwp_element *impl = NULL;
+    int i;
+    void *handlers[16];
+    int count;
+
+    for (i = 0; i < MAX_ACTIVE_DISPATCHER_TIMERS; i++)
+    {
+        if (g_active_timers[i] && g_active_timers[i]->timer_win32_id == id)
+        {
+            impl = g_active_timers[i];
+            break;
+        }
+    }
+    if (!impl || !impl->timer_enabled) return;
+
+    uwp_sub_AddRef( &impl->IInspectable_iface );
+    count = xaml_event_registry_snapshot( &impl->timer_tick_reg, handlers, ARRAY_SIZE(handlers) );
+    TRACE( "uwp_dispatcher_timer_proc id=%Iu impl=%p handlers=%d\n", id, impl, count );
+    for (i = 0; i < count; i++)
+    {
+        struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+        IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+        __TRY
+        {
+            h->lpVtbl->Invoke( h, sender, NULL );
+        }
+        __EXCEPT_ALL {}
+        __ENDTRY;
+        IUnknown_Release( (IUnknown *)handlers[i] );
+    }
+    uwp_sub_Release( &impl->IInspectable_iface );
+}
+
+static HRESULT WINAPI uwp_timer_get_Interval( void *iface, INT64 *value )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (value) *value = impl ? impl->timer_interval_100ns : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_timer_put_Interval( void *iface, INT64 value )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->timer_interval_100ns = value;
+    TRACE( "uwp_timer_put_Interval impl=%p interval_100ns=%s\n", impl, wine_dbgstr_longlong( value ) );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_timer_get_IsEnabled( void *iface, boolean *value )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (value) *value = (impl && impl->timer_enabled) ? TRUE : FALSE;
+    return S_OK;
+}
 static HRESULT WINAPI uwp_timer_add_Tick( void *iface, void *handler, EventRegistrationToken *tok )
 {
-    if (tok) tok->value = 1;
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    TRACE( "uwp_timer_add_Tick impl=%p handler=%p\n", impl, handler );
+    return xaml_event_registry_add( &impl->timer_tick_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_timer_remove_Tick( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_remove( &impl->timer_tick_reg, tok );
+}
+static HRESULT WINAPI uwp_timer_Start( void *iface )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    UINT ms;
+    int i, slot = -1;
+    if (!impl) return S_OK;
+    if (impl->timer_enabled && impl->timer_win32_id) return S_OK;
+    ms = (impl->timer_interval_100ns > 150000) ? (UINT)(impl->timer_interval_100ns / 10000) : 15;
+    if (ms > 60000) ms = 60000;
+    for (i = 0; i < MAX_ACTIVE_DISPATCHER_TIMERS; i++)
+    {
+        if (g_active_timers[i] == impl) { slot = i; break; }
+        if (!g_active_timers[i] && slot < 0) slot = i;
+    }
+    if (slot < 0) return S_OK;
+    impl->timer_win32_id = SetTimer( NULL, 0, ms, uwp_dispatcher_timer_proc );
+    if (impl->timer_win32_id)
+    {
+        if (g_active_timers[slot] != impl)
+        {
+            g_active_timers[slot] = impl;
+            uwp_sub_AddRef( &impl->IInspectable_iface );
+        }
+        impl->timer_enabled = TRUE;
+    }
+    TRACE( "uwp_timer_Start impl=%p ms=%u win32_id=%Iu\n", impl, ms, impl->timer_win32_id );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_timer_Stop( void *iface )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    int i;
+    if (!impl) return S_OK;
+    if (impl->timer_win32_id)
+    {
+        KillTimer( NULL, impl->timer_win32_id );
+        impl->timer_win32_id = 0;
+    }
+    impl->timer_enabled = FALSE;
+    for (i = 0; i < MAX_ACTIVE_DISPATCHER_TIMERS; i++)
+    {
+        if (g_active_timers[i] == impl)
+        {
+            g_active_timers[i] = NULL;
+            uwp_sub_Release( &impl->IInspectable_iface );
+            break;
+        }
+    }
+    TRACE( "uwp_timer_Stop impl=%p\n", impl );
     return S_OK;
 }
 
@@ -530,9 +698,14 @@ const void *uwp_timer_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 8] = uwp_generic_noop,
+    [6] = uwp_timer_get_Interval,
+    [7] = uwp_timer_put_Interval,
+    [8] = uwp_timer_get_IsEnabled,
     [9] = uwp_timer_add_Tick,
-    [10 ... 15] = uwp_generic_noop,
+    [10] = uwp_timer_remove_Tick,
+    [11] = uwp_timer_Start,
+    [12] = uwp_timer_Stop,
+    [13 ... 15] = uwp_generic_noop,
 };
 
 /* CoreRT's McgMarshal.ComInterfaceToObject wraps a projected IInspectable in a
@@ -668,6 +841,63 @@ struct uwp_rtt_target
 static inline UINT32 cr_to_argb( COLORREF cr )
 {
     return 0xff000000u | ((UINT32)GetRValue( cr ) << 16) | ((UINT32)GetGValue( cr ) << 8) | (UINT32)GetBValue( cr );
+}
+
+static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
+                                      WCHAR *out, size_t out_len )
+{
+    static const GUID IID_ICustomPropertyProvider_gpu =
+        { 0x7c925755, 0x3e48, 0x42b4, { 0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f } };
+    HSTRING hcls = NULL;
+    void *cpp = NULL;
+    unsigned int pi;
+
+    if (!vm || !out || !out_len) return FALSE;
+    out[0] = 0;
+
+    if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
+    {
+        const WCHAR *cls = WindowsGetStringRawBuffer( hcls, NULL );
+        if (cls && cls[0])
+        {
+            for (pi = 0; pi < count && !out[0]; pi++)
+            {
+                IInspectable *pval = NULL;
+                if (uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, props[pi], vm, &pval ) && pval)
+                {
+                    uwp_unbox_string( pval, out, out_len );
+                    IInspectable_Release( pval );
+                }
+            }
+        }
+        WindowsDeleteString( hcls );
+    }
+    if (!out[0] && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICustomPropertyProvider_gpu, &cpp )) && cpp)
+    {
+        HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
+        for (pi = 0; pi < count && !out[0]; pi++)
+        {
+            HSTRING hp = NULL;
+            void *cp = NULL;
+            if (get_prop && SUCCEEDED(WindowsCreateString( props[pi], wcslen(props[pi]), &hp )) && hp)
+            {
+                if (SUCCEEDED(get_prop( cpp, hp, &cp )) && cp)
+                {
+                    HRESULT (WINAPI *get_val)(void *, IInspectable *, IInspectable **) = (void *)(*(void ***)cp)[8];
+                    IInspectable *pval = NULL;
+                    if (get_val && SUCCEEDED(get_val( cp, vm, &pval )) && pval)
+                    {
+                        uwp_unbox_string( pval, out, out_len );
+                        IInspectable_Release( pval );
+                    }
+                    IUnknown_Release( (IUnknown *)cp );
+                }
+                WindowsDeleteString( hp );
+            }
+        }
+        IUnknown_Release( (IUnknown *)cpp );
+    }
+    return out[0] != 0;
 }
 
 static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
@@ -910,6 +1140,77 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
         BOOL draw_bg = TRUE, draw_bd = TRUE;
         int fh;
 
+        if (!label[0] && (!el->content || !uwp_elem_from_any( el->content )))
+        {
+            IInspectable *vm = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
+            if (vm)
+            {
+                static const WCHAR *const title_props[] = { L"Title", L"ProductTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
+                static const WCHAR *const sub_props[] = { L"DisplayPrice", L"FormattedPrice", L"Price", L"Category", L"PublisherName", L"Subtitle", L"AverageRating" };
+                static const WCHAR *const nested_props[] = { L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
+                WCHAR title_buf[128] = {0}, sub_buf[128] = {0};
+                IInspectable *target_vm = vm;
+                IInspectable *nested_vm = NULL;
+
+                if (!uwp_vm_query_string_prop( vm, title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf) ))
+                {
+                    HSTRING hcls = NULL;
+                    if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
+                    {
+                        const WCHAR *cls = WindowsGetStringRawBuffer( hcls, NULL );
+                        unsigned int ni;
+                        for (ni = 0; ni < ARRAY_SIZE(nested_props) && !nested_vm; ni++)
+                        {
+                            IInspectable *nv = NULL;
+                            if (cls && cls[0] && uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, nested_props[ni], vm, &nv ) && nv)
+                                nested_vm = nv;
+                        }
+                        WindowsDeleteString( hcls );
+                    }
+                    if (nested_vm)
+                    {
+                        target_vm = nested_vm;
+                        uwp_vm_query_string_prop( target_vm, title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf) );
+                    }
+                }
+                if (title_buf[0])
+                {
+                    if (uwp_vm_query_string_prop( target_vm, sub_props, ARRAY_SIZE(sub_props), sub_buf, ARRAY_SIZE(sub_buf) ))
+                        swprintf( el->text, ARRAY_SIZE(el->text), L"%.120s\n%.120s", title_buf, sub_buf );
+                    else
+                        lstrcpynW( el->text, title_buf, ARRAY_SIZE(el->text) );
+                    label = el->text;
+                }
+                if (nested_vm) IInspectable_Release( nested_vm );
+            }
+        }
+
+        if (label[0] && (wcschr( label, '\n' ) || wcsstr( el->class_name, L"Card" )) &&
+            (brc.right - brc.left) >= 160 && (brc.bottom - brc.top) >= 60)
+        {
+            const WCHAR *nl = wcschr( label, '\n' );
+            WCHAR tline[128] = {0};
+            RECT trc, src;
+            size_t tlen = nl ? (size_t)(nl - label) : wcslen( label );
+            if (tlen >= ARRAY_SIZE(tline)) tlen = ARRAY_SIZE(tline) - 1;
+            memcpy( tline, label, tlen * sizeof(WCHAR) );
+            tline[tlen] = 0;
+            InflateRect( &brc, -2, -2 );
+            xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                6.0f, cr_to_argb( el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ) ),
+                                cr_to_argb( RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
+            SetRect( &trc, brc.left + 14, brc.top + 14, brc.right - 14, brc.top + 48 );
+            xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                &trc, NULL, RGB( 255, 255, 255 ), 1.0f );
+            if (nl)
+            {
+                SetRect( &src, brc.left + 14, brc.top + 52, brc.right - 14, brc.bottom - 12 );
+                xaml_gpu_push_text( ctx, nl + 1, 12, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &src, NULL, RGB( 180, 180, 180 ), 1.0f );
+            }
+            return;
+        }
+
         if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
             return;
 
@@ -1067,7 +1368,175 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el) uwp_gpu_paint_element( ctx, ch );
+        if (ch && ch != el)
+        {
+            uwp_gpu_paint_element( ctx, ch );
+        }
+        else if (el->kind == UWP_KIND_CONTENT_CONTROL)
+        {
+            WCHAR label[128] = {0};
+            if (el->text[0])
+            {
+                lstrcpynW( label, el->text, ARRAY_SIZE(label) );
+            }
+            else if (!uwp_unbox_string( el->content, label, ARRAY_SIZE(label) ))
+            {
+                /* Resolve ViewModel label via IXamlMember (Title/Label/DisplayName/Text) or IStringable */
+                HSTRING hcls = NULL;
+                if (SUCCEEDED(IInspectable_GetRuntimeClassName( el->content, &hcls )) && hcls)
+                {
+                    const WCHAR *cls = WindowsGetStringRawBuffer( hcls, NULL );
+                    if (cls && cls[0])
+                    {
+                        static const WCHAR *const prop_names[] = { L"Title", L"Label", L"DisplayName", L"Header", L"Text", L"Name" };
+                        unsigned int pi;
+                        for (pi = 0; pi < ARRAY_SIZE(prop_names) && !label[0]; pi++)
+                        {
+                            IInspectable *pval = NULL;
+                            if (uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, prop_names[pi], el->content, &pval ) && pval)
+                            {
+                                uwp_unbox_string( pval, label, ARRAY_SIZE(label) );
+                                IInspectable_Release( pval );
+                            }
+                        }
+                    }
+                    WindowsDeleteString( hcls );
+                }
+                if (!label[0])
+                {
+                    /* Try ICustomPropertyProvider ({7c925755-3e48-42b4-8677-76372267033f}) for managed ViewModels */
+                    static const GUID IID_ICustomPropertyProvider_gpu =
+                        { 0x7c925755, 0x3e48, 0x42b4, { 0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f } };
+                    void *cpp = NULL;
+                    if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_ICustomPropertyProvider_gpu, &cpp )) && cpp)
+                    {
+                        static const WCHAR *const prop_names[] = { L"Title", L"Label", L"DisplayName", L"Header", L"Text", L"Content", L"Name" };
+                        HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
+                        unsigned int pi;
+                        for (pi = 0; pi < ARRAY_SIZE(prop_names) && !label[0]; pi++)
+                        {
+                            HSTRING hp = NULL;
+                            void *cp = NULL;
+                            if (get_prop && SUCCEEDED(WindowsCreateString( prop_names[pi], wcslen(prop_names[pi]), &hp )) && hp)
+                            {
+                                if (SUCCEEDED(get_prop( cpp, hp, &cp )) && cp)
+                                {
+                                    HRESULT (WINAPI *get_val)(void *, IInspectable *, IInspectable **) = (void *)(*(void ***)cp)[8];
+                                    IInspectable *pval = NULL;
+                                    if (get_val && SUCCEEDED(get_val( cp, el->content, &pval )) && pval)
+                                    {
+                                        uwp_unbox_string( pval, label, ARRAY_SIZE(label) );
+                                        IInspectable_Release( pval );
+                                    }
+                                    IUnknown_Release( (IUnknown *)cp );
+                                }
+                                WindowsDeleteString( hp );
+                            }
+                        }
+                        IUnknown_Release( (IUnknown *)cpp );
+                    }
+                }
+                if (!label[0])
+                {
+                    static const GUID IID_IStringable_gpu =
+                        { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+                    void *strable = NULL;
+                    if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_IStringable_gpu, &strable )) && strable)
+                    {
+                        HSTRING hs = NULL;
+                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
+                        if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
+                        {
+                            const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
+                            if (s && s[0] && wcsncmp( s, L"WinStore.", 9 ) && wcsncmp( s, L"Windows.", 8 ))
+                                lstrcpynW( label, s, ARRAY_SIZE(label) );
+                            WindowsDeleteString( hs );
+                        }
+                        IUnknown_Release( (IUnknown *)strable );
+                    }
+                }
+                if (label[0])
+                    lstrcpynW( el->text, label, ARRAY_SIZE(el->text) );
+            }
+            if (label[0])
+            {
+                RECT brc = el->bounds;
+                COLORREF bg = (el->is_pressed || el->is_hovered) ? RGB( 60, 60, 60 ) : RGB( 42, 42, 42 );
+                COLORREF fg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 240, 240, 240 ), surface_bg );
+                InflateRect( &brc, -2, -4 );
+                xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                    6.0f, cr_to_argb( bg ), 0, 0.0f, 1.0f );
+                xaml_gpu_push_text( ctx, label, 11, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                    &brc, NULL, fg, 1.0f );
+            }
+        }
+    }
+    else if (!el->children_coll && el->data_context &&
+             (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56)
+    {
+        if (!el->text[0])
+        {
+            static const WCHAR *const title_props[] = { L"Title", L"ProductTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
+            static const WCHAR *const sub_props[] = { L"DisplayPrice", L"PriceText", L"FormattedPrice", L"Price", L"Category", L"PublisherName", L"Publisher", L"Subtitle", L"Description" };
+            static const WCHAR *const nested_props[] = { L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
+            WCHAR title_buf[128] = {0}, sub_buf[128] = {0};
+            IInspectable *vm = el->data_context;
+            IInspectable *target_vm = vm;
+            IInspectable *nested_vm = NULL;
+            HSTRING hcls = NULL;
+
+            if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
+            {
+                const WCHAR *cls = WindowsGetStringRawBuffer( hcls, NULL );
+                unsigned int ni;
+                for (ni = 0; ni < ARRAY_SIZE(nested_props) && !nested_vm; ni++)
+                {
+                    IInspectable *nv = NULL;
+                    if (cls && cls[0] && uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, nested_props[ni], vm, &nv ) && nv)
+                        nested_vm = nv;
+                }
+                WindowsDeleteString( hcls );
+            }
+            if (!uwp_vm_query_string_prop( vm, title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf) ) && nested_vm)
+            {
+                target_vm = nested_vm;
+                uwp_vm_query_string_prop( target_vm, title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf) );
+            }
+            if (title_buf[0])
+            {
+                if (!uwp_vm_query_string_prop( target_vm, sub_props, ARRAY_SIZE(sub_props), sub_buf, ARRAY_SIZE(sub_buf) ) &&
+                    nested_vm && target_vm != nested_vm)
+                    uwp_vm_query_string_prop( nested_vm, sub_props, ARRAY_SIZE(sub_props), sub_buf, ARRAY_SIZE(sub_buf) );
+                if (sub_buf[0])
+                    swprintf( el->text, ARRAY_SIZE(el->text), L"%.120s\n%.120s", title_buf, sub_buf );
+                else
+                    lstrcpynW( el->text, title_buf, ARRAY_SIZE(el->text) );
+            }
+            if (nested_vm) IInspectable_Release( nested_vm );
+        }
+        if (el->text[0])
+        {
+            RECT brc = el->bounds, trc, src;
+            const WCHAR *nl = wcschr( el->text, '\n' );
+            WCHAR tline[128] = {0};
+            size_t tlen = nl ? (size_t)(nl - el->text) : wcslen( el->text );
+            if (tlen >= ARRAY_SIZE(tline)) tlen = ARRAY_SIZE(tline) - 1;
+            memcpy( tline, el->text, tlen * sizeof(WCHAR) );
+            tline[tlen] = 0;
+            InflateRect( &brc, -2, -2 );
+            xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                6.0f, cr_to_argb( el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ) ),
+                                cr_to_argb( RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
+            SetRect( &trc, brc.left + 14, brc.top + 14, brc.right - 14, brc.top + 48 );
+            xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                &trc, NULL, RGB( 255, 255, 255 ), 1.0f );
+            if (nl)
+            {
+                SetRect( &src, brc.left + 14, brc.top + 52, brc.right - 14, brc.bottom - 12 );
+                xaml_gpu_push_text( ctx, nl + 1, 12, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &src, NULL, RGB( 180, 180, 180 ), 1.0f );
+            }
+        }
     }
     if (el->children_coll)
     {
@@ -1300,6 +1769,10 @@ static const GUID IID_IElementCompositionPreviewStatics_UWP =
     { 0x08c92b38, 0xec99, 0x4c55, { 0xbc, 0x85, 0xa1, 0xc1, 0x80, 0xb2, 0x76, 0x46 } };
 static const GUID IID_IElementCompositionPreviewStatics2_UWP =
     { 0x24148fbb, 0x23d6, 0x4f37, { 0xba, 0x0c, 0x07, 0x33, 0xe7, 0x99, 0x72, 0x2d } };
+static const GUID IID_IElementCompositionPreviewStatics_WinUI3 =
+    { 0x585a3a99, 0x9d25, 0x5673, { 0xa1, 0x0d, 0xd1, 0xf2, 0x92, 0xb8, 0x50, 0x53 } };
+static const GUID IID_IElementCompositionPreviewStatics_WinUI3_v2 =
+    { 0x84da5a6c, 0x0cfa, 0x532b, { 0x9b, 0x15, 0xcc, 0xd9, 0x86, 0x37, 0x43, 0x42 } };
 
 static __x_ABI_CWindows_CUI_CComposition_CICompositor *g_ecp_compositor = NULL;
 
@@ -1334,12 +1807,14 @@ static HRESULT WINAPI ecp_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ))
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
     {
         *out = iface;
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_UWP ))
+    if (IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_UWP ) ||
+        IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_WinUI3 ) ||
+        IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_WinUI3_v2 ))
     {
         *out = (void *)&ecp_statics_obj;
         return S_OK;
@@ -1349,6 +1824,7 @@ static HRESULT WINAPI ecp_QueryInterface( void *iface, REFIID iid, void **out )
         *out = (void *)&ecp_statics2_obj;
         return S_OK;
     }
+    ERR( "ecp_QueryInterface unknown iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1393,8 +1869,36 @@ static HRESULT WINAPI ecp_GetElementChildVisual( void *iface, void *elem, void *
     *out = NULL;
     return S_OK;
 }
+static IDCompositionVisual *g_ecp_child_visual = NULL;
+
 static HRESULT WINAPI ecp_SetElementChildVisual( void *iface, void *elem, void *visual )
 {
+    IDCompositionVisual *root = xaml_get_dcomp_root_visual();
+    IDCompositionVisual *dcomp_vis = NULL;
+    if (visual)
+        IUnknown_QueryInterface( (IUnknown *)visual, &IID_IDCompositionVisual, (void **)&dcomp_vis );
+    if (root)
+    {
+        if (g_ecp_child_visual && g_ecp_child_visual != dcomp_vis)
+        {
+            IDCompositionVisual_RemoveVisual( root, g_ecp_child_visual );
+            IDCompositionVisual_Release( g_ecp_child_visual );
+            g_ecp_child_visual = NULL;
+        }
+        if (dcomp_vis && dcomp_vis != root && g_ecp_child_visual != dcomp_vis)
+        {
+            HRESULT hr_add = IDCompositionVisual_AddVisual( root, dcomp_vis, TRUE, NULL );
+            ERR( "ecp_SetElementChildVisual elem=%p vis=%p dcomp=%p root=%p hr=%#lx\n",
+                 elem, visual, dcomp_vis, root, hr_add );
+            if (SUCCEEDED(hr_add))
+            {
+                g_ecp_child_visual = dcomp_vis;
+                IDCompositionVisual_AddRef( g_ecp_child_visual );
+            }
+        }
+        xaml_dcomp_commit();
+    }
+    if (dcomp_vis) IDCompositionVisual_Release( dcomp_vis );
     return S_OK;
 }
 static HRESULT WINAPI ecp_GetScrollViewerManipulationPropertySet( void *iface, void *sv, void **out )
@@ -1448,7 +1952,153 @@ static const void *ecp_statics2_vtbl[] =
 };
 static const void *ecp_statics2_obj = ecp_statics2_vtbl;
 
+IActivationFactory *xaml_get_ecp_factory( void )
+{
+    return (IActivationFactory *)&ecp_statics_obj;
+}
+
+struct uwp_size_f_gpu { float width; float height; };
+struct uwp_rect_f_gpu { float x; float y; float width; float height; };
+
+static HRESULT WINAPI layout_info_GetAvailableSize( void *iface, void *el_ptr, struct uwp_size_f_gpu *out )
+{
+    struct uwp_element *el = uwp_elem_from_any( el_ptr );
+    if (!out) return E_POINTER;
+    out->width = el ? (float)el->actual_w : 0.0f;
+    out->height = el ? (float)el->actual_h : 0.0f;
+    return S_OK;
+}
+static HRESULT WINAPI layout_info_GetLayoutExceptionElement( void *iface, void *dispatcher, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI layout_info_GetLayoutSlot( void *iface, void *el_ptr, struct uwp_rect_f_gpu *out )
+{
+    struct uwp_element *el = uwp_elem_from_any( el_ptr );
+    if (!out) return E_POINTER;
+    if (el && el->has_bounds)
+    {
+        out->x = (float)el->bounds.left;
+        out->y = (float)el->bounds.top;
+        out->width = (float)(el->bounds.right - el->bounds.left);
+        out->height = (float)(el->bounds.bottom - el->bounds.top);
+    }
+    else
+    {
+        out->x = out->y = out->width = out->height = 0.0f;
+    }
+    return S_OK;
+}
+static const void *layout_info_statics_vtbl[] =
+{
+    ecp_QueryInterface,
+    ecp_AddRef,
+    ecp_Release,
+    ecp_GetIids,
+    ecp_GetRuntimeClassName,
+    ecp_GetTrustLevel,
+    layout_info_GetAvailableSize,
+    layout_info_GetLayoutExceptionElement,
+    layout_info_GetLayoutSlot,
+};
+static const void *layout_info_statics_obj = layout_info_statics_vtbl;
+
+static const GUID IID_IConnectedAnimationService_UWP =
+    { 0x1c6875c9, 0x19bb, 0x4d47, { 0xb9, 0xaa, 0x66, 0xc8, 0x02, 0xdc, 0xb9, 0xff } };
+static const GUID IID_IConnectedAnimationServiceStatics_UWP =
+    { 0xc7078ea5, 0xd688, 0x40e8, { 0x8f, 0x90, 0x96, 0xa6, 0x27, 0x92, 0x73, 0xd2 } };
+
+static HRESULT WINAPI cas_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IConnectedAnimationService_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI cas_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.UI.Xaml.Media.Animation.ConnectedAnimationService";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+static HRESULT WINAPI cas_get_DefaultDuration( void *iface, INT64 *val )
+{
+    if (val) *val = 3000000; /* 300 ms */
+    return S_OK;
+}
+static HRESULT WINAPI cas_put_DefaultDuration( void *iface, INT64 val ) { return S_OK; }
+static HRESULT WINAPI cas_get_DefaultEasingFunction( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cas_put_DefaultEasingFunction( void *iface, void *val ) { return S_OK; }
+static HRESULT WINAPI cas_PrepareToAnimate( void *iface, HSTRING key, void *src, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cas_GetAnimation( void *iface, HSTRING key, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static const void *cas_vtbl[] =
+{
+    cas_QI, ecp_AddRef, ecp_Release, ecp_GetIids, cas_GetRuntimeClassName, ecp_GetTrustLevel,
+    cas_get_DefaultDuration, cas_put_DefaultDuration,
+    cas_get_DefaultEasingFunction, cas_put_DefaultEasingFunction,
+    cas_PrepareToAnimate, cas_GetAnimation,
+};
+static const void *cas_obj = cas_vtbl;
+
+static HRESULT WINAPI cas_statics_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IConnectedAnimationServiceStatics_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI cas_statics_GetForCurrentView( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = (void *)&cas_obj;
+    return S_OK;
+}
+static const void *cas_statics_vtbl[] =
+{
+    cas_statics_QI, ecp_AddRef, ecp_Release, ecp_GetIids, cas_GetRuntimeClassName, ecp_GetTrustLevel,
+    cas_statics_GetForCurrentView,
+};
+static const void *cas_statics_obj = cas_statics_vtbl;
+
 static const void *comp_target_statics_obj;
+static const void *binding_ops_statics_obj;
+static const void *thickness_helper_statics_obj;
+static const void *uwp_uielement_statics_obj;
+static const void *uwp_uielement_routed_statics_obj;
+static const void *uwp_grid_statics_obj;
+static const GUID IID_IUIElementStatics4_UWP;
+static const GUID IID_IUIElementStatics6_UWP;
+static const GUID IID_IUIElementStatics7_UWP;
+static const GUID IID_IUIElementStatics8_UWP;
+static const GUID IID_IRoutedEventArgsFactory_WinUI3 =
+    { 0x914b02c7, 0x076b, 0x5b89, { 0x98, 0xe7, 0x6c, 0x37, 0x33, 0x79, 0xe9, 0xaf } };
+
 HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
@@ -1494,12 +2144,57 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             { 0x67ef17e1, 0xfe37, 0x474f, { 0x9e, 0x97, 0x3b, 0x5e, 0x0b, 0x30, 0xf2, 0xe0 } };
         static const GUID IID_IAutoSuggestBoxStatics_UWP =
             { 0xee22c7f4, 0xc15d, 0x4ff3, { 0x8a, 0x94, 0xf5, 0x0d, 0xfd, 0xfb, 0xe8, 0x9a } };
+        static const GUID IID_ISplitViewStatics_UWP =
+            { 0x859b4f6f, 0x44ab, 0x4e4b, { 0x91, 0xc1, 0x17, 0xb7, 0x05, 0x6d, 0x9b, 0x5f } };
+        static const GUID IID_IContentControlStatics_UWP =
+            { 0x116982a4, 0x5cf5, 0x4c05, { 0xa5, 0x3f, 0x15, 0xe4, 0x87, 0x6c, 0x85, 0xec } };
+        static const GUID IID_ISymbolIconStatics_UWP =
+            { 0x8624fbdf, 0x952c, 0x4f76, { 0xb0, 0x3f, 0x30, 0x83, 0x3b, 0xe9, 0x95, 0x72 } };
+        static const GUID IID_IBindingOperationsStatics_UWP =
+            { 0xe155ef73, 0x95a0, 0x4aab, { 0x8c, 0x7d, 0x2a, 0x47, 0xda, 0x07, 0x3c, 0x79 } };
+        static const GUID IID_IThicknessHelperStatics_UWP =
+            { 0xc0991a7c, 0x070c, 0x4da6, { 0x87, 0x84, 0x01, 0xca, 0x80, 0x0e, 0xb7, 0x3a } };
+        static const GUID IID_IXamlBindingHelperStatics_UWP =
+            { 0xf65cfb71, 0xc80c, 0x4ffa, { 0x86, 0xee, 0x55, 0x87, 0x54, 0xee, 0x33, 0x6d } };
+        static const GUID IID_ILayoutInformationStatics_UWP =
+            { 0xcf06cf99, 0x58e9, 0x4682, { 0x83, 0x26, 0x50, 0xca, 0xab, 0x65, 0xed, 0x7c } };
+        static const GUID IID_IStoryboardStatics_UWP =
+            { 0xd82f07d8, 0x73d5, 0x4379, { 0xbd, 0x48, 0x7e, 0x05, 0x18, 0x4a, 0x8b, 0xad } };
+        if (IsEqualGUID( iid, &IID_IStoryboardStatics_UWP ))
+        {
+            *out = (void *)&sb_factory_obj.IStatics_iface;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_ILayoutInformationStatics_UWP ))
+        {
+            *out = (void *)&layout_info_statics_obj;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IConnectedAnimationServiceStatics_UWP ))
+        {
+            *out = (void *)&cas_statics_obj;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IBindingOperationsStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IXamlBindingHelperStatics_UWP ))
+        {
+            *out = (void *)&binding_ops_statics_obj;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IThicknessHelperStatics_UWP ))
+        {
+            *out = (void *)&thickness_helper_statics_obj;
+            return S_OK;
+        }
         if (IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ) ||
             IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IControlStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IRangeBaseStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IAutoSuggestBoxStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_ISplitViewStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IContentControlStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_ISymbolIconStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP )) /* ISelectorStatics {13300b06-...} */
         {
             *out = f && f->IDpStatics_iface.lpVtbl ? (void *)&f->IDpStatics_iface : (void *)&f->IStatics_iface;
@@ -1516,14 +2211,44 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             return S_OK;
         }
     }
+    {
+        static const GUID IID_IFrameworkElementAutomationPeerFactory_UWP =
+            { 0x0db9b8bc, 0xb812, 0x48e3, { 0xaf, 0x1f, 0xdb, 0xc5, 0x76, 0x00, 0xc3, 0x25 } };
+        if (IsEqualGUID( iid, &IID_IFrameworkElementAutomationPeerFactory_UWP ))
+        {
+            *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
+            return S_OK;
+        }
+    }
+    if (IsEqualGUID( iid, &IID_IUIElementStatics_UWP ))
+    {
+        *out = (void *)&uwp_uielement_statics_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IUIElementStatics4_UWP ) ||
+        IsEqualGUID( iid, &IID_IUIElementStatics6_UWP ) ||
+        IsEqualGUID( iid, &IID_IUIElementStatics7_UWP ) ||
+        IsEqualGUID( iid, &IID_IUIElementStatics8_UWP ))
+    {
+        *out = (void *)&uwp_uielement_routed_statics_obj;
+        return S_OK;
+    }
+    {
+        static const GUID IID_IGridStatics_UWP3 =
+            { 0x64fe2e9f, 0xf951, 0x42b6, { 0xa9, 0xce, 0xbb, 0x17, 0x9a, 0xf1, 0x15, 0x95 } };
+        if (IsEqualGUID( iid, &IID_IGridStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IGridStatics_UWP2 ) ||
+            IsEqualGUID( iid, &IID_IGridStatics_UWP3 ))
+        {
+            *out = (void *)&uwp_grid_statics_obj;
+            return S_OK;
+        }
+    }
     if (f == &auto_props_factory_obj ||
         f == &feap_factory_obj ||
         IsEqualGUID( iid, &IID_ICanvasStatics_local ) ||
         IsEqualGUID( iid, &IID_IScrollViewerStatics_local ) ||
-        IsEqualGUID( iid, &IID_IGridStatics_UWP ) ||
-        IsEqualGUID( iid, &IID_IGridStatics_UWP2 ) ||
         IsEqualGUID( iid, &IID_IVisualTreeHelperStatics_UWP ) ||
-        IsEqualGUID( iid, &IID_IUIElementStatics_UWP ) ||
         IsEqualGUID( iid, &IID_IFrameworkElementStatics_UWP ))
     {
         *out = (void *)&f->IStatics_iface;
@@ -1532,10 +2257,13 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
     {
         static const GUID IID_IRangeBaseFactory_UWP =
             { 0x389b7c71, 0x5220, 0x42b2, { 0x99, 0x92, 0x26, 0x90, 0xc1, 0xa6, 0x70, 0x30 } };
-        static const GUID IID_INotifyCollectionChangedEventArgsFactory_UWP =
-            { 0xb30c3e3a, 0xdf8d, 0x44a5, { 0x9a, 0x38, 0x7a, 0xc0, 0xd0, 0x8c, 0xe6, 0x3d } };
+        static const GUID IID_IMediaPlayerElementFactory_UWP =
+            { 0x77e525c3, 0xeb17, 0x4b8d, { 0x88, 0x9d, 0x1e, 0xa8, 0xab, 0xdb, 0xd4, 0xef } };
+        static const GUID IID_ISwapChainPanelFactory_UWP =
+            { 0xf38f8d7f, 0x1a48, 0x49cb, { 0x86, 0xd2, 0x10, 0xea, 0xaa, 0xf6, 0xfd, 0x70 } };
         if (IsEqualGUID( iid, &IID_IRangeBaseFactory_UWP ) ||
-            IsEqualGUID( iid, &IID_INotifyCollectionChangedEventArgsFactory_UWP ))
+            IsEqualGUID( iid, &IID_IMediaPlayerElementFactory_UWP ) ||
+            IsEqualGUID( iid, &IID_ISwapChainPanelFactory_UWP ))
         {
             *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
             return S_OK;
@@ -1569,6 +2297,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IMenuFlyoutSeparatorFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IMarkupExtensionFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IRoutedEventArgsFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgsFactory_WinUI3 ) ||
         IsEqualGUID( iid, &IID_IBindingFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IRelativeSourceFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IRadioButtonFactory_UWP ) ||
@@ -1605,6 +2334,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
          wcsstr( f->class_name, L"Accelerator" ) ||
          wcsstr( f->class_name, L"Command" ) ||
          wcsstr( f->class_name, L"Timer" ) ||
+         wcsstr( f->class_name, L"Configuration" ) ||
          wcsstr( f->class_name, L"Collection" )))
     {
         WARN( "uwp_cf_QI(%s) unknown iid %s -> ComposableFactory fallback\n",
@@ -1651,10 +2381,12 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
     const WCHAR *cls = f ? f->class_name : L"Windows.UI.Xaml.FrameworkElement";
     /* IPropertyPathFactory::CreateInstance(HSTRING path, IPropertyPath **out)
-     * takes 2 args after iface, so the output pointer arrives in `inner`. */
-    if (!wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" ))
+     * and ISymbolIconFactory::CreateInstanceWithIcon(Symbol sym, ISymbolIcon **out)
+     * take 2 args after iface, so the output pointer arrives in `inner`. */
+    if (!wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" ) ||
+        !wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" ))
     {
-        TRACE( "uwp_cf_CreateInstance(PropertyPath, path=%p, out=%p)\n", outer, inner );
+        TRACE( "uwp_cf_CreateInstance(%s, arg1=%p, out=%p)\n", debugstr_w(cls), outer, inner );
         return uwp_element_create( cls, NULL, NULL, (void **)inner );
     }
     /* If called as I*Statics::get_*Property(iface, IDependencyProperty **out)
@@ -1669,8 +2401,102 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
 
 static HRESULT WINAPI uwp_cf_dp_prop( void *iface, void **out )
 {
+    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
+
+static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
+{
+    struct uwp_class_factory *f = uwp_cf_from_any( iface );
+    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (f && f->class_name && !wcscmp( f->class_name, L"Windows.UI.Xaml.UIElement" ))
+    {
+        if (!g_routed_event_ptr_pressed)
+            uwp_element_create( L"Windows.UI.Xaml.RoutedEvent", NULL, NULL, (void **)&g_routed_event_ptr_pressed );
+        *out = g_routed_event_ptr_pressed;
+        if (*out) IUnknown_AddRef( (IUnknown *)*out );
+        return S_OK;
+    }
+    return dependency_property_create( NULL, (IDependencyProperty **)out );
+}
+
+static HRESULT WINAPI uwp_cf_routed_event( void *iface, void **out )
+{
+    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (!g_routed_event_ptr_pressed)
+        uwp_element_create( L"Windows.UI.Xaml.RoutedEvent", NULL, NULL, (void **)&g_routed_event_ptr_pressed );
+    *out = g_routed_event_ptr_pressed;
+    if (*out) IUnknown_AddRef( (IUnknown *)*out );
+    return S_OK;
+}
+
+static const GUID IID_IUIElementStatics4_UWP =
+    { 0x5d1157a0, 0x0588, 0x4b15, { 0x89, 0x5c, 0x76, 0x99, 0x5c, 0x45, 0x8d, 0x83 } };
+static const GUID IID_IUIElementStatics6_UWP =
+    { 0x62809849, 0x2689, 0x4266, { 0xba, 0x3b, 0x3c, 0x5e, 0x86, 0xc3, 0xa8, 0x26 } };
+static const GUID IID_IUIElementStatics7_UWP =
+    { 0x933e9348, 0xb1e5, 0x4005, { 0x8d, 0x3a, 0x29, 0xba, 0xb9, 0xe7, 0xb9, 0x73 } };
+static const GUID IID_IUIElementStatics8_UWP =
+    { 0xa6890878, 0x664e, 0x4679, { 0x9c, 0x6b, 0x96, 0x67, 0x25, 0x16, 0x2f, 0x59 } };
+
+static const void *uwp_uielement_routed_statics_vtbl[32] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6 ... 31] = uwp_cf_routed_event,
+};
+static const void *uwp_uielement_routed_statics_obj = uwp_uielement_routed_statics_vtbl;
+
+static HRESULT WINAPI uwp_grid_statics_SetProp( void *iface, void *elem, INT32 val )
+{
+    return S_OK;
+}
+static HRESULT WINAPI uwp_grid_statics_GetProp( void *iface, void *elem, INT32 *out )
+{
+    if (out) *out = 0;
+    return S_OK;
+}
+static const void *uwp_grid_statics_vtbl[24] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = uwp_cf_dp_prop,             /* RowProperty */
+    [7] = uwp_grid_statics_GetProp,   /* GetRow */
+    [8] = uwp_grid_statics_SetProp,   /* SetRow */
+    [9] = uwp_cf_dp_prop,             /* ColumnProperty */
+    [10] = uwp_grid_statics_GetProp,  /* GetColumn */
+    [11] = uwp_grid_statics_SetProp,  /* SetColumn */
+    [12] = uwp_cf_dp_prop,            /* RowSpanProperty */
+    [13] = uwp_grid_statics_GetProp,  /* GetRowSpan */
+    [14] = uwp_grid_statics_SetProp,  /* SetRowSpan */
+    [15] = uwp_cf_dp_prop,            /* ColumnSpanProperty */
+    [16] = uwp_grid_statics_GetProp,  /* GetColumnSpan */
+    [17] = uwp_grid_statics_SetProp,  /* SetColumnSpan */
+    [18 ... 23] = uwp_generic_noop,
+};
+static const void *uwp_grid_statics_obj = uwp_grid_statics_vtbl;
+
+static const void *uwp_uielement_statics_vtbl[64] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6 ... 22] = uwp_cf_routed_event,
+    [23 ... 24] = uwp_cf_routed_event,
+    [25 ... 63] = uwp_cf_dp_prop,
+};
+static const void *uwp_uielement_statics_obj = uwp_uielement_statics_vtbl;
 
 static HRESULT WINAPI uwp_cf_dp_prop_slot9( void *iface, void **out )
 {
@@ -1679,11 +2505,12 @@ static HRESULT WINAPI uwp_cf_dp_prop_slot9( void *iface, void **out )
     {
         if (!out) return E_POINTER;
         if (!g_routed_event_ptr_pressed)
-            dependency_property_create( NULL, &g_routed_event_ptr_pressed );
+            uwp_element_create( L"Windows.UI.Xaml.RoutedEvent", NULL, NULL, (void **)&g_routed_event_ptr_pressed );
         *out = g_routed_event_ptr_pressed;
         if (*out) IUnknown_AddRef( (IUnknown *)*out );
         return S_OK;
     }
+    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
 
@@ -1714,7 +2541,354 @@ const void *uwp_cf_comp_vtbl[64] =
     [10 ... 63] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI comp_target_GetCompositorForCurrentThread( void *iface, void **out )
+{
+    __x_ABI_CWindows_CUI_CComposition_CICompositor *comp;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    comp = ecp_get_compositor();
+    ERR( "comp_target_GetCompositorForCurrentThread -> %p\n", comp );
+    if (!comp) return E_FAIL;
+    __x_ABI_CWindows_CUI_CComposition_CICompositor_AddRef( comp );
+    *out = comp;
+    return S_OK;
+}
+
+static HRESULT WINAPI comp_target_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker_UWP ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP2 ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    ERR( "comp_target_QI iid=%s\n", debugstr_guid( iid ) );
+    *out = (void *)&comp_target_statics_obj;
+    return S_OK;
+}
+
+static const GUID IID_IRenderingEventArgs_UWP =
+    { 0x58b55d6d, 0x50a6, 0x435e, { 0x96, 0x9c, 0xf0, 0xe8, 0x18, 0xa9, 0x6e, 0x35 } };
+
+static HRESULT WINAPI rendering_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IRenderingEventArgs_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI rendering_args_get_RenderingTime( void *iface, INT64 *val )
+{
+    if (val) *val = (INT64)GetTickCount64() * 10000;
+    return S_OK;
+}
+static const void *rendering_args_vtbl[] =
+{
+    rendering_args_QI, ecp_AddRef, ecp_Release, ecp_GetIids, ecp_GetRuntimeClassName, ecp_GetTrustLevel,
+    rendering_args_get_RenderingTime,
+};
+static const void *rendering_args_obj = rendering_args_vtbl;
+
+static struct { IInspectable *handler; INT64 token; } g_ct_rendering[32];
+static int g_ct_rendering_cnt = 0;
+static LONG g_ct_rendering_next_tok = 1;
+static BOOL g_ct_in_rendering = FALSE;
+
+static HRESULT WINAPI comp_target_add_Rendering( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    INT64 t = InterlockedIncrement( &g_ct_rendering_next_tok );
+    if (tok && (ULONG_PTR)tok > 0x10000 && !IsBadWritePtr( tok, sizeof(*tok) ))
+        tok->value = t;
+    if (handler && g_ct_rendering_cnt < (int)ARRAY_SIZE(g_ct_rendering))
+    {
+        TRACE( "CompositionTarget::add_Rendering handler=%p cnt=%d\n", handler, g_ct_rendering_cnt + 1 );
+        g_ct_rendering[g_ct_rendering_cnt].handler = (IInspectable *)handler;
+        g_ct_rendering[g_ct_rendering_cnt].token = t;
+        g_ct_rendering_cnt++;
+        IInspectable_AddRef( (IInspectable *)handler );
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI comp_target_remove_Rendering( void *iface, EventRegistrationToken tok )
+{
+    int i;
+    for (i = 0; i < g_ct_rendering_cnt; i++)
+    {
+        if (g_ct_rendering[i].token == tok.value)
+        {
+            IInspectable *h = g_ct_rendering[i].handler;
+            g_ct_rendering[i] = g_ct_rendering[--g_ct_rendering_cnt];
+            if (h) IInspectable_Release( h );
+            break;
+        }
+    }
+    return S_OK;
+}
+
+void uwp_fire_composition_target_rendering( void )
+{
+    IInspectable *snap[32];
+    int n = 0, i;
+    if (g_ct_in_rendering || g_ct_rendering_cnt <= 0) return;
+    g_ct_in_rendering = TRUE;
+    for (i = 0; i < g_ct_rendering_cnt && n < (int)ARRAY_SIZE(snap); i++)
+    {
+        if (g_ct_rendering[i].handler)
+        {
+            snap[n++] = g_ct_rendering[i].handler;
+            IInspectable_AddRef( g_ct_rendering[i].handler );
+        }
+    }
+    for (i = 0; i < n; i++)
+    {
+        struct xaml_event_handler *h = (struct xaml_event_handler *)snap[i];
+        __TRY
+        {
+            h->lpVtbl->Invoke( h, NULL, (IInspectable *)&rendering_args_obj );
+        }
+        __EXCEPT_ALL
+        {
+        }
+        __ENDTRY;
+        IInspectable_Release( snap[i] );
+    }
+    g_ct_in_rendering = FALSE;
+}
+
 static const void *comp_target_statics_vtbl[16] =
+{
+    [0] = comp_target_QI,
+    [1] = ecp_AddRef,
+    [2] = ecp_Release,
+    [3] = ecp_GetIids,
+    [4] = ecp_GetRuntimeClassName,
+    [5] = ecp_GetTrustLevel,
+    [6] = comp_target_add_Rendering,
+    [7] = comp_target_remove_Rendering,
+    [8] = uwp_ui_event_add,
+    [9] = uwp_generic_noop,
+    [10] = uwp_ui_event_add,
+    [11] = uwp_generic_noop,
+    [12] = comp_target_GetCompositorForCurrentThread,
+    [13 ... 15] = uwp_generic_noop,
+};
+static const void *comp_target_statics_obj = comp_target_statics_vtbl;
+
+IActivationFactory *xaml_get_comp_target_factory( void )
+{
+    return (IActivationFactory *)&comp_target_statics_obj;
+}
+
+/* Microsoft.UI.Content.ContentExternalOutputLink bridge -> PlacementVisual + IDCompositionTarget */
+struct xaml_ceol
+{
+    const void *link_vtbl;
+    const void *target_vtbl;
+    LONG ref;
+    __x_ABI_CWindows_CUI_CComposition_CIContainerVisual *placement_visual;
+    IDCompositionVisual *placement_dcomp_vis;
+};
+
+static inline struct xaml_ceol *ceol_from_link( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_ceol, link_vtbl );
+}
+static inline struct xaml_ceol *ceol_from_target( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_ceol, target_vtbl );
+}
+
+static HRESULT WINAPI ceol_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IDCompositionTarget_local =
+        { 0xeacdd04c, 0x117e, 0x4e17, { 0x88, 0xf4, 0xd1, 0xb1, 0x2b, 0x0e, 0x3d, 0x89 } };
+    static const GUID IID_IDCompositionVisual_local =
+        { 0x4d93059d, 0x097b, 0x4651, { 0x9a, 0x60, 0xf0, 0xf2, 0x51, 0x16, 0xe2, 0xf3 } };
+    static const GUID IID_IDCompositionVisual2_local =
+        { 0xe8de1639, 0x4331, 0x4b26, { 0xbc, 0x5f, 0x6a, 0x32, 0x1d, 0x34, 0x7a, 0x85 } };
+    static const GUID IID_IContentExternalOutputLink_WinUI3 =
+        { 0x1054bf83, 0xb35b, 0x5fde, { 0x8d, 0xd7, 0xac, 0x3b, 0xb3, 0xe6, 0xce, 0x27 } };
+    struct xaml_ceol *impl = ceol_from_link( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IContentExternalOutputLink_WinUI3 ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->link_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IDCompositionTarget_local ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->target_vtbl;
+        ERR( "ceol_QueryInterface -> IDCompositionTarget %p (dcomp_vis=%p)\n", *out, impl->placement_dcomp_vis );
+        return S_OK;
+    }
+    if ((IsEqualGUID( iid, &IID_IDCompositionVisual_local ) ||
+         IsEqualGUID( iid, &IID_IDCompositionVisual2_local )) && impl->placement_dcomp_vis)
+    {
+        HRESULT hr = IDCompositionVisual_QueryInterface( impl->placement_dcomp_vis, iid, out );
+        ERR( "ceol_QueryInterface -> IDCompositionVisual %p hr=%#lx\n", *out, hr );
+        return hr;
+    }
+    ERR( "ceol_QueryInterface unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ceol_AddRef( void *iface )
+{
+    return InterlockedIncrement( &ceol_from_link( iface )->ref );
+}
+static ULONG WINAPI ceol_Release( void *iface )
+{
+    struct xaml_ceol *impl = ceol_from_link( iface );
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r)
+    {
+        if (impl->placement_dcomp_vis) IDCompositionVisual_Release( impl->placement_dcomp_vis );
+        if (impl->placement_visual) __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_Release( impl->placement_visual );
+        free( impl );
+    }
+    return r;
+}
+static HRESULT WINAPI ceol_get_PlacementVisual( void *iface, void **out )
+{
+    struct xaml_ceol *impl = ceol_from_link( iface );
+    if (!out) return E_POINTER;
+    *out = impl->placement_visual;
+    if (impl->placement_visual)
+        __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_AddRef( impl->placement_visual );
+    ERR( "ceol_get_PlacementVisual -> %p\n", *out );
+    return S_OK;
+}
+static HRESULT WINAPI ceol_target_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct xaml_ceol *impl = ceol_from_target( iface );
+    return ceol_QueryInterface( &impl->link_vtbl, iid, out );
+}
+static ULONG WINAPI ceol_target_AddRef( void *iface )
+{
+    return InterlockedIncrement( &ceol_from_target( iface )->ref );
+}
+static ULONG WINAPI ceol_target_Release( void *iface )
+{
+    struct xaml_ceol *impl = ceol_from_target( iface );
+    return ceol_Release( &impl->link_vtbl );
+}
+static HRESULT WINAPI ceol_target_SetRoot( void *iface, IDCompositionVisual *visual )
+{
+    struct xaml_ceol *impl = ceol_from_target( iface );
+    HRESULT hr = S_OK;
+    ERR( "ceol_target_SetRoot(impl=%p, visual=%p, placement_dcomp_vis=%p)\n", impl, visual, impl->placement_dcomp_vis );
+    if (impl->placement_dcomp_vis)
+    {
+        IDCompositionVisual_RemoveAllVisuals( impl->placement_dcomp_vis );
+        if (visual)
+            hr = IDCompositionVisual_AddVisual( impl->placement_dcomp_vis, visual, TRUE, NULL );
+        xaml_dcomp_commit();
+    }
+    return hr;
+}
+
+static const void *ceol_link_vtbl[24] =
+{
+    [0] = ceol_QueryInterface,
+    [1] = ceol_AddRef,
+    [2] = ceol_Release,
+    [3] = ecp_GetIids,
+    [4] = ecp_GetRuntimeClassName,
+    [5] = ecp_GetTrustLevel,
+    [6 ... 12] = uwp_generic_noop,
+    [13] = ceol_get_PlacementVisual,
+    [14 ... 23] = uwp_generic_noop,
+};
+static const void *ceol_target_vtbl[4] =
+{
+    [0] = ceol_target_QueryInterface,
+    [1] = ceol_target_AddRef,
+    [2] = ceol_target_Release,
+    [3] = ceol_target_SetRoot,
+};
+
+static HRESULT WINAPI ceol_statics_Create( void *iface, void *compositor_arg, void **out )
+{
+    static const GUID IID_IDCompositionVisual_local =
+        { 0x4d93059d, 0x097b, 0x4651, { 0x9a, 0x60, 0xf0, 0xf2, 0x51, 0x16, 0xe2, 0xf3 } };
+    __x_ABI_CWindows_CUI_CComposition_CICompositor *comp = ecp_get_compositor();
+    struct xaml_ceol *impl;
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!comp) return E_FAIL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->link_vtbl = ceol_link_vtbl;
+    impl->target_vtbl = ceol_target_vtbl;
+    impl->ref = 1;
+    hr = __x_ABI_CWindows_CUI_CComposition_CICompositor_CreateContainerVisual( comp, &impl->placement_visual );
+    if (FAILED(hr) || !impl->placement_visual)
+    {
+        free( impl );
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_QueryInterface(
+        impl->placement_visual, &IID_IDCompositionVisual_local, (void **)&impl->placement_dcomp_vis );
+    ERR( "ceol_statics_Create -> %p (placement_visual=%p, dcomp_vis=%p)\n",
+         impl, impl->placement_visual, impl->placement_dcomp_vis );
+    *out = &impl->link_vtbl;
+    return S_OK;
+}
+
+static const void *ceol_statics_obj;
+static HRESULT WINAPI ceol_statics_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker_UWP ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP2 ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = (void *)&ceol_statics_obj;
+    return S_OK;
+}
+static const void *ceol_statics_vtbl[8] =
+{
+    [0] = ceol_statics_QI,
+    [1] = ecp_AddRef,
+    [2] = ecp_Release,
+    [3] = ecp_GetIids,
+    [4] = ecp_GetRuntimeClassName,
+    [5] = ecp_GetTrustLevel,
+    [6] = ceol_statics_Create,
+    [7] = uwp_generic_noop,
+};
+static const void *ceol_statics_obj = ceol_statics_vtbl;
+
+IActivationFactory *xaml_get_ceol_factory( void )
+{
+    return (IActivationFactory *)&ceol_statics_obj;
+}
+
+static HRESULT WINAPI binding_ops_SetBinding( void *iface, void *target, void *dp, void *binding )
+{
+    TRACE( "binding_ops_SetBinding(target=%p, dp=%p, binding=%p)\n", target, dp, binding );
+    return S_OK;
+}
+static const void *binding_ops_statics_vtbl[8] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1722,13 +2896,38 @@ static const void *comp_target_statics_vtbl[16] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6] = uwp_ui_event_add,
+    [6] = binding_ops_SetBinding,
     [7] = uwp_generic_noop,
-    [8] = uwp_ui_event_add,
-    [9] = uwp_generic_noop,
-    [10 ... 15] = uwp_generic_noop,
 };
-static const void *comp_target_statics_obj = comp_target_statics_vtbl;
+static const void *binding_ops_statics_obj = binding_ops_statics_vtbl;
+
+static HRESULT WINAPI thickness_helper_FromLengths( void *iface, double left, double top, double right, double bottom, double *out )
+{
+    if (!out) return E_POINTER;
+    out[0] = left;
+    out[1] = top;
+    out[2] = right;
+    out[3] = bottom;
+    return S_OK;
+}
+static HRESULT WINAPI thickness_helper_FromUniformLength( void *iface, double uniform, double *out )
+{
+    if (!out) return E_POINTER;
+    out[0] = out[1] = out[2] = out[3] = uniform;
+    return S_OK;
+}
+static const void *thickness_helper_statics_vtbl[8] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = thickness_helper_FromLengths,
+    [7] = thickness_helper_FromUniformLength,
+};
+static const void *thickness_helper_statics_obj = thickness_helper_statics_vtbl;
 
 const void *uwp_cf_statics_vtbl[64] =
 {
@@ -1738,7 +2937,7 @@ const void *uwp_cf_statics_vtbl[64] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6] = uwp_cf_dp_prop,
+    [6] = uwp_cf_dp_prop_slot6,
     [7 ... 8] = uwp_generic_noop,
     [9] = uwp_cf_dp_prop_slot9,
     [10 ... 11] = uwp_generic_noop,
@@ -1776,7 +2975,8 @@ const void *uwp_dp_statics_vtbl[32] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6 ... 31] = uwp_cf_dp_prop,
+    [6] = uwp_cf_dp_prop_slot6,
+    [7 ... 31] = uwp_cf_dp_prop,
 };
 
 /* VisualStateManagerStatics (slot 6 = GoToState(Control, HSTRING, bool, bool*), slot 7 = GetVisualStateGroups) */

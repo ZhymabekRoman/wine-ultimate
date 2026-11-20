@@ -376,6 +376,8 @@ static inline struct dependency_property *impl_from_IDependencyProperty( IDepend
 
 static HRESULT WINAPI dep_prop_QueryInterface( IDependencyProperty *iface, REFIID iid, void **out )
 {
+    static const GUID IID_IRoutedEvent_UWP =
+        { 0xa6b25818, 0x43c1, 0x4c70, { 0x86, 0x5c, 0x7b, 0xdd, 0x5a, 0x32, 0xe3, 0x27 } };
     struct dependency_property *impl = impl_from_IDependencyProperty( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
@@ -384,7 +386,8 @@ static HRESULT WINAPI dep_prop_QueryInterface( IDependencyProperty *iface, REFII
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IDependencyProperty ) ||
-        IsEqualGUID( iid, &IID_IDependencyProperty_WinUI ))
+        IsEqualGUID( iid, &IID_IDependencyProperty_WinUI ) ||
+        IsEqualGUID( iid, &IID_IRoutedEvent_UWP ))
     {
         *out = &impl->IDependencyProperty_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -567,6 +570,83 @@ static HRESULT WINAPI dp_statics_get_UnsetValue( IDependencyPropertyStatics *ifa
     return S_OK;
 }
 
+static IInspectable *dp_create_primitive_default( HSTRING type_name )
+{
+    static const GUID IID_IPropertyValueStatics_local =
+        { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
+    const WCHAR *tname;
+    HSTRING hcls = NULL;
+    void *pvs = NULL;
+    IInspectable *ret = NULL;
+
+    if ((ULONG_PTR)type_name < 0x10000) return NULL;
+    tname = WindowsGetStringRawBuffer( type_name, NULL );
+    if (!tname || !tname[0]) return NULL;
+
+    if (wcscmp( tname, L"Boolean" ) && wcscmp( tname, L"Int32" ) && wcscmp( tname, L"UInt32" ) &&
+        wcscmp( tname, L"Int64" ) && wcscmp( tname, L"UInt64" ) &&
+        wcscmp( tname, L"Single" ) && wcscmp( tname, L"Double" ))
+        return NULL;
+
+    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &hcls )) && hcls)
+    {
+        if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IPropertyValueStatics_local, &pvs )) && pvs)
+        {
+            void **vt = *(void ***)pvs;
+            if (!wcscmp( tname, L"Boolean" ))
+                ((HRESULT (WINAPI *)(void *, boolean, IInspectable **))vt[17])( pvs, FALSE, &ret );
+            else if (!wcscmp( tname, L"Int32" ))
+                ((HRESULT (WINAPI *)(void *, INT32, IInspectable **))vt[10])( pvs, 0, &ret );
+            else if (!wcscmp( tname, L"UInt32" ))
+                ((HRESULT (WINAPI *)(void *, UINT32, IInspectable **))vt[11])( pvs, 0, &ret );
+            else if (!wcscmp( tname, L"Int64" ))
+                ((HRESULT (WINAPI *)(void *, INT64, IInspectable **))vt[12])( pvs, 0, &ret );
+            else if (!wcscmp( tname, L"UInt64" ))
+                ((HRESULT (WINAPI *)(void *, UINT64, IInspectable **))vt[13])( pvs, 0, &ret );
+            else if (!wcscmp( tname, L"Single" ))
+                ((HRESULT (WINAPI *)(void *, float, IInspectable **))vt[14])( pvs, 0.0f, &ret );
+            else if (!wcscmp( tname, L"Double" ))
+                ((HRESULT (WINAPI *)(void *, double, IInspectable **))vt[15])( pvs, 0.0, &ret );
+            IUnknown_Release( (IUnknown *)pvs );
+        }
+        WindowsDeleteString( hcls );
+    }
+    return ret;
+}
+
+static HRESULT dp_register_common( HSTRING name, TypeName property_type,
+                                   IPropertyMetadata *type_metadata, IDependencyProperty **result )
+{
+    IPropertyMetadata *synth_meta = NULL;
+    IInspectable *prim_def = NULL;
+    HRESULT hr;
+
+    if (!type_metadata)
+    {
+        if ((prim_def = dp_create_primitive_default( property_type.Name )))
+        {
+            if (SUCCEEDED(property_metadata_create( prim_def, NULL, &synth_meta )))
+                type_metadata = synth_meta;
+            IInspectable_Release( prim_def );
+        }
+    }
+    else if (type_metadata->lpVtbl == &property_metadata_vtbl)
+    {
+        struct property_metadata *pm = impl_from_IPropertyMetadata( type_metadata );
+        if (!pm->default_value && (prim_def = dp_create_primitive_default( property_type.Name )))
+            pm->default_value = prim_def; /* transfers ref */
+    }
+
+    hr = dependency_property_create( type_metadata, result );
+    if (synth_meta) IPropertyMetadata_Release( synth_meta );
+    if (SUCCEEDED(hr) && result && *result && (ULONG_PTR)name >= 0x10000)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
+        if (raw) lstrcpynW( impl_from_IDependencyProperty( *result )->name, raw, 64 );
+    }
+    return hr;
+}
+
 static HRESULT WINAPI dp_statics_Register(
     IDependencyPropertyStatics *iface,
     HSTRING name,
@@ -575,16 +655,9 @@ static HRESULT WINAPI dp_statics_Register(
     IPropertyMetadata *type_metadata,
     IDependencyProperty **result )
 {
-    HRESULT hr;
-    TRACE( "iface %p, name %s, metadata %p, result %p\n",
-           iface, debugstr_hstring( name ), type_metadata, result );
-    hr = dependency_property_create( type_metadata, result );
-    if (SUCCEEDED(hr) && result && *result && (ULONG_PTR)name >= 0x10000)
-    {
-        const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
-        if (raw) lstrcpynW( impl_from_IDependencyProperty( *result )->name, raw, 64 );
-    }
-    return hr;
+    TRACE( "iface %p, name %s, type %s, metadata %p, result %p\n",
+           iface, debugstr_hstring( name ), debugstr_hstring( property_type.Name ), type_metadata, result );
+    return dp_register_common( name, property_type, type_metadata, result );
 }
 
 static HRESULT WINAPI dp_statics_RegisterAttached(
@@ -595,16 +668,9 @@ static HRESULT WINAPI dp_statics_RegisterAttached(
     IPropertyMetadata *default_metadata,
     IDependencyProperty **result )
 {
-    HRESULT hr;
-    TRACE( "iface %p, name %s, metadata %p, result %p\n",
-           iface, debugstr_hstring( name ), default_metadata, result );
-    hr = dependency_property_create( default_metadata, result );
-    if (SUCCEEDED(hr) && result && *result && (ULONG_PTR)name >= 0x10000)
-    {
-        const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
-        if (raw) lstrcpynW( impl_from_IDependencyProperty( *result )->name, raw, 64 );
-    }
-    return hr;
+    TRACE( "iface %p, name %s, type %s, metadata %p, result %p\n",
+           iface, debugstr_hstring( name ), debugstr_hstring( property_type.Name ), default_metadata, result );
+    return dp_register_common( name, property_type, default_metadata, result );
 }
 
 static const struct __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyStaticsVtbl dp_statics_vtbl =
@@ -906,8 +972,12 @@ static IActivationFactory *meta_provider_factory = (IActivationFactory *)&meta_p
 /* Microsoft.UI.Xaml.PropertyPath / Windows.UI.Xaml.PropertyPath */
 static const GUID IID_IPropertyPath =
     { 0x8b0712f6, 0x9e57, 0x53b0, { 0x80, 0xb1, 0x96, 0x6a, 0x79, 0xf6, 0x0b, 0x96 } };
+static const GUID IID_IPropertyPath_UWP =
+    { 0x300e5d8a, 0x1ff3, 0x4d2c, { 0x95, 0xec, 0x27, 0xf8, 0x1d, 0xeb, 0xac, 0xb8 } };
 static const GUID IID_IPropertyPathFactory =
     { 0x08a8ccab, 0x7ff8, 0x5cec, { 0xbd, 0x3c, 0x72, 0xc9, 0x88, 0x04, 0xd9, 0x89 } };
+static const GUID IID_IPropertyPathFactory_UWP =
+    { 0x4e4cdf99, 0x9826, 0x4e56, { 0x84, 0x7c, 0xca, 0x05, 0x5f, 0x16, 0x29, 0x05 } };
 
 struct property_path
 {
@@ -923,6 +993,7 @@ static HRESULT WINAPI pp_QueryInterface( IInspectable *iface, REFIID iid, void *
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IPropertyPath ) ||
+        IsEqualGUID( iid, &IID_IPropertyPath_UWP ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
     {
         *out = iface;
@@ -1003,7 +1074,8 @@ static HRESULT WINAPI pp_factory_QueryInterface( IActivationFactory *iface, REFI
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IPropertyPathFactory ))
+        IsEqualGUID( iid, &IID_IPropertyPathFactory ) ||
+        IsEqualGUID( iid, &IID_IPropertyPathFactory_UWP ))
     {
         *out = iface;
         IActivationFactory_AddRef( iface );
@@ -1225,6 +1297,333 @@ static struct pcea_factory_impl property_changed_factory_inst =
 };
 static IActivationFactory *property_changed_factory = (IActivationFactory *)&property_changed_factory_inst.vtbl_activation;
 
+/* Windows.UI.Xaml.Interop.NotifyCollectionChangedEventArgs */
+static const GUID IID_INotifyCollectionChangedEventArgs_UWP =
+    { 0x4cf68d33, 0xe3f2, 0x4964, { 0xb8, 0x5e, 0x94, 0x5b, 0x4f, 0x7e, 0x2f, 0x21 } };
+static const GUID IID_INotifyCollectionChangedEventArgsFactory_UWP =
+    { 0xb30c3e3a, 0xdf8d, 0x44a5, { 0x9a, 0x38, 0x7a, 0xc0, 0xd0, 0x8c, 0xe6, 0x3d } };
+
+struct nccea_impl
+{
+    const void *vtbl;
+    const void *inner_vtbl;
+    LONG ref;
+    IInspectable *outer;
+    INT32 action;
+    IUnknown *new_items;
+    IUnknown *old_items;
+    INT32 new_index;
+    INT32 old_index;
+};
+
+static inline struct nccea_impl *impl_from_nccea( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct nccea_impl, vtbl );
+}
+
+static inline struct nccea_impl *impl_from_nccea_inner( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct nccea_impl, inner_vtbl );
+}
+
+static HRESULT WINAPI nccea_inner_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct nccea_impl *impl = impl_from_nccea_inner( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = &impl->inner_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_INotifyCollectionChangedEventArgs_UWP ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "nccea unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI nccea_inner_AddRef( void *iface )
+{
+    struct nccea_impl *impl = impl_from_nccea_inner( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI nccea_inner_Release( void *iface )
+{
+    struct nccea_impl *impl = impl_from_nccea_inner( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->new_items) IUnknown_Release( impl->new_items );
+        if (impl->old_items) IUnknown_Release( impl->old_items );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI nccea_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    IID *out;
+    if (!count || !iids) return E_POINTER;
+    out = CoTaskMemAlloc( sizeof(IID) );
+    if (!out) return E_OUTOFMEMORY;
+    out[0] = IID_INotifyCollectionChangedEventArgs_UWP;
+    *count = 1;
+    *iids = out;
+    return S_OK;
+}
+
+static HRESULT WINAPI nccea_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.UI.Xaml.Interop.NotifyCollectionChangedEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI nccea_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static const void *nccea_inner_vtbl[] =
+{
+    nccea_inner_QueryInterface,
+    nccea_inner_AddRef,
+    nccea_inner_Release,
+    nccea_GetIids,
+    nccea_GetRuntimeClassName,
+    nccea_GetTrustLevel,
+};
+
+static HRESULT WINAPI nccea_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (impl->outer) return IInspectable_QueryInterface( impl->outer, iid, out );
+    return nccea_inner_QueryInterface( &impl->inner_vtbl, iid, out );
+}
+
+static ULONG WINAPI nccea_AddRef( void *iface )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (impl->outer) return IInspectable_AddRef( impl->outer );
+    return nccea_inner_AddRef( &impl->inner_vtbl );
+}
+
+static ULONG WINAPI nccea_Release( void *iface )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (impl->outer) return IInspectable_Release( impl->outer );
+    return nccea_inner_Release( &impl->inner_vtbl );
+}
+
+static HRESULT WINAPI nccea_get_Action( void *iface, INT32 *value )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (!value) return E_POINTER;
+    *value = impl->action;
+    return S_OK;
+}
+
+static HRESULT WINAPI nccea_get_NewItems( void *iface, void **value )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (!value) return E_POINTER;
+    *value = impl->new_items;
+    if (impl->new_items) IUnknown_AddRef( impl->new_items );
+    return S_OK;
+}
+
+static HRESULT WINAPI nccea_get_OldItems( void *iface, void **value )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (!value) return E_POINTER;
+    *value = impl->old_items;
+    if (impl->old_items) IUnknown_AddRef( impl->old_items );
+    return S_OK;
+}
+
+static HRESULT WINAPI nccea_get_NewStartingIndex( void *iface, INT32 *value )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (!value) return E_POINTER;
+    *value = impl->new_index;
+    return S_OK;
+}
+
+static HRESULT WINAPI nccea_get_OldStartingIndex( void *iface, INT32 *value )
+{
+    struct nccea_impl *impl = impl_from_nccea( iface );
+    if (!value) return E_POINTER;
+    *value = impl->old_index;
+    return S_OK;
+}
+
+static const void *nccea_vtbl[] =
+{
+    nccea_QueryInterface,
+    nccea_AddRef,
+    nccea_Release,
+    nccea_GetIids,
+    nccea_GetRuntimeClassName,
+    nccea_GetTrustLevel,
+    nccea_get_Action,
+    nccea_get_NewItems,
+    nccea_get_OldItems,
+    nccea_get_NewStartingIndex,
+    nccea_get_OldStartingIndex,
+};
+
+struct nccea_factory_impl
+{
+    const void *vtbl_activation;
+    const void *vtbl_factory;
+};
+
+static inline struct nccea_factory_impl *impl_from_nccea_act( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct nccea_factory_impl, vtbl_activation );
+}
+
+static inline struct nccea_factory_impl *impl_from_nccea_fac( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct nccea_factory_impl, vtbl_factory );
+}
+
+static HRESULT WINAPI nccea_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct nccea_factory_impl *impl = impl_from_nccea_act( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &impl->vtbl_activation;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_INotifyCollectionChangedEventArgsFactory_UWP ))
+    {
+        *out = &impl->vtbl_factory;
+        return S_OK;
+    }
+    FIXME( "nccea_factory unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI nccea_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI nccea_factory_Release( void *iface ) { return 1; }
+
+static HRESULT WINAPI nccea_factory_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    IID *out;
+    if (!count || !iids) return E_POINTER;
+    out = CoTaskMemAlloc( 2 * sizeof(IID) );
+    if (!out) return E_OUTOFMEMORY;
+    out[0] = IID_IActivationFactory;
+    out[1] = IID_INotifyCollectionChangedEventArgsFactory_UWP;
+    *count = 2;
+    *iids = out;
+    return S_OK;
+}
+
+static HRESULT WINAPI nccea_factory_ActivateInstance( void *iface, IInspectable **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI nccea_factory2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct nccea_factory_impl *impl = impl_from_nccea_fac( iface );
+    return nccea_factory_QueryInterface( &impl->vtbl_activation, iid, out );
+}
+
+static HRESULT WINAPI nccea_factory_CreateInstanceWithAllParameters(
+    void *iface, INT32 action, IUnknown *new_items, IUnknown *old_items,
+    INT32 new_index, INT32 old_index, IInspectable *outer,
+    IInspectable **inner, void **value )
+{
+    struct nccea_impl *impl;
+
+    TRACE( "action=%d new_items=%p old_items=%p new_idx=%d old_idx=%d outer=%p inner=%p value=%p\n",
+           action, new_items, old_items, new_index, old_index, outer, inner, value );
+
+    if (!value) return E_POINTER;
+    if (inner) *inner = NULL;
+    *value = NULL;
+
+    impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return E_OUTOFMEMORY;
+
+    impl->vtbl = nccea_vtbl;
+    impl->inner_vtbl = nccea_inner_vtbl;
+    impl->ref = 1;
+    impl->outer = outer;
+    impl->action = action;
+    impl->new_items = new_items;
+    if (new_items) IUnknown_AddRef( new_items );
+    impl->old_items = old_items;
+    if (old_items) IUnknown_AddRef( old_items );
+    impl->new_index = new_index;
+    impl->old_index = old_index;
+
+    if (outer)
+    {
+        if (inner) *inner = (IInspectable *)&impl->inner_vtbl;
+        IInspectable_AddRef( outer );
+        *value = &impl->vtbl;
+    }
+    else
+    {
+        if (inner)
+        {
+            *inner = (IInspectable *)&impl->inner_vtbl;
+            InterlockedIncrement( &impl->ref );
+        }
+        *value = &impl->vtbl;
+    }
+    return S_OK;
+}
+
+static const void *nccea_activation_vtbl[] =
+{
+    nccea_factory_QueryInterface,
+    nccea_factory_AddRef,
+    nccea_factory_Release,
+    nccea_factory_GetIids,
+    nccea_GetRuntimeClassName,
+    nccea_GetTrustLevel,
+    nccea_factory_ActivateInstance,
+};
+
+static const void *nccea_factory_vtbl[] =
+{
+    nccea_factory2_QueryInterface,
+    nccea_factory_AddRef,
+    nccea_factory_Release,
+    nccea_factory_GetIids,
+    nccea_GetRuntimeClassName,
+    nccea_GetTrustLevel,
+    nccea_factory_CreateInstanceWithAllParameters,
+};
+
+static struct nccea_factory_impl notify_collection_changed_factory_inst =
+{
+    nccea_activation_vtbl,
+    nccea_factory_vtbl,
+};
+static IActivationFactory *notify_collection_changed_factory = (IActivationFactory *)&notify_collection_changed_factory_inst.vtbl_activation;
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -1232,6 +1631,10 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     TRACE( "class %s, factory %p.\n", debugstr_hstring(classid), factory );
 
     *factory = NULL;
+
+    if (!wcscmp( buffer, L"Windows.UI.Xaml.Interop.NotifyCollectionChangedEventArgs" ) ||
+        !wcscmp( buffer, L"Microsoft.UI.Xaml.Interop.NotifyCollectionChangedEventArgs" ))
+        return IActivationFactory_QueryInterface( notify_collection_changed_factory, &IID_IActivationFactory, (void **)factory );
 
     if (SUCCEEDED(uwp_get_activation_factory( classid, factory )) && *factory)
         return S_OK;
@@ -1261,6 +1664,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Data.PropertyChangedEventArgs" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Data.PropertyChangedEventArgs" ))
         IActivationFactory_QueryInterface( property_changed_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Interop.NotifyCollectionChangedEventArgs" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Interop.NotifyCollectionChangedEventArgs" ))
+        IActivationFactory_QueryInterface( notify_collection_changed_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.PropertyPath" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.PropertyPath" ))
         IActivationFactory_QueryInterface( property_path_factory, &IID_IActivationFactory, (void **)factory );
@@ -1299,11 +1705,19 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( canvas_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.Grid" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Grid" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Panel" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Panel" ) ||
              !wcscmp( buffer, L"Windows.UI.Xaml.Controls.StackPanel" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.StackPanel" ))
         IActivationFactory_QueryInterface( grid_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.ContentControl" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ContentControl" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Control" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Control" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.FrameworkElement" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.FrameworkElement" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.UIElement" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.UIElement" ) ||
              !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Button" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Button" ) ||
              !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Border" ) ||
@@ -1328,7 +1742,23 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
              !wcscmp( buffer, L"Windows.UI.Xaml.FrameworkTemplate" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.FrameworkTemplate" ) ||
              !wcscmp( buffer, L"Windows.UI.Xaml.Controls.ProgressRing" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ProgressRing" ))
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ProgressRing" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Media.SolidColorBrush" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Media.SolidColorBrush" ))
+        IActivationFactory_QueryInterface( element_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Hosting.ElementCompositionPreview" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Hosting.ElementCompositionPreview" ))
+        IActivationFactory_QueryInterface( xaml_get_ecp_factory(), &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Media.CompositionTarget" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Media.CompositionTarget" ))
+        IActivationFactory_QueryInterface( xaml_get_comp_target_factory(), &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Microsoft.UI.Content.ContentExternalOutputLink" ))
+        IActivationFactory_QueryInterface( xaml_get_ceol_factory(), &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Markup.XamlReader" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Markup.XamlReader" ))
+        return uwp_get_activation_factory( classid, factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.RoutedEventArgs" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.RoutedEventArgs" ))
         IActivationFactory_QueryInterface( element_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;

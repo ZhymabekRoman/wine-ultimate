@@ -120,6 +120,12 @@ void xaml_dcomp_commit( void );
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_handle_start_msg( LPARAM lparam );
+void xaml_wv2_post_resize( UINT width, UINT height );
+IActivationFactory *xaml_get_ecp_factory( void );
+IActivationFactory *xaml_get_comp_target_factory( void );
+IActivationFactory *xaml_get_ceol_factory( void );
+HRESULT xaml_dp_get_default_value( void *dp, IInspectable **out );
+HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value );
 /* Runtime app capabilities, probed from the running application's own
  * COM/WinRT surface (IXamlMetadataProvider QI + registered XAML types),
  * not from package-family name tables. */
@@ -143,12 +149,15 @@ HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
 HRESULT xaml_resource_dictionary_create_for_uwp( void **out );
 HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val );
+void uwp_fire_composition_target_rendering( void );
 BOOL uwp_rd_haskey( void *rd_key, void *key_obj );
 BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *app_outer );
 BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content );
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory );
 ICoreWindow *get_current_core_window( void );
 BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz );
+void uwp_fire_loaded_content( IInspectable *content );
+void uwp_notify_swapchain_panel_resize( void *el, UINT w, UINT h );
 
 /* Shared token-based WinRT event registry (twinapi bg_events pattern) */
 struct xaml_event_entry
@@ -215,6 +224,10 @@ IPointerPoint *xaml_pointer_point_create( const struct xaml_pointer_info *info, 
 __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *xaml_core_pointer_args_create( const struct xaml_pointer_info *info );
 BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info,
                               int width, int height, IInspectable *root_content );
+void xaml_winui_fire_size_changed( float old_w, float old_h, float new_w, float new_h );
+void xaml_winui_fire_pointer_event( enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info );
+void xaml_winui_fire_key_event( BOOL is_down, UINT32 vk, LPARAM lparam );
+void xaml_winui_fire_focus_event( BOOL got_focus );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

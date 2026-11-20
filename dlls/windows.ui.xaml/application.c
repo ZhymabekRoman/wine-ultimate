@@ -143,6 +143,8 @@ struct xaml_window
     BOOL core_window_subscribed;
     void *activated_handlers[8];
     int activated_handler_count;
+    void *visibility_handlers[8];
+    int visibility_handler_count;
     BOOL is_active;
 };
 static struct xaml_window global_xaml_window;
@@ -179,10 +181,22 @@ static HRESULT WINAPI app_view_activated_Invoke(
             if (SUCCEEDED(hr_uwp) && overrides)
             {
                 void **ov_vtbl = *(void ***)overrides;
-                HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
-                WARN( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
-                       on_launched, overrides, args );
-                if (on_launched) on_launched( overrides, args );
+                __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind kind = 0;
+                if (args) __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_get_Kind( args, &kind );
+                if (kind == 0 /* ActivationKind_Launch */)
+                {
+                    HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
+                    WARN( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
+                           on_launched, overrides, args );
+                    if (on_launched) on_launched( overrides, args );
+                }
+                else
+                {
+                    HRESULT (WINAPI *on_activated)( void *, void * ) = (void *)ov_vtbl[6];
+                    WARN( "invoking UWP App OnActivated(kind=%d) via QI %p (overrides %p, args %p)\n",
+                           (int)kind, on_activated, overrides, args );
+                    if (on_activated) on_activated( overrides, args );
+                }
                 IInspectable_Release( overrides );
             }
             else
@@ -2595,7 +2609,51 @@ struct xaml_resource_dictionary
     IInspectable IInspectable_iface; /* IResourceDictionary face */
     IInspectable IMap_iface;          /* IMap / IDictionary face */
     LONG ref;
+    struct { WCHAR *key_str; void *key_ptr; IInspectable *val; } entries[32];
+    int entry_count;
+    IInspectable *merged_dicts;
+    IInspectable *source_uri;
 };
+
+static WCHAR *rd_key_to_wstr( void *key )
+{
+    IPropertyValue *pv = NULL;
+    HSTRING hs = NULL;
+    WCHAR *dup = NULL;
+    if (!key) return NULL;
+    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)key, &IID_IPropertyValue, (void **)&pv )) && pv)
+    {
+        if (SUCCEEDED(IPropertyValue_GetString( pv, &hs )) && hs)
+        {
+            const WCHAR *buf = WindowsGetStringRawBuffer( hs, NULL );
+            if (buf) dup = wcsdup( buf );
+            WindowsDeleteString( hs );
+        }
+        IPropertyValue_Release( pv );
+    }
+    return dup;
+}
+
+static int rd_find_entry( struct xaml_resource_dictionary *impl, void *key )
+{
+    WCHAR *ks = rd_key_to_wstr( key );
+    int i, found = -1;
+    for (i = 0; i < impl->entry_count; i++)
+    {
+        if (ks && impl->entries[i].key_str && !wcscmp( ks, impl->entries[i].key_str ))
+        {
+            found = i;
+            break;
+        }
+        if (!ks && impl->entries[i].key_ptr == key)
+        {
+            found = i;
+            break;
+        }
+    }
+    free( ks );
+    return found;
+}
 
 static inline struct xaml_resource_dictionary *impl_from_rd( IInspectable *iface )
 {
@@ -2676,23 +2734,42 @@ static ULONG WINAPI rd_Release( IInspectable *iface )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        if (impl->merged_dicts) IInspectable_Release( impl->merged_dicts );
+        if (impl->source_uri) IInspectable_Release( impl->source_uri );
+        free( impl );
+    }
     return ref;
 }
 
+extern HRESULT uwp_vec_create( void *owner, IInspectable **out );
+
 static HRESULT WINAPI rd_get_MergedDictionaries( void *iface, void **value )
 {
+    struct xaml_resource_dictionary *impl = impl_from_rd( iface );
     TRACE( "rd_get_MergedDictionaries iface %p, value %p\n", iface, value );
-    if (value) *value = NULL;
+    if (!value) return E_POINTER;
+    if (!impl->merged_dicts)
+        uwp_vec_create( NULL, &impl->merged_dicts );
+    *value = impl->merged_dicts;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
     return S_OK;
 }
 static HRESULT WINAPI rd_get_Source( void *iface, void **value )
 {
-    if (value) *value = NULL;
+    struct xaml_resource_dictionary *impl = impl_from_rd( iface );
+    if (!value) return E_POINTER;
+    *value = impl->source_uri;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
     return S_OK;
 }
 static HRESULT WINAPI rd_set_Source( void *iface, void *value )
 {
+    struct xaml_resource_dictionary *impl = impl_from_rd( iface );
+    if (value) IInspectable_AddRef( (IInspectable *)value );
+    if (impl->source_uri) IInspectable_Release( impl->source_uri );
+    impl->source_uri = (IInspectable *)value;
     return S_OK;
 }
 static HRESULT WINAPI rd_get_ThemeDictionaries( void *iface, void **value )
@@ -2704,15 +2781,27 @@ static HRESULT WINAPI rd_get_ThemeDictionaries( void *iface, void **value )
 static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    int idx;
     TRACE( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
     if (!xaml_get_app_caps()->winui3)
         return uwp_rd_lookup( &impl->IInspectable_iface, key, value );
+    idx = rd_find_entry( impl, key );
+    if (idx >= 0)
+    {
+        if (value)
+        {
+            *value = impl->entries[idx].val;
+            if (impl->entries[idx].val) IInspectable_AddRef( impl->entries[idx].val );
+        }
+        return S_OK;
+    }
     if (value) *value = NULL;
     return 0x8000000b; /* E_BOUNDS */
 }
 static HRESULT WINAPI rd_map_get_Size( void *iface, UINT32 *size )
 {
-    if (size) *size = 0;
+    struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    if (size) *size = (UINT32)impl->entry_count;
     return S_OK;
 }
 static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
@@ -2723,12 +2812,35 @@ static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
         if (found) *found = uwp_rd_haskey( &impl->IInspectable_iface, key );
         return S_OK;
     }
-    if (found) *found = FALSE;
+    if (found) *found = (rd_find_entry( impl, key ) >= 0);
     return S_OK;
 }
 static HRESULT WINAPI rd_map_GetView( void *iface, void **view )
 {
     if (view) *view = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI rd_map_Insert( void *iface, void *key, IInspectable *val, boolean *replaced )
+{
+    struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    int idx = rd_find_entry( impl, key );
+    if (idx >= 0)
+    {
+        if (impl->entries[idx].val) IInspectable_Release( impl->entries[idx].val );
+        impl->entries[idx].val = val;
+        if (val) IInspectable_AddRef( val );
+        if (replaced) *replaced = TRUE;
+        return S_OK;
+    }
+    if (impl->entry_count < 32)
+    {
+        int n = impl->entry_count++;
+        impl->entries[n].key_str = rd_key_to_wstr( key );
+        impl->entries[n].key_ptr = key;
+        impl->entries[n].val = val;
+        if (val) IInspectable_AddRef( val );
+    }
+    if (replaced) *replaced = FALSE;
     return S_OK;
 }
 
@@ -2740,11 +2852,11 @@ static const void *rd_vtbl[256] =
     [3] = rd_GetIids,
     [4] = rd_GetRuntimeClassName,
     [5] = rd_GetTrustLevel,
-    [10 ... 255] = rd_generic_slot,
-    [6] = rd_get_MergedDictionaries,
-    [7] = rd_get_Source,
-    [8] = rd_set_Source,
+    [6] = rd_get_Source,
+    [7] = rd_set_Source,
+    [8] = rd_get_MergedDictionaries,
     [9] = rd_get_ThemeDictionaries,
+    [10 ... 255] = rd_generic_slot,
 };
 
 static const void *rd_map_vtbl[256] =
@@ -2755,11 +2867,12 @@ static const void *rd_map_vtbl[256] =
     [3] = rd_GetIids,
     [4] = rd_GetRuntimeClassName,
     [5] = rd_GetTrustLevel,
-    [10 ... 255] = rd_generic_slot,
+    [11 ... 255] = rd_generic_slot,
     [6] = rd_map_Lookup,
     [7] = rd_map_get_Size,
     [8] = rd_map_HasKey,
     [9] = rd_map_GetView,
+    [10] = rd_map_Insert,
 };
 
 static HRESULT xaml_resource_dictionary_create( void **out )
@@ -4572,9 +4685,6 @@ static void xaml_fill_pointer_info( HWND hwnd, HWND top, UINT msg, WPARAM wparam
 }
 
 static volatile LONG g_xaml_window_dirty = 1;
-static BOOL g_xaml_post_load_presented;
-static HWND g_xaml_timer_armed_hwnd;
-static int g_xaml_timer_idle_ticks;
 static BOOL g_in_xaml_present;
 static HRESULT xaml_window_present( struct xaml_window *impl );
 
@@ -4709,6 +4819,88 @@ static BOOL xaml_render_retained_if_dirty( struct xaml_window *impl, HWND hwnd, 
     return TRUE;
 }
 
+static void *g_active_scp_elem = NULL;
+static void *g_active_scp_swapchain = NULL;
+
+void xaml_get_host_window_size( UINT *out_w, UINT *out_h )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    UINT w = impl->width, h = impl->height;
+    if (impl->target_hwnd && IsWindow( impl->target_hwnd ))
+    {
+        RECT rc;
+        if (GetClientRect( impl->target_hwnd, &rc ) && rc.right > 0 && rc.bottom > 0)
+        {
+            w = (UINT)rc.right;
+            h = (UINT)rc.bottom;
+        }
+    }
+    if (w == 0) w = 1280;
+    if (h == 0) h = 720;
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
+}
+
+void xaml_set_active_swapchain_panel( void *el, void *sc )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    g_active_scp_elem = sc ? el : NULL;
+    g_active_scp_swapchain = sc;
+    if (sc && impl->swapchain)
+    {
+        xaml_gpu_release_rtv();
+        if (impl->d3d11_ctx)
+            ID3D11DeviceContext_Flush( impl->d3d11_ctx );
+        IDXGISwapChain1_Release( impl->swapchain );
+        impl->swapchain = NULL;
+        ERR( "xaml_set_active_swapchain_panel: released XAML HWND swapchain for SwapChainPanel sc=%p\n", sc );
+    }
+}
+
+HRESULT xaml_attach_swapchain_panel_content( IUnknown *content, IDCompositionVisual2 **slot )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    HRESULT hr;
+
+    if (!slot) return E_POINTER;
+    if (!impl->dcomp_device || !impl->dcomp_root_visual)
+    {
+        ERR( "xaml_attach_swapchain_panel_content: dcomp not ready (dev=%p root=%p)\n",
+             impl->dcomp_device, impl->dcomp_root_visual );
+        return S_OK;
+    }
+    if (!*slot)
+    {
+        hr = IDCompositionDesktopDevice_CreateVisual( impl->dcomp_device, slot );
+        if (FAILED(hr) || !*slot) return hr;
+        IDCompositionVisual_AddVisual( (IDCompositionVisual *)impl->dcomp_root_visual,
+                                       (IDCompositionVisual *)*slot, TRUE, NULL );
+    }
+    hr = IDCompositionVisual_SetContent( (IDCompositionVisual *)*slot, content );
+    IDCompositionDesktopDevice_Commit( impl->dcomp_device );
+    ERR( "xaml_attach_swapchain_panel_content content=%p vis=%p hr=%#lx\n", content, *slot, hr );
+    return hr;
+}
+
+HRESULT xaml_attach_swapchain_panel_handle( HANDLE h, IDCompositionVisual2 **slot )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    IUnknown *surface = NULL;
+    HRESULT hr;
+
+    if (!slot) return E_POINTER;
+    if (!impl->dcomp_device || !impl->dcomp_root_visual)
+        return S_OK;
+    if (h)
+    {
+        hr = IDCompositionDesktopDevice_CreateSurfaceFromHandle( impl->dcomp_device, h, &surface );
+        if (FAILED(hr)) return hr;
+    }
+    hr = xaml_attach_swapchain_panel_content( surface, slot );
+    if (surface) IUnknown_Release( surface );
+    return hr;
+}
+
 static void xaml_window_refresh_present( HWND hwnd )
 {
     static BOOL in_refresh;
@@ -4720,7 +4912,7 @@ static void xaml_window_refresh_present( HWND hwnd )
         return;
 
     in_refresh = TRUE;
-    if (impl->swapchain && !xaml_get_app_caps()->winui3)
+    if (impl->swapchain && !xaml_get_app_caps()->winui3 && !g_active_scp_swapchain)
     {
         HWND target = impl->target_hwnd && IsWindow( impl->target_hwnd ) ? impl->target_hwnd : hwnd;
         GetClientRect( target, &rc );
@@ -4769,11 +4961,31 @@ void xaml_mark_dirty_rect( const RECT *rc )
 void xaml_mark_window_dirty( void )
 {
     InterlockedExchange( &g_xaml_window_dirty, 1 );
-    g_xaml_timer_idle_ticks = 0;
-    if (!g_xaml_timer_armed_hwnd && global_xaml_window.target_hwnd && IsWindow( global_xaml_window.target_hwnd ))
+    if (global_xaml_window.target_hwnd && IsWindow( global_xaml_window.target_hwnd ))
+        InvalidateRect( global_xaml_window.target_hwnd, NULL, FALSE );
+}
+
+static void xaml_corewindow_sync_size( HWND hwnd )
+{
+    HWND top = GetAncestor( hwnd, GA_ROOT );
+    RECT rc;
+    if (!top) top = hwnd;
+    GetClientRect( top, &rc );
+    if (rc.right > 0 && rc.bottom > 0)
     {
-        g_xaml_timer_armed_hwnd = global_xaml_window.target_hwnd;
-        SetTimer( g_xaml_timer_armed_hwnd, 0x5756, 500, NULL );
+        if (top != hwnd)
+            SetWindowPos( hwnd, 0, 0, 0, rc.right, rc.bottom,
+                          SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE );
+        xaml_wv2_on_window_resize( top, rc.right, rc.bottom );
+        if ((UINT)rc.right != global_xaml_window.width ||
+            (UINT)rc.bottom != global_xaml_window.height)
+        {
+            float old_w = (float)global_xaml_window.width;
+            float old_h = (float)global_xaml_window.height;
+            xaml_mark_window_dirty();
+            xaml_window_present( &global_xaml_window );
+            xaml_winui_fire_size_changed( old_w, old_h, (float)rc.right, (float)rc.bottom );
+        }
     }
 }
 
@@ -4781,8 +4993,32 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
 {
     if (msg == WM_ERASEBKGND)
         return TRUE;
+    if (msg == WM_NCHITTEST)
+    {
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        RECT rc;
+        if (!top) top = hwnd;
+        if (GetClientRect( top, &rc ) && rc.right > 0 && rc.bottom > 0 &&
+            ((UINT)rc.right != global_xaml_window.width ||
+             (UINT)rc.bottom != global_xaml_window.height))
+        {
+            xaml_corewindow_sync_size( hwnd );
+        }
+        goto forward_msg;
+    }
     if (msg == WM_PAINT)
     {
+        {
+            HWND top = GetAncestor( hwnd, GA_ROOT );
+            RECT rc;
+            if (!top) top = hwnd;
+            if (GetClientRect( top, &rc ) && rc.right > 0 && rc.bottom > 0 &&
+                ((UINT)rc.right != global_xaml_window.width ||
+                 (UINT)rc.bottom != global_xaml_window.height))
+            {
+                xaml_corewindow_sync_size( hwnd );
+            }
+        }
         if (!xaml_get_app_caps()->winui3)
         {
             RECT rc, dirty_rc;
@@ -4790,6 +5026,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             if (!top) top = hwnd;
             GetClientRect( top, &rc );
             TRACE( "xaml corewindow WM_PAINT top %p rc %ldx%ld\n", top, rc.right, rc.bottom );
+            uwp_fire_composition_target_rendering();
             if (rc.right > 0 && rc.bottom > 0)
             {
                 if (global_xaml_window.gpu_active && global_xaml_window.swapchain &&
@@ -4839,6 +5076,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             ret = CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
         else
             ret = DefWindowProcW( hwnd, msg, wparam, lparam );
+        if (msg == WM_EXITSIZEMOVE)
+            xaml_corewindow_sync_size( hwnd );
         xaml_window_refresh_present( hwnd );
         return ret;
     }
@@ -4850,6 +5089,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             ret = CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
         else
             ret = DefWindowProcW( hwnd, msg, wparam, lparam );
+        if (!wp || !(wp->flags & SWP_NOSIZE))
+            xaml_corewindow_sync_size( hwnd );
         if (!wp || !(wp->flags & SWP_NOMOVE) || !(wp->flags & SWP_NOSIZE) || (wp->flags & SWP_SHOWWINDOW))
             xaml_window_refresh_present( hwnd );
         return ret;
@@ -4862,30 +5103,12 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     }
     if (msg == WM_SIZE)
     {
-        HWND top = GetAncestor( hwnd, GA_ROOT );
-        RECT rc;
         LRESULT ret;
-        if (!top) top = hwnd;
         if (xaml_corewindow_prev_proc && xaml_corewindow_prev_proc != xaml_corewindow_wndproc)
             ret = CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
         else
             ret = DefWindowProcW( hwnd, msg, wparam, lparam );
-        GetClientRect( top, &rc );
-        TRACE( "xaml corewindow WM_SIZE hwnd %p top %p rc %ldx%ld (prev %ux%u)\n",
-               hwnd, top, rc.right, rc.bottom, global_xaml_window.width, global_xaml_window.height );
-        if (rc.right > 0 && rc.bottom > 0)
-        {
-            if (top != hwnd)
-                SetWindowPos( hwnd, 0, 0, 0, rc.right, rc.bottom,
-                              SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE );
-            xaml_wv2_on_window_resize( top, rc.right, rc.bottom );
-            if ((UINT)rc.right != global_xaml_window.width ||
-                (UINT)rc.bottom != global_xaml_window.height)
-            {
-                xaml_mark_window_dirty();
-                xaml_window_present( &global_xaml_window );
-            }
-        }
+        xaml_corewindow_sync_size( hwnd );
         return ret;
     }
     if (msg == WM_CLOSE)
@@ -4895,22 +5118,10 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         PostQuitMessage( 0 );
         return 0;
     }
-    if (msg == WM_TIMER && wparam == 0x5756)
+    if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS)
     {
-        if (InterlockedCompareExchange( &g_xaml_window_dirty, 1, 1 ))
-        {
-            SIZE sz;
-            g_xaml_timer_idle_ticks = 0;
-            xaml_window_present( &global_xaml_window );
-            xaml_get_layout_metrics( hwnd, &sz, NULL );
-            xaml_wv2_on_window_ready( hwnd, sz.cx, sz.cy );
-        }
-        else if (g_xaml_post_load_presented && ++g_xaml_timer_idle_ticks >= 4)
-        {
-            KillTimer( hwnd, 0x5756 );
-            g_xaml_timer_armed_hwnd = NULL;
-        }
-        return 0;
+        xaml_winui_fire_focus_event( msg == WM_SETFOCUS );
+        goto forward_msg;
     }
     if (msg == WM_DEADCHAR || msg == WM_SYSCHAR)
         goto forward_msg;
@@ -4919,8 +5130,16 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
         HRESULT hr;
         BOOL accel_handled = FALSE;
+        if (msg == WM_KEYDOWN && wparam == VK_F12)
+        {
+            extern void uwp_debug_dump_root( IInspectable *root );
+            uwp_debug_dump_root( global_xaml_window.content );
+            return 0;
+        }
         if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
             accel_handled = uwp_dispatch_keydown( hwnd, (UINT)wparam, lparam, NULL );
+        if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP)
+            xaml_winui_fire_key_event( msg != WM_KEYUP, (UINT32)wparam, lparam );
         xaml_cw_fire_key_event( cw, msg, wparam, lparam );
         hr = notify_inner_core_window_key( hwnd, msg, wparam );
         if (msg == WM_CHAR && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
@@ -4936,14 +5155,17 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
         msg == WM_MOUSEMOVE || msg == WM_MOUSEWHEEL || msg == WM_MOUSELEAVE || msg == WM_CAPTURECHANGED)
     {
-        HWND top = GetAncestor( hwnd, GA_ROOT );
-        struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
+        HWND top;
+        struct xaml_core_window *cw;
         struct xaml_pointer_info info;
         enum xaml_pointer_event_kind kind;
         RECT rc;
         POINT pt = { 0, 0 };
         BOOL btn_handled = FALSE;
         BOOL tree_routed = FALSE;
+
+        top = GetAncestor( hwnd, GA_ROOT );
+        cw = as_xaml_core_window( global_xaml_window.core_window );
 
         if (!top) top = hwnd;
         GetClientRect( top, &rc );
@@ -4959,6 +5181,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                 info.pointer_id = 1;
                 info.is_in_window = cw->pointer_inside;
                 xaml_cw_fire_pointer_event( cw, XAML_PTR_CAPTURE_LOST, &info );
+                xaml_winui_fire_pointer_event( XAML_PTR_CAPTURE_LOST, &info );
                 if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
                     uwp_route_pointer_event( top, XAML_PTR_CAPTURE_LOST, &info, rc.right, rc.bottom, global_xaml_window.content );
             }
@@ -4978,6 +5201,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                 {
                     cw->pointer_inside = FALSE;
                     xaml_cw_fire_pointer_event( cw, XAML_PTR_EXITED, &info );
+                    xaml_winui_fire_pointer_event( XAML_PTR_EXITED, &info );
                 }
             }
             if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
@@ -5000,6 +5224,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                 tme.dwHoverTime = 0;
                 TrackMouseEvent( &tme );
                 xaml_cw_fire_pointer_event( cw, XAML_PTR_ENTERED, &info );
+                xaml_winui_fire_pointer_event( XAML_PTR_ENTERED, &info );
             }
         }
 
@@ -5013,7 +5238,6 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         case WM_LBUTTONUP:
         case WM_RBUTTONUP:
             kind = XAML_PTR_RELEASED;
-            if (cw && cw->has_capture) { ReleaseCapture(); cw->has_capture = FALSE; }
             break;
         case WM_MOUSEWHEEL:
             kind = XAML_PTR_WHEEL;
@@ -5024,6 +5248,12 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         }
 
         xaml_cw_fire_pointer_event( cw, kind, &info );
+        xaml_winui_fire_pointer_event( kind, &info );
+        if ((msg == WM_LBUTTONUP || msg == WM_RBUTTONUP) && cw && cw->has_capture)
+        {
+            cw->has_capture = FALSE;
+            ReleaseCapture();
+        }
 
         if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
         {
@@ -5188,6 +5418,20 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
     }
 
+    /* Proactively cache the UI thread's DispatcherQueue so worker threads
+     * querying DependencyObject.DispatcherQueue (e.g. WebView2.DispatcherQueue)
+     * receive the UI thread's queue instead of NULL. */
+    {
+        static BOOL dq_warmed;
+        if (!dq_warmed)
+        {
+            void *dq = NULL;
+            dq_warmed = TRUE;
+            if (SUCCEEDED(uwp_do_get_DispatcherQueue( NULL, &dq )) && dq)
+                IInspectable_Release( (IInspectable *)dq );
+        }
+    }
+
     /* 3. Ensure DComp root visual */
     if (!impl->dcomp_root_visual)
     {
@@ -5225,8 +5469,10 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                                             DXGI_FORMAT_B8G8R8A8_UNORM, 0 );
         TRACE( "XAML: resized composition swapchain %p to %ux%u (hr %#lx)\n",
                impl->swapchain, width, height, hr );
+        if (g_active_scp_elem && width > 1 && height > 1)
+            uwp_notify_swapchain_panel_resize( g_active_scp_elem, width, height );
     }
-    if (!impl->swapchain && !xaml_get_app_caps()->winui3 && !d3d11_create_failed)
+    if (!impl->swapchain && !xaml_get_app_caps()->winui3 && !d3d11_create_failed && !g_active_scp_swapchain)
     {
         static const D3D_FEATURE_LEVEL feature_levels[] =
         {
@@ -5251,7 +5497,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         desc.BufferCount = 1;
         desc.Scaling = DXGI_SCALING_STRETCH;
         desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        desc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
         desc.Flags = 0;
 
         hr = D3D11CreateDevice( NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
@@ -5278,22 +5524,16 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                     hr = IDXGIAdapter_GetParent( dxgi_adapter, &IID_IDXGIFactory2, (void **)&dxgi_factory );
                     if (SUCCEEDED(hr))
                     {
-                        /* Composition swapchain: DComp owns the single onscreen GLX swapchain
-                         * on hwnd and composites impl->swapchain's front buffer on Commit. */
-                        hr = IDXGIFactory2_CreateSwapChainForComposition( dxgi_factory, (IUnknown *)impl->d3d11_dev,
-                                                                           &desc, NULL, &impl->swapchain );
+                        /* Present directly to the top-level XAML CoreWindow HWND so Present()
+                         * blits the rendered UWP tree onscreen without relying on DComp target. */
+                        hr = IDXGIFactory2_CreateSwapChainForHwnd( dxgi_factory, (IUnknown *)impl->d3d11_dev,
+                                                                   hwnd, &desc, NULL, NULL, &impl->swapchain );
                         IDXGIFactory2_Release( dxgi_factory );
                     }
                     IDXGIAdapter_Release( dxgi_adapter );
                 }
                 IDXGIDevice_Release( dxgi_dev );
             }
-        }
-
-        if (impl->swapchain)
-        {
-            IDCompositionVisual_SetContent( (IDCompositionVisual *)impl->dcomp_root_visual,
-                                            (IUnknown *)impl->swapchain );
         }
     }
 
@@ -5306,7 +5546,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 
         QueryPerformanceFrequency( &freq );
         QueryPerformanceCounter( &t0 );
-        if (impl->swapchain && impl->d3d11_dev && impl->d3d11_ctx && !xaml_get_app_caps()->winui3)
+        if (impl->swapchain && impl->d3d11_dev && impl->d3d11_ctx && !xaml_get_app_caps()->winui3 && !g_active_scp_swapchain)
         {
             BOOL dirty = InterlockedExchange( &g_xaml_window_dirty, 0 ) != 0;
             BOOL size_changed = (width != prev_width || height != prev_height || !impl->gpu_rendered_once);
@@ -5350,11 +5590,14 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
     }
 
-    /* 8. Commit the DirectComposition tree */
-    IDCompositionDesktopDevice_Commit( impl->dcomp_device );
+    /* 8. Commit the DirectComposition tree (skip when GPU swapchain presents directly to hwnd) */
+    if (!impl->gpu_active)
+        IDCompositionDesktopDevice_Commit( impl->dcomp_device );
 
-    /* 9. Blit the retained DIB into the top-level window DC for winex11 backing store. */
-    if (impl->retained_valid && impl->retained_dc)
+    /* 9. Blit the retained DIB into the top-level window DC for UWP / non-DComp backing store.
+     * On WinUI 3 with an active DComp tree, DComp composites child visuals (e.g.
+     * ElementCompositionPreview) above the XAML visual; a direct GDI BitBlt would overwrite them. */
+    if (impl->retained_valid && impl->retained_dc && (!xaml_get_app_caps()->winui3 || !impl->dcomp_device))
     {
         HWND root = GetAncestor( hwnd, GA_ROOT );
         HDC hdc = root ? GetDC( root ) : NULL;
@@ -5377,13 +5620,6 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u scale %.2f)\n", hwnd, width, height, scale );
     ERR( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
     InterlockedExchange( &g_xaml_window_dirty, 0 );
-    if (impl->content) g_xaml_post_load_presented = TRUE;
-    if (g_xaml_timer_armed_hwnd != hwnd)
-    {
-        g_xaml_timer_armed_hwnd = hwnd;
-        g_xaml_timer_idle_ticks = 0;
-        SetTimer( hwnd, 0x5756, 500, NULL );
-    }
     xaml_wv2_on_window_ready( hwnd, width, height );
     g_in_xaml_present = FALSE;
     return S_OK;
@@ -5509,6 +5745,7 @@ static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, vo
     if (impl->content) IInspectable_Release( impl->content );
     impl->content = content;
     if (impl->content) IInspectable_AddRef( impl->content );
+    if (impl->is_active && impl->content) uwp_fire_loaded_content( impl->content );
     xaml_mark_window_dirty();
     xaml_window_present( impl );
     return S_OK;
@@ -5636,6 +5873,7 @@ static HRESULT WINAPI xaml_window_remove_Activated( IInspectable *iface, EventRe
 
 static HRESULT WINAPI xaml_window_add_Closed( IInspectable *iface, void *handler, EventRegistrationToken *token )
 {
+    TRACE( "iface %p, handler %p\n", iface, handler );
     if (token) token->value = 1;
     return S_OK;
 }
@@ -5647,6 +5885,7 @@ static HRESULT WINAPI xaml_window_remove_Closed( IInspectable *iface, EventRegis
 
 static HRESULT WINAPI xaml_window_add_SizeChanged( IInspectable *iface, void *handler, EventRegistrationToken *token )
 {
+    TRACE( "iface %p, handler %p\n", iface, handler );
     if (token) token->value = 1;
     return S_OK;
 }
@@ -5656,9 +5895,59 @@ static HRESULT WINAPI xaml_window_remove_SizeChanged( IInspectable *iface, Event
     return S_OK;
 }
 
+static const GUID IID_IVisibilityChangedEventArgs_app =
+    { 0xbf9918ea, 0xd801, 0x4564, { 0xa4, 0x95, 0xb1, 0xe8, 0x4f, 0x8a, 0xd0, 0x85 } };
+
+static HRESULT WINAPI dummy_vis_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IVisibilityChangedEventArgs_app ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI dummy_vis_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI dummy_vis_Release( void *iface ) { return 1; }
+static HRESULT WINAPI dummy_vis_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI dummy_vis_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.UI.Core.VisibilityChangedEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI dummy_vis_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI dummy_vis_get_Handled( void *iface, boolean *v ) { if (v) *v = FALSE; return S_OK; }
+static HRESULT WINAPI dummy_vis_put_Handled( void *iface, boolean v ) { return S_OK; }
+static HRESULT WINAPI dummy_vis_get_Visible( void *iface, boolean *v ) { if (v) *v = TRUE; return S_OK; }
+static const void *dummy_vis_vtbl[] =
+{
+    dummy_vis_QueryInterface,
+    dummy_vis_AddRef,
+    dummy_vis_Release,
+    dummy_vis_GetIids,
+    dummy_vis_GetRuntimeClassName,
+    dummy_vis_GetTrustLevel,
+    dummy_vis_get_Handled,
+    dummy_vis_put_Handled,
+    dummy_vis_get_Visible,
+};
+static struct { const void **vtbl; } dummy_vis_obj = { dummy_vis_vtbl };
+
 static HRESULT WINAPI xaml_window_add_VisibilityChanged( IInspectable *iface, void *handler, EventRegistrationToken *token )
 {
-    if (token) token->value = 1;
+    struct xaml_window *impl = &global_xaml_window;
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (impl->visibility_handler_count < (int)ARRAY_SIZE(impl->visibility_handlers))
+    {
+        impl->visibility_handlers[impl->visibility_handler_count++] = handler;
+        if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    }
+    if (token) token->value = impl->visibility_handler_count;
     return S_OK;
 }
 
@@ -5696,6 +5985,24 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
         }
     }
     impl->is_active = TRUE;
+    for (i = 0; i < impl->visibility_handler_count; i++)
+    {
+        void *h = impl->visibility_handlers[i];
+        if (h)
+        {
+            HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, void *) = (*(void ***)h)[3];
+            TRACE( "invoking Window.VisibilityChanged handler %p\n", h );
+            __TRY
+            {
+                invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_vis_obj );
+            }
+            __EXCEPT_ALL
+            {
+                TRACE( "Window.VisibilityChanged handler %p faulted\n", h );
+            }
+            __ENDTRY;
+        }
+    }
     for (i = 0; i < impl->activated_handler_count; i++)
     {
         void *h = impl->activated_handlers[i];
@@ -5714,6 +6021,7 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
             __ENDTRY;
         }
     }
+    if (impl->content) uwp_fire_loaded_content( impl->content );
     xaml_window_present( impl );
     return S_OK;
 }
@@ -6683,15 +6991,25 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
             HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
             if (get_by_name && SUCCEEDED(WindowsCreateString( full_name, wcslen(full_name), &hname )) && hname)
             {
+                ERR( "GetXamlTypeByFullName(%s) calling...\n", debugstr_w(full_name) );
                 hr = get_by_name( provider, hname, &xaml_type );
                 ERR( "GetXamlTypeByFullName(%s) -> hr %#lx, type %p\n", debugstr_w(full_name), hr, xaml_type );
                 WindowsDeleteString( hname );
                 if (SUCCEEDED(hr) && xaml_type)
                 {
                     void **type_vtbl = *(void ***)xaml_type;
-                    /* UWP IXamlType: slot 18 is ActivateInstance; WinUI 3 IXamlType: slot 19 is ActivateInstance */
+                    /* IXamlType: slot 11 is IsConstructible on both UWP and WinUI 3;
+                     * ActivateInstance is slot 18 (UWP) / slot 19 (WinUI 3). */
+                    HRESULT (WINAPI *get_is_constructible)(void *, boolean *) = (void *)type_vtbl[11];
                     HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[is_uwp ? 18 : 19];
-                    if (activate)
+                    boolean constructible = TRUE;
+                    if (get_is_constructible)
+                        get_is_constructible( xaml_type, &constructible );
+                    if (!constructible)
+                    {
+                        hr = E_NOTIMPL;
+                    }
+                    else if (activate)
                     {
                         hr = activate( xaml_type, out );
                         ERR( "ActivateInstance(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
@@ -6966,7 +7284,16 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                         class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Grid" : L"Windows.UI.Xaml.Controls.Grid";
                                                     TRACE("XBF connect conn_id %lu, elem_name %s, class_name %s\n",
                                                           (unsigned long)conn_id, debugstr_w(elem_name), debugstr_w(class_name));
-                                                    if (!wcsncmp(class_name, L"Windows.UI.Xaml.", 16) || !wcsncmp(class_name, L"Microsoft.UI.Xaml.", 18))
+                                                    if (!wcsncmp(class_name, L"Windows.UI.Xaml.", 16) ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Controls.Grid") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Controls.TextBlock") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Controls.Border") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Controls.StackPanel") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Controls.Canvas") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Controls.Image") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Controls.Viewbox") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.Shapes.Rectangle") ||
+                                                        !wcscmp(class_name, L"Microsoft.UI.Xaml.DataTemplate"))
                                                         element_create_typed(class_name, &target);
                                                     else if (FAILED(xaml_create_instance_from_provider(class_name, &target)) || !target)
                                                         element_create_typed(class_name, &target);
@@ -7082,15 +7409,22 @@ static HRESULT WINAPI statics_GetTrustLevel( IApplicationStatics *iface, TrustLe
     return factory_GetTrustLevel( &impl->IActivationFactory_iface, trust_level );
 }
 
-static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
-        IApplicationInitializationCallback *callback )
+struct app_start_ctx
+{
+    IApplicationInitializationCallback *callback;
+    HRESULT hr;
+};
+
+static HRESULT application_statics_start_impl( IApplicationInitializationCallback *callback )
 {
     struct view_source *source;
     ICoreApplication *core_app = NULL;
     HSTRING class_name;
     HRESULT hr = S_OK;
 
-    TRACE( "iface %p, callback %p\n", iface, callback );
+    /* Ensure the UI thread has a live CoreWindow before ApplicationInitializationCallback
+     * runs so .NET Native / UWP installs WinRTSynchronizationContext on this thread. */
+    ensure_core_window( &global_xaml_window );
 
     if (callback)
     {
@@ -7141,6 +7475,45 @@ static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
 
     IFrameworkViewSource_Release( &source->IFrameworkViewSource_iface );
     return hr;
+}
+
+static DWORD WINAPI application_statics_sta_thread( void *param )
+{
+    struct app_start_ctx *ctx = param;
+    CoInitializeEx( NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE );
+    ctx->hr = application_statics_start_impl( ctx->callback );
+    CoUninitialize();
+    return 0;
+}
+
+static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
+        IApplicationInitializationCallback *callback )
+{
+    APTTYPE apt = APTTYPE_CURRENT;
+    APTTYPEQUALIFIER qual = APTTYPEQUALIFIER_NONE;
+
+    TRACE( "iface %p, callback %p\n", iface, callback );
+
+    /* UWP apps initialize their main thread as MTA and rely on Application.Start /
+     * CoreApplication.Run to host the XAML UI loop on a dedicated STA/ASTA thread
+     * so .NET Native installs WinRTSynchronizationContext backed by CoreDispatcher. */
+    if (SUCCEEDED(CoGetApartmentType( &apt, &qual )) && apt == APTTYPE_MTA)
+    {
+        struct app_start_ctx ctx = { callback, S_OK };
+        HANDLE th;
+        if (callback) IApplicationInitializationCallback_AddRef( callback );
+        th = CreateThread( NULL, 0, application_statics_sta_thread, &ctx, 0, NULL );
+        if (th)
+        {
+            WaitForSingleObject( th, INFINITE );
+            CloseHandle( th );
+            if (callback) IApplicationInitializationCallback_Release( callback );
+            return ctx.hr;
+        }
+        if (callback) IApplicationInitializationCallback_Release( callback );
+    }
+
+    return application_statics_start_impl( callback );
 }
 
 /* Application.Current: Windows returns the activated Application (the WinUI3 app's own
@@ -7455,9 +7828,15 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
             hr = E_FAIL;
             if (get_by_name && type && type->Name)
             {
-                hr = get_by_name( provider, type->Name, &xaml_type );
+                const WCHAR *raw_tn = WindowsGetStringRawBuffer( type->Name, NULL );
+                const WCHAR *comma = raw_tn ? wcschr( raw_tn, ',' ) : NULL;
+                HSTRING stripped = NULL;
+                if (comma && comma > raw_tn)
+                    WindowsCreateString( raw_tn, (UINT32)(comma - raw_tn), &stripped );
+                hr = get_by_name( provider, stripped ? stripped : type->Name, &xaml_type );
                 TRACE( "GetXamlTypeByFullName(%s) returned hr %#lx, xaml_type %p\n",
-                       debugstr_hstring( type->Name ), hr, xaml_type );
+                       debugstr_hstring( stripped ? stripped : type->Name ), hr, xaml_type );
+                if (stripped) WindowsDeleteString( stripped );
             }
             if (FAILED(hr) || !xaml_type)
             {

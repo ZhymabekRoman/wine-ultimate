@@ -22,7 +22,7 @@ enum xbf_known_type_id
     XBF_TYPE_THICKNESS = 0x807c,
     XBF_TYPE_VISUAL_STATE = 0x8089,
     XBF_TYPE_VISUAL_STATE_GROUP = 0x808a,
-    XBF_TYPE_BRUSH_A = 0x80c2,  /* inline brush (verified) */
+    XBF_TYPE_DATA_TEMPLATE = 0x80c2,  /* Windows.UI.Xaml.DataTemplate (verified) */
     XBF_TYPE_DISCRETE_OBJECT_KEY_FRAME = 0x80c5,
     XBF_TYPE_BRUSH_B = 0x80d2,  /* inline brush (verified) */
     XBF_TYPE_OBJECT_ANIMATION_USING_KEY_FRAMES = 0x80f0,
@@ -279,7 +279,7 @@ static const WCHAR *const xbf_known_types[] =
     [0x00bf] = L"Windows.UI.Xaml.DataTemplate",
     [0x00c0] = L"Windows.UI.Xaml.Media.Animation.CubicEase",
     [0x00c1] = L"Windows.UI.Xaml.CustomResource",
-    [0x00c2] = L"Windows.UI.Xaml.Media.SolidColorBrush",
+    [0x00c2] = L"Windows.UI.Xaml.DataTemplate",
     [0x00c3] = L"Windows.UI.Xaml.Media.Animation.DiscreteColorKeyFrame",
     [0x00c4] = L"Windows.UI.Xaml.Media.Animation.DiscreteDoubleKeyFrame",
     [0x00c5] = L"Windows.UI.Xaml.Media.Animation.DiscreteObjectKeyFrame",

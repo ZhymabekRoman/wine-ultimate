@@ -102,6 +102,19 @@ enum uwp_rd_kind
     UWP_RD_STRING,
     UWP_RD_ALIAS,
     UWP_RD_STYLE,
+    UWP_RD_DATA_TEMPLATE,
+};
+
+struct uwp_style_setter
+{
+    WORD pid;
+    int vt;
+    BOOL is_res_ref;
+    double num;
+    double vec4[4];
+    WCHAR str[128];
+    WCHAR prop_name[64];
+    WCHAR owner_cls[128];
 };
 
 struct xaml_metadata_provider
@@ -137,6 +150,8 @@ struct xaml_type_vtbl
     HRESULT (WINAPI *ActivateInstance)( struct xaml_type *This, IInspectable **instance );  /* slot 18 */
     HRESULT (WINAPI *CreateFromString)( struct xaml_type *This, HSTRING input, void **value ); /* slot 19 */
     HRESULT (WINAPI *GetMember)( struct xaml_type *This, HSTRING name, struct xaml_member **member ); /* slot 20 */
+    HRESULT (WINAPI *AddToVector)( struct xaml_type *This, void *instance, void *value );   /* slot 21 */
+    HRESULT (WINAPI *AddToMap)( struct xaml_type *This, void *instance, void *key, void *value ); /* slot 22 */
 };
 
 
@@ -151,7 +166,9 @@ struct xaml_member_vtbl
     HRESULT (WINAPI *QueryInterface)( struct xaml_member *This, REFIID riid, void **ppv );
     ULONG (WINAPI *AddRef)( struct xaml_member *This );
     ULONG (WINAPI *Release)( struct xaml_member *This );
-    void *pad3, *pad4, *pad5, *pad6, *pad7, *pad8, *pad9, *pad10;
+    void *pad3, *pad4, *pad5;
+    HRESULT (WINAPI *get_IsAttachable)( struct xaml_member *This, boolean *value );          /* slot 6 */
+    void *pad7, *pad8, *pad9, *pad10;
     HRESULT (WINAPI *get_Type)( struct xaml_member *This, struct xaml_type **type );        /* slot 11 */
     HRESULT (WINAPI *GetValue)( struct xaml_member *This, void *instance, IInspectable **value ); /* slot 12 */
     HRESULT (WINAPI *SetValue)( struct xaml_member *This, void *instance, void *value );    /* slot 13 */
@@ -248,22 +265,31 @@ struct uwp_element
     IInspectable IDependencyObject2_iface;
     IInspectable IUIElement_iface;
     IInspectable IFrameworkElement_iface;
+    IInspectable IFrameworkElement2_iface;
     IInspectable IFrameworkElement3_iface;
+    IInspectable IFrameworkElement7_iface;
     IInspectable IControl_iface;
     IInspectable IControlProtected_iface;
     IInspectable IContentControl_iface;
     IInspectable IUserControl_iface;
     IInspectable IPage_iface;
     IInspectable IFrame_iface;
+    IInspectable IFrame2_iface;
+    IInspectable IFrame3_iface;
+    IInspectable IFrame5_iface;
     IInspectable IButtonBase_iface;
     IInspectable IToggleButton_iface;
     IInspectable IPanel_iface;
     IInspectable IGrid_iface;
+    IInspectable IGrid3_iface;
     IInspectable IBorder_iface;
     IInspectable ITextBlock_iface;
     IInspectable IRowDefinition_iface;
     IInspectable IColumnDefinition_iface;
     IInspectable IStyle_iface;
+    IInspectable IDataTemplate_iface;
+    IInspectable IDataTemplateSelector_iface;
+    IInspectable IDataTemplateSelector2_iface;
     IInspectable IBrush_iface;
     IInspectable ISolidColorBrush_iface;
     IInspectable IFlyout_iface;
@@ -286,19 +312,39 @@ struct uwp_element
     IInspectable IMenuFlyoutSubItem_iface;
     IInspectable IMenuFlyout2_iface;
     IInspectable IUIElement4_iface;
+    IInspectable IUIElement5_iface;
+    IInspectable IButtonWithFlyout_iface;
     IInspectable IContentDialog_iface;
     IInspectable IContentDialog2_iface;
+    IInspectable ISwapChainPanel_iface;
+    IInspectable ISwapChainPanelNative2_iface;
     IInspectable ITeachingTip_iface;
     IInspectable IAutoSuggestBox_iface;
+    IInspectable IAutoSuggestBox2_iface;
+    IInspectable ISplitView_iface;
+    IInspectable ISplitView2_iface;
+    IInspectable IEasingFunctionBase_iface;
+    IInspectable IMediaPlayerElement_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
     IDispatch IDispatch_iface;
     IInspectable IReferenceTrackerTarget_iface;
     ITypeInfo ITypeInfo_iface;
     LONG ref;
+    int easing_mode;
+    IInspectable *media_source;
+    IDCompositionVisual2 *scp_visual;
+    IInspectable *media_transport_controls;
+    IInspectable *media_poster_source;
+    IInspectable *media_player;
+    boolean media_transport_enabled;
+    int media_stretch;
+    boolean media_auto_play;
+    boolean media_is_full_window;
     HWND island_hwnd;
     HWND dialog_hwnd;
     IInspectable *outer;
     BOOL delegating;             /* outer is a real app-side element (answers IUIElement): refcounts delegate to it */
+    BOOL outer_pinned;           /* visual tree holds an explicit AddRef on outer to prevent GC while live */
     enum uwp_elem_kind kind;
     WCHAR class_name[128];
     WCHAR x_class[128];
@@ -317,6 +363,7 @@ struct uwp_element
     struct uwp_element *owner_component;
     IInspectable *content;       /* ContentControl/UserControl/Page/Border/ScrollViewer child */
     IInspectable *context_flyout; /* UIElement.ContextFlyout */
+    IInspectable *flyout;         /* Button.Flyout */
     IInspectable *children_coll; /* Panel.Children */
     IInspectable *accelerators_coll; /* UIElement.KeyboardAccelerators */
     IInspectable *row_defs_coll; /* Grid.RowDefinitions */
@@ -375,6 +422,7 @@ struct uwp_element
     struct uwp_style_setter *style_setters;
     int style_setter_cnt;
     int style_setter_cap;
+    IInspectable *style_obj;
     struct uwp_rd_bucket *rd_bucket;
     /* Computed screen rectangle */
     RECT bounds;
@@ -384,6 +432,16 @@ struct uwp_element
     int loaded_cnt;
     int loaded_cap;
     BOOL loaded_fired;
+    IInspectable *evc_handlers[4];
+    int evc_cnt;
+    BOOL evc_fired;
+    int loaded_fired_cnt;
+    IInspectable **size_changed_handlers;
+    int size_changed_cnt;
+    int size_changed_cap;
+    IInspectable **layout_updated_handlers;
+    int layout_updated_cnt;
+    int layout_updated_cap;
     BOOL template_applied;
     IInspectable **click_handlers;
     int click_cnt;
@@ -409,12 +467,17 @@ struct uwp_element
     struct xaml_event_registry ptr_entered_reg;
     struct xaml_event_registry ptr_exited_reg;
     struct xaml_event_registry ptr_capture_lost_reg;
+    struct xaml_event_registry tapped_reg;
     struct xaml_event_registry ptr_canceled_reg;
     struct xaml_event_registry ptr_wheel_reg;
     struct xaml_event_registry nav_sel_changed_reg;
     struct xaml_event_registry nav_item_invoked_reg;
+    struct xaml_event_registry frame_navigated_reg;
+    IInspectable *back_stack;
+    IInspectable *forward_stack;
     IInspectable *nav_args_item;
     BOOL nav_fired;
+    boolean nav_stack_enabled;
     struct uwp_dp_entry *dp_store;
     int dp_cnt;
     int dp_cap;
@@ -484,6 +547,21 @@ struct uwp_element
     int flyout_closed_cnt;
     int flyout_closed_cap;
     BOOL is_open;
+    const BYTE *template_xbf_data;
+    DWORD template_xbf_size;
+    DWORD template_sub_idx;
+    IInspectable *template_owner_comp;
+    struct xaml_event_registry asb_text_changed_reg;
+    struct xaml_event_registry asb_query_submitted_reg;
+    struct xaml_event_registry asb_suggestion_chosen_reg;
+    struct xaml_event_registry obsvec_changed_reg;
+    INT64 timer_interval_100ns;
+    UINT_PTR timer_win32_id;
+    BOOL timer_enabled;
+    struct xaml_event_registry timer_tick_reg;
+    float last_measured_w;
+    float last_measured_h;
+    BOOL in_measure_arrange;
 };
 
 struct xaml_frame_prop
@@ -579,6 +657,7 @@ struct cwv2_pending_op
 struct xaml_cached_type
 {
     const void **lpVtbl;
+    const void **lpVtbl_winui3;
     LONG ref;
     WCHAR *full_name;
     const WCHAR *short_name;
@@ -621,6 +700,10 @@ struct xbf_stack_val
     double vsm_num;
     BOOL vsm_is_res_ref;
     BOOL vsm_has_val;
+    const BYTE *template_xbf_data;
+    DWORD template_xbf_size;
+    DWORD template_sub_idx;
+    IInspectable *template_owner_comp;
 };
 
 struct uwp_vsm_group
@@ -677,7 +760,19 @@ struct uwp_rd_entry
     struct uwp_style_setter *setters;
     int setter_cnt;
     int setter_cap;
+    const BYTE *template_xbf_data;
+    DWORD template_xbf_size;
+    DWORD template_sub_idx;
+    IInspectable *template_owner_comp;
 };
+
+static inline void uwp_set_template_owner( IInspectable **dst, IInspectable *src )
+{
+    if (*dst == src) return;
+    if (src) IInspectable_AddRef( src );
+    if (*dst) IInspectable_Release( *dst );
+    *dst = src;
+}
 
 struct xaml_meta_cache_entry
 {
@@ -688,6 +783,8 @@ struct xaml_meta_cache_entry
     struct xaml_type *provider_type;
     void *provider_key;
 };
+
+struct xaml_weak_ref;
 
 struct xaml_element
 {
@@ -700,7 +797,12 @@ struct xaml_element
     IInspectable IWebView2_iface;
     IInspectable IWebView22_iface;
     IInspectable IUIElement_iface;
+    IInspectable IFrameworkElement_iface;
     IInspectable IDependencyObject_iface;
+    IUnknown IWeakReferenceSource_iface;
+    struct xaml_weak_ref *weak_ref;
+    struct { void *dp; IInspectable *val; } dp_store[16];
+    int dp_count;
     LONG ref;
     int visibility;
     IInspectable *outer;
@@ -781,6 +883,7 @@ struct uwp_rd_bucket
 struct uwp_vec_view
 {
     IInspectable IInspectable_iface;
+    IInspectable IIterable_iface;
     LONG ref;
     IInspectable **items;
     unsigned int count;
@@ -1029,6 +1132,10 @@ struct xaml_async_action *impl_from_async_info( IAsyncInfo *iface );
 const BYTE *pri_get_data( DWORD *out_size );
 void pri_map_file_to( const WCHAR *pri_path, const BYTE **out_data, DWORD *out_size );
 struct uwp_rd_entry *rd_bucket_upsert( struct uwp_rd_bucket *b, const WCHAR *key );
+IInspectable *uwp_instantiate_xbf_substream( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx, IInspectable *owner_comp );
+void uwp_asb_fire_text_changed( struct uwp_element *el );
+void uwp_asb_fire_query_submitted( struct uwp_element *el );
+void uwp_keyboard_press_char( WCHAR ch );
 void scan_disk_xbfs_in_dir( const WCHAR *dir_path, const char *rel_prefix, struct pri_xbf_catalog *cat );
 extern struct uwp_class_factory scb_factory_obj;
 void store_make_icon_monogram( const WCHAR *title, WCHAR *icon, size_t icon_len );
@@ -1076,6 +1183,7 @@ HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, v
 HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp );
 HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out );
 HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val );
+void uwp_sync_all_template_presenters( struct uwp_element *impl );
 HRESULT WINAPI uwp_do_get_Dispatcher( void *iface, void **value );
 HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value );
 void uwp_el_set_bg_argb( struct uwp_element *el, UINT32 argb );
@@ -1107,6 +1215,8 @@ HRESULT WINAPI uwp_fe_put_Tag( void *iface, void *val );
 HRESULT WINAPI uwp_fe_put_Width( void *iface, double val );
 struct uwp_element *uwp_find_owning_page( struct uwp_element *el );
 void uwp_fire_loaded_tree( struct uwp_element *el );
+void uwp_fire_evc_if_needed( struct uwp_element *el );
+void uwp_fire_size_and_layout_changed( struct uwp_element *el );
 BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_routed_args *args );
 const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp, size_t tmp_len );
 HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result );
@@ -1166,6 +1276,7 @@ struct uwp_rd_bucket *uwp_rd_bucket_for_el( struct uwp_element *el, BOOL create 
 BOOL uwp_rd_find_entry( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
                                const WCHAR *raw_key, int depth,
                                struct uwp_rd_entry **out_entry, struct uwp_rd_bucket **out_bucket );
+IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_entry *e );
 void uwp_rd_link_merged( struct uwp_rd_bucket *parent, struct uwp_rd_bucket *child );
 void uwp_rd_link_theme( struct uwp_rd_bucket *parent, const WCHAR *theme_name, struct uwp_rd_bucket *child );
 void uwp_realize_empty_panel_defers( struct uwp_element *root );
@@ -1177,6 +1288,10 @@ HRESULT WINAPI uwp_rowcol_get_Length( void *iface, struct uwp_grid_length *gl );
 HRESULT WINAPI uwp_rowcol_put_Length( void *iface, struct uwp_grid_length *gl );
 void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
                                         const WCHAR *prop_name, void *target_obj, const WCHAR *str_val );
+BOOL uwp_set_custom_xaml_member_obj( void *app_outer, const WCHAR *owner_type_name,
+                                     const WCHAR *prop_name, void *target_obj, void *val_obj );
+BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_type_name,
+                                          const WCHAR *prop_name, void *target_obj, void *item_obj );
 void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int screen_x, int screen_y );
 ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
 HRESULT WINAPI uwp_sub_GetIids( IInspectable *iface, ULONG *count, IID **iids );
@@ -2033,6 +2148,9 @@ extern const GUID IID_IXamlReaderStatics_UWP;
 extern const GUID IID_IXamlType_UWP_g;
 
 extern const void *uwp_asb_vtbl[32];
+extern const void *uwp_asb2_vtbl[16];
+extern const void *uwp_splitview_vtbl[32];
+extern const void *uwp_splitview2_vtbl[16];
 
 extern const void *uwp_brush_vtbl[16];
 
@@ -2052,11 +2170,18 @@ extern const void *uwp_dp_statics_vtbl[32];
 
 extern const void *uwp_dwxs_native_vtbl[16];
 
+extern const void *uwp_fe2_vtbl[16];
 extern const void *uwp_fe3_vtbl[16];
 
 extern const void *uwp_flyout_vtbl[128];
 
 extern const void *uwp_grid_vtbl[32];
+extern const void *uwp_grid3_vtbl[16];
+HRESULT xaml_attach_swapchain_panel_content( IUnknown *content, IDCompositionVisual2 **slot );
+HRESULT xaml_attach_swapchain_panel_handle( HANDLE h, IDCompositionVisual2 **slot );
+void xaml_get_host_window_size( UINT *out_w, UINT *out_h );
+void xaml_set_active_swapchain_panel( void *el, void *sc );
+void uwp_fire_size_and_layout_changed( struct uwp_element *el );
 
 extern const void *uwp_icmd_vtbl[16];
 
@@ -2539,6 +2664,7 @@ extern const size_t xaml_static_factories_count;
 extern const struct xaml_static_factory *xaml_factory_hash[32];
 extern INIT_ONCE xaml_factory_hash_once;
 extern struct uwp_class_factory vsm_factory_obj;
+extern struct uwp_class_factory sb_factory_obj;
 extern struct uwp_class_factory auto_props_factory_obj;
 extern struct uwp_class_factory vth_factory_obj;
 extern struct uwp_class_factory feap_factory_obj;

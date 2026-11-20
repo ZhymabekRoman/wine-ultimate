@@ -198,6 +198,168 @@ BOOL uwp_is_border_pid( WORD pid )
     return pid == XBF_PROP_CONTROL_BORDER_BRUSH || pid == XBF_PROP_BORDER_BRUSH || pid == XBF_PROP_GRID_BORDER_BRUSH || pid == XBF_PROP_SHAPE_STROKE;
 }
 
+struct uwp_size_f
+{
+    float width;
+    float height;
+};
+
+static const GUID IID_IFrameworkElementOverrides_layout =
+    { 0xda007e54, 0xb3c2, 0x4b9a, { 0xaa, 0x8e, 0xd3, 0xf0, 0x71, 0x26, 0x2b, 0x97 } };
+
+static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int h )
+{
+    void *fe_ovr = NULL;
+    struct uwp_size_f avail, desired = {0}, arranged = {0};
+    HRESULT hr;
+
+    if (!el || !el->outer || el->in_measure_arrange || w <= 0 || h <= 0) return;
+    if (!wcsstr( el->class_name, L"ItemsRepeater" )) return;
+    if (el->last_measured_w == (float)w && el->last_measured_h == (float)h && el->children_coll &&
+        CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count > 0)
+        return;
+
+    el->in_measure_arrange = TRUE;
+    el->last_measured_w = (float)w;
+    el->last_measured_h = (float)h;
+    avail.width = (float)w;
+    avail.height = (float)h;
+
+    if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_layout, &fe_ovr )) && fe_ovr)
+    {
+        HRESULT (WINAPI *measure_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = (void *)(*(void ***)fe_ovr)[6];
+        HRESULT (WINAPI *arrange_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = (void *)(*(void ***)fe_ovr)[7];
+        __TRY
+        {
+            if (measure_ovr)
+            {
+                hr = measure_ovr( fe_ovr, avail, &desired );
+                if (desired.width <= 1.5f && desired.height <= 1.5f && el->evc_cnt > 0)
+                {
+                    el->evc_fired = FALSE;
+                    uwp_fire_evc_if_needed( el );
+                    hr = measure_ovr( fe_ovr, avail, &desired );
+                }
+                if (w >= 480)
+                {
+                    WARN( "MeasureOverride(%s %s %dx%d) -> hr %#lx desired=(%.0f,%.0f) kids=%u dp_cnt=%d\n",
+                          debugstr_w(el->class_name), debugstr_w(el->name), w, h, hr,
+                          desired.width, desired.height,
+                          el->children_coll ? CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count : 0,
+                          el->dp_cnt );
+                    if ((desired.width == 1.0f && desired.height == 1.0f) || !wcscmp( el->name, L"TileList" ))
+                    {
+                        int di;
+                        for (di = 0; di < el->dp_cnt && di < 8; di++)
+                        {
+                            HSTRING hc = NULL;
+                            UINT32 vsz = 0xffffffffu;
+                            struct uwp_element *de = uwp_elem_from_any( el->dp_store[di].value );
+                            if (el->dp_store[di].value)
+                            {
+                                static const GUID IID_IVectorView_Obj =
+                                    { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
+                                void *vv = NULL;
+                                IInspectable_GetRuntimeClassName( el->dp_store[di].value, &hc );
+                                if (SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Obj, &vv )) && vv)
+                                {
+                                    HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vv)[7];
+                                    if (get_sz) get_sz( vv, &vsz );
+                                    IUnknown_Release( (IUnknown *)vv );
+                                }
+                            }
+                            WARN( "  dp[%d] val=%p cls=%s uwp=%s sz=%u\n", di,
+                                  el->dp_store[di].value,
+                                  hc ? debugstr_w(WindowsGetStringRawBuffer(hc, NULL)) : "\"null\"",
+                                  de ? debugstr_w(de->class_name) : "\"-\"", vsz );
+                            if (hc) WindowsDeleteString( hc );
+                        }
+                    }
+                }
+            }
+            if (arrange_ovr)
+            {
+                hr = arrange_ovr( fe_ovr, avail, &arranged );
+                TRACE( "ArrangeOverride(%s %s %dx%d) -> hr %#lx arranged=(%.0f,%.0f)\n",
+                       debugstr_w(el->class_name), debugstr_w(el->name), w, h, hr, arranged.width, arranged.height );
+            }
+        }
+        __EXCEPT_ALL
+        {
+            WARN( "Measure/ArrangeOverride exception on %s (%s)\n", debugstr_w(el->class_name), debugstr_w(el->name) );
+        }
+        __ENDTRY;
+        IUnknown_Release( (IUnknown *)fe_ovr );
+    }
+    el->in_measure_arrange = FALSE;
+
+    if (el->loaded_fired && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el && (!ch->loaded_fired || ch->loaded_fired_cnt < ch->loaded_cnt))
+                uwp_fire_loaded_tree( ch );
+        }
+    }
+}
+
+static BOOL uwp_has_shimmer_descendant( struct uwp_element *el, int depth )
+{
+    if (!el || depth > 8) return FALSE;
+    if (wcsstr( el->class_name, L"Shimmer" )) return TRUE;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_has_shimmer_descendant( ch, depth + 1 )) return TRUE;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el && uwp_has_shimmer_descendant( ch, depth + 1 )) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
+{
+    if (!el || el->visibility != 0 || depth > 14) return FALSE;
+    if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
+    if (el->text[0] || el->img_pixels || el->img_loaded) return TRUE;
+    if (wcsstr( el->class_name, L"ItemsRepeater" ))
+    {
+        if (el->data_context || el->dp_cnt >= 2) return TRUE;
+        if (el->children_coll)
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+            if (v->count > 0) return TRUE;
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_scroll_child_has_content( ch, depth + 1 )) return TRUE;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el && uwp_scroll_child_has_content( ch, depth + 1 )) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 void uwp_arrange_element( struct uwp_element *el, RECT rc )
 {
     int w, h;
@@ -244,10 +406,21 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
             h = eh;
         }
     }
-    el->bounds = rc;
-    el->has_bounds = (w > 0 && h > 0);
-    el->actual_w = (double)w;
-    el->actual_h = (double)h;
+    {
+        double prev_w = el->actual_w, prev_h = el->actual_h;
+        el->bounds = rc;
+        el->has_bounds = (w > 0 && h > 0);
+        el->actual_w = (double)w;
+        el->actual_h = (double)h;
+        if (w > 0 && h > 0 && (prev_w != el->actual_w || prev_h != el->actual_h))
+            uwp_fire_size_and_layout_changed( el );
+    }
+
+    if (!el->loaded_fired || el->loaded_fired_cnt < el->loaded_cnt)
+        uwp_fire_loaded_tree( el );
+
+    uwp_invoke_winui_measure_arrange( el, w, h );
+    uwp_fire_evc_if_needed( el );
 
     if (el->kind == UWP_KIND_GRID && el->children_coll)
     {
@@ -412,6 +585,20 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
         {
             int idx = 0, auto_idx = 0, cur_y = rc.top;
             int auto_total_h = max( 0, h - fixed_h );
+            BOOL in_scroll = FALSE;
+            if (el->orientation == 0 && auto_cnt > 1 && auto_total_h / auto_cnt < 140)
+            {
+                struct uwp_element *p;
+                int hop;
+                for (p = el->parent, hop = 0; p && hop < 5; p = p->parent, hop++)
+                {
+                    if (wcsstr( p->class_name, L"ScrollViewer" ))
+                    {
+                        in_scroll = TRUE;
+                        break;
+                    }
+                }
+            }
             for (k = 0; k < children->count; k++)
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
@@ -427,9 +614,42 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
                 }
                 else if (ch->height > 0.0 && !isnan( ch->height ) && (int)ch->height < h)
                 {
+                    if (in_scroll && cur_y >= rc.bottom)
+                    {
+                        ch->has_bounds = FALSE;
+                        idx++;
+                        continue;
+                    }
                     crc.top    = cur_y;
                     crc.bottom = min( (int)rc.bottom, cur_y + (int)(ch->height + 0.5) );
                     cur_y = crc.bottom;
+                }
+                else if (in_scroll)
+                {
+                    int nat_h;
+                    if (ch->kind == UWP_KIND_TEXT_BLOCK)
+                        nat_h = 44;
+                    else if (!uwp_scroll_child_has_content( ch, 0 ))
+                        nat_h = 20;
+                    else
+                        nat_h = 240;
+                    if (cur_y >= rc.bottom)
+                    {
+                        /* Still arrange off-screen children in virtual coordinates so
+                         * their EffectiveViewportChanged/MeasureOverride run for hydration,
+                         * then clear has_bounds if completely below viewport. */
+                        crc.top = cur_y;
+                        crc.bottom = cur_y + nat_h;
+                        cur_y = crc.bottom + (nat_h > 24 ? 8 : 0);
+                        auto_idx++;
+                        idx++;
+                        uwp_arrange_element( ch, crc );
+                        continue;
+                    }
+                    crc.top    = cur_y;
+                    crc.bottom = min( (int)rc.bottom, cur_y + nat_h );
+                    cur_y = crc.bottom + (nat_h > 24 ? 8 : 0);
+                    auto_idx++;
                 }
                 else
                 {
@@ -534,6 +754,94 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
             ch->actual_h = (double)(crc.bottom - crc.top);
         }
         return;
+    }
+
+    if (!wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ))
+    {
+        int rail_w = 68;
+        if (el->children_coll)
+        {
+            struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int k;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                RECT crc;
+                if (!ch || ch->visibility != 0) continue;
+                if (!wcscmp( ch->name, L"TogglePaneButton" ))
+                    SetRect( &crc, rc.left + 8, rc.top + 8, rc.left + 56, rc.top + 48 );
+                else if (!wcscmp( ch->name, L"MenuItemsHost" ))
+                    SetRect( &crc, rc.left, rc.top + 56, rc.left + rail_w, max( rc.top + 120, rc.bottom - 180 ) );
+                else if (!wcscmp( ch->name, L"FooterMenuItemsHost" ))
+                    SetRect( &crc, rc.left, max( rc.top + 120, rc.bottom - 172 ), rc.left + rail_w, rc.bottom - 8 );
+                else
+                    crc = rc;
+                uwp_arrange_element( ch, crc );
+            }
+        }
+        if (el->content)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( el->content );
+            if (ch && ch != el)
+            {
+                RECT content_rc;
+                SetRect( &content_rc, rc.left + rail_w, rc.top, rc.right, rc.bottom );
+                uwp_arrange_element( ch, content_rc );
+            }
+        }
+        return;
+    }
+
+    if (wcsstr( el->class_name, L"ItemsRepeater" ) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        BOOL is_nav_rail = (!wcscmp( el->name, L"MenuItemsHost" ) || !wcscmp( el->name, L"FooterMenuItemsHost" ));
+        int avail_w = rc.right - rc.left;
+
+        if (!is_nav_rail && avail_w >= 480)
+        {
+            int pad = 12, gap = 12;
+            int cols = max( 1, (avail_w - pad) / 270 );
+            int card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
+            int card_h = 96;
+            int idx = 0;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                int col, row, x0, y0;
+                RECT crc;
+                if (!ch || ch->visibility != 0) continue;
+                col = idx % cols;
+                row = idx / cols;
+                x0 = rc.left + pad + col * (card_w + gap);
+                y0 = rc.top + pad + row * (card_h + gap);
+                if (y0 >= rc.bottom)
+                {
+                    ch->has_bounds = FALSE;
+                    idx++;
+                    continue;
+                }
+                SetRect( &crc, x0, y0, x0 + card_w, min( (int)rc.bottom, y0 + card_h ) );
+                uwp_arrange_element( ch, crc );
+                idx++;
+            }
+            return;
+        }
+        {
+            int cur_y = rc.top;
+            int item_h = is_nav_rail ? 48 : 80;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                RECT crc;
+                if (!ch || ch->visibility != 0) continue;
+                SetRect( &crc, rc.left + 4, cur_y, rc.right - 4, min( (int)rc.bottom, cur_y + item_h ) );
+                uwp_arrange_element( ch, crc );
+                cur_y += item_h + 4;
+            }
+            return;
+        }
     }
 
     if (el->content)
