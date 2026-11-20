@@ -463,7 +463,13 @@ NTSTATUS WINAPI NtAlpcCreatePort( HANDLE *port_handle, OBJECT_ATTRIBUTES *obj_at
         req->max_msg_len = port_attr ? (unsigned int)port_attr->MaxMessageLength : 0x1000;
         wine_server_add_data( req, objattr, len );
         ret = wine_server_call( req );
-        if (!ret) *port_handle = wine_server_ptr_handle( reply->handle );
+        if (ret == STATUS_OBJECT_NAME_EXISTS)
+        {
+            if (reply->handle) NtClose( wine_server_ptr_handle( reply->handle ) );
+            ret = STATUS_OBJECT_NAME_COLLISION;
+        }
+        else if (!ret)
+            *port_handle = wine_server_ptr_handle( reply->handle );
     }
     SERVER_END_REQ;
 

@@ -1915,10 +1915,46 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
 
         case IOCTL_AFD_EVENT_SELECT:
         {
-            const struct afd_event_select_params *params = in_buffer;
-
-            TRACE( "event %p, mask %#x\n", params->event, params->mask );
             if (out_size) FIXME( "unexpected output size %u\n", out_size );
+
+            if (in_wow64_call())
+            {
+                const struct afd_event_select_params_32 *params32 = in_buffer;
+                HANDLE ev;
+
+                if (in_size < sizeof(*params32)) return STATUS_INVALID_PARAMETER;
+                ev = wine_server_ptr_handle( params32->event );
+                TRACE( "event %p, mask %#x\n", ev, params32->mask );
+                if (is_local_sync_handle( ev ))
+                {
+                    struct afd_event_select_params_32 promoted;
+                    HANDLE real_event;
+                    NTSTATUS s = promote_local_sync_handle( ev, &real_event );
+                    if (s) return s;
+                    promoted.event = wine_server_obj_handle( real_event );
+                    promoted.mask = params32->mask;
+                    return NtDeviceIoControlFile( handle, event, apc, apc_user, io, code,
+                                                  &promoted, sizeof(promoted), out_buffer, out_size );
+                }
+            }
+            else
+            {
+                const struct afd_event_select_params *params = in_buffer;
+
+                if (in_size < sizeof(*params)) return STATUS_INVALID_PARAMETER;
+                TRACE( "event %p, mask %#x\n", params->event, params->mask );
+                if (is_local_sync_handle( params->event ))
+                {
+                    struct afd_event_select_params promoted;
+                    HANDLE real_event;
+                    NTSTATUS s = promote_local_sync_handle( params->event, &real_event );
+                    if (s) return s;
+                    promoted.event = real_event;
+                    promoted.mask = params->mask;
+                    return NtDeviceIoControlFile( handle, event, apc, apc_user, io, code,
+                                                  &promoted, sizeof(promoted), out_buffer, out_size );
+                }
+            }
 
             status = STATUS_BAD_DEVICE_TYPE;
             break;

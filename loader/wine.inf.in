@@ -586,6 +586,21 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Input.GestureRecognizer,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Input.GestureRecognizer,"DllPath",2,"%12%\windows.ui.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Input.GestureRecognizer,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.MessageDialog,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.MessageDialog,"DllPath",2,"%12%\windows.ui.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.MessageDialog,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.UICommand,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.UICommand,"DllPath",2,"%12%\windows.ui.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.UICommand,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.UICommandSeparator,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.UICommandSeparator,"DllPath",2,"%12%\windows.ui.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.UICommandSeparator,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.PopupMenu,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.PopupMenu,"DllPath",2,"%12%\windows.ui.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Popups.PopupMenu,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Profile.SystemManufacturers.SystemSupportInfo,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Profile.SystemManufacturers.SystemSupportInfo,"DllPath",2,"%12%\windows.system.profile.systemmanufacturers.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Profile.SystemManufacturers.SystemSupportInfo,"ThreadingModel",0x10001,2
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,"DllPath",2,"%12%\twinapi.appcore.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,"ThreadingModel",0x10001,2
@@ -601,6 +616,9 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notificatio
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlDocument,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlDocument,"DllPath",2,"%12%\msxml6.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlDocument,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlLoadSettings,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlLoadSettings,"DllPath",2,"%12%\msxml6.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlLoadSettings,"ThreadingModel",0x10001,2
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Xsl.XsltProcessor,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Xsl.XsltProcessor,"DllPath",2,"%12%\msxml6.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Xsl.XsltProcessor,"ThreadingModel",0x10001,2
@@ -952,6 +970,15 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Input.
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"DllPath",2,"%12%\windows.system.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Launcher,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Launcher,"DllPath",2,"%12%\windows.system.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Launcher,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Display.DisplayMonitor,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Display.DisplayMonitor,"DllPath",2,"%12%\windows.graphics.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Display.DisplayMonitor,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.HttpBufferContent,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.HttpBufferContent,"DllPath",2,"%12%\windows.web.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.HttpBufferContent,"ThreadingModel",0x10001,2
 
 ; The Windows.Devices.Geolocation classes, served by the own-name builtin module
 ; windows.devices.geolocation.dll (the module Windows hosts the namespace in).  The

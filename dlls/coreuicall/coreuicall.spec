@@ -18,3 +18,9 @@
 @ cdecl rand() "wine_rand"
 @ cdecl rand_s(ptr) "wine_rand_s"
 @ cdecl srand(long) "wine_srand"
+@ cdecl bsearch(ptr ptr long long ptr) ucrtbase.bsearch
+@ cdecl bsearch_s(ptr ptr long long ptr ptr) ucrtbase.bsearch_s
+@ cdecl -ret64 div(long long) ucrtbase.div
+@ cdecl -ret64 ldiv(long long) ucrtbase.ldiv
+@ cdecl -norelay lldiv(int64 int64) ucrtbase.lldiv
+@ cdecl -norelay imaxdiv(int64 int64) ucrtbase.imaxdiv

@@ -29,6 +29,7 @@
 #include "evntprov.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
+WINE_DECLARE_DEBUG_CHANNEL(etw);
 
 LPCSTR debugstr_us( const UNICODE_STRING *us )
 {
@@ -349,8 +350,68 @@ ULONG WINAPI EtwEventWriteString( REGHANDLE handle, UCHAR level, ULONGLONG keywo
 ULONG WINAPI EtwEventWriteTransfer( REGHANDLE handle, PCEVENT_DESCRIPTOR descriptor, LPCGUID activity,
                                     LPCGUID related, ULONG count, PEVENT_DATA_DESCRIPTOR data )
 {
-    FIXME("%s, %p, %s, %s, %lu, %p: stub\n", wine_dbgstr_longlong(handle), descriptor,
-          debugstr_guid(activity), debugstr_guid(related), count, data);
+    if (TRACE_ON(etw) && data && count)
+    {
+        ULONG i, limit = count < 16 ? count : 16;
+        TRACE_(etw)("h=%s id=%u lvl=%u op=%u kw=%s cnt=%lu\n",
+                    wine_dbgstr_longlong(handle),
+                    descriptor ? descriptor->Id : 0,
+                    descriptor ? descriptor->Level : 0,
+                    descriptor ? descriptor->Opcode : 0,
+                    descriptor ? wine_dbgstr_longlong(descriptor->Keyword) : "0",
+                    count);
+        for (i = 0; i < limit; i++)
+        {
+            const BYTE *p = (const BYTE *)(ULONG_PTR)data[i].Ptr;
+            ULONG len = data[i].Size;
+            ULONG type = data[i].Reserved & 0xff;
+            if (!p || !len) continue;
+            if (type == 2 && len > 2)
+            {
+                TRACE_(etw)("  [%lu] PROV: %s\n", i, debugstr_an((const char *)(p + 2), len - 2));
+            }
+            else if (type == 1 && len > 3)
+            {
+                ULONG off = 2;
+                while (off < len && (p[off] & 0x80)) off++;
+                if (off < len) off++;
+                if (off < len)
+                    TRACE_(etw)("  [%lu] EVT: %s\n", i, debugstr_an((const char *)(p + off), len - off));
+            }
+            else if (len == 4)
+            {
+                ULONG v = *(const ULONG *)p;
+                TRACE_(etw)("  [%lu] u32=0x%08lx (%ld)\n", i, v, (LONG)v);
+            }
+            else if (len == 8)
+            {
+                ULONGLONG v = *(const ULONGLONG *)p;
+                TRACE_(etw)("  [%lu] u64=%s\n", i, wine_dbgstr_longlong(v));
+            }
+            else if (len >= 4 && !(len & 1) && p[0] >= 0x20 && p[0] < 0x7f && p[1] == 0)
+            {
+                ULONG wlen = len / 2;
+                if (wlen > 128) wlen = 128;
+                TRACE_(etw)("  [%lu] W: %s\n", i, debugstr_wn((const WCHAR *)p, wlen));
+            }
+            else if (len >= 2 && p[0] >= 0x20 && p[0] < 0x7f && p[1] >= 0x20 && p[1] < 0x7f)
+            {
+                ULONG alen = len < 128 ? len : 128;
+                TRACE_(etw)("  [%lu] A: %s\n", i, debugstr_an((const char *)p, alen));
+            }
+            else
+            {
+                TRACE_(etw)("  [%lu] bin(type=%lu len=%lu) %02x%02x%02x%02x\n",
+                            i, type, len,
+                            p[0], len > 1 ? p[1] : 0, len > 2 ? p[2] : 0, len > 3 ? p[3] : 0);
+            }
+        }
+    }
+    else
+    {
+        FIXME("%s, %p, %s, %s, %lu, %p: stub\n", wine_dbgstr_longlong(handle), descriptor,
+              debugstr_guid(activity), debugstr_guid(related), count, data);
+    }
     return ERROR_SUCCESS;
 }
 

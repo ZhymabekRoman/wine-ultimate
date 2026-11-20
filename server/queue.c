@@ -757,14 +757,43 @@ static int update_desktop_cursor_pos( struct desktop *desktop, user_handle_t win
     return updated;
 }
 
-static void update_desktop_cursor_handle( struct desktop *desktop, struct thread_input *input, user_handle_t handle )
+static void update_desktop_cursor_handle( struct desktop *desktop, struct thread_input *input,
+                                          user_handle_t prev_handle, user_handle_t handle )
 {
-    if (input == get_desktop_cursor_thread_input( desktop ))
+    struct thread *thread = get_window_thread( desktop->cursor_win );
+
+    if (thread)
     {
-        user_handle_t win = desktop->cursor_win;
-        /* when clipping send the message to the foreground window as well, as some driver have an artificial overlay window */
-        if (is_cursor_clipped( desktop )) queue_cursor_message( desktop, 0, WM_WINE_SETCURSOR, win, handle );
-        queue_cursor_message( desktop, win, WM_WINE_SETCURSOR, win, handle );
+        struct thread_input *cursor_input = thread->queue ? thread->queue->input : NULL;
+        int send = 0;
+
+        if (cursor_input == input)
+        {
+            send = (prev_handle != handle);
+        }
+        else if (thread->process == current->process && cursor_input)
+        {
+            input_shm_t *cursor_shm = cursor_input->shared;
+            user_handle_t cur = cursor_shm->cursor_count < 0 ? 0 : cursor_shm->cursor;
+            if (cur != handle)
+            {
+                SHARED_WRITE_BEGIN( cursor_shm, input_shm_t )
+                {
+                    shared->cursor = handle;
+                }
+                SHARED_WRITE_END;
+                send = 1;
+            }
+        }
+        release_object( thread );
+
+        if (send)
+        {
+            user_handle_t win = desktop->cursor_win;
+            /* when clipping send the message to the foreground window as well, as some driver have an artificial overlay window */
+            if (is_cursor_clipped( desktop )) queue_cursor_message( desktop, 0, WM_WINE_SETCURSOR, win, handle );
+            queue_cursor_message( desktop, win, WM_WINE_SETCURSOR, win, handle );
+        }
     }
 }
 
@@ -4379,7 +4408,7 @@ DECL_HANDLER(set_cursor)
     if (req->flags & SET_CURSOR_NOCLIP) set_clip_rectangle( desktop, NULL, SET_CURSOR_NOCLIP, 0 );
 
     new_cursor = input_shm->cursor_count < 0 ? 0 : input_shm->cursor;
-    if (prev_cursor != new_cursor) update_desktop_cursor_handle( desktop, input, new_cursor );
+    update_desktop_cursor_handle( desktop, input, prev_cursor, new_cursor );
 
     reply->new_x       = desktop_shm->cursor.x;
     reply->new_y       = desktop_shm->cursor.y;

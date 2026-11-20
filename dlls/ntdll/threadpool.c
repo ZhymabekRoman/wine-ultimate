@@ -3091,6 +3091,24 @@ BOOL WINAPI TpSetPoolMinThreads( TP_POOL *pool, DWORD minimum )
 }
 
 /***********************************************************************
+ *           TpSetTimerEx  (NTDLL.@)
+ */
+BOOL WINAPI TpSetTimerEx( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
+{
+    struct threadpool_object *this = impl_from_TP_TIMER( timer );
+    BOOL prev;
+
+    TRACE( "%p %p %lu %lu\n", timer, timeout, period, window_length );
+
+    RtlEnterCriticalSection( &timerqueue.cs );
+    prev = this->u.timer.timer_set;
+    RtlLeaveCriticalSection( &timerqueue.cs );
+
+    TpSetTimer( timer, timeout, period, window_length );
+    return prev;
+}
+
+/***********************************************************************
  *           TpSetTimer    (NTDLL.@)
  */
 VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )

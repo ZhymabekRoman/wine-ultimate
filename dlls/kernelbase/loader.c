@@ -604,9 +604,26 @@ HMODULE WINAPI DECLSPEC_HOTPATCH LoadLibraryExW( LPCWSTR name, HANDLE file, DWOR
  */
 HMODULE WINAPI /* DECLSPEC_HOTPATCH */ LoadPackagedLibrary( LPCWSTR name, DWORD reserved )
 {
-    FIXME( "semi-stub, name %s, reserved %#lx.\n", debugstr_w(name), reserved );
-    SetLastError( APPMODEL_ERROR_NO_PACKAGE );
-    return NULL;
+    WCHAR path[MAX_PATH], *p;
+    HMODULE module;
+    DWORD len;
+
+    if (!name)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return NULL;
+    }
+
+    /* Windows searches the package install location and its dependencies;
+       emulate that with the process exe directory (the package root for
+       UWP apps) first, then fall back to the standard search order. */
+    len = GetModuleFileNameW( NULL, path, ARRAY_SIZE( path ));
+    if (len && len < ARRAY_SIZE( path ) && (p = wcsrchr( path, '\\' )) && p[1])
+    {
+        lstrcpyW( p + 1, name );
+        if ((module = LoadLibraryExW( path, 0, LOAD_WITH_ALTERED_SEARCH_PATH ))) return module;
+    }
+    return LoadLibraryExW( name, 0, 0 );
 }
 
 
@@ -1078,6 +1095,75 @@ BOOL WINAPI DECLSPEC_HOTPATCH EnumResourceTypesExW( HMODULE module, ENUMRESTYPEP
 }
 
 
+struct mui_cache_entry
+{
+    HMODULE mod;
+    HMODULE mui;
+    const void *rsrc_start;
+    const void *rsrc_end;
+};
+
+static struct mui_cache_entry mui_cache[32];
+static unsigned int mui_cache_count = 0;
+
+static HMODULE get_mui_module( HMODULE module )
+{
+    WCHAR path[MAX_PATH], mui_path[MAX_PATH + 32];
+    const WCHAR *slash;
+    unsigned int i;
+    HMODULE mui = NULL;
+    ULONG rsrc_size = 0;
+    const void *rsrc_start = NULL;
+
+    if (!module || ((ULONG_PTR)module & 3)) return NULL;
+
+    for (i = 0; i < mui_cache_count; i++)
+    {
+        if (mui_cache[i].mod == module)
+            return mui_cache[i].mui;
+    }
+
+    if (GetModuleFileNameW( module, path, ARRAY_SIZE(path) ) &&
+        (slash = wcsrchr( path, '\\' )) != NULL)
+    {
+        size_t dir_len = slash - path;
+        if (dir_len + 1 + 6 + wcslen( slash + 1 ) + 5 < ARRAY_SIZE(mui_path))
+        {
+            memcpy( mui_path, path, dir_len * sizeof(WCHAR) );
+            wcscpy( mui_path + dir_len, L"\\en-US\\" );
+            wcscat( mui_path, slash + 1 );
+            wcscat( mui_path, L".mui" );
+            mui = LoadLibraryExW( mui_path, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE );
+            if (mui)
+                rsrc_start = RtlImageDirectoryEntryToData( mui, TRUE, IMAGE_DIRECTORY_ENTRY_RESOURCE, &rsrc_size );
+        }
+    }
+
+    if (mui_cache_count < ARRAY_SIZE(mui_cache))
+    {
+        mui_cache[mui_cache_count].mod = module;
+        mui_cache[mui_cache_count].mui = mui;
+        mui_cache[mui_cache_count].rsrc_start = rsrc_start;
+        mui_cache[mui_cache_count].rsrc_end = rsrc_start ? (const char *)rsrc_start + rsrc_size : NULL;
+        mui_cache_count++;
+    }
+    return mui;
+}
+
+static HMODULE find_mui_owner( HMODULE module, const void *rsrc )
+{
+    unsigned int i;
+    for (i = 0; i < mui_cache_count; i++)
+    {
+        if (mui_cache[i].mod == module && mui_cache[i].mui &&
+            mui_cache[i].rsrc_start &&
+            (const char *)rsrc >= (const char *)mui_cache[i].rsrc_start &&
+            (const char *)rsrc < (const char *)mui_cache[i].rsrc_end)
+            return mui_cache[i].mui;
+    }
+    return module;
+}
+
 /**********************************************************************
  *	    FindResourceExW  (kernelbase.@)
  */
@@ -1101,6 +1187,12 @@ HRSRC WINAPI DECLSPEC_HOTPATCH FindResourceExW( HMODULE module, LPCWSTR type, LP
         info.Name = (ULONG_PTR)nameW.Buffer;
         info.Language = lang;
         status = LdrFindResource_U( module, &info, 3, &entry );
+        if (status != STATUS_SUCCESS)
+        {
+            HMODULE mui = get_mui_module( module );
+            if (mui)
+                status = LdrFindResource_U( mui, &info, 3, &entry );
+        }
     done:
         if (status != STATUS_SUCCESS) SetLastError( RtlNtStatusToDosError(status) );
     }
@@ -1145,6 +1237,7 @@ HGLOBAL WINAPI DECLSPEC_HOTPATCH LoadResource( HINSTANCE module, HRSRC rsrc )
 
     if (!rsrc) return 0;
     if (!module) module = GetModuleHandleW( 0 );
+    module = find_mui_owner( module, rsrc );
     if (!set_ntstatus( LdrAccessResource( module, (IMAGE_RESOURCE_DATA_ENTRY *)rsrc, &ret, NULL )))
         return 0;
     return ret;

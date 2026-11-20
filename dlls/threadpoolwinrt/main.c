@@ -49,7 +49,15 @@ struct async_action
     IAsyncAction IAsyncAction_iface;
     IAsyncInfo IAsyncInfo_iface;
     LONG refcount;
+    CRITICAL_SECTION cs;
+    AsyncStatus status;
+    HRESULT error_code;
+    UINT32 id;
+    IAsyncActionCompletedHandler *completed;
+    BOOL completed_invoked;
 };
+
+static LONG next_async_id = 1;
 
 static inline struct threadpool_factory *impl_from_IActivationFactory(IActivationFactory *iface)
 {
@@ -116,7 +124,12 @@ static ULONG STDMETHODCALLTYPE async_action_Release(IAsyncAction *iface)
     TRACE("iface %p, refcount %lu.\n", iface, refcount);
 
     if (!refcount)
+    {
+        if (action->completed)
+            IAsyncActionCompletedHandler_Release(action->completed);
+        DeleteCriticalSection(&action->cs);
         free(action);
+    }
 
     return refcount;
 }
@@ -140,30 +153,103 @@ static HRESULT STDMETHODCALLTYPE async_action_GetRuntimeClassName(
 static HRESULT STDMETHODCALLTYPE async_action_GetTrustLevel(
         IAsyncAction *iface, TrustLevel *trust_level)
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
+}
 
-    return E_NOTIMPL;
+static void async_action_complete(struct async_action *action, HRESULT hr)
+{
+    IAsyncActionCompletedHandler *handler = NULL;
+    AsyncStatus status;
+
+    EnterCriticalSection(&action->cs);
+    if (action->status == Started)
+    {
+        action->error_code = hr;
+        action->status = SUCCEEDED(hr) ? Completed : Error;
+    }
+    status = action->status;
+    if (action->completed && !action->completed_invoked)
+    {
+        handler = action->completed;
+        IAsyncActionCompletedHandler_AddRef(handler);
+        action->completed_invoked = TRUE;
+    }
+    LeaveCriticalSection(&action->cs);
+
+    if (handler)
+    {
+        IAsyncActionCompletedHandler_Invoke(handler, &action->IAsyncAction_iface, status);
+        IAsyncActionCompletedHandler_Release(handler);
+    }
 }
 
 static HRESULT STDMETHODCALLTYPE async_action_put_Completed(IAsyncAction *iface, IAsyncActionCompletedHandler *handler)
 {
-    FIXME("iface %p, handler %p stub!\n", iface, handler);
+    struct async_action *action = impl_from_IAsyncAction(iface);
+    IAsyncActionCompletedHandler *to_invoke = NULL;
+    AsyncStatus status = Started;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, handler %p.\n", iface, handler);
+
+    EnterCriticalSection(&action->cs);
+    if (action->completed)
+    {
+        LeaveCriticalSection(&action->cs);
+        return E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    }
+    action->completed = handler;
+    if (handler)
+        IAsyncActionCompletedHandler_AddRef(handler);
+    if (action->status != Started && handler && !action->completed_invoked)
+    {
+        to_invoke = handler;
+        IAsyncActionCompletedHandler_AddRef(to_invoke);
+        action->completed_invoked = TRUE;
+        status = action->status;
+    }
+    LeaveCriticalSection(&action->cs);
+
+    if (to_invoke)
+    {
+        IAsyncActionCompletedHandler_Invoke(to_invoke, iface, status);
+        IAsyncActionCompletedHandler_Release(to_invoke);
+    }
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE async_action_get_Completed(IAsyncAction *iface, IAsyncActionCompletedHandler **handler)
 {
-    FIXME("iface %p, handler %p stub!\n", iface, handler);
+    struct async_action *action = impl_from_IAsyncAction(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, handler %p.\n", iface, handler);
+
+    if (!handler)
+        return E_POINTER;
+
+    EnterCriticalSection(&action->cs);
+    *handler = action->completed;
+    if (*handler)
+        IAsyncActionCompletedHandler_AddRef(*handler);
+    LeaveCriticalSection(&action->cs);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE async_action_GetResults(IAsyncAction *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct async_action *action = impl_from_IAsyncAction(iface);
+    HRESULT hr;
 
-    return E_NOTIMPL;
+    TRACE("iface %p.\n", iface);
+
+    EnterCriticalSection(&action->cs);
+    if (action->status == Started)
+        hr = E_ILLEGAL_METHOD_CALL;
+    else
+        hr = action->error_code;
+    LeaveCriticalSection(&action->cs);
+    return hr;
 }
 
 static const IAsyncActionVtbl async_action_vtbl =
@@ -217,37 +303,58 @@ static HRESULT STDMETHODCALLTYPE async_info_GetTrustLevel(IAsyncInfo *iface, Tru
 
 static HRESULT STDMETHODCALLTYPE async_info_get_Id(IAsyncInfo *iface, UINT32 *id)
 {
-    FIXME("iface %p, id %p stub!\n", iface, id);
+    struct async_action *action = impl_from_IAsyncInfo(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, id %p.\n", iface, id);
+
+    if (!id) return E_POINTER;
+    *id = action->id;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE async_info_get_Status(IAsyncInfo *iface, AsyncStatus *status)
 {
-    FIXME("iface %p, status %p stub!\n", iface, status);
+    struct async_action *action = impl_from_IAsyncInfo(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, status %p.\n", iface, status);
+
+    if (!status) return E_POINTER;
+    EnterCriticalSection(&action->cs);
+    *status = action->status;
+    LeaveCriticalSection(&action->cs);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE async_info_get_ErrorCode(IAsyncInfo *iface, HRESULT *error_code)
 {
-    FIXME("iface %p, error_code %p stub!\n", iface, error_code);
+    struct async_action *action = impl_from_IAsyncInfo(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, error_code %p.\n", iface, error_code);
+
+    if (!error_code) return E_POINTER;
+    EnterCriticalSection(&action->cs);
+    *error_code = action->error_code;
+    LeaveCriticalSection(&action->cs);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE async_info_Cancel(IAsyncInfo *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct async_action *action = impl_from_IAsyncInfo(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p.\n", iface);
+
+    EnterCriticalSection(&action->cs);
+    if (action->status == Started)
+        action->status = Canceled;
+    LeaveCriticalSection(&action->cs);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE async_info_Close(IAsyncInfo *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-
-    return E_NOTIMPL;
+    TRACE("iface %p.\n", iface);
+    return S_OK;
 }
 
 static const IAsyncInfoVtbl async_info_vtbl =
@@ -277,6 +384,10 @@ static HRESULT async_action_create(IAsyncAction **ret)
     object->IAsyncAction_iface.lpVtbl = &async_action_vtbl;
     object->IAsyncInfo_iface.lpVtbl = &async_info_vtbl;
     object->refcount = 1;
+    InitializeCriticalSection(&object->cs);
+    object->status = Started;
+    object->error_code = S_OK;
+    object->id = (UINT32)InterlockedIncrement(&next_async_id);
 
     *ret = &object->IAsyncAction_iface;
 
@@ -321,7 +432,9 @@ static HRESULT alloc_work_item(IWorkItemHandler *handler, struct work_item **ret
 
 static void work_item_invoke_release(struct work_item *item)
 {
-    IWorkItemHandler_Invoke(item->handler, item->action);
+    struct async_action *action = impl_from_IAsyncAction(item->action);
+    HRESULT hr = IWorkItemHandler_Invoke(item->handler, item->action);
+    async_action_complete(action, hr);
     release_work_item(item);
 }
 

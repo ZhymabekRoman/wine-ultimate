@@ -23712,6 +23712,7 @@ wine_fn_config_makefile dlls/windows.devices.bluetooth enable_windows_devices_bl
 wine_fn_config_makefile dlls/windows.devices.bluetooth/tests enable_tests
 wine_fn_config_makefile dlls/windows.devices.enumeration enable_windows_devices_enumeration
 wine_fn_config_makefile dlls/windows.devices.enumeration/tests enable_tests
+wine_fn_config_makefile dlls/windows.devices.haptics enable_windows_devices_haptics
 wine_fn_config_makefile dlls/windows.devices.input enable_windows_devices_input
 wine_fn_config_makefile dlls/windows.devices.input/tests enable_tests
 wine_fn_config_makefile dlls/windows.devices.radios enable_windows_devices_radios

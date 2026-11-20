@@ -2491,6 +2491,66 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buff
  */
 LONG WINAPI PackageFamilyNameFromFullName(const WCHAR *full_name, UINT32 *length, WCHAR *family_name);
 
+static void appmodel_add_pkg_dependencies( struct pkg_entry *entries, UINT32 *n, const WCHAR *pkg_full )
+{
+    static const HKEY roots[2] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR key[512];
+    UINT32 r;
+
+    if (!pkg_full || !pkg_full[0]) return;
+    if (swprintf( key, ARRAY_SIZE(key),
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\%s", pkg_full ) <= 0)
+        return;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        HKEY hpkg, hdeps;
+        if (RegOpenKeyExW( roots[r], key, 0, KEY_READ, &hpkg ))
+            continue;
+
+        {
+            WCHAR multi[4096];
+            DWORD type = 0, cb = sizeof(multi);
+            if (!RegQueryValueExW( hpkg, L"Dependencies", NULL, &type, (BYTE *)multi, &cb )
+                    && type == REG_MULTI_SZ)
+            {
+                const WCHAR *p = multi;
+                while (*p)
+                {
+                    pkg_entry_add( entries, n, p, TRUE );
+                    p += wcslen( p ) + 1;
+                }
+            }
+        }
+
+        if (!RegOpenKeyExW( hpkg, L"Dependencies", 0, KEY_READ, &hdeps ))
+        {
+            WCHAR sub[128], dep_full[512];
+            DWORD idx;
+            for (idx = 0; ; idx++)
+            {
+                DWORD sub_len = ARRAY_SIZE(sub);
+                HKEY hsub;
+                if (RegEnumKeyExW( hdeps, idx, sub, &sub_len, NULL, NULL, NULL, NULL ))
+                    break;
+                if (!RegOpenKeyExW( hdeps, sub, 0, KEY_READ, &hsub ))
+                {
+                    DWORD type = 0, cb = sizeof(dep_full);
+                    if (!RegQueryValueExW( hsub, L"FullName", NULL, &type, (BYTE *)dep_full, &cb )
+                            && (type == REG_SZ || type == REG_EXPAND_SZ) && dep_full[0])
+                    {
+                        dep_full[ARRAY_SIZE(dep_full) - 1] = 0;
+                        pkg_entry_add( entries, n, dep_full, TRUE );
+                    }
+                    RegCloseKey( hsub );
+                }
+            }
+            RegCloseKey( hdeps );
+        }
+        RegCloseKey( hpkg );
+    }
+}
+
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
     struct pkg_entry entries[MAX_PKG_ENTRIES];
@@ -2504,13 +2564,19 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
     if (!buffer_size) return ERROR_INVALID_PARAMETER;
 
     n = 0;
+    full[0] = 0;
     if (get_current_package_full_name( full, ARRAY_SIZE(full) )) pkg_entry_add( entries, &n, full, FALSE );
     if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
         pkg_entry_add( entries, &n, fw, TRUE );
-    else if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ) && appmodel_auto_cache.valid)
+    else
     {
-        for (i = 0; i < appmodel_auto_cache.fw_count; i++)
-            pkg_entry_add( entries, &n, appmodel_auto_cache.fw_full[i], TRUE );
+        if (full[0])
+            appmodel_add_pkg_dependencies( entries, &n, full );
+        if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ) && appmodel_auto_cache.valid)
+        {
+            for (i = 0; i < appmodel_auto_cache.fw_count; i++)
+                pkg_entry_add( entries, &n, appmodel_auto_cache.fw_full[i], TRUE );
+        }
     }
     if (!n)
     {

@@ -158,6 +158,7 @@ static void timer_callback( void *private )
 
     timer->signaled = 1;
     signal_sync( timer->sync );
+    signal_wait_completion_packets( &timer->obj );
 }
 
 /* cancel a running timer */

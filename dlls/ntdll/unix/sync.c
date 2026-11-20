@@ -4669,6 +4669,7 @@ NTSTATUS WINAPI NtAssociateWaitCompletionPacket( HANDLE handle, HANDLE completio
 NTSTATUS WINAPI NtCancelWaitCompletionPacket( HANDLE handle, BOOLEAN remove_signaled_packet )
 {
     unsigned int status;
+    int cancelled = 0;
 
     TRACE( "(%p, %d)\n", handle, remove_signaled_packet );
 
@@ -4677,8 +4678,12 @@ NTSTATUS WINAPI NtCancelWaitCompletionPacket( HANDLE handle, BOOLEAN remove_sign
         req->handle          = wine_server_obj_handle( handle );
         req->remove_signaled = remove_signaled_packet;
         status = wine_server_call( req );
+        cancelled = reply->cancelled;
     }
     SERVER_END_REQ;
+
+    if (status == STATUS_SUCCESS && !cancelled)
+        return STATUS_CANCELLED;
 
     return status;
 }

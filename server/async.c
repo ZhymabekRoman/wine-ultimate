@@ -322,7 +322,7 @@ void queue_async( struct async_queue *queue, struct async *async )
     grab_object( async );
     list_add_tail( &queue->queue, &async->queue_entry );
 
-    if (!async->is_system) set_fd_signaled( async->fd, 0 );
+    if (!async->is_system && !is_alpc_fd( async->fd )) set_fd_signaled( async->fd, 0 );
 }
 
 /* create an async on a given queue of a fd */
@@ -646,7 +646,7 @@ void async_set_result( struct object *obj, unsigned int status, apc_param_t tota
             }
 
             if (async->event) set_event( async->event );
-            else if (async->fd && !async->is_system) set_fd_signaled( async->fd, 1 );
+            else if (async->fd && !async->is_system && !is_alpc_fd( async->fd )) set_fd_signaled( async->fd, 1 );
         }
 
         if (!async->signaled)

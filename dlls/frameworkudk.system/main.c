@@ -1,8 +1,10 @@
 #include <stdarg.h>
+#define COBJMACROS
 #include <windef.h>
 #include <winbase.h>
 #include <winuser.h>
 #include <winerror.h>
+#include <unknwn.h>
 #include <wine/debug.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(frameworkudk);
@@ -39,11 +41,6 @@ static HRESULT WINAPI win_GetWindowFromWindowId(UINT64 window_id, HWND *hwnd)
 {
     TRACE("window_id %016llx, hwnd %p\n", window_id, hwnd);
     if (!hwnd) return E_POINTER;
-    if (!window_id)
-    {
-        *hwnd = NULL;
-        return E_INVALIDARG;
-    }
     *hwnd = (HWND)(ULONG_PTR)window_id;
     return S_OK;
 }
@@ -84,6 +81,18 @@ static HRESULT WINAPI win_GetIconIdFromIcon(HICON icon, UINT64 *icon_id)
     if (!icon_id) return E_POINTER;
     *icon_id = (UINT64)(ULONG_PTR)icon;
     return S_OK;
+}
+
+static const GUID IID_ID3D11PartnerDevice =
+    {0x26c5dc23, 0xe49c, 0x4b0a, {0x8f, 0x79, 0xe7, 0xb1, 0xac, 0x80, 0x4d, 0x32}};
+
+static HRESULT WINAPI dx_PartnerDeviceFromDevice(IUnknown *device, void **out)
+{
+    TRACE("device %p, out %p\n", device, out);
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!device) return E_INVALIDARG;
+    return IUnknown_QueryInterface(device, &IID_ID3D11PartnerDevice, out);
 }
 
 static HRESULT WINAPI win_GetIconFromIconId(UINT64 icon_id, HICON *icon)
@@ -129,6 +138,7 @@ static void init_tables(void)
     for (i = 0; i < 16; i++) table11[i] = (void *)default_stub;
     for (i = 0; i < 16; i++) table12[i] = (void *)default_stub;
 
+    table0[44] = (void *)dx_PartnerDeviceFromDevice;
     table0[47] = (void *)win_GetWindowIdFromWindow;
     table0[48] = (void *)win_GetWindowFromWindowId;
     table0[49] = (void *)win_GetDisplayIdFromMonitor;

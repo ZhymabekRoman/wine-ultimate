@@ -2892,6 +2892,187 @@ static void pkg_scan_reg_frameworks( HANDLE root_key, const WCHAR *sub_prefix, c
     NtClose( hpkgs );
 }
 
+#define PKG_DEP_MAX 64
+#define PKG_DEP_MAX_DEPTH 16
+#define PKG_NAME_MAX 512
+
+/* Read a REG_MULTI_SZ of package full names (the legacy Dependencies blob)
+ * into a caller buffer, forced closed with an empty string. */
+static BOOL nt_reg_query_multi_sz( HANDLE hkey, const WCHAR *name, WCHAR *out, DWORD cch )
+{
+    KEY_VALUE_PARTIAL_INFORMATION *info;
+    UNICODE_STRING ustr;
+    NTSTATUS status;
+    ULONG size = 0;
+    BYTE *buf;
+    BOOL ret = FALSE;
+
+    RtlInitUnicodeString( &ustr, name );
+    status = NtQueryValueKey( hkey, &ustr, KeyValuePartialInformation, NULL, 0, &size );
+    if (status && status != STATUS_BUFFER_TOO_SMALL)
+        return FALSE;
+    if (size <= FIELD_OFFSET( KEY_VALUE_PARTIAL_INFORMATION, Data ) ||
+        size > FIELD_OFFSET( KEY_VALUE_PARTIAL_INFORMATION, Data ) + cch * sizeof(WCHAR))
+        return FALSE;
+    if (!(buf = RtlAllocateHeap( GetProcessHeap(), 0, size ))) return FALSE;
+    info = (KEY_VALUE_PARTIAL_INFORMATION *)buf;
+    status = NtQueryValueKey( hkey, &ustr, KeyValuePartialInformation, buf, size, &size );
+    if (!status && info->Type == REG_MULTI_SZ && info->DataLength >= sizeof(WCHAR))
+    {
+        DWORD len = min( info->DataLength / sizeof(WCHAR), cch - 1 );
+        memcpy( out, info->Data, len * sizeof(WCHAR) );
+        out[len] = 0;
+        ret = TRUE;
+    }
+    RtlFreeHeap( GetProcessHeap(), 0, buf );
+    return ret;
+}
+
+static HANDLE reg_open_path( HANDLE root, const WCHAR *path )
+{
+    UNICODE_STRING ustr;
+    OBJECT_ATTRIBUTES attr;
+    HANDLE hkey = 0;
+
+    RtlInitUnicodeString( &ustr, path );
+    InitializeObjectAttributes( &attr, &ustr, OBJ_CASE_INSENSITIVE, root, NULL );
+    if (!NtOpenKey( &hkey, KEY_READ, &attr )) return hkey;
+    return 0;
+}
+
+static NTSTATUS reg_open_child( HANDLE parent, const WCHAR *name, HANDLE *out )
+{
+    UNICODE_STRING ustr;
+    OBJECT_ATTRIBUTES attr;
+
+    RtlInitUnicodeString( &ustr, name );
+    InitializeObjectAttributes( &attr, &ustr, OBJ_CASE_INSENSITIVE, parent, NULL );
+    return NtOpenKey( out, KEY_READ, &attr );
+}
+
+/* The deployment writes the resolved path under PackagePath (app packages,
+ * msix-install), FrameworkPath (framework registrations) or PackageRootPath. */
+static BOOL pkg_reg_read_path( HANDLE hkey, WCHAR *out, DWORD cch )
+{
+    if (nt_reg_query_sz( hkey, L"PackagePath", out, cch )) return TRUE;
+    if (nt_reg_query_sz( hkey, L"FrameworkPath", out, cch )) return TRUE;
+    return nt_reg_query_sz( hkey, L"PackageRootPath", out, cch );
+}
+
+struct pkg_dep_queue
+{
+    WCHAR (*names)[PKG_NAME_MAX]; /* enqueued full names, also the visited set */
+    BYTE *depth;                  /* graph depth of each entry */
+    SIZE_T total;                 /* entries enqueued so far */
+    SIZE_T head;                  /* next entry to expand */
+};
+
+static void pkg_dep_enqueue( struct pkg_dep_queue *q, const WCHAR *name, BYTE depth )
+{
+    SIZE_T i, len;
+
+    if (!name[0] || q->total >= PKG_DEP_MAX) return;
+    for (i = 0; i < q->total; i++)
+        if (!wcsicmp( q->names[i], name )) return;  /* cycle / duplicate guard */
+    len = wcslen( name );
+    if (len >= PKG_NAME_MAX) len = PKG_NAME_MAX - 1;
+    memcpy( q->names[q->total], name, len * sizeof(WCHAR) );
+    q->names[q->total][len] = 0;
+    q->depth[q->total] = depth;
+    q->total++;
+}
+
+/* Walk the Package Dependency Graph rooted at a package full name: for every
+ * package append its on-disk path, then expand its dependencies from both the
+ * REG_MULTI_SZ Dependencies value and the numbered Dependencies\<n>\FullName
+ * subkeys the deployment writes. Breadth-first, HKCU over HKLM per package,
+ * depth bounded, cycles broken by the visited-name set in the queue. */
+static void pkg_graph_walk( HANDLE hkcu, const WCHAR *start, WCHAR **buf, SIZE_T *cap, SIZE_T *len )
+{
+    static const WCHAR pkgs_rel[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    static const WCHAR pkgs_machine[] = L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    struct pkg_dep_queue q = {0};
+    HANDLE hpkgs[2];
+    WCHAR *deps;
+    int r;
+
+    if (!start || !start[0]) return;
+    hpkgs[0] = hkcu ? reg_open_path( hkcu, pkgs_rel ) : 0;
+    hpkgs[1] = reg_open_path( 0, pkgs_machine );
+    if (!hpkgs[0] && !hpkgs[1]) return;
+
+    q.names = RtlAllocateHeap( GetProcessHeap(), 0, PKG_DEP_MAX * PKG_NAME_MAX * sizeof(WCHAR) );
+    q.depth = RtlAllocateHeap( GetProcessHeap(), 0, PKG_DEP_MAX * sizeof(*q.depth) );
+    deps = RtlAllocateHeap( GetProcessHeap(), 0, 8192 * sizeof(WCHAR) );
+    if (q.names && q.depth && deps)
+    {
+        pkg_dep_enqueue( &q, start, 0 );
+        while (q.head < q.total)
+        {
+            const WCHAR *name = q.names[q.head];
+            BYTE depth = q.depth[q.head];
+            WCHAR path[MAX_PATH];
+            HANDLE hkey = 0, hdeps = 0;
+
+            q.head++;
+            for (r = 0; r < 2; r++)
+            {
+                if (hpkgs[r] && !reg_open_child( hpkgs[r], name, &hkey )) break;
+            }
+            if (!hkey) continue;
+
+            if (pkg_reg_read_path( hkey, path, ARRAY_SIZE(path) ) && dos_path_exists( path, TRUE ))
+            {
+                pkg_path_append_dir( buf, cap, len, path );
+            }
+
+            if (depth < PKG_DEP_MAX_DEPTH)
+            {
+                if (nt_reg_query_multi_sz( hkey, L"Dependencies", deps, 8192 ))
+                {
+                    const WCHAR *p = deps;
+                    while (*p)
+                    {
+                        pkg_dep_enqueue( &q, p, depth + 1 );
+                        p += wcslen( p ) + 1;
+                    }
+                }
+                if (!reg_open_child( hkey, L"Dependencies", &hdeps ))
+                {
+                    BYTE kbuf[512];
+                    ULONG idx = 0;
+
+                    for (;;idx++)
+                    {
+                        KEY_BASIC_INFORMATION *kinfo = (KEY_BASIC_INFORMATION *)kbuf;
+                        ULONG ret_len = 0, nlen;
+                        WCHAR subname[128], fn[PKG_NAME_MAX];
+                        HANDLE hn = 0;
+
+                        if (NtEnumerateKey( hdeps, idx, KeyBasicInformation, kbuf,
+                                            sizeof(kbuf) - sizeof(WCHAR), &ret_len ))
+                            break;
+                        nlen = kinfo->NameLength / sizeof(WCHAR);
+                        if (!nlen || nlen >= ARRAY_SIZE(subname)) continue;
+                        memcpy( subname, kinfo->Name, kinfo->NameLength );
+                        subname[nlen] = 0;
+                        if (reg_open_child( hdeps, subname, &hn )) continue;
+                        if (nt_reg_query_sz( hn, L"FullName", fn, ARRAY_SIZE(fn) ))
+                            pkg_dep_enqueue( &q, fn, depth + 1 );
+                        NtClose( hn );
+                    }
+                    NtClose( hdeps );
+                }
+            }
+            NtClose( hkey );
+        }
+    }
+    if (q.names) RtlFreeHeap( GetProcessHeap(), 0, q.names );
+    if (q.depth) RtlFreeHeap( GetProcessHeap(), 0, q.depth );
+    if (deps) RtlFreeHeap( GetProcessHeap(), 0, deps );
+    for (r = 0; r < 2; r++) if (hpkgs[r]) NtClose( hpkgs[r] );
+}
+
 static const WCHAR *get_package_load_path( void )
 {
     if (is_prefix_bootstrap) return NULL;
@@ -2901,6 +3082,7 @@ static const WCHAR *get_package_load_path( void )
 
     {
         WCHAR pkg_dir[MAX_PATH] = {0}, fw_env[MAX_PATH] = {0}, manifest_path[MAX_PATH + 32];
+        WCHAR full_name[PKG_NAME_MAX] = {0};
         UNICODE_STRING env_name, env_val;
         const WCHAR *image = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
         WCHAR *buf = NULL;
@@ -2908,6 +3090,13 @@ static const WCHAR *get_package_load_path( void )
         HANDLE hkcu = 0;
 
         RtlOpenCurrentUser( KEY_READ, &hkcu );
+
+        RtlInitUnicodeString( &env_name, L"WINE_PACKAGE_FULL_NAME" );
+        env_val.Buffer = full_name;
+        env_val.Length = 0;
+        env_val.MaximumLength = sizeof(full_name) - sizeof(WCHAR);
+        if (!RtlQueryEnvironmentVariable_U( NULL, &env_name, &env_val ) && env_val.Length)
+            full_name[env_val.Length / sizeof(WCHAR)] = 0;
 
         RtlInitUnicodeString( &env_name, L"WINE_PACKAGE_PATH" );
         env_val.Buffer = pkg_dir;
@@ -2952,7 +3141,9 @@ static const WCHAR *get_package_load_path( void )
                 InitializeObjectAttributes( &attr, &ustr, OBJ_CASE_INSENSITIVE, hkcu, NULL );
                 if (!NtOpenKey( &hkey, KEY_READ, &attr ))
                 {
-                    nt_reg_query_sz( hkey, L"PackagePath", pkg_dir, ARRAY_SIZE(pkg_dir) );
+                    if (!pkg_dir[0]) nt_reg_query_sz( hkey, L"PackagePath", pkg_dir, ARRAY_SIZE(pkg_dir) );
+                    if (!full_name[0])
+                        nt_reg_query_sz( hkey, L"PackageFullName", full_name, ARRAY_SIZE(full_name) );
                     NtClose( hkey );
                 }
             }
@@ -2964,8 +3155,28 @@ static const WCHAR *get_package_load_path( void )
                 InitializeObjectAttributes( &attr, &ustr, OBJ_CASE_INSENSITIVE, 0, NULL );
                 if (!NtOpenKey( &hkey, KEY_READ, &attr ))
                 {
-                    nt_reg_query_sz( hkey, L"PackagePath", pkg_dir, ARRAY_SIZE(pkg_dir) );
+                    if (!pkg_dir[0]) nt_reg_query_sz( hkey, L"PackagePath", pkg_dir, ARRAY_SIZE(pkg_dir) );
+                    if (!full_name[0])
+                        nt_reg_query_sz( hkey, L"PackageFullName", full_name, ARRAY_SIZE(full_name) );
                     NtClose( hkey );
+                }
+            }
+            /* unregistered images: the prefix-wide AppModel\Identity seed */
+            if (!full_name[0])
+            {
+                static const WCHAR identity_rel[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Identity";
+                static const WCHAR identity_machine[] = L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Identity";
+                HANDLE h = reg_open_path( hkcu, identity_rel );
+
+                if (h)
+                {
+                    nt_reg_query_sz( h, L"PackageFullName", full_name, ARRAY_SIZE(full_name) );
+                    NtClose( h );
+                }
+                if (!full_name[0] && (h = reg_open_path( 0, identity_machine )))
+                {
+                    nt_reg_query_sz( h, L"PackageFullName", full_name, ARRAY_SIZE(full_name) );
+                    NtClose( h );
                 }
             }
         }
@@ -3070,6 +3281,10 @@ static const WCHAR *get_package_load_path( void )
             }
         }
 
+        /* the registered dependency graph: framework packages with no env */
+        if (full_name[0])
+            pkg_graph_walk( hkcu, full_name, &buf, &cap, &len );
+
         if (hkcu) NtClose( hkcu );
         cached_pkg_load_path = buf;
     }
@@ -3111,9 +3326,9 @@ static NTSTATUS get_dll_load_path( LPCWSTR module, LPCWSTR dll_dir, ULONG safe_m
     p = append_path( p, module, mod_end - module );
     if (dll_dir) p = append_path( p, dll_dir, -1 );
     else if (!safe_mode) p = append_path( p, L".", -1 );
+    if (pkg_path) p = append_path( p, pkg_path, -1 );
     p = append_path( p, system_path, -1 );
     if (!dll_dir && safe_mode) p = append_path( p, L".", -1 );
-    if (pkg_path) p = append_path( p, pkg_path, -1 );
 
     value.Buffer = p;
     value.MaximumLength = path_len;

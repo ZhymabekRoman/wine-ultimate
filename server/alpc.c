@@ -84,6 +84,7 @@ struct alpc_message
     struct list      entry;
     unsigned int     msg_id;     /* for connect msgs: the pending-conn id */
     int              is_connect; /* 1 = connect notification */
+    int              is_reply;   /* 1 = synchronous LPC_REPLY (do not wake async/fd waiters) */
     data_size_t      data_size;  /* size of user data that follows */
     /* Handle-attribute bookkeeping: a message carrying ALPC_MESSAGE_HANDLE_
      * ATTRIBUTE has its handle duplicated into the receiving process at
@@ -763,6 +764,9 @@ static void alpc_shm_flush_single( struct alpc_port *port )
             hdr->callback_id  = sm->callback_id;
             if (sm->user_size)
                 memcpy( hdr + 1, sm->data, sm->user_size );
+            if (sm->user_size >= ALPC_USER_TYPE_OFF + 2 &&
+                *(const unsigned short *)(sm->data + ALPC_USER_TYPE_OFF) == ALPC_LPC_REPLY)
+                msg->is_reply = 1;
             list_add_tail( &port->msg_queue, &msg->entry );
         }
         sp->ring_head = (sp->ring_head + 1) % ALPC_SHM_RING_SLOTS;
@@ -987,6 +991,12 @@ static enum server_fd_type alpc_fd_get_type( struct fd *fd )
     return FD_TYPE_DEVICE;
 }
 
+int is_alpc_fd( struct fd *fd )
+{
+    struct object *user = fd ? get_fd_user( fd ) : NULL;
+    return user && user->ops == &alpc_port_ops;
+}
+
 /* A connection has two client-side handles: the communication port itself, and
  * the reserve (reverse) handle the kernel hands back in the connect reply.  They
  * are two handles of one message queue: a receive armed on either of them takes
@@ -1197,14 +1207,22 @@ static void wake_connection_waits( struct alpc_port *port )
     }
 }
 
+static int alpc_queue_has_non_reply( struct alpc_port *port )
+{
+    struct alpc_message *msg;
+    LIST_FOR_EACH_ENTRY( msg, &port->msg_queue, struct alpc_message, entry )
+        if (!msg->is_reply) return 1;
+    return 0;
+}
+
 static void update_alpc_readiness( struct alpc_port *port )
 {
     struct alpc_port *pair = alpc_port_pair( port );
-    int ready = !list_empty( &port->msg_queue );
+    int ready = alpc_queue_has_non_reply( port );
 
     if (pair)
     {
-        int pair_ready = !list_empty( &pair->msg_queue );
+        int pair_ready = alpc_queue_has_non_reply( pair );
         set_fd_signaled( pair->fd, pair_ready );
         ready |= pair_ready;
     }
@@ -1212,7 +1230,7 @@ static void update_alpc_readiness( struct alpc_port *port )
     {
         struct alpc_port *conn;
         LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-            if (conn->peer && !list_empty( &conn->peer->msg_queue ))
+            if (conn->peer && alpc_queue_has_non_reply( conn->peer ))
             {
                 ready = 1;
                 break;
@@ -1439,37 +1457,41 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
                  (msg_type == ALPC_LPC_REPLY || reply_stamped), hex );
     }
 #endif
-    alpc_shm_flush_single( peer );
-    WV2IO( "P pid=%04x ->=%04x seq=%u len=%u r=%d\n", sender_pid,
-           peer->process ? peer->process->id : 0, peer->sequence_no + 1, user_size,
-           (msg_type == ALPC_LPC_REPLY || reply_stamped) ? 1 : 0 );
-    peer->sequence_no++;
-    list_add_tail( &peer->msg_queue, &msg->entry );
-    wake_up( &peer->obj, 0 );
-    reselect_alpc_port( peer );
-    /* A message queued on a server communication port is also readable by a
-     * receive armed on the listening port that accepted this connection. */
-    if (!peer->is_server && !peer->listen_port && peer->peer && peer->peer->listen_port)
     {
-        peer->peer->listen_port->sequence_no++;
-        wake_up( &peer->peer->listen_port->obj, 0 );
-        reselect_alpc_port( peer->peer->listen_port );
-        alpc_shm_sync_port( peer->peer->listen_port );
-    }
-    /* readiness of any handle of a connection is readiness of all of them: the
-     * client keys its wake completion packets to the handle it arms the receive
-     * on, which for the server side is the listening port and for the client
-     * side may be the connection handle or its reserve handle.
-     * Synchronous replies do not fire wait completion packets because they are
-     * consumed directly by the calling thread in NtAlpcSendWaitReceivePort. */
-    {
+        const unsigned char *user_msg = (const unsigned char *)(hdr + 1) + (dup ? sizeof(struct alpc_handle_blk) : 0);
         unsigned short delivered_type = 0;
         int is_reply;
         if (user_size >= ALPC_USER_TYPE_OFF + 2)
-            delivered_type = *(const unsigned short *)((char *)(hdr + 1) + ALPC_USER_TYPE_OFF);
+            delivered_type = *(const unsigned short *)(user_msg + ALPC_USER_TYPE_OFF);
         is_reply = (msg_type == ALPC_LPC_REPLY || delivered_type == ALPC_LPC_REPLY || reply_stamped);
+        msg->is_reply = is_reply;
 
-        if (!is_reply && (!list_empty( &peer->msg_queue ) || (alpc_port_pair( peer ) && !list_empty( &alpc_port_pair( peer )->msg_queue ))))
+        alpc_shm_flush_single( peer );
+        WV2IO( "P pid=%04x ->=%04x seq=%u len=%u r=%d\n", sender_pid,
+               peer->process ? peer->process->id : 0, peer->sequence_no + 1, user_size,
+               is_reply ? 1 : 0 );
+        peer->sequence_no++;
+        list_add_tail( &peer->msg_queue, &msg->entry );
+        reselect_alpc_port( peer );
+        if (!is_reply && alpc_queue_has_non_reply( peer ))
+            wake_up( &peer->obj, 0 );
+        /* A message queued on a server communication port is also readable by a
+         * receive armed on the listening port that accepted this connection. */
+        if (!peer->is_server && !peer->listen_port && peer->peer && peer->peer->listen_port)
+        {
+            peer->peer->listen_port->sequence_no++;
+            reselect_alpc_port( peer->peer->listen_port );
+            if (!is_reply)
+                wake_up( &peer->peer->listen_port->obj, 0 );
+            alpc_shm_sync_port( peer->peer->listen_port );
+        }
+        /* readiness of any handle of a connection is readiness of all of them: the
+         * client keys its wake completion packets to the handle it arms the receive
+         * on, which for the server side is the listening port and for the client
+         * side may be the connection handle or its reserve handle.
+         * Synchronous replies do not fire wait completion packets because they are
+         * consumed directly by the calling thread in NtAlpcSendWaitReceivePort. */
+        if (!is_reply && (alpc_queue_has_non_reply( peer ) || (alpc_port_pair( peer ) && alpc_queue_has_non_reply( alpc_port_pair( peer ) ))))
             wake_connection_waits( peer );
     }
     /* the port handle becomes signaled while the message stays queued

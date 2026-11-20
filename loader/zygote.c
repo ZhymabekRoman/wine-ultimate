@@ -282,6 +282,7 @@ static void __attribute__((noreturn)) run_child( const struct zygote_request *re
 {
     char buffer[64];
     char **argv;
+    struct sigaction sa;
     nfds_t i;
     int n;
 
@@ -303,8 +304,13 @@ static void __attribute__((noreturn)) run_child( const struct zygote_request *re
         close( cwd_fd );
     }
 
-    /* reset the signals the zygote changed, like a fresh loader does */
-    signal( SIGPIPE, SIG_DFL );
+    /* reset the signals the zygote changed, like a fresh loader does;
+     * clear sa_flags so SA_NOCLDSTOP / SA_RESTART are not inherited */
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+    sigemptyset( &sa.sa_mask );
+    sigaction( SIGPIPE, &sa, NULL );
+    sigaction( SIGCHLD, &sa, NULL );
 
     apply_env_block( env_block );
     if (winedebug) setenv( "WINEDEBUG", winedebug, 1 );
@@ -554,6 +560,8 @@ int main( int argc, char *argv[] )
     void (*wine_main)( int, char ** );
     int listen_fd;
     struct pollfd *pfds;
+    struct sigaction sa;
+    sigset_t mask;
     nfds_t nfds = 1, cap = 64, i;
 
     (void)argc;
@@ -577,8 +585,19 @@ int main( int argc, char *argv[] )
 
     warm_libraries( ntdll_path );
 
-    signal( SIGPIPE, SIG_IGN );
-    signal( SIGCHLD, reap_children );
+    /* ntdll blocks a set of signals before the zygote is exec'd; unblock
+     * them so that SIGCHLD notifications for the forked children arrive */
+    sigemptyset( &mask );
+    sigprocmask( SIG_SETMASK, &mask, NULL );
+
+    sa.sa_handler = SIG_IGN;
+    sa.sa_flags = 0;
+    sigemptyset( &sa.sa_mask );
+    sigaction( SIGPIPE, &sa, NULL );
+
+    sa.sa_handler = reap_children;
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction( SIGCHLD, &sa, NULL );
 
     if ((listen_fd = create_listen_socket( sock_path )) == -1)
     {
@@ -592,7 +611,13 @@ int main( int argc, char *argv[] )
 
     for (;;)
     {
-        int ret = poll( pfds, nfds, -1 );
+        int ret;
+
+        /* sweep in case a SIGCHLD was delivered while the mask was being reset */
+        while (waitpid( -1, NULL, WNOHANG ) > 0)
+            ;
+
+        ret = poll( pfds, nfds, -1 );
         if (ret < 0)
         {
             if (errno == EINTR) continue;

@@ -377,6 +377,7 @@ static void dispatcher_queue_destroy_wake( struct dispatcher_queue *queue )
 }
 
 static const GUID IID_IMicrosoftDispatcherQueue = {0xf6ebf8fa, 0xbe1c, 0x5bf6, {0xa4, 0x67, 0x73, 0xda, 0x28, 0x73, 0x8a, 0xe8}};
+static const GUID IID_IMicrosoftUiDispatcherQueue2 = {0x0cf48751, 0xf1ac, 0x59b8, {0xba, 0x52, 0x6c, 0xe7, 0xa1, 0x44, 0x4d, 0x6f}};
 /* Microsoft.UI.Dispatching.IDispatcherQueue3 (Windows App SDK generated IID). */
 static const GUID IID_IMicrosoftUiDispatcherQueue3 = {0x14a7a175, 0x5c27, 0x5a35, {0xb0, 0x79, 0x21, 0x96, 0x0c, 0xf7, 0x64, 0xa8}};
 static const GUID IID_IMicrosoftUiDispatcherQueueInternal = {0x7f3c9b24, 0xefc1, 0x53a2, {0xa2, 0xa9, 0x88, 0x28, 0x0f, 0x24, 0x1a, 0xc0}};
@@ -400,7 +401,8 @@ static HRESULT WINAPI dispatcher_queue_QueryInterface( IDispatcherQueue *iface, 
         IDispatcherQueue_AddRef( *out );
         return S_OK;
     }
-    else if (IsEqualGUID( iid, &IID_IDispatcherQueue2 ))
+    else if (IsEqualGUID( iid, &IID_IDispatcherQueue2 ) ||
+             IsEqualGUID( iid, &IID_IMicrosoftUiDispatcherQueue2 ))
     {
         *out = &impl->IDispatcherQueue2_iface;
         IDispatcherQueue2_AddRef( *out );
@@ -1738,6 +1740,7 @@ static HRESULT WINAPI dispatcher_queue_controller_statics_CreateOnDedicatedThrea
 static HRESULT WINAPI dispatcher_queue_controller_statics_CreateOnCurrentThread( IDispatcherQueueControllerStatics *iface, IDispatcherQueueController **result )
 {
     DispatcherQueueOptions opts = { sizeof(opts), DQTYPE_THREAD_CURRENT, DQTAT_COM_NONE };
+    TRACE( "CreateOnCurrentThread result %p, tid %lu.\n", result, GetCurrentThreadId() );
     return CreateDispatcherQueueController( opts, (PDISPATCHERQUEUECONTROLLER *)result );
 }
 
@@ -1818,6 +1821,7 @@ static HRESULT WINAPI dispatcher_queue_statics_GetForCurrentThread( void *iface,
     }
     *result = &queue->IDispatcherQueue_iface;
     IDispatcherQueue_AddRef( *result );
+    TRACE( "statics GetForCurrentThread returning queue %p for tid %lu.\n", *result, GetCurrentThreadId() );
     return S_OK;
 }
 
@@ -1870,6 +1874,7 @@ HRESULT WINAPI GetDispatcherQueueForCurrentThread( IDispatcherQueue **dispatcher
     }
     *dispatcher_queue = &queue->IDispatcherQueue_iface;
     IDispatcherQueue_AddRef( *dispatcher_queue );
+    TRACE( "returning queue %p for tid %lu.\n", *dispatcher_queue, GetCurrentThreadId() );
     return S_OK;
 }
 

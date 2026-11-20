@@ -320,6 +320,120 @@ static void scan_appx_env_paths_locked( const WCHAR *env_name )
     free( val );
 }
 
+static BOOL read_reg_sz_any_root( const WCHAR *subkey, const WCHAR *value, WCHAR *out, DWORD out_chars )
+{
+    static const HKEY roots[2] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    DWORD r;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        HKEY hkey;
+        if (!RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey ))
+        {
+            DWORD type = 0, cb = out_chars * sizeof(WCHAR);
+            LSTATUS st = RegQueryValueExW( hkey, value, NULL, &type, (BYTE *)out, &cb );
+            RegCloseKey( hkey );
+            if (!st && (type == REG_SZ || type == REG_EXPAND_SZ) && out[0])
+            {
+                out[out_chars - 1] = 0;
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
+static void scan_appmodel_pkg_dir_locked( const WCHAR *pkg_full_name )
+{
+    WCHAR key[512], path[MAX_PATH];
+
+    if (!pkg_full_name || !pkg_full_name[0]) return;
+    if (swprintf( key, ARRAY_SIZE(key),
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\%s", pkg_full_name ) <= 0)
+        return;
+
+    if (read_reg_sz_any_root( key, L"PackagePath", path, ARRAY_SIZE(path) )
+            || read_reg_sz_any_root( key, L"PackageRootPath", path, ARRAY_SIZE(path) ))
+        scan_appx_manifest_file( path );
+}
+
+static void scan_appmodel_registered_paths_locked( void )
+{
+    static const HKEY roots[2] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR exe_buf[MAX_PATH], key[512], pkg_full[256], pkg_path[MAX_PATH];
+    const WCHAR *base;
+    DWORD len, r;
+
+    len = GetModuleFileNameW( NULL, exe_buf, ARRAY_SIZE(exe_buf) );
+    if (!len || len >= ARRAY_SIZE(exe_buf)) return;
+    base = wcsrchr( exe_buf, '\\' );
+    base = base ? base + 1 : exe_buf;
+
+    if (swprintf( key, ARRAY_SIZE(key),
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Exes\\%s", base ) <= 0)
+        return;
+
+    if (read_reg_sz_any_root( key, L"PackagePath", pkg_path, ARRAY_SIZE(pkg_path) ))
+        scan_appx_manifest_file( pkg_path );
+
+    if (!read_reg_sz_any_root( key, L"PackageFullName", pkg_full, ARRAY_SIZE(pkg_full) ))
+        return;
+
+    scan_appmodel_pkg_dir_locked( pkg_full );
+
+    if (swprintf( key, ARRAY_SIZE(key),
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\%s", pkg_full ) <= 0)
+        return;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        HKEY hpkg, hdeps;
+        if (RegOpenKeyExW( roots[r], key, 0, KEY_READ, &hpkg ))
+            continue;
+
+        {
+            WCHAR multi[4096];
+            DWORD type = 0, cb = sizeof(multi);
+            if (!RegQueryValueExW( hpkg, L"Dependencies", NULL, &type, (BYTE *)multi, &cb )
+                    && type == REG_MULTI_SZ)
+            {
+                const WCHAR *p = multi;
+                while (*p)
+                {
+                    scan_appmodel_pkg_dir_locked( p );
+                    p += wcslen( p ) + 1;
+                }
+            }
+        }
+
+        if (!RegOpenKeyExW( hpkg, L"Dependencies", 0, KEY_READ, &hdeps ))
+        {
+            WCHAR sub[128], dep_full[256];
+            DWORD idx;
+            for (idx = 0; ; idx++)
+            {
+                DWORD sub_len = ARRAY_SIZE(sub);
+                HKEY hsub;
+                if (RegEnumKeyExW( hdeps, idx, sub, &sub_len, NULL, NULL, NULL, NULL ))
+                    break;
+                if (!RegOpenKeyExW( hdeps, sub, 0, KEY_READ, &hsub ))
+                {
+                    DWORD type = 0, cb = sizeof(dep_full);
+                    if (!RegQueryValueExW( hsub, L"FullName", NULL, &type, (BYTE *)dep_full, &cb )
+                            && (type == REG_SZ || type == REG_EXPAND_SZ) && dep_full[0])
+                    {
+                        dep_full[ARRAY_SIZE(dep_full) - 1] = 0;
+                        scan_appmodel_pkg_dir_locked( dep_full );
+                    }
+                    RegCloseKey( hsub );
+                }
+            }
+            RegCloseKey( hdeps );
+        }
+        RegCloseKey( hpkg );
+    }
+}
+
 /* True for the WinUI XAML surface (Microsoft.UI.Xaml and Microsoft.UI.Xaml.*),
  * the class family a WinUI 3 app re-implements in its own Microsoft.UI.Xaml.dll
  * and a WinUI 2.8 app leaves on Wine's UWP windows.ui.xaml.dll.  Used to order
@@ -328,7 +442,9 @@ static void scan_appx_env_paths_locked( const WCHAR *env_name )
 static BOOL is_microsoft_ui_xaml_class( const WCHAR *classid )
 {
     static const WCHAR prefix[] = L"Microsoft.UI.Xaml";
-    return !wcsncmp( classid, prefix, ARRAY_SIZE( prefix ) - 1 );
+    static const WCHAR disp_prefix[] = L"Microsoft.UI.Dispatching.";
+    return !wcsncmp( classid, prefix, ARRAY_SIZE( prefix ) - 1 ) ||
+           !wcsncmp( classid, disp_prefix, ARRAY_SIZE( disp_prefix ) - 1 );
 }
 
 /* WhatsApp (WindowsAppRuntime 1.6) relies on Wine's windows.ui.xaml.dll
@@ -378,6 +494,16 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         { L"Microsoft.UI.Xaml.Controls.Page",                           L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.Grid",                           L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.Canvas",                         L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Panel",                          L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Control",                        L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.FrameworkElement",                        L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.UIElement",                               L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Hosting.ElementCompositionPreview",       L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Content.ContentExternalOutputLink",            L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Media.CompositionTarget",                 L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Markup.XamlReader",                       L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.RoutedEventArgs",                         L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Media.SolidColorBrush",                   L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.StackPanel",                     L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.Border",                         L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.RowDefinition",                  L"windows.ui.xaml.dll" },
@@ -387,7 +513,6 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         { L"Microsoft.UI.Xaml.Controls.ContentControl",                 L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.Image",                          L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.SwapChainPanel",                 L"windows.ui.xaml.dll" },
-        { L"Microsoft.UI.Xaml.Controls.WebView2",                       L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.UserControl",                    L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.Button",                         L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.TextBlock",                      L"windows.ui.xaml.dll" },
@@ -443,6 +568,7 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
     scan_appx_env_paths_locked( L"WINE_FRAMEWORK_PACKAGE_PATH" );
     scan_appx_env_paths_locked( L"WINEPATH" );
     scan_appx_env_paths_locked( L"PATH" );
+    scan_appmodel_registered_paths_locked();
 
     if (defer_xaml)
         for (i = 0; i < ARRAY_SIZE(static_exact_routes); i++)
@@ -732,6 +858,16 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Page") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Grid") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Canvas") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Panel") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Control") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.FrameworkElement") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.UIElement") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Hosting.ElementCompositionPreview") ||
+        !wcscmp(classid, L"Microsoft.UI.Content.ContentExternalOutputLink") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Media.CompositionTarget") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Markup.XamlReader") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.RoutedEventArgs") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Media.SolidColorBrush") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.StackPanel") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Border") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.RowDefinition") ||
@@ -741,7 +877,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.ContentControl") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Image") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.SwapChainPanel") ||
-        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.WebView2") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.UserControl") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Button") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.TextBlock") ||
@@ -838,14 +973,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * side-by-side by the app.  It is resolved through the ActivatableClassId\DllPath
      * registry mapping (absolute path) below, so that the server loads regardless of
      * the activating process's own application directory. */
-    /* Route CoreWebView2Environment to windows.ui.xaml.dll so the app's
-     * CreateWithOptionsAsync shares the single EmbeddedBrowserWebView instance
-     * owned by wv2_start_browser instead of loading a colliding second one. */
-    if (!wcscmp(classid, L"Microsoft.Web.WebView2.Core.CoreWebView2Environment"))
-    {
-        *out = wcsdup(L"windows.ui.xaml.dll");
-        return S_OK;
-    }
 
     if (!wcsncmp(classid, L"Windows.System.Threading.", 25))
     {
@@ -1638,6 +1765,12 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
     }
 
     if (!(*module = LoadLibraryW(library)))
+    {
+        const WCHAR *base = wcsrchr(library, '\\');
+        if (base && base[1])
+            *module = LoadLibraryW(base + 1);
+    }
+    if (!*module)
     {
         ERR("Failed to load module %s\n", debugstr_w(library));
         hr = HRESULT_FROM_WIN32(GetLastError());
@@ -3496,6 +3629,15 @@ HRESULT WINAPI RoGetErrorReportingFlags(UINT32 *flags)
 
     *flags = error_reporting_flags;
     return S_OK;
+}
+
+/***********************************************************************
+ *      IsErrorPropagationEnabled (combase.@)
+ */
+BOOL WINAPI IsErrorPropagationEnabled(void)
+{
+    TRACE("()\n");
+    return (error_reporting_flags & RO_ERROR_REPORTING_SUPPRESSSETERRORINFO) == 0;
 }
 
 
