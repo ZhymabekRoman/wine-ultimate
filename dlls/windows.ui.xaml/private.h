@@ -223,6 +223,7 @@ struct xaml_pointer_info
 
 IPointerPoint *xaml_pointer_point_create( const struct xaml_pointer_info *info, float rel_x, float rel_y );
 __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *xaml_core_pointer_args_create( const struct xaml_pointer_info *info );
+void uwp_ciis_dispatch_pointer_event( enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info );
 BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info,
                               int width, int height, IInspectable *root_content );
 void xaml_winui_fire_size_changed( float old_w, float old_h, float new_w, float new_h );

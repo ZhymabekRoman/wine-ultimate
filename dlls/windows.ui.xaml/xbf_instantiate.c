@@ -1038,6 +1038,16 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                     }
                     else if (last_popped.raw &&
                              last_popped.kind == UWP_RD_OBJ &&
+                             ctx && pid < ctx->prop_cnt &&
+                             !wcscmp( ctx->props[pid].name, L"Pane" ))
+                    {
+                        if (parent_el->pane) IInspectable_Release( parent_el->pane );
+                        parent_el->pane = last_popped.raw;
+                        IInspectable_AddRef( last_popped.raw );
+                        if (last_popped.el) last_popped.el->parent = parent_el;
+                    }
+                    else if (last_popped.raw &&
+                             last_popped.kind == UWP_RD_OBJ &&
                              (!last_popped.el ||
                               (last_popped.el->kind != UWP_KIND_STYLE &&
                                last_popped.el->kind != UWP_KIND_BRUSH &&

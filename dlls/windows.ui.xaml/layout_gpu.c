@@ -900,7 +900,18 @@ static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *prop
     return out[0] != 0;
 }
 
+static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el );
+
 static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
+{
+    static int depth = 0;
+    if (!el || depth >= 48) return;
+    depth++;
+    uwp_gpu_paint_element_inner( ctx, el );
+    depth--;
+}
+
+static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     COLORREF surface_bg = g_paint_page_bg;
     TRACE( "paint-enter %s (%s) bounds=%d vis=%u kids=%p content=%p\n",

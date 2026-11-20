@@ -998,6 +998,15 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     if (child_el) child_el->parent = parent_el;
                 }
                 else if (child_raw && op->sv_kind == UWP_RD_OBJ &&
+                         op->pid < hdr->prop_cnt &&
+                         !wcscmp( fake_ctx.props[op->pid].name, L"Pane" ))
+                {
+                    if (parent_el->pane) IInspectable_Release( parent_el->pane );
+                    parent_el->pane = child_raw;
+                    IInspectable_AddRef( child_raw );
+                    if (child_el) child_el->parent = parent_el;
+                }
+                else if (child_raw && op->sv_kind == UWP_RD_OBJ &&
                          (!child_el || (child_el->kind != UWP_KIND_STYLE &&
                                         child_el->kind != UWP_KIND_BRUSH &&
                                         child_el->kind != UWP_KIND_COLOR)) &&

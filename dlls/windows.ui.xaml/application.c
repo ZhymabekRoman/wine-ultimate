@@ -5111,8 +5111,20 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
 
     if (msg == WM_TIMER && wparam == XAML_SCP_DIRTY_TIMER_ID)
     {
-        if (g_active_scp_swapchain && InterlockedCompareExchange( &g_xaml_window_dirty, 0, 0 ))
-            xaml_window_present( &global_xaml_window );
+        static int scp_ticks = 0;
+        if (g_active_scp_swapchain)
+        {
+            scp_ticks++;
+            if (scp_ticks == 15 && global_xaml_window.content)
+            {
+                extern void uwp_debug_dump_root( IInspectable *root );
+                ERR( "=== EDITORPAGE TREE DUMP ===\n" );
+                uwp_debug_dump_root( global_xaml_window.content );
+                ERR( "=== END EDITORPAGE TREE DUMP ===\n" );
+            }
+            if (InterlockedCompareExchange( &g_xaml_window_dirty, 0, 0 ))
+                xaml_window_present( &global_xaml_window );
+        }
         return 0;
     }
     if (msg == WM_APP_WV2_START)
@@ -5281,6 +5293,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_MOUSEMOVE)
                 btn_handled = uwp_handle_mouse_input( top, msg, pt.x, pt.y, rc.right, rc.bottom, global_xaml_window.content );
         }
+        if (!btn_handled && g_active_scp_swapchain)
+            uwp_ciis_dispatch_pointer_event( kind, &info );
 
         if (btn_handled || (tree_routed && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)))
         {

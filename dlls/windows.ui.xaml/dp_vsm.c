@@ -2517,11 +2517,13 @@ static void uwp_vsm_transition_group( struct uwp_element *scope, struct uwp_vsm_
 
 void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h )
 {
+    static int vsm_depth = 0;
     int g, s, i, j;
     unsigned int k;
-    if (!el) return;
+    if (!el || vsm_depth >= 64) return;
     if (el->vsm_eval_valid && el->vsm_eval_width == win_w && el->vsm_eval_height == win_h)
         return;
+    vsm_depth++;
 
     el->vsm_eval_width = win_w;
     el->vsm_eval_height = win_h;
@@ -2595,6 +2597,7 @@ void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h )
             if (ch && ch != el) uwp_vsm_evaluate_tree( ch, win_w, win_h );
         }
     }
+    vsm_depth--;
 }
 
 static BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name )

@@ -362,6 +362,7 @@ struct uwp_element
     struct uwp_element *parent;
     struct uwp_element *owner_component;
     IInspectable *content;       /* ContentControl/UserControl/Page/Border/ScrollViewer child */
+    IInspectable *pane;          /* SplitView.Pane */
     IInspectable *context_flyout; /* UIElement.ContextFlyout */
     IInspectable *flyout;         /* Button.Flyout */
     IInspectable *children_coll; /* Panel.Children */

@@ -5680,10 +5680,9 @@ static void uwp_fire_evc_one( struct uwp_element *impl, IInspectable *handler )
     args->y = 0.0f;
     args->w = impl->actual_w > 10.0 ? (float)impl->actual_w : 960.0f;
     args->h = impl->actual_h > 10.0 ? (float)impl->actual_h : 650.0f;
-    sender = &impl->IFrameworkElement_iface;
-    if (wcsstr( impl->class_name, L"ItemsRepeater" ))
-        WARN( "EVC_BEFORE %s (%s) h=%p sender=%p rect=(%.0f,%.0f,%.0f,%.0f)\n",
-              debugstr_w(impl->class_name), debugstr_w(impl->name), h, sender, args->x, args->y, args->w, args->h );
+    sender = impl->outer ? impl->outer : &impl->IFrameworkElement_iface;
+    WARN( "EVC_BEFORE %s (%s) h=%p sender=%p rect=(%.0f,%.0f,%.0f,%.0f)\n",
+          debugstr_w(impl->class_name), debugstr_w(impl->name), h, sender, args->x, args->y, args->w, args->h );
     __TRY
     {
         h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
@@ -5693,8 +5692,7 @@ static void uwp_fire_evc_one( struct uwp_element *impl, IInspectable *handler )
         WARN( "EVC_EXCEPT %s (%s)\n", debugstr_w(impl->class_name), debugstr_w(impl->name) );
     }
     __ENDTRY;
-    if (wcsstr( impl->class_name, L"ItemsRepeater" ))
-        WARN( "EVC_AFTER %s (%s)\n", debugstr_w(impl->class_name), debugstr_w(impl->name) );
+    WARN( "EVC_AFTER %s (%s)\n", debugstr_w(impl->class_name), debugstr_w(impl->name) );
     IInspectable_Release( &args->IInspectable_iface );
 }
 
@@ -5724,8 +5722,7 @@ static HRESULT WINAPI uwp_fe7_add_EffectiveViewportChanged( IInspectable *iface,
         tok->value = impl->evc_cnt + 1;
     if (handler && impl->evc_cnt < (int)ARRAY_SIZE(impl->evc_handlers))
     {
-        if (wcsstr( impl->class_name, L"ItemsRepeater" ))
-            WARN( "EVC_ADD %s (%s) h=%p tok=%d\n", debugstr_w(impl->class_name), debugstr_w(impl->name), handler, impl->evc_cnt + 1 );
+        WARN( "EVC_ADD %s (%s) h=%p tok=%d\n", debugstr_w(impl->class_name), debugstr_w(impl->name), handler, impl->evc_cnt + 1 );
         impl->evc_handlers[impl->evc_cnt++] = (IInspectable *)handler;
         IInspectable_AddRef( (IInspectable *)handler );
         impl->evc_fired = FALSE;
@@ -5789,6 +5786,9 @@ static const GUID IID_ICorePointerInputSource_UWP =
 static const GUID IID_ICorePointerInputSource2_UWP =
     { 0xd70370ba, 0x1953, 0x4271, { 0xb8, 0x65, 0x72, 0x77, 0x0c, 0x92, 0x7d, 0x03 } };
 
+#define CIIS_MAX_HANDLERS 16
+#define CIIS_MAX_SOURCES  16
+
 struct core_ind_input_source
 {
     const void **lpVtbl_base;
@@ -5797,7 +5797,15 @@ struct core_ind_input_source
     LONG ref;
     LONG next_token;
     boolean input_enabled;
+    boolean has_capture;
+    float last_x;
+    float last_y;
+    void *handlers[7][CIIS_MAX_HANDLERS];
+    INT64 tokens[7][CIIS_MAX_HANDLERS];
 };
+
+static CRITICAL_SECTION g_ciis_cs = { NULL, -1, 0, 0, 0, 0 };
+static struct core_ind_input_source *g_ciis_sources[CIIS_MAX_SOURCES];
 
 static inline struct core_ind_input_source *ciis_from_base( void *iface )
 { return CONTAINING_RECORD( iface, struct core_ind_input_source, lpVtbl_base ); }
@@ -5838,7 +5846,18 @@ static ULONG WINAPI ciis_Release( void *iface )
 {
     struct core_ind_input_source *impl = ciis_from_base( iface );
     ULONG r = InterlockedDecrement( &impl->ref );
-    if (!r) free( impl );
+    if (!r)
+    {
+        int i, k;
+        EnterCriticalSection( &g_ciis_cs );
+        for (i = 0; i < CIIS_MAX_SOURCES; i++)
+            if (g_ciis_sources[i] == impl) g_ciis_sources[i] = NULL;
+        LeaveCriticalSection( &g_ciis_cs );
+        for (k = 0; k < 7; k++)
+            for (i = 0; i < CIIS_MAX_HANDLERS; i++)
+                if (impl->handlers[k][i]) IUnknown_Release( (IUnknown *)impl->handlers[k][i] );
+        free( impl );
+    }
     return r;
 }
 static HRESULT WINAPI ciis_GetIids( void *iface, ULONG *cnt, IID **iids )
@@ -5865,6 +5884,132 @@ static HRESULT WINAPI ciis_event_add( void *iface, void *handler, EventRegistrat
 static HRESULT WINAPI ciis_event_remove( void *iface, EventRegistrationToken token )
 { return S_OK; }
 
+static HRESULT ciis_ptr_add_kind( void *iface, int kind, void *handler, EventRegistrationToken *token )
+{
+    struct core_ind_input_source *impl = ciis_from_ptr( iface );
+    int i;
+    if (!handler) return E_POINTER;
+    EnterCriticalSection( &g_ciis_cs );
+    for (i = 0; i < CIIS_MAX_HANDLERS; i++)
+    {
+        if (!impl->handlers[kind][i])
+        {
+            INT64 tok = InterlockedIncrement( &impl->next_token );
+            IUnknown_AddRef( (IUnknown *)handler );
+            impl->handlers[kind][i] = handler;
+            impl->tokens[kind][i] = tok;
+            if (token) token->value = tok;
+            LeaveCriticalSection( &g_ciis_cs );
+            ERR( "ciis_ptr_add_kind kind=%d handler=%p tok=%lld\n", kind, handler, (long long)tok );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &g_ciis_cs );
+    return E_OUTOFMEMORY;
+}
+
+static HRESULT ciis_ptr_remove_kind( void *iface, int kind, EventRegistrationToken token )
+{
+    struct core_ind_input_source *impl = ciis_from_ptr( iface );
+    int i;
+    EnterCriticalSection( &g_ciis_cs );
+    for (i = 0; i < CIIS_MAX_HANDLERS; i++)
+    {
+        if (impl->handlers[kind][i] && impl->tokens[kind][i] == token.value)
+        {
+            void *h = impl->handlers[kind][i];
+            impl->handlers[kind][i] = NULL;
+            impl->tokens[kind][i] = 0;
+            LeaveCriticalSection( &g_ciis_cs );
+            IUnknown_Release( (IUnknown *)h );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &g_ciis_cs );
+    return S_OK;
+}
+
+#define CIIS_PTR_EV( name, kind ) \
+static HRESULT WINAPI ciis_add_##name( void *iface, void *h, EventRegistrationToken *t ) \
+{ return ciis_ptr_add_kind( iface, kind, h, t ); } \
+static HRESULT WINAPI ciis_remove_##name( void *iface, EventRegistrationToken t ) \
+{ return ciis_ptr_remove_kind( iface, kind, t ); }
+
+CIIS_PTR_EV( PointerPressed,      XAML_PTR_PRESSED )
+CIIS_PTR_EV( PointerMoved,        XAML_PTR_MOVED )
+CIIS_PTR_EV( PointerReleased,     XAML_PTR_RELEASED )
+CIIS_PTR_EV( PointerWheelChanged, XAML_PTR_WHEEL )
+CIIS_PTR_EV( PointerEntered,      XAML_PTR_ENTERED )
+CIIS_PTR_EV( PointerExited,       XAML_PTR_EXITED )
+CIIS_PTR_EV( PointerCaptureLost,  XAML_PTR_CAPTURE_LOST )
+
+void uwp_ciis_dispatch_pointer_event( enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info )
+{
+    struct core_ind_input_source *srcs[CIIS_MAX_SOURCES];
+    void *handlers[CIIS_MAX_HANDLERS];
+    int n_srcs = 0, i, k;
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args = NULL;
+
+    if ((unsigned int)kind >= 7 || !info) return;
+
+    EnterCriticalSection( &g_ciis_cs );
+    for (i = 0; i < CIIS_MAX_SOURCES; i++)
+    {
+        if (g_ciis_sources[i] && g_ciis_sources[i]->input_enabled)
+        {
+            InterlockedIncrement( &g_ciis_sources[i]->ref );
+            srcs[n_srcs++] = g_ciis_sources[i];
+        }
+    }
+    LeaveCriticalSection( &g_ciis_cs );
+
+    if (!n_srcs) return;
+    if (kind == XAML_PTR_PRESSED || kind == XAML_PTR_WHEEL)
+        ERR( "uwp_ciis_dispatch_pointer_event kind=%d pos=(%.1f,%.1f) R=%d L=%d wheel=%d srcs=%d\n",
+             kind, info->x, info->y, info->is_right, info->is_left, info->wheel_delta, n_srcs );
+    args = xaml_core_pointer_args_create( info );
+    if (!args)
+    {
+        for (i = 0; i < n_srcs; i++) ciis_Release( &srcs[i]->lpVtbl_base );
+        return;
+    }
+
+    for (i = 0; i < n_srcs; i++)
+    {
+        struct core_ind_input_source *src = srcs[i];
+        int n_h = 0;
+        src->last_x = info->x;
+        src->last_y = info->y;
+        EnterCriticalSection( &g_ciis_cs );
+        for (k = 0; k < CIIS_MAX_HANDLERS; k++)
+        {
+            if (src->handlers[kind][k])
+            {
+                IUnknown_AddRef( (IUnknown *)src->handlers[kind][k] );
+                handlers[n_h++] = src->handlers[kind][k];
+            }
+        }
+        LeaveCriticalSection( &g_ciis_cs );
+        for (k = 0; k < n_h; k++)
+        {
+            typedef HRESULT (WINAPI *invoke_fn)( void *iface, void *sender, void *args );
+            void ***vtbl = (void ***)handlers[k];
+            invoke_fn fn = (invoke_fn)((*vtbl)[3]);
+            __TRY
+            {
+                fn( handlers[k], &src->lpVtbl_ptr, args );
+            }
+            __EXCEPT_ALL
+            {
+            }
+            __ENDTRY;
+            IUnknown_Release( (IUnknown *)handlers[k] );
+        }
+        ciis_Release( &src->lpVtbl_base );
+    }
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_Release( args );
+}
+
 static const void *ciis_base_vtbl[] =
 {
     ciis_QueryInterface,
@@ -5886,11 +6031,18 @@ static ULONG WINAPI ciis_ptr_AddRef( void *iface )
 { return ciis_AddRef( &ciis_from_ptr( iface )->lpVtbl_base ); }
 static ULONG WINAPI ciis_ptr_Release( void *iface )
 { return ciis_Release( &ciis_from_ptr( iface )->lpVtbl_base ); }
-static HRESULT WINAPI ciis_ptr_noop( void *iface ) { return S_OK; }
+static HRESULT WINAPI ciis_ptr_ReleaseCapture( void *iface )
+{ ciis_from_ptr( iface )->has_capture = FALSE; return S_OK; }
+static HRESULT WINAPI ciis_ptr_SetCapture( void *iface )
+{ ciis_from_ptr( iface )->has_capture = TRUE; return S_OK; }
 static HRESULT WINAPI ciis_ptr_get_HasCapture( void *iface, boolean *val )
-{ if (val) *val = FALSE; return S_OK; }
+{ if (val) *val = ciis_from_ptr( iface )->has_capture; return S_OK; }
 static HRESULT WINAPI ciis_ptr_get_PointerPosition( void *iface, Point *pt )
-{ if (pt) { pt->X = 0.0f; pt->Y = 0.0f; } return S_OK; }
+{
+    struct core_ind_input_source *impl = ciis_from_ptr( iface );
+    if (pt) { pt->X = impl->last_x; pt->Y = impl->last_y; }
+    return S_OK;
+}
 static HRESULT WINAPI ciis_ptr_get_PointerCursor( void *iface, void **out )
 { if (out) *out = NULL; return S_OK; }
 static HRESULT WINAPI ciis_ptr_put_PointerCursor( void *iface, void *cursor )
@@ -5904,26 +6056,26 @@ static const void *ciis_ptr_vtbl[] =
     ciis_GetIids,
     ciis_GetRuntimeClassName,
     ciis_GetTrustLevel,
-    ciis_ptr_noop,                /* 6: ReleasePointerCapture */
-    ciis_ptr_noop,                /* 7: SetPointerCapture */
+    ciis_ptr_ReleaseCapture,      /* 6: ReleasePointerCapture */
+    ciis_ptr_SetCapture,          /* 7: SetPointerCapture */
     ciis_ptr_get_HasCapture,      /* 8: get_HasCapture */
     ciis_ptr_get_PointerPosition, /* 9: get_PointerPosition */
     ciis_ptr_get_PointerCursor,   /* 10: get_PointerCursor */
     ciis_ptr_put_PointerCursor,   /* 11: put_PointerCursor */
-    ciis_event_add,               /* 12: add_PointerCaptureLost */
-    ciis_event_remove,            /* 13: remove_PointerCaptureLost */
-    ciis_event_add,               /* 14: add_PointerEntered */
-    ciis_event_remove,            /* 15: remove_PointerEntered */
-    ciis_event_add,               /* 16: add_PointerExited */
-    ciis_event_remove,            /* 17: remove_PointerExited */
-    ciis_event_add,               /* 18: add_PointerMoved */
-    ciis_event_remove,            /* 19: remove_PointerMoved */
-    ciis_event_add,               /* 20: add_PointerPressed */
-    ciis_event_remove,            /* 21: remove_PointerPressed */
-    ciis_event_add,               /* 22: add_PointerReleased */
-    ciis_event_remove,            /* 23: remove_PointerReleased */
-    ciis_event_add,               /* 24: add_PointerWheelChanged */
-    ciis_event_remove,            /* 25: remove_PointerWheelChanged */
+    ciis_add_PointerCaptureLost,      /* 12: add_PointerCaptureLost */
+    ciis_remove_PointerCaptureLost,   /* 13: remove_PointerCaptureLost */
+    ciis_add_PointerEntered,          /* 14: add_PointerEntered */
+    ciis_remove_PointerEntered,       /* 15: remove_PointerEntered */
+    ciis_add_PointerExited,           /* 16: add_PointerExited */
+    ciis_remove_PointerExited,        /* 17: remove_PointerExited */
+    ciis_add_PointerMoved,            /* 18: add_PointerMoved */
+    ciis_remove_PointerMoved,         /* 19: remove_PointerMoved */
+    ciis_add_PointerPressed,          /* 20: add_PointerPressed */
+    ciis_remove_PointerPressed,       /* 21: remove_PointerPressed */
+    ciis_add_PointerReleased,         /* 22: add_PointerReleased */
+    ciis_remove_PointerReleased,      /* 23: remove_PointerReleased */
+    ciis_add_PointerWheelChanged,     /* 24: add_PointerWheelChanged */
+    ciis_remove_PointerWheelChanged,  /* 25: remove_PointerWheelChanged */
 };
 
 static HRESULT WINAPI ciis_ptr2_QI( void *iface, REFIID iid, void **out )
@@ -5933,7 +6085,7 @@ static ULONG WINAPI ciis_ptr2_AddRef( void *iface )
 static ULONG WINAPI ciis_ptr2_Release( void *iface )
 { return ciis_Release( &ciis_from_ptr2( iface )->lpVtbl_base ); }
 static HRESULT WINAPI ciis_ptr2_get_DispatcherQueue( void *iface, void **out )
-{ if (out) *out = NULL; return S_OK; }
+{ return uwp_do_get_DispatcherQueue( NULL, out ); }
 
 static const void *ciis_ptr2_vtbl[] =
 {
@@ -5949,7 +6101,8 @@ static const void *ciis_ptr2_vtbl[] =
 static HRESULT WINAPI uwp_scp_CreateCoreIndependentInputSource( void *iface, UINT32 device_types, void **out )
 {
     struct core_ind_input_source *src;
-    TRACE( "uwp_scp_CreateCoreIndependentInputSource dev=%#x\n", device_types );
+    int i;
+    ERR( "uwp_scp_CreateCoreIndependentInputSource dev=%#x\n", device_types );
     if (!out) return E_POINTER;
     if (!(src = calloc( 1, sizeof(*src) ))) return E_OUTOFMEMORY;
     src->lpVtbl_base = ciis_base_vtbl;
@@ -5957,6 +6110,16 @@ static HRESULT WINAPI uwp_scp_CreateCoreIndependentInputSource( void *iface, UIN
     src->lpVtbl_ptr2 = ciis_ptr2_vtbl;
     src->ref = 1;
     src->input_enabled = TRUE;
+    EnterCriticalSection( &g_ciis_cs );
+    for (i = 0; i < CIIS_MAX_SOURCES; i++)
+    {
+        if (!g_ciis_sources[i])
+        {
+            g_ciis_sources[i] = src;
+            break;
+        }
+    }
+    LeaveCriticalSection( &g_ciis_cs );
     *out = &src->lpVtbl_base;
     return S_OK;
 }

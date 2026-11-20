@@ -2386,6 +2386,70 @@ static HRESULT WINAPI uwp_sv_get_DisplayMode( void *iface, INT32 *val )
     return S_OK;
 }
 
+static BOOL uwp_sv_would_cycle( struct uwp_element *parent, struct uwp_element *child )
+{
+    int guard = 0;
+    struct uwp_element *cur = parent;
+    if (!child || !parent) return FALSE;
+    while (cur && guard++ < 64)
+    {
+        if (cur == child) return TRUE;
+        cur = cur->parent;
+    }
+    return guard >= 64;
+}
+
+static HRESULT WINAPI uwp_sv_get_Content( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->content : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_put_Content( void *iface, void *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_element *ch;
+    if (!impl) return S_OK;
+    ch = uwp_elem_from_any( val );
+    ERR( "uwp_sv_put_Content impl=%p(%s) val=%p(%s)\n",
+         impl, debugstr_w(impl->class_name), val, ch ? debugstr_w(ch->class_name) : "?" );
+    if (ch && uwp_sv_would_cycle( impl, ch ))
+    {
+        WARN( "uwp_sv_put_Content: cycle detected, skipping\n" );
+        return S_OK;
+    }
+    if (impl->content) IInspectable_Release( impl->content );
+    impl->content = (IInspectable *)val;
+    if (impl->content) IInspectable_AddRef( impl->content );
+    if (ch) ch->parent = impl;
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_get_Pane( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->pane : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_put_Pane( void *iface, void *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_element *ch;
+    if (!impl) return S_OK;
+    if (impl->pane) IInspectable_Release( impl->pane );
+    impl->pane = (IInspectable *)val;
+    if (impl->pane) IInspectable_AddRef( impl->pane );
+    if ((ch = uwp_elem_from_any( val )) != NULL) ch->parent = impl;
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+    return S_OK;
+}
+
 const void *uwp_splitview_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -2396,8 +2460,8 @@ const void *uwp_splitview_vtbl[32] =
     [5] = uwp_sub_GetTrustLevel,
     [6] = uwp_cd_get_NullOut,        /* get_Content */
     [7] = uwp_generic_noop,          /* put_Content */
-    [8] = uwp_cd_get_NullOut,        /* get_Pane */
-    [9] = uwp_generic_noop,          /* put_Pane */
+    [8] = uwp_sv_get_Pane,           /* get_Pane */
+    [9] = uwp_sv_put_Pane,           /* put_Pane */
     [10] = uwp_sv_get_IsPaneOpen,    /* get_IsPaneOpen */
     [11] = uwp_sv_put_IsPaneOpen,    /* put_IsPaneOpen */
     [12] = uwp_sv_get_OpenPaneLength,/* get_OpenPaneLength */

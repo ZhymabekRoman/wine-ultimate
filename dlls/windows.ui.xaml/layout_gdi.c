@@ -336,10 +336,31 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
     if (el->text[0] || el->img_pixels || el->img_loaded) return TRUE;
     if (wcsstr( el->class_name, L"ItemsRepeater" ))
     {
+        int di;
         if (el->children_coll)
         {
             struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
             if (v->count > 0) return TRUE;
+        }
+        for (di = 0; di < el->dp_cnt; di++)
+        {
+            if (el->dp_store[di].value)
+            {
+                static const GUID IID_IVectorView_Obj_sz =
+                    { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
+                static const GUID IID_IVector_Obj_sz =
+                    { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
+                void *vv = NULL;
+                UINT32 sz = 0;
+                if ((SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Obj_sz, &vv )) ||
+                     SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVector_Obj_sz, &vv ))) && vv)
+                {
+                    HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vv)[7];
+                    if (get_sz) get_sz( vv, &sz );
+                    IUnknown_Release( (IUnknown *)vv );
+                    if (sz > 0) return TRUE;
+                }
+            }
         }
         return FALSE;
     }
@@ -361,7 +382,18 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
     return FALSE;
 }
 
+static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc );
+
 void uwp_arrange_element( struct uwp_element *el, RECT rc )
+{
+    static int depth = 0;
+    if (!el || depth >= 48) return;
+    depth++;
+    uwp_arrange_element_inner( el, rc );
+    depth--;
+}
+
+static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 {
     int w, h;
     if (!el) return;
