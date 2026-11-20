@@ -1030,9 +1030,9 @@ static HRESULT WINAPI vault_Remove( IPasswordVault *iface, IPasswordCredential *
     status = RegDeleteKeyW( HKEY_CURRENT_USER, path );
     vault_unlock();
     free( path );
-    /* RegDeleteKeyW succeeds for missing keys; a second Remove is a no-op,
-     * matching Windows. */
-    hr = status ? HRESULT_FROM_WIN32( status ) : S_OK;
+    /* RegDeleteKeyW returns ERROR_FILE_NOT_FOUND for missing keys; a second
+     * Remove is a no-op, matching Windows. */
+    hr = (status && status != ERROR_FILE_NOT_FOUND) ? HRESULT_FROM_WIN32( status ) : S_OK;
 
 done:
     free( resource );
@@ -1069,8 +1069,9 @@ static HRESULT WINAPI vault_Retrieve( IPasswordVault *iface, HSTRING resource, H
         hr = read_reg_password( hkey, &password );
         RegCloseKey( hkey );
     }
-    else hr = (status == ERROR_NOT_FOUND) ? HRESULT_FROM_WIN32( ERROR_NOT_FOUND )
-                                          : HRESULT_FROM_WIN32( status );
+    else hr = (status == ERROR_FILE_NOT_FOUND || status == ERROR_NOT_FOUND)
+              ? HRESULT_FROM_WIN32( ERROR_NOT_FOUND )
+              : HRESULT_FROM_WIN32( status );
     vault_unlock();
     free( path );
 

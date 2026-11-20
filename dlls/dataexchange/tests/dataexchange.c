@@ -226,28 +226,23 @@ static void test_ICoreDragDropManager(void)
 
     token.value++;
     hr = ICoreDragDropManager_remove_TargetRequested(manager, token);
-    todo_wine
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     token.value--;
 
     hr = ICoreDragDropManager_remove_TargetRequested(manager, token);
-    todo_wine
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     enabled = TRUE;
     hr = ICoreDragDropManager_get_AreConcurrentOperationsEnabled(manager, &enabled);
-    todo_wine
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     todo_wine
     ok(enabled == FALSE, "Got unexpected state.\n");
 
     enabled = TRUE;
     hr = ICoreDragDropManager_put_AreConcurrentOperationsEnabled(manager, enabled);
-    todo_wine
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     hr = ICoreDragDropManager_get_AreConcurrentOperationsEnabled(manager, &enabled);
-    todo_wine
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ok(enabled == TRUE, "Got unexpected state.\n");
 

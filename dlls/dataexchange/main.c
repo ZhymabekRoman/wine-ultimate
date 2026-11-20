@@ -200,7 +200,8 @@ static ULONG WINAPI async_operation_Release(IAsyncInfo *iface)
 
     if (!ref)
     {
-        __FIAsyncOperationCompletedHandler_1_DataPackageOperation_Release(impl->completed);
+        if (impl->completed)
+            __FIAsyncOperationCompletedHandler_1_DataPackageOperation_Release(impl->completed);
         free(impl);
     }
     return ref;
@@ -1043,6 +1044,9 @@ static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_statics_GetForCurrentView
     __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_Release( corewindow_statics );
     if (FAILED( hr ))
         return hr;
+
+    if (!window)
+        return create_core_dragdrop_manager( NULL, &IID_ICoreDragDropManager, (void **)value );
 
     hr = manager_for_window( window, value );
     __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( window );

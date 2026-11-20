@@ -266,15 +266,17 @@ static void test_vault( void )
         /* Add overwrites the entry for the same (resource, user) key */
         {
             HSTRING hpassword2 = hstr( password2 );
+            IPasswordCredential *cred2_new, *cred2_ret;
             hr = IPasswordCredentialFactory_CreatePasswordCredential( factory, hresource2, huser, hpassword2,
-                                                                      &cred2 );
+                                                                      &cred2_new );
             ok( hr == S_OK, "CreatePasswordCredential failed, hr %#lx\n", hr );
-            hr = IPasswordVault_Add( vault, cred2 );
+            hr = IPasswordVault_Add( vault, cred2_new );
             ok( hr == S_OK, "Add failed, hr %#lx\n", hr );
-            hr = IPasswordVault_Retrieve( vault, hresource2, huser, &cred2 );
+            IPasswordCredential_Release( cred2_new );
+            hr = IPasswordVault_Retrieve( vault, hresource2, huser, &cred2_ret );
             ok( hr == S_OK, "Retrieve failed, hr %#lx\n", hr );
-            check_credential( cred2, resource2, user, password2 );
-            IPasswordCredential_Release( cred2 );
+            check_credential( cred2_ret, resource2, user, password2 );
+            IPasswordCredential_Release( cred2_ret );
             WindowsDeleteString( hpassword2 );
         }
 
@@ -351,6 +353,7 @@ static void test_vault( void )
             hr = IPasswordVault_Remove( vault, cred );
             ok( hr == S_OK, "Remove of a persisted credential failed, hr %#lx\n", hr );
             IPasswordCredential_Release( cred );
+            cred = NULL;
 
             hr = IPasswordVault_Retrieve( vault, hpres, husr, &cred );
             ok( hr == HRESULT_FROM_WIN32( ERROR_NOT_FOUND ), "got hr %#lx, expected ERROR_NOT_FOUND\n", hr );
@@ -378,6 +381,7 @@ static void test_vault( void )
                 ok( hr == S_OK, "Retrieve through the second vault failed, hr %#lx\n", hr );
                 check_credential( cred, persist_resource, persist_user, persist_password );
                 IPasswordCredential_Release( cred );
+                cred = NULL;
                 IPasswordVault_Release( vault2 );
             }
 
@@ -419,7 +423,7 @@ static void test_vault( void )
     WindowsDeleteString( hresource );
     WindowsDeleteString( huser );
     WindowsDeleteString( hpassword );
-    IPasswordCredential_Release( cred );
+    if (cred) IPasswordCredential_Release( cred );
     IPasswordVault_Release( vault );
     IPasswordCredentialFactory_Release( factory );
 }

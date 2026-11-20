@@ -231,8 +231,9 @@ static void test_User_Statics(void)
         ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
         ok( !watcher, "got watcher %p.\n", watcher );
         hr = IUserStatics_FindAllAsync( statics, &op );
-        ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
-        ok( !op, "got operation %p.\n", op );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!op, "got operation %p.\n", op );
+        if (op) __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser_Release( op );
     }
 
     IUser_Release( user2 );

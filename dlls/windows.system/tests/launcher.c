@@ -82,7 +82,7 @@ typedef struct { const void **lpVtbl; } ILauncherStatics;
 #define OP_CALL( op, n, ... ) \
     ((HRESULT (STDMETHODCALLTYPE *)( void *, ... ))((const void ***)( op ))[0][n])( (void *)(op), __VA_ARGS__ )
 
-/* ILauncherStatics: 6 LaunchUriAsync, 8 LaunchFileAsync; ILauncherStatics2: 9
+/* ILauncherStatics: 6 LaunchFileAsync, 8 LaunchUriAsync; ILauncherStatics2: 9
  * QueryUriSupportAsync; ILauncherStatics3: 6 LaunchFolderAsync, 8 LaunchFolderPathAsync. */
 
 static void check_interface_( unsigned int line, void *obj, const IID *iid, BOOL supported )
@@ -205,7 +205,7 @@ static void test_launcher( void )
 
     /* LaunchUriAsync(NULL) */
     op = NULL;
-    hr = CALL_STATICS( statics, 6, NULL, &op );
+    hr = CALL_STATICS( statics, 8, NULL, &op );
     ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
 
     hr = IUnknown_QueryInterface( (IUnknown *)statics, &IID_ILauncherStatics2, (void **)&statics2 );
@@ -264,7 +264,7 @@ static void test_launcher( void )
         hr = make_uri( L"https://example.com/probe", &uri );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         op = NULL;
-        hr = CALL_STATICS( statics, 6, uri, &op );
+        hr = CALL_STATICS( statics, 8, uri, &op );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         IUriRuntimeClass_Release( uri );
         check_interface( op, &IID_op_bool, TRUE );
