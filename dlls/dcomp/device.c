@@ -47,6 +47,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 /* Exported by dxgi (dxgi.spec): the wined3d swapchain behind a DXGI
  * swapchain, for direct-to-display composition. */
 struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
+HRESULT WINAPI dxgi_bind_external_memory(IUnknown *obj, HANDLE nt_handle, UINT64 alloc_size);
 
 /* D3DKMTWaitForVerticalBlankEvent (d3d11.spec, exported by d3d11.dll; the
  * winex11 build is a stub that returns immediately) and the win32u syscall it
@@ -448,6 +449,22 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
             && target->composite_width == width && target->composite_height == height)
         return S_OK;
 
+    if (target->composite_context)
+    {
+        ID3D11DeviceContext_OMSetRenderTargets(target->composite_context, 0, NULL, NULL);
+        ID3D11DeviceContext_Flush(target->composite_context);
+    }
+    if (device)
+    {
+        ID3D11DeviceContext *imm_ctx = NULL;
+        ID3D11Device_GetImmediateContext(device, &imm_ctx);
+        if (imm_ctx)
+        {
+            ID3D11DeviceContext_OMSetRenderTargets(imm_ctx, 0, NULL, NULL);
+            ID3D11DeviceContext_Flush(imm_ctx);
+            ID3D11DeviceContext_Release(imm_ctx);
+        }
+    }
     if (target->composite_rtv)
     {
         ID3D11RenderTargetView_Release(target->composite_rtv);
@@ -586,6 +603,21 @@ static HRESULT ensure_composite_pipeline(struct composition_target *target,
     rs_desc.DepthClipEnable = TRUE;
     if (FAILED(hr = ID3D11Device1_CreateRasterizerState(d3d11_device, &rs_desc, &target->composite_rs)))
         return hr;
+
+    {
+        D3D11_BLEND_DESC blend_desc;
+        memset(&blend_desc, 0, sizeof(blend_desc));
+        blend_desc.RenderTarget[0].BlendEnable = TRUE;
+        blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        blend_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        blend_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        blend_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        blend_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(hr = ID3D11Device1_CreateBlendState(d3d11_device, &blend_desc, &target->composite_bs)))
+            return hr;
+    }
 
     memset(&sampler_desc, 0, sizeof(sampler_desc));
     sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -727,7 +759,13 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         UINT dst_width, UINT dst_height, const D3DMATRIX *proj_matrix,
         float opacity, const D2D_RECT_F *clip_rect, BOOL clear, POINT copy_off)
 {
-    static const float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static const float transparent_clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    static const float black_clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static const float light_clear[4] = {0.953f, 0.953f, 0.953f, 1.0f};
+    DWORD ex_style = target->hwnd ? GetWindowLongW(target->hwnd, GWL_EXSTYLE) : 0;
+    DWORD style = target->hwnd ? GetWindowLongW(target->hwnd, GWL_STYLE) : 0;
+    const float *clear_color = (ex_style & WS_EX_NOREDIRECTIONBITMAP)
+            ? ((style & WS_POPUP) ? transparent_clear : light_clear) : black_clear;
     struct composite_vs_data vs_data;
     struct composite_blit_data blit_data;
     ID3D11ShaderResourceView *srv = NULL;
@@ -784,6 +822,10 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         ID3D11DeviceContext_OMSetRenderTargets(d3d11_device_context, 1, &rtv, NULL);
         if (clear)
             ID3D11DeviceContext_ClearRenderTargetView(d3d11_device_context, rtv, clear_color);
+        if (target->composite_bs && (!visual || !visual->is_shared_proxy))
+            ID3D11DeviceContext_OMSetBlendState(d3d11_device_context, target->composite_bs, NULL, 0xffffffff);
+        else
+            ID3D11DeviceContext_OMSetBlendState(d3d11_device_context, NULL, NULL, 0xffffffff);
         ID3D11DeviceContext_RSSetState(d3d11_device_context, target->composite_rs);
         ID3D11DeviceContext_PSSetShaderResources(d3d11_device_context, 0, 1, &srv);
         ID3D11DeviceContext_PSSetSamplers(d3d11_device_context, 0, 1, &target->composite_sampler);
@@ -993,8 +1035,9 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
         goto done;
     }
 
-    /* Resolve the window (and the point inside it) this visual occupies. */
-    if (target_hwnd && IsWindow(target_hwnd) && IsWindowVisible(target_hwnd))
+    if (!target_hwnd || !IsWindow(target_hwnd) || !IsWindowVisible(target_hwnd))
+        goto done;
+
     {
         WCHAR class_name[64];
         RealGetWindowClassW(target_hwnd, class_name, ARRAY_SIZE(class_name));
@@ -1014,13 +1057,7 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
     }
 
     if (!root_hwnd || !IsWindow(root_hwnd))
-        root_hwnd = find_root_top_level_window();
-
-    if (!root_hwnd)
-    {
-        ERR("Failed to find a window to composite into\n");
         goto done;
-    }
 
     /* Batch mode: the back buffer is the size of the window client, the pixel
      * space the visual's projection matrix and clip rectangle are expressed
@@ -1207,8 +1244,12 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
         RECT r;
 
         SetRect(&r, dst_x, dst_y, dst_x + (LONG)dst_w, dst_y + (LONG)dst_h);
-        TRACE("DCOMP: batch-draw dst %ld,%ld %ux%u buf %ux%u use_proj %u\n",
-                dst_x, dst_y, dst_w, dst_h, buf_w, buf_h, use_proj_path);
+        TRACE("DCOMP: batch-draw dst %ld,%ld %ux%u buf %ux%u use_proj %u m=[%.3f %.3f %.3f %.3f]\n",
+                dst_x, dst_y, dst_w, dst_h, buf_w, buf_h, use_proj_path,
+                world_transform ? world_transform->m[0][0] : 1.0f,
+                world_transform ? world_transform->m[1][1] : 1.0f,
+                world_transform ? world_transform->m[3][0] : 0.0f,
+                world_transform ? world_transform->m[3][1] : 0.0f);
         UnionRect(&target->composite_batch_rect, &target->composite_batch_rect, &r);
         target->composite_batch_cleared = TRUE;
         target->composite_root_hwnd = root_hwnd;
@@ -1307,7 +1348,7 @@ static void composite_target_end(struct composition_target *target)
     if ((wined3d_swapchain = dxgi_get_wined3d_swapchain((struct IDXGISwapChain *)target->composite_swapchain))
             && target->composite_root_hwnd && rect.right > rect.left && rect.bottom > rect.top)
     {
-        wined3d_swapchain_present(wined3d_swapchain, &rect, &rect, target->composite_root_hwnd, 0, 0);
+        wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, target->composite_root_hwnd, 0, 0);
         TRACE("DCOMP: batch-presented %ldx%ld at %ld,%ld to root_hwnd %p\n",
                 rect.right - rect.left, rect.bottom - rect.top, rect.left, rect.top,
                 target->composite_root_hwnd);
@@ -1401,17 +1442,28 @@ static IDCompositionVisual *shared_visual_proxy_root(HANDLE shared_visual_handle
             }
             if (surface && surface != impl->shared_content_handle)
             {
-                impl->shared_content_handle = surface;
-                impl->content_version++;
+                HANDLE cap_surf = (impl->captured_hwnd && IsWindow(impl->captured_hwnd))
+                        ? GetPropW(impl->captured_hwnd, L"__wine_dcomp_hwnd_surface") : NULL;
+                if (!cap_surf || cap_surf == surface)
+                {
+                    impl->shared_content_handle = surface;
+                    impl->content_version++;
+                }
             }
             if (dirty_count != impl->shared_dirty_count)
             {
                 impl->shared_dirty_count = dirty_count;
                 impl->content_version++;
             }
+            if (impl->shm_ptr)
+            {
+                UINT seq = ((const volatile UINT *)impl->shm_ptr)[3];
+                if (seq && !(seq & 1) && seq != impl->shm_last_seq)
+                    impl->content_version++;
+            }
+            dcomp_unlock();
+            return root;
         }
-        dcomp_unlock();
-        return root;
     }
     dcomp_unlock();
 
@@ -1753,6 +1805,7 @@ struct target_snapshot
 };
 
 static BOOL visual_get_clip_rect(const struct composition_visual *visual, D2D_RECT_F *rect);
+static void composite_frame_cleanup(struct composite_frame *frame);
 
 static struct composite_frame *device_alloc_frame(struct composition_device *device)
 {
@@ -1855,11 +1908,58 @@ static void transform_rect_to_target(const D2D_RECT_F *local_rect, const D3DMATR
     out->bottom = max_y;
 }
 
+static BOOL CALLBACK dcomp_find_captured_child_cb(HWND hwnd, LPARAM lparam)
+{
+    HWND *out = (HWND *)lparam;
+
+    if (GetPropW(hwnd, L"__wine_dcomp_captured_hwnd"))
+    {
+        *out = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL CALLBACK dcomp_find_captured_hwnd_cb(HWND hwnd, LPARAM lparam)
+{
+    HWND *out = (HWND *)lparam;
+
+    if (GetPropW(hwnd, L"__wine_dcomp_captured_hwnd"))
+    {
+        *out = hwnd;
+        return FALSE;
+    }
+    EnumChildWindows(hwnd, dcomp_find_captured_child_cb, lparam);
+    return !*out;
+}
+
+static void dcomp_sync_captured_hwnd(HWND target_hwnd, struct composition_visual *visual)
+{
+    HANDLE hwnd_surf;
+
+    if (!visual || !visual->is_shared_proxy)
+        return;
+    if (!visual->captured_hwnd || !IsWindow(visual->captured_hwnd))
+    {
+        HWND found = NULL;
+        EnumWindows(dcomp_find_captured_hwnd_cb, (LPARAM)&found);
+        visual->captured_hwnd = found;
+    }
+    if (!visual->captured_hwnd)
+        return;
+    hwnd_surf = GetPropW(visual->captured_hwnd, L"__wine_dcomp_hwnd_surface");
+    if (hwnd_surf && hwnd_surf != visual->shared_content_handle)
+    {
+        visual->shared_content_handle = hwnd_surf;
+        visual->content_version++;
+    }
+}
+
 static void collect_visual_frames(struct composition_device *device, struct composition_target *target,
         struct composition_visual *visual, HWND target_hwnd, float parent_x, float parent_y,
         const D3DMATRIX *parent_transform, BOOL parent_has_transform,
         unsigned int parent_xform_ver, const D2D_RECT_F *parent_clip,
-        unsigned int depth, unsigned int *queued)
+        unsigned int depth, BOOL force_redraw, unsigned int *queued)
 {
     struct composition_visual *child, *child_root;
     struct composite_frame *frame;
@@ -1946,7 +2046,7 @@ static void collect_visual_frames(struct composition_device *device, struct comp
         child_root = resolve_shared_visual_root(visual->shared_visual_handle);
         if (child_root && child_root != visual)
             collect_visual_frames(device, target, child_root, target_hwnd, pos_x, pos_y, &world_m,
-                    has_transform, xform_ver, effective_clip_ptr, depth + 1, queued);
+                    has_transform, xform_ver, effective_clip_ptr, depth + 1, force_redraw, queued);
 
         if (!*queued && !visual_tree_has_content(child_root) && g_last_rendered_surface
                 && g_last_rendered_surface->physical_surface
@@ -1994,9 +2094,36 @@ static void collect_visual_frames(struct composition_device *device, struct comp
                     content_ver += present_count + 1;
             }
         }
+        if (visual->is_shared_proxy)
+        {
+            dcomp_sync_captured_hwnd(target_hwnd, visual);
+            content_ver = visual->content_version;
+        }
+        if (visual->is_shared_proxy && visual->shared_content_handle)
+        {
+            if (visual->shm_ptr && visual->shm_kmt_handle == visual->shared_content_handle)
+            {
+                UINT seq = visual->shm_ptr[3];
+                if (seq && !(seq & 1))
+                {
+                    RECT crc = {0};
+                    content_ver += (seq >> 1) + 1;
+                    if (target_hwnd && GetClientRect(target_hwnd, &crc))
+                        content_ver ^= ((UINT)crc.right << 16) ^ (UINT)crc.bottom;
+                }
+                else
+                    content_ver = visual->composited_version;
+            }
+            else
+            {
+                /* SHM not opened yet: retry until producer creates it on first Present. */
+                content_ver = visual->composited_version + 1;
+            }
+        }
         if (((visual->is_shared_proxy && visual->shared_content_handle)
                     || (visual->content && has_drawn_content))
-                && (content_ver != visual->composited_version
+                && (force_redraw
+                    || content_ver != visual->composited_version
                     || xform_ver != visual->composited_transform_version
                     || visual->composited_hwnd != target_hwnd))
         {
@@ -2017,13 +2144,17 @@ static void collect_visual_frames(struct composition_device *device, struct comp
                 }
                 IDCompositionVisual_AddRef((IDCompositionVisual *)&visual->IDCompositionVisualUnknown_iface);
                 (*queued)++;
+                /* A dirty parent clears/repaints the target backbuffer: force all
+                 * descendant visuals (e.g. WebView2 shared proxy) to draw on top in
+                 * the exact same batch pass so they are never overwritten. */
+                force_redraw = TRUE;
             }
         }
     }
 
     LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
         collect_visual_frames(device, target, child, target_hwnd, pos_x, pos_y, &world_m,
-                has_transform, xform_ver, effective_clip_ptr, depth + 1, queued);
+                has_transform, xform_ver, effective_clip_ptr, depth + 1, force_redraw, queued);
 }
 
 /* Pure memory: gather the shared visual handles in use, so that the window
@@ -2087,8 +2218,9 @@ static void snapshot_device_targets(struct composition_device *device, BOOL *has
     dcomp_unlock();
 }
 
-static void warm_shared_visual_cache(struct composition_device *device)
+static BOOL warm_shared_visual_cache(struct composition_device *device)
 {
+    BOOL has_cross_process = FALSE;
     unsigned int i;
 
     /* Window server round-trips, outside the critical section. */
@@ -2097,10 +2229,14 @@ static void warm_shared_visual_cache(struct composition_device *device)
         HANDLE h = device->handle_buf[i];
         IDCompositionVisual *root = shared_visual_query_root(h);
 
+        if (root && impl_from_IDCompositionVisual(root)->is_shared_proxy)
+            has_cross_process = TRUE;
+
         dcomp_lock();
         shared_visual_cache_set(h, root);
         dcomp_unlock();
     }
+    return has_cross_process;
 }
 
 static void resolve_target_windows(struct composition_device *device, BOOL *any_needs_hwnd)
@@ -2155,8 +2291,9 @@ static void validate_target_windows(struct composition_device *device)
 
         if (snap->host_target && snap->host_target->hwnd && IsWindow(snap->host_target->hwnd))
         {
+            HWND host_root = GetAncestor(snap->host_target->hwnd, GA_ROOT);
             snap->use_container = TRUE;
-            snap->resolved_hwnd = snap->host_target->hwnd;
+            snap->resolved_hwnd = (host_root && IsWindow(host_root)) ? host_root : snap->host_target->hwnd;
             continue;
         }
 
@@ -2183,25 +2320,59 @@ static void collect_device_frames(struct composition_device *device, LONG *out_t
         if (!(root = snap->root))
             continue;
 
-        if (!snap->needs_hwnd)
+        if (target->hwnd)
         {
+            HWND p = target->hwnd;
+            BOOL captured = FALSE;
+            while (p)
+            {
+                if (GetPropW(p, L"__wine_dcomp_captured_hwnd"))
+                {
+                    captured = TRUE;
+                    break;
+                }
+                p = GetParent(p);
+            }
+            if (captured)
+                continue;
+        }
+
+        if (snap->needs_hwnd)
+        {
+            if (snap->use_container && !root->parent)
+            {
+                target->hwnd = snap->resolved_hwnd;
+                root->parent = snap->container;
+            }
+            else if (snap->resolved_hwnd)
+            {
+                target->hwnd = snap->resolved_hwnd;
+            }
+        }
+
+        {
+            unsigned int target_start = device->frame_buf_count;
+            unsigned int target_queued = 0;
+            BOOL force = target->needs_redraw;
+            target->needs_redraw = FALSE;
             collect_visual_frames(device, target, root, target->hwnd, 0.0f, 0.0f,
-                    &identity, FALSE, 0, NULL, 0, &queued);
-            continue;
+                    &identity, FALSE, 0, NULL, 0, force, &target_queued);
+            if (!force && target_queued > 0)
+            {
+                /* Any dirty visual clears and repaints the target backbuffer:
+                 * re-collect the entire target in full z-order so sibling and
+                 * earlier visuals (e.g. Paint canvas) are never erased by
+                 * light_clear when only one visual was dirty. */
+                unsigned int j;
+                for (j = target_start; j < device->frame_buf_count; j++)
+                    composite_frame_cleanup(&device->frame_buf[j]);
+                device->frame_buf_count = target_start;
+                target_queued = 0;
+                collect_visual_frames(device, target, root, target->hwnd, 0.0f, 0.0f,
+                        &identity, FALSE, 0, NULL, 0, TRUE, &target_queued);
+            }
+            queued += target_queued;
         }
-
-        if (snap->use_container && !root->parent)
-        {
-            target->hwnd = snap->resolved_hwnd;
-            root->parent = snap->container;
-        }
-        else if (snap->resolved_hwnd)
-        {
-            target->hwnd = snap->resolved_hwnd;
-        }
-
-        collect_visual_frames(device, target, root, target->hwnd, 0.0f, 0.0f,
-                &identity, FALSE, 0, NULL, 0, &queued);
     }
     dcomp_unlock();
 }
@@ -2362,6 +2533,18 @@ static RECT composite_dst_rect(const struct composite_frame *frame, UINT width, 
     return rect;
 }
 
+static void dcomp_raise_shared_proxy_host(HWND target_hwnd, struct composition_visual *visual)
+{
+    /* Do NOT lower captured_hwnd (Chrome_WidgetWin_1) below target_hwnd in Win32
+     * Z-order: Chromium's WindowOcclusionTrackerWin walks GW_HWNDPREV and marks
+     * Chrome_WidgetWin_1 OCCLUDED (freezing rendering at seq=4/6) whenever an
+     * opaque window of the same size sits above it. Visual/input pass-through is
+     * handled on X11 by winex11.drv apply_window_cloak() (1x1 ShapeBounding +
+     * empty ShapeInput + SKIP_TASKBAR). */
+    (void)target_hwnd;
+    (void)visual;
+}
+
 static void render_composite_frame(struct composite_frame *frame)
 {
     IDXGISwapChain *swapchain = NULL;
@@ -2405,11 +2588,16 @@ static void render_composite_frame(struct composite_frame *frame)
          * swapchain. No CPU staging readback on either side. */
         TRACE("DCOMP: shared proxy visual %p handle %p to hwnd %p at %ld,%ld\n", visual,
                 visual->shared_content_handle, frame->target_hwnd, frame->pt.x, frame->pt.y);
-        if ((dxgi_surface = shared_proxy_open_surface(visual)))
+        if ((dxgi_surface = shared_proxy_open_surface(
+                (frame->target && frame->target->device) ? impl_from_IDCompositionDevice(frame->target->device) : NULL,
+                visual)))
         {
             if (do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
                     dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform, &culled))
+            {
                 frame->rendered = TRUE;
+                dcomp_raise_shared_proxy_host(frame->target_hwnd, visual);
+            }
             else if (culled)
                 frame->culled = TRUE;
             IDXGISurface_Release(dxgi_surface);
@@ -2651,6 +2839,17 @@ static BOOL device_check_swapchains(struct composition_device *device, BOOL *has
     LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
     {
         RECT rc;
+        if (target->hwnd && IsWindow(target->hwnd))
+        {
+            BOOL vis = IsWindowVisible(target->hwnd) && !IsIconic(target->hwnd);
+            if (vis && !target->last_visible)
+            {
+                target->needs_redraw = TRUE;
+                InterlockedIncrement(&dcomp_tree_version);
+                updated = TRUE;
+            }
+            target->last_visible = vis;
+        }
         if (target->hwnd && IsWindow(target->hwnd) && GetClientRect(target->hwnd, &rc)
                 && (rc.right != target->last_client_rect.right
                     || rc.bottom != target->last_client_rect.bottom))
@@ -2670,7 +2869,7 @@ static BOOL composite_device(struct composition_device *device)
 {
     struct composition_target *current_target;
     LONG tree_ver, xform_ver;
-    BOOL has_shared = FALSE, any_needs_hwnd = FALSE, has_swapchain = FALSE, sc_updated;
+    BOOL has_shared = FALSE, has_cross_process_shared = FALSE, any_needs_hwnd = FALSE, has_swapchain = FALSE, sc_updated;
     unsigned int count = 0, i;
 
     /* Objects released by the application's dcomp calls since the previous tick
@@ -2710,7 +2909,7 @@ static BOOL composite_device(struct composition_device *device)
 
     snapshot_device_targets(device, &has_shared);
     if (has_shared)
-        warm_shared_visual_cache(device);
+        has_cross_process_shared = warm_shared_visual_cache(device);
     resolve_target_windows(device, &any_needs_hwnd);
     if (any_needs_hwnd)
     {
@@ -2769,7 +2968,7 @@ static BOOL composite_device(struct composition_device *device)
 
     device->last_tree_version = tree_ver;
     device->last_xform_version = xform_ver;
-    device->last_has_shared = has_shared || any_needs_hwnd;
+    device->last_has_shared = has_cross_process_shared || any_needs_hwnd;
     dcomp_reclaim_drain();
 
     if (count)
@@ -2780,6 +2979,10 @@ static BOOL composite_device(struct composition_device *device)
     }
     return FALSE;
 }
+
+static HWND g_dcomp_captured_top_hwnd;
+static void dcomp_enforce_captured_toolwindow(HWND top);
+static BOOL CALLBACK dcomp_enforce_own_captured_cb(HWND hwnd, LPARAM lparam);
 
 static DWORD WINAPI composite_thread_proc(void *iface)
 {
@@ -2808,6 +3011,45 @@ static DWORD WINAPI composite_thread_proc(void *iface)
         BOOL sc_updated = device->committed && device_check_swapchains(device, &has_sc);
         device->last_has_swapchain = has_sc;
 
+        /* Always poll shared-visual targets for updated cross-process surfaces
+         * (e.g. resized Chromium swapchains published via __wine_dcomp_hwnd_surface). */
+        {
+            struct composition_target *st;
+            struct { HANDLE handle; IDCompositionVisual *root; struct composition_target *t; } to_pub[8];
+            int n_pub = 0, pi;
+            dcomp_lock();
+            LIST_FOR_EACH_ENTRY(st, &device->targets, struct composition_target, entry)
+            {
+                if (st->shared_visual_handle && st->root && n_pub < (int)ARRAY_SIZE(to_pub))
+                {
+                    to_pub[n_pub].handle = st->shared_visual_handle;
+                    to_pub[n_pub].root = st->root;
+                    to_pub[n_pub].t = st;
+                    IDCompositionTarget_AddRef(&st->IDCompositionTarget_iface);
+                    IDCompositionVisual_AddRef(st->root);
+                    n_pub++;
+                }
+            }
+            dcomp_unlock();
+            for (pi = 0; pi < n_pub; pi++)
+            {
+                HANDLE cur_surf = NULL;
+                UINT cw = 0, ch = 0;
+                visual_publish_shared_content(impl_from_IDCompositionVisual(to_pub[pi].root), &cur_surf, &cw, &ch);
+                if (cur_surf && cur_surf != to_pub[pi].t->last_published_surface)
+                {
+                    to_pub[pi].t->last_published_surface = cur_surf;
+                    shared_visual_target_set_root(to_pub[pi].handle, to_pub[pi].root);
+                }
+                IDCompositionVisual_Release(to_pub[pi].root);
+                IDCompositionTarget_Release(&to_pub[pi].t->IDCompositionTarget_iface);
+            }
+            if (g_dcomp_captured_top_hwnd && IsWindow(g_dcomp_captured_top_hwnd))
+                dcomp_enforce_captured_toolwindow(g_dcomp_captured_top_hwnd);
+            else if (n_pub > 0)
+                EnumWindows(dcomp_enforce_own_captured_cb, (LPARAM)GetCurrentProcessId());
+        }
+
         if (!device->commit_pending && !device->last_has_shared && !sc_updated)
         {
             DWORD wait_ms;
@@ -2834,7 +3076,39 @@ static DWORD WINAPI composite_thread_proc(void *iface)
             if (device->commit_pending || device->last_has_shared || sc_updated || has_sc)
                 idle_ticks = 0;
             else if (idle_ticks >= 3 && !InterlockedCompareExchange(&g_compositor_clock_handle_count, 0, 0))
+            {
+                struct composition_target *st;
+                struct { HANDLE handle; IDCompositionVisual *root; struct composition_target *t; } to_pub[8];
+                int n_pub = 0, pi;
+                dcomp_lock();
+                LIST_FOR_EACH_ENTRY(st, &device->targets, struct composition_target, entry)
+                {
+                    if (st->shared_visual_handle && st->root && n_pub < (int)ARRAY_SIZE(to_pub))
+                    {
+                        to_pub[n_pub].handle = st->shared_visual_handle;
+                        to_pub[n_pub].root = st->root;
+                        to_pub[n_pub].t = st;
+                        IDCompositionTarget_AddRef(&st->IDCompositionTarget_iface);
+                        IDCompositionVisual_AddRef(st->root);
+                        n_pub++;
+                    }
+                }
+                dcomp_unlock();
+                for (pi = 0; pi < n_pub; pi++)
+                {
+                    HANDLE cur_surf = NULL;
+                    UINT cw = 0, ch = 0;
+                    visual_publish_shared_content(impl_from_IDCompositionVisual(to_pub[pi].root), &cur_surf, &cw, &ch);
+                    if (cur_surf && cur_surf != to_pub[pi].t->last_published_surface)
+                    {
+                        to_pub[pi].t->last_published_surface = cur_surf;
+                        shared_visual_target_set_root(to_pub[pi].handle, to_pub[pi].root);
+                    }
+                    IDCompositionVisual_Release(to_pub[pi].root);
+                    IDCompositionTarget_Release(&to_pub[pi].t->IDCompositionTarget_iface);
+                }
                 continue;
+            }
         }
         else
         {
@@ -2891,7 +3165,23 @@ static DWORD WINAPI composite_thread_proc(void *iface)
         if (!(++tick % 2))
         {
             LONG k;
+            struct composition_target *st;
+            struct { HANDLE handle; IDCompositionVisual *root; struct composition_target *t; } to_pub[8];
+            int n_pub = 0, pi;
+
             dcomp_lock();
+            LIST_FOR_EACH_ENTRY(st, &device->targets, struct composition_target, entry)
+            {
+                if (st->shared_visual_handle && st->root && n_pub < (int)ARRAY_SIZE(to_pub))
+                {
+                    to_pub[n_pub].handle = st->shared_visual_handle;
+                    to_pub[n_pub].root = st->root;
+                    to_pub[n_pub].t = st;
+                    IDCompositionTarget_AddRef(&st->IDCompositionTarget_iface);
+                    IDCompositionVisual_AddRef(st->root);
+                    n_pub++;
+                }
+            }
             for (k = 0; k < g_compositor_clock_handle_count; )
             {
                 if (!g_compositor_clock_handles[k])
@@ -2912,6 +3202,19 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 k++;
             }
             dcomp_unlock();
+            for (pi = 0; pi < n_pub; pi++)
+            {
+                HANDLE cur_surf = NULL;
+                UINT cw = 0, ch = 0;
+                visual_publish_shared_content(impl_from_IDCompositionVisual(to_pub[pi].root), &cur_surf, &cw, &ch);
+                if (cur_surf && cur_surf != to_pub[pi].t->last_published_surface)
+                {
+                    to_pub[pi].t->last_published_surface = cur_surf;
+                    shared_visual_target_set_root(to_pub[pi].handle, to_pub[pi].root);
+                }
+                IDCompositionVisual_Release(to_pub[pi].root);
+                IDCompositionTarget_Release(&to_pub[pi].t->IDCompositionTarget_iface);
+            }
             if (g_commit_completion_event)
                 SetEvent(g_commit_completion_event);
             /* gate104 lever (c): hand the UI thread one pump beat per
@@ -3044,7 +3347,8 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
     struct composition_device *device = impl_from_IDCompositionDevice(iface);
     struct composition_target *t;
     struct { HANDLE handle; IDCompositionVisual *root; } to_republish[16];
-    int n_republish = 0, i;
+    struct { HWND hwnd; IDCompositionVisual *root; } to_publish_hwnd[16];
+    int n_republish = 0, n_publish_hwnd = 0, i;
     HRESULT hr = S_OK;
 
     TRACE("DCOMP: device_Commit iface %p\n", iface);
@@ -3061,8 +3365,54 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
             IDCompositionVisual_AddRef(t->root);
             n_republish++;
         }
+        if (t->hwnd && t->root && n_publish_hwnd < (int)ARRAY_SIZE(to_publish_hwnd))
+        {
+            to_publish_hwnd[n_publish_hwnd].hwnd = t->hwnd;
+            to_publish_hwnd[n_publish_hwnd].root = t->root;
+            IDCompositionVisual_AddRef(t->root);
+            n_publish_hwnd++;
+        }
     }
     dcomp_unlock();
+
+    for (i = 0; i < n_publish_hwnd; i++)
+    {
+        HANDLE surf_h = NULL;
+        UINT w = 0, h = 0;
+        visual_publish_shared_content(impl_from_IDCompositionVisual(to_publish_hwnd[i].root), &surf_h, &w, &h);
+        if (surf_h)
+        {
+            static LONG hwnd_frame_seq;
+            ULONG_PTR seq = (ULONG_PTR)InterlockedIncrement(&hwnd_frame_seq);
+            HWND hw = to_publish_hwnd[i].hwnd;
+            while (hw)
+            {
+                SetPropW(hw, L"__wine_dcomp_hwnd_surface", surf_h);
+                SetPropW(hw, L"__wine_dcomp_hwnd_frame", (HANDLE)seq);
+                if (w && h)
+                    SetPropW(hw, L"__wine_dcomp_hwnd_size",
+                            (HANDLE)(ULONG_PTR)(((ULONG_PTR)w << 16) | (h & 0xffff)));
+                if (GetPropW(hw, L"__wine_dcomp_captured_hwnd"))
+                {
+                    DWORD wpid = 0;
+                    GetWindowThreadProcessId(hw, &wpid);
+                    if (wpid == GetCurrentProcessId())
+                    {
+                        LONG_PTR ex = GetWindowLongPtrW(hw, GWL_EXSTYLE);
+                        if ((ex & WS_EX_APPWINDOW) || !(ex & WS_EX_TOOLWINDOW) || !(ex & WS_EX_NOACTIVATE))
+                        {
+                            SetWindowLongPtrW(hw, GWL_EXSTYLE,
+                                    (ex & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+                            SetWindowPos(hw, 0, 0, 0, 0, 0,
+                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS);
+                        }
+                    }
+                }
+                hw = GetParent(hw);
+            }
+        }
+        IDCompositionVisual_Release(to_publish_hwnd[i].root);
+    }
 
     for (i = 0; i < n_republish; i++)
     {
@@ -3077,8 +3427,7 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
     ensure_composite_thread(device);
 
     EnterCriticalSection(&composite_render_cs);
-    if (InterlockedCompareExchange(&dcomp_tree_version, 0, 0) != device->last_tree_version
-            || qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= device->refresh_period_ms)
+    if (qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= device->refresh_period_ms)
     {
         InterlockedExchange(&device->commit_pending, FALSE);
         if (composite_device(device))
@@ -3095,6 +3444,25 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
     LeaveCriticalSection(&composite_render_cs);
     if (device->wake_event)
         SetEvent(device->wake_event);
+
+    /* Cross-device visual trees (e.g. WebView2 / ContentExternalOutputLink):
+     * wake any other committed device that owns targets so its composite thread
+     * picks up visuals grafted into its tree by this device. */
+    if (n_publish_hwnd == 0)
+    {
+        struct composition_device *other;
+        dcomp_lock();
+        LIST_FOR_EACH_ENTRY(other, &dcomp_devices, struct composition_device, dev_entry)
+        {
+            if (other != device && other->committed && !list_empty(&other->targets))
+            {
+                InterlockedExchange(&other->commit_pending, TRUE);
+                if (other->wake_event)
+                    SetEvent(other->wake_event);
+            }
+        }
+        dcomp_unlock();
+    }
 
     return hr;
 }
@@ -3255,10 +3623,13 @@ static HRESULT get_default_rendering_device(IUnknown **out_device)
  * opening it on a device of this process yields a view of the same resource.
  * The device is created once per process and kept: shared-resource views are
  * not device specific, and creating one per frame would cost a device. */
-IDXGISurface *shared_proxy_open_surface(struct composition_visual *visual)
+static HRESULT device_get_or_create_rendering_device(struct composition_device *device,
+        IUnknown **out_rendering_device);
+
+IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, struct composition_visual *visual)
 {
-    static ID3D11Device *device;
-    ID3D11Texture2D *texture = NULL;
+    static ID3D11Device *fallback_device;
+    ID3D11Device *device = NULL;
     IUnknown *rendering_device = NULL;
     IDXGISurface *surface = NULL;
     HRESULT hr;
@@ -3266,27 +3637,178 @@ IDXGISurface *shared_proxy_open_surface(struct composition_visual *visual)
     if (!visual->shared_content_handle)
         return NULL;
 
+    if (comp_dev && SUCCEEDED(device_get_or_create_rendering_device(comp_dev, &rendering_device)) && rendering_device)
+    {
+        IUnknown_QueryInterface(rendering_device, &IID_ID3D11Device, (void **)&device);
+        IUnknown_Release(rendering_device);
+    }
     if (!device)
     {
-        if (FAILED(get_default_rendering_device(&rendering_device)) || !rendering_device)
-            return NULL;
-        device = (ID3D11Device *)rendering_device; /* the reference is kept for the process */
+        if (!fallback_device)
+        {
+            if (FAILED(get_default_rendering_device(&rendering_device)) || !rendering_device)
+                return NULL;
+            fallback_device = (ID3D11Device *)rendering_device;
+        }
+        device = fallback_device;
+        ID3D11Device_AddRef(device);
     }
 
-    hr = ID3D11Device_OpenSharedResource(device, visual->shared_content_handle,
-            &IID_ID3D11Texture2D, (void **)&texture);
-    if (FAILED(hr) || !texture)
+    if (visual->shm_kmt_handle != visual->shared_content_handle || !visual->shm_ptr)
     {
-        TRACE("Failed to open shared content handle %p, hr %#lx.\n", visual->shared_content_handle, hr);
+        WCHAR shm_name[64];
+        if (visual->shm_ptr) { UnmapViewOfFile(visual->shm_ptr); visual->shm_ptr = NULL; }
+        if (visual->shm_map) { CloseHandle(visual->shm_map); visual->shm_map = NULL; }
+        visual->shm_kmt_handle = visual->shared_content_handle;
+        visual->shm_last_seq = 0;
+        swprintf(shm_name, ARRAY_SIZE(shm_name), L"Local\\wine_dcomp_shm_%08x",
+                (UINT)(ULONG_PTR)visual->shared_content_handle);
+        if ((visual->shm_map = OpenFileMappingW(FILE_MAP_READ, FALSE, shm_name)))
+            visual->shm_ptr = MapViewOfFile(visual->shm_map, FILE_MAP_READ, 0, 0, 0);
+    }
+
+    if (visual->shm_ptr)
+    {
+        const UINT *hdr = visual->shm_ptr;
+        UINT s1 = hdr[3];
+        MemoryBarrier();
+        if (s1 && !(s1 & 1))
+        {
+            UINT w = hdr[0], h = hdr[1], stride = hdr[2];
+            UINT magic = hdr[4];
+            if (magic == 0x5A434750u && w > 0 && h > 0 && w <= 4096 && h <= 2160)
+            {
+                DWORD pid = hdr[5];
+                HANDLE remote_h = (HANDLE)(ULONG_PTR)hdr[6];
+                UINT alloc_sz = hdr[7];
+
+                if (pid && remote_h && alloc_sz)
+                {
+                    if (!visual->zc_tex || visual->zc_pid != pid || visual->zc_remote_handle != remote_h
+                            || visual->zc_w != w || visual->zc_h != h || visual->zc_alloc_size != alloc_sz)
+                    {
+                        HANDLE src_proc = NULL, local_h = NULL;
+                        ID3D11Texture2D *ztex = NULL;
+
+                        if (visual->zc_tex)
+                        {
+                            ID3D11Texture2D_Release(visual->zc_tex);
+                            visual->zc_tex = NULL;
+                        }
+                        if (pid == GetCurrentProcessId())
+                        {
+                            DuplicateHandle(GetCurrentProcess(), remote_h, GetCurrentProcess(), &local_h,
+                                    0, FALSE, DUPLICATE_SAME_ACCESS);
+                        }
+                        else if ((src_proc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid)))
+                        {
+                            DuplicateHandle(src_proc, remote_h, GetCurrentProcess(), &local_h,
+                                    0, FALSE, DUPLICATE_SAME_ACCESS);
+                            CloseHandle(src_proc);
+                        }
+
+                        if (local_h)
+                        {
+                            D3D11_TEXTURE2D_DESC tdesc = {0};
+                            tdesc.Width = w;
+                            tdesc.Height = h;
+                            tdesc.MipLevels = 1;
+                            tdesc.ArraySize = 1;
+                            tdesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                            tdesc.SampleDesc.Count = 1;
+                            tdesc.Usage = D3D11_USAGE_DEFAULT;
+                            tdesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                            if (SUCCEEDED(ID3D11Device_CreateTexture2D(device, &tdesc, NULL, &ztex)))
+                            {
+                                if (SUCCEEDED(dxgi_bind_external_memory((IUnknown *)ztex, local_h, alloc_sz)))
+                                {
+                                    visual->zc_tex = ztex;
+                                    visual->zc_pid = pid;
+                                    visual->zc_remote_handle = remote_h;
+                                    visual->zc_w = w;
+                                    visual->zc_h = h;
+                                    visual->zc_alloc_size = alloc_sz;
+                                    visual->size.cx = (LONG)w;
+                                    visual->size.cy = (LONG)h;
+                                    TRACE("DCOMP: Imported zero-copy GPU texture %ux%u (pid %lu, handle %p, size %u)\n",
+                                            w, h, pid, remote_h, alloc_sz);
+                                }
+                                else
+                                {
+                                    ID3D11Texture2D_Release(ztex);
+                                }
+                            }
+                            CloseHandle(local_h);
+                        }
+                    }
+
+                    if (visual->zc_tex)
+                    {
+                        MemoryBarrier();
+                        if (hdr[3] == s1)
+                            visual->shm_last_seq = s1;
+                        hr = ID3D11Texture2D_QueryInterface(visual->zc_tex, &IID_IDXGISurface, (void **)&surface);
+                        ID3D11Device_Release(device);
+                        return SUCCEEDED(hr) ? surface : NULL;
+                    }
+                }
+            }
+            if (magic != 0x5A434750u && w > 0 && h > 0 && w <= 4096 && h <= 2160 && stride >= w * 4)
+            {
+                if (!visual->shm_tex || visual->shm_tex_w != w || visual->shm_tex_h != h)
+                {
+                    D3D11_TEXTURE2D_DESC tdesc = {0};
+                    if (visual->shm_tex)
+                    {
+                        ID3D11Texture2D_Release(visual->shm_tex);
+                        visual->shm_tex = NULL;
+                    }
+                    tdesc.Width = w;
+                    tdesc.Height = h;
+                    tdesc.MipLevels = 1;
+                    tdesc.ArraySize = 1;
+                    tdesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                    tdesc.SampleDesc.Count = 1;
+                    tdesc.Usage = D3D11_USAGE_DEFAULT;
+                    tdesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    if (SUCCEEDED(ID3D11Device_CreateTexture2D(device, &tdesc, NULL, &visual->shm_tex)))
+                    {
+                        visual->shm_tex_w = w;
+                        visual->shm_tex_h = h;
+                        visual->size.cx = (LONG)w;
+                        visual->size.cy = (LONG)h;
+                    }
+                }
+                if (visual->shm_tex && s1 != visual->shm_last_seq)
+                {
+                    ID3D11DeviceContext *ctx = NULL;
+                    ID3D11Device_GetImmediateContext(device, &ctx);
+                    if (ctx)
+                    {
+                        ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)visual->shm_tex,
+                                0, NULL, (const BYTE *)hdr + 32, stride, 0);
+                        ID3D11DeviceContext_Release(ctx);
+                    }
+                    MemoryBarrier();
+                    if (hdr[3] == s1)
+                        visual->shm_last_seq = s1;
+                }
+            }
+        }
+        if (visual->shm_tex)
+        {
+            hr = ID3D11Texture2D_QueryInterface(visual->shm_tex, &IID_IDXGISurface, (void **)&surface);
+            ID3D11Device_Release(device);
+            return SUCCEEDED(hr) ? surface : NULL;
+        }
+        ID3D11Device_Release(device);
         return NULL;
     }
 
-    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&surface);
-    ID3D11Texture2D_Release(texture);
-    if (FAILED(hr))
-        return NULL;
-
-    return surface;
+    /* Producer has not created its SHM mapping yet; wait for first Present instead
+     * of opening a blank unlinked cross-process D3D11 texture. */
+    ID3D11Device_Release(device);
+    return NULL;
 }
 
 static HRESULT device_get_or_create_rendering_device(struct composition_device *device,
@@ -3489,6 +4011,54 @@ static HRESULT STDMETHODCALLTYPE device_CreateSurfaceFromHandle(IDCompositionDev
     return hr;
 }
 
+static BOOL CALLBACK dcomp_enforce_own_captured_cb(HWND hwnd, LPARAM lparam)
+{
+    DWORD wpid = 0;
+
+    if (!GetPropW(hwnd, L"__wine_dcomp_captured_hwnd"))
+        return TRUE;
+    GetWindowThreadProcessId(hwnd, &wpid);
+    if (wpid == (DWORD)lparam)
+    {
+        g_dcomp_captured_top_hwnd = hwnd;
+        dcomp_enforce_captured_toolwindow(hwnd);
+    }
+    return TRUE;
+}
+
+static void dcomp_enforce_captured_toolwindow(HWND top)
+{
+    LONG_PTR ex;
+    DWORD wpid = 0;
+
+    if (!top || !IsWindow(top) || !IsWindowVisible(top))
+        return;
+    GetWindowThreadProcessId(top, &wpid);
+    if (wpid != GetCurrentProcessId())
+        return;
+    ex = GetWindowLongPtrW(top, GWL_EXSTYLE);
+    if ((ex & WS_EX_APPWINDOW) || !(ex & WS_EX_TOOLWINDOW) || !(ex & WS_EX_NOACTIVATE))
+    {
+        SetWindowLongPtrW(top, GWL_EXSTYLE,
+                (ex & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+        SetWindowPos(top, 0, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS);
+    }
+}
+
+static void dcomp_hide_captured_hwnd(HWND hwnd)
+{
+    HWND top;
+
+    SetPropW(hwnd, L"__wine_dcomp_captured_hwnd", (HANDLE)1);
+    top = GetAncestor(hwnd, GA_ROOT);
+    if (!top) top = hwnd;
+    if (top != hwnd)
+        SetPropW(top, L"__wine_dcomp_captured_hwnd", (HANDLE)1);
+    g_dcomp_captured_top_hwnd = top;
+    dcomp_enforce_captured_toolwindow(top);
+}
+
 static HRESULT STDMETHODCALLTYPE device_CreateSurfaceFromHwnd(IDCompositionDevice *iface,
         HWND hwnd, IUnknown **surface)
 {
@@ -3515,7 +4085,13 @@ static HRESULT STDMETHODCALLTYPE device_CreateSurfaceFromHwnd(IDCompositionDevic
     hr = composition_device_create_surface(device, width, height,
             DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED, &dcomp_surface);
     if (SUCCEEDED(hr))
+    {
+        struct composition_surface *surf_impl = unsafe_impl_from_IDCompositionSurface(dcomp_surface);
+        if (surf_impl)
+            surf_impl->source_hwnd = hwnd;
+        dcomp_hide_captured_hwnd(hwnd);
         *surface = (IUnknown *)dcomp_surface;
+    }
     return hr;
 }
 
@@ -4108,7 +4684,13 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateSurfaceFromHwnd(IDComposit
     hr = composition_device_create_surface(device, width, height,
             DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED, &dcomp_surface);
     if (SUCCEEDED(hr))
+    {
+        struct composition_surface *surf_impl = unsafe_impl_from_IDCompositionSurface(dcomp_surface);
+        if (surf_impl)
+            surf_impl->source_hwnd = hwnd;
+        dcomp_hide_captured_hwnd(hwnd);
         *surface = (IUnknown *)dcomp_surface;
+    }
     return hr;
 }
 
@@ -4184,34 +4766,6 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateFromSharedVisualHandle(IDC
         if (SUCCEEDED(hr) && *out)
         {
             struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
-            HWND hwnd = find_root_top_level_window();
-            if (hwnd)
-            {
-                struct composition_target *existing_target = NULL, *t;
-                dcomp_lock();
-                LIST_FOR_EACH_ENTRY(t, &device->targets, struct composition_target, entry)
-                {
-                    if (t->hwnd == hwnd)
-                    {
-                        existing_target = t;
-                        break;
-                    }
-                }
-                dcomp_unlock();
-
-                if (!existing_target)
-                {
-                    IDCompositionTarget *target = NULL;
-                    create_target(device, hwnd, TRUE, &target);
-                    if (target)
-                    {
-                        struct composition_target *target_impl = impl_from_IDCompositionTarget(target);
-                        target_impl->root = (IDCompositionVisual *)*out;
-                        IDCompositionVisual_AddRef(target_impl->root);
-                        TRACE("Attached shared visual %p to target %p hwnd %p\n", *out, target, hwnd);
-                    }
-                }
-            }
             ensure_composite_thread(device);
         }
         return hr;
@@ -4222,13 +4776,6 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateFromSharedVisualHandle(IDC
         hr = create_target_from_shared_visual_handle(device, visual_handle, out);
         if (SUCCEEDED(hr) && *out)
         {
-            struct composition_target *target_impl = impl_from_IDCompositionTarget((IDCompositionTarget *)*out);
-            HWND hwnd = find_root_top_level_window();
-            if (hwnd)
-            {
-                target_impl->hwnd = hwnd;
-                TRACE("Bound shared target %p to root_hwnd %p\n", *out, hwnd);
-            }
             ensure_composite_thread(device);
         }
         return hr;
@@ -4330,14 +4877,16 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown15(IDCompositionDeviceUnk
     return E_NOTIMPL;
 }
 
+static LONG g_batch_id_counter = 10;
+
 static HRESULT STDMETHODCALLTYPE desktop_device_Unknown16(IDCompositionDeviceUnknown *iface, void **parameter1)
 {
-    FIXME("iface %p parameter1 %p stub!\n", iface, parameter1);
+    TRACE("iface %p parameter1 %p.\n", iface, parameter1);
 
     if (!parameter1)
         return E_INVALIDARG;
 
-    *parameter1 = NULL;
+    *(UINT64 *)parameter1 = (UINT64)(DWORD)InterlockedIncrement(&g_batch_id_counter);
     return S_OK;
 }
 
@@ -4349,7 +4898,7 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown17(IDCompositionDeviceUnk
     if (!parameter1)
         return E_INVALIDARG;
 
-    *parameter1 = NULL;
+    *(UINT64 *)parameter1 = (UINT64)(DWORD)InterlockedIncrement(&g_batch_id_counter);
     return S_OK;
 }
 
@@ -5163,8 +5712,6 @@ static ULONG WINAPI batch_query_Release(IUnknown *iface)
     return ref;
 }
 
-static LONG g_batch_id_counter = 10;
-
 static HRESULT WINAPI batch_query_slot3(IUnknown *iface, DWORD *batch_id)
 {
     if (batch_id) *batch_id = (DWORD)InterlockedIncrement(&g_batch_id_counter);
@@ -5416,7 +5963,7 @@ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handle
     }
     else
         Sleep( sleep_ms );
-    return WAIT_OBJECT_0;
+    return WAIT_OBJECT_0 + count;
 }
 
 static ULONGLONG get_emulated_compositor_frame_id(void)

@@ -227,9 +227,100 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *ifac
 
 /* IUnknown methods */
 
+static const GUID IID_IDXGISwapChainPartner_local =
+    {0x7652c85a, 0x0df5, 0x4567, {0xbc, 0xdd, 0x81, 0x76, 0xa3, 0x32, 0xb9, 0x9b}};
+
+static inline struct d3d11_swapchain *impl_from_IDXGISwapChainPartner(IUnknown *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChainPartner_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_swapchain_partner_QueryInterface(IUnknown *iface, REFIID riid, void **out)
+{
+    struct d3d11_swapchain *sc = impl_from_IDXGISwapChainPartner(iface);
+    return IDXGISwapChain4_QueryInterface(&sc->IDXGISwapChain4_iface, riid, out);
+}
+
+static ULONG STDMETHODCALLTYPE dxgi_swapchain_partner_AddRef(IUnknown *iface)
+{
+    struct d3d11_swapchain *sc = impl_from_IDXGISwapChainPartner(iface);
+    return IDXGISwapChain4_AddRef(&sc->IDXGISwapChain4_iface);
+}
+
+static ULONG STDMETHODCALLTYPE dxgi_swapchain_partner_Release(IUnknown *iface)
+{
+    struct d3d11_swapchain *sc = impl_from_IDXGISwapChainPartner(iface);
+    return IDXGISwapChain4_Release(&sc->IDXGISwapChain4_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_swapchain_partner_GetCompositionSurfaceHandle(IUnknown *iface, HANDLE *handle)
+{
+    struct d3d11_swapchain *sc = impl_from_IDXGISwapChainPartner(iface);
+    IDXGIResource1 *res = NULL;
+    HRESULT hr;
+
+    TRACE("iface %p, handle %p.\n", iface, handle);
+    if (!handle)
+        return E_POINTER;
+    *handle = NULL;
+
+    hr = d3d11_swapchain_GetBuffer(&sc->IDXGISwapChain4_iface, 0, &IID_IDXGIResource1, (void **)&res);
+    if (SUCCEEDED(hr) && res)
+    {
+        hr = dxgi_resource_create_composition_handle(res, handle);
+        IDXGIResource1_Release(res);
+        if (SUCCEEDED(hr))
+        {
+            sc->is_composition_surface = TRUE;
+            return S_OK;
+        }
+    }
+
+    WARN("Failed to create composition surface handle from buffer 0 (hr %#lx), falling back to event.\n", hr);
+    *handle = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!*handle)
+        return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_swapchain_partner_stub(IUnknown *iface)
+{
+    FIXME("iface %p stub!\n", iface);
+    return S_OK;
+}
+
+static const void * const dxgi_swapchain_partner_vtbl[] =
+{
+    dxgi_swapchain_partner_QueryInterface,
+    dxgi_swapchain_partner_AddRef,
+    dxgi_swapchain_partner_Release,
+    dxgi_swapchain_partner_stub, /* 3 */
+    dxgi_swapchain_partner_stub, /* 4 */
+    dxgi_swapchain_partner_stub, /* 5 */
+    dxgi_swapchain_partner_stub, /* 6 */
+    dxgi_swapchain_partner_stub, /* 7 */
+    dxgi_swapchain_partner_stub, /* 8 */
+    dxgi_swapchain_partner_stub, /* 9 */
+    dxgi_swapchain_partner_stub, /* 10 */
+    dxgi_swapchain_partner_GetCompositionSurfaceHandle, /* 11 (+0x58) */
+    dxgi_swapchain_partner_stub, /* 12 */
+    dxgi_swapchain_partner_stub, /* 13 */
+    dxgi_swapchain_partner_stub, /* 14 */
+    dxgi_swapchain_partner_stub, /* 15 */
+};
+
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 *iface, REFIID riid, void **object)
 {
+    struct d3d11_swapchain *swapchain = CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
+
     TRACE("iface %p, riid %s, object %p\n", iface, debugstr_guid(riid), object);
+
+    if (IsEqualGUID(riid, &IID_IDXGISwapChainPartner_local))
+    {
+        IUnknown_AddRef(iface);
+        *object = &swapchain->IDXGISwapChainPartner_iface;
+        return S_OK;
+    }
 
     if (IsEqualGUID(riid, &IID_IUnknown)
             || IsEqualGUID(riid, &IID_IDXGIObject)
@@ -283,6 +374,38 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     if (!refcount)
     {
         IWineDXGIDevice *device = swapchain->device;
+        if (swapchain->zc_tex)
+        {
+            wined3d_mutex_lock();
+            wined3d_texture_decref(swapchain->zc_tex);
+            wined3d_mutex_unlock();
+            swapchain->zc_tex = NULL;
+        }
+        if (swapchain->zc_nt_handle || swapchain->zc_vk_image || swapchain->zc_vk_memory)
+        {
+            extern void dxgi_vk_free_shared_image(UINT64 vk_image, UINT64 vk_memory, HANDLE nt_handle);
+            dxgi_vk_free_shared_image(swapchain->zc_vk_image, swapchain->zc_vk_memory, swapchain->zc_nt_handle);
+            swapchain->zc_vk_image = 0;
+            swapchain->zc_vk_memory = 0;
+            swapchain->zc_nt_handle = NULL;
+        }
+        if (swapchain->shm_staging)
+        {
+            wined3d_mutex_lock();
+            wined3d_texture_decref(swapchain->shm_staging);
+            wined3d_mutex_unlock();
+            swapchain->shm_staging = NULL;
+        }
+        if (swapchain->shm_ptr)
+        {
+            UnmapViewOfFile(swapchain->shm_ptr);
+            swapchain->shm_ptr = NULL;
+        }
+        if (swapchain->shm_map)
+        {
+            CloseHandle(swapchain->shm_map);
+            swapchain->shm_map = NULL;
+        }
         if (swapchain->target)
         {
             WARN("Releasing fullscreen swapchain.\n");
@@ -350,6 +473,438 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 
 /* IDXGISwapChain1 methods */
 
+#define WINE_DCOMP_ZCGP_MAGIC 0x5A434750u /* 'ZCGP' */
+
+static struct
+{
+    LONG init_state; /* 0=uninit, 1=ok, -1=failed */
+    CRITICAL_SECTION cs;
+    HMODULE vk_mod;
+    VkInstance instance;
+    VkPhysicalDevice phys_dev;
+    VkDevice device;
+    VkPhysicalDeviceMemoryProperties mem_props;
+    PFN_vkCreateImage p_vkCreateImage;
+    PFN_vkDestroyImage p_vkDestroyImage;
+    PFN_vkGetImageMemoryRequirements p_vkGetImageMemoryRequirements;
+    PFN_vkAllocateMemory p_vkAllocateMemory;
+    PFN_vkFreeMemory p_vkFreeMemory;
+    PFN_vkBindImageMemory p_vkBindImageMemory;
+    PFN_vkGetMemoryWin32HandleKHR p_vkGetMemoryWin32HandleKHR;
+} dxgi_vk_exp;
+
+static BOOL dxgi_vk_exporter_init(void)
+{
+    PFN_vkCreateInstance p_vkCreateInstance;
+    PFN_vkEnumeratePhysicalDevices p_vkEnumeratePhysicalDevices;
+    PFN_vkGetPhysicalDeviceMemoryProperties p_vkGetPhysicalDeviceMemoryProperties;
+    PFN_vkCreateDevice p_vkCreateDevice;
+    PFN_vkGetDeviceProcAddr p_vkGetDeviceProcAddr;
+    VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
+    VkInstanceCreateInfo inst_info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+    VkDeviceQueueCreateInfo queue_info = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+    VkDeviceCreateInfo dev_info = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+    const char *dev_exts[] = { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME };
+    float queue_prio = 1.0f;
+    VkPhysicalDevice phys[8];
+    uint32_t count = ARRAY_SIZE(phys);
+    static LONG cs_init = 0;
+
+    if (InterlockedCompareExchange(&dxgi_vk_exp.init_state, 0, 0) == 1)
+        return TRUE;
+    if (InterlockedCompareExchange(&dxgi_vk_exp.init_state, 0, 0) == -1)
+        return FALSE;
+
+    if (InterlockedCompareExchange(&cs_init, 1, 0) == 0)
+        InitializeCriticalSection(&dxgi_vk_exp.cs);
+    else
+        while (InterlockedCompareExchange(&cs_init, 0, 0) == 0) Sleep(0);
+
+    EnterCriticalSection(&dxgi_vk_exp.cs);
+    if (dxgi_vk_exp.init_state != 0)
+    {
+        BOOL ok = (dxgi_vk_exp.init_state == 1);
+        LeaveCriticalSection(&dxgi_vk_exp.cs);
+        return ok;
+    }
+
+    dxgi_vk_exp.vk_mod = LoadLibraryW(L"vulkan-1.dll");
+    if (!dxgi_vk_exp.vk_mod)
+        goto fail;
+
+    p_vkCreateInstance = (void *)GetProcAddress(dxgi_vk_exp.vk_mod, "vkCreateInstance");
+    p_vkEnumeratePhysicalDevices = (void *)GetProcAddress(dxgi_vk_exp.vk_mod, "vkEnumeratePhysicalDevices");
+    p_vkGetPhysicalDeviceMemoryProperties = (void *)GetProcAddress(dxgi_vk_exp.vk_mod, "vkGetPhysicalDeviceMemoryProperties");
+    p_vkCreateDevice = (void *)GetProcAddress(dxgi_vk_exp.vk_mod, "vkCreateDevice");
+    p_vkGetDeviceProcAddr = (void *)GetProcAddress(dxgi_vk_exp.vk_mod, "vkGetDeviceProcAddr");
+    if (!p_vkCreateInstance || !p_vkEnumeratePhysicalDevices || !p_vkGetPhysicalDeviceMemoryProperties
+            || !p_vkCreateDevice || !p_vkGetDeviceProcAddr)
+        goto fail;
+
+    app_info.apiVersion = VK_API_VERSION_1_1;
+    inst_info.pApplicationInfo = &app_info;
+    if (p_vkCreateInstance(&inst_info, NULL, &dxgi_vk_exp.instance) != VK_SUCCESS)
+        goto fail;
+
+    if (p_vkEnumeratePhysicalDevices(dxgi_vk_exp.instance, &count, phys) < VK_SUCCESS || !count)
+        goto fail;
+    dxgi_vk_exp.phys_dev = phys[0];
+    p_vkGetPhysicalDeviceMemoryProperties(dxgi_vk_exp.phys_dev, &dxgi_vk_exp.mem_props);
+
+    queue_info.queueFamilyIndex = 0;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &queue_prio;
+    dev_info.queueCreateInfoCount = 1;
+    dev_info.pQueueCreateInfos = &queue_info;
+    dev_info.enabledExtensionCount = ARRAY_SIZE(dev_exts);
+    dev_info.ppEnabledExtensionNames = dev_exts;
+    if (p_vkCreateDevice(dxgi_vk_exp.phys_dev, &dev_info, NULL, &dxgi_vk_exp.device) != VK_SUCCESS)
+        goto fail;
+
+    dxgi_vk_exp.p_vkCreateImage = (void *)p_vkGetDeviceProcAddr(dxgi_vk_exp.device, "vkCreateImage");
+    dxgi_vk_exp.p_vkDestroyImage = (void *)p_vkGetDeviceProcAddr(dxgi_vk_exp.device, "vkDestroyImage");
+    dxgi_vk_exp.p_vkGetImageMemoryRequirements = (void *)p_vkGetDeviceProcAddr(dxgi_vk_exp.device, "vkGetImageMemoryRequirements");
+    dxgi_vk_exp.p_vkAllocateMemory = (void *)p_vkGetDeviceProcAddr(dxgi_vk_exp.device, "vkAllocateMemory");
+    dxgi_vk_exp.p_vkFreeMemory = (void *)p_vkGetDeviceProcAddr(dxgi_vk_exp.device, "vkFreeMemory");
+    dxgi_vk_exp.p_vkBindImageMemory = (void *)p_vkGetDeviceProcAddr(dxgi_vk_exp.device, "vkBindImageMemory");
+    dxgi_vk_exp.p_vkGetMemoryWin32HandleKHR = (void *)p_vkGetDeviceProcAddr(dxgi_vk_exp.device, "vkGetMemoryWin32HandleKHR");
+    if (!dxgi_vk_exp.p_vkCreateImage || !dxgi_vk_exp.p_vkDestroyImage || !dxgi_vk_exp.p_vkGetImageMemoryRequirements
+            || !dxgi_vk_exp.p_vkAllocateMemory || !dxgi_vk_exp.p_vkFreeMemory || !dxgi_vk_exp.p_vkBindImageMemory
+            || !dxgi_vk_exp.p_vkGetMemoryWin32HandleKHR)
+        goto fail;
+
+    InterlockedExchange(&dxgi_vk_exp.init_state, 1);
+    LeaveCriticalSection(&dxgi_vk_exp.cs);
+    TRACE("Initialized Vulkan external-memory zero-copy exporter.\n");
+    return TRUE;
+
+fail:
+    InterlockedExchange(&dxgi_vk_exp.init_state, -1);
+    LeaveCriticalSection(&dxgi_vk_exp.cs);
+    WARN("Vulkan external-memory exporter unavailable; using SHM fallback.\n");
+    return FALSE;
+}
+
+static BOOL dxgi_vk_alloc_shared_image(UINT width, UINT height, UINT64 *out_image,
+        UINT64 *out_memory, HANDLE *out_handle, UINT64 *out_alloc_size)
+{
+    VkExternalMemoryImageCreateInfo ext_img_info = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+    VkImageCreateInfo img_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    VkExportMemoryAllocateInfo exp_mem_info = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO };
+    VkMemoryDedicatedAllocateInfo ded_mem_info = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+    VkMemoryAllocateInfo alloc_info = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    VkMemoryGetWin32HandleInfoKHR get_h_info = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+    VkMemoryRequirements mem_reqs;
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    HANDLE nt_handle = NULL;
+    uint32_t mem_type = ~0u, i;
+
+    if (!dxgi_vk_exporter_init())
+        return FALSE;
+
+    ext_img_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    img_info.pNext = &ext_img_info;
+    img_info.imageType = VK_IMAGE_TYPE_2D;
+    img_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    img_info.extent.width = width;
+    img_info.extent.height = height;
+    img_info.extent.depth = 1;
+    img_info.mipLevels = 1;
+    img_info.arrayLayers = 1;
+    img_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    img_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+            | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    img_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (dxgi_vk_exp.p_vkCreateImage(dxgi_vk_exp.device, &img_info, NULL, &image) != VK_SUCCESS)
+        return FALSE;
+
+    dxgi_vk_exp.p_vkGetImageMemoryRequirements(dxgi_vk_exp.device, image, &mem_reqs);
+    for (i = 0; i < dxgi_vk_exp.mem_props.memoryTypeCount; i++)
+    {
+        if ((mem_reqs.memoryTypeBits & (1u << i))
+                && (dxgi_vk_exp.mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+        {
+            mem_type = i;
+            break;
+        }
+    }
+    if (mem_type == ~0u)
+    {
+        for (i = 0; i < dxgi_vk_exp.mem_props.memoryTypeCount; i++)
+        {
+            if (mem_reqs.memoryTypeBits & (1u << i)) { mem_type = i; break; }
+        }
+    }
+    if (mem_type == ~0u)
+    {
+        dxgi_vk_exp.p_vkDestroyImage(dxgi_vk_exp.device, image, NULL);
+        return FALSE;
+    }
+
+    ded_mem_info.image = image;
+    exp_mem_info.pNext = &ded_mem_info;
+    exp_mem_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    alloc_info.pNext = &exp_mem_info;
+    alloc_info.allocationSize = mem_reqs.size;
+    alloc_info.memoryTypeIndex = mem_type;
+
+    if (dxgi_vk_exp.p_vkAllocateMemory(dxgi_vk_exp.device, &alloc_info, NULL, &mem) != VK_SUCCESS)
+    {
+        dxgi_vk_exp.p_vkDestroyImage(dxgi_vk_exp.device, image, NULL);
+        return FALSE;
+    }
+
+    if (dxgi_vk_exp.p_vkBindImageMemory(dxgi_vk_exp.device, image, mem, 0) != VK_SUCCESS)
+    {
+        dxgi_vk_exp.p_vkFreeMemory(dxgi_vk_exp.device, mem, NULL);
+        dxgi_vk_exp.p_vkDestroyImage(dxgi_vk_exp.device, image, NULL);
+        return FALSE;
+    }
+
+    get_h_info.memory = mem;
+    get_h_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    if (dxgi_vk_exp.p_vkGetMemoryWin32HandleKHR(dxgi_vk_exp.device, &get_h_info, &nt_handle) != VK_SUCCESS || !nt_handle)
+    {
+        dxgi_vk_exp.p_vkFreeMemory(dxgi_vk_exp.device, mem, NULL);
+        dxgi_vk_exp.p_vkDestroyImage(dxgi_vk_exp.device, image, NULL);
+        return FALSE;
+    }
+
+    *out_image = (UINT64)(ULONG_PTR)image;
+    *out_memory = (UINT64)(ULONG_PTR)mem;
+    *out_handle = nt_handle;
+    *out_alloc_size = mem_reqs.size;
+    return TRUE;
+}
+
+void dxgi_vk_free_shared_image(UINT64 vk_image, UINT64 vk_memory, HANDLE nt_handle)
+{
+    if (nt_handle)
+        CloseHandle(nt_handle);
+    if (InterlockedCompareExchange(&dxgi_vk_exp.init_state, 0, 0) == 1)
+    {
+        if (vk_image)
+            dxgi_vk_exp.p_vkDestroyImage(dxgi_vk_exp.device, (VkImage)(ULONG_PTR)vk_image, NULL);
+        if (vk_memory)
+            dxgi_vk_exp.p_vkFreeMemory(dxgi_vk_exp.device, (VkDeviceMemory)(ULONG_PTR)vk_memory, NULL);
+    }
+}
+
+static void STDMETHODCALLTYPE shm_staging_destroyed(void *parent) {}
+static const struct wined3d_parent_ops shm_staging_parent_ops = { shm_staging_destroyed };
+
+static BOOL d3d11_swapchain_export_shm(struct d3d11_swapchain *swapchain)
+{
+    IDXGIResource1 *res = NULL;
+    HANDLE kmt;
+    struct wined3d_texture *src_tex;
+    struct wined3d_resource *src_res, *dst_res;
+    struct wined3d_resource_desc rdesc;
+    struct wined3d_device *wined3d_device;
+    struct wined3d_device_context *ctx;
+    struct wined3d_map_desc map_desc;
+    SIZE_T needed;
+    UINT *hdr;
+    BYTE *dst_px;
+    UINT y, row_bytes;
+    HRESULT hr;
+
+    if (FAILED(d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface, 0, &IID_IDXGIResource1, (void **)&res)) || !res)
+        return FALSE;
+    kmt = dxgi_resource_get_existing_kmt_handle(res);
+    IDXGIResource1_Release(res);
+    if (!kmt)
+        kmt = swapchain->shm_kmt_handle;
+    if (!kmt)
+        return FALSE;
+
+    wined3d_mutex_lock();
+    src_tex = wined3d_swapchain_get_back_buffer(swapchain->wined3d_swapchain, 0);
+    if (!src_tex)
+    {
+        wined3d_mutex_unlock();
+        return TRUE;
+    }
+    src_res = wined3d_texture_get_resource(src_tex);
+    wined3d_resource_get_desc(src_res, &rdesc);
+    if (!rdesc.width || !rdesc.height || rdesc.width > 4096 || rdesc.height > 2160)
+    {
+        wined3d_mutex_unlock();
+        return TRUE;
+    }
+
+    row_bytes = rdesc.width * 4;
+    needed = 32 + (SIZE_T)row_bytes * rdesc.height;
+    if (swapchain->shm_kmt_handle != kmt || swapchain->shm_size < needed)
+    {
+        /* Reserve up to 4096x2160x4 + 32 (~35 MB virtual; only touched pages use RAM)
+         * so ResizeBuffers (e.g. 1272x990 -> 2560x1440) never hits ERROR_ALREADY_EXISTS
+         * with a smaller file mapping. */
+        SIZE_T map_size = 32 + (SIZE_T)4096 * 2160 * 4;
+        WCHAR name[64];
+        if (needed > map_size) map_size = needed;
+        if (swapchain->shm_ptr) { UnmapViewOfFile(swapchain->shm_ptr); swapchain->shm_ptr = NULL; }
+        if (swapchain->shm_map) { CloseHandle(swapchain->shm_map); swapchain->shm_map = NULL; }
+        swprintf(name, ARRAY_SIZE(name), L"Local\\wine_dcomp_shm_%08x", (UINT)(ULONG_PTR)kmt);
+        swapchain->shm_map = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                0, (DWORD)map_size, name);
+        if (swapchain->shm_map)
+            swapchain->shm_ptr = MapViewOfFile(swapchain->shm_map, FILE_MAP_WRITE, 0, 0, map_size);
+        swapchain->shm_kmt_handle = kmt;
+        swapchain->shm_size = swapchain->shm_ptr ? map_size : 0;
+    }
+    if (!swapchain->shm_ptr)
+    {
+        wined3d_mutex_unlock();
+        return TRUE;
+    }
+
+    wined3d_device = wined3d_swapchain_get_device(swapchain->wined3d_swapchain);
+    ctx = wined3d_device_get_immediate_context(wined3d_device);
+
+    /* Fast path: Zero-copy GPU-to-GPU shared external memory (Vulkan -> GL_EXT_memory_object_win32). */
+    if (!swapchain->zc_failed)
+    {
+        if (!swapchain->zc_tex || swapchain->zc_width != rdesc.width || swapchain->zc_height != rdesc.height)
+        {
+            struct wined3d_resource_desc zdesc = rdesc;
+            UINT64 vk_img = 0, vk_mem = 0, alloc_sz = 0;
+            HANDLE nt_h = NULL;
+            struct wined3d_texture *ztex = NULL;
+
+            if (swapchain->zc_tex)
+            {
+                wined3d_texture_decref(swapchain->zc_tex);
+                swapchain->zc_tex = NULL;
+            }
+            if (swapchain->zc_nt_handle || swapchain->zc_vk_image || swapchain->zc_vk_memory)
+            {
+                dxgi_vk_free_shared_image(swapchain->zc_vk_image, swapchain->zc_vk_memory, swapchain->zc_nt_handle);
+                swapchain->zc_vk_image = 0;
+                swapchain->zc_vk_memory = 0;
+                swapchain->zc_nt_handle = NULL;
+            }
+
+            zdesc.access = WINED3D_RESOURCE_ACCESS_GPU;
+            zdesc.usage = 0;
+            zdesc.bind_flags = WINED3D_BIND_SHADER_RESOURCE | WINED3D_BIND_RENDER_TARGET;
+            zdesc.multisample_type = WINED3D_MULTISAMPLE_NONE;
+            zdesc.multisample_quality = 0;
+
+            if (dxgi_vk_alloc_shared_image(rdesc.width, rdesc.height, &vk_img, &vk_mem, &nt_h, &alloc_sz)
+                    && SUCCEEDED(wined3d_texture_create(wined3d_device, &zdesc, 1, 1, 0, NULL, NULL,
+                            &shm_staging_parent_ops, &ztex))
+                    && SUCCEEDED(wined3d_texture_set_external_memory(ztex, nt_h, alloc_sz)))
+            {
+                swapchain->zc_tex = ztex;
+                swapchain->zc_vk_image = vk_img;
+                swapchain->zc_vk_memory = vk_mem;
+                swapchain->zc_nt_handle = nt_h;
+                swapchain->zc_alloc_size = alloc_sz;
+                swapchain->zc_width = rdesc.width;
+                swapchain->zc_height = rdesc.height;
+                TRACE("Zero-copy GPU surface allocated %ux%u (handle %p, size %s).\n",
+                        rdesc.width, rdesc.height, nt_h, wine_dbgstr_longlong(alloc_sz));
+            }
+            else
+            {
+                if (ztex) wined3d_texture_decref(ztex);
+                dxgi_vk_free_shared_image(vk_img, vk_mem, nt_h);
+                swapchain->zc_failed = TRUE;
+                WARN("Zero-copy GPU surface setup failed; falling back to POSIX SHM.\n");
+            }
+        }
+
+        if (swapchain->zc_tex)
+        {
+            dst_res = wined3d_texture_get_resource(swapchain->zc_tex);
+            wined3d_device_context_copy_resource(ctx, dst_res, src_res);
+            wined3d_device_context_flush(ctx);
+
+            hdr = (UINT *)swapchain->shm_ptr;
+            InterlockedIncrement((LONG *)&hdr[3]);
+            MemoryBarrier();
+            hdr[0] = rdesc.width;
+            hdr[1] = rdesc.height;
+            hdr[2] = row_bytes;
+            hdr[4] = WINE_DCOMP_ZCGP_MAGIC;
+            hdr[5] = GetCurrentProcessId();
+            hdr[6] = (UINT)(ULONG_PTR)swapchain->zc_nt_handle;
+            hdr[7] = (UINT)swapchain->zc_alloc_size;
+            MemoryBarrier();
+            InterlockedIncrement((LONG *)&hdr[3]);
+
+            wined3d_mutex_unlock();
+            return TRUE;
+        }
+    }
+
+    if (!swapchain->shm_staging || swapchain->shm_width != rdesc.width || swapchain->shm_height != rdesc.height)
+    {
+        struct wined3d_resource_desc sdesc = rdesc;
+        if (swapchain->shm_staging)
+        {
+            wined3d_texture_decref(swapchain->shm_staging);
+            swapchain->shm_staging = NULL;
+        }
+        sdesc.access = WINED3D_RESOURCE_ACCESS_CPU | WINED3D_RESOURCE_ACCESS_MAP_R;
+        sdesc.usage = 0;
+        sdesc.bind_flags = 0;
+        sdesc.multisample_type = WINED3D_MULTISAMPLE_NONE;
+        sdesc.multisample_quality = 0;
+        if (FAILED(wined3d_texture_create(wined3d_device, &sdesc, 1, 1, 0, NULL, NULL,
+                &shm_staging_parent_ops, &swapchain->shm_staging)))
+        {
+            wined3d_mutex_unlock();
+            return TRUE;
+        }
+        swapchain->shm_width = rdesc.width;
+        swapchain->shm_height = rdesc.height;
+    }
+
+    dst_res = wined3d_texture_get_resource(swapchain->shm_staging);
+    wined3d_device_context_copy_resource(ctx, dst_res, src_res);
+    hr = wined3d_device_context_map(ctx, dst_res, 0, &map_desc, NULL, WINED3D_MAP_READ);
+    if (SUCCEEDED(hr) && map_desc.data)
+    {
+        hdr = (UINT *)swapchain->shm_ptr;
+        dst_px = (BYTE *)swapchain->shm_ptr + 32;
+        /* Seqlock: odd = write in progress, even = complete stable frame. */
+        InterlockedIncrement((LONG *)&hdr[3]);
+        MemoryBarrier();
+        hdr[0] = rdesc.width;
+        hdr[1] = rdesc.height;
+        hdr[2] = row_bytes;
+        hdr[4] = 0;
+        for (y = 0; y < rdesc.height; y++)
+            memcpy(dst_px + (SIZE_T)y * row_bytes, (const BYTE *)map_desc.data + (SIZE_T)y * map_desc.row_pitch, row_bytes);
+        MemoryBarrier();
+        InterlockedIncrement((LONG *)&hdr[3]);
+        wined3d_device_context_unmap(ctx, dst_res, 0);
+    }
+    wined3d_mutex_unlock();
+    return TRUE;
+}
+
+static BOOL dxgi_swapchain_is_dcomp_captured(struct d3d11_swapchain *swapchain)
+{
+    HWND hwnd = d3d11_swapchain_get_hwnd(swapchain), root;
+
+    if (!hwnd || !IsWindow(hwnd))
+        return FALSE;
+    if (GetPropW(hwnd, L"__wine_dcomp_captured_hwnd") || GetPropW(hwnd, L"__wine_dwm_cloaked"))
+        return TRUE;
+    root = GetAncestor(hwnd, GA_ROOT);
+    if (root && root != hwnd
+            && (GetPropW(root, L"__wine_dcomp_captured_hwnd") || GetPropW(root, L"__wine_dwm_cloaked")))
+        return TRUE;
+    return FALSE;
+}
+
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
@@ -388,6 +943,23 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     }
 
     swapchain->present_interval = sync_interval;
+
+    if (d3d11_swapchain_export_shm(swapchain)
+            || (swapchain->is_composition_surface && !IsWindowVisible(d3d11_swapchain_get_hwnd(swapchain)))
+            || dxgi_swapchain_is_dcomp_captured(swapchain))
+    {
+        /* Composition, DComp-exported, or DComp-captured swapchain: pixels were
+         * exported directly to DComp SHM; skip X11/GLX/Vulkan SwapBuffers on the
+         * cloaked/offscreen HWND so XWayland never stalls waiting for wl_surface.frame. */
+        if (!(flags & DXGI_PRESENT_DO_NOT_SEQUENCE))
+            InterlockedIncrement(&swapchain->present_count);
+        if (swapchain->frame_latency_semaphore
+                && !ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL))
+            ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
+        if (sync_interval && !(flags & DXGI_PRESENT_DO_NOT_WAIT))
+            Sleep(16);
+        return S_OK;
+    }
 
     if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
             NULL, NULL, NULL, sync_interval, 0)))
@@ -963,17 +1535,29 @@ static HANDLE STDMETHODCALLTYPE d3d11_swapchain_GetFrameLatencyWaitableObject(ID
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMatrixTransform(IDXGISwapChain4 *iface,
         const DXGI_MATRIX_3X2_F *matrix)
 {
-    FIXME("iface %p, matrix %p stub!\n", iface, matrix);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, matrix %p.\n", iface, matrix);
+
+    if (!matrix)
+        return E_INVALIDARG;
+
+    swapchain->matrix_transform = *matrix;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMatrixTransform(IDXGISwapChain4 *iface,
         DXGI_MATRIX_3X2_F *matrix)
 {
-    FIXME("iface %p, matrix %p stub!\n", iface, matrix);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, matrix %p.\n", iface, matrix);
+
+    if (!matrix)
+        return E_INVALIDARG;
+
+    *matrix = swapchain->matrix_transform;
+    return S_OK;
 }
 
 /* IDXGISwapChain3 methods */
@@ -1156,6 +1740,15 @@ static HRESULT d3d11_swapchain_create_d3d11_textures(struct d3d11_swapchain *swa
     return hr;
 }
 
+void d3d11_swapchain_mark_composition(IDXGISwapChain1 *iface)
+{
+    if (iface && (const void *)iface->lpVtbl == (const void *)&d3d11_swapchain_vtbl)
+    {
+        struct d3d11_swapchain *sc = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
+        sc->is_composition_surface = TRUE;
+    }
+}
+
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc, UINT dxgi_flags)
 {
@@ -1175,11 +1768,14 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     IWineDXGIDevice_AddRef(swapchain->device = &device->IWineDXGIDevice_iface);
 
     swapchain->IDXGISwapChain4_iface.lpVtbl = &d3d11_swapchain_vtbl;
+    swapchain->IDXGISwapChainPartner_iface.lpVtbl = (const IUnknownVtbl *)dxgi_swapchain_partner_vtbl;
     swapchain->state_parent.ops = &d3d11_swapchain_state_parent_ops;
     swapchain->refcount = 1;
     swapchain->swap_effect = dxgi_swap_effect_from_wined3d(desc->swap_effect);
     swapchain->flip_model = (swapchain->swap_effect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
             || swapchain->swap_effect == DXGI_SWAP_EFFECT_FLIP_DISCARD);
+    swapchain->matrix_transform._11 = 1.0f;
+    swapchain->matrix_transform._22 = 1.0f;
     swapchain->buffer_count = desc->backbuffer_count;
     swapchain->dxgi_flags = dxgi_flags;
     swapchain->back_buffer_index = 0;

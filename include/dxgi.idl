@@ -200,7 +200,6 @@ interface IDXGIDeviceSubObject : IDXGIObject
 interface IDXGIResource : IDXGIDeviceSubObject
 {
     HRESULT GetSharedHandle([out] HANDLE *pSharedHandle);
-    HRESULT GetResourceType([out] DXGI_RESOURCE_TYPE *pResourceType);
     HRESULT GetUsage([out] DXGI_USAGE *pUsage);
     HRESULT SetEvictionPriority([in] UINT EvictionPriority);
     HRESULT GetEvictionPriority([out, retval] UINT *pEvictionPriority);

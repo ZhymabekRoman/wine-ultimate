@@ -66,6 +66,156 @@ HRESULT WINAPI D3D12GetDebugInterface(REFIID iid, void **debug)
     return DXGI_ERROR_SDK_COMPONENT_MISSING;
 }
 
+DEFINE_GUID(GUID_D3D12Debug, 0xc2a15b95, 0xbad7, 0x44e4, 0x92,0xee, 0x8e,0x2b,0xb9,0xe7,0x7f,0x8f);
+DEFINE_GUID(GUID_D3D12Debug1, 0xaffc3dc5, 0x2e17, 0x4355, 0xa9,0x3d, 0x9d,0x33,0x83,0x13,0x03,0xfe);
+DEFINE_GUID(GUID_D3D12Debug2, 0xc4f529f5, 0x5de4, 0x4905, 0x96,0x1c, 0x01,0x9c,0xc9,0x13,0x61,0x78);
+
+struct d3d12_debug
+{
+    ID3D12Debug5 ID3D12Debug5_iface;
+    LONG refcount;
+    BOOL gpu_validation;
+    BOOL sync_validation;
+    D3D12_GPU_BASED_VALIDATION_FLAGS gpu_flags;
+};
+
+static inline struct d3d12_debug *impl_from_ID3D12Debug5( ID3D12Debug5 *iface )
+{
+    return CONTAINING_RECORD( iface, struct d3d12_debug, ID3D12Debug5_iface );
+}
+
+static HRESULT WINAPI d3d12_debug_QueryInterface( ID3D12Debug5 *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_ID3D12Debug ) ||
+        IsEqualGUID( iid, &IID_ID3D12Debug1 ) ||
+        IsEqualGUID( iid, &IID_ID3D12Debug2 ) ||
+        IsEqualGUID( iid, &IID_ID3D12Debug3 ) ||
+        IsEqualGUID( iid, &IID_ID3D12Debug4 ) ||
+        IsEqualGUID( iid, &IID_ID3D12Debug5 ))
+    {
+        ID3D12Debug5_AddRef( iface );
+        *out = iface;
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI d3d12_debug_AddRef( ID3D12Debug5 *iface )
+{
+    struct d3d12_debug *debug = impl_from_ID3D12Debug5( iface );
+    return InterlockedIncrement( &debug->refcount );
+}
+
+static ULONG WINAPI d3d12_debug_Release( ID3D12Debug5 *iface )
+{
+    struct d3d12_debug *debug = impl_from_ID3D12Debug5( iface );
+    ULONG refcount = InterlockedDecrement( &debug->refcount );
+
+    if (!refcount)
+        HeapFree( GetProcessHeap(), 0, debug );
+    return refcount;
+}
+
+static void WINAPI d3d12_debug_EnableDebugLayer( ID3D12Debug5 *iface )
+{
+    struct d3d12_debug *debug = impl_from_ID3D12Debug5( iface );
+
+    TRACE( "iface %p.\n", iface );
+    debug->gpu_validation = true;
+}
+
+static void WINAPI d3d12_debug_SetEnableGPUBasedValidation( ID3D12Debug5 *iface, BOOL enable )
+{
+    struct d3d12_debug *debug = impl_from_ID3D12Debug5( iface );
+
+    TRACE( "iface %p, enable %s.\n", iface, enable ? "TRUE" : "FALSE" );
+    debug->gpu_validation = enable;
+}
+
+static void WINAPI d3d12_debug_SetEnableSynchronizedCommandQueueValidation( ID3D12Debug5 *iface, BOOL enable )
+{
+    struct d3d12_debug *debug = impl_from_ID3D12Debug5( iface );
+
+    TRACE( "iface %p, enable %s.\n", iface, enable ? "TRUE" : "FALSE" );
+    debug->sync_validation = enable;
+}
+
+static void WINAPI d3d12_debug_SetGPUBasedValidationFlags( ID3D12Debug5 *iface,
+        D3D12_GPU_BASED_VALIDATION_FLAGS flags )
+{
+    struct d3d12_debug *debug = impl_from_ID3D12Debug5( iface );
+
+    TRACE( "iface %p, flags %#x.\n", iface, flags );
+    debug->gpu_flags = flags;
+}
+
+static void WINAPI d3d12_debug_DisableDebugLayer( ID3D12Debug5 *iface )
+{
+    struct d3d12_debug *debug = impl_from_ID3D12Debug5( iface );
+
+    TRACE( "iface %p.\n", iface );
+    debug->gpu_validation = false;
+}
+
+static void WINAPI d3d12_debug_SetEnableAutoName( ID3D12Debug5 *iface, BOOL enable )
+{
+    FIXME( "iface %p, enable %s, stub!\n", iface, enable ? "TRUE" : "FALSE" );
+}
+
+static const struct ID3D12Debug5Vtbl d3d12_debug_vtbl =
+{
+    d3d12_debug_QueryInterface,
+    d3d12_debug_AddRef,
+    d3d12_debug_Release,
+    d3d12_debug_EnableDebugLayer,
+    d3d12_debug_SetEnableGPUBasedValidation,
+    d3d12_debug_SetEnableSynchronizedCommandQueueValidation,
+    d3d12_debug_SetGPUBasedValidationFlags,
+    d3d12_debug_DisableDebugLayer,
+    d3d12_debug_SetEnableAutoName,
+};
+
+static void d3d12_debug_init( struct d3d12_debug *debug )
+{
+    static const ID3D12Debug5Vtbl *vtbl = &d3d12_debug_vtbl;
+
+    debug->ID3D12Debug5_iface.lpVtbl = vtbl;
+    debug->refcount = 1;
+}
+
+HRESULT WINAPI D3D12GetInterface(REFCLSID rclsid, REFIID riid, void **ppv)
+{
+    struct d3d12_debug *debug;
+    HRESULT hr;
+
+    TRACE( "rclsid %s, riid %s, ppv %p.\n", debugstr_guid( rclsid ), debugstr_guid( riid ), ppv );
+
+    if (!ppv)
+        return E_INVALIDARG;
+    *ppv = NULL;
+
+    if (IsEqualGUID( rclsid, &GUID_D3D12Debug ) ||
+        IsEqualGUID( rclsid, &GUID_D3D12Debug1 ) ||
+        IsEqualGUID( rclsid, &GUID_D3D12Debug2 ))
+    {
+        if (!(debug = HeapAlloc( GetProcessHeap(), 0, sizeof(*debug) )))
+            return E_OUTOFMEMORY;
+        d3d12_debug_init( debug );
+        hr = ID3D12Debug5_QueryInterface( &debug->ID3D12Debug5_iface, riid, ppv );
+        ID3D12Debug5_Release( &debug->ID3D12Debug5_iface );
+        return hr;
+    }
+
+    FIXME( "rclsid %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( rclsid ) );
+    return E_NOINTERFACE;
+}
+
 HRESULT WINAPI D3D12EnableExperimentalFeatures(UINT feature_count,
         const IID *iids, void *configurations, UINT *configurations_sizes)
 {

@@ -179,6 +179,7 @@ enum wined3d_gl_extension
     EXT_GPU_PROGRAM_PARAMETERS,
     EXT_GPU_SHADER4,
     EXT_MEMORY_OBJECT,
+    EXT_MEMORY_OBJECT_WIN32,
     EXT_PACKED_DEPTH_STENCIL,
     EXT_PACKED_FLOAT,
     EXT_POINT_PARAMETERS,
@@ -972,6 +973,10 @@ struct wined3d_texture_gl
 
     struct list renderbuffers;
     const struct wined3d_renderbuffer_entry *current_renderbuffer;
+
+    HANDLE ext_mem_handle;
+    UINT64 ext_mem_size;
+    GLuint ext_mem_obj;
 };
 
 static inline struct wined3d_texture_gl *wined3d_texture_gl(struct wined3d_texture *texture)

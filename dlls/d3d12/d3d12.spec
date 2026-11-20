@@ -6,6 +6,7 @@
 @ stub D3D12CoreRegisterLayers
 @ stdcall D3D12CreateRootSignatureDeserializer(ptr long ptr ptr)
 @ stdcall D3D12CreateVersionedRootSignatureDeserializer(ptr long ptr ptr)
+@ stdcall D3D12GetInterface(ptr ptr ptr)
 @ stdcall D3D12EnableExperimentalFeatures(long ptr ptr ptr)
 @ stdcall D3D12SerializeRootSignature(ptr long ptr ptr)
 @ stdcall D3D12SerializeVersionedRootSignature(ptr ptr ptr)

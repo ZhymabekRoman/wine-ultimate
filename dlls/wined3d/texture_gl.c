@@ -1414,9 +1414,21 @@ static void wined3d_texture_gl_allocate_immutable_storage(struct wined3d_texture
             GL_EXTCALL(glTexStorage1D(texture_gl->target, texture_gl->t.level_count, gl_internal_format, width));
             break;
         default:
-            GL_EXTCALL(glTexStorage2D(texture_gl->target, texture_gl->t.level_count,
-                    gl_internal_format, width, height));
+        {
+            GLint immutable = 0;
+            gl_info->gl_ops.gl.p_glGetTexParameteriv(texture_gl->target, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
+            if (immutable && !texture_gl->ext_mem_obj && texture_gl->texture_rgb.name)
+            {
+                gl_info->gl_ops.gl.p_glDeleteTextures(1, &texture_gl->texture_rgb.name);
+                gl_info->gl_ops.gl.p_glGenTextures(1, &texture_gl->texture_rgb.name);
+                gl_info->gl_ops.gl.p_glBindTexture(texture_gl->target, texture_gl->texture_rgb.name);
+                immutable = 0;
+            }
+            if (!immutable)
+                GL_EXTCALL(glTexStorage2D(texture_gl->target, texture_gl->t.level_count,
+                        gl_internal_format, width, height));
             break;
+        }
     }
 
     checkGLcall("allocate immutable storage");
@@ -2367,11 +2379,58 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
 
     TRACE("internal %#x, format %#x, type %#x.\n", internal, format_gl->format, format_gl->type);
 
+    if (!srgb && texture_gl->ext_mem_handle && texture_gl->target == GL_TEXTURE_2D
+            && gl_info->supported[EXT_MEMORY_OBJECT] && gl_info->supported[EXT_MEMORY_OBJECT_WIN32])
+    {
+        GLint dedicated = GL_TRUE;
+        GLsizei width = wined3d_texture_get_level_width(&texture_gl->t, 0);
+        GLsizei height = wined3d_texture_get_level_height(&texture_gl->t, 0);
+
+        while (gl_info->gl_ops.gl.p_glGetError() != GL_NO_ERROR) {}
+        GL_EXTCALL(glCreateMemoryObjectsEXT(1, &texture_gl->ext_mem_obj));
+        GL_EXTCALL(glMemoryObjectParameterivEXT(texture_gl->ext_mem_obj, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated));
+        GL_EXTCALL(glImportMemoryWin32HandleEXT(texture_gl->ext_mem_obj, texture_gl->ext_mem_size,
+                GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, texture_gl->ext_mem_handle));
+        if (gl_info->gl_ops.gl.p_glGetError() == GL_NO_ERROR)
+        {
+            GL_EXTCALL(glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, internal, width, height, texture_gl->ext_mem_obj, 0));
+            if (gl_info->gl_ops.gl.p_glGetError() == GL_NO_ERROR)
+            {
+                CloseHandle(texture_gl->ext_mem_handle);
+                texture_gl->ext_mem_handle = NULL;
+                texture_gl->t.flags |= alloc_flag;
+                wined3d_texture_validate_location(&texture_gl->t, 0, WINED3D_LOCATION_TEXTURE_RGB);
+                wined3d_texture_invalidate_location(&texture_gl->t, 0, ~WINED3D_LOCATION_TEXTURE_RGB);
+                TRACE("Imported external GPU memory %u (%ux%u, size %s, internal %#x) into texture %p.\n",
+                        texture_gl->ext_mem_obj, width, height,
+                        wine_dbgstr_longlong(texture_gl->ext_mem_size), internal, texture_gl);
+                goto done_alloc;
+            }
+        }
+        WARN("External GPU memory import failed for texture %p, falling back to normal storage.\n", texture_gl);
+        if (texture_gl->ext_mem_obj)
+        {
+            GL_EXTCALL(glDeleteMemoryObjectsEXT(1, &texture_gl->ext_mem_obj));
+            texture_gl->ext_mem_obj = 0;
+        }
+        CloseHandle(texture_gl->ext_mem_handle);
+        texture_gl->ext_mem_handle = NULL;
+        /* Recreate GL texture object in case glTexStorageMem2DEXT left it immutable. */
+        if (texture_gl->texture_rgb.name)
+        {
+            gl_info->gl_ops.gl.p_glDeleteTextures(1, &texture_gl->texture_rgb.name);
+            gl_info->gl_ops.gl.p_glGenTextures(1, &texture_gl->texture_rgb.name);
+            gl_info->gl_ops.gl.p_glBindTexture(texture_gl->target, texture_gl->texture_rgb.name);
+        }
+    }
+
     if (wined3d_texture_use_immutable_storage(&texture_gl->t, gl_info))
         wined3d_texture_gl_allocate_immutable_storage(texture_gl, internal, gl_info);
     else
         wined3d_texture_gl_allocate_mutable_storage(texture_gl, internal, format_gl, gl_info);
     texture_gl->t.flags |= alloc_flag;
+
+done_alloc:
 
     if (format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
         wined3d_texture_gl_chroma_prepare(texture_gl, context_gl);
@@ -2638,6 +2697,17 @@ static void wined3d_texture_gl_unload_location(struct wined3d_texture *texture,
         case WINED3D_LOCATION_TEXTURE_RGB:
             if (texture_gl->texture_rgb.name)
                 gltexture_delete(texture_gl->t.resource.device, context_gl->gl_info, &texture_gl->texture_rgb);
+            if (texture_gl->ext_mem_obj)
+            {
+                const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+                GL_EXTCALL(glDeleteMemoryObjectsEXT(1, &texture_gl->ext_mem_obj));
+                texture_gl->ext_mem_obj = 0;
+            }
+            if (texture_gl->ext_mem_handle)
+            {
+                CloseHandle(texture_gl->ext_mem_handle);
+                texture_gl->ext_mem_handle = NULL;
+            }
             if (texture_gl->chroma_name)
             {
                 context_gl_resource_released(texture_gl->t.resource.device, texture_gl->chroma_name, FALSE);
@@ -2770,6 +2840,44 @@ HRESULT wined3d_texture_gl_init(struct wined3d_texture_gl *texture_gl, struct wi
         texture_gl->t.flags &= ~WINED3D_TEXTURE_DOWNLOADABLE;
 
     return WINED3D_OK;
+}
+
+HRESULT __cdecl wined3d_texture_set_external_memory(struct wined3d_texture *texture,
+        HANDLE nt_handle, UINT64 alloc_size)
+{
+    const struct wined3d_gl_info *gl_info;
+    struct wined3d_texture_gl *texture_gl;
+    HANDLE dup = NULL;
+
+    if (!texture || !nt_handle || !alloc_size)
+        return E_INVALIDARG;
+    if (texture->texture_ops != &texture_gl_ops)
+        return E_NOTIMPL;
+
+    texture_gl = wined3d_texture_gl(texture);
+    gl_info = &wined3d_adapter_gl(texture->resource.device->adapter)->gl_info;
+    if (!gl_info->supported[EXT_MEMORY_OBJECT] || !gl_info->supported[EXT_MEMORY_OBJECT_WIN32]
+            || !gl_info->gl_ops.ext.p_glCreateMemoryObjectsEXT
+            || !gl_info->gl_ops.ext.p_glDeleteMemoryObjectsEXT
+            || !gl_info->gl_ops.ext.p_glMemoryObjectParameterivEXT
+            || !gl_info->gl_ops.ext.p_glTexStorageMem2DEXT
+            || !gl_info->gl_ops.ext.p_glImportMemoryWin32HandleEXT)
+        return E_NOTIMPL;
+    if (texture_gl->target != GL_TEXTURE_2D || (texture->flags & WINED3D_TEXTURE_RGB_ALLOCATED))
+        return E_FAIL;
+
+    if (!DuplicateHandle(GetCurrentProcess(), nt_handle, GetCurrentProcess(), &dup,
+            0, FALSE, DUPLICATE_SAME_ACCESS))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    if (texture_gl->ext_mem_handle)
+        CloseHandle(texture_gl->ext_mem_handle);
+    texture_gl->ext_mem_handle = dup;
+    texture_gl->ext_mem_size = alloc_size;
+    /* Queue preload asynchronously without calling wined3d_cs_finish() while the
+     * caller holds wined3d_cs, avoiding lock-order deadlock with the CSMT worker. */
+    wined3d_cs_emit_preload_resource(texture->resource.device->cs, &texture->resource);
+    return S_OK;
 }
 
 void wined3d_gl_texture_swizzle_from_color_fixup(GLint swizzle[4], struct color_fixup_desc fixup)

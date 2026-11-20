@@ -244,7 +244,7 @@ static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *
         texture_desc.Usage = D3D11_USAGE_DEFAULT;
         texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
         texture_desc.CPUAccessFlags = 0;
-        texture_desc.MiscFlags = D3D11_RESOURCE_MISC_GUARDED;
+        texture_desc.MiscFlags = D3D11_RESOURCE_MISC_GUARDED | D3D11_RESOURCE_MISC_SHARED;
         if (surface->pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM)
             texture_desc.MiscFlags |= D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
         hr = ID3D11Device_CreateTexture2D(d3d11_device, &texture_desc, NULL, &draw_surface);
@@ -486,10 +486,14 @@ static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *i
     return composition_surface_resize(surface, width, height);
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown4(IDCompositionSurfaceUnknown *iface)
+/* Undocumented. Win11 FrameworkUdk ResizeDCompositionSurface calls slot 11 (+0x58). */
+static HRESULT STDMETHODCALLTYPE surface_Unknown4(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
+
+    TRACE("iface %p, width %u, height %u.\n", iface, width, height);
+
+    return composition_surface_resize(surface, width, height);
 }
 
 static HRESULT STDMETHODCALLTYPE surface_Unknown5(IDCompositionSurfaceUnknown *iface)

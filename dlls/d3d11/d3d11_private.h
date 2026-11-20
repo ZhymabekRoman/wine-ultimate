@@ -37,6 +37,7 @@
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
 #include "wine/rbtree.h"
+#include "wine/list.h"
 
 struct d3d_device;
 
@@ -73,6 +74,8 @@ struct d3d11_runtime_desc
         D3D11_TEXTURE2D_DESC d3d11_2d;
         D3D11_TEXTURE3D_DESC d3d11_3d;
     };
+    UINT owner_pid;
+    UINT64 owner_resource;
 };
 
 static inline BOOL is_kmt_handle(HANDLE h)
@@ -184,6 +187,12 @@ struct d3d_texture2d
     struct wined3d_swapchain *swapchain;
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Device5 *device;
+    struct d3d_texture2d *shared_source;
+    ID3D11Texture2D *shared_staging;
+    struct list shared_peer_entry;
+    struct list shared_peers;
+    BOOL has_guard_rect;
+    RECT guard_rect;
 };
 
 static inline struct d3d_texture2d *impl_from_ID3D11Texture2D(ID3D11Texture2D *iface)
@@ -196,6 +205,9 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
         const D3D11_SUBRESOURCE_DATA *data, struct d3d_texture2d **out);
 struct d3d_texture2d *unsafe_impl_from_ID3D11Texture2D(ID3D11Texture2D *iface);
 struct d3d_texture2d *unsafe_impl_from_ID3D10Texture2D(ID3D10Texture2D *iface);
+struct d3d11_device_context;
+void d3d_texture2d_link_shared(struct d3d_texture2d *dst, IUnknown *owner_unk);
+void d3d_texture2d_sync_from_shared(ID3D11Resource *resource, struct d3d11_device_context *dst_ctx);
 
 /* ID3D11Texture3D, ID3D10Texture3D */
 struct d3d_texture3d
@@ -604,6 +616,35 @@ struct d3d11_device_context
     struct d3d_device *device;
 
     struct wined3d_private_store private_store;
+    BOOL has_guard_rect;
+    RECT guard_rect;
+    D3D11_RECT last_scissors[WINED3D_MAX_VIEWPORTS];
+    UINT last_scissor_count;
+};
+
+/* Undocumented ID3D11PartnerDevice used by WinUI 3 dcompi.dll */
+typedef struct ID3D11PartnerDevice ID3D11PartnerDevice;
+typedef struct ID3D11PartnerDeviceVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ID3D11PartnerDevice *iface, REFIID riid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ID3D11PartnerDevice *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(ID3D11PartnerDevice *iface);
+    HRESULT (STDMETHODCALLTYPE *EnablePartnerMode)(ID3D11PartnerDevice *iface);
+    HRESULT (STDMETHODCALLTYPE *DisablePartnerMode)(ID3D11PartnerDevice *iface);
+    HRESULT (STDMETHODCALLTYPE *CreateTexture2D)(ID3D11PartnerDevice *iface,
+            const D3D11_TEXTURE2D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
+            ID3D11Texture2D **texture);
+    HRESULT (STDMETHODCALLTYPE *SetGuardRect)(ID3D11PartnerDevice *iface,
+            ID3D11Texture2D *texture, const RECT *rect);
+    HRESULT (STDMETHODCALLTYPE *SetEmptyGuardRect)(ID3D11PartnerDevice *iface,
+            ID3D11Texture2D *texture);
+    HRESULT (STDMETHODCALLTYPE *RemoveGuardRect)(ID3D11PartnerDevice *iface,
+            ID3D11Texture2D *texture);
+} ID3D11PartnerDeviceVtbl;
+
+struct ID3D11PartnerDevice
+{
+    const ID3D11PartnerDeviceVtbl *lpVtbl;
 };
 
 /* ID3D11Device, ID3D10Device1 */
@@ -615,6 +656,7 @@ struct d3d_device
     ID3D10Multithread ID3D10Multithread_iface;
     IWineDXGIDeviceParent IWineDXGIDeviceParent_iface;
     ID3D11VideoDevice1 ID3D11VideoDevice1_iface;
+    ID3D11PartnerDevice ID3D11PartnerDevice_iface;
     IUnknown *outer_unk;
     LONG refcount;
 

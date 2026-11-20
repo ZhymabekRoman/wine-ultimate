@@ -656,6 +656,8 @@ static void d3d11_device_context_set_shader_resource_views(ID3D11DeviceContext4 
     {
         struct d3d_shader_resource_view *view = unsafe_impl_from_ID3D11ShaderResourceView(views[i]);
 
+        if (view && view->resource)
+            d3d_texture2d_sync_from_shared(view->resource, context);
         wined3d_views[i] = view ? view->wined3d_view : NULL;
     }
 
@@ -1094,12 +1096,41 @@ static void STDMETHODCALLTYPE d3d11_device_context_GSSetSamplers(ID3D11DeviceCon
     d3d11_device_context_set_samplers(iface, WINED3D_SHADER_TYPE_GEOMETRY, start_slot, sampler_count, samplers);
 }
 
+static void d3d11_device_context_apply_scissors(struct d3d11_device_context *context)
+{
+    D3D11_RECT clipped[WINED3D_MAX_VIEWPORTS];
+    UINT i, count;
+
+    if (!context->has_guard_rect)
+    {
+        if (context->last_scissor_count)
+            wined3d_device_context_set_scissor_rects(context->wined3d_context,
+                    context->last_scissor_count, context->last_scissors);
+        return;
+    }
+
+    count = context->last_scissor_count ? context->last_scissor_count : 1;
+    for (i = 0; i < count; ++i)
+    {
+        D3D11_RECT r = context->last_scissor_count ? context->last_scissors[i] : context->guard_rect;
+        if (context->guard_rect.left > r.left) r.left = context->guard_rect.left;
+        if (context->guard_rect.top > r.top) r.top = context->guard_rect.top;
+        if (context->guard_rect.right < r.right) r.right = context->guard_rect.right;
+        if (context->guard_rect.bottom < r.bottom) r.bottom = context->guard_rect.bottom;
+        if (r.right < r.left) r.right = r.left;
+        if (r.bottom < r.top) r.bottom = r.top;
+        clipped[i] = r;
+    }
+    wined3d_device_context_set_scissor_rects(context->wined3d_context, count, clipped);
+}
+
 static void STDMETHODCALLTYPE d3d11_device_context_OMSetRenderTargets(ID3D11DeviceContext4 *iface,
         UINT rtv_count, ID3D11RenderTargetView *const *rtvs, ID3D11DepthStencilView *depth_stencil_view)
 {
     struct wined3d_rendertarget_view *wined3d_rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct d3d_depthstencil_view *dsv;
+    BOOL prev_guard = context->has_guard_rect;
     unsigned int i;
 
     TRACE("iface %p, rtv_count %u, rtvs %p, depth_stencil_view %p.\n", iface, rtv_count, rtvs, depth_stencil_view);
@@ -1110,17 +1141,29 @@ static void STDMETHODCALLTYPE d3d11_device_context_OMSetRenderTargets(ID3D11Devi
         rtv_count = ARRAY_SIZE(wined3d_rtvs);
     }
 
+    context->has_guard_rect = FALSE;
     for (i = 0; i < rtv_count; ++i)
     {
         struct d3d_rendertarget_view *rtv = unsafe_impl_from_ID3D11RenderTargetView(rtvs[i]);
 
         wined3d_rtvs[i] = rtv ? rtv->wined3d_view : NULL;
+        if (i == 0 && rtv && rtv->resource)
+        {
+            struct d3d_texture2d *tex = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)rtv->resource);
+            if (tex && tex->has_guard_rect)
+            {
+                context->has_guard_rect = TRUE;
+                context->guard_rect = tex->guard_rect;
+            }
+        }
     }
 
     dsv = unsafe_impl_from_ID3D11DepthStencilView(depth_stencil_view);
 
     wined3d_device_context_set_render_targets_and_unordered_access_views(context->wined3d_context,
             ARRAY_SIZE(wined3d_rtvs), wined3d_rtvs, dsv ? dsv->wined3d_view : NULL, ~0u, NULL, NULL);
+    if (context->has_guard_rect || prev_guard)
+        d3d11_device_context_apply_scissors(context);
 }
 
 static void STDMETHODCALLTYPE d3d11_device_context_OMSetRenderTargetsAndUnorderedAccessViews(
@@ -1350,7 +1393,14 @@ static void STDMETHODCALLTYPE d3d11_device_context_RSSetScissorRects(ID3D11Devic
     if (rect_count > WINED3D_MAX_VIEWPORTS)
         return;
 
-    wined3d_device_context_set_scissor_rects(context->wined3d_context, rect_count, rects);
+    context->last_scissor_count = rect_count;
+    if (rect_count && rects)
+        memcpy(context->last_scissors, rects, rect_count * sizeof(*rects));
+
+    if (context->has_guard_rect)
+        d3d11_device_context_apply_scissors(context);
+    else
+        wined3d_device_context_set_scissor_rects(context->wined3d_context, rect_count, rects);
 }
 
 static void STDMETHODCALLTYPE d3d11_device_context_CopySubresourceRegion(ID3D11DeviceContext4 *iface,
@@ -1369,6 +1419,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopySubresourceRegion(ID3D11D
     if (!dst_resource || !src_resource)
         return;
 
+    d3d_texture2d_sync_from_shared(src_resource, context);
+
     if (src_box)
         wined3d_box_set(&wined3d_src_box, src_box->left, src_box->top,
                 src_box->right, src_box->bottom, src_box->front, src_box->back);
@@ -1386,6 +1438,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopyResource(ID3D11DeviceCont
     struct wined3d_resource *wined3d_dst_resource, *wined3d_src_resource;
 
     TRACE("iface %p, dst_resource %p, src_resource %p.\n", iface, dst_resource, src_resource);
+
+    d3d_texture2d_sync_from_shared(src_resource, context);
 
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
@@ -1442,9 +1496,13 @@ static void STDMETHODCALLTYPE d3d11_device_context_ClearRenderTargetView(ID3D11D
     if (!view)
         return;
 
-    if (FAILED(hr = wined3d_device_context_clear_rendertarget_view(context->wined3d_context, view->wined3d_view, NULL,
-            WINED3DCLEAR_TARGET, &color, 0.0f, 0)))
-        ERR("Failed to clear view, hr %#lx.\n", hr);
+    {
+        struct d3d_texture2d *tex = view->resource ? unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)view->resource) : NULL;
+        const RECT *clear_rect = (tex && tex->has_guard_rect) ? &tex->guard_rect : NULL;
+        if (FAILED(hr = wined3d_device_context_clear_rendertarget_view(context->wined3d_context, view->wined3d_view,
+                clear_rect, WINED3DCLEAR_TARGET, &color, 0.0f, 0)))
+            ERR("Failed to clear view, hr %#lx.\n", hr);
+    }
 }
 
 static void STDMETHODCALLTYPE d3d11_device_context_ClearUnorderedAccessViewUint(ID3D11DeviceContext4 *iface,
@@ -2768,6 +2826,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopySubresourceRegion1(ID3D11
     if (!dst_resource || !src_resource)
         return;
 
+    d3d_texture2d_sync_from_shared(src_resource, context);
+
     if (src_box)
         wined3d_box_set(&wined3d_src_box, src_box->left, src_box->top,
                 src_box->right, src_box->bottom, src_box->front, src_box->back);
@@ -3093,20 +3153,222 @@ static void STDMETHODCALLTYPE d3d11_device_context_GetHardwareProtectionState(ID
         *enable = FALSE;
 }
 
-static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext4 *iface,
-        ID3D11Fence *fence, UINT64 value)
+struct d3d11_fence_waiter
 {
-    FIXME("iface %p, fence %p, value %I64x stub!\n", iface, fence, value);
+    UINT64 value;
+    HANDLE event;
+};
 
+struct d3d11_fence
+{
+    ID3D11Fence ID3D11Fence_iface;
+    LONG refcount;
+    ID3D11Device5 *device;
+    struct wined3d_private_store private_store;
+    CRITICAL_SECTION cs;
+    UINT64 value;
+    struct d3d11_fence_waiter waiters[32];
+    unsigned int waiter_count;
+};
+
+static inline struct d3d11_fence *impl_from_ID3D11Fence(ID3D11Fence *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d11_fence, ID3D11Fence_iface);
+}
+
+static inline struct d3d11_fence *unsafe_impl_from_ID3D11Fence(ID3D11Fence *iface);
+
+static HRESULT STDMETHODCALLTYPE d3d11_fence_QueryInterface(ID3D11Fence *iface, REFIID iid, void **out)
+{
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (!out)
+        return E_POINTER;
+
+    if (IsEqualGUID(iid, &IID_ID3D11Fence)
+            || IsEqualGUID(iid, &IID_ID3D11DeviceChild)
+            || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        ID3D11Fence_AddRef(iface);
+        *out = iface;
+        return S_OK;
+    }
+
+    WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_fence_AddRef(ID3D11Fence *iface)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    return InterlockedIncrement(&fence->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_fence_Release(ID3D11Fence *iface)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    ULONG ref = InterlockedDecrement(&fence->refcount);
+    if (!ref)
+    {
+        DeleteCriticalSection(&fence->cs);
+        wined3d_private_store_cleanup(&fence->private_store);
+        if (fence->device)
+            ID3D11Device5_Release(fence->device);
+        free(fence);
+    }
+    return ref;
+}
+
+static void STDMETHODCALLTYPE d3d11_fence_GetDevice(ID3D11Fence *iface, ID3D11Device **device)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    *device = (ID3D11Device *)fence->device;
+    ID3D11Device_AddRef(*device);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_fence_GetPrivateData(ID3D11Fence *iface, REFGUID guid,
+        UINT *data_size, void *data)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    return d3d_get_private_data(&fence->private_store, guid, data_size, data);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_fence_SetPrivateData(ID3D11Fence *iface, REFGUID guid,
+        UINT data_size, const void *data)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    return d3d_set_private_data(&fence->private_store, guid, data_size, data);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_fence_SetPrivateDataInterface(ID3D11Fence *iface, REFGUID guid,
+        const IUnknown *data)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    return d3d_set_private_data_interface(&fence->private_store, guid, data);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_fence_CreateSharedHandle(ID3D11Fence *iface,
+        const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
+{
+    FIXME("iface %p, attributes %p, access %#lx, name %s, handle %p stub!\n",
+            iface, attributes, access, debugstr_w(name), handle);
+    if (!handle)
+        return E_INVALIDARG;
+    *handle = NULL;
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 *iface,
-        ID3D11Fence *fence, UINT64 value)
+static UINT64 STDMETHODCALLTYPE d3d11_fence_GetCompletedValue(ID3D11Fence *iface)
 {
-    FIXME("iface %p, fence %p, value %I64x stub!\n", iface, fence, value);
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    UINT64 val;
+    EnterCriticalSection(&fence->cs);
+    val = fence->value;
+    LeaveCriticalSection(&fence->cs);
+    return val;
+}
 
-    return E_NOTIMPL;
+static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *iface,
+        UINT64 value, HANDLE event)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    EnterCriticalSection(&fence->cs);
+    if (fence->value >= value)
+    {
+        LeaveCriticalSection(&fence->cs);
+        if (event)
+            SetEvent(event);
+        return S_OK;
+    }
+    if (event && fence->waiter_count < ARRAY_SIZE(fence->waiters))
+    {
+        fence->waiters[fence->waiter_count].value = value;
+        fence->waiters[fence->waiter_count].event = event;
+        fence->waiter_count++;
+    }
+    LeaveCriticalSection(&fence->cs);
+    return S_OK;
+}
+
+static const struct ID3D11FenceVtbl d3d11_fence_vtbl =
+{
+    d3d11_fence_QueryInterface,
+    d3d11_fence_AddRef,
+    d3d11_fence_Release,
+    d3d11_fence_GetDevice,
+    d3d11_fence_GetPrivateData,
+    d3d11_fence_SetPrivateData,
+    d3d11_fence_SetPrivateDataInterface,
+    d3d11_fence_CreateSharedHandle,
+    d3d11_fence_GetCompletedValue,
+    d3d11_fence_SetEventOnCompletion,
+};
+
+static inline struct d3d11_fence *unsafe_impl_from_ID3D11Fence(ID3D11Fence *iface)
+{
+    if (!iface || iface->lpVtbl != &d3d11_fence_vtbl)
+        return NULL;
+    return impl_from_ID3D11Fence(iface);
+}
+
+static void d3d11_fence_signal_value(struct d3d11_fence *fence, UINT64 value)
+{
+    unsigned int i = 0;
+    EnterCriticalSection(&fence->cs);
+    if (value > fence->value)
+        fence->value = value;
+    while (i < fence->waiter_count)
+    {
+        if (fence->value >= fence->waiters[i].value)
+        {
+            HANDLE ev = fence->waiters[i].event;
+            fence->waiters[i] = fence->waiters[--fence->waiter_count];
+            if (ev)
+                SetEvent(ev);
+        }
+        else
+            i++;
+    }
+    LeaveCriticalSection(&fence->cs);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext4 *iface,
+        ID3D11Fence *fence_iface, UINT64 value)
+{
+    struct d3d11_fence *fence = unsafe_impl_from_ID3D11Fence(fence_iface);
+
+    TRACE("iface %p, fence %p, value %I64x.\n", iface, fence_iface, value);
+
+    if (!fence)
+        return E_INVALIDARG;
+
+    d3d11_device_context_Flush(iface);
+    d3d11_fence_signal_value(fence, value);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 *iface,
+        ID3D11Fence *fence_iface, UINT64 value)
+{
+    struct d3d11_fence *fence = unsafe_impl_from_ID3D11Fence(fence_iface);
+
+    TRACE("iface %p, fence %p, value %I64x.\n", iface, fence_iface, value);
+
+    if (!fence)
+        return E_INVALIDARG;
+
+    if (d3d11_fence_GetCompletedValue(fence_iface) < value)
+    {
+        HANDLE ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (ev)
+        {
+            d3d11_fence_SetEventOnCompletion(fence_iface, value, ev);
+            WaitForSingleObject(ev, 5000);
+            CloseHandle(ev);
+        }
+    }
+    return S_OK;
 }
 
 static const struct ID3D11DeviceContext4Vtbl d3d11_device_context_vtbl =
@@ -5889,12 +6151,18 @@ static HRESULT d3d11_device_create_shared_resource(ID3D11Device5 *iface,
             ID3D11Texture2D *texture;
             D3D11_TEXTURE2D_DESC tex_desc = desc->d3d11_2d;
 
+            if (tex_desc.Usage == D3D11_USAGE_DEFAULT)
+                tex_desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+
             hr = ID3D11Device5_CreateTexture2D(iface, &tex_desc, NULL, &texture);
             if (FAILED(hr))
             {
                 WARN("Failed to create Texture2D, hr %#lx.\n", hr);
                 return hr;
             }
+            if (desc->owner_pid == GetCurrentProcessId() && desc->owner_resource)
+                d3d_texture2d_link_shared(impl_from_ID3D11Texture2D(texture),
+                        (IUnknown *)(ULONG_PTR)desc->owner_resource);
             hr = ID3D11Texture2D_QueryInterface(texture, iid, out);
             ID3D11Texture2D_Release(texture);
             return hr;
@@ -6878,12 +7146,31 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedFence(ID3D11Device5 *ifa
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_CreateFence(ID3D11Device5 *iface, UINT64 initial_value,
-        D3D11_FENCE_FLAG flags, REFIID iid, void **fence)
+        D3D11_FENCE_FLAG flags, REFIID iid, void **out)
 {
-    FIXME("iface %p, initial_value %I64x, flags %d, iid %s, fence %p stub!\n", iface, initial_value,
-            flags, debugstr_guid(iid), fence);
+    struct d3d11_fence *fence;
+    HRESULT hr;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, initial_value %I64x, flags %#x, iid %s, out %p.\n",
+            iface, initial_value, flags, debugstr_guid(iid), out);
+
+    if (!out || !iid)
+        return E_INVALIDARG;
+
+    if (!(fence = calloc(1, sizeof(*fence))))
+        return E_OUTOFMEMORY;
+
+    fence->ID3D11Fence_iface.lpVtbl = &d3d11_fence_vtbl;
+    fence->refcount = 1;
+    fence->device = iface;
+    ID3D11Device5_AddRef(iface);
+    wined3d_private_store_init(&fence->private_store);
+    InitializeCriticalSection(&fence->cs);
+    fence->value = initial_value;
+
+    hr = d3d11_fence_QueryInterface(&fence->ID3D11Fence_iface, iid, out);
+    d3d11_fence_Release(&fence->ID3D11Fence_iface);
+    return hr;
 }
 
 static const struct ID3D11Device5Vtbl d3d11_device_vtbl =
@@ -6966,6 +7253,104 @@ static const struct ID3D11Device5Vtbl d3d11_device_vtbl =
     d3d11_device_CreateFence,
 };
 
+static const GUID IID_ID3D11PartnerDevice =
+    {0x26c5dc23, 0xe49c, 0x4b0a, {0x8f, 0x79, 0xe7, 0xb1, 0xac, 0x80, 0x4d, 0x32}};
+
+static inline struct d3d_device *impl_from_ID3D11PartnerDevice(ID3D11PartnerDevice *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d_device, ID3D11PartnerDevice_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_partner_device_QueryInterface(ID3D11PartnerDevice *iface, REFIID riid, void **out)
+{
+    struct d3d_device *device = impl_from_ID3D11PartnerDevice(iface);
+    return IUnknown_QueryInterface(device->outer_unk, riid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_partner_device_AddRef(ID3D11PartnerDevice *iface)
+{
+    struct d3d_device *device = impl_from_ID3D11PartnerDevice(iface);
+    return IUnknown_AddRef(device->outer_unk);
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_partner_device_Release(ID3D11PartnerDevice *iface)
+{
+    struct d3d_device *device = impl_from_ID3D11PartnerDevice(iface);
+    return IUnknown_Release(device->outer_unk);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_partner_device_EnablePartnerMode(ID3D11PartnerDevice *iface)
+{
+    TRACE("iface %p.\n", iface);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_partner_device_DisablePartnerMode(ID3D11PartnerDevice *iface)
+{
+    TRACE("iface %p.\n", iface);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_partner_device_CreateTexture2D(ID3D11PartnerDevice *iface,
+        const D3D11_TEXTURE2D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
+        ID3D11Texture2D **texture)
+{
+    struct d3d_device *device = impl_from_ID3D11PartnerDevice(iface);
+    return ID3D11Device5_CreateTexture2D(&device->ID3D11Device5_iface, desc, data, texture);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_partner_device_SetGuardRect(ID3D11PartnerDevice *iface,
+        ID3D11Texture2D *texture, const RECT *rect)
+{
+    struct d3d_texture2d *tex = unsafe_impl_from_ID3D11Texture2D(texture);
+
+    TRACE("iface %p, texture %p, rect %s.\n", iface, texture, wine_dbgstr_rect(rect));
+    if (tex && rect)
+    {
+        tex->has_guard_rect = TRUE;
+        tex->guard_rect = *rect;
+    }
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_partner_device_SetEmptyGuardRect(ID3D11PartnerDevice *iface,
+        ID3D11Texture2D *texture)
+{
+    struct d3d_texture2d *tex = unsafe_impl_from_ID3D11Texture2D(texture);
+
+    TRACE("iface %p, texture %p.\n", iface, texture);
+    if (tex)
+    {
+        tex->has_guard_rect = TRUE;
+        SetRectEmpty(&tex->guard_rect);
+    }
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_partner_device_RemoveGuardRect(ID3D11PartnerDevice *iface,
+        ID3D11Texture2D *texture)
+{
+    struct d3d_texture2d *tex = unsafe_impl_from_ID3D11Texture2D(texture);
+
+    TRACE("iface %p, texture %p.\n", iface, texture);
+    if (tex)
+        tex->has_guard_rect = FALSE;
+    return S_OK;
+}
+
+static const ID3D11PartnerDeviceVtbl d3d11_partner_device_vtbl =
+{
+    d3d11_partner_device_QueryInterface,
+    d3d11_partner_device_AddRef,
+    d3d11_partner_device_Release,
+    d3d11_partner_device_EnablePartnerMode,
+    d3d11_partner_device_DisablePartnerMode,
+    d3d11_partner_device_CreateTexture2D,
+    d3d11_partner_device_SetGuardRect,
+    d3d11_partner_device_SetEmptyGuardRect,
+    d3d11_partner_device_RemoveGuardRect,
+};
+
 /* Inner IUnknown methods */
 
 static inline struct d3d_device *impl_from_IUnknown(IUnknown *iface)
@@ -7006,6 +7391,10 @@ static HRESULT STDMETHODCALLTYPE d3d_device_inner_QueryInterface(IUnknown *iface
     else if (IsEqualGUID(riid, &IID_ID3D11VideoDevice) || IsEqualGUID(riid, &IID_ID3D11VideoDevice1))
     {
         *out = &device->ID3D11VideoDevice1_iface;
+    }
+    else if (IsEqualGUID(riid, &IID_ID3D11PartnerDevice))
+    {
+        *out = &device->ID3D11PartnerDevice_iface;
     }
     else
     {
@@ -9752,6 +10141,7 @@ void d3d_device_init(struct d3d_device *device, void *outer_unknown)
     device->ID3D10Device1_iface.lpVtbl = &d3d10_device1_vtbl;
     device->ID3D10Multithread_iface.lpVtbl = &d3d10_multithread_vtbl;
     device->ID3D11VideoDevice1_iface.lpVtbl = &d3d11_video_device1_vtbl;
+    device->ID3D11PartnerDevice_iface.lpVtbl = &d3d11_partner_device_vtbl;
     device->IWineDXGIDeviceParent_iface.lpVtbl = &d3d_dxgi_device_parent_vtbl;
     device->device_parent.ops = &d3d_wined3d_device_parent_ops;
     device->refcount = 1;

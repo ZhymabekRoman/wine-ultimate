@@ -1817,10 +1817,12 @@ HRESULT CDECL wined3d_device_context_get_stream_source(const struct wined3d_devi
     }
 
     stream = &context->state->streams[stream_idx];
-    *buffer = stream->buffer;
+    if (buffer)
+        *buffer = stream->buffer;
     if (offset)
         *offset = stream->offset;
-    *stride = stream->stride;
+    if (stride)
+        *stride = stream->stride;
 
     return WINED3D_OK;
 }

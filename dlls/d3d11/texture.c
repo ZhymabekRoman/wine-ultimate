@@ -565,6 +565,141 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_AddRef(ID3D11Texture2D *iface)
     return refcount;
 }
 
+static CRITICAL_SECTION shared_tex_cs;
+static CRITICAL_SECTION_DEBUG shared_tex_cs_debug =
+{
+    0, 0, &shared_tex_cs,
+    { &shared_tex_cs_debug.ProcessLocksList, &shared_tex_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": shared_tex_cs") }
+};
+static CRITICAL_SECTION shared_tex_cs = { &shared_tex_cs_debug, -1, 0, 0, 0, 0 };
+
+void d3d_texture2d_link_shared(struct d3d_texture2d *dst, IUnknown *owner_unk)
+{
+    ID3D11Texture2D *src_iface = NULL;
+    struct d3d_texture2d *src;
+
+    if (!dst || !owner_unk)
+        return;
+
+    if (FAILED(IUnknown_QueryInterface(owner_unk, &IID_ID3D11Texture2D, (void **)&src_iface)))
+        return;
+
+    src = unsafe_impl_from_ID3D11Texture2D(src_iface);
+    if (src && src != dst)
+    {
+        EnterCriticalSection(&shared_tex_cs);
+        if (!dst->shared_source)
+        {
+            dst->shared_source = src;
+            list_add_tail(&src->shared_peers, &dst->shared_peer_entry);
+        }
+        LeaveCriticalSection(&shared_tex_cs);
+    }
+    ID3D11Texture2D_Release(src_iface);
+}
+
+void d3d_texture2d_sync_from_shared(ID3D11Resource *resource, struct d3d11_device_context *dst_ctx)
+{
+    struct d3d_texture2d *dst, *src = NULL, *staging;
+    struct d3d_device *src_dev;
+    struct wined3d_map_desc map_desc;
+    D3D11_RESOURCE_DIMENSION dim;
+    ID3D11Texture2D *staging_iface;
+    HRESULT hr;
+
+    if (!resource || !dst_ctx || dst_ctx->type != D3D11_DEVICE_CONTEXT_IMMEDIATE)
+        return;
+
+    ID3D11Resource_GetType(resource, &dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+        return;
+
+    dst = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)resource);
+    if (!dst || !dst->shared_source)
+        return;
+
+    EnterCriticalSection(&shared_tex_cs);
+    src = dst->shared_source;
+    if (src)
+    {
+        LONG ref;
+        do
+        {
+            ref = src->refcount;
+            if (ref <= 0)
+            {
+                src = NULL;
+                break;
+            }
+        } while (InterlockedCompareExchange(&src->refcount, ref + 1, ref) != ref);
+    }
+    LeaveCriticalSection(&shared_tex_cs);
+
+    if (!src)
+        return;
+
+    if (src->desc.SampleDesc.Count > 1 || src->desc.Width != dst->desc.Width || src->desc.Height != dst->desc.Height)
+    {
+        ID3D11Texture2D_Release(&src->ID3D11Texture2D_iface);
+        return;
+    }
+
+    if (src->device == dst->device)
+    {
+        wined3d_device_context_copy_sub_resource_region(dst_ctx->wined3d_context,
+                wined3d_texture_get_resource(dst->wined3d_texture), 0, 0, 0, 0,
+                wined3d_texture_get_resource(src->wined3d_texture), 0, NULL, 0);
+        ID3D11Texture2D_Release(&src->ID3D11Texture2D_iface);
+        return;
+    }
+
+    staging_iface = dst->shared_staging;
+    if (!staging_iface)
+    {
+        D3D11_TEXTURE2D_DESC st_desc = src->desc;
+        st_desc.MipLevels = 1;
+        st_desc.ArraySize = 1;
+        st_desc.Usage = D3D11_USAGE_STAGING;
+        st_desc.BindFlags = 0;
+        st_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        st_desc.MiscFlags = 0;
+        if (SUCCEEDED(ID3D11Device5_CreateTexture2D(src->device, &st_desc, NULL, &staging_iface)))
+        {
+            if (InterlockedCompareExchangePointer((void **)&dst->shared_staging, staging_iface, NULL))
+            {
+                ID3D11Texture2D_Release(staging_iface);
+                staging_iface = dst->shared_staging;
+            }
+        }
+        else
+        {
+            staging_iface = NULL;
+        }
+    }
+
+    if (staging_iface)
+    {
+        src_dev = impl_from_ID3D11Device5(src->device);
+        staging = impl_from_ID3D11Texture2D(staging_iface);
+        wined3d_device_context_copy_sub_resource_region(src_dev->immediate_context.wined3d_context,
+                wined3d_texture_get_resource(staging->wined3d_texture), 0, 0, 0, 0,
+                wined3d_texture_get_resource(src->wined3d_texture), 0, NULL, 0);
+        hr = wined3d_device_context_map(src_dev->immediate_context.wined3d_context,
+                wined3d_texture_get_resource(staging->wined3d_texture), 0, &map_desc, NULL, WINED3D_MAP_READ);
+        if (SUCCEEDED(hr))
+        {
+            wined3d_device_context_update_sub_resource(dst_ctx->wined3d_context,
+                    wined3d_texture_get_resource(dst->wined3d_texture), 0, NULL,
+                    map_desc.data, map_desc.row_pitch, map_desc.slice_pitch, 0);
+            wined3d_device_context_unmap(src_dev->immediate_context.wined3d_context,
+                    wined3d_texture_get_resource(staging->wined3d_texture), 0);
+        }
+    }
+
+    ID3D11Texture2D_Release(&src->ID3D11Texture2D_iface);
+}
+
 static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
 {
     struct d3d_texture2d *texture = impl_from_ID3D11Texture2D(iface);
@@ -575,6 +710,9 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
     if (!refcount)
     {
         ID3D11Device5 *device = texture->device;
+        ID3D11Texture2D *staging = InterlockedExchangePointer((void **)&texture->shared_staging, NULL);
+        if (staging)
+            ID3D11Texture2D_Release(staging);
         if (texture->swapchain)
             wined3d_swapchain_decref(texture->swapchain);
         /* Releasing the texture may free the d3d11 object, so do not access it
@@ -751,6 +889,20 @@ static ULONG STDMETHODCALLTYPE d3d10_texture2d_AddRef(ID3D10Texture2D *iface)
 static void STDMETHODCALLTYPE d3d_texture2d_wined3d_object_released(void *parent)
 {
     struct d3d_texture2d *texture = parent;
+    struct d3d_texture2d *peer, *next;
+
+    EnterCriticalSection(&shared_tex_cs);
+    if (texture->shared_source)
+    {
+        list_remove(&texture->shared_peer_entry);
+        texture->shared_source = NULL;
+    }
+    LIST_FOR_EACH_ENTRY_SAFE(peer, next, &texture->shared_peers, struct d3d_texture2d, shared_peer_entry)
+    {
+        list_remove(&peer->shared_peer_entry);
+        peer->shared_source = NULL;
+    }
+    LeaveCriticalSection(&shared_tex_cs);
 
     if (texture->dxgi_resource) IUnknown_Release(texture->dxgi_resource);
     free(texture);
@@ -981,6 +1133,7 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
     texture->ID3D11Texture2D_iface.lpVtbl = &d3d11_texture2d_vtbl;
     texture->ID3D10Texture2D_iface.lpVtbl = &d3d10_texture2d_vtbl;
     texture->refcount = 1;
+    list_init(&texture->shared_peers);
     wined3d_mutex_lock();
     texture->desc = *desc;
 

@@ -325,6 +325,7 @@
 @ cdecl wined3d_texture_create(ptr ptr long long long ptr ptr ptr ptr)
 @ cdecl wined3d_texture_decref(ptr)
 @ cdecl wined3d_texture_from_resource(ptr)
+@ cdecl wined3d_texture_set_external_memory(ptr ptr int64)
 @ cdecl wined3d_texture_get_dc(ptr long ptr)
 @ cdecl wined3d_texture_get_level_count(ptr)
 @ cdecl wined3d_texture_get_lod(ptr)

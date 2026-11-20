@@ -57,6 +57,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_inner_QueryInterface(IUnknown *if
         *out = &resource->IDXGIResource1_iface;
         return S_OK;
     }
+    else if (is_subresource && !IsEqualGUID(riid, &IID_IDXGIResource)
+            && !IsEqualGUID(riid, &IID_IDXGIResource1))
+    {
+        return IDXGIResource1_QueryInterface(resource->parent_resource, riid, out);
+    }
 
     WARN("%s not implemented, returning E_NOINTERFACE\n", debugstr_guid(riid));
 
@@ -394,6 +399,8 @@ static BOOL get_dxgi_resource_desc(struct dxgi_resource *resource, struct d3d11_
     memset(desc, 0, sizeof(*desc));
     desc->dxgi.size = sizeof(*desc);
     desc->dxgi.version = 4;
+    desc->owner_pid = GetCurrentProcessId();
+    desc->owner_resource = (UINT64)(ULONG_PTR)resource->outer_unknown;
     *misc_flags = 0;
 
     if (resource->outer_unknown &&
@@ -602,9 +609,26 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_GetSharedHandle(IDXGIResource1 *i
 
     if (!(misc_flags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)))
     {
-        TRACE("Resource is not shared, returning NULL handle.\n");
-        *shared_handle = NULL;
-        return S_OK;
+        BOOL is_backbuffer = FALSE;
+        if (resource->wined3d_resource)
+        {
+            struct wined3d_resource_desc rdesc;
+            wined3d_mutex_lock();
+            wined3d_resource_get_desc(resource->wined3d_resource, &rdesc);
+            if (rdesc.resource_type != WINED3D_RTYPE_BUFFER)
+            {
+                struct wined3d_texture *tex = wined3d_texture_from_resource(resource->wined3d_resource);
+                is_backbuffer = (wined3d_texture_get_swapchain(tex) != NULL);
+            }
+            wined3d_mutex_unlock();
+        }
+        if (!is_backbuffer)
+        {
+            TRACE("Resource is not shared, returning NULL handle.\n");
+            *shared_handle = NULL;
+            return S_OK;
+        }
+        desc.d3d11_2d.MiscFlags |= D3D11_RESOURCE_MISC_SHARED;
     }
 
     if (resource->kmt_handle)
@@ -724,8 +748,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSubresourceSurface(IDXGIRes
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1 *iface,
-        const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
+static HRESULT dxgi_resource_create_shared_handle_impl(IDXGIResource1 *iface,
+        const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle, BOOL require_nthandle)
 {
     struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
     struct d3d11_runtime_desc desc;
@@ -744,7 +768,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
     if (!get_dxgi_resource_desc(resource, &desc, &misc_flags))
         return E_FAIL;
 
-    if (!(misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE))
+    if (require_nthandle && !(misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE))
     {
         WARN("Resource does not have D3D11_RESOURCE_MISC_SHARED_NTHANDLE.\n");
         return E_INVALIDARG;
@@ -820,6 +844,24 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1 *iface,
+        const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
+{
+    return dxgi_resource_create_shared_handle_impl(iface, attributes, access, name, handle, TRUE);
+}
+
+HRESULT dxgi_resource_create_composition_handle(IDXGIResource1 *iface, HANDLE *handle)
+{
+    return dxgi_resource_create_shared_handle_impl(iface, NULL, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+            NULL, handle, FALSE);
+}
+
+HANDLE dxgi_resource_get_existing_kmt_handle(IDXGIResource1 *iface)
+{
+    struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
+    return resource ? (HANDLE)(ULONG_PTR)resource->kmt_handle : NULL;
+}
+
 static const struct IDXGIResource1Vtbl dxgi_resource_vtbl =
 {
     /* IUnknown methods */
@@ -835,7 +877,6 @@ static const struct IDXGIResource1Vtbl dxgi_resource_vtbl =
     dxgi_resource_GetDevice,
     /* IDXGIResource methods */
     dxgi_resource_GetSharedHandle,
-    dxgi_resource_GetResourceType,
     dxgi_resource_GetUsage,
     dxgi_resource_SetEvictionPriority,
     dxgi_resource_GetEvictionPriority,
@@ -843,6 +884,35 @@ static const struct IDXGIResource1Vtbl dxgi_resource_vtbl =
     dxgi_resource_CreateSubresourceSurface,
     dxgi_resource_CreateSharedHandle,
 };
+
+HRESULT WINAPI dxgi_bind_external_memory(IUnknown *obj, HANDLE nt_handle, UINT64 alloc_size)
+{
+    IDXGIResource1 *res1 = NULL;
+    struct dxgi_resource *resource;
+    struct wined3d_texture *tex;
+    HRESULT hr;
+
+    if (!obj || !nt_handle || !alloc_size)
+        return E_INVALIDARG;
+
+    if (FAILED(hr = IUnknown_QueryInterface(obj, &IID_IDXGIResource1, (void **)&res1)) || !res1)
+        return hr;
+
+    if (res1->lpVtbl != &dxgi_resource_vtbl)
+    {
+        IDXGIResource1_Release(res1);
+        return E_INVALIDARG;
+    }
+
+    resource = impl_from_IDXGIResource1(res1);
+    wined3d_mutex_lock();
+    tex = resource->wined3d_resource ? wined3d_texture_from_resource(resource->wined3d_resource) : NULL;
+    hr = tex ? wined3d_texture_set_external_memory(tex, nt_handle, alloc_size) : E_FAIL;
+    wined3d_mutex_unlock();
+
+    IDXGIResource1_Release(res1);
+    return hr;
+}
 
 static const struct IUnknownVtbl dxgi_resource_inner_unknown_vtbl =
 {

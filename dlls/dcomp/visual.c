@@ -27,6 +27,11 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
+static const GUID IID_IDCompositionVisualDebug_local =
+        {0xfed2b808, 0x5eb4, 0x43a0, {0xae, 0xa3, 0x35, 0xf6, 0x52, 0x80, 0xf9, 0x1b}};
+static const GUID IID_IDCompositionVisual3_local =
+        {0x2775f462, 0xb6c1, 0x4015, {0xb0, 0xbe, 0xb3, 0xe7, 0xd6, 0xa4, 0x97, 0x6d}};
+
 static HRESULT STDMETHODCALLTYPE visual_QueryInterface(IDCompositionVisualUnknown *iface, REFIID iid,
         void **out)
 {
@@ -37,6 +42,8 @@ static HRESULT STDMETHODCALLTYPE visual_QueryInterface(IDCompositionVisualUnknow
     if (dcomp_is_equal_guid(iid, &IID_IUnknown)
             || dcomp_is_equal_guid(iid, &IID_IDCompositionVisual)
             || (visual->version >= 2 && dcomp_is_equal_guid(iid, &IID_IDCompositionVisual2))
+            || dcomp_is_equal_guid(iid, &IID_IDCompositionVisualDebug_local)
+            || dcomp_is_equal_guid(iid, &IID_IDCompositionVisual3_local)
             || dcomp_is_equal_guid(iid, &IID_IDCompositionVisualUnknown))
     {
         IUnknown_AddRef(&visual->IDCompositionVisualUnknown_iface);
@@ -118,6 +125,14 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             CloseHandle(visual->shared_visual_handle);
         if (visual->shared_content_handle)
             CloseHandle(visual->shared_content_handle);
+        if (visual->zc_tex)
+            ID3D11Texture2D_Release(visual->zc_tex);
+        if (visual->shm_tex)
+            ID3D11Texture2D_Release(visual->shm_tex);
+        if (visual->shm_ptr)
+            UnmapViewOfFile(visual->shm_ptr);
+        if (visual->shm_map)
+            CloseHandle(visual->shm_map);
         free(visual);
     }
 
@@ -779,62 +794,75 @@ static HRESULT STDMETHODCALLTYPE visual_SetBackFaceVisibility(IDCompositionVisua
 
 static HRESULT WINAPI visual_unknown_method1(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method2(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method3(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method4(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method5(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method6(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method7(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method8(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method9(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_unknown_method9(IDCompositionVisualUnknown *iface,
+        const D2D_MATRIX_4X4_F *matrix)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    D2D_MATRIX_3X2_F m;
+
+    TRACE("iface %p, matrix %p.\n", iface, matrix);
+    if (!matrix)
+        return S_OK;
+
+    m._11 = matrix->_11;
+    m._12 = matrix->_12;
+    m._21 = matrix->_21;
+    m._22 = matrix->_22;
+    m._31 = matrix->_41;
+    m._32 = matrix->_42;
+    return visual_SetTransform(iface, &m);
 }
 
-static HRESULT WINAPI visual_unknown_method10(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_unknown_method10(IDCompositionVisualUnknown *iface,
+        void *transform)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p, transform %p.\n", iface, transform);
+    return visual_SetTransformObject(iface, (IDCompositionTransform *)transform);
 }
 
 static HRESULT WINAPI visual_unknown_method11(IDCompositionVisualUnknown *iface)
@@ -1543,6 +1571,17 @@ static HRESULT content_get_shared_handle(IUnknown *content, HANDLE *handle)
     {
         struct composition_surface *surface_impl = unsafe_impl_from_IDCompositionSurface(surface);
 
+        if (surface_impl && surface_impl->source_hwnd)
+        {
+            HANDLE hwnd_surf = GetPropW(surface_impl->source_hwnd, L"__wine_dcomp_hwnd_surface");
+            IDCompositionSurface_Release(surface);
+            if (hwnd_surf)
+            {
+                *handle = hwnd_surf;
+                return S_OK;
+            }
+            return E_FAIL;
+        }
         if (surface_impl && surface_impl->physical_surface)
         {
             physical = surface_impl->physical_surface;
@@ -1593,6 +1632,17 @@ static HRESULT content_get_size(IUnknown *content, UINT *width, UINT *height)
     {
         struct composition_surface *surface_impl = unsafe_impl_from_IDCompositionSurface(surface);
 
+        if (surface_impl && surface_impl->source_hwnd)
+        {
+            ULONG_PTR sz = (ULONG_PTR)GetPropW(surface_impl->source_hwnd, L"__wine_dcomp_hwnd_size");
+            if (sz)
+            {
+                IDCompositionSurface_Release(surface);
+                *width = (UINT)(sz >> 16);
+                *height = (UINT)(sz & 0xffff);
+                return S_OK;
+            }
+        }
         IDCompositionSurface_Release(surface);
         if (surface_impl && surface_impl->width && surface_impl->height)
         {
@@ -1641,20 +1691,41 @@ static HRESULT content_get_size(IUnknown *content, UINT *width, UINT *height)
     return E_FAIL;
 }
 
-static struct composition_visual *visual_find_first_content(struct composition_visual *visual)
+static void visual_find_best_shared_content(struct composition_visual *visual,
+        struct composition_visual **best_vis, HANDLE *best_handle,
+        UINT *best_w, UINT *best_h, ULONGLONG *best_area)
 {
-    struct composition_visual *child, *found;
+    struct composition_visual *child;
+    HANDLE h = NULL;
 
     if (!visual)
-        return NULL;
+        return;
     if (visual->content)
-        return visual;
-    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
     {
-        if ((found = visual_find_first_content(child)))
-            return found;
+        if (FAILED(content_get_shared_handle(visual->content, &h)) || !h)
+            h = visual->shared_content_handle;
+        if (h)
+        {
+            UINT w = 0, ht = 0;
+            ULONGLONG area;
+            if (FAILED(content_get_size(visual->content, &w, &ht)))
+            {
+                w = (UINT)visual->size.cx;
+                ht = (UINT)visual->size.cy;
+            }
+            area = (ULONGLONG)w * ht;
+            if (!*best_vis || area >= *best_area)
+            {
+                *best_vis = visual;
+                *best_handle = h;
+                *best_w = w;
+                *best_h = ht;
+                *best_area = area;
+            }
+        }
     }
-    return NULL;
+    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
+        visual_find_best_shared_content(child, best_vis, best_handle, best_w, best_h, best_area);
 }
 
 /* Publish this visual's content to whoever consumes its shared visual handle.
@@ -1663,9 +1734,10 @@ static struct composition_visual *visual_find_first_content(struct composition_v
  * lifetime of the texture), so the per-frame republish is a memory read. */
 void visual_publish_shared_content(struct composition_visual *visual, HANDLE *handle, UINT *width, UINT *height)
 {
-    struct composition_visual *cv;
+    struct composition_visual *cv = NULL;
     HANDLE shared_handle = NULL;
     UINT w = 0, h = 0;
+    ULONGLONG area = 0;
 
     *handle = NULL;
     *width = 0;
@@ -1674,20 +1746,12 @@ void visual_publish_shared_content(struct composition_visual *visual, HANDLE *ha
     if (!visual)
         return;
 
-    cv = visual_find_first_content(visual);
+    visual_find_best_shared_content(visual, &cv, &shared_handle, &w, &h, &area);
     if (!cv || !cv->content)
         return;
 
-    if (cv->shared_content_handle)
-        shared_handle = cv->shared_content_handle;
-    else if (SUCCEEDED(content_get_shared_handle(cv->content, &shared_handle)) && shared_handle)
+    if (shared_handle)
         cv->shared_content_handle = shared_handle;
-
-    if (FAILED(content_get_size(cv->content, &w, &h)))
-    {
-        w = (UINT)cv->size.cx;
-        h = (UINT)cv->size.cy;
-    }
 
     *handle = shared_handle;
     *width = w;

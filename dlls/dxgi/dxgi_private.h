@@ -207,6 +207,7 @@ struct dxgi_adapter *unsafe_impl_from_IDXGIAdapter(IDXGIAdapter *iface);
 struct d3d11_swapchain
 {
     IDXGISwapChain4 IDXGISwapChain4_iface;
+    IUnknown IDXGISwapChainPartner_iface;
     LONG refcount;
     struct wined3d_private_store private_store;
     struct wined3d_swapchain *wined3d_swapchain;
@@ -225,13 +226,31 @@ struct d3d11_swapchain
     UINT back_buffer_index;
     UINT present_interval;
     BOOL flip_model;
+    BOOL is_composition_surface;
 
     HANDLE frame_latency_semaphore;
     UINT frame_latency;
+    HANDLE shm_kmt_handle;
+    HANDLE shm_map;
+    void *shm_ptr;
+    SIZE_T shm_size;
+    struct wined3d_texture *shm_staging;
+    UINT shm_width;
+    UINT shm_height;
+    struct wined3d_texture *zc_tex;
+    HANDLE zc_nt_handle;
+    UINT64 zc_vk_image;
+    UINT64 zc_vk_memory;
+    UINT64 zc_alloc_size;
+    UINT zc_width;
+    UINT zc_height;
+    BOOL zc_failed;
+    DXGI_MATRIX_3X2_F matrix_transform;
 };
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc, UINT dxgi_flags);
+void d3d11_swapchain_mark_composition(IDXGISwapChain1 *iface);
 
 HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *queue, HWND window,
         const DXGI_SWAP_CHAIN_DESC1 *swapchain_desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc,
@@ -272,7 +291,12 @@ struct d3d11_runtime_desc
         D3D11_TEXTURE2D_DESC d3d11_2d;
         D3D11_TEXTURE3D_DESC d3d11_3d;
     };
+    UINT owner_pid;
+    UINT64 owner_resource;
 };
+
+HRESULT dxgi_resource_create_composition_handle(IDXGIResource1 *iface, HANDLE *handle);
+HANDLE dxgi_resource_get_existing_kmt_handle(IDXGIResource1 *iface);
 
 static inline BOOL is_kmt_handle(HANDLE h)
 {

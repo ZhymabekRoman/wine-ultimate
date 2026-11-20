@@ -155,6 +155,7 @@ struct composition_surface
     GUID physical_surface_iid;
     UINT width;
     UINT height;
+    HWND source_hwnd;
     DXGI_FORMAT pixel_format;
     DXGI_ALPHA_MODE alpha_mode;
     BOOL is_virtual;          /* answers IDCompositionVirtualSurface, BeginDraw takes sub-rects */
@@ -174,6 +175,8 @@ struct composition_target
     BOOL topmost;
     HWND hwnd;
     HANDLE shared_visual_handle;
+    HANDLE last_published_surface;
+    ULONG_PTR last_published_frame;
     struct list entry;
     struct composition_surface *composited_surface; /* last fallback surface blitted to the window */
     /* Zero-copy GPU presentation: a swapchain created on the content's D3D11
@@ -204,8 +207,11 @@ struct composition_target
     ID3D11Buffer *composite_ps_cb;
     ID3D11Buffer *composite_vb;
     ID3D11RasterizerState *composite_rs;
+    ID3D11BlendState *composite_bs;
     ID3D11SamplerState *composite_sampler;
     RECT last_client_rect;
+    BOOL last_visible;
+    BOOL needs_redraw;
     HWND composite_root_hwnd;               /* window the batch present blits to */
     RECT composite_batch_rect;              /* union of the visual regions drawn this pass */
     BOOL composite_batch_active;            /* a composite pass for this target is open */
@@ -256,6 +262,20 @@ struct composition_visual
     UINT cached_copy_width;
     UINT cached_copy_height;
     DXGI_FORMAT cached_copy_format;
+    HANDLE shm_kmt_handle;
+    HANDLE shm_map;
+    const UINT *shm_ptr;
+    UINT shm_last_seq;
+    ID3D11Texture2D *shm_tex;
+    UINT shm_tex_w;
+    UINT shm_tex_h;
+    ID3D11Texture2D *zc_tex;
+    DWORD zc_pid;
+    HANDLE zc_remote_handle;
+    UINT zc_w;
+    UINT zc_h;
+    UINT zc_alloc_size;
+    HWND captured_hwnd;
     LONG ref;
 };
 
@@ -323,7 +343,7 @@ HRESULT create_visual(int version, REFIID iid, void **visual);
 HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual);
 void visual_publish_shared_content(struct composition_visual *visual, HANDLE *handle, UINT *width, UINT *height);
 void shared_visual_target_set_root(HANDLE shared_visual_handle, IDCompositionVisual *visual);
-IDXGISurface *shared_proxy_open_surface(struct composition_visual *visual);
+IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, struct composition_visual *visual);
 HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXGISurface *dxgi_surface, IUnknown **out_surface);
 void ensure_composite_thread(struct composition_device *device);
 BOOL dcomp_has_active_composite_thread(void);

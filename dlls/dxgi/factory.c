@@ -478,13 +478,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterStereoStatusWindow(IWineDX
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusEvent(IWineDXGIFactory *iface,
-        LUID window_luid, HANDLE event, DWORD *cookie)
+        HANDLE event, DWORD *cookie)
 {
     struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
     struct dxgi_occlusion_registration *reg;
 
-    TRACE("iface %p, window_luid %lu:%lu, event %p, cookie %p.\n",
-            iface, window_luid.HighPart, window_luid.LowPart, event, cookie);
+    TRACE("iface %p, event %p, cookie %p.\n", iface, event, cookie);
 
     if (!cookie || !event)
         return E_INVALIDARG;
@@ -500,8 +499,6 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusEvent(IWine
         free(reg);
         return E_INVALIDARG;
     }
-
-    reg->luid = window_luid;
 
     return dxgi_factory_register_occlusion(factory, reg, cookie);
 }
@@ -611,7 +608,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     }
 
     ERR("CreateSwapChainForComposition using hwnd %p (size %ux%u)\n", hwnd, swapchain_desc.Width, swapchain_desc.Height);
-    return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, &swapchain_desc, NULL, output, swapchain);
+    {
+        HRESULT hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, &swapchain_desc, NULL, output, swapchain);
+        if (SUCCEEDED(hr) && !core_window && swapchain && *swapchain)
+            d3d11_swapchain_mark_composition(*swapchain);
+        return hr;
+    }
 }
 
 static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *iface)

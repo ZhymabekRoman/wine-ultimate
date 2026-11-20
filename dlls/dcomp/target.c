@@ -93,6 +93,8 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
             ID3D11SamplerState_Release(target->composite_sampler);
         if (target->composite_rs)
             ID3D11RasterizerState_Release(target->composite_rs);
+        if (target->composite_bs)
+            ID3D11BlendState_Release(target->composite_bs);
         if (target->composite_vb)
             ID3D11Buffer_Release(target->composite_vb);
         if (target->composite_ps_cb)

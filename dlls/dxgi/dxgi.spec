@@ -6,4 +6,5 @@
 @ stdcall DXGIGetDebugInterface1(long ptr ptr)
 @ stdcall DXGIDisableVBlankVirtualization()
 @ stdcall dxgi_get_wined3d_swapchain(ptr)
+@ stdcall dxgi_bind_external_memory(ptr ptr int64)
 @ stdcall DXGIEnableVBlankVirtualization()

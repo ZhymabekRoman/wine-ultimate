@@ -440,7 +440,10 @@ static HRESULT STDMETHODCALLTYPE mt_SetMatrix( IDCompositionMatrixTransform *ifa
 {
     struct dcomp_transform *impl = impl_from_mt( iface );
 
-    TRACE( "iface %p, matrix %p.\n", iface, matrix );
+    TRACE( "iface %p, matrix %p (%.3f %.3f %.3f %.3f %.3f %.3f).\n", iface, matrix,
+           matrix ? matrix->_11 : 0.0f, matrix ? matrix->_12 : 0.0f,
+           matrix ? matrix->_21 : 0.0f, matrix ? matrix->_22 : 0.0f,
+           matrix ? matrix->_31 : 0.0f, matrix ? matrix->_32 : 0.0f );
 
     if (!matrix) return E_INVALIDARG;
     impl->matrix = *matrix;

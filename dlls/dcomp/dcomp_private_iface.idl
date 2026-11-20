@@ -158,8 +158,8 @@ interface IDCompositionVisualUnknown : IDCompositionVisual2
     HRESULT Unknown6();
     HRESULT Unknown7();
     HRESULT Unknown8();
-    HRESULT Unknown9();
-    HRESULT Unknown10();
+    HRESULT Unknown9(const D2D_MATRIX_4X4_F *matrix);
+    HRESULT Unknown10(void *transform);
     HRESULT Unknown11();
     HRESULT Unknown12();
     HRESULT Unknown13();
@@ -262,7 +262,7 @@ interface IDCompositionSurfaceUnknown : IDCompositionSurface
     HRESULT Unknown1();
     HRESULT Unknown2();
     HRESULT Unknown3(UINT, UINT);
-    HRESULT Unknown4();
+    HRESULT Unknown4(UINT, UINT);
     HRESULT Unknown5();
     HRESULT Unknown6();
     HRESULT Unknown7();
