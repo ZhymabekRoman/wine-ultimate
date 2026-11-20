@@ -607,6 +607,21 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
             swapchain_desc.BufferCount = 2;
     }
 
+    if (hwnd)
+    {
+        HWND child = CreateWindowExW(WS_EX_TRANSPARENT, L"static", NULL,
+                WS_CHILD | WS_CLIPSIBLINGS,
+                0, 48, swapchain_desc.Width > 0 ? swapchain_desc.Width : 1,
+                swapchain_desc.Height > 0 ? swapchain_desc.Height : 1,
+                hwnd, NULL, NULL, NULL);
+        if (child)
+        {
+            ERR("CreateSwapChainForComposition created child hwnd %p inside %p\n", child, hwnd);
+            hwnd = child;
+            core_window = TRUE;
+        }
+    }
+
     ERR("CreateSwapChainForComposition using hwnd %p (size %ux%u)\n", hwnd, swapchain_desc.Width, swapchain_desc.Height);
     {
         HRESULT hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, &swapchain_desc, NULL, output, swapchain);
