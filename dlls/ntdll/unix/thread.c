@@ -1708,6 +1708,28 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
                     SIZE_T len = fa == (ULONG64)-1 ? 0x4000000 : 0x10000;
                     NTSTATUS st = NtAllocateVirtualMemory( GetCurrentProcess(), &base, 0, &len,
                                                            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
+                    if (st == STATUS_CONFLICTING_ADDRESSES && fa != (ULONG64)-1)
+                    {
+                        /* Already-reserved region with a decommitted hole (e.g. .NET Native BGC
+                         * MEM_DECOMMIT followed by foreground compact_phase memcpy): commit the
+                         * contiguous reserved sub-region in place and resume execution. */
+                        MEMORY_BASIC_INFORMATION mbi;
+                        base = (void *)(fa & ~0xfffULL);
+                        len = 0x1000;
+                        if (NtQueryVirtualMemory( GetCurrentProcess(), base, MemoryBasicInformation,
+                                                  &mbi, sizeof(mbi), NULL ) == STATUS_SUCCESS &&
+                            mbi.State == MEM_RESERVE)
+                        {
+                            SIZE_T avail = (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize - (ULONG_PTR)base;
+                            len = avail < 0x40000 ? avail : 0x40000;
+                        }
+                        st = NtAllocateVirtualMemory( GetCurrentProcess(), &base, 0, &len,
+                                                      MEM_COMMIT, PAGE_READWRITE );
+                        TRACE_(seh)("  av_commit(MEM_COMMIT) fa=%p base=%p len=%lx st=%x\n",
+                                    (void *)fa, base, len, (unsigned int)st);
+                        if (st == STATUS_SUCCESS)
+                            return NtContinue( context, FALSE );
+                    }
                     TRACE_(seh)("  av_commit fa=%p base=%p len=%lx st=%x\n",
                                 (void *)fa, base, len, (unsigned int)st);
                     if (k < 4) seen[k] = fa;
