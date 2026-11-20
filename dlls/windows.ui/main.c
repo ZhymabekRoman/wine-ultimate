@@ -717,6 +717,76 @@ static const void *taskbar_mgr_factory_vtbl[] =
 static struct { const void **vtbl; } taskbar_mgr_factory_obj = { taskbar_mgr_factory_vtbl };
 static IActivationFactory *taskbar_mgr_factory = (IActivationFactory *)&taskbar_mgr_factory_obj;
 
+/* Windows.UI.StartScreen.JumpList */
+static const GUID IID_IJumpListStatics_local =
+    { 0xa7e0c681, 0xe67e, 0x4b74, { 0x82, 0x50, 0x3f, 0x32, 0x2c, 0x4d, 0x92, 0xc3 } };
+
+static const void *jumplist_act_vtbl[];
+static const void *jumplist_stat_vtbl[];
+static struct { const void **vtbl_act; const void **vtbl_stat; } jumplist_factory_obj =
+    { jumplist_act_vtbl, jumplist_stat_vtbl };
+
+static HRESULT WINAPI jumplist_factory_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &jumplist_factory_obj.vtbl_act;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IJumpListStatics_local ))
+    {
+        *out = &jumplist_factory_obj.vtbl_stat;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI jumplist_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.StartScreen.JumpList", 31, n );
+}
+static HRESULT WINAPI jumplist_ActivateInstance( void *iface, IInspectable **out )
+{
+    if (out) *out = NULL;
+    return E_NOTIMPL;
+}
+static HRESULT WINAPI jumplist_LoadCurrentAsync( void *iface, void **op )
+{
+    if (op) *op = NULL;
+    return E_NOTIMPL;
+}
+static HRESULT WINAPI jumplist_IsSupported( void *iface, boolean *result )
+{
+    if (result) *result = FALSE;
+    return S_OK;
+}
+static const void *jumplist_act_vtbl[] =
+{
+    jumplist_factory_QI,
+    taskbar_mgr_factory_AddRef,
+    taskbar_mgr_factory_Release,
+    taskbar_mgr_factory_GetIids,
+    jumplist_GetRuntimeClassName,
+    taskbar_mgr_factory_GetTrustLevel,
+    jumplist_ActivateInstance,
+};
+static const void *jumplist_stat_vtbl[] =
+{
+    jumplist_factory_QI,
+    taskbar_mgr_factory_AddRef,
+    taskbar_mgr_factory_Release,
+    taskbar_mgr_factory_GetIids,
+    jumplist_GetRuntimeClassName,
+    taskbar_mgr_factory_GetTrustLevel,
+    jumplist_LoadCurrentAsync,
+    jumplist_IsSupported,
+};
+static IActivationFactory *jumplist_factory = (IActivationFactory *)&jumplist_factory_obj.vtbl_act;
+
 static const void *sc_act_vtbl[];
 static const void *sc_fac_vtbl[];
 static const void *sc_stat_vtbl[];
@@ -858,6 +928,19 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     if (!wcscmp( buffer, L"Windows.UI.Shell.TaskbarManager" ))
         IActivationFactory_QueryInterface( taskbar_mgr_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.UI.StartScreen.JumpList" ))
+        IActivationFactory_QueryInterface( jumplist_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.UI.Popups.MessageDialog" ) ||
+        !wcscmp( buffer, L"Windows.UI.Popups.UICommand" ))
+        IActivationFactory_QueryInterface( popup_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.UI.Popups.UICommandSeparator" ))
+        IActivationFactory_QueryInterface( uicmd_separator_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.UI.Popups.PopupMenu" ))
+        IActivationFactory_QueryInterface( popupmenu_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     /* This module is reached through the ext-ms-win-windowing-internal-l1-1-0 apiset as

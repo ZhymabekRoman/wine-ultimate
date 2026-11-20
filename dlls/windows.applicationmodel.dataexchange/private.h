@@ -139,6 +139,7 @@ extern const void *async_info_vtbl[];
 extern const void *async_action_vtbl[];
 
 struct async_op *create_async_op( const IID *iid, const WCHAR *class_name, void *result, enum op_result_kind kind );
+struct async_op *create_async_op_progress( const IID *iid, const WCHAR *class_name, void *result );
 struct async_op *create_async_action( void );
 void *async_op_iface( struct async_op *impl );
 

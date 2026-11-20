@@ -18,38 +18,106 @@
  */
 
 #include <assert.h>
-
+#include <wctype.h>
 
 #include "private.h"
-#include "wincred.h"
+#include "wincrypt.h"
 
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(creds);
 
 /*
- * The vault is the WinRT projection of the Win32 Credential Manager: each
- * PasswordVault entry is one CRED_TYPE_GENERIC credential whose TargetName
- * is "<resource>:<userName>" (the same shape on real Windows, where the
- * vault stores resource and user in the target key).  Credential Manager
- * keys are case-insensitive, matching the vault's Retrieve() contract.
+ * The vault persists entries in the prefix registry under
+ * HKCU\Software\Wine\PasswordVault\<key>.  <key> is built from the
+ * (resource, userName) pair: the UTF-16 code units of each string are
+ * hex encoded and joined with '-', so arbitrary characters in resource
+ * URLs and user names (':', '"', '\\', accents, surrogate pairs) are all
+ * legal in a registry key name.  Registry key lookup is case-insensitive,
+ * matching the vault's Retrieve() contract, and one key per
+ * (resource, userName) pair gives the upsert semantics of Add().
  *
- * The password is stored as the credential blob, as a NUL-terminated UTF-16
- * string including the terminator, which is what Windows' vault entries
- * carry for generic credentials.
+ * Each key carries the plain-text Resource and UserName REG_SZ values
+ * plus the Password as a REG_BINARY blob protected with DPAPI
+ * (CryptProtectData/CryptUnprotectData, the same protection real Windows
+ * vault entries use).  The Protected REG_DWORD marker records whether the
+ * blob is DPAPI-protected; when CryptProtectData fails the raw NUL
+ * terminated UTF-16 password is stored as the fallback blob.
  */
 
-static WCHAR *build_target( const WCHAR *resource, const WCHAR *username )
+#define VAULT_ROOT_KEY L"Software\\Wine\\PasswordVault"
+#define VAULT_VALUE_RESOURCE L"Resource"
+#define VAULT_VALUE_USERNAME L"UserName"
+#define VAULT_VALUE_PASSWORD L"Password"
+#define VAULT_VALUE_PROTECTED L"Protected"
+
+static CRITICAL_SECTION vault_cs;
+static INIT_ONCE vault_init_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK vault_init_once_cb( PINIT_ONCE once, PVOID arg, PVOID *context )
+{
+    InitializeCriticalSection( &vault_cs );
+    return TRUE;
+}
+
+static void vault_lock( void )
+{
+    InitOnceExecuteOnce( &vault_init_once, vault_init_once_cb, NULL, NULL );
+    EnterCriticalSection( &vault_cs );
+}
+
+static void vault_unlock( void )
+{
+    LeaveCriticalSection( &vault_cs );
+}
+
+/* Append the 4 hex digits of one UTF-16 code unit, return the new end. */
+static WCHAR *append_hex( WCHAR *p, WCHAR c )
+{
+    static const WCHAR hex[] = L"0123456789abcdef";
+
+    *p++ = hex[(c >> 12) & 0xf];
+    *p++ = hex[(c >> 8) & 0xf];
+    *p++ = hex[(c >> 4) & 0xf];
+    *p++ = hex[c & 0xf];
+    return p;
+}
+
+/*
+ * Deterministic registry key name for the (resource, username) pair.
+ * Hex digits do not case-fold, so the code units are upper-cased before
+ * encoding: the vault's Retrieve()/key matching is case-insensitive, and
+ * the registry compares key names case-insensitively only for the hex
+ * letters, not for case pairs hidden inside the encoded code units.
+ */
+static WCHAR *build_key( const WCHAR *resource, const WCHAR *username )
 {
     SIZE_T res_len = lstrlenW( resource );
     SIZE_T user_len = lstrlenW( username );
-    WCHAR *target = malloc( (res_len + 1 + user_len + 1) * sizeof(WCHAR) );
+    WCHAR *key, *p;
+    SIZE_T i;
 
-    if (!target) return NULL;
-    memcpy( target, resource, res_len * sizeof(WCHAR) );
-    target[res_len] = L':';
-    memcpy( target + res_len + 1, username, (user_len + 1) * sizeof(WCHAR) );
-    return target;
+    if (!(key = malloc( (res_len + user_len) * 4 * sizeof(WCHAR) + 2 * sizeof(WCHAR) ))) return NULL;
+    p = key;
+    for (i = 0; i < res_len; ++i) p = append_hex( p, towupper( resource[i] ) );
+    *p++ = L'-';
+    for (i = 0; i < user_len; ++i) p = append_hex( p, towupper( username[i] ) );
+    *p = 0;
+    return key;
+}
+
+/* "Software\Wine\PasswordVault\<key>" in a freshly allocated string. */
+static WCHAR *build_path( const WCHAR *key )
+{
+    SIZE_T root_len = lstrlenW( VAULT_ROOT_KEY );
+    SIZE_T key_len = lstrlenW( key );
+    WCHAR *path = malloc( (root_len + 1 + key_len + 1) * sizeof(WCHAR) );
+
+    if (!path) return NULL;
+    memcpy( path, VAULT_ROOT_KEY, root_len * sizeof(WCHAR) );
+    path[root_len] = L'\\';
+    memcpy( path + root_len + 1, key, (key_len + 1) * sizeof(WCHAR) );
+    return path;
 }
 
 static HRESULT get_credential_string( IPasswordCredential *credential,
@@ -84,46 +152,156 @@ static HRESULT get_credential_string( IPasswordCredential *credential,
     return S_OK;
 }
 
-static HRESULT store_credential( const WCHAR *resource, const WCHAR *username, const WCHAR *password )
+/* Read a REG_SZ value into a freshly allocated NUL-terminated string. */
+static HRESULT read_reg_sz( HKEY hkey, const WCHAR *name, WCHAR **out )
 {
-    CREDENTIALW cred;
-    WCHAR *target;
-    BOOL ret;
-
-    if (!(target = build_target( resource, username ))) return E_OUTOFMEMORY;
-
-    memset( &cred, 0, sizeof(cred) );
-    cred.Type = CRED_TYPE_GENERIC;
-    cred.TargetName = target;
-    cred.CredentialBlobSize = (DWORD)(lstrlenW( password ) + 1) * sizeof(WCHAR);
-    cred.CredentialBlob = (LPVOID)password;
-    cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
-    cred.UserName = (WCHAR *)username;
-
-    ret = CredWriteW( &cred, 0 );
-    free( target );
-    return ret ? S_OK : HRESULT_FROM_WIN32( GetLastError() );
-}
-
-/* Copy the credential blob into a freshly allocated NUL-terminated string. */
-static HRESULT blob_to_string( const CREDENTIALW *cred, WCHAR **out )
-{
-    DWORD chars = cred->CredentialBlobSize / sizeof(WCHAR);
+    DWORD type = 0, size = 0, chars;
     WCHAR *str;
+    LSTATUS status;
 
-    if (!cred->CredentialBlobSize)
+    status = RegQueryValueExW( hkey, name, NULL, &type, NULL, &size );
+    if (status || type != REG_SZ || size < sizeof(WCHAR))
     {
         if (!(str = malloc( sizeof(WCHAR) ))) return E_OUTOFMEMORY;
         str[0] = 0;
         *out = str;
         return S_OK;
     }
+    chars = size / sizeof(WCHAR);
     if (!(str = malloc( (chars + 1) * sizeof(WCHAR) ))) return E_OUTOFMEMORY;
-    memcpy( str, cred->CredentialBlob, cred->CredentialBlobSize );
-    if (chars && str[chars - 1] == 0) chars--; /* blob already NUL-terminated */
-    else str[chars] = 0;
+    size = chars * sizeof(WCHAR);
+    status = RegQueryValueExW( hkey, name, NULL, NULL, (BYTE *)str, &size );
+    if (status)
+    {
+        free( str );
+        return HRESULT_FROM_WIN32( status );
+    }
+    str[size / sizeof(WCHAR)] = 0; /* tolerate a value stored without terminator */
     *out = str;
     return S_OK;
+}
+
+/*
+ * Read the password value.  A Protected == 1 (the default when the marker
+ * is absent) blob is run through CryptUnprotectData; on unprotect failure
+ * the blob is decoded as the raw UTF-16 fallback form.  Result is a
+ * freshly allocated NUL-terminated string, empty when the value is absent.
+ */
+static HRESULT read_reg_password( HKEY hkey, WCHAR **out )
+{
+    DWORD type = 0, size = 0, protected_flag = 1, ptype = 0, psize = sizeof(protected_flag);
+    BYTE *blob;
+    WCHAR *str;
+    LSTATUS status;
+
+    status = RegQueryValueExW( hkey, VAULT_VALUE_PASSWORD, NULL, &type, NULL, &size );
+    if (status || !size)
+    {
+        if (!(str = malloc( sizeof(WCHAR) ))) return E_OUTOFMEMORY;
+        str[0] = 0;
+        *out = str;
+        return S_OK;
+    }
+    RegQueryValueExW( hkey, VAULT_VALUE_PROTECTED, NULL, &ptype, (BYTE *)&protected_flag, &psize );
+
+    if (!(blob = malloc( size ))) return E_OUTOFMEMORY;
+    status = RegQueryValueExW( hkey, VAULT_VALUE_PASSWORD, NULL, NULL, blob, &size );
+    if (status)
+    {
+        free( blob );
+        return HRESULT_FROM_WIN32( status );
+    }
+
+    if (protected_flag == 1 && type == REG_BINARY)
+    {
+        DATA_BLOB in = { size, blob }, out_blob = { 0, NULL };
+
+        if (CryptUnprotectData( &in, NULL, NULL, NULL, NULL, 0, &out_blob ))
+        {
+            DWORD chars = out_blob.cbData / sizeof(WCHAR);
+            if (!(str = malloc( (chars + 1) * sizeof(WCHAR) )))
+            {
+                GlobalFree( out_blob.pbData );
+                free( blob );
+                return E_OUTOFMEMORY;
+            }
+            memcpy( str, out_blob.pbData, out_blob.cbData );
+            str[chars] = 0; /* the stored form carries the terminator; this is belt-and-braces */
+            GlobalFree( out_blob.pbData );
+            free( blob );
+            *out = str;
+            return S_OK;
+        }
+        /* fall through: decode the blob as the raw UTF-16 fallback form */
+    }
+
+    {
+        DWORD chars = size / sizeof(WCHAR);
+        if (!(str = malloc( (chars + 1) * sizeof(WCHAR) )))
+        {
+            free( blob );
+            return E_OUTOFMEMORY;
+        }
+        memcpy( str, blob, size );
+        str[chars] = 0;
+        free( blob );
+        *out = str;
+    }
+    return S_OK;
+}
+
+/* Upsert one (resource, username) entry into the registry-backed vault. */
+static HRESULT store_credential( const WCHAR *resource, const WCHAR *username, const WCHAR *password )
+{
+    WCHAR *key, *path;
+    HKEY hkey;
+    LSTATUS status;
+    DWORD len;
+
+    if (!(key = build_key( resource, username ))) return E_OUTOFMEMORY;
+    if (!(path = build_path( key )))
+    {
+        free( key );
+        return E_OUTOFMEMORY;
+    }
+    free( key );
+
+    status = RegCreateKeyExW( HKEY_CURRENT_USER, path, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL );
+    free( path );
+    if (status) return HRESULT_FROM_WIN32( status );
+
+    len = (lstrlenW( resource ) + 1) * sizeof(WCHAR);
+    status = RegSetValueExW( hkey, VAULT_VALUE_RESOURCE, 0, REG_SZ, (const BYTE *)resource, len );
+    if (!status)
+    {
+        len = (lstrlenW( username ) + 1) * sizeof(WCHAR);
+        status = RegSetValueExW( hkey, VAULT_VALUE_USERNAME, 0, REG_SZ, (const BYTE *)username, len );
+    }
+    if (!status)
+    {
+        DATA_BLOB in, out_blob;
+        BYTE *data;
+        DWORD data_size, protect = 1;
+
+        len = (lstrlenW( password ) + 1) * sizeof(WCHAR);
+        in.cbData = len;
+        in.pbData = (BYTE *)password;
+        data = (BYTE *)password;
+        data_size = len;
+        if (CryptProtectData( &in, NULL, NULL, NULL, NULL, 0, &out_blob ))
+        {
+            data = out_blob.pbData; /* GlobalAlloc'ed DPAPI blob */
+            data_size = out_blob.cbData;
+            protect = 1;
+        }
+        else protect = 0;
+        status = RegSetValueExW( hkey, VAULT_VALUE_PASSWORD, 0, REG_BINARY, data, data_size );
+        if (!status)
+            status = RegSetValueExW( hkey, VAULT_VALUE_PROTECTED, 0, REG_DWORD, (const BYTE *)&protect, sizeof(protect) );
+        if (protect == 1) GlobalFree( data );
+    }
+    RegCloseKey( hkey );
+    return status ? HRESULT_FROM_WIN32( status ) : S_OK;
 }
 
 /*
@@ -615,77 +793,100 @@ static HRESULT create_vector( IPasswordCredential **items, ULONG count,
 }
 
 /*
- * Enumerate the vault.  resource_filter/user_name_filter are matched
- * case-insensitively against the target name split at its first ':' (the
- * same first-separator rule build_target produces); NULL means "all".
+ * Enumerate the vault.  resource_filter/user_filter are matched
+ * case-insensitively against the stored Resource/UserName values (NULL
+ * means "all").  Callers hold the vault lock.
  */
-static HRESULT vault_enumerate( const WCHAR *resource_filter, const WCHAR *user_filter,
-                                __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential **out )
+static HRESULT vault_enumerate_locked( const WCHAR *resource_filter, const WCHAR *user_filter,
+                                       __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential **out )
 {
-    PCREDENTIALW *creds = NULL;
-    DWORD count = 0, i;
+    HKEY root;
     IPasswordCredential **items = NULL;
     ULONG size = 0, n = 0;
+    DWORD index;
     HRESULT hr = S_OK;
 
-    if (!CredEnumerateW( NULL, 0, &count, &creds ))
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, VAULT_ROOT_KEY, 0, KEY_READ, &root ))
     {
-        TRACE( "CredEnumerateW failed, err %lu.\n", GetLastError() );
-        /* An empty vault surfaces as not-found errors; a credential store
-         * without the MountMgr device (driver not loaded) fails enumeration
-         * outright.  Both mean "no credentials". */
-        count = 0;
+        /* No vault key at all is a valid empty vault. */
+        TRACE( "no vault key, returning empty vector.\n" );
+        return create_vector( NULL, 0, out );
     }
-    else TRACE( "CredEnumerateW count %lu.\n", count );
 
-    for (i = 0; i < count; ++i)
+    for (index = 0; ; ++index)
     {
-        WCHAR *target = creds[i]->TargetName;
-        WCHAR *sep, *resource, *username;
+        WCHAR name[1024];
+        DWORD name_size = ARRAY_SIZE( name );
+        HKEY hkey;
+        WCHAR *resource = NULL, *username = NULL, *password = NULL;
         IPasswordCredential *credential = NULL;
 
-        if (creds[i]->Type != CRED_TYPE_GENERIC || !target) continue;
-        if (!(sep = wcschr( target, L':' ))) continue;
-        *sep = 0;
-        resource = target;
-        username = sep + 1;
+        if (RegEnumKeyExW( root, index, name, &name_size, NULL, NULL, NULL, NULL )) break;
+        if (RegOpenKeyExW( root, name, 0, KEY_READ, &hkey )) continue;
 
-        if (resource_filter && lstrcmpiW( resource, resource_filter )) continue;
-        if (user_filter && lstrcmpiW( username, user_filter )) continue;
-
+        hr = read_reg_sz( hkey, VAULT_VALUE_RESOURCE, &resource );
+        if (SUCCEEDED(hr)) hr = read_reg_sz( hkey, VAULT_VALUE_USERNAME, &username );
+        if (SUCCEEDED(hr)) hr = read_reg_password( hkey, &password );
+        if (SUCCEEDED(hr))
         {
-            WCHAR *password = NULL;
-            if (FAILED(hr = blob_to_string( creds[i], &password ))) goto done;
-            hr = create_password_credential( resource, username, password, &credential );
-            free( password );
-            if (FAILED(hr)) goto done;
-        }
-
-        if (n == size)
-        {
-            IPasswordCredential **grown = realloc( items, (size + 8) * sizeof(*items) );
-            if (!grown)
+            if (!resource_filter || !lstrcmpiW( resource, resource_filter ))
             {
-                IPasswordCredential_Release( credential );
-                hr = E_OUTOFMEMORY;
-                goto done;
+                if (!user_filter || !lstrcmpiW( username, user_filter ))
+                {
+                    hr = create_password_credential( resource, username, password, &credential );
+                    if (SUCCEEDED(hr))
+                    {
+                        if (n == size)
+                        {
+                            IPasswordCredential **grown = realloc( items, (size + 8) * sizeof(*items) );
+                            if (!grown)
+                            {
+                                IPasswordCredential_Release( credential );
+                                hr = E_OUTOFMEMORY;
+                            }
+                            else
+                            {
+                                items = grown;
+                                size += 8;
+                                items[n++] = credential;
+                                credential = NULL;
+                            }
+                        }
+                        else items[n++] = credential;
+                    }
+                }
             }
-            items = grown;
-            size += 8;
         }
-        items[n++] = credential;
+
+        RegCloseKey( hkey );
+        free( resource );
+        free( username );
+        free( password );
+        if (FAILED(hr)) goto done;
     }
 
     hr = create_vector( items, n, out );
     items = NULL;
 
 done:
-    CredFree( creds );
+    RegCloseKey( root );
     if (FAILED(hr))
     {
+        ULONG i;
         for (i = 0; i < n; ++i) IPasswordCredential_Release( items[i] );
         free( items );
     }
+    return hr;
+}
+
+static HRESULT vault_enumerate( const WCHAR *resource_filter, const WCHAR *user_filter,
+                                __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential **out )
+{
+    HRESULT hr;
+
+    vault_lock();
+    hr = vault_enumerate_locked( resource_filter, user_filter, out );
+    vault_unlock();
     return hr;
 }
 
@@ -785,7 +986,12 @@ static HRESULT WINAPI vault_Add( IPasswordVault *iface, IPasswordCredential *cre
     if (FAILED(hr = get_credential_string( cred, IPasswordCredential_get_Resource, &resource ))) return hr;
     hr = get_credential_string( cred, IPasswordCredential_get_UserName, &username );
     if (SUCCEEDED(hr)) hr = get_credential_string( cred, IPasswordCredential_get_Password, &password );
-    if (SUCCEEDED(hr)) hr = store_credential( resource, username, password );
+    if (SUCCEEDED(hr))
+    {
+        vault_lock();
+        hr = store_credential( resource, username, password );
+        vault_unlock();
+    }
 
     free( resource );
     free( username );
@@ -796,9 +1002,8 @@ static HRESULT WINAPI vault_Add( IPasswordVault *iface, IPasswordCredential *cre
 static HRESULT WINAPI vault_Remove( IPasswordVault *iface, IPasswordCredential *credential )
 {
     IPasswordCredential *cred = credential;
-    WCHAR *resource = NULL, *username = NULL;
-    WCHAR *target;
-    BOOL ret;
+    WCHAR *resource = NULL, *username = NULL, *key, *path;
+    LSTATUS status;
     HRESULT hr;
 
     TRACE( "iface %p, credential %p.\n", iface, credential );
@@ -808,20 +1013,26 @@ static HRESULT WINAPI vault_Remove( IPasswordVault *iface, IPasswordCredential *
     hr = get_credential_string( cred, IPasswordCredential_get_UserName, &username );
     if (FAILED(hr)) goto done;
 
-    if (!(target = build_target( resource, username )))
+    if (!(key = build_key( resource, username )))
     {
         hr = E_OUTOFMEMORY;
         goto done;
     }
-    ret = CredDeleteW( target, CRED_TYPE_GENERIC, 0 );
-    free( target );
-    if (!ret)
+    if (!(path = build_path( key )))
     {
-        DWORD err = GetLastError();
-        hr = (err == ERROR_NOT_FOUND) ? S_OK : HRESULT_FROM_WIN32( err );
+        free( key );
+        hr = E_OUTOFMEMORY;
         goto done;
     }
-    hr = S_OK;
+    free( key );
+
+    vault_lock();
+    status = RegDeleteKeyW( HKEY_CURRENT_USER, path );
+    vault_unlock();
+    free( path );
+    /* RegDeleteKeyW succeeds for missing keys; a second Remove is a no-op,
+     * matching Windows. */
+    hr = status ? HRESULT_FROM_WIN32( status ) : S_OK;
 
 done:
     free( resource );
@@ -834,27 +1045,40 @@ static HRESULT WINAPI vault_Retrieve( IPasswordVault *iface, HSTRING resource, H
 {
     const WCHAR *resource_buf = WindowsGetStringRawBuffer( resource, NULL );
     const WCHAR *username_buf = WindowsGetStringRawBuffer( username, NULL );
-    CREDENTIALW *cred;
-    WCHAR *target, *password = NULL;
-    BOOL ret;
+    WCHAR *key, *path, *password = NULL;
+    HKEY hkey;
+    LSTATUS status;
     HRESULT hr;
 
     TRACE( "iface %p, resource %s, username %s, credential %p.\n", iface, debugstr_hstring( resource ),
            debugstr_hstring( username ), credential );
 
     if (!resource || !username || !credential) return E_INVALIDARG;
-    if (!(target = build_target( resource_buf, username_buf ))) return E_OUTOFMEMORY;
+    if (!(key = build_key( resource_buf, username_buf ))) return E_OUTOFMEMORY;
+    if (!(path = build_path( key )))
+    {
+        free( key );
+        return E_OUTOFMEMORY;
+    }
+    free( key );
 
-    ret = CredReadW( target, CRED_TYPE_GENERIC, 0, &cred );
-    free( target );
-    if (!ret) return HRESULT_FROM_WIN32( GetLastError() );
+    vault_lock();
+    status = RegOpenKeyExW( HKEY_CURRENT_USER, path, 0, KEY_READ, &hkey );
+    if (!status)
+    {
+        hr = read_reg_password( hkey, &password );
+        RegCloseKey( hkey );
+    }
+    else hr = (status == ERROR_NOT_FOUND) ? HRESULT_FROM_WIN32( ERROR_NOT_FOUND )
+                                          : HRESULT_FROM_WIN32( status );
+    vault_unlock();
+    free( path );
 
-    if (SUCCEEDED(hr = blob_to_string( cred, &password )))
+    if (SUCCEEDED(hr))
     {
         hr = create_password_credential( resource_buf, username_buf, password, credential );
         free( password );
     }
-    CredFree( cred );
     return hr;
 }
 

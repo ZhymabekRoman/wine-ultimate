@@ -25,6 +25,7 @@
 
 #define COBJMACROS
 #include "initguid.h"
+#include "dwmapi.h"
 #include "winstring.h"
 #include "winternl.h"
 #include "roapi.h"
@@ -410,6 +411,281 @@ static void test_ApplicationView(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static const struct __FIReference_1_ColorVtbl test_color_vtbl;
+
+struct test_color_ref
+{
+    __FIReference_1_Color iface;
+    struct __x_ABI_CWindows_CUI_CColor color;
+    LONG ref;
+};
+
+static inline struct test_color_ref *impl_from_test_color_ref(__FIReference_1_Color *iface)
+{
+    return CONTAINING_RECORD( iface, struct test_color_ref, iface );
+}
+
+static void test_color_ref_init( struct test_color_ref *c, BYTE a, BYTE r, BYTE g, BYTE b )
+{
+    c->iface.lpVtbl = &test_color_vtbl;
+    c->color.A = a;
+    c->color.R = r;
+    c->color.G = g;
+    c->color.B = b;
+    c->ref = 1;
+}
+
+static HRESULT WINAPI test_color_QueryInterface( __FIReference_1_Color *iface, REFIID iid, void **out )
+{
+    struct test_color_ref *impl = impl_from_test_color_ref( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___FIReference_1_Color ))
+    {
+        __FIReference_1_Color_AddRef( iface );
+        *out = impl;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI test_color_AddRef( __FIReference_1_Color *iface )
+{
+    struct test_color_ref *impl = impl_from_test_color_ref( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI test_color_Release( __FIReference_1_Color *iface )
+{
+    struct test_color_ref *impl = impl_from_test_color_ref( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI test_color_GetIids( __FIReference_1_Color *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI test_color_GetRuntimeClassName( __FIReference_1_Color *iface, HSTRING *name )
+{
+    return WindowsCreateString( NULL, 0, name );
+}
+
+static HRESULT WINAPI test_color_GetTrustLevel( __FIReference_1_Color *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI test_color_get_Value( __FIReference_1_Color *iface, struct __x_ABI_CWindows_CUI_CColor *value )
+{
+    struct test_color_ref *impl = impl_from_test_color_ref( iface );
+    if (!value) return E_POINTER;
+    *value = impl->color;
+    return S_OK;
+}
+
+static const struct __FIReference_1_ColorVtbl test_color_vtbl =
+{
+    test_color_QueryInterface,
+    test_color_AddRef,
+    test_color_Release,
+    test_color_GetIids,
+    test_color_GetRuntimeClassName,
+    test_color_GetTrustLevel,
+    test_color_get_Value,
+};
+
+static void test_ApplicationViewTitleBar(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_UI_ViewManagement_ApplicationView;
+    HMODULE user32 = LoadLibraryA( "user32.dll" );
+    HMODULE dwmapi = LoadLibraryA( "dwmapi.dll" );
+    BOOL (WINAPI *pSetForegroundWindow)(HWND);
+    ATOM (WINAPI *pRegisterClassW)(const WNDCLASSW *);
+    HWND (WINAPI *pCreateWindowExW)(DWORD, const WCHAR *, const WCHAR *, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, void *);
+    BOOL (WINAPI *pShowWindow)(HWND, int);
+    BOOL (WINAPI *pDestroyWindow)(HWND);
+    LRESULT (WINAPI *pDefWindowProcW)(HWND, UINT, WPARAM, LPARAM);
+    HRESULT (WINAPI *pDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+    IApplicationViewStatics2 *app_view_statics2;
+    IApplicationViewTitleBar *title_bar;
+    IApplicationView *app_view;
+    IApplicationView3 *app_view3;
+    IActivationFactory *factory;
+    struct
+    {
+        HRESULT (WINAPI *put)(IApplicationViewTitleBar *, __FIReference_1_Color *);
+        HRESULT (WINAPI *get)(IApplicationViewTitleBar *, __FIReference_1_Color **);
+        const char *name;
+    } props[] =
+    {
+        { IApplicationViewTitleBar_put_ForegroundColor, IApplicationViewTitleBar_get_ForegroundColor, "ForegroundColor" },
+        { IApplicationViewTitleBar_put_BackgroundColor, IApplicationViewTitleBar_get_BackgroundColor, "BackgroundColor" },
+        { IApplicationViewTitleBar_put_ButtonForegroundColor, IApplicationViewTitleBar_get_ButtonForegroundColor, "ButtonForegroundColor" },
+        { IApplicationViewTitleBar_put_ButtonBackgroundColor, IApplicationViewTitleBar_get_ButtonBackgroundColor, "ButtonBackgroundColor" },
+        { IApplicationViewTitleBar_put_ButtonHoverForegroundColor, IApplicationViewTitleBar_get_ButtonHoverForegroundColor, "ButtonHoverForegroundColor" },
+        { IApplicationViewTitleBar_put_ButtonHoverBackgroundColor, IApplicationViewTitleBar_get_ButtonHoverBackgroundColor, "ButtonHoverBackgroundColor" },
+        { IApplicationViewTitleBar_put_ButtonPressedForegroundColor, IApplicationViewTitleBar_get_ButtonPressedForegroundColor, "ButtonPressedForegroundColor" },
+        { IApplicationViewTitleBar_put_ButtonPressedBackgroundColor, IApplicationViewTitleBar_get_ButtonPressedBackgroundColor, "ButtonPressedBackgroundColor" },
+        { IApplicationViewTitleBar_put_InactiveForegroundColor, IApplicationViewTitleBar_get_InactiveForegroundColor, "InactiveForegroundColor" },
+        { IApplicationViewTitleBar_put_InactiveBackgroundColor, IApplicationViewTitleBar_get_InactiveBackgroundColor, "InactiveBackgroundColor" },
+        { IApplicationViewTitleBar_put_ButtonInactiveForegroundColor, IApplicationViewTitleBar_get_ButtonInactiveForegroundColor, "ButtonInactiveForegroundColor" },
+        { IApplicationViewTitleBar_put_ButtonInactiveBackgroundColor, IApplicationViewTitleBar_get_ButtonInactiveBackgroundColor, "ButtonInactiveBackgroundColor" },
+    };
+    struct test_color_ref dark, light;
+    WNDCLASSW wc = {0};
+    __FIReference_1_Color *ret;
+    HSTRING str;
+    HWND hwnd;
+    COLORREF caption;
+    HRESULT hr;
+    ULONG i;
+    LONG ref;
+
+    if (!user32 || !dwmapi)
+    {
+        win_skip( "user32/dwmapi not available\n" );
+        return;
+    }
+    pSetForegroundWindow = (void *)GetProcAddress( user32, "SetForegroundWindow" );
+    pRegisterClassW = (void *)GetProcAddress( user32, "RegisterClassW" );
+    pCreateWindowExW = (void *)GetProcAddress( user32, "CreateWindowExW" );
+    pShowWindow = (void *)GetProcAddress( user32, "ShowWindow" );
+    pDestroyWindow = (void *)GetProcAddress( user32, "DestroyWindow" );
+    pDefWindowProcW = (void *)GetProcAddress( user32, "DefWindowProcW" );
+    pDwmSetWindowAttribute = (void *)GetProcAddress( dwmapi, "DwmSetWindowAttribute" );
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IApplicationViewStatics2,
+                                            (void **)&app_view_statics2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IApplicationViewStatics2_GetForCurrentView( app_view_statics2, &app_view );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IApplicationView_QueryInterface( app_view, &IID_IApplicationView3, (void **)&app_view3 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    title_bar = NULL;
+    hr = IApplicationView3_get_TitleBar( app_view3, &title_bar );
+    ok( hr == S_OK && title_bar, "get_TitleBar failed, hr %#lx\n", hr );
+
+    test_color_ref_init( &dark, 0xff, 0x20, 0x20, 0x20 );
+    test_color_ref_init( &light, 0xff, 0xff, 0xff, 0xff );
+
+    /* put/get round-trip on every color property, with value verification */
+    for (i = 0; i < ARRAY_SIZE( props ); i++)
+    {
+        struct __x_ABI_CWindows_CUI_CColor color;
+
+        ret = (void *)0xdeadbeef;
+        hr = props[i].get( title_bar, &ret );
+        ok( hr == S_OK, "%s get failed, hr %#lx\n", props[i].name, hr );
+        ok( ret == NULL, "%s expected NULL default, got %p\n", props[i].name, ret );
+
+        hr = props[i].put( title_bar, (__FIReference_1_Color *)&dark );
+        ok( hr == S_OK, "%s put failed, hr %#lx\n", props[i].name, hr );
+        ok( dark.ref == 2, "%s expected title bar to hold a reference, ref %ld\n", props[i].name, dark.ref );
+
+        ret = NULL;
+        hr = props[i].get( title_bar, &ret );
+        ok( hr == S_OK, "%s get failed, hr %#lx\n", props[i].name, hr );
+        ok( ret == (__FIReference_1_Color *)&dark, "%s expected %p, got %p\n", props[i].name, &dark, ret );
+        ok( dark.ref == 3, "%s get should AddRef, ref %ld\n", props[i].name, dark.ref );
+
+        color.A = color.R = color.G = color.B = 0;
+        hr = __FIReference_1_Color_get_Value( ret, &color );
+        ok( hr == S_OK, "%s get_Value failed, hr %#lx\n", props[i].name, hr );
+        ok( color.A == 0xff && color.R == 0x20 && color.G == 0x20 && color.B == 0x20,
+            "%s got color %02x%02x%02x%02x\n", props[i].name, color.A, color.R, color.G, color.B );
+
+        __FIReference_1_Color_Release( ret );
+        ok( dark.ref == 2, "%s Release of getter result should drop to 2, ref %ld\n", props[i].name, dark.ref );
+
+        /* overwrite: the title bar swaps references without leaking */
+        hr = props[i].put( title_bar, (__FIReference_1_Color *)&light );
+        ok( hr == S_OK, "%s overwrite put failed, hr %#lx\n", props[i].name, hr );
+        ok( dark.ref == 1, "%s overwrite should release old color, ref %ld\n", props[i].name, dark.ref );
+        ok( light.ref == 2, "%s overwrite should addref new color, ref %ld\n", props[i].name, light.ref );
+
+        /* NULL resets the property */
+        hr = props[i].put( title_bar, NULL );
+        ok( hr == S_OK, "%s NULL put failed, hr %#lx\n", props[i].name, hr );
+        ok( light.ref == 1, "%s NULL put should release stored color, ref %ld\n", props[i].name, light.ref );
+
+        ret = (void *)0xdeadbeef;
+        hr = props[i].get( title_bar, &ret );
+        ok( hr == S_OK, "%s get after reset failed, hr %#lx\n", props[i].name, hr );
+        ok( ret == NULL, "%s expected NULL after reset, got %p\n", props[i].name, ret );
+    }
+
+    hr = props[0].get( title_bar, NULL );
+    ok( hr == E_POINTER, "expected E_POINTER for NULL out param, got hr %#lx\n", hr );
+
+    /* With a top-level window the colors are pushed to DWM: caption color,
+     * immersive dark mode and text color all must succeed on the HWND. */
+    wc.lpfnWndProc = pDefWindowProcW;
+    wc.hInstance = GetModuleHandleW( NULL );
+    wc.lpszClassName = L"WineTwinapiTitleBarTest";
+    pRegisterClassW( &wc );
+    hwnd = pCreateWindowExW( 0, wc.lpszClassName, L"TitleBarTest", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                             100, 100, 320, 240, NULL, NULL, wc.hInstance, NULL );
+    ok( hwnd != NULL, "CreateWindowExW failed\n" );
+    pShowWindow( hwnd, SW_SHOWNORMAL );
+    pSetForegroundWindow( hwnd );
+
+    hr = IApplicationViewTitleBar_put_BackgroundColor( title_bar, (__FIReference_1_Color *)&dark );
+    ok( hr == S_OK, "put_BackgroundColor with window failed, hr %#lx\n", hr );
+    ok( dark.ref == 2, "expected title bar reference, ref %ld\n", dark.ref );
+
+    hr = IApplicationViewTitleBar_put_ForegroundColor( title_bar, (__FIReference_1_Color *)&light );
+    ok( hr == S_OK, "put_ForegroundColor with window failed, hr %#lx\n", hr );
+
+    if (pDwmSetWindowAttribute && hwnd)
+    {
+        caption = RGB( 0x20, 0x20, 0x20 );
+        hr = pDwmSetWindowAttribute( hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption) );
+        ok( hr == S_OK, "DwmSetWindowAttribute caption failed, hr %#lx\n", hr );
+    }
+
+    /* reset both DWM-mapped properties back to defaults */
+    hr = IApplicationViewTitleBar_put_BackgroundColor( title_bar, NULL );
+    ok( hr == S_OK, "put_BackgroundColor NULL failed, hr %#lx\n", hr );
+    hr = IApplicationViewTitleBar_put_ForegroundColor( title_bar, NULL );
+    ok( hr == S_OK, "put_ForegroundColor NULL failed, hr %#lx\n", hr );
+    ok( dark.ref == 1, "expected dark ref back to 1, got %ld\n", dark.ref );
+    ok( light.ref == 1, "expected light ref back to 1, got %ld\n", light.ref );
+
+    ref = __FIReference_1_Color_Release( (__FIReference_1_Color *)&dark );
+    ok( !ref, "got ref %ld.\n", ref );
+    ref = __FIReference_1_Color_Release( (__FIReference_1_Color *)&light );
+    ok( !ref, "got ref %ld.\n", ref );
+
+    pDestroyWindow( hwnd );
+
+    IApplicationViewTitleBar_Release( title_bar );
+    IApplicationView3_Release( app_view3 );
+    IApplicationView_Release( app_view );
+    IApplicationViewStatics2_Release( app_view_statics2 );
+    ref = IActivationFactory_Release( factory );
+    ok( ref == 1, "got ref %ld.\n", ref );
+    FreeLibrary( dwmapi );
+    FreeLibrary( user32 );
+}
+
 static void test_CoreApplication(void)
 {
     static const GUID IID_ICoreApplicationView2_custom =
@@ -525,7 +801,7 @@ static void test_CoreApplication(void)
 
                     hr = ICoreApplicationViewTitleBar_get_SystemOverlayRightInset( title_bar, &right );
                     ok( hr == S_OK, "get_SystemOverlayRightInset failed, hr %#lx\n", hr );
-                    ok( right == 0.0, "got right inset %f\n", right );
+                    ok( right == 138.0, "got right inset %f\n", right );
 
                     hr = ICoreApplicationViewTitleBar_get_Height( title_bar, &height );
                     ok( hr == S_OK, "get_Height failed, hr %#lx\n", hr );
@@ -561,6 +837,231 @@ static void test_CoreApplication(void)
 
     ref = IActivationFactory_Release( factory );
     ok( ref == 1, "got ref %ld.\n", ref );
+}
+
+#define TB_EVENT __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable
+
+struct test_title_bar_handler
+{
+    void *lpVtbl;
+    LONG ref;
+    LONG count;
+    IInspectable *sender;
+};
+
+static HRESULT WINAPI test_title_bar_handler_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct test_title_bar_handler *impl = (struct test_title_bar_handler *)iface;
+    if (IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI test_title_bar_handler_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct test_title_bar_handler *)iface)->ref );
+}
+
+static ULONG WINAPI test_title_bar_handler_Release( void *iface )
+{
+    return InterlockedDecrement( &((struct test_title_bar_handler *)iface)->ref );
+}
+
+static HRESULT WINAPI test_title_bar_handler_Invoke( TB_EVENT *iface, IInspectable *sender, IInspectable *args )
+{
+    struct test_title_bar_handler *impl = (struct test_title_bar_handler *)iface;
+    InterlockedIncrement( &impl->count );
+    impl->sender = sender;
+    return S_OK;
+}
+
+static const void *test_title_bar_handler_vtbl[] =
+{
+    test_title_bar_handler_QueryInterface,
+    test_title_bar_handler_AddRef,
+    test_title_bar_handler_Release,
+    test_title_bar_handler_Invoke,
+};
+
+static void test_title_bar_handler_init( struct test_title_bar_handler *h )
+{
+    h->lpVtbl = (void *)test_title_bar_handler_vtbl;
+    h->ref = 1;
+    h->count = 0;
+    h->sender = NULL;
+}
+
+static void test_CoreApplicationViewTitleBar(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_ApplicationModel_Core_CoreApplication;
+    IActivationFactory *factory;
+    ICoreApplication *core_app;
+    ICoreApplicationView *view;
+    ICoreApplicationView3 *view3;
+    ICoreApplicationViewTitleBar *title_bar;
+    struct test_title_bar_handler h1, h2, h3;
+    EventRegistrationToken token1 = {0}, token2 = {0}, token3 = {0}, token4 = {0};
+    boolean extend, visible;
+    DOUBLE height, left, right;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICoreApplication, (void **)&core_app );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED( hr )) goto done;
+
+    hr = ICoreApplication_GetCurrentView( core_app, &view );
+    ok( hr == S_OK && view, "GetCurrentView failed, hr %#lx\n", hr );
+    if (FAILED( hr )) goto done;
+
+    hr = ICoreApplicationView_QueryInterface( view, &IID_ICoreApplicationView3, (void **)&view3 );
+    ok( hr == S_OK && view3, "QI ICoreApplicationView3 failed, hr %#lx\n", hr );
+    if (FAILED( hr )) goto done;
+
+    hr = ICoreApplicationView3_get_TitleBar( view3, &title_bar );
+    ok( hr == S_OK && title_bar, "get_TitleBar failed, hr %#lx\n", hr );
+    if (FAILED( hr )) goto done;
+
+    /* Normalize state shared with test_CoreApplication (runs earlier). */
+    hr = ICoreApplicationViewTitleBar_put_ExtendViewIntoTitleBar( title_bar, FALSE );
+    ok( hr == S_OK, "put_ExtendViewIntoTitleBar(FALSE) failed, hr %#lx\n", hr );
+
+    extend = TRUE;
+    hr = ICoreApplicationViewTitleBar_get_ExtendViewIntoTitleBar( title_bar, &extend );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( extend == FALSE, "got extend %d\n", extend );
+
+    visible = FALSE;
+    hr = ICoreApplicationViewTitleBar_get_IsVisible( title_bar, &visible );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( visible == TRUE, "got is_visible %d\n", visible );
+
+    height = 0.0;
+    hr = ICoreApplicationViewTitleBar_get_Height( title_bar, &height );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( height > 0.0, "got height %f\n", height );
+
+    left = right = -1.0;
+    hr = ICoreApplicationViewTitleBar_get_SystemOverlayLeftInset( title_bar, &left );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( left == 0.0, "got left inset %f\n", left );
+    hr = ICoreApplicationViewTitleBar_get_SystemOverlayRightInset( title_bar, &right );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( right == 0.0, "got right inset %f\n", right );
+
+    /* Registering LayoutMetricsChanged, then extending: callback fires, insets update. */
+    test_title_bar_handler_init( &h1 );
+    hr = ICoreApplicationViewTitleBar_add_LayoutMetricsChanged( title_bar, (TB_EVENT *)&h1, &token1 );
+    ok( hr == S_OK, "add_LayoutMetricsChanged failed, hr %#lx\n", hr );
+    ok( token1.value != 0, "got token %s\n", wine_dbgstr_longlong( token1.value ) );
+    ok( h1.ref == 2, "got handler ref %ld\n", h1.ref );
+
+    hr = ICoreApplicationViewTitleBar_put_ExtendViewIntoTitleBar( title_bar, TRUE );
+    ok( hr == S_OK, "put_ExtendViewIntoTitleBar(TRUE) failed, hr %#lx\n", hr );
+    ok( h1.count == 1, "got handler count %ld, expected 1\n", h1.count );
+    ok( h1.sender == (IInspectable *)title_bar, "got sender %p\n", h1.sender );
+
+    extend = FALSE;
+    hr = ICoreApplicationViewTitleBar_get_ExtendViewIntoTitleBar( title_bar, &extend );
+    ok( hr == S_OK && extend == TRUE, "got extend %d hr %#lx\n", extend, hr );
+
+    right = 0.0;
+    hr = ICoreApplicationViewTitleBar_get_SystemOverlayRightInset( title_bar, &right );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( right > 0.0, "got right inset %f\n", right );
+
+    height = 0.0;
+    hr = ICoreApplicationViewTitleBar_get_Height( title_bar, &height );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( height > 0.0, "got height %f\n", height );
+
+    /* Setting the same value again fires no event. */
+    hr = ICoreApplicationViewTitleBar_put_ExtendViewIntoTitleBar( title_bar, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( h1.count == 1, "got handler count %ld, expected 1\n", h1.count );
+
+    /* Second handler registered: both fire on toggle. */
+    test_title_bar_handler_init( &h2 );
+    hr = ICoreApplicationViewTitleBar_add_LayoutMetricsChanged( title_bar, (TB_EVENT *)&h2, &token2 );
+    ok( hr == S_OK, "add_LayoutMetricsChanged (2) failed, hr %#lx\n", hr );
+    ok( token2.value != token1.value, "tokens should differ\n" );
+    ok( h2.ref == 2, "got handler ref %ld\n", h2.ref );
+
+    hr = ICoreApplicationViewTitleBar_put_ExtendViewIntoTitleBar( title_bar, FALSE );
+    ok( hr == S_OK, "put_ExtendViewIntoTitleBar(FALSE) failed, hr %#lx\n", hr );
+    ok( h1.count == 2, "got h1 count %ld, expected 2\n", h1.count );
+    ok( h2.count == 1, "got h2 count %ld, expected 1\n", h2.count );
+
+    right = -1.0;
+    hr = ICoreApplicationViewTitleBar_get_SystemOverlayRightInset( title_bar, &right );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( right == 0.0, "got right inset %f\n", right );
+
+    /* Removing the first handler stops its callbacks and releases it. */
+    hr = ICoreApplicationViewTitleBar_remove_LayoutMetricsChanged( title_bar, token1 );
+    ok( hr == S_OK, "remove_LayoutMetricsChanged failed, hr %#lx\n", hr );
+    ok( h1.ref == 1, "got handler ref %ld\n", h1.ref );
+
+    hr = ICoreApplicationViewTitleBar_put_ExtendViewIntoTitleBar( title_bar, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( h1.count == 2, "got h1 count %ld, expected 2\n", h1.count );
+    ok( h2.count == 2, "got h2 count %ld, expected 2\n", h2.count );
+
+    /* Removing an already-removed token is a no-op. */
+    hr = ICoreApplicationViewTitleBar_remove_LayoutMetricsChanged( title_bar, token1 );
+    ok( hr == S_OK, "remove_LayoutMetricsChanged (again) failed, hr %#lx\n", hr );
+    ok( h1.ref == 1, "got handler ref %ld\n", h1.ref );
+
+    hr = ICoreApplicationViewTitleBar_remove_LayoutMetricsChanged( title_bar, token2 );
+    ok( hr == S_OK, "remove_LayoutMetricsChanged (2) failed, hr %#lx\n", hr );
+    ok( h2.ref == 1, "got handler ref %ld\n", h2.ref );
+
+    hr = ICoreApplicationViewTitleBar_put_ExtendViewIntoTitleBar( title_bar, FALSE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( h1.count == 2, "got h1 count %ld, expected 2\n", h1.count );
+    ok( h2.count == 2, "got h2 count %ld, expected 2\n", h2.count );
+
+    /* IsVisibleChanged add/remove round-trip. */
+    test_title_bar_handler_init( &h3 );
+    hr = ICoreApplicationViewTitleBar_add_IsVisibleChanged( title_bar, (TB_EVENT *)&h3, &token3 );
+    ok( hr == S_OK, "add_IsVisibleChanged failed, hr %#lx\n", hr );
+    ok( token3.value != 0, "got token %s\n", wine_dbgstr_longlong( token3.value ) );
+    ok( h3.ref == 2, "got handler ref %ld\n", h3.ref );
+    hr = ICoreApplicationViewTitleBar_remove_IsVisibleChanged( title_bar, token3 );
+    ok( hr == S_OK, "remove_IsVisibleChanged failed, hr %#lx\n", hr );
+    ok( h3.ref == 1, "got handler ref %ld\n", h3.ref );
+
+    /* NULL handler accepted, carries a valid token, removable. */
+    hr = ICoreApplicationViewTitleBar_add_LayoutMetricsChanged( title_bar, NULL, &token4 );
+    ok( hr == S_OK, "add_LayoutMetricsChanged(NULL) failed, hr %#lx\n", hr );
+    ok( token4.value != 0, "got token %s\n", wine_dbgstr_longlong( token4.value ) );
+    hr = ICoreApplicationViewTitleBar_remove_LayoutMetricsChanged( title_bar, token4 );
+    ok( hr == S_OK, "remove_LayoutMetricsChanged(NULL entry) failed, hr %#lx\n", hr );
+
+    ICoreApplicationViewTitleBar_Release( title_bar );
+    ICoreApplicationView3_Release( view3 );
+    ICoreApplicationView_Release( view );
+    ICoreApplication_Release( core_app );
+
+done:
+    IActivationFactory_Release( factory );
 }
 
 struct test_lifecycle_handler
@@ -1963,6 +2464,182 @@ static void test_ToastNotification(void)
     ok( ref >= 1, "got ref %ld.\n", ref );
 }
 
+/* Show() reads the payload <text> elements, hands the pair to the tray
+ * balloon, and records the toast in the history; Hide() retires the balloon
+ * and drops the history entry again. */
+static void test_ToastNotificationShowXml(void)
+{
+    static const WCHAR *title = L"Hello Title";
+    static const WCHAR *body = L"Body line 1";
+    static const WCHAR *toast_class = RuntimeClass_Windows_UI_Notifications_ToastNotification;
+    static const WCHAR *manager_class = RuntimeClass_Windows_UI_Notifications_ToastNotificationManager;
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlNodeSerializer *serializer = NULL;
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *content = NULL;
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlNodeList *list = NULL;
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlNode *node = NULL;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationHistory2 *history2 = NULL;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationFactory *toast_factory = NULL;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationHistory *history = NULL;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier *notifier = NULL;
+    __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *view = NULL;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotification *toast = NULL;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationManagerStatics2 *statics2 = NULL;
+    IToastNotificationManagerStatics *statics = NULL;
+    IActivationFactory *manager_factory = NULL, *toast_factory_obj = NULL;
+    UINT32 size = 0xc0ffee, index = 0xc0ffee;
+    LONG ref;
+    BOOLEAN found = FALSE;
+    HSTRING str = NULL, tag_name = NULL;
+    HRESULT hr;
+
+    hr = WindowsCreateString( manager_class, wcslen( manager_class ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&manager_factory );
+    WindowsDeleteString( str );
+    str = NULL;
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( manager_class ) );
+        return;
+    }
+    hr = IActivationFactory_QueryInterface( manager_factory, &IID_IToastNotificationManagerStatics,
+                                            (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( manager_factory, &IID_IToastNotificationManagerStatics2,
+                                            (void **)&statics2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* the ToastText02 template: a title and a body text element */
+    hr = IToastNotificationManagerStatics_GetTemplateContent( statics, ToastTemplateType_ToastText02,
+                                                              &content );
+    ok( hr == S_OK && content, "got hr %#lx, content %p.\n", hr, content );
+    if (hr != S_OK) goto done;
+
+    hr = WindowsCreateString( L"text", 4, &tag_name );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IXmlDocument_GetElementsByTagName( content, tag_name, &list );
+    ok( hr == S_OK && list, "got hr %#lx, list %p.\n", hr, list );
+    if (hr != S_OK) goto done;
+
+    {
+        UINT32 length = 0;
+        const WCHAR *const values[] = { title, body };
+        UINT32 i;
+
+        hr = IXmlNodeList_get_Length( list, &length );
+        ok( hr == S_OK && length == 2, "got hr %#lx, length %u.\n", hr, length );
+        for (i = 0; i < 2 && SUCCEEDED( hr ) && i < length; ++i)
+        {
+            hr = IXmlNodeList_Item( list, i, &node );
+            if (FAILED( hr )) break;
+            hr = WindowsCreateString( values[i], wcslen( values[i] ), &str );
+            if (SUCCEEDED( hr ))
+            {
+                hr = IXmlNode_QueryInterface( node, &IID_IXmlNodeSerializer, (void **)&serializer );
+                if (SUCCEEDED( hr ))
+                {
+                    hr = IXmlNodeSerializer_put_InnerText( serializer, str );
+                    IXmlNodeSerializer_Release( serializer );
+                    serializer = NULL;
+                }
+                WindowsDeleteString( str );
+                str = NULL;
+            }
+            IXmlNode_Release( node );
+            node = NULL;
+            ok( hr == S_OK, "got hr %#lx setting text %u.\n", hr, i );
+        }
+        if (FAILED( hr )) goto done;
+    }
+
+    /* the toast carrying the filled template */
+    hr = WindowsCreateString( toast_class, wcslen( toast_class ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&toast_factory_obj );
+    WindowsDeleteString( str );
+    str = NULL;
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( toast_factory_obj, &IID_IToastNotificationFactory,
+                                            (void **)&toast_factory );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotificationFactory_CreateToastNotification( toast_factory, content, &toast );
+    ok( hr == S_OK && toast, "got hr %#lx, toast %p.\n", hr, toast );
+    if (hr != S_OK) goto done;
+
+    hr = IToastNotificationManagerStatics_CreateToastNotifier( statics, &notifier );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* a known-empty history to observe Show and Hide against */
+    hr = IToastNotificationManagerStatics2_get_History( statics2, &history );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotificationHistory_Clear( history );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotificationHistory_QueryInterface( history, &IID_IToastNotificationHistory2, (void **)&history2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Show( notifier, toast );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* Show() recorded the toast in the history */
+    hr = IToastNotificationHistory2_GetHistory( history2, &view );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    size = 0xc0ffee;
+    hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_get_Size( view, &size );
+    ok( hr == S_OK && size == 1, "got hr %#lx, size %u.\n", hr, size );
+    found = FALSE;
+    index = 0xc0ffee;
+    hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_IndexOf( view, toast, &index, &found );
+
+    ok( hr == S_OK && found && index == 0, "got hr %#lx, found %d, index %u.\n", hr, found, index );
+    __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_Release( view );
+    view = NULL;
+
+    /* shown: history, the shown queue and (when a daemon accepted the toast)
+     * the visible-toast list each keep a reference on top of the test's own */
+    ref = IToastNotification_AddRef( toast );
+    ref = IToastNotification_Release( toast );
+    ok( ref == 3 || ref == 4, "got ref %ld after Show.\n", ref );
+
+    /* Hide() retires the balloon and drops the history entry */
+    hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Hide( notifier, toast );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotificationHistory2_GetHistory( history2, &view );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    size = 0xc0ffee;
+    hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_get_Size( view, &size );
+    ok( hr == S_OK && !size, "got hr %#lx, size %u.\n", hr, size );
+    __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_Release( view );
+    view = NULL;
+
+    /* hidden: the history and visible-toast references are gone, the shown
+     * queue keeps its own; a re-show after Hide displays again */
+    ref = IToastNotification_AddRef( toast );
+    ref = IToastNotification_Release( toast );
+    ok( ref == 2, "got ref %ld after Hide.\n", ref );
+    hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Show( notifier, toast );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Hide( notifier, toast );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+done:
+    if (toast) IToastNotification_Release( toast );
+    if (history2) IToastNotificationHistory2_Release( history2 );
+    if (history) IToastNotificationHistory_Release( history );
+    if (notifier) __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Release( notifier );
+    if (toast_factory) IToastNotificationFactory_Release( toast_factory );
+    if (toast_factory_obj) IActivationFactory_Release( toast_factory_obj );
+    if (content) IXmlDocument_Release( content );
+    if (list) IXmlNodeList_Release( list );
+    if (serializer) IXmlNodeSerializer_Release( serializer );
+    if (node) IXmlNode_Release( node );
+    if (statics2) IToastNotificationManagerStatics2_Release( statics2 );
+    if (statics) IToastNotificationManagerStatics_Release( statics );
+    if (manager_factory) IActivationFactory_Release( manager_factory );
+    WindowsDeleteString( tag_name );
+    WindowsDeleteString( str );
+}
+
 START_TEST(twinapi)
 {
     HRESULT hr;
@@ -1976,13 +2653,16 @@ START_TEST(twinapi)
     test_CoreApplication_lifecycle();
     test_CoreApplication_properties();
     test_ApplicationView();
+    test_ApplicationViewTitleBar();
     test_CoreApplication();
+    test_CoreApplicationViewTitleBar();
     test_AppInstance();
     test_DataTransferManager();
     test_PowerManager();
     test_toast_payload();
     test_ToastNotificationManager();
     test_ToastNotification();
+    test_ToastNotificationShowXml();
 
     RoUninitialize();
 }

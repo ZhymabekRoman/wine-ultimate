@@ -36,10 +36,12 @@
 #define WIDL_using_Windows_UI_Input
 #define WIDL_using_Windows_UI_ViewManagement
 #define WIDL_using_Windows_UI_Text
+#define WIDL_using_Windows_UI_Popups
 #define WIDL_using_Microsoft_UI_Text
 #define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xc0000
 #include "windows.ui.input.h"
 #include "windows.ui.h"
+#include "windows.ui.popups.h"
 #include "windows.ui.viewmanagement.h"
 #include "windows.ui_private.h"
 
@@ -52,6 +54,10 @@ extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
 extern IActivationFactory *core_cursor_factory;
 extern IActivationFactory *gesturerecognizer_factory;
+extern IActivationFactory *popup_factory;
+#define AsyncStatus_Closed ((AsyncStatus)4)
+extern IActivationFactory *uicmd_separator_factory;
+extern IActivationFactory *popupmenu_factory;
 extern __x_ABI_CWindows_CUI_CCore_CICoreWindow *core_window_create(void);
 extern HRESULT PrivateCreateCoreWindow( DWORD window_type, const WCHAR *title, INT x, INT y,
                                         UINT width, UINT height, DWORD flags, HWND parent,

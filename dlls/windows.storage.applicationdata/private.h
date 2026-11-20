@@ -35,6 +35,8 @@
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Storage
+#define WIDL_using_Windows_Storage_Streams
+#include "windows.storage.streams.h"
 #include "windows.storage.h"
 
 extern IActivationFactory *application_data_factory;

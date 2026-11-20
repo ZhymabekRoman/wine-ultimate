@@ -546,7 +546,9 @@ static HRESULT decode_bytes_to_hbitmap( const BYTE *bytes, SIZE_T size, HBITMAP 
     return FAILED( hr ) ? hr : E_FAIL;
 }
 
-HRESULT stream_ref_to_hbitmap( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref, HBITMAP *out_hbm )
+/* Open the reference, read the whole stream into a malloc'd byte array. */
+static HRESULT stream_ref_to_bytes( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref,
+                                    BYTE **out_bytes, SIZE_T *out_size )
 {
     __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType *open_op = NULL;
     __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType *wct = NULL;
@@ -561,7 +563,8 @@ HRESULT stream_ref_to_hbitmap( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccess
     BYTE *raw = NULL, *copy = NULL;
     HRESULT hr;
 
-    *out_hbm = NULL;
+    *out_bytes = NULL;
+    *out_size = 0;
     if (!ref) return E_INVALIDARG;
 
     hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_OpenReadAsync( ref, &open_op );
@@ -620,8 +623,26 @@ HRESULT stream_ref_to_hbitmap( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccess
     if (buf) __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( buf );
 
     if (SUCCEEDED( hr ) && copy)
-        hr = decode_bytes_to_hbitmap( copy, read_len, out_hbm );
+    {
+        *out_bytes = copy;
+        *out_size = read_len;
+        copy = NULL;
+    }
     free( copy );
+    return hr;
+}
+
+HRESULT stream_ref_to_hbitmap( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref, HBITMAP *out_hbm )
+{
+    BYTE *bytes = NULL;
+    SIZE_T size = 0;
+    HRESULT hr;
+
+    *out_hbm = NULL;
+    hr = stream_ref_to_bytes( ref, &bytes, &size );
+    if (FAILED( hr )) return hr;
+    hr = decode_bytes_to_hbitmap( bytes, size, out_hbm );
+    free( bytes );
     return hr;
 }
 
@@ -694,76 +715,445 @@ HRESULT hbitmap_to_dib_global( HBITMAP hbm, HGLOBAL *out_global )
     return hr;
 }
 
+/*
+ * In-memory bitmap stream reference: the IRandomAccessStreamReference the view
+ * hands out for the Bitmap format (GetBitmapAsync, GetDataAsync("Bitmap")).  One
+ * object carries four faces, resolved from the face's vtable pointer the way
+ * every object in this module does it:
+ *
+ *   IRandomAccessStreamReference  OpenReadAsync -> born-completed operation
+ *   IRandomAccessStreamWithContentType   the stream opened for reading, slot 15
+ *                                        answers get_ContentType "image/bmp"
+ *   IRandomAccessStream           the same face without the content type
+ *   IInputStream                  ReadAsync(buffer, count, options, &op)
+ *
+ * QueryInterface is a strict IsEqualGUID allowlist.  The ReadAsync points copy
+ * out of the owned byte buffer, set the destination IBuffer's Length and return
+ * a born-completed IAsyncOperationWithProgress`2<IBuffer,UINT32> over it.  The
+ * stream faces carry the Win11 C projection slots (30 ReadAsync(buffer),
+ * 31 ReadAsyncAt(op, buffer, count)) like the windows.storage in-memory stream;
+ * the position is shared by every face, as the consumers seek to 0 before read.
+ */
+
+struct bmp_stream_ref
+{
+    const void *ref_vtbl;      /* IRandomAccessStreamReference at offset 0 */
+    const void *wct_vtbl;      /* IRandomAccessStreamWithContentType at offset 1 pointer */
+    const void *stream_vtbl;   /* IRandomAccessStream at offset 2 pointers */
+    const void *input_vtbl;    /* IInputStream at offset 3 pointers */
+    LONG ref;
+    BYTE *data;
+    SIZE_T size;
+    UINT64 pos;
+};
+
+static const void *bmp_ref_vtbl[];
+static const void *bmp_wct_vtbl[];
+static const void *bmp_stream_vtbl[];
+static const void *bmp_input_vtbl[];
+
+static struct bmp_stream_ref *bmp_impl_from( const void *iface )
+{
+    static const void *groups[] = { bmp_ref_vtbl, bmp_wct_vtbl, bmp_stream_vtbl, bmp_input_vtbl };
+    static const int offsets[] = { 0, 1, 2, 3 };
+    const void *vtbl = *(const void *const *)iface;
+    int i;
+
+    for (i = 0; i < (int)ARRAY_SIZE( groups ); i++)
+        if (vtbl == groups[i])
+            return (struct bmp_stream_ref *)((const BYTE *)iface - offsets[i] * sizeof(void *));
+    return (struct bmp_stream_ref *)iface;
+}
+
+static HRESULT WINAPI bmp_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IRandomAccessStreamReference ))
+    {
+        *out = (void *)&impl->ref_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IRandomAccessStreamWithContentType ))
+    {
+        *out = (void *)&impl->wct_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IRandomAccessStream ))
+    {
+        *out = (void *)&impl->stream_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IInputStream ))
+    {
+        *out = (void *)&impl->input_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI bmp_AddRef( const void *iface )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI bmp_Release( const void *iface )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        free( impl->data );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI bmp_GetIids( const void *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI bmp_GetRuntimeClassName( const void *iface, HSTRING *class_name )
+{
+    const void *vtbl = *(const void *const *)iface;
+    const WCHAR *cls;
+
+    if (!class_name) return E_POINTER;
+    if (vtbl == bmp_ref_vtbl) cls = L"Windows.Storage.Streams.RandomAccessStreamReference";
+    else if (vtbl == bmp_wct_vtbl) cls = L"Windows.Storage.Streams.RandomAccessStreamWithContentType";
+    else if (vtbl == bmp_input_vtbl) cls = L"Windows.Storage.Streams.InputStream";
+    else cls = L"Windows.Storage.Streams.RandomAccessStream";
+    return WindowsCreateString( cls, lstrlenW( cls ), class_name );
+}
+
+static HRESULT WINAPI bmp_GetTrustLevel( const void *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI bmp_get_Size( const void *iface, UINT64 *value )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    if (!value) return E_POINTER;
+    *value = impl->size;
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_put_Size( const void *iface, UINT64 value )
+{
+    FIXME( "iface %p, value %I64u stub!\n", iface, value );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI bmp_GetInputStreamAt( const void *iface, UINT64 position, IInputStream **stream )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    if (!stream) return E_POINTER;
+    impl->pos = position;
+    *stream = (IInputStream *)&impl->input_vtbl;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_GetOutputStreamAt( const void *iface, UINT64 position, IOutputStream **stream )
+{
+    FIXME( "iface %p, position %I64u, stream %p stub!\n", iface, position, stream );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI bmp_get_Position( const void *iface, UINT64 *value )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    if (!value) return E_POINTER;
+    *value = impl->pos;
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_Seek( const void *iface, UINT64 position )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    impl->pos = position;
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_CloneStream( const void *iface, IRandomAccessStream **stream )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    if (!stream) return E_POINTER;
+    *stream = (IRandomAccessStream *)&impl->stream_vtbl;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_get_CanRead( const void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = TRUE;
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_get_CanWrite( const void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_get_ContentType( const void *iface, HSTRING *value )
+{
+    static const WCHAR type[] = L"image/bmp";
+
+    if (!value) return E_POINTER;
+    return WindowsCreateString( type, ARRAY_SIZE( type ) - 1, value );
+}
+
+static HRESULT WINAPI bmp_StreamGetResults( const void *iface, void **result )
+{
+    FIXME( "iface %p, result %p stub!\n", iface, result );
+    return E_NOTIMPL;
+}
+
+/* Copy out of the owned buffer, publish the length on the destination IBuffer
+ * and hand back the born-completed progress operation over the same buffer. */
+static HRESULT bmp_read_at( struct bmp_stream_ref *impl, IBuffer *buffer, UINT64 pos, UINT32 count,
+                            __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 **operation )
+{
+    __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 *op;
+    struct async_op *async;
+    IBufferByteAccess *access = NULL;
+    BYTE *dest = NULL;
+    UINT32 cap = 0, to_read = 0;
+    HRESULT hr;
+
+    if (!buffer || !operation) return E_POINTER;
+    *operation = NULL;
+    IBuffer_get_Capacity( buffer, &cap );
+
+    if (pos < impl->size)
+    {
+        UINT64 avail = impl->size - pos;
+        to_read = (avail < count) ? (UINT32)avail : count;
+        if (to_read > cap) to_read = cap;
+        if (to_read && SUCCEEDED( hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access ) ))
+        {
+            if (SUCCEEDED( IBufferByteAccess_Buffer( access, &dest ) ) && dest)
+                memcpy( dest, impl->data + pos, to_read );
+            IBufferByteAccess_Release( access );
+        }
+        impl->pos = pos + to_read;
+    }
+    IBuffer_put_Length( buffer, to_read );
+
+    async = create_async_op_progress( &IID___FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32,
+                                      L"Windows.Foundation.IAsyncOperationWithProgress`2<Windows.Storage.Streams.IBuffer, UInt32>",
+                                      buffer );
+    if (!async) return E_OUTOFMEMORY;
+    op = (void *)async_op_iface( async );
+    *operation = op;
+    return S_OK;
+}
+
+static HRESULT WINAPI bmp_ReadAsync( const void *iface, IBuffer *buffer,
+                                     __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 **operation )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    UINT32 cap = 0;
+
+    if (buffer) IBuffer_get_Capacity( buffer, &cap );
+    return bmp_read_at( impl, buffer, impl->pos, cap, operation );
+}
+
+static HRESULT WINAPI bmp_ReadAsyncAt( const void *iface,
+                                       __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 **operation,
+                                       IBuffer *buffer, UINT32 count )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    return bmp_read_at( impl, buffer, impl->pos, count, operation );
+}
+
+static HRESULT WINAPI bmp_input_ReadAsync( const void *iface, IBuffer *buffer, UINT32 count,
+                                           InputStreamOptions options,
+                                           __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 **operation )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    return bmp_read_at( impl, buffer, impl->pos, count, operation );
+}
+
+static HRESULT WINAPI bmp_ref_OpenReadAsync( const void *iface,
+                                             __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType **operation )
+{
+    struct bmp_stream_ref *impl = bmp_impl_from( iface );
+    struct async_op *async;
+
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+
+    if (!operation) return E_POINTER;
+    async = create_async_op( &IID___FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType,
+                             L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.Streams.RandomAccessStreamWithContentType>",
+                             (void *)&impl->wct_vtbl, OP_RESULT_COM );
+    if (!async) return E_OUTOFMEMORY;
+    *operation = (void *)async_op_iface( async );
+    return S_OK;
+}
+
+/* Stream faces in the Win11 C projection layout: slots 0-14 the classic
+ * IRandomAccessStream, 15-29/37-39 projection fillers (QueryInterface-shaped),
+ * 30 ReadAsync(buffer), 31 ReadAsyncAt(op, buffer, count), 32-36 GetResults
+ * fillers; the WithContentType face answers get_ContentType at slot 15. */
+static const void *bmp_stream_vtbl[] =
+{
+    bmp_QueryInterface,          /* 0 */
+    bmp_AddRef,
+    bmp_Release,
+    bmp_GetIids,
+    bmp_GetRuntimeClassName,
+    bmp_GetTrustLevel,
+    bmp_get_Size,                /* 6 */
+    bmp_put_Size,
+    bmp_GetInputStreamAt,
+    bmp_GetOutputStreamAt,
+    bmp_get_Position,            /* 10 */
+    bmp_Seek,
+    bmp_CloneStream,
+    bmp_get_CanRead,
+    bmp_get_CanWrite,            /* 14 */
+    bmp_QueryInterface,          /* 15-29 projection fillers */
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_ReadAsync,               /* 30 ReadAsync(buffer) */
+    bmp_ReadAsyncAt,             /* 31 ReadAsyncAt(op, buffer, count) */
+    bmp_StreamGetResults,        /* 32-36 GetResults fillers */
+    bmp_StreamGetResults,
+    bmp_StreamGetResults,
+    bmp_StreamGetResults,
+    bmp_StreamGetResults,
+    bmp_QueryInterface,          /* 37-39 projection fillers */
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+};
+
+static const void *bmp_wct_vtbl[] =
+{
+    bmp_QueryInterface,          /* 0 */
+    bmp_AddRef,
+    bmp_Release,
+    bmp_GetIids,
+    bmp_GetRuntimeClassName,
+    bmp_GetTrustLevel,
+    bmp_get_Size,                /* 6 */
+    bmp_put_Size,
+    bmp_GetInputStreamAt,
+    bmp_GetOutputStreamAt,
+    bmp_get_Position,            /* 10 */
+    bmp_Seek,
+    bmp_CloneStream,
+    bmp_get_CanRead,
+    bmp_get_CanWrite,            /* 14 */
+    bmp_get_ContentType,         /* 15 */
+    bmp_QueryInterface,          /* 16-29 projection fillers */
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+    bmp_ReadAsync,               /* 30 ReadAsync(buffer) */
+    bmp_ReadAsyncAt,             /* 31 ReadAsyncAt(op, buffer, count) */
+    bmp_StreamGetResults,        /* 32-36 GetResults fillers */
+    bmp_StreamGetResults,
+    bmp_StreamGetResults,
+    bmp_StreamGetResults,
+    bmp_StreamGetResults,
+    bmp_QueryInterface,          /* 37-39 projection fillers */
+    bmp_QueryInterface,
+    bmp_QueryInterface,
+};
+
+static const void *bmp_ref_vtbl[] =
+{
+    bmp_QueryInterface,
+    bmp_AddRef,
+    bmp_Release,
+    bmp_GetIids,
+    bmp_GetRuntimeClassName,
+    bmp_GetTrustLevel,
+    bmp_ref_OpenReadAsync,
+};
+
+static const void *bmp_input_vtbl[] =
+{
+    bmp_QueryInterface,
+    bmp_AddRef,
+    bmp_Release,
+    bmp_GetIids,
+    bmp_GetRuntimeClassName,
+    bmp_GetTrustLevel,
+    bmp_input_ReadAsync,
+};
+
 static HRESULT bmp_bytes_to_stream_ref( const BYTE *bytes, SIZE_T size,
                                         __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference **out_ref )
 {
-    static const WCHAR stream_cls[] = L"Windows.Storage.Streams.InMemoryRandomAccessStream";
-    static const WCHAR ref_cls[] = L"Windows.Storage.Streams.RandomAccessStreamReference";
-    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *stream = NULL;
-    __x_ABI_CWindows_CStorage_CStreams_CIOutputStream *output = NULL;
-    __x_ABI_CWindows_CStorage_CStreams_CIBuffer *buf = NULL;
-    IBufferByteAccess *access = NULL;
-    __FIAsyncOperationWithProgress_2_UINT32_UINT32 *write_op = NULL;
-    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics *ref_statics = NULL;
-    HSTRING hstr = NULL;
-    BYTE *dst = NULL;
-    UINT32 written = 0;
-    HRESULT hr;
+    struct bmp_stream_ref *impl;
 
     *out_ref = NULL;
     if (!bytes || !size) return E_INVALIDARG;
 
-    if (FAILED( (hr = WindowsCreateString( stream_cls, ARRAY_SIZE( stream_cls ) - 1, &hstr )) )) return hr;
-    hr = RoActivateInstance( hstr, (IInspectable **)&stream );
-    WindowsDeleteString( hstr );
-    if (FAILED( hr )) return hr;
-
-    hr = create_winrt_buffer( (UINT32)size, &buf );
-    if (SUCCEEDED( hr ))
-        hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_QueryInterface( buf, &IID_IBufferByteAccess, (void **)&access );
-    if (SUCCEEDED( hr ))
-        hr = IBufferByteAccess_Buffer( access, &dst );
-    if (SUCCEEDED( hr ) && dst)
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    if (!(impl->data = malloc( size )))
     {
-        memcpy( dst, bytes, size );
-        hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_put_Length( buf, (UINT32)size );
+        free( impl );
+        return E_OUTOFMEMORY;
     }
-    if (access) IBufferByteAccess_Release( access );
+    memcpy( impl->data, bytes, size );
+    impl->ref_vtbl = bmp_ref_vtbl;
+    impl->wct_vtbl = bmp_wct_vtbl;
+    impl->stream_vtbl = bmp_stream_vtbl;
+    impl->input_vtbl = bmp_input_vtbl;
+    impl->ref = 1;
+    impl->size = size;
 
-    if (SUCCEEDED( hr ))
-        hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_QueryInterface(
-                stream, &IID___x_ABI_CWindows_CStorage_CStreams_CIOutputStream, (void **)&output );
-    if (SUCCEEDED( hr ))
-        hr = __x_ABI_CWindows_CStorage_CStreams_CIOutputStream_WriteAsync( output, buf, &write_op );
-    if (output) __x_ABI_CWindows_CStorage_CStreams_CIOutputStream_Release( output );
-    if (buf) __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( buf );
-
-    if (SUCCEEDED( hr ) && write_op)
-    {
-        hr = wait_async_info( write_op );
-        if (SUCCEEDED( hr ))
-            __FIAsyncOperationWithProgress_2_UINT32_UINT32_GetResults( write_op, &written );
-        __FIAsyncOperationWithProgress_2_UINT32_UINT32_Release( write_op );
-    }
-
-    if (SUCCEEDED( hr ))
-        hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Seek( stream, 0 );
-
-    if (SUCCEEDED( hr ))
-    {
-        if (SUCCEEDED( (hr = WindowsCreateString( ref_cls, ARRAY_SIZE( ref_cls ) - 1, &hstr )) ))
-        {
-            hr = RoGetActivationFactory( hstr, &IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics,
-                                         (void **)&ref_statics );
-            WindowsDeleteString( hstr );
-        }
-    }
-    if (SUCCEEDED( hr ) && ref_statics)
-        hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics_CreateFromStream( ref_statics, stream, out_ref );
-
-    if (ref_statics) __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics_Release( ref_statics );
-    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Release( stream );
-    return hr;
+    *out_ref = (void *)&impl->ref_vtbl;
+    return S_OK;
 }
 
 HRESULT hbitmap_to_stream_ref( HBITMAP hbm, __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference **out_ref )
@@ -968,6 +1358,15 @@ static HRESULT data_obj_read_bitmap( IDataObject *data_obj,
         return hr;
     }
     free( dib );
+
+    /* BITMAPV5HEADER carries the classic BITMAPINFO as its prefix. */
+    if (SUCCEEDED( data_obj_read_cf_bytes( data_obj, CF_DIBV5, &dib, &dib_size ) ) && dib)
+    {
+        hr = dib_to_stream_ref( (const BITMAPINFO *)dib, dib_size, out_ref );
+        free( dib );
+        return hr;
+    }
+    free( dib );
     return E_FAIL;
 }
 
@@ -987,7 +1386,406 @@ static BOOL data_obj_has_text( IDataObject *data_obj )
 static BOOL data_obj_has_bitmap( IDataObject *data_obj )
 {
     return data_obj_has_cf( data_obj, CF_BITMAP, TYMED_GDI ) ||
-           data_obj_has_cf( data_obj, CF_DIB, TYMED_HGLOBAL | TYMED_ISTREAM );
+           data_obj_has_cf( data_obj, CF_DIB, TYMED_HGLOBAL | TYMED_ISTREAM ) ||
+           data_obj_has_cf( data_obj, CF_DIBV5, TYMED_HGLOBAL | TYMED_ISTREAM );
+}
+
+static BOOL data_obj_has_storage_items( IDataObject *data_obj )
+{
+    return data_obj_has_cf( data_obj, CF_HDROP, TYMED_HGLOBAL | TYMED_ISTREAM );
+}
+
+/* The CF_HDROP payload header (include/shlobj.h:1750); declared locally, the
+ * module imports only the small header set above (see the
+ * IDataTransferManagerInterop note in private.h for the same reason). */
+typedef struct
+{
+    DWORD pFiles;
+    POINT pt;
+    BOOL  fNC;
+    BOOL  fWide;
+} dropfiles_hdr;
+
+/* ------------------------------------------- storage items ------------- */
+
+/*
+ * The IStorageItem the StorageItems format hands out for each CF_HDROP path
+ * (and for each item a SetStorageItems iterable carried).  The object is a
+ * path wrapper: Name is the last component of Path, Attributes and the
+ * file/folder type come from one GetFileAttributesW snapshot taken at
+ * creation, the mutation and property points answer E_NOTIMPL, and
+ * QueryInterface answers the strict IUnknown/IInspectable/IAgileObject/
+ * IStorageItem set only.
+ */
+
+struct storage_item
+{
+    const void *item_vtbl;      /* IStorageItem at offset 0 */
+    LONG ref;
+    HSTRING path;
+    HSTRING name;
+    DWORD attrs;
+    BOOL is_dir;
+};
+
+static const void *storage_item_vtbl[];
+
+static inline struct storage_item *storage_item_from( const void *iface )
+{
+    return (struct storage_item *)iface;
+}
+
+static HRESULT WINAPI item_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    struct storage_item *impl = storage_item_from( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStorageItem ))
+    {
+        *out = (void *)impl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI item_AddRef( const void *iface )
+{
+    return InterlockedIncrement( &storage_item_from( iface )->ref );
+}
+
+static ULONG WINAPI item_Release( const void *iface )
+{
+    struct storage_item *impl = storage_item_from( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        WindowsDeleteString( impl->path );
+        WindowsDeleteString( impl->name );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI item_GetIids( const void *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_GetRuntimeClassName( const void *iface, HSTRING *class_name )
+{
+    struct storage_item *impl = storage_item_from( iface );
+    const WCHAR *cls = impl->is_dir ? RuntimeClass_Windows_Storage_StorageFolder
+                                    : RuntimeClass_Windows_Storage_StorageFile;
+
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( cls, lstrlenW( cls ), class_name );
+}
+
+static HRESULT WINAPI item_GetTrustLevel( const void *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_RenameAsyncOverload( const void *iface, HSTRING name, void **operation )
+{
+    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring( name ), operation );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_RenameAsync( const void *iface, HSTRING name,
+                                        enum __x_ABI_CWindows_CStorage_CNameCollisionOption option,
+                                        void **operation )
+{
+    FIXME( "iface %p, name %s, option %u, operation %p stub!\n", iface, debugstr_hstring( name ), option, operation );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_DeleteAsyncOverload( const void *iface, void **operation )
+{
+    FIXME( "iface %p, operation %p stub!\n", iface, operation );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_DeleteAsync( const void *iface,
+                                        enum __x_ABI_CWindows_CStorage_CStorageDeleteOption option,
+                                        void **operation )
+{
+    FIXME( "iface %p, option %u, operation %p stub!\n", iface, option, operation );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_GetBasicPropertiesAsync( const void *iface, void **operation )
+{
+    FIXME( "iface %p, operation %p stub!\n", iface, operation );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_get_Name( const void *iface, HSTRING *value )
+{
+    struct storage_item *impl = storage_item_from( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->name, value );
+}
+
+static HRESULT WINAPI item_get_Path( const void *iface, HSTRING *value )
+{
+    struct storage_item *impl = storage_item_from( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->path, value );
+}
+
+static HRESULT WINAPI item_get_Attributes( const void *iface,
+                                           enum __x_ABI_CWindows_CStorage_CFileAttributes *value )
+{
+    struct storage_item *impl = storage_item_from( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = (enum __x_ABI_CWindows_CStorage_CFileAttributes)impl->attrs;
+    return S_OK;
+}
+
+static HRESULT WINAPI item_get_DateCreated( const void *iface,
+                                            struct __x_ABI_CWindows_CFoundation_CDateTime *value )
+{
+    FIXME( "iface %p, value %p stub!\n", iface, value );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI item_IsOfType( const void *iface,
+                                     enum __x_ABI_CWindows_CStorage_CStorageItemTypes type,
+                                     boolean *value )
+{
+    struct storage_item *impl = storage_item_from( iface );
+
+    TRACE( "iface %p, type %u, value %p.\n", iface, type, value );
+
+    if (!value) return E_POINTER;
+    switch (type)
+    {
+    case StorageItemTypes_File:   *value = !impl->is_dir; break;
+    case StorageItemTypes_Folder: *value = impl->is_dir; break;
+    default:                      *value = FALSE; break;
+    }
+    return S_OK;
+}
+
+static const void *storage_item_vtbl[] =
+{
+    item_QueryInterface,
+    item_AddRef,
+    item_Release,
+    item_GetIids,
+    item_GetRuntimeClassName,
+    item_GetTrustLevel,
+    item_RenameAsyncOverload,
+    item_RenameAsync,
+    item_DeleteAsyncOverload,
+    item_DeleteAsync,
+    item_GetBasicPropertiesAsync,
+    item_get_Name,
+    item_get_Path,
+    item_get_Attributes,
+    item_get_DateCreated,
+    item_IsOfType,
+};
+
+/* Wrap one path (len characters, not NUL-terminated) in an IStorageItem;
+ * Name is the last component, trailing directory separators excluded. */
+static HRESULT create_storage_item( const WCHAR *path, SIZE_T len, struct storage_item **out )
+{
+    struct storage_item *impl;
+    const WCHAR *name;
+    SIZE_T i, nlen;
+    DWORD attrs;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->item_vtbl = storage_item_vtbl;
+    impl->ref = 1;
+    if (FAILED( WindowsCreateString( path, (UINT32)len, &impl->path ) ))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+
+    name = path;
+    for (i = 0; i < len; i++)
+        if (path[i] == L'\\' || path[i] == L'/') name = path + i + 1;
+    nlen = len - (name - path);
+    while (nlen && (name[nlen - 1] == L'\\' || name[nlen - 1] == L'/')) nlen--;
+    if (!nlen)
+    {
+        name = path;
+        nlen = len;
+        while (nlen && (name[nlen - 1] == L'\\' || name[nlen - 1] == L'/')) nlen--;
+    }
+    if (FAILED( WindowsCreateString( name, (UINT32)nlen, &impl->name ) ))
+    {
+        WindowsDeleteString( impl->path );
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+
+    attrs = GetFileAttributesW( path );
+    impl->is_dir = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+    impl->attrs = attrs == INVALID_FILE_ATTRIBUTES ? FILE_ATTRIBUTE_NORMAL : attrs;
+    *out = impl;
+    return S_OK;
+}
+
+/* Serialize the storage item vector into GMEM_MOVEABLE CF_HDROP memory:
+ * dropfiles_hdr with pFiles = sizeof(dropfiles_hdr), fWide = TRUE, and the
+ * double-NUL-terminated wide path list. */
+static HRESULT items_to_hdrop_global( struct winrt_vector *items, HGLOBAL *out )
+{
+    __x_ABI_CWindows_CStorage_CIStorageItem *item;
+    HSTRING *paths = NULL;
+    dropfiles_hdr *df;
+    WCHAR *dst;
+    HGLOBAL h;
+    SIZE_T size, total = 0;
+    ULONG count, i;
+    HRESULT hr = S_OK;
+
+    *out = NULL;
+    count = items ? vector_size( items ) : 0;
+    if (count)
+    {
+        if (!(paths = calloc( count, sizeof(*paths) ))) return E_OUTOFMEMORY;
+        for (i = 0; i < count; i++)
+        {
+            item = (__x_ABI_CWindows_CStorage_CIStorageItem *)vector_get_at( items, i );
+            if (!item) continue;
+            if (SUCCEEDED( __x_ABI_CWindows_CStorage_CIStorageItem_get_Path( item, &paths[i] ) ) && paths[i])
+                total += WindowsGetStringLen( paths[i] ) + 1;
+            else paths[i] = NULL;
+        }
+    }
+
+    size = sizeof(dropfiles_hdr) + (total + 1) * sizeof(WCHAR);
+    if (!(h = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, size )))
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+    df = GlobalLock( h );
+    df->pFiles = sizeof(dropfiles_hdr);
+    df->pt.x = df->pt.y = 0;
+    df->fNC = FALSE;
+    df->fWide = TRUE;
+    dst = (WCHAR *)((BYTE *)df + sizeof(dropfiles_hdr));
+    for (i = 0; i < count; i++)
+    {
+        const WCHAR *raw;
+        UINT32 len = 0;
+
+        if (!paths[i]) continue;
+        raw = WindowsGetStringRawBuffer( paths[i], &len );
+        if (len) memcpy( dst, raw, len * sizeof(WCHAR) );
+        dst += len;
+        *dst++ = 0;
+    }
+    *dst = 0;
+    GlobalUnlock( h );
+    *out = h;
+
+done:
+    if (paths) for (i = 0; i < count; i++) WindowsDeleteString( paths[i] );
+    free( paths );
+    return hr;
+}
+
+/* Read CF_HDROP (dropfiles_hdr, fWide TRUE and FALSE) and append one
+ * IStorageItem per path to the vector, in clipboard order. */
+static HRESULT data_obj_read_storage_items( IDataObject *data_obj, struct winrt_vector *items )
+{
+    const dropfiles_hdr *df;
+    struct storage_item *item = NULL;
+    BYTE *bytes = NULL;
+    SIZE_T size = 0, off;
+    HRESULT hr;
+
+    hr = data_obj_read_cf_bytes( data_obj, CF_HDROP, &bytes, &size );
+    if (FAILED( hr )) return hr;
+    if (!bytes || size < sizeof(dropfiles_hdr))
+    {
+        free( bytes );
+        return E_FAIL;
+    }
+    df = (const dropfiles_hdr *)bytes;
+    off = df->pFiles;
+    if (off < sizeof(dropfiles_hdr) || off > size)
+    {
+        free( bytes );
+        return E_FAIL;
+    }
+
+    if (df->fWide)
+    {
+        const WCHAR *p = (const WCHAR *)(bytes + off), *end = (const WCHAR *)(bytes + size);
+
+        while (p < end && *p)
+        {
+            SIZE_T len = 0;
+
+            while (p + len < end && p[len]) len++;
+            if (len && SUCCEEDED( create_storage_item( p, len, &item ) ))
+            {
+                hr = vector_append( items, item );
+                __x_ABI_CWindows_CStorage_CIStorageItem_Release( (void *)item );
+                item = NULL;
+                if (FAILED( hr )) break;
+            }
+            p += len + 1;
+        }
+    }
+    else
+    {
+        const char *p = (const char *)(bytes + off), *end = (const char *)(bytes + size);
+
+        while (p < end && *p)
+        {
+            int wlen = MultiByteToWideChar( CP_ACP, 0, p, -1, NULL, 0 );
+            WCHAR *wbuf;
+
+            if (wlen > 0 && (wbuf = malloc( wlen * sizeof(WCHAR) )))
+            {
+                MultiByteToWideChar( CP_ACP, 0, p, -1, wbuf, wlen );
+                if (SUCCEEDED( create_storage_item( wbuf, lstrlenW( wbuf ), &item ) ))
+                {
+                    hr = vector_append( items, item );
+                    __x_ABI_CWindows_CStorage_CIStorageItem_Release( (void *)item );
+                    item = NULL;
+                }
+                free( wbuf );
+                if (FAILED( hr )) break;
+            }
+            p += strlen( p ) + 1;
+        }
+    }
+
+    free( bytes );
+    return S_OK;
 }
 
 static BOOL vector_contains_string( struct winrt_vector *vec, const WCHAR *str )
@@ -1331,7 +2129,7 @@ static HRESULT WINAPI view_do_GetData( IDataObject *iface, FORMATETC *fmt, STGME
         return set_hglobal_medium( h, fmt->tymed, med );
     }
 
-    if (fmt->cfFormat == CF_BITMAP || fmt->cfFormat == CF_DIB)
+    if (fmt->cfFormat == CF_BITMAP || fmt->cfFormat == CF_DIB || fmt->cfFormat == CF_DIBV5)
     {
         __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref;
         HBITMAP hbm = NULL;
@@ -1358,11 +2156,31 @@ static HRESULT WINAPI view_do_GetData( IDataObject *iface, FORMATETC *fmt, STGME
         else
         {
             HGLOBAL h = NULL;
+            BYTE *bytes = NULL;
+            SIZE_T size = 0;
+
             if (!(fmt->tymed & (TYMED_HGLOBAL | TYMED_ISTREAM)))
             {
                 __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( ref );
                 return DV_E_TYMED;
             }
+
+            /* The Bitmap value is a BMP stream; CF_DIB is its byte stream
+             * without the 14-byte file header, so hand the pixel payload out
+             * directly.  Other encodings (PNG, JPEG) round-trip via a DIB. */
+            hr = stream_ref_to_bytes( ref, &bytes, &size );
+            if (SUCCEEDED( hr ) && bytes && size >= sizeof(BITMAPFILEHEADER) &&
+                (bytes[0] == 'B' && bytes[1] == 'M'))
+            {
+                hr = alloc_hglobal_copy( bytes + sizeof(BITMAPFILEHEADER),
+                                         size - sizeof(BITMAPFILEHEADER), &h );
+                free( bytes );
+                __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( ref );
+                if (FAILED( hr )) return hr;
+                return set_hglobal_medium( h, fmt->tymed, med );
+            }
+            free( bytes );
+
             hr = stream_ref_to_hbitmap( ref, &hbm );
             __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( ref );
             if (FAILED( hr )) return hr;
@@ -1371,6 +2189,24 @@ static HRESULT WINAPI view_do_GetData( IDataObject *iface, FORMATETC *fmt, STGME
             if (FAILED( hr )) return hr;
             return set_hglobal_medium( h, fmt->tymed, med );
         }
+    }
+
+    if (fmt->cfFormat == CF_HDROP)
+    {
+        struct winrt_vector *items = package_get_items( impl->package );
+        HGLOBAL h;
+        HRESULT hr;
+
+        if (!items) return DV_E_FORMATETC;
+        if (!(fmt->tymed & (TYMED_HGLOBAL | TYMED_ISTREAM)))
+        {
+            vector_release( items );
+            return DV_E_TYMED;
+        }
+        hr = items_to_hdrop_global( items, &h );
+        vector_release( items );
+        if (FAILED( hr )) return hr;
+        return set_hglobal_medium( h, fmt->tymed, med );
     }
 
     if (fmt->cfFormat == clipboard_preferred_drop_effect_format())
@@ -1463,12 +2299,20 @@ static HRESULT WINAPI view_do_QueryGetData( IDataObject *iface, FORMATETC *fmt )
         if (kind != FMT_COM) return DV_E_CLIPFORMAT;
         return (fmt->tymed & TYMED_GDI) ? S_OK : DV_E_TYMED;
     }
-    if (fmt->cfFormat == CF_DIB)
+    if (fmt->cfFormat == CF_DIB || fmt->cfFormat == CF_DIBV5)
     {
         package_lock( impl->package );
         package_get_raw( impl->package, format_bitmap, &kind );
         package_unlock( impl->package );
         if (kind != FMT_COM) return DV_E_CLIPFORMAT;
+        return (fmt->tymed & (TYMED_HGLOBAL | TYMED_ISTREAM)) ? S_OK : DV_E_TYMED;
+    }
+    if (fmt->cfFormat == CF_HDROP)
+    {
+        package_lock( impl->package );
+        package_get_raw( impl->package, format_storage_items, &kind );
+        package_unlock( impl->package );
+        if (kind != FMT_ITEMS) return DV_E_CLIPFORMAT;
         return (fmt->tymed & (TYMED_HGLOBAL | TYMED_ISTREAM)) ? S_OK : DV_E_TYMED;
     }
     if (fmt->cfFormat == clipboard_preferred_drop_effect_format())
@@ -1552,6 +2396,11 @@ static HRESULT WINAPI view_do_EnumFormatEtc( IDataObject *iface, DWORD dir, IEnu
         {
             add_fmt( e, CF_BITMAP, TYMED_GDI );
             add_fmt( e, CF_DIB, TYMED_HGLOBAL | TYMED_ISTREAM );
+            add_fmt( e, CF_DIBV5, TYMED_HGLOBAL | TYMED_ISTREAM );
+        }
+        else if (!wcscmp( key, format_storage_items ) && kind == FMT_ITEMS)
+        {
+            add_fmt( e, CF_HDROP, TYMED_HGLOBAL | TYMED_ISTREAM );
         }
         else if (!is_builtin_format_name( key ) && kind == FMT_STRING)
         {
@@ -1800,6 +2649,8 @@ static HRESULT WINAPI view_get_AvailableFormats( const void *iface, void **forma
                     vector_append_unique_str( vector, format_rtf );
                 else if (fmt.cfFormat == CF_BITMAP || fmt.cfFormat == CF_DIB || fmt.cfFormat == CF_DIBV5)
                     vector_append_unique_str( vector, format_bitmap );
+                else if (fmt.cfFormat == CF_HDROP)
+                    vector_append_unique_str( vector, format_storage_items );
                 else if (fmt.cfFormat >= 0xC000)
                 {
                     WCHAR name[256];
@@ -1820,6 +2671,8 @@ static HRESULT WINAPI view_get_AvailableFormats( const void *iface, void **forma
             if (data_obj_has_cf( impl->data_obj, clipboard_rtf_format(), TYMED_HGLOBAL | TYMED_ISTREAM ))
                 vector_append_unique_str( vector, format_rtf );
             if (data_obj_has_bitmap( impl->data_obj )) vector_append_unique_str( vector, format_bitmap );
+            if (data_obj_has_storage_items( impl->data_obj ))
+                vector_append_unique_str( vector, format_storage_items );
         }
 
         *formats = vector_view_iface( vector );
@@ -1862,6 +2715,8 @@ static HRESULT WINAPI view_Contains( const void *iface, HSTRING format_id, BOOLE
         else if (!wcscmp( key, format_rtf ))
             *value = data_obj_has_cf( impl->data_obj, clipboard_rtf_format(), TYMED_HGLOBAL | TYMED_ISTREAM );
         else if (!wcscmp( key, format_bitmap )) *value = data_obj_has_bitmap( impl->data_obj );
+        else if (!wcscmp( key, format_storage_items ))
+            *value = data_obj_has_cf( impl->data_obj, CF_HDROP, TYMED_HGLOBAL | TYMED_ISTREAM );
         else
         {
             UINT cf = RegisterClipboardFormatW( key );
@@ -2067,6 +2922,19 @@ static HRESULT WINAPI view_GetStorageItemsAsync( const void *iface, void **opera
     TRACE( "iface %p, operation %p.\n", iface, operation );
 
     if (!operation) return E_POINTER;
+
+    if (impl->data_obj)
+    {
+        items = create_vector( NULL, &IID___FIVectorView_1_Windows__CStorage__CIStorageItem,
+                               &IID___FIIterable_1_Windows__CStorage__CIStorageItem,
+                               &IID___FIIterator_1_Windows__CStorage__CIStorageItem, ELEM_COM,
+                               L"Windows.Foundation.Collections.IVectorView`1<Windows.Storage.IStorageItem>" );
+        if (!items) return E_OUTOFMEMORY;
+        data_obj_read_storage_items( impl->data_obj, items );
+        return view_com_op( &IID___FIAsyncOperation_1___FIVectorView_1_Windows__CStorage__CIStorageItem,
+                            L"Windows.Foundation.IAsyncOperation`1<Windows.Foundation.Collections.IVectorView`1<Windows.Storage.IStorageItem>>",
+                            vector_view_iface( items ), operation );
+    }
 
     items = package_get_items( impl->package );
     if (!items)

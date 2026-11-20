@@ -90,20 +90,38 @@ static struct dummy_async_impl dummy_async;
 
 static HRESULT WINAPI dummy_async_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    static const GUID IID_IAsyncOperation_boolean_local =
+        { 0xcdb5efb3, 0x5788, 0x509d, { 0x9b, 0xe1, 0x71, 0xcc, 0xb8, 0xa3, 0x36, 0x2a } };
+    static const GUID IID_IAsyncOperation_PushChannel_local =
+        { 0x70945a09, 0x331a, 0x5e40, { 0xb8, 0x54, 0x66, 0xb7, 0xa3, 0x23, 0x3b, 0xab } };
+    static const GUID IID_IAsyncOperation_StartupTaskState_local =
+        { 0x55733555, 0x3474, 0x5d19, { 0x9c, 0xc3, 0x9b, 0x75, 0xbe, 0x39, 0x1b, 0x7f } };
+    static const GUID IID_IAsyncOperation_BackgroundAccessStatus_local =
+        { 0x7b44e581, 0xcfa9, 0x5763, { 0xbe, 0xd7, 0x6a, 0x65, 0x73, 0x9f, 0x0d, 0xbf } };
     struct dummy_async_impl *impl = iface;
-    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
-    {
-        *out = NULL;
-        return E_NOINTERFACE;
-    }
+
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IAsyncInfo ))
     {
         *out = &impl->vtbl_info;
         return S_OK;
     }
-    *out = &impl->vtbl_op;
-    return S_OK;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncAction ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperation_boolean_local ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperation_PushChannel_local ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperation_StartupTaskState_local ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperation_BackgroundAccessStatus_local ))
+    {
+        *out = &impl->vtbl_op;
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static HRESULT WINAPI dummy_async_info_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -112,10 +130,16 @@ static HRESULT WINAPI dummy_async_info_QueryInterface( void *iface, REFIID iid, 
 }
 static ULONG WINAPI dummy_async_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI dummy_async_Release( void *iface ) { return 1; }
-static HRESULT WINAPI dummy_async_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI dummy_async_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI dummy_async_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation", 32, n );
+    static const WCHAR cls[] = L"Windows.Foundation.IAsyncOperation";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
 }
 static HRESULT WINAPI dummy_async_GetTrustLevel( void *iface, TrustLevel *l )
 {
@@ -125,6 +149,7 @@ static HRESULT WINAPI dummy_async_GetTrustLevel( void *iface, TrustLevel *l )
 
 static HRESULT WINAPI dummy_async_put_Completed( void *iface, void *handler )
 {
+    TRACE( "iface %p, handler %p\n", iface, handler );
     if (handler)
     {
         /* Every completed handler is { QueryInterface, AddRef, Release, Invoke }; the concrete
@@ -203,7 +228,8 @@ static HRESULT WINAPI dummy_channel_QueryInterface( void *iface, REFIID iid, voi
     }
 
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IStringable ))
     {
         *out = NULL;
         return E_NOINTERFACE;
@@ -1910,15 +1936,15 @@ static const void *bg_task_reg_vtbl[] =
     dummy_async_GetIids,
     dummy_async_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
-    bg_task_reg_add_event,     /* add_Completed */
-    bg_task_reg_remove_event,  /* remove_Completed */
-    bg_task_reg_add_event,     /* add_Progress */
-    bg_task_reg_remove_event,  /* remove_Progress */
-    bg_task_reg_Cancel,
-    bg_task_reg_get_TaskId,
-    bg_task_reg_get_Name,
-    bg_task_reg_get_Trigger,
-    bg_task_reg_Unregister,
+    bg_task_reg_get_TaskId,    /* slot 6: get_TaskId */
+    bg_task_reg_get_Name,      /* slot 7: get_Name */
+    bg_task_reg_add_event,     /* slot 8: add_Progress */
+    bg_task_reg_remove_event,  /* slot 9: remove_Progress */
+    bg_task_reg_add_event,     /* slot 10: add_Completed */
+    bg_task_reg_remove_event,  /* slot 11: remove_Completed */
+    bg_task_reg_Unregister,    /* slot 12: Unregister */
+    bg_task_reg_get_Trigger,   /* slot 13 */
+    bg_task_reg_Cancel,        /* slot 14 */
 };
 static struct { const void *vtbl; } dummy_bg_task_reg = { bg_task_reg_vtbl };
 
@@ -1968,6 +1994,12 @@ static HRESULT WINAPI bg_builder_Register_group( void *iface, void *name, const 
     return bg_builder_Register_name( iface, name, reg );
 }
 
+static HRESULT WINAPI bg_builder_get_TaskEntryPoint( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI bg_builder_success( void *iface, void *a, void *b, void *c ) { return S_OK; }
 
 static const void *bg_builder_vtbl[] =
@@ -1979,7 +2011,7 @@ static const void *bg_builder_vtbl[] =
     dummy_async_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
     bg_builder_success,     /* put_TaskEntryPoint */
-    bg_builder_success,     /* get_TaskEntryPoint */
+    bg_builder_get_TaskEntryPoint, /* get_TaskEntryPoint */
     bg_builder_success,     /* SetTrigger */
     bg_builder_success,     /* AddCondition */
     bg_builder_put_Name,    /* put_Name */
@@ -2070,7 +2102,8 @@ static HRESULT WINAPI bg_trigger_QueryInterface( void *iface, REFIID iid, void *
 {
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IStringable ))
     {
         *out = NULL;
         return E_NOINTERFACE;
@@ -2228,6 +2261,45 @@ static const void *sys_trigger_factory_vtbl[] =
     push_notification_factory_GetRuntimeClassName,
     push_notification_factory_GetTrustLevel,
     sys_trigger_factory_Create,
+};
+
+static HRESULT WINAPI sys_condition_factory_Create( void *iface, UINT32 condition_type, void **condition )
+{
+    struct bg_trigger_obj *obj;
+    if (!condition) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->vtbl = sys_trigger_vtbl;
+    obj->ref = 1;
+    obj->param = condition_type;
+    *condition = obj;
+    return S_OK;
+}
+
+static const void *sys_condition_factory_vtbl[];
+static struct { const void **vtbl; } sys_condition_factory_obj = { sys_condition_factory_vtbl };
+
+static HRESULT WINAPI sys_condition_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = &sys_condition_factory_obj;
+    return S_OK;
+}
+
+static const void *sys_condition_factory_vtbl[] =
+{
+    sys_condition_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    sys_condition_factory_Create,
 };
 
 /* Direct PRI (resources.pri) support for ResourceLoader, sharing the mrm_pri2
@@ -2904,6 +2976,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         *factory = (IActivationFactory *)&time_trigger_factory_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.SystemTrigger" ))
         *factory = (IActivationFactory *)&sys_trigger_factory_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.SystemCondition" ))
+        *factory = (IActivationFactory *)&sys_condition_factory_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.StartupTask" ))
         *factory = (IActivationFactory *)&startup_task_factory_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.Resources.ResourceLoader" ))

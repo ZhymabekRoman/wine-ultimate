@@ -24,5 +24,8 @@
 import "windows.system.profile.systemmanufacturers.idl";
 
 namespace Windows.System.Profile.SystemManufacturers {
+    runtimeclass OemSupportInfo;
+    runtimeclass SystemSupportDeviceInfo;
+    runtimeclass SystemSupportInfo;
     runtimeclass SmbiosInformation;
 }

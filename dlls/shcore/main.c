@@ -2581,13 +2581,99 @@ HRESULT WINAPI RegisterScaleChangeNotifications(DISPLAY_DEVICE_TYPE display_devi
     return E_NOTIMPL;
 }
 
+static HRESULT create_winrt_buffer( ULONG capacity, void **out );
+
 /*************************************************************************
  * CreateRandomAccessStreamOverStream        [SHCORE.@]
  */
 HRESULT WINAPI CreateRandomAccessStreamOverStream(IStream *stream, BSOS_OPTIONS options, REFIID riid, void **ppv)
 {
-    FIXME("(%p, %d, %s, %p) stub\n", stream, options, debugstr_guid(riid), ppv);
-    return E_NOTIMPL;
+    static const WCHAR ims_cls[] = L"Windows.Storage.Streams.InMemoryRandomAccessStream";
+    static const GUID iid_ras =
+        { 0x905a0fe1, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+    static const GUID iid_output_stream =
+        { 0x905a0fe6, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+    static const GUID iid_buffer_byte_access =
+        { 0x905a0fef, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+    static const GUID iid_async_info =
+        { 0x00000036, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    IInspectable *ims = NULL;
+    void *ras = NULL, *out_stream = NULL, *buffer = NULL, *bba = NULL, *op = NULL;
+    LARGE_INTEGER zero = {{ 0 }}, cur_pos = {{ 0 }};
+    ULARGE_INTEGER orig_pos = {{ 0 }}, end_pos = {{ 0 }};
+    HSTRING hs;
+    HRESULT hr;
+
+    TRACE("(%p, %d, %s, %p)\n", stream, options, debugstr_guid(riid), ppv);
+
+    if (!stream || !riid || !ppv) return E_INVALIDARG;
+    *ppv = NULL;
+
+    if (FAILED(hr = WindowsCreateString(ims_cls, ARRAY_SIZE(ims_cls) - 1, &hs)))
+        return hr;
+    hr = RoActivateInstance(hs, &ims);
+    WindowsDeleteString(hs);
+    if (FAILED(hr)) return hr;
+
+    hr = IInspectable_QueryInterface(ims, &iid_ras, &ras);
+    if (FAILED(hr))
+    {
+        IInspectable_Release(ims);
+        return hr;
+    }
+
+    /* Copy existing bytes from IStream into the InMemoryRandomAccessStream. */
+    IStream_Seek(stream, zero, STREAM_SEEK_CUR, &orig_pos);
+    if (SUCCEEDED(IStream_Seek(stream, zero, STREAM_SEEK_END, &end_pos)) && end_pos.QuadPart > 0)
+    {
+        ULONG size = (ULONG)min(end_pos.QuadPart, (ULONGLONG)(64 * 1024 * 1024));
+        IStream_Seek(stream, zero, STREAM_SEEK_SET, NULL);
+        if (SUCCEEDED(create_winrt_buffer(size, &buffer)) && buffer)
+        {
+            if (SUCCEEDED(((HRESULT (STDMETHODCALLTYPE *)(void *, REFIID, void **))((void *const *)(*(void *const **)buffer))[0])(buffer, &iid_buffer_byte_access, &bba)) && bba)
+            {
+                BYTE *dst = NULL;
+                if (SUCCEEDED(((HRESULT (STDMETHODCALLTYPE *)(void *, BYTE **))((void *const *)(*(void *const **)bba))[3])(bba, &dst)) && dst)
+                {
+                    ULONG total = 0, got = 0;
+                    while (total < size && SUCCEEDED(IStream_Read(stream, dst + total, size - total, &got)) && got)
+                        total += got;
+                    /* IBuffer::put_Length (slot 8) */
+                    ((HRESULT (STDMETHODCALLTYPE *)(void *, UINT32))((void *const *)(*(void *const **)buffer))[8])(buffer, total);
+                    if (total && SUCCEEDED(IInspectable_QueryInterface(ims, &iid_output_stream, &out_stream)) && out_stream)
+                    {
+                        /* IOutputStream::WriteAsync (slot 6) */
+                        if (SUCCEEDED(((HRESULT (STDMETHODCALLTYPE *)(void *, void *, void **))((void *const *)(*(void *const **)out_stream))[6])(out_stream, buffer, &op)) && op)
+                        {
+                            void *ai = NULL;
+                            if (SUCCEEDED(((HRESULT (STDMETHODCALLTYPE *)(void *, REFIID, void **))((void *const *)(*(void *const **)op))[0])(op, &iid_async_info, &ai)) && ai)
+                            {
+                                INT32 st = 0;
+                                int spin = 0;
+                                while (SUCCEEDED(((HRESULT (STDMETHODCALLTYPE *)(void *, INT32 *))((void *const *)(*(void *const **)ai))[7])(ai, &st)) && st == 0 && spin++ < 1000)
+                                    Sleep(1);
+                                ((void (STDMETHODCALLTYPE *)(void *))((void *const *)(*(void *const **)ai))[2])(ai);
+                            }
+                            ((void (STDMETHODCALLTYPE *)(void *))((void *const *)(*(void *const **)op))[2])(op);
+                        }
+                        ((void (STDMETHODCALLTYPE *)(void *))((void *const *)(*(void *const **)out_stream))[2])(out_stream);
+                    }
+                }
+                ((void (STDMETHODCALLTYPE *)(void *))((void *const *)(*(void *const **)bba))[2])(bba);
+            }
+            ((void (STDMETHODCALLTYPE *)(void *))((void *const *)(*(void *const **)buffer))[2])(buffer);
+        }
+    }
+    cur_pos.QuadPart = (LONGLONG)orig_pos.QuadPart;
+    IStream_Seek(stream, cur_pos, STREAM_SEEK_SET, NULL);
+    /* IRandomAccessStream::Seek (slot 11) to 0 (or orig_pos if before EOF) */
+    ((HRESULT (STDMETHODCALLTYPE *)(void *, UINT64))((void *const *)(*(void *const **)ras))[11])(ras,
+            orig_pos.QuadPart < end_pos.QuadPart ? orig_pos.QuadPart : 0);
+
+    hr = IInspectable_QueryInterface(ims, riid, ppv);
+    ((void (STDMETHODCALLTYPE *)(void *))((void *const *)(*(void *const **)ras))[2])(ras);
+    IInspectable_Release(ims);
+    return hr;
 }
 
 /* Contract with the in-memory IRandomAccessStream face served by
@@ -2691,7 +2777,13 @@ static HRESULT WINAPI rasstream_Read( IStream *iface, void *pv, ULONG cb, ULONG 
     hr = RAS_CALL( impl->ras, 8, (UINT64)impl->pos, &in );              /* GetInputStreamAt */
     if (SUCCEEDED( hr ) && in)
     {
-        hr = RAS_CALL( in, 15, buffer, cb, (INT32)1, &op );             /* ReadAsync(buffer, cb, Options) */
+        void *in_qi = NULL;
+        if (SUCCEEDED( ((HRESULT (STDMETHODCALLTYPE *)( void *, REFIID, void ** ))VT_SLOT( in, 0 ))( in, &iid_input_stream, &in_qi ) ) && in_qi)
+        {
+            VT_RELEASE( in );
+            in = in_qi;
+        }
+        hr = ((HRESULT (STDMETHODCALLTYPE *)( void *, void *, UINT32, INT32, void ** ))VT_SLOT( in, 6 ))( in, buffer, cb, 1, &op );
     }
     else
     {

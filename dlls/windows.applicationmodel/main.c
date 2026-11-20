@@ -4145,26 +4145,117 @@ static HRESULT WINAPI store_cfg_GetRuntimeClassName( void *iface, HSTRING *n )
 }
 static HRESULT WINAPI store_cfg_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 
-/* Statics 1 */
-static HRESULT WINAPI store_cfg1_SetSystemConfiguration( void *iface, HSTRING m, HSTRING mod, void *exp, HSTRING d ) { return S_OK; }
+/* StoreHardwareManufacturerInfo ({F292DC08-C654-43AC-A21F-34801C9D3388}) */
+static const GUID IID_IStoreHardwareManufacturerInfo =
+    { 0xf292dc08, 0xc654, 0x43ac, { 0xa2, 0x1f, 0x34, 0x80, 0x1c, 0x9d, 0x33, 0x88 } };
+
+struct store_hw_info
+{
+    const void **vtbl;
+    LONG ref;
+};
+
+static HRESULT WINAPI store_hw_info_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IReferenceTracker_hw =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    struct store_hw_info *impl = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStoreHardwareManufacturerInfo ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = impl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_hw ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI store_hw_info_AddRef( void *iface ) { return InterlockedIncrement( &((struct store_hw_info *)iface)->ref ); }
+static ULONG WINAPI store_hw_info_Release( void *iface )
+{
+    struct store_hw_info *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI store_hw_info_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI store_hw_info_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.ApplicationModel.Store.Preview.StoreHardwareManufacturerInfo";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI store_hw_info_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI store_hw_info_get_HardwareManufacturerId( void *iface, HSTRING *val )
+{
+    if (!val) return E_POINTER;
+    return WindowsCreateString( L"WinePC", 6, val );
+}
+static HRESULT WINAPI store_hw_info_get_StoreContentModifierId( void *iface, HSTRING *val )
+{
+    if (!val) return E_POINTER;
+    return WindowsCreateString( L"", 0, val );
+}
+static HRESULT WINAPI store_hw_info_get_ModelName( void *iface, HSTRING *val )
+{
+    if (!val) return E_POINTER;
+    return WindowsCreateString( L"Desktop", 7, val );
+}
+static HRESULT WINAPI store_hw_info_get_ManufacturerName( void *iface, HSTRING *val )
+{
+    if (!val) return E_POINTER;
+    return WindowsCreateString( L"Wine", 4, val );
+}
+static const void *store_hw_info_vtbl[] =
+{
+    store_hw_info_QueryInterface,
+    store_hw_info_AddRef,
+    store_hw_info_Release,
+    store_hw_info_GetIids,
+    store_hw_info_GetRuntimeClassName,
+    store_hw_info_GetTrustLevel,
+    store_hw_info_get_HardwareManufacturerId,
+    store_hw_info_get_StoreContentModifierId,
+    store_hw_info_get_ModelName,
+    store_hw_info_get_ManufacturerName,
+};
+
+/* Statics 1 ({728F7FC0-8628-42EC-84A2-07780EB44D8B}):
+ *   slot 6:  SetSystemConfiguration
+ *   slot 7:  SetMobileOperatorConfiguration
+ *   slot 8:  SetStoreWebAccountId
+ *   slot 9:  IsStoreWebAccountId
+ *   slot 10: get_HardwareManufacturerInfo
+ *   slot 11: FilterUnsupportedSystemFeaturesAsync */
+static HRESULT WINAPI store_cfg1_SetSystemConfiguration( void *iface, HSTRING m, HSTRING mod, UINT64 exp, HSTRING d ) { return S_OK; }
 static HRESULT WINAPI store_cfg1_SetMobileOperatorConfiguration( void *iface, HSTRING m, UINT32 a, UINT32 u ) { return S_OK; }
-static HRESULT WINAPI store_cfg1_SetSubSystemConfiguration( void *iface, HSTRING m, HSTRING mod, void *exp, HSTRING d ) { return S_OK; }
-static HRESULT WINAPI store_cfg1_IsAnyPackageInstalledWithId( void *iface, HSTRING id, BOOL *val )
+static HRESULT WINAPI store_cfg1_SetStoreWebAccountId( void *iface, HSTRING id ) { return S_OK; }
+static HRESULT WINAPI store_cfg1_IsStoreWebAccountId( void *iface, HSTRING id, boolean *val )
 {
     if (val) *val = FALSE;
     return S_OK;
 }
-static HRESULT WINAPI store_cfg1_IsPackageInstalledWithId( void *iface, HSTRING id, BOOL *val )
+static HRESULT WINAPI store_cfg1_get_HardwareManufacturerInfo( void *iface, void **val )
 {
-    if (val) *val = FALSE;
+    struct store_hw_info *impl;
+    if (!val) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = store_hw_info_vtbl;
+    impl->ref = 1;
+    *val = impl;
     return S_OK;
 }
-static HRESULT WINAPI store_cfg1_GetStoreWebSelection( void *iface, void **val )
+static HRESULT WINAPI store_cfg1_FilterUnsupportedSystemFeaturesAsync( void *iface, void *features, void **op )
 {
-    if (val) *val = NULL;
-    return S_OK;
+    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
 }
-static HRESULT WINAPI store_cfg1_SetStoreWebSelection( void *iface, UINT32 val ) { return S_OK; }
 
 static const void *store_cfg_vtbl1[] =
 {
@@ -4176,11 +4267,10 @@ static const void *store_cfg_vtbl1[] =
     store_cfg_GetTrustLevel,
     store_cfg1_SetSystemConfiguration,
     store_cfg1_SetMobileOperatorConfiguration,
-    store_cfg1_SetSubSystemConfiguration,
-    store_cfg1_IsAnyPackageInstalledWithId,
-    store_cfg1_IsPackageInstalledWithId,
-    store_cfg1_GetStoreWebSelection,
-    store_cfg1_SetStoreWebSelection,
+    store_cfg1_SetStoreWebAccountId,
+    store_cfg1_IsStoreWebAccountId,
+    store_cfg1_get_HardwareManufacturerInfo,
+    store_cfg1_FilterUnsupportedSystemFeaturesAsync,
 };
 
 /* Statics 2 */

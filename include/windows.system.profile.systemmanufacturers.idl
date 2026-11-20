@@ -29,14 +29,70 @@ import "windows.foundation.idl";
 namespace Windows.System.Profile.SystemManufacturers
 {
     apicontract SystemManufacturersContract;
+    interface IOemSupportInfo;
+    interface ISystemSupportDeviceInfo;
+    interface ISystemSupportInfoStatics;
+    interface ISystemSupportInfoStatics2;
     interface ISmbiosInformationStatics;
+    runtimeclass OemSupportInfo;
+    runtimeclass SystemSupportDeviceInfo;
+    runtimeclass SystemSupportInfo;
     runtimeclass SmbiosInformation;
 
     [
-        contractversion(3.0)
+        contractversion(4.0)
     ]
     apicontract SystemManufacturersContract
     {
+    }
+
+    [
+        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 2.0),
+        exclusiveto(Windows.System.Profile.SystemManufacturers.OemSupportInfo),
+        uuid(8d2eae55-87ef-4266-86d0-c4afbeb29bb9)
+    ]
+    interface IOemSupportInfo : IInspectable
+    {
+        [propget] HRESULT SupportLink([out, retval] Windows.Foundation.Uri **value);
+        [propget] HRESULT SupportAppLink([out, retval] Windows.Foundation.Uri **value);
+        [propget] HRESULT SupportProvider([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 4.0),
+        exclusiveto(Windows.System.Profile.SystemManufacturers.SystemSupportDeviceInfo),
+        uuid(05880b99-8247-441b-a996-a1784bab79a8)
+    ]
+    interface ISystemSupportDeviceInfo : IInspectable
+    {
+        [propget] HRESULT OperatingSystem([out, retval] HSTRING *value);
+        [propget] HRESULT FriendlyName([out, retval] HSTRING *value);
+        [propget] HRESULT SystemManufacturer([out, retval] HSTRING *value);
+        [propget] HRESULT SystemProductName([out, retval] HSTRING *value);
+        [propget] HRESULT SystemSku([out, retval] HSTRING *value);
+        [propget] HRESULT SystemHardwareVersion([out, retval] HSTRING *value);
+        [propget] HRESULT SystemFirmwareVersion([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 2.0),
+        exclusiveto(Windows.System.Profile.SystemManufacturers.SystemSupportInfo),
+        uuid(ef750974-c422-45d7-a44d-5c1c0043a2b3)
+    ]
+    interface ISystemSupportInfoStatics : IInspectable
+    {
+        [propget] HRESULT LocalSystemEdition([out, retval] HSTRING *value);
+        [propget] HRESULT OemSupportInfo([out, retval] Windows.System.Profile.SystemManufacturers.OemSupportInfo **value);
+    }
+
+    [
+        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 4.0),
+        exclusiveto(Windows.System.Profile.SystemManufacturers.SystemSupportInfo),
+        uuid(33f349a4-3fa1-4986-aa4b-057420455e6d)
+    ]
+    interface ISystemSupportInfoStatics2 : IInspectable
+    {
+        [propget] HRESULT LocalDeviceInfo([out, retval] Windows.System.Profile.SystemManufacturers.SystemSupportDeviceInfo **value);
     }
 
     [
@@ -47,6 +103,34 @@ namespace Windows.System.Profile.SystemManufacturers
     interface ISmbiosInformationStatics : IInspectable
     {
         [propget] HRESULT SerialNumber([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 2.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass OemSupportInfo
+    {
+        [default] interface Windows.System.Profile.SystemManufacturers.IOemSupportInfo;
+    }
+
+    [
+        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 4.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass SystemSupportDeviceInfo
+    {
+        [default] interface Windows.System.Profile.SystemManufacturers.ISystemSupportDeviceInfo;
+    }
+
+    [
+        contract(Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.SystemManufacturers.ISystemSupportInfoStatics, Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 2.0),
+        static(Windows.System.Profile.SystemManufacturers.ISystemSupportInfoStatics2, Windows.System.Profile.SystemManufacturers.SystemManufacturersContract, 4.0)
+    ]
+    runtimeclass SystemSupportInfo
+    {
     }
 
     [

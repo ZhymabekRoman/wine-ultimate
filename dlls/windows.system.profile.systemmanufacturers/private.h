@@ -24,8 +24,12 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winstring.h"
+#include "roapi.h"
 
 #include "activation.h"
+
+#define WIDL_using_Windows_Foundation
+#include "windows.foundation.h"
 
 #define WIDL_using_Windows_System_Profile_SystemManufacturers
 #include "windows.system.profile.systemmanufacturers.h"

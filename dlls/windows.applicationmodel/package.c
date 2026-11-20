@@ -437,7 +437,6 @@ static const struct IStorageFolderVtbl storage_folder_vtbl =
     storage_folder_GetRuntimeClassName,
     storage_folder_GetTrustLevel,
     /* IStorageFolder methods */
-    storage_folder_GetParentAsync,
     storage_folder_CreateFileAsyncOverloadDefaultOptions,
     storage_folder_CreateFileAsync,
     storage_folder_CreateFolderAsyncOverloadDefaultOptions,
@@ -1317,6 +1316,7 @@ static HRESULT create_async_result( struct storage_folder *folder, int kind,
 struct package
 {
     IPackage IPackage_iface;
+    IPackage2 IPackage2_iface;
     LONG ref;
 };
 
@@ -1337,6 +1337,12 @@ static HRESULT WINAPI package_QueryInterface( IPackage *iface, REFIID iid, void 
         IsEqualGUID( iid, &IID_IPackage ))
     {
         *out = &impl->IPackage_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPackage2 ))
+    {
+        *out = &impl->IPackage2_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -1455,15 +1461,36 @@ static HRESULT WINAPI package_id_GetTrustLevel( IPackageId *iface, TrustLevel *l
 
 static HRESULT WINAPI package_id_get_Name( IPackageId *iface, HSTRING *value )
 {
-    WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ))
+    WCHAR buf[MAX_PATH], *us;
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ) &&
+        !package_get_reg_str( L"PackageFamilyName", buf, ARRAY_SIZE(buf) ) &&
+        !GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ) &&
+        !package_get_reg_str( L"PackageFullName", buf, ARRAY_SIZE(buf) ))
         wcscpy( buf, L"5319275A.WhatsAppDesktop" );
+    if ((us = wcschr( buf, '_' ))) *us = 0;
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_Version( IPackageId *iface, struct PackageVersion *value )
 {
+    WCHAR full[MAX_PATH];
+    const WCHAR *us;
+    unsigned int maj = 0, min = 0, bld = 0, rev = 0;
+
     if (!value) return E_POINTER;
+    full[0] = 0;
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", full, ARRAY_SIZE(full) ) &&
+        !package_get_reg_str( L"PackageFullName", full, ARRAY_SIZE(full) ))
+        full[0] = 0;
+    if (full[0] && (us = wcschr( full, '_' )) &&
+        swscanf( us + 1, L"%u.%u.%u.%u", &maj, &min, &bld, &rev ) == 4)
+    {
+        value->Major = (UINT16)maj;
+        value->Minor = (UINT16)min;
+        value->Build = (UINT16)bld;
+        value->Revision = (UINT16)rev;
+        return S_OK;
+    }
     value->Major = 2;
     value->Minor = 2620;
     value->Build = 102;
@@ -1600,6 +1627,65 @@ static const struct IPackageVtbl package_vtbl =
     package_get_Dependencies,
 };
 
+DEFINE_IINSPECTABLE( package2, IPackage2, struct package, IPackage_iface )
+
+static HRESULT WINAPI package2_get_DisplayName( IPackage2 *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"Microsoft Store", 15, value );
+}
+static HRESULT WINAPI package2_get_PublisherDisplayName( IPackage2 *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"Microsoft Corporation", 21, value );
+}
+static HRESULT WINAPI package2_get_Description( IPackage2 *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"", 0, value );
+}
+static HRESULT WINAPI package2_get_Logo( IPackage2 *iface, IUriRuntimeClass **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI package2_get_IsResourcePackage( IPackage2 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI package2_get_IsBundle( IPackage2 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI package2_get_IsDevelopmentMode( IPackage2 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static const struct IPackage2Vtbl package2_vtbl =
+{
+    package2_QueryInterface,
+    package2_AddRef,
+    package2_Release,
+    package2_GetIids,
+    package2_GetRuntimeClassName,
+    package2_GetTrustLevel,
+    package2_get_DisplayName,
+    package2_get_PublisherDisplayName,
+    package2_get_Description,
+    package2_get_Logo,
+    package2_get_IsResourcePackage,
+    package2_get_IsBundle,
+    package2_get_IsDevelopmentMode,
+};
+
 DEFINE_IINSPECTABLE( package_statics, IPackageStatics, struct package_statics, IActivationFactory_iface )
 
 /* The running process is the package Wine reports, both IPackageStatics.Current
@@ -1611,6 +1697,7 @@ HRESULT create_package_instance( IPackage **out )
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 
     impl->IPackage_iface.lpVtbl = &package_vtbl;
+    impl->IPackage2_iface.lpVtbl = &package2_vtbl;
     impl->ref = 1;
     *out = &impl->IPackage_iface;
     return S_OK;

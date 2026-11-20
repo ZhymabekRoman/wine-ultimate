@@ -21,6 +21,7 @@
 
 #include "private.h"
 #include "objbase.h"
+#include "weakref.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
@@ -28,7 +29,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ui);
 struct accessibilitysettings
 {
     IAccessibilitySettings IAccessibilitySettings_iface;
-    LONG ref;
+    struct weak_reference_source weak_reference_source;
 };
 
 static inline struct accessibilitysettings *impl_from_IAccessibilitySettings(IAccessibilitySettings *iface)
@@ -52,6 +53,12 @@ static HRESULT WINAPI accessibilitysettings_QueryInterface(IAccessibilitySetting
         IAccessibilitySettings_AddRef(&impl->IAccessibilitySettings_iface);
         return S_OK;
     }
+    if (IsEqualGUID(iid, &IID_IWeakReferenceSource))
+    {
+        *out = &impl->weak_reference_source.IWeakReferenceSource_iface;
+        IWeakReferenceSource_AddRef(&impl->weak_reference_source.IWeakReferenceSource_iface);
+        return S_OK;
+    }
 
     *out = NULL;
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
@@ -61,7 +68,7 @@ static HRESULT WINAPI accessibilitysettings_QueryInterface(IAccessibilitySetting
 static ULONG WINAPI accessibilitysettings_AddRef(IAccessibilitySettings *iface)
 {
     struct accessibilitysettings *impl = impl_from_IAccessibilitySettings(iface);
-    ULONG ref = InterlockedIncrement(&impl->ref);
+    ULONG ref = weak_reference_strong_add_ref(&impl->weak_reference_source);
     TRACE("iface %p, ref %lu.\n", iface, ref);
     return ref;
 }
@@ -69,7 +76,7 @@ static ULONG WINAPI accessibilitysettings_AddRef(IAccessibilitySettings *iface)
 static ULONG WINAPI accessibilitysettings_Release(IAccessibilitySettings *iface)
 {
     struct accessibilitysettings *impl = impl_from_IAccessibilitySettings(iface);
-    ULONG ref = InterlockedDecrement(&impl->ref);
+    ULONG ref = weak_reference_strong_release(&impl->weak_reference_source);
 
     TRACE("iface %p, ref %lu.\n", iface, ref);
 
@@ -134,14 +141,15 @@ static HRESULT WINAPI accessibilitysettings_add_HighContrastChanged(IAccessibili
                                                                     EventRegistrationToken *cookie)
 {
     FIXME("iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie);
-    return E_NOTIMPL;
+    if (cookie) cookie->value = 0xdeadbeef;
+    return S_OK;
 }
 
 static HRESULT WINAPI accessibilitysettings_remove_HighContrastChanged(IAccessibilitySettings *iface,
                                                                        EventRegistrationToken cookie)
 {
     FIXME("iface %p, cookie %I64x stub!\n", iface, cookie.value);
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static const struct IAccessibilitySettingsVtbl accessibilitysettings_vtbl =
@@ -239,6 +247,7 @@ static HRESULT WINAPI factory_GetTrustLevel(IActivationFactory *iface, TrustLeve
 static HRESULT WINAPI factory_ActivateInstance(IActivationFactory *iface, IInspectable **instance)
 {
     struct accessibilitysettings *impl;
+    HRESULT hr;
 
     TRACE("iface %p, instance %p.\n", iface, instance);
 
@@ -249,7 +258,13 @@ static HRESULT WINAPI factory_ActivateInstance(IActivationFactory *iface, IInspe
     }
 
     impl->IAccessibilitySettings_iface.lpVtbl = &accessibilitysettings_vtbl;
-    impl->ref = 1;
+    if (FAILED(hr = weak_reference_source_init(&impl->weak_reference_source,
+                                               (IUnknown *)&impl->IAccessibilitySettings_iface)))
+    {
+        *instance = NULL;
+        free(impl);
+        return hr;
+    }
 
     *instance = (IInspectable *)&impl->IAccessibilitySettings_iface;
     return S_OK;

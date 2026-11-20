@@ -19,7 +19,13 @@
 
 #include "private.h"
 
+#include "dwmapi.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
+
+#ifndef DWMWA_COLOR_DEFAULT
+#define DWMWA_COLOR_DEFAULT 0xffffffff
+#endif
 
 static const GUID IID_IApplicationView_alt =
     {0xd222d3c7, 0x71a8, 0x495d, {0x95, 0x46, 0x04, 0x33, 0x0f, 0xb3, 0x3d, 0x76}};
@@ -35,6 +41,7 @@ struct application_view_title_bar
     IApplicationViewTitleBar IApplicationViewTitleBar_iface;
     LONG ref;
 
+    HWND hwnd;
     __FIReference_1_Color *foreground_color;
     __FIReference_1_Color *background_color;
     __FIReference_1_Color *button_foreground_color;
@@ -129,14 +136,133 @@ static HRESULT WINAPI title_bar_GetTrustLevel(IApplicationViewTitleBar *iface, T
     return S_OK;
 }
 
+static void title_bar_store_color(__FIReference_1_Color **field, __FIReference_1_Color *value)
+{
+    if (value) __FIReference_1_Color_AddRef(value);
+    if (*field) __FIReference_1_Color_Release(*field);
+    *field = value;
+}
+
+/* Resolve the window whose Win32 caption the title bar colors map onto. The
+ * title bar is not explicitly bound to an HWND, so fall back to the thread
+ * active window and then the process foreground window. Cached, validated
+ * with IsWindow() on every access in case the window was destroyed. */
+static HWND title_bar_get_hwnd(struct application_view_title_bar *impl)
+{
+    HWND hwnd;
+
+    if (impl->hwnd && IsWindow(impl->hwnd)) return impl->hwnd;
+
+    if ((hwnd = GetActiveWindow()) && IsWindow(hwnd))
+    {
+        impl->hwnd = hwnd;
+        return hwnd;
+    }
+    if ((hwnd = GetForegroundWindow()) && IsWindow(hwnd))
+    {
+        impl->hwnd = hwnd;
+        return hwnd;
+    }
+    impl->hwnd = NULL;
+    return NULL;
+}
+
+static void set_window_dwm_attr(HWND hwnd, DWORD attr, const void *value, DWORD size)
+{
+    static HMODULE hmodule;
+    static HRESULT (WINAPI *pDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+
+    if (!hwnd) return;
+
+    if (!hmodule)
+    {
+        if (!(hmodule = GetModuleHandleW(L"dwmapi.dll")))
+            hmodule = LoadLibraryW(L"dwmapi.dll");
+        if (hmodule)
+            pDwmSetWindowAttribute = (void *)GetProcAddress(hmodule, "DwmSetWindowAttribute");
+    }
+    if (pDwmSetWindowAttribute)
+        pDwmSetWindowAttribute(hwnd, attr, value, size);
+}
+
+/* BackgroundColor maps to DWMWA_CAPTION_COLOR; a dark background needs light
+ * caption buttons, so derive DWMWA_USE_IMMERSIVE_DARK_MODE from perceived
+ * luminance (0.299R + 0.587G + 0.114B). NULL resets to DWMWA_COLOR_DEFAULT. */
+static void title_bar_apply_background(struct application_view_title_bar *impl)
+{
+    __FIReference_1_Color *value = impl->background_color;
+    COLORREF caption = DWMWA_COLOR_DEFAULT;
+    HWND hwnd = title_bar_get_hwnd(impl);
+
+    if (value)
+    {
+        unsigned int luminance;
+        struct __x_ABI_CWindows_CUI_CColor color = {0xff, 0, 0, 0};
+        BOOL dark;
+
+        __FIReference_1_Color_get_Value(value, &color);
+        caption = RGB(color.R, color.G, color.B);
+        luminance = (299 * color.R + 587 * color.G + 114 * color.B) / 1000;
+        dark = luminance < 128;
+        set_window_dwm_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    }
+    set_window_dwm_attr(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+}
+
+static HRESULT WINAPI title_bar_put_BackgroundColor(IApplicationViewTitleBar *iface, __FIReference_1_Color *value)
+{
+    struct application_view_title_bar *impl = impl_from_IApplicationViewTitleBar(iface);
+    TRACE("iface %p, value %p\n", iface, value);
+    title_bar_store_color(&impl->background_color, value);
+    title_bar_apply_background(impl);
+    return S_OK;
+}
+
+static HRESULT WINAPI title_bar_get_BackgroundColor(IApplicationViewTitleBar *iface, __FIReference_1_Color **value)
+{
+    struct application_view_title_bar *impl = impl_from_IApplicationViewTitleBar(iface);
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    if ((*value = impl->background_color))
+        __FIReference_1_Color_AddRef(*value);
+    return S_OK;
+}
+
+/* ForegroundColor maps to DWMWA_TEXT_COLOR (caption text), NULL resets it. */
+static HRESULT WINAPI title_bar_put_ForegroundColor(IApplicationViewTitleBar *iface, __FIReference_1_Color *value)
+{
+    struct application_view_title_bar *impl = impl_from_IApplicationViewTitleBar(iface);
+    COLORREF text = DWMWA_COLOR_DEFAULT;
+
+    TRACE("iface %p, value %p\n", iface, value);
+    title_bar_store_color(&impl->foreground_color, value);
+
+    if (value)
+    {
+        struct __x_ABI_CWindows_CUI_CColor color = {0xff, 0, 0, 0};
+        __FIReference_1_Color_get_Value(value, &color);
+        text = RGB(color.R, color.G, color.B);
+    }
+    set_window_dwm_attr(title_bar_get_hwnd(impl), DWMWA_TEXT_COLOR, &text, sizeof(text));
+    return S_OK;
+}
+
+static HRESULT WINAPI title_bar_get_ForegroundColor(IApplicationViewTitleBar *iface, __FIReference_1_Color **value)
+{
+    struct application_view_title_bar *impl = impl_from_IApplicationViewTitleBar(iface);
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    if ((*value = impl->foreground_color))
+        __FIReference_1_Color_AddRef(*value);
+    return S_OK;
+}
+
 #define DEFINE_TITLE_BAR_COLOR_PROP(prop, field) \
 static HRESULT WINAPI title_bar_put_##prop(IApplicationViewTitleBar *iface, __FIReference_1_Color *value) \
 { \
     struct application_view_title_bar *impl = impl_from_IApplicationViewTitleBar(iface); \
     TRACE("iface %p, value %p\n", iface, value); \
-    if (value) __FIReference_1_Color_AddRef(value); \
-    if (impl->field) __FIReference_1_Color_Release(impl->field); \
-    impl->field = value; \
+    title_bar_store_color(&impl->field, value); \
     return S_OK; \
 } \
 static HRESULT WINAPI title_bar_get_##prop(IApplicationViewTitleBar *iface, __FIReference_1_Color **value) \
@@ -149,8 +275,6 @@ static HRESULT WINAPI title_bar_get_##prop(IApplicationViewTitleBar *iface, __FI
     return S_OK; \
 }
 
-DEFINE_TITLE_BAR_COLOR_PROP(ForegroundColor, foreground_color)
-DEFINE_TITLE_BAR_COLOR_PROP(BackgroundColor, background_color)
 DEFINE_TITLE_BAR_COLOR_PROP(ButtonForegroundColor, button_foreground_color)
 DEFINE_TITLE_BAR_COLOR_PROP(ButtonBackgroundColor, button_background_color)
 DEFINE_TITLE_BAR_COLOR_PROP(ButtonHoverForegroundColor, button_hover_foreground_color)

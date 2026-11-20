@@ -1,5 +1,6 @@
 TESTDLL = windows.system.dll
-IMPORTS = combase kernelbase advapi32 uuid
+IMPORTS = combase kernelbase advapi32 user32 uuid
 
 SOURCES = \
+	launcher.c \
 	user.c

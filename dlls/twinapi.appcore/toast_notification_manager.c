@@ -15,6 +15,8 @@
 
 #include "private.h"
 
+#include <shellapi.h>
+
 #include "wine/debug.h"
 #include "wine/list.h"
 
@@ -569,6 +571,150 @@ static HRESULT toast_join_texts( const HSTRING *texts, UINT32 first, UINT32 coun
     return hr;
 }
 
+/*
+ * Tray (Shell_NotifyIcon) delivery reads the notification back as a flat
+ * title + body pair: the first non-empty <text> element is the balloon title,
+ * the remaining ones join into the body. A document with a single <text> has
+ * no title to show, so the generic "Notification" app label stands in.
+ */
+static void toast_copy_text( WCHAR *dst, size_t dst_len, const WCHAR *src, size_t len )
+{
+    if (len > dst_len - 1) len = dst_len - 1;
+    memcpy( dst, src, len * sizeof(*dst) );
+    dst[len] = 0;
+}
+
+/*
+ * Last-resort <text> reader for documents whose DOM answers neither
+ * IXmlCharacterData nor the element-list accessors: serialize the document
+ * through IXmlNodeSerializer::GetXml and scan the <text>…</text> spans out of
+ * the markup.
+ */
+static HRESULT toast_collect_texts_markup( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *doc,
+        HSTRING **out, UINT32 *count )
+{
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlNodeSerializer *serializer = NULL;
+    HSTRING xml = NULL, *texts = NULL;
+    UINT32 size = 0, n = 0;
+    const WCHAR *p;
+    HRESULT hr;
+
+    *out = NULL;
+    *count = 0;
+    hr = IInspectable_QueryInterface( (IInspectable *)doc, &IID_IXmlNodeSerializer, (void **)&serializer );
+    if (FAILED( hr )) return hr;
+    hr = IXmlNodeSerializer_GetXml( serializer, &xml );
+    IInspectable_Release( (IInspectable *)serializer );
+    if (FAILED( hr )) return hr;
+
+    hr = S_OK;
+    for (p = WindowsGetStringRawBuffer( xml, NULL ); p && (p = wcsstr( p, L"<text" )); )
+    {
+        const WCHAR *gt, *close;
+
+        if (!(gt = wcschr( p, L'>' ))) break;
+        p = gt + 1;
+        if (gt[-1] == L'/') close = p;                            /* <text/>: empty node */
+        else if (!(close = wcsstr( p, L"</text" ))) break;
+
+        if (n == size)
+        {
+            HSTRING *grown = realloc( texts, (size + 8) * sizeof(*grown) );
+            if (!grown) { hr = E_OUTOFMEMORY; break; }
+            texts = grown;
+            size += 8;
+        }
+        texts[n] = NULL;
+        if (FAILED( hr = WindowsCreateString( p, close - p, &texts[n] ) )) break;
+        ++n;
+        p = close;
+    }
+    WindowsDeleteString( xml );
+
+    if (SUCCEEDED( hr ))
+    {
+        *out = texts;
+        *count = n;
+    }
+    else
+    {
+        UINT32 i;
+        for (i = 0; texts && i < n; ++i) WindowsDeleteString( texts[i] );
+        free( texts );
+    }
+    return hr;
+}
+
+static HRESULT toast_extract_text( IToastNotification *notification,
+        WCHAR *title, size_t title_len, WCHAR *body, size_t body_len )
+{
+    static const WCHAR notificationW[] = L"Notification";
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *doc = NULL;
+    HSTRING *texts = NULL;
+    UINT32 i, count = 0, first, len;
+    const WCHAR *raw;
+    WCHAR *p;
+    HRESULT hr;
+
+    title[0] = body[0] = 0;
+
+    if (FAILED( hr = IToastNotification_get_Content( notification, &doc ) ) || !doc)
+        return S_OK;   /* a notification with no content shows an empty balloon */
+
+    hr = toast_collect_texts( doc, &texts, &count );
+    if (FAILED( hr ) || !count)
+    {
+        if (texts)
+        {
+            for (i = 0; i < count; ++i) WindowsDeleteString( texts[i] );
+            free( texts );
+            texts = NULL;
+        }
+        hr = toast_collect_texts_markup( doc, &texts, &count );
+    }
+    IInspectable_Release( (IInspectable *)doc );
+    if (FAILED( hr )) return hr;
+
+    for (i = 0; i < count; ++i)
+    {
+        if (texts[i] && WindowsGetStringLen( texts[i] )) break;
+    }
+    if (i == count) goto done;   /* only empty <text> elements */
+    first = i;
+
+    /* a lone <text> is the body; the title falls back to the app label */
+    for (i = first + 1; i < count; ++i)
+    {
+        if (texts[i] && WindowsGetStringLen( texts[i] )) break;
+    }
+    if (i == count)
+    {
+        toast_copy_text( title, title_len, notificationW, ARRAY_SIZE( notificationW ) - 1 );
+        raw = WindowsGetStringRawBuffer( texts[first], &len );
+        toast_copy_text( body, body_len, raw, len );
+        goto done;
+    }
+
+    raw = WindowsGetStringRawBuffer( texts[first], &len );
+    toast_copy_text( title, title_len, raw, len );
+
+    p = body;
+    for (i = first + 1; i < count; ++i)
+    {
+        if (!texts[i] || !(len = WindowsGetStringLen( texts[i] ))) continue;
+        if (p > body && p < body + body_len - 1) *p++ = '\n';
+        if ((size_t)(p - body) + len > body_len - 1) len = body_len - 1 - (p - body);
+        memcpy( p, WindowsGetStringRawBuffer( texts[i], NULL ), len * sizeof(*p) );
+        p += len;
+    }
+    *p = 0;
+
+done:
+    for (i = 0; i < count; ++i) WindowsDeleteString( texts[i] );
+    free( texts );
+    return S_OK;
+}
+
 HRESULT toast_extract_payload( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *doc,
         struct toast_payload *payload )
 {
@@ -697,6 +843,7 @@ static inline struct toast_notification *impl_from_IToastNotification( IToastNot
 
 static void toast_notifier_drain_events( void );
 static void toast_history_add( IToastNotification *toast );
+static void toast_history_remove_toast( IToastNotification *toast );
 static void toast_notification_fire_suppressed( struct toast_notification *impl );
 
 /* ToastNotifications currently visible in the notification daemon, keyed by
@@ -839,12 +986,99 @@ static HRESULT WINAPI toast_notifier_GetTrustLevel( IToastNotifier *iface, Trust
     return S_OK;
 }
 
+/*
+ * Win32 tray delivery. Shell_NotifyIconW is resolved from shell32.dll at call
+ * time (the module links shell32, the runtime lookup keeps the import set as
+ * it is), on a process-wide message-only window owning one icon id. Setting
+ * WINE_DISABLE_TOAST_POPUP keeps toasts on the FreeDesktop path only.
+ */
+#define TOAST_TRAY_ID 0x544F4153   /* 'TOAS' */
+
+typedef BOOL (WINAPI *pShell_NotifyIconW)( DWORD message, NOTIFYICONDATAW *data );
+
+static pShell_NotifyIconW toast_shell_notify_icon( void )
+{
+    static pShell_NotifyIconW fn;
+    HMODULE module;
+
+    if (!fn)
+    {
+        if (!(module = GetModuleHandleW( L"shell32.dll" ))) module = LoadLibraryW( L"shell32.dll" );
+        if (module) fn = (pShell_NotifyIconW)GetProcAddress( module, "Shell_NotifyIconW" );
+    }
+    return fn;
+}
+
+static HWND toast_tray_window( void )
+{
+    static const WCHAR class_name[] = L"Wine Toast Tray";
+    static HWND hwnd;
+
+    if (!hwnd)
+    {
+        WNDCLASSEXW desc = {0};
+
+        desc.cbSize = sizeof(desc);
+        desc.lpfnWndProc = DefWindowProcW;
+        desc.hInstance = GetModuleHandleW( NULL );
+        desc.lpszClassName = class_name;
+        RegisterClassExW( &desc );
+        hwnd = CreateWindowExW( 0, class_name, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, desc.hInstance, NULL );
+    }
+    return hwnd;
+}
+
+static void toast_dispatch_notify_icon( const WCHAR *title, const WCHAR *body )
+{
+    static BOOL added;
+    pShell_NotifyIconW notify_icon;
+    NOTIFYICONDATAW nid = {0};
+    HWND hwnd;
+
+    if (GetEnvironmentVariableW( L"WINE_DISABLE_TOAST_POPUP", NULL, 0 )) return;
+    if (!(notify_icon = toast_shell_notify_icon())) return;
+    if (!(hwnd = toast_tray_window())) return;
+
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = TOAST_TRAY_ID;
+    nid.uFlags = NIF_INFO | NIF_TIP;
+    nid.dwInfoFlags = NIIF_INFO;
+    lstrcpynW( nid.szInfo, body, ARRAY_SIZE( nid.szInfo ) );
+    lstrcpynW( nid.szInfoTitle, title, ARRAY_SIZE( nid.szInfoTitle ) );
+    lstrcpynW( nid.szTip, title, ARRAY_SIZE( nid.szTip ) );
+
+    if (notify_icon( added ? NIM_MODIFY : NIM_ADD, &nid ) && !added) added = TRUE;
+    else if (added) notify_icon( NIM_ADD, &nid );   /* the icon was removed in between */
+}
+
+static void toast_dismiss_notify_icon( void )
+{
+    static const WCHAR emptyW[] = L"";
+    pShell_NotifyIconW notify_icon;
+    NOTIFYICONDATAW nid = {0};
+    HWND hwnd;
+
+    if (GetEnvironmentVariableW( L"WINE_DISABLE_TOAST_POPUP", NULL, 0 )) return;
+    if (!(notify_icon = toast_shell_notify_icon())) return;
+    if (!(hwnd = toast_tray_window())) return;
+
+    /* An empty szInfo on NIM_MODIFY retires the visible balloon. */
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = TOAST_TRAY_ID;
+    nid.uFlags = NIF_INFO;
+    lstrcpynW( nid.szInfo, emptyW, ARRAY_SIZE( nid.szInfo ) );
+    notify_icon( NIM_MODIFY, &nid );
+}
+
 static HRESULT WINAPI toast_notifier_Show( IToastNotifier *iface,
         __x_ABI_CWindows_CUI_CNotifications_CIToastNotification *notification )
 {
     struct toast_payload payload = {0};
     struct toast_notification *impl;
     struct fd_notify_params params;
+    WCHAR title[64], body[256];
     HRESULT hr;
 
     TRACE( "iface %p, notification %p.\n", iface, notification );
@@ -881,6 +1115,11 @@ static HRESULT WINAPI toast_notifier_Show( IToastNotifier *iface,
     NOTIFY_TRACE( "toast shown: summary %s, body %s%s\n", debugstr_w( params.summary ),
                   debugstr_w( params.body ), impl->suppress_popup ? " (popup suppressed)" : "" );
 
+    /* Win32 balloon on the tray, fed by the same <text> elements. */
+    toast_extract_text( notification, title, ARRAY_SIZE( title ), body, ARRAY_SIZE( body ) );
+    TRACE( "toast Show title=%s body=%s\n", debugstr_w( title ), debugstr_w( body ) );
+    toast_dispatch_notify_icon( title, body );
+
     if (TWINAPI_CALL( fd_notify, &params ) == STATUS_SUCCESS && params.id)
     {
         impl->fd_id = params.id;
@@ -915,6 +1154,8 @@ static HRESULT WINAPI toast_notifier_Hide( IToastNotifier *iface,
         list_init( &impl->shown_entry );
         IToastNotification_Release( notification );
     }
+    toast_dismiss_notify_icon();
+    toast_history_remove_toast( notification );
     return S_OK;
 }
 
@@ -1460,6 +1701,22 @@ static void toast_history_add( IToastNotification *toast )
     entry->group = group;
     IToastNotification_AddRef( toast );
     list_add_tail( &toast_history, &entry->entry );
+}
+
+/* Drop the history entries for this exact notification (ToastNotifier::Hide). */
+static void toast_history_remove_toast( IToastNotification *toast )
+{
+    struct toast_history_entry *entry, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &toast_history, struct toast_history_entry, entry )
+    {
+        if (entry->toast != toast) continue;
+        list_remove( &entry->entry );
+        IToastNotification_Release( entry->toast );
+        WindowsDeleteString( entry->tag );
+        WindowsDeleteString( entry->group );
+        free( entry );
+    }
 }
 
 /* Drop the history entries matching tag and group; NULL matches anything. */

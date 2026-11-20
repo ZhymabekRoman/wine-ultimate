@@ -358,12 +358,118 @@ static DWORD get_app_theme(void)
     return ret;
 }
 
+static const WCHAR *accent_subkey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
+static const WCHAR *dwm_subkey = L"Software\\Microsoft\\Windows\\DWM";
+
+#define ACCENT_PALETTE_COUNT 8
+#define ACCENT_PALETTE_BYTES (ACCENT_PALETTE_COUNT * sizeof(DWORD))
+
+/* Windows 10 default (orange) accent ramp, BGR DWORD layout:
+ * Light3, Light2, Light1, Accent, Dark1, Dark2, Dark3, Dark3. Used when
+ * neither HKCU DWM AccentColor nor ColorizationColor is present. */
+static const DWORD default_accent_palette[ACCENT_PALETTE_COUNT] =
+{
+    0x00ffd8a6, 0x00edb976, 0x00e39c42, 0x00d77800, 0x009e5a00, 0x00754200, 0x00422600, 0x00422600,
+};
+
+static void hsl_from_bgr( DWORD bgr, float *h, float *s, float *l )
+{
+    float r = (bgr & 0xFF) / 255.0f, g = ((bgr >> 8) & 0xFF) / 255.0f, b = ((bgr >> 16) & 0xFF) / 255.0f;
+    float max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    float min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    float c = max - min;
+
+    *l = (max + min) / 2.0f;
+    /* S = C / (1 - |2L - 1|), and 1 - |2L - 1| == 2L > 1 ? 2 - 2L : 2L */
+    *s = c ? c / (2.0f * *l > 1.0f ? 2.0f - 2.0f * *l : 2.0f * *l) : 0.0f;
+
+    if (!c) *h = 0.0f;
+    else if (max == r) *h = (g - b) / c;
+    else if (max == g) *h = (b - r) / c + 2.0f;
+    else *h = (r - g) / c + 4.0f;
+    *h /= 6.0f;
+    if (*h < 0.0f) *h += 1.0f;
+}
+
+static DWORD bgr_from_hsl( float h, float s, float l )
+{
+    float c = (1.0f - (2.0f * l > 1.0f ? 2.0f - 2.0f * l : 2.0f * l)) * s;
+    float m = l - c / 2.0f;
+    float r, g, b, x;
+    int seg = (int)(h * 6.0f);
+    float f = h * 6.0f - (float)seg;
+
+    /* standard HSL -> RGB sector decode */
+    x = c * (1.0f - (2.0f * f > 1.0f ? 2.0f * f - 1.0f : 1.0f - 2.0f * f));
+    switch (seg)
+    {
+    case 0:  r = c; g = x; b = 0; break;
+    case 1:  r = x; g = c; b = 0; break;
+    case 2:  r = 0; g = c; b = x; break;
+    case 3:  r = 0; g = x; b = c; break;
+    case 4:  r = x; g = 0; b = c; break;
+    default: r = c; g = 0; b = x; break;
+    }
+    r += m; g += m; b += m;
+    if (r < 0.0f) r = 0.0f; if (r > 1.0f) r = 1.0f;
+    if (g < 0.0f) g = 0.0f; if (g > 1.0f) g = 1.0f;
+    if (b < 0.0f) b = 0.0f; if (b > 1.0f) b = 1.0f;
+
+    return ((DWORD)(b * 255.0f + 0.5f) << 16) | ((DWORD)(g * 255.0f + 0.5f) << 8) | (DWORD)(r * 255.0f + 0.5f);
+}
+
+/* Scale the HSL lightness of a BGR color: t > 0 lightens toward white,
+ * t < 0 darkens toward black, keeping hue and saturation. */
+static DWORD scale_accent_lightness( DWORD bgr, float t )
+{
+    float h, s, l;
+
+    hsl_from_bgr( bgr, &h, &s, &l );
+    if (t >= 0.0f) l += (1.0f - l) * t;
+    else l *= 1.0f + t;
+    if (l < 0.0f) l = 0.0f;
+    if (l > 1.0f) l = 1.0f;
+    return bgr_from_hsl( h, s, l );
+}
+
+/* Windows derives the accent ramp from the accent color at fixed lightness
+ * offsets; registry layout: Light3, Light2, Light1, Accent, Dark1, Dark2, Dark3, Dark3. */
+static void build_accent_palette( DWORD accent, DWORD *palette )
+{
+    palette[0] = scale_accent_lightness( accent, 0.72f );  /* Light3 */
+    palette[1] = scale_accent_lightness( accent, 0.48f );  /* Light2 */
+    palette[2] = scale_accent_lightness( accent, 0.24f );  /* Light1 */
+    palette[3] = accent & 0xFFFFFF;                        /* Accent   */
+    palette[4] = scale_accent_lightness( accent, -0.22f ); /* Dark1    */
+    palette[5] = scale_accent_lightness( accent, -0.42f ); /* Dark2    */
+    palette[6] = scale_accent_lightness( accent, -0.62f ); /* Dark3    */
+    palette[7] = palette[6];
+}
+
 static DWORD initialize_accent_palette( HKEY hkey, DWORD offset )
 {
-    DWORD palette[7] = { 0x00ffd8a6, 0x00edb976, 0x00e39c42, 0x00d77800, 0x009e5a00, 0x00754200, 0x00422600 };
-    DWORD len = sizeof(palette);
+    DWORD palette[ACCENT_PALETTE_COUNT];
+    DWORD accent, len = sizeof(palette);
+    HKEY dwm;
 
-    RegSetValueExW( hkey, L"AccentPalette", 0, REG_BINARY, (const BYTE *)&palette, len );
+    accent = default_accent_palette[3];
+    if (!RegOpenKeyExW( HKEY_CURRENT_USER, dwm_subkey, 0, KEY_QUERY_VALUE, &dwm ))
+    {
+        DWORD type, size = sizeof(accent);
+        if (RegQueryValueExW( dwm, L"AccentColor", NULL, &type, (BYTE *)&accent, &size )
+            || type != REG_DWORD)
+        {
+            size = sizeof(accent);
+            if (RegQueryValueExW( dwm, L"ColorizationColor", NULL, &type, (BYTE *)&accent, &size )
+                || type != REG_DWORD)
+                accent = default_accent_palette[3];
+        }
+        RegCloseKey( dwm );
+    }
+    accent &= 0xFFFFFF;
+
+    build_accent_palette( accent, palette );
+    RegSetValueExW( hkey, L"AccentPalette", 0, REG_BINARY, (const BYTE *)palette, len );
     return palette[offset];
 }
 
@@ -377,13 +483,14 @@ static void dword_to_color( DWORD color, Color *out )
 
 static void get_accent_palette_color( DWORD offset, Color *out )
 {
-    DWORD palette[7];
+    DWORD palette[ACCENT_PALETTE_COUNT];
     DWORD ret = 0, len = sizeof(palette), type;
     HKEY hkey;
 
-    if (!RegCreateKeyW( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent", &hkey ))
+    if (!RegCreateKeyW( HKEY_CURRENT_USER, accent_subkey, &hkey ))
     {
-        if (RegQueryValueExW( hkey, L"AccentPalette", NULL, &type, (BYTE *)&palette, &len ) || type != REG_BINARY)
+        if (RegQueryValueExW( hkey, L"AccentPalette", NULL, &type, (BYTE *)&palette, &len )
+            || type != REG_BINARY || len < 7 * sizeof(DWORD))
             ret = initialize_accent_palette( hkey, offset );
         else
             ret = palette[offset];
@@ -479,7 +586,7 @@ DEFINE_IINSPECTABLE( uisettings4, IUISettings4, struct uisettings, IUISettings_i
 static HRESULT WINAPI uisettings4_get_AdvancedEffectsEnabled( IUISettings4 *iface, boolean *value )
 {
     FIXME( "iface %p, value %p stub!.\n", iface, value );
-    *value = TRUE;
+    *value = FALSE;
     return S_OK;
 }
 

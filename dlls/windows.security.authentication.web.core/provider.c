@@ -41,15 +41,26 @@ static HRESULT dup_empty_string( HSTRING *value )
  * QI-able provider instead of a null pointer the projection would throw on.
  */
 
+static const GUID IID_IWebAccountProvider2_local =
+    { 0x4a01eb05, 0x4e42, 0x41d4, { 0xb5, 0x18, 0xe0, 0x08, 0xa5, 0x16, 0x36, 0x14 } };
+
 struct web_account_provider
 {
     const void *provider_vtbl;
+    const void *provider2_vtbl;
     LONG ref;
 };
+
+static const void *web_account_provider2_vtbl[];
 
 static inline struct web_account_provider *impl_from_provider( const void *iface )
 {
     return (struct web_account_provider *)iface;
+}
+
+static inline struct web_account_provider *impl_from_provider2( const void *iface )
+{
+    return CONTAINING_RECORD( iface, struct web_account_provider, provider2_vtbl );
 }
 
 static HRESULT WINAPI provider_QueryInterface( const void *iface, REFIID iid, void **out )
@@ -66,7 +77,13 @@ static HRESULT WINAPI provider_QueryInterface( const void *iface, REFIID iid, vo
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IWebAccountProvider ))
     {
-        *out = (void *)impl;
+        *out = &impl->provider_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IWebAccountProvider2_local ))
+    {
+        *out = &impl->provider2_vtbl;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -140,12 +157,61 @@ static const void *web_account_provider_vtbl[] =
     provider_get_IconUri,
 };
 
+static HRESULT WINAPI provider2_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    return provider_QueryInterface( &impl_from_provider2( iface )->provider_vtbl, iid, out );
+}
+static ULONG WINAPI provider2_AddRef( const void *iface )
+{
+    return provider_AddRef( &impl_from_provider2( iface )->provider_vtbl );
+}
+static ULONG WINAPI provider2_Release( const void *iface )
+{
+    return provider_Release( &impl_from_provider2( iface )->provider_vtbl );
+}
+static HRESULT WINAPI provider2_GetIids( const void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI provider2_GetRuntimeClassName( const void *iface, HSTRING *name )
+{
+    return create_class_name( L"Windows.Security.Credentials.WebAccountProvider", name );
+}
+static HRESULT WINAPI provider2_GetTrustLevel( const void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI provider2_get_DisplayPurpose( const void *iface, HSTRING *value )
+{
+    return dup_empty_string( value );
+}
+static HRESULT WINAPI provider2_get_Authority( const void *iface, HSTRING *value )
+{
+    return dup_empty_string( value );
+}
+
+static const void *web_account_provider2_vtbl[] =
+{
+    provider2_QueryInterface,
+    provider2_AddRef,
+    provider2_Release,
+    provider2_GetIids,
+    provider2_GetRuntimeClassName,
+    provider2_GetTrustLevel,
+    provider2_get_DisplayPurpose,
+    provider2_get_Authority,
+};
+
 IInspectable *create_web_account_provider( void )
 {
     struct web_account_provider *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->provider_vtbl = web_account_provider_vtbl;
+    impl->provider2_vtbl = web_account_provider2_vtbl;
     impl->ref = 1;
 
     TRACE( "created WebAccountProvider %p.\n", impl );

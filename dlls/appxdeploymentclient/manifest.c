@@ -1700,18 +1700,78 @@ static void append_to_path(const WCHAR *new_dir)
                         SMTO_ABORTIFHUNG, 5000, &dwResult);
 }
 
+/* Package versions are 'major.minor.build.revision' decimal fields. A short
+ * version has implicit zero tails, and a missing MinVersion is satisfied by
+ * anything; the comparison is field-wise on 16-bit parts, as the appx name
+ * grammar caps them. */
+static void parse_version(const WCHAR *s, WORD v[4])
+{
+    int i;
+
+    v[0] = v[1] = v[2] = v[3] = 0;
+    for (i = 0; i < 4 && s && *s; i++)
+    {
+        WCHAR *end = NULL;
+        unsigned long n = wcstoul(s, &end, 10);
+        if (!end || end == s) break;
+        v[i] = (WORD)n;
+        s = end;
+        if (*s == L'.') s++;
+        else break;
+    }
+}
+
+/* < 0 when a is older, 0 when equal, > 0 when newer. */
+static int cmp_version(const WCHAR *a, const WCHAR *b)
+{
+    WORD va[4], vb[4];
+    int i;
+
+    parse_version(a, va);
+    parse_version(b, vb);
+    for (i = 0; i < 4; i++)
+        if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
+    return 0;
+}
+
+static BOOL version_satisfies(const WCHAR *installed, const WCHAR *min)
+{
+    if (!min || !min[0]) return TRUE;
+    return cmp_version(installed, min) >= 0;
+}
+
+/* The version token of a '<name>_<version>_<arch>__<pub>' full name given the
+ * name's length; empty string when the name carries no version field. */
+static const WCHAR *full_name_version(const WCHAR *full, SIZE_T name_len)
+{
+    const WCHAR *v = full + name_len;
+
+    if (*v != L'_') return L"";
+    v++;
+    if (wcschr(v, L'_') == v) return L"";   /* 'Name__Publisher': no version */
+    return v;
+}
+
 /* A <PackageDependency Name="..."/> names a package family, not a full name: the
  * staged framework is the registration (or the sibling folder) whose name is
- * '<dep_name>_<rest>'. Both the directory and the full name come back, the name
- * being what the dependency graph on the package's own key is written from. */
+ * '<dep_name>_<version>_<rest>'. Candidates must carry a version at least
+ * MinVersion, and of the satisfying ones the lowest wins — the framework the
+ * app was built against before its next compatible bump. Both the directory
+ * and the full name come back, the name being what the dependency graph on the
+ * package's own key is written from. */
 static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR *dep_name,
+                                    const WCHAR *min_version,
                                     WCHAR *out_path, DWORD cch, WCHAR *out_full_name, DWORD cch_name)
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     WCHAR key[600], name[256];
+    WCHAR best_path[MAX_PATH], best_full[512];
+    const SIZE_T dep_len = lstrlenW(dep_name);
+    BOOL have_best = FALSE;
     DWORD r, i;
 
     if (out_full_name && cch_name) out_full_name[0] = 0;
+    best_path[0] = best_full[0] = 0;
 
     for (r = 0; r < ARRAY_SIZE(roots); r++)
     {
@@ -1719,7 +1779,6 @@ static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR 
         if (RegOpenKeyExW(roots[r], L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages",
                           0, KEY_READ, &hkey) == ERROR_SUCCESS)
         {
-            DWORD dep_len = lstrlenW(dep_name);
             for (i = 0; ; i++)
             {
                 DWORD name_size = ARRAY_SIZE(name);
@@ -1732,14 +1791,20 @@ static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR 
                              L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\%ls", name);
                     if (RegOpenKeyExW(roots[r], key, 0, KEY_READ, &sub) == ERROR_SUCCESS)
                     {
-                        DWORD size = cch * sizeof(WCHAR);
+                        WCHAR cand_path[MAX_PATH];
+                        DWORD size = sizeof(cand_path);
                         DWORD type = 0;
-                        if (RegQueryValueExW(sub, L"PackagePath", NULL, &type, (BYTE *)out_path, &size) == ERROR_SUCCESS && out_path[0])
+                        if (RegQueryValueExW(sub, L"PackagePath", NULL, &type, (BYTE *)cand_path, &size) == ERROR_SUCCESS
+                            && cand_path[0])
                         {
-                            if (out_full_name && cch_name) lstrcpynW(out_full_name, name, cch_name);
-                            RegCloseKey(sub);
-                            RegCloseKey(hkey);
-                            return TRUE;
+                            const WCHAR *ver = full_name_version(name, dep_len);
+                            if (version_satisfies(ver, min_version) &&
+                                (!have_best || cmp_version(ver, full_name_version(best_full, dep_len)) < 0))
+                            {
+                                lstrcpynW(best_path, cand_path, ARRAY_SIZE(best_path));
+                                lstrcpynW(best_full, name, ARRAY_SIZE(best_full));
+                                have_best = TRUE;
+                            }
                         }
                         RegCloseKey(sub);
                     }
@@ -1747,6 +1812,15 @@ static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR 
             }
             RegCloseKey(hkey);
         }
+        /* a registration in HKCU answers before any HKLM one */
+        if (have_best) break;
+    }
+
+    if (have_best)
+    {
+        lstrcpynW(out_path, best_path, cch);
+        if (out_full_name && cch_name) lstrcpynW(out_full_name, best_full, cch_name);
+        return TRUE;
     }
 
     {
@@ -1769,18 +1843,30 @@ static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR 
                 do
                 {
                     if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                        wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L".."))
+                        wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..") &&
+                        !wcsncmp(fd.cFileName, dep_name, dep_len) && fd.cFileName[dep_len] == L'_')
                     {
-                        swprintf(out_path, cch, L"%ls\\%ls", parent_dir, fd.cFileName);
-                        if (out_full_name && cch_name)
-                            lstrcpynW(out_full_name, fd.cFileName, cch_name);
-                        FindClose(hFind);
-                        return TRUE;
+                        const WCHAR *ver = full_name_version(fd.cFileName, dep_len);
+                        if (!version_satisfies(ver, min_version))
+                            continue;
+                        if (have_best &&
+                            cmp_version(ver, full_name_version(best_full, dep_len)) >= 0)
+                            continue;
+                        swprintf(best_path, ARRAY_SIZE(best_path), L"%ls\\%ls", parent_dir, fd.cFileName);
+                        lstrcpynW(best_full, fd.cFileName, ARRAY_SIZE(best_full));
+                        have_best = TRUE;
                     }
                 } while (FindNextFileW(hFind, &fd));
                 FindClose(hFind);
             }
         }
+    }
+
+    if (have_best)
+    {
+        lstrcpynW(out_path, best_path, cch);
+        if (out_full_name && cch_name) lstrcpynW(out_full_name, best_full, cch_name);
+        return TRUE;
     }
 
     return FALSE;
@@ -1827,13 +1913,40 @@ static void multi_sz_flush( const struct multi_sz *m, HKEY root, const WCHAR *ke
     }
 }
 
+/* One resolved dependency persists as a numbered subkey
+ * Packages\<FullName>\Dependencies\<index> carrying the requested Name,
+ * MinVersion and Publisher next to the resolved FullName, so the graph survives
+ * as data, not only as the legacy multi-sz blob. Indices are dense from 0. */
+static void write_dependency_subkey(const WCHAR *pkg_key, DWORD index,
+                                    const struct appx_dependency *dep, const WCHAR *full)
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR sub[660];
+    DWORD r;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        HKEY hkey;
+        swprintf(sub, ARRAY_SIZE(sub), L"%ls\\Dependencies\\%lu", pkg_key, index);
+        if (RegCreateKeyExW(roots[r], sub, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS)
+        {
+            set_reg_str(hkey, L"FullName", full);
+            set_reg_str(hkey, L"Name", dep->name);
+            set_reg_str(hkey, L"MinVersion", dep->min_version);
+            set_reg_str(hkey, L"Publisher", dep->publisher);
+            RegCloseKey(hkey);
+        }
+    }
+}
+
 /*
  * The <Dependencies> section names package families, not full names, so each
  * entry is matched against the staged set (registration first, then a sibling
- * folder under the package's own parent). A resolved framework is registered
- * under its own full name, its bin directory joins the DLL search path, and the
- * full name is appended to the package's Dependencies value: that value is the
- * dependency graph IPackage::Dependencies reads back.
+ * folder under the package's own parent) and must carry a version at least
+ * its MinVersion. A resolved framework is registered under its own full name,
+ * its bin directory joins the DLL search path, and the full name is appended
+ * to the package's Dependencies value and a numbered Dependencies subkey: that
+ * graph is what IPackage::Dependencies reads back.
  */
 static void process_dependencies(const struct appx_package *pkg)
 {
@@ -1841,7 +1954,18 @@ static void process_dependencies(const struct appx_package *pkg)
     static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
     struct multi_sz graph = {0};
     WCHAR pkg_key[600];
+    DWORD resolved = 0;
     DWORD i, r;
+
+    swprintf( pkg_key, ARRAY_SIZE(pkg_key), L"%ls\\%ls", appmodel_path, pkg->identity.full_name );
+
+    /* a re-registration replaces the graph wholesale */
+    if (pkg->dependencies_count)
+    {
+        WCHAR dep_key[640];
+        swprintf( dep_key, ARRAY_SIZE(dep_key), L"%ls\\Dependencies", pkg_key );
+        for (r = 0; r < ARRAY_SIZE(roots); r++) RegDeleteTreeW( roots[r], dep_key );
+    }
 
     for (i = 0; i < pkg->dependencies_count; i++)
     {
@@ -1851,7 +1975,8 @@ static void process_dependencies(const struct appx_package *pkg)
                                  wcsstr(dep, L"Xaml") != NULL);
         WCHAR dep_path[MAX_PATH], dep_full[512];
 
-        if (resolve_dependency_path(pkg, dep, dep_path, ARRAY_SIZE(dep_path),
+        if (resolve_dependency_path(pkg, dep, pkg->dependencies[i].min_version,
+                                    dep_path, ARRAY_SIZE(dep_path),
                                     dep_full, ARRAY_SIZE(dep_full)))
         {
             WCHAR manifest[MAX_PATH];
@@ -1905,6 +2030,7 @@ static void process_dependencies(const struct appx_package *pkg)
                 lstrcpynW( dep_full, slash ? slash + 1 : dep_path, ARRAY_SIZE(dep_full) );
             }
             multi_sz_append( &graph, dep_full );
+            write_dependency_subkey( pkg_key, resolved++, &pkg->dependencies[i], dep_full );
         }
         else
         {
@@ -1913,7 +2039,6 @@ static void process_dependencies(const struct appx_package *pkg)
     }
 
     /* the graph hangs off the package's own registration, both hives */
-    swprintf( pkg_key, ARRAY_SIZE(pkg_key), L"%ls\\%ls", appmodel_path, pkg->identity.full_name );
     for (r = 0; r < ARRAY_SIZE(roots); r++)
         multi_sz_flush( &graph, roots[r], pkg_key, L"Dependencies" );
 

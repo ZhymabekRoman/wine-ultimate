@@ -38,12 +38,6 @@ struct telemetry_client
     LONG ref;
 };
 
-static HRESULT WINAPI telemetry_QueryInterface( void *t, REFIID riid, void **obj )
-{
-    *obj = t;
-    return S_OK;
-}
-
 static ULONG WINAPI telemetry_AddRef( void *t )
 {
     struct telemetry_client *c = t;
@@ -56,28 +50,43 @@ static ULONG WINAPI telemetry_Release( void *t )
     return InterlockedDecrement( &c->ref );
 }
 
+static HRESULT WINAPI telemetry_QueryInterface( void *t, REFIID riid, void **obj )
+{
+    if (!obj) return E_POINTER;
+    telemetry_AddRef( t );
+    *obj = t;
+    return S_OK;
+}
+
 static HRESULT WINAPI telemetry_ActivateInstance( void *t, IInspectable **instance )
 {
     struct telemetry_client *c = t;
+    if (!instance) return E_POINTER;
     telemetry_AddRef( c );
     *instance = (IInspectable *)c;
     return S_OK;
 }
 
-static HRESULT WINAPI telemetry_stub( void *t, void *arg, void *arg2 )
+static HRESULT WINAPI telemetry_stub( void *t )
 {
-    if (arg) *(void **)arg = NULL;
-    if (arg2) *(void **)arg2 = NULL;
+    return E_NOTIMPL;
+}
+
+/* IPlatformTelemetryRegistrationResult face:
+ *   slot 6: get_Status([out, retval] PlatformTelemetryRegistrationStatus *value) -> 4-byte UINT32 (0 = Success)
+ */
+static HRESULT WINAPI telemetry_result_get_Status( void *t, UINT32 *status )
+{
+    if (status) *status = 0;
     return S_OK;
 }
 
-/* IMapView-like face handed out by client slot 6 (GetContextProperties /
- * Get shape): the app chains client->slot6(out=map), map->slot6(out=count)
- * (GetMany), so the map's vtbl is all S_OK stubs that zero their outs. */
 static const void **telemetry_map_vtbl;
 
 static HRESULT WINAPI telemetry_map_QI( void *t, REFIID riid, void **obj )
 {
+    if (!obj) return E_POINTER;
+    telemetry_AddRef( t );
     *obj = t;
     return S_OK;
 }
@@ -88,23 +97,43 @@ static struct telemetry_client *create_telemetry_map( void )
     const void **vt;
     unsigned int i;
 
-    if (telemetry_map_vtbl) return &map_obj;
+    if (telemetry_map_vtbl)
+    {
+        telemetry_AddRef( &map_obj );
+        return &map_obj;
+    }
     if (!(vt = HeapAlloc( GetProcessHeap(), 0, 32 * sizeof(*vt) ))) return NULL;
     for (i = 0; i < 32; i++) vt[i] = telemetry_stub;
     vt[0] = telemetry_map_QI;
     vt[1] = telemetry_AddRef;
     vt[2] = telemetry_Release;
+    vt[6] = telemetry_result_get_Status;
     telemetry_map_vtbl = vt;
     map_obj.vtbl = vt;
+    telemetry_AddRef( &map_obj );
     return &map_obj;
 }
 
-static HRESULT WINAPI telemetry_get( void *t, void *key, void *value )
+/* IPlatformTelemetryClientStatics:
+ *   slot 6: Register(HSTRING id, IPlatformTelemetryRegistrationResult **result)
+ *   slot 7: RegisterWithSettings(HSTRING id, IPlatformTelemetryRegistrationSettings *settings,
+ *                                IPlatformTelemetryRegistrationResult **result)
+ */
+static HRESULT WINAPI telemetry_register( void *t, HSTRING id, void **result )
 {
     struct telemetry_client *m;
-    if (key) *(void **)key = NULL;
-    if (!value) return S_OK;
-    if ((m = create_telemetry_map())) *(void **)value = m;
+    if (!result) return E_POINTER;
+    *result = NULL;
+    if ((m = create_telemetry_map())) *result = m;
+    return S_OK;
+}
+
+static HRESULT WINAPI telemetry_register_with_settings( void *t, HSTRING id, void *settings, void **result )
+{
+    struct telemetry_client *m;
+    if (!result) return E_POINTER;
+    *result = NULL;
+    if ((m = create_telemetry_map())) *result = m;
     return S_OK;
 }
 
@@ -127,7 +156,8 @@ static struct telemetry_client *create_telemetry_client( void )
     vt[1] = telemetry_AddRef;
     vt[2] = telemetry_Release;
     vt[3] = telemetry_ActivateInstance;
-    vt[6] = telemetry_get;
+    vt[6] = telemetry_register;
+    vt[7] = telemetry_register_with_settings;
     c->vtbl = vt;
     c->ref = 1;
     client = c;
@@ -549,6 +579,659 @@ static struct named_policy_statics named_policy_statics_obj =
     named_policy_statics_vtbl,
 };
 
+/* Windows.System.UserPicker */
+static const GUID IID_IUserPicker =
+    { 0x7d548008, 0xf1e3, 0x4a6c, { 0x8d, 0xdc, 0xa9, 0xbb, 0x0f, 0x48, 0x8a, 0xed } };
+static const GUID IID_IUserPickerStatics =
+    { 0xde3290dc, 0x7e73, 0x4df6, { 0xa1, 0xae, 0x4d, 0x7e, 0xca, 0x82, 0xb4, 0x0d } };
+static const GUID IID_IAsyncOperation_User_picker =
+    { 0x7f131288, 0x5c96, 0x58e4, { 0x93, 0x3b, 0x62, 0x20, 0x1e, 0x6f, 0x49, 0x3f } };
+
+struct user_picker
+{
+    const void **vtbl;
+    LONG ref;
+    boolean allow_guest;
+    IUser *suggested_user;
+};
+
+static HRESULT WINAPI user_picker_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct user_picker *impl = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IUserPicker ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = impl;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI user_picker_AddRef( void *iface )
+{
+    struct user_picker *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI user_picker_Release( void *iface )
+{
+    struct user_picker *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->suggested_user) user_release( impl->suggested_user );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI user_picker_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_picker_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.System.UserPicker";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI user_picker_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_picker_get_AllowGuestAccounts( void *iface, boolean *value )
+{
+    struct user_picker *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->allow_guest;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_picker_put_AllowGuestAccounts( void *iface, boolean value )
+{
+    struct user_picker *impl = iface;
+    impl->allow_guest = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_picker_get_SuggestedSelectedUser( void *iface, IUser **value )
+{
+    struct user_picker *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->suggested_user;
+    if (*value) user_add_ref( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI user_picker_put_SuggestedSelectedUser( void *iface, IUser *value )
+{
+    struct user_picker *impl = iface;
+    if (value) user_add_ref( value );
+    if (impl->suggested_user) user_release( impl->suggested_user );
+    impl->suggested_user = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_picker_PickSingleUserAsync( void *iface, void **operation )
+{
+    struct async_op *op;
+    void *user = NULL;
+
+    if (!operation) return E_POINTER;
+    *operation = NULL;
+    create_user( &user );
+    op = create_async_op( &IID_IAsyncOperation_User_picker,
+                          L"Windows.Foundation.IAsyncOperation`1<Windows.System.User>",
+                          (IInspectable *)user );
+    if (user) IInspectable_Release( (IInspectable *)user );
+    if (!op) return E_OUTOFMEMORY;
+    *operation = async_op_iface( op );
+    return S_OK;
+}
+
+static const void *user_picker_vtbl[] =
+{
+    user_picker_QueryInterface,
+    user_picker_AddRef,
+    user_picker_Release,
+    user_picker_GetIids,
+    user_picker_GetRuntimeClassName,
+    user_picker_GetTrustLevel,
+    user_picker_get_AllowGuestAccounts,
+    user_picker_put_AllowGuestAccounts,
+    user_picker_get_SuggestedSelectedUser,
+    user_picker_put_SuggestedSelectedUser,
+    user_picker_PickSingleUserAsync,
+};
+
+struct user_picker_statics
+{
+    const void **vtbl_factory;
+    const void **vtbl_statics;
+};
+
+static struct user_picker_statics user_picker_statics_obj;
+
+static HRESULT WINAPI user_picker_statics_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+        *out = &user_picker_statics_obj.vtbl_factory;
+    else if (IsEqualGUID( iid, &IID_IUserPickerStatics ))
+        *out = &user_picker_statics_obj.vtbl_statics;
+    else
+        return E_NOINTERFACE;
+    return S_OK;
+}
+
+static ULONG WINAPI user_picker_statics_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI user_picker_statics_Release( void *iface ) { return 1; }
+
+static HRESULT WINAPI user_picker_statics_ActivateInstance( void *iface, IInspectable **instance )
+{
+    struct user_picker *impl;
+    if (!instance) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = user_picker_vtbl;
+    impl->ref = 1;
+    *instance = (IInspectable *)impl;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_picker_statics_IsSupported( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static const void *user_picker_factory_vtbl[] =
+{
+    user_picker_statics_QueryInterface,
+    user_picker_statics_AddRef,
+    user_picker_statics_Release,
+    user_picker_GetIids,
+    user_picker_GetRuntimeClassName,
+    user_picker_GetTrustLevel,
+    user_picker_statics_ActivateInstance,
+};
+
+static const void *user_picker_statics_vtbl[] =
+{
+    user_picker_statics_QueryInterface,
+    user_picker_statics_AddRef,
+    user_picker_statics_Release,
+    user_picker_GetIids,
+    user_picker_GetRuntimeClassName,
+    user_picker_GetTrustLevel,
+    user_picker_statics_IsSupported,
+};
+
+static struct user_picker_statics user_picker_statics_obj =
+{
+    user_picker_factory_vtbl,
+    user_picker_statics_vtbl,
+};
+
+/* ============================================================================
+ * Windows.System.Diagnostics.SystemDiagnosticInfo
+ * ============================================================================ */
+
+static const GUID IID_ISystemDiagnosticInfoStatics =
+    { 0xd404ac21, 0xfc7d, 0x45f0, {0x9a, 0x3f, 0x39, 0x20, 0x3a, 0xed, 0x9f, 0x7e} };
+static const GUID IID_ISystemDiagnosticInfoStatics2 =
+    { 0x79ded189, 0x6af9, 0x4da9, {0xa4, 0x22, 0x15, 0xf7, 0x32, 0x55, 0xb3, 0xeb} };
+static const GUID IID_ISystemDiagnosticInfo =
+    { 0xa290fe05, 0xdff3, 0x407f, {0x9a, 0x1b, 0x0b, 0x2b, 0x31, 0x7c, 0xa8, 0x00} };
+static const GUID IID_ISystemMemoryUsage =
+    { 0x17ffc595, 0x1702, 0x49cf, {0xaa, 0x27, 0x2f, 0x0a, 0x32, 0x59, 0x14, 0x04} };
+static const GUID IID_ISystemMemoryUsageReport =
+    { 0x38663c87, 0x2a9f, 0x403a, {0xbd, 0x19, 0x2c, 0xf3, 0xe8, 0x16, 0x95, 0x00} };
+static const GUID IID_ISystemCpuUsage =
+    { 0x6037b3ac, 0x02d6, 0x4234, {0x83, 0x62, 0x7f, 0xe3, 0xad, 0xc8, 0x1f, 0x5f} };
+static const GUID IID_ISystemCpuUsageReport =
+    { 0x2c26d0b2, 0x9483, 0x4f62, {0xab, 0x57, 0x82, 0xb2, 0x9d, 0x97, 0x19, 0xb8} };
+
+struct sys_mem_report
+{
+    const void *lpVtbl;
+    LONG ref;
+    UINT64 total_phys;
+    UINT64 avail_phys;
+    UINT64 committed;
+};
+
+static HRESULT WINAPI smr_QI( void *iface, REFIID iid, void **out )
+{
+    struct sys_mem_report *impl = (struct sys_mem_report *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ISystemMemoryUsageReport ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI smr_AddRef( void *iface ) { return InterlockedIncrement( &((struct sys_mem_report *)iface)->ref ); }
+static ULONG WINAPI smr_Release( void *iface )
+{
+    struct sys_mem_report *impl = (struct sys_mem_report *)iface;
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) free( impl );
+    return r;
+}
+static HRESULT WINAPI smr_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_ISystemMemoryUsageReport;
+    *c = 1;
+    return S_OK;
+}
+static HRESULT WINAPI smr_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.System.Diagnostics.SystemMemoryUsageReport";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI smr_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI smr_get_TotalPhysical( void *iface, UINT64 *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct sys_mem_report *)iface)->total_phys;
+    return S_OK;
+}
+static HRESULT WINAPI smr_get_Available( void *iface, UINT64 *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct sys_mem_report *)iface)->avail_phys;
+    return S_OK;
+}
+static HRESULT WINAPI smr_get_Committed( void *iface, UINT64 *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct sys_mem_report *)iface)->committed;
+    return S_OK;
+}
+
+static const void * const smr_vtbl[] =
+{
+    smr_QI, smr_AddRef, smr_Release, smr_GetIids, smr_GetRuntimeClassName, smr_GetTrustLevel,
+    smr_get_TotalPhysical, smr_get_Available, smr_get_Committed,
+};
+
+struct sys_mem_usage { const void *lpVtbl; LONG ref; };
+static HRESULT WINAPI smu_QI( void *iface, REFIID iid, void **out )
+{
+    struct sys_mem_usage *impl = (struct sys_mem_usage *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ISystemMemoryUsage ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI smu_AddRef( void *iface ) { return InterlockedIncrement( &((struct sys_mem_usage *)iface)->ref ); }
+static ULONG WINAPI smu_Release( void *iface )
+{
+    struct sys_mem_usage *impl = (struct sys_mem_usage *)iface;
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) free( impl );
+    return r;
+}
+static HRESULT WINAPI smu_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_ISystemMemoryUsage;
+    *c = 1;
+    return S_OK;
+}
+static HRESULT WINAPI smu_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.System.Diagnostics.SystemMemoryUsage";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI smu_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI smu_GetReport( void *iface, void **out )
+{
+    struct sys_mem_report *r;
+    MEMORYSTATUSEX ms;
+    if (!out) return E_POINTER;
+    if (!(r = calloc( 1, sizeof(*r) ))) return E_OUTOFMEMORY;
+    r->lpVtbl = smr_vtbl;
+    r->ref = 1;
+    ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx( &ms ))
+    {
+        r->total_phys = ms.ullTotalPhys;
+        r->avail_phys = ms.ullAvailPhys;
+        r->committed = ms.ullTotalPageFile > ms.ullAvailPageFile ? ms.ullTotalPageFile - ms.ullAvailPageFile : 0;
+    }
+    *out = r;
+    return S_OK;
+}
+static const void * const smu_vtbl[] =
+{
+    smu_QI, smu_AddRef, smu_Release, smu_GetIids, smu_GetRuntimeClassName, smu_GetTrustLevel,
+    smu_GetReport,
+};
+
+struct sys_cpu_report
+{
+    const void *lpVtbl;
+    LONG ref;
+    INT64 kernel_time;
+    INT64 user_time;
+    INT64 idle_time;
+};
+
+static HRESULT WINAPI scr_QI( void *iface, REFIID iid, void **out )
+{
+    struct sys_cpu_report *impl = (struct sys_cpu_report *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ISystemCpuUsageReport ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI scr_AddRef( void *iface ) { return InterlockedIncrement( &((struct sys_cpu_report *)iface)->ref ); }
+static ULONG WINAPI scr_Release( void *iface )
+{
+    struct sys_cpu_report *impl = (struct sys_cpu_report *)iface;
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) free( impl );
+    return r;
+}
+static HRESULT WINAPI scr_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_ISystemCpuUsageReport;
+    *c = 1;
+    return S_OK;
+}
+static HRESULT WINAPI scr_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.System.Diagnostics.SystemCpuUsageReport";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI scr_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI scr_get_KernelTime( void *iface, INT64 *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct sys_cpu_report *)iface)->kernel_time;
+    return S_OK;
+}
+static HRESULT WINAPI scr_get_UserTime( void *iface, INT64 *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct sys_cpu_report *)iface)->user_time;
+    return S_OK;
+}
+static HRESULT WINAPI scr_get_IdleTime( void *iface, INT64 *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct sys_cpu_report *)iface)->idle_time;
+    return S_OK;
+}
+static const void * const scr_vtbl[] =
+{
+    scr_QI, scr_AddRef, scr_Release, scr_GetIids, scr_GetRuntimeClassName, scr_GetTrustLevel,
+    scr_get_KernelTime, scr_get_UserTime, scr_get_IdleTime,
+};
+
+struct sys_cpu_usage { const void *lpVtbl; LONG ref; };
+static HRESULT WINAPI scu_QI( void *iface, REFIID iid, void **out )
+{
+    struct sys_cpu_usage *impl = (struct sys_cpu_usage *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ISystemCpuUsage ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI scu_AddRef( void *iface ) { return InterlockedIncrement( &((struct sys_cpu_usage *)iface)->ref ); }
+static ULONG WINAPI scu_Release( void *iface )
+{
+    struct sys_cpu_usage *impl = (struct sys_cpu_usage *)iface;
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) free( impl );
+    return r;
+}
+static HRESULT WINAPI scu_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_ISystemCpuUsage;
+    *c = 1;
+    return S_OK;
+}
+static HRESULT WINAPI scu_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.System.Diagnostics.SystemCpuUsage";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI scu_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI scu_GetReport( void *iface, void **out )
+{
+    struct sys_cpu_report *r;
+    FILETIME create, exit_t, kernel, user;
+    if (!out) return E_POINTER;
+    if (!(r = calloc( 1, sizeof(*r) ))) return E_OUTOFMEMORY;
+    r->lpVtbl = scr_vtbl;
+    r->ref = 1;
+    if (GetProcessTimes( GetCurrentProcess(), &create, &exit_t, &kernel, &user ))
+    {
+        r->kernel_time = ((INT64)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
+        r->user_time = ((INT64)user.dwHighDateTime << 32) | user.dwLowDateTime;
+    }
+    r->idle_time = (INT64)GetTickCount64() * 10000;
+    *out = r;
+    return S_OK;
+}
+static const void * const scu_vtbl[] =
+{
+    scu_QI, scu_AddRef, scu_Release, scu_GetIids, scu_GetRuntimeClassName, scu_GetTrustLevel,
+    scu_GetReport,
+};
+
+struct sys_diag_info { const void *lpVtbl; LONG ref; };
+static HRESULT WINAPI sdi_QI( void *iface, REFIID iid, void **out )
+{
+    struct sys_diag_info *impl = (struct sys_diag_info *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ISystemDiagnosticInfo ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI sdi_AddRef( void *iface ) { return InterlockedIncrement( &((struct sys_diag_info *)iface)->ref ); }
+static ULONG WINAPI sdi_Release( void *iface )
+{
+    struct sys_diag_info *impl = (struct sys_diag_info *)iface;
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) free( impl );
+    return r;
+}
+static HRESULT WINAPI sdi_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_ISystemDiagnosticInfo;
+    *c = 1;
+    return S_OK;
+}
+static HRESULT WINAPI sdi_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.System.Diagnostics.SystemDiagnosticInfo";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI sdi_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI sdi_get_MemoryUsage( void *iface, void **out )
+{
+    struct sys_mem_usage *u;
+    if (!out) return E_POINTER;
+    if (!(u = calloc( 1, sizeof(*u) ))) return E_OUTOFMEMORY;
+    u->lpVtbl = smu_vtbl;
+    u->ref = 1;
+    *out = u;
+    return S_OK;
+}
+static HRESULT WINAPI sdi_get_CpuUsage( void *iface, void **out )
+{
+    struct sys_cpu_usage *u;
+    if (!out) return E_POINTER;
+    if (!(u = calloc( 1, sizeof(*u) ))) return E_OUTOFMEMORY;
+    u->lpVtbl = scu_vtbl;
+    u->ref = 1;
+    *out = u;
+    return S_OK;
+}
+static const void * const sdi_vtbl[] =
+{
+    sdi_QI, sdi_AddRef, sdi_Release, sdi_GetIids, sdi_GetRuntimeClassName, sdi_GetTrustLevel,
+    sdi_get_MemoryUsage, sdi_get_CpuUsage,
+};
+
+struct sys_diag_factory
+{
+    const void *lpVtbl_factory;
+    const void *lpVtbl_statics;
+    const void *lpVtbl_statics2;
+};
+static struct sys_diag_factory sys_diag_factory_obj;
+
+static HRESULT WINAPI sdi_fac_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &sys_diag_factory_obj.lpVtbl_factory;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ISystemDiagnosticInfoStatics ))
+    {
+        *out = &sys_diag_factory_obj.lpVtbl_statics;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ISystemDiagnosticInfoStatics2 ))
+    {
+        *out = &sys_diag_factory_obj.lpVtbl_statics2;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI sdi_fac_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI sdi_fac_Release( void *iface ) { return 1; }
+static HRESULT WINAPI sdi_fac_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *c = 0; *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI sdi_fac_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.System.Diagnostics.SystemDiagnosticInfo";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI sdi_fac_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI sdi_fac_ActivateInstance( void *iface, IInspectable **out )
+{
+    if (out) *out = NULL;
+    return E_NOTIMPL;
+}
+static HRESULT WINAPI sdi_statics_GetForCurrentSystem( void *iface, void **out )
+{
+    struct sys_diag_info *impl;
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->lpVtbl = sdi_vtbl;
+    impl->ref = 1;
+    *out = impl;
+    return S_OK;
+}
+static HRESULT WINAPI sdi_statics2_IsArchitectureSupported( void *iface, INT32 arch, boolean *out )
+{
+    if (!out) return E_POINTER;
+    /* ProcessorArchitecture_X64 = 9, X86 = 0 */
+    *out = (arch == 9 || arch == 0);
+    return S_OK;
+}
+static HRESULT WINAPI sdi_statics2_get_PreferredArchitecture( void *iface, INT32 *out )
+{
+    if (!out) return E_POINTER;
+    *out = 9; /* ProcessorArchitecture_X64 */
+    return S_OK;
+}
+
+static const void * const sdi_factory_vtbl[] =
+{
+    sdi_fac_QI, sdi_fac_AddRef, sdi_fac_Release,
+    sdi_fac_GetIids, sdi_fac_GetRuntimeClassName, sdi_fac_GetTrustLevel,
+    sdi_fac_ActivateInstance,
+};
+static const void * const sdi_statics_vtbl[] =
+{
+    sdi_fac_QI, sdi_fac_AddRef, sdi_fac_Release,
+    sdi_fac_GetIids, sdi_fac_GetRuntimeClassName, sdi_fac_GetTrustLevel,
+    sdi_statics_GetForCurrentSystem,
+};
+static const void * const sdi_statics2_vtbl[] =
+{
+    sdi_fac_QI, sdi_fac_AddRef, sdi_fac_Release,
+    sdi_fac_GetIids, sdi_fac_GetRuntimeClassName, sdi_fac_GetTrustLevel,
+    sdi_statics2_IsArchitectureSupported, sdi_statics2_get_PreferredArchitecture,
+};
+static struct sys_diag_factory sys_diag_factory_obj =
+{
+    sdi_factory_vtbl,
+    sdi_statics_vtbl,
+    sdi_statics2_vtbl,
+};
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *name = WindowsGetStringRawBuffer( classid, NULL );
@@ -560,12 +1243,20 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     if (!wcscmp( name, RuntimeClass_Windows_System_User ))
         IActivationFactory_QueryInterface( user_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( name, L"Windows.System.Launcher" ))
+        IActivationFactory_QueryInterface( launcher_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( name, L"Windows.System.UserPicker" ))
+        IActivationFactory_QueryInterface( (IActivationFactory *)&user_picker_statics_obj.vtbl_factory,
+                                           &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( name, RuntimeClass_Windows_System_Diagnostics_Telemetry_PlatformTelemetryClient ))
     {
         struct telemetry_client *c = create_telemetry_client();
         if (c) IActivationFactory_QueryInterface( (IActivationFactory *)c, &IID_IActivationFactory,
                                                   (void **)factory );
     }
+    else if (!wcscmp( name, L"Windows.System.Diagnostics.SystemDiagnosticInfo" ))
+        IActivationFactory_QueryInterface( (IActivationFactory *)&sys_diag_factory_obj.lpVtbl_factory,
+                                           &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( name, L"Windows.Management.Policies.NamedPolicy" ))
         IActivationFactory_QueryInterface( (IActivationFactory *)&named_policy_statics_obj.vtbl_factory,
                                            &IID_IActivationFactory, (void **)factory );

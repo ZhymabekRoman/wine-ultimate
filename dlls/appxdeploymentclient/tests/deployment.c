@@ -61,6 +61,29 @@ static const IID IID_ipm = {0x9a7d4b65, 0x5e8f, 0x4fc7, {0xa2, 0xe5, 0x7f, 0x69,
 static const IID IID_ipm2 = {0xf7aad08d, 0x0840, 0x46f2, {0xb5, 0xd8, 0xca, 0xd4, 0x76, 0x93, 0xa0, 0x95}};
 static const IID IID_istorageitem = {0x4207a996, 0xca2f, 0x42f7, {0xbd, 0xe8, 0x8b, 0x10, 0x45, 0x7a, 0x7f, 0x30}};
 
+/* Real catalog event handler: the catalog AddRefs on add and Releases on
+ * remove, so the handler must be a live IUnknown, not a bare sentinel. */
+static LONG catalog_handler_refs;
+
+static HRESULT WINAPI catalog_handler_QueryInterface( IUnknown *This, REFIID riid, void **obj )
+{
+    *obj = This;
+    return S_OK;
+}
+static ULONG WINAPI catalog_handler_AddRef( IUnknown *This )
+{
+    return InterlockedIncrement( &catalog_handler_refs ) + 1;
+}
+static ULONG WINAPI catalog_handler_Release( IUnknown *This )
+{
+    return InterlockedDecrement( &catalog_handler_refs ) + 1;
+}
+static const IUnknownVtbl catalog_handler_vtbl =
+{
+    catalog_handler_QueryInterface, catalog_handler_AddRef, catalog_handler_Release
+};
+static IUnknown catalog_handler = { &catalog_handler_vtbl };
+
 typedef interface IPackageCatalog IPackageCatalog;
 typedef interface IPackageCatalog2 IPackageCatalog2;
 typedef interface IPackageCatalog3 IPackageCatalog3;
@@ -789,35 +812,35 @@ static void test_package_catalog( void )
     {
         /* PackageInstalling */
         token.value = 0;
-        hr = catalog->lpVtbl->add_PackageInstalling( catalog, (void *)0xdead, &token );
+        hr = catalog->lpVtbl->add_PackageInstalling( catalog, (void *)&catalog_handler, &token );
         ok( hr == S_OK && token.value != 0, "add_PackageInstalling hr %#lx token %I64d\n", hr, token.value );
         hr = catalog->lpVtbl->remove_PackageInstalling( catalog, token );
         ok( hr == S_OK, "remove_PackageInstalling hr %#lx\n", hr );
 
         /* PackageUpdating */
         token.value = 0;
-        hr = catalog->lpVtbl->add_PackageUpdating( catalog, (void *)0xdead, &token );
+        hr = catalog->lpVtbl->add_PackageUpdating( catalog, (void *)&catalog_handler, &token );
         ok( hr == S_OK && token.value != 0, "add_PackageUpdating hr %#lx token %I64d\n", hr, token.value );
         hr = catalog->lpVtbl->remove_PackageUpdating( catalog, token );
         ok( hr == S_OK, "remove_PackageUpdating hr %#lx\n", hr );
 
         /* PackageUninstalling */
         token.value = 0;
-        hr = catalog->lpVtbl->add_PackageUninstalling( catalog, (void *)0xdead, &token );
+        hr = catalog->lpVtbl->add_PackageUninstalling( catalog, (void *)&catalog_handler, &token );
         ok( hr == S_OK && token.value != 0, "add_PackageUninstalling hr %#lx token %I64d\n", hr, token.value );
         hr = catalog->lpVtbl->remove_PackageUninstalling( catalog, token );
         ok( hr == S_OK, "remove_PackageUninstalling hr %#lx\n", hr );
 
         /* PackageStatusChanged */
         token.value = 0;
-        hr = catalog->lpVtbl->add_PackageStatusChanged( catalog, (void *)0xdead, &token );
+        hr = catalog->lpVtbl->add_PackageStatusChanged( catalog, (void *)&catalog_handler, &token );
         ok( hr == S_OK && token.value != 0, "add_PackageStatusChanged hr %#lx token %I64d\n", hr, token.value );
         hr = catalog->lpVtbl->remove_PackageStatusChanged( catalog, token );
         ok( hr == S_OK, "remove_PackageStatusChanged hr %#lx\n", hr );
 
         /* PackageStaging */
         token.value = 0;
-        hr = catalog->lpVtbl->add_PackageStaging( catalog, (void *)0xdead, &token );
+        hr = catalog->lpVtbl->add_PackageStaging( catalog, (void *)&catalog_handler, &token );
         ok( hr == S_OK && token.value != 0, "add_PackageStaging hr %#lx token %I64d\n", hr, token.value );
         hr = catalog->lpVtbl->remove_PackageStaging( catalog, token );
         ok( hr == S_OK, "remove_PackageStaging hr %#lx\n", hr );
@@ -829,7 +852,7 @@ static void test_package_catalog( void )
         if (SUCCEEDED( hr ) && cat2)
         {
             token.value = 0;
-            hr = cat2->lpVtbl->add_PackageContentGroupStaging( cat2, (void *)0xdead, &token );
+            hr = cat2->lpVtbl->add_PackageContentGroupStaging( cat2, (void *)&catalog_handler, &token );
             ok( hr == S_OK && token.value != 0, "add_PackageContentGroupStaging hr %#lx\n", hr );
             hr = cat2->lpVtbl->remove_PackageContentGroupStaging( cat2, token );
             ok( hr == S_OK, "remove_PackageContentGroupStaging hr %#lx\n", hr );
@@ -1056,10 +1079,365 @@ static void test_package_dependencies( void )
     FreeLibrary( mod );
 }
 
+/* Shared plumbing for the dependency tests: a PackageManager from the
+ * activation factory, module kept loaded by the caller. */
+static IPackageManager *create_package_manager( HMODULE *mod_out )
+{
+    static const WCHAR class_name[] = L"Windows.Management.Deployment.PackageManager";
+    HRESULT (WINAPI *p_DllGetActivationFactory)( HSTRING, IActivationFactory ** );
+    IActivationFactory *factory;
+    IInspectable *inspectable;
+    IPackageManager *pm = NULL;
+    HMODULE mod;
+    HSTRING str;
+    HRESULT hr;
+
+    mod = LoadLibraryA( "appxdeploymentclient.dll" );
+    if (!mod) return NULL;
+    p_DllGetActivationFactory = (void *)GetProcAddress( mod, "DllGetActivationFactory" );
+    if (!p_DllGetActivationFactory)
+    {
+        FreeLibrary( mod );
+        return NULL;
+    }
+    WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &str );
+    factory = NULL;
+    hr = p_DllGetActivationFactory( str, &factory );
+    WindowsDeleteString( str );
+    if (hr != S_OK || !factory)
+    {
+        FreeLibrary( mod );
+        return NULL;
+    }
+    inspectable = NULL;
+    hr = IActivationFactory_ActivateInstance( factory, &inspectable );
+    IActivationFactory_Release( factory );
+    if (SUCCEEDED( hr ))
+    {
+        hr = IInspectable_QueryInterface( inspectable, &IID_ipm, (void **)&pm );
+        IInspectable_Release( inspectable );
+    }
+    *mod_out = mod;
+    return pm;
+}
+
+static void seed_dependency_subkey( const WCHAR *index, const WCHAR *full_name,
+                                    const WCHAR *name, const WCHAR *min_version )
+{
+    WCHAR subkey[768];
+    HKEY hkey;
+
+    swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\Dependencies\\%ls", appmodel_key, index );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL )) return;
+    if (full_name && full_name[0])
+        RegSetValueExW( hkey, L"FullName", 0, REG_SZ, (const BYTE *)full_name,
+                        (lstrlenW( full_name ) + 1) * sizeof(WCHAR) );
+    if (name && name[0])
+        RegSetValueExW( hkey, L"Name", 0, REG_SZ, (const BYTE *)name,
+                        (lstrlenW( name ) + 1) * sizeof(WCHAR) );
+    if (min_version && min_version[0])
+        RegSetValueExW( hkey, L"MinVersion", 0, REG_SZ, (const BYTE *)min_version,
+                        (lstrlenW( min_version ) + 1) * sizeof(WCHAR) );
+    RegCloseKey( hkey );
+}
+
+/* The numbered-subkey graph resolves each entry against the staged set with
+ * the MinVersion floor: of the satisfying versions the lowest one wins, a bare
+ * FullName entry answers directly, and a family with no satisfying staged
+ * package is skipped. */
+static void test_package_dependencies_subkey( void )
+{
+    static const WCHAR fw_a1_full[] = L"WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_a2_full[] = L"WineTest.Framework.App_2.5.0.0_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_b_full[] = L"WineTest.Framework.Low_1.0.0.0_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_a1_path[] = L"C:\\WineTestFw\\WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_a2_path[] = L"C:\\WineTestFw\\WineTest.Framework.App_2.5.0.0_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_b_path[] = L"C:\\WineTestFw\\WineTest.Framework.Low_1.0.0.0_x64__t7q2w3e4r5y6";
+    HMODULE mod;
+    IPackageManager *pm;
+    IPackage *pkg;
+    IVectorView_Package *view;
+    HSTRING str;
+    HRESULT hr;
+    UINT32 size = 0;
+
+    pm = create_package_manager( &mod );
+    if (!pm)
+    {
+        ok( FALSE, "no PackageManager for subkey test\n" );
+        return;
+    }
+
+    seed_package_key( fw_a1_full, fw_a1_path, 1 );
+    seed_package_key( fw_a2_full, fw_a2_path, 1 );
+    seed_package_key( fw_b_full, fw_b_path, 1 );
+    seed_package_key( full_name, staged_path, 0 );
+    seed_dependency_subkey( L"0", NULL, L"WineTest.Framework.App", L"1.0.0.0" );
+    seed_dependency_subkey( L"1", NULL, L"WineTest.Framework.App", L"2.0.0.0" );
+    seed_dependency_subkey( L"2", fw_b_full, NULL, NULL );
+    seed_dependency_subkey( L"3", NULL, L"WineTest.Framework.Gone", L"1.0.0.0" );
+
+    pkg = NULL;
+    WindowsCreateString( full_name, ARRAY_SIZE(full_name) - 1, &str );
+    hr = IPackageManager_FindPackageByPackageFullName( pm, str, &pkg );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && pkg, "subkey test FindPackage hr %#lx\n", hr );
+    if (!pkg) goto done;
+
+    view = NULL;
+    hr = IPackage_get_Dependencies( pkg, &view );
+    ok( hr == S_OK && view, "get_Dependencies subkey graph hr %#lx\n", hr );
+    if (view)
+    {
+        IPackage *row;
+
+        IVectorView_Package_get_Size( view, &size );
+        ok( size == 3, "subkey graph size %u, expected 3\n", size );
+
+        row = NULL;
+        if (SUCCEEDED( IVectorView_Package_GetAt( view, 0, &row ) ) && row)
+        {
+            check_package_full_name( row, fw_a1_full );   /* lowest satisfying 1.0.0.0 */
+            IPackage_Release( row );
+        }
+        row = NULL;
+        if (SUCCEEDED( IVectorView_Package_GetAt( view, 1, &row ) ) && row)
+        {
+            check_package_full_name( row, fw_a2_full );   /* floor 2.0.0.0 skips 1.2.3.4 */
+            IPackage_Release( row );
+        }
+        row = NULL;
+        if (SUCCEEDED( IVectorView_Package_GetAt( view, 2, &row ) ) && row)
+        {
+            check_package_full_name( row, fw_b_full );    /* exact FullName entry */
+            IPackage_Release( row );
+        }
+        IVectorView_Package_Release( view );
+    }
+
+done:
+    if (pkg) IPackage_Release( pkg );
+    IPackageManager_Release( pm );
+    RegDeleteTreeW( HKEY_CURRENT_USER, appmodel_key );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6" );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.Framework.App_2.5.0.0_x64__t7q2w3e4r5y6" );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.Framework.Low_1.0.0.0_x64__t7q2w3e4r5y6" );
+    FreeLibrary( mod );
+}
+
+static void write_manifest_file( const WCHAR *path, const char *text )
+{
+    HANDLE h = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL );
+    DWORD written;
+
+    if (h == INVALID_HANDLE_VALUE) return;
+    WriteFile( h, text, lstrlenA( text ), &written, NULL );
+    CloseHandle( h );
+}
+
+/* No recorded graph: the package's own AppxManifest.xml answers
+ * get_Dependencies, its <PackageDependency> entries resolved against the
+ * staged set with their MinVersion floors. */
+static void test_package_dependencies_manifest( void )
+{
+    static const WCHAR fw_a1_full[] = L"WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_a2_full[] = L"WineTest.Framework.App_2.5.0.0_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_a1_path[] = L"C:\\WineTestFw\\WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_a2_path[] = L"C:\\WineTestFw\\WineTest.Framework.App_2.5.0.0_x64__t7q2w3e4r5y6";
+    static const char manifest_text[] =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+        "<Package xmlns=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10\">\n"
+        "  <Identity Name=\"WineTest.Deploy\" Version=\"4.5.6.7\" ProcessorArchitecture=\"x64\""
+        " Publisher=\"CN=WineTest\" />\n"
+        "  <Dependencies>\n"
+        "    <PackageDependency Name=\"WineTest.Framework.App\" MinVersion=\"1.2.0.0\" Publisher=\"CN=WineTest\"/>\n"
+        "  </Dependencies>\n"
+        "</Package>\n";
+    WCHAR manifest_path[MAX_PATH];
+    HMODULE mod;
+    IPackageManager *pm;
+    IPackage *pkg, *row;
+    IVectorView_Package *view;
+    HSTRING str;
+    HRESULT hr;
+    UINT32 size = 0;
+
+    CreateDirectoryW( L"C:\\WineTestStage", NULL );
+    CreateDirectoryW( staged_path, NULL );
+    swprintf( manifest_path, ARRAY_SIZE(manifest_path), L"%ls\\AppxManifest.xml", staged_path );
+    write_manifest_file( manifest_path, manifest_text );
+
+    pm = create_package_manager( &mod );
+    if (!pm)
+    {
+        ok( FALSE, "no PackageManager for manifest test\n" );
+        return;
+    }
+
+    seed_package_key( fw_a1_full, fw_a1_path, 1 );
+    seed_package_key( fw_a2_full, fw_a2_path, 1 );
+    seed_package_key( full_name, staged_path, 0 );
+
+    pkg = NULL;
+    WindowsCreateString( full_name, ARRAY_SIZE(full_name) - 1, &str );
+    hr = IPackageManager_FindPackageByPackageFullName( pm, str, &pkg );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && pkg, "manifest test FindPackage hr %#lx\n", hr );
+    if (pkg)
+    {
+        view = NULL;
+        hr = IPackage_get_Dependencies( pkg, &view );
+        ok( hr == S_OK && view, "get_Dependencies manifest graph hr %#lx\n", hr );
+        if (view)
+        {
+            IVectorView_Package_get_Size( view, &size );
+            ok( size == 1, "manifest graph size %u, expected 1\n", size );
+            row = NULL;
+            if (SUCCEEDED( IVectorView_Package_GetAt( view, 0, &row ) ) && row)
+            {
+                check_package_full_name( row, fw_a1_full );
+                IPackage_Release( row );
+            }
+            IVectorView_Package_Release( view );
+        }
+        IPackage_Release( pkg );
+    }
+
+    IPackageManager_Release( pm );
+    RegDeleteTreeW( HKEY_CURRENT_USER, appmodel_key );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6" );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.Framework.App_2.5.0.0_x64__t7q2w3e4r5y6" );
+    FreeLibrary( mod );
+}
+
+/* AppxRegisterPackageManifest parses <PackageDependency Name MinVersion>,
+ * resolves each against the staged frameworks honoring the floor, and persists
+ * the resolved FullName (plus the requested Name and MinVersion) under
+ * Packages\<FullName>\Dependencies\<index>. */
+static void test_register_manifest_dependencies( void )
+{
+    static const WCHAR fw_full[] = L"WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6";
+    static const WCHAR fw_path[] = L"C:\\WineTestDep\\WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6";
+    static const WCHAR app_dir[] = L"C:\\WineTestDep\\WineTest.DepApp_4.5.6.7_x64__t7q2w3e4r5y6";
+    static const WCHAR app_full[] = L"WineTest.DepApp_4.5.6.7_x64__t7q2w3e4r5y6";
+    static const char manifest_text[] =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+        "<Package xmlns=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10\">\n"
+        "  <Identity Name=\"WineTest.DepApp\" Version=\"4.5.6.7\" ProcessorArchitecture=\"x64\""
+        " Publisher=\"CN=WineTest\" />\n"
+        "  <Dependencies>\n"
+        "    <PackageDependency Name=\"WineTest.Framework.App\" MinVersion=\"1.2.3.0\" Publisher=\"CN=WineTest\"/>\n"
+        "    <PackageDependency Name=\"WineTest.Framework.App\" MinVersion=\"9.9.9.9\" Publisher=\"CN=WineTest\"/>\n"
+        "    <PackageDependency Name=\"WineTest.Framework.Gone\" MinVersion=\"1.0.0.0\"/>\n"
+        "  </Dependencies>\n"
+        "</Package>\n";
+    WCHAR manifest_path[MAX_PATH], subkey[768];
+    HRESULT (WINAPI *p_AppxRegisterPackageManifest)( const WCHAR * );
+    HMODULE mod;
+    IPackageManager *pm;
+    IPackage *pkg, *row;
+    IVectorView_Package *view;
+    HKEY hkey;
+    HSTRING str;
+    HRESULT hr;
+    WCHAR buf[512];
+    DWORD size, type;
+    UINT32 vsize = 0;
+
+    mod = LoadLibraryA( "appxdeploymentclient.dll" );
+    if (!mod) return;
+    p_AppxRegisterPackageManifest = (void *)GetProcAddress( mod, "AppxRegisterPackageManifest" );
+    ok( p_AppxRegisterPackageManifest != NULL, "AppxRegisterPackageManifest not exported\n" );
+    if (!p_AppxRegisterPackageManifest)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+
+    CreateDirectoryW( L"C:\\WineTestDep", NULL );
+    CreateDirectoryW( app_dir, NULL );
+    seed_package_key( fw_full, fw_path, 1 );
+
+    swprintf( manifest_path, ARRAY_SIZE(manifest_path), L"%ls\\AppxManifest.xml", app_dir );
+    write_manifest_file( manifest_path, manifest_text );
+
+    hr = p_AppxRegisterPackageManifest( manifest_path );
+    ok( hr == S_OK, "AppxRegisterPackageManifest hr %#lx\n", hr );
+
+    /* the resolved graph persisted: index 0 carries the fw the floor accepts */
+    swprintf( subkey, ARRAY_SIZE(subkey),
+              L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\%ls\\Dependencies\\0",
+              app_full );
+    hkey = 0;
+    hr = RegOpenKeyExW( HKEY_CURRENT_USER, subkey, 0, KEY_READ, &hkey );
+    ok( hr == ERROR_SUCCESS, "Dependencies\\0 subkey hr %#lx\n", hr );
+    if (hr == ERROR_SUCCESS)
+    {
+        size = sizeof(buf);
+        type = 0;
+        buf[0] = 0;
+        hr = RegQueryValueExW( hkey, L"FullName", NULL, &type, (BYTE *)buf, &size );
+        ok( hr == ERROR_SUCCESS && type == REG_SZ && !wcscmp( buf, fw_full ),
+                "persisted FullName %s\n", debugstr_w( buf ) );
+        size = sizeof(buf);
+        type = 0;
+        buf[0] = 0;
+        if (RegQueryValueExW( hkey, L"MinVersion", NULL, &type, (BYTE *)buf, &size ) == ERROR_SUCCESS)
+            ok( !wcscmp( buf, L"1.2.3.0" ), "persisted MinVersion %s\n", debugstr_w( buf ) );
+        RegCloseKey( hkey );
+    }
+
+    /* and it reads back through the COM face: one row, the floor picked it */
+    pm = create_package_manager( &mod );
+    if (pm)
+    {
+        pkg = NULL;
+        WindowsCreateString( app_full, ARRAY_SIZE(app_full) - 1, &str );
+        hr = IPackageManager_FindPackageByPackageFullName( pm, str, &pkg );
+        WindowsDeleteString( str );
+        ok( hr == S_OK && pkg, "register test FindPackage hr %#lx\n", hr );
+        if (pkg)
+        {
+            view = NULL;
+            hr = IPackage_get_Dependencies( pkg, &view );
+            ok( hr == S_OK && view, "register test get_Dependencies hr %#lx\n", hr );
+            if (view)
+            {
+                IVectorView_Package_get_Size( view, &vsize );
+                ok( vsize == 1, "register graph size %u, expected 1\n", vsize );
+                row = NULL;
+                if (SUCCEEDED( IVectorView_Package_GetAt( view, 0, &row ) ) && row)
+                {
+                    check_package_full_name( row, fw_full );
+                    IPackage_Release( row );
+                }
+                IVectorView_Package_Release( view );
+            }
+            IPackage_Release( pkg );
+        }
+        IPackageManager_Release( pm );
+    }
+
+    swprintf( subkey, ARRAY_SIZE(subkey),
+              L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\%ls", app_full );
+    RegDeleteTreeW( HKEY_CURRENT_USER, subkey );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.Framework.App_1.2.3.4_x64__t7q2w3e4r5y6" );
+    FreeLibrary( mod );
+}
+
 START_TEST( deployment )
 {
     test_register_package();
     test_package_dependencies();
+    test_package_dependencies_subkey();
+    test_package_dependencies_manifest();
+    test_register_manifest_dependencies();
     test_class_factory();
     test_package_catalog();
 }

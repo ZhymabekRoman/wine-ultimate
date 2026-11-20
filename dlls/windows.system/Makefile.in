@@ -1,8 +1,9 @@
 MODULE  = windows.system.dll
-IMPORTS = combase kernelbase advapi32 uuid
+IMPORTS = combase kernelbase advapi32 shell32 uuid
 
 SOURCES = \
 	classes.idl \
 	async.c \
+	launcher.c \
 	main.c \
 	user.c

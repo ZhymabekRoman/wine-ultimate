@@ -9,6 +9,7 @@ SOURCES = \
 	gesturerecognizer.c \
 	inputpane.c \
 	main.c \
+	popups.c \
 	uisettings.c \
 	uiviewsettings.c \
 	windows.ui_private.idl \

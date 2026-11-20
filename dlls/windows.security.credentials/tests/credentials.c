@@ -47,6 +47,20 @@ static const WCHAR user[] = L"wine-credentials-test-user";
 static const WCHAR password[] = L"s3cret";
 static const WCHAR password2[] = L"m0retokens";
 
+/* entries that survive the process, to test registry + DPAPI persistence */
+static const WCHAR persist_resource[] = L"wine-credentials-persist:res\u00e9/\u00fcrl";
+static const WCHAR persist_user[] = L"persist \"user\" \\:<\u20ac>";
+static const WCHAR persist_password[] = L"p\u00e4ss:w0rd#1 <>\"'\\ \u20ac";
+
+/* Phase 2 runs after a first process invocation wrote the entries. */
+static int persistence_phase2( void )
+{
+    WCHAR buf[8];
+
+    if (!GetEnvironmentVariableW( L"WINE_CREDS_PHASE", buf, ARRAY_SIZE( buf ) )) return 0;
+    return !lstrcmpW( buf, L"2" );
+}
+
 static HSTRING hstr( const WCHAR *s )
 {
     HSTRING ret;
@@ -288,6 +302,119 @@ static void test_vault( void )
     ok( hr == S_OK, "FindAllByResource failed, hr %#lx\n", hr );
     expect_vector( vec, 0 );
     __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_Release( vec );
+
+    /* Registry-backed persistence: special-character keys, a second vault
+     * object in this process, and (across invocations) DPAPI round trip. */
+    {
+        HSTRING hpres = hstr( persist_resource );
+        HSTRING husr = hstr( persist_user );
+        HSTRING hpass = hstr( persist_password );
+
+        if (persistence_phase2())
+        {
+            /* the entry was added by the previous Wine process invocation */
+            hr = IPasswordVault_Retrieve( vault, hpres, husr, &cred );
+            ok( hr == S_OK, "Retrieve of a persisted credential failed, hr %#lx\n", hr );
+            if (SUCCEEDED(hr))
+            {
+                check_credential( cred, persist_resource, persist_user, persist_password );
+                IPasswordCredential_Release( cred );
+            }
+
+            hr = IPasswordVault_FindAllByResource( vault, hpres, &vec );
+            ok( hr == S_OK, "FindAllByResource failed, hr %#lx\n", hr );
+            expect_vector( vec, 1 );
+            hr = __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_GetAt( vec, 0, &elem );
+            ok( hr == S_OK, "GetAt failed, hr %#lx\n", hr );
+            check_credential( elem, persist_resource, persist_user, persist_password );
+            IPasswordCredential_Release( elem );
+            __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_Release( vec );
+
+            hr = IPasswordVault_FindAllByUserName( vault, husr, &vec );
+            ok( hr == S_OK, "FindAllByUserName failed, hr %#lx\n", hr );
+            expect_vector( vec, 1 );
+            __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_Release( vec );
+
+            hr = IPasswordVault_RetrieveAll( vault, &vec );
+            ok( hr == S_OK, "RetrieveAll failed, hr %#lx\n", hr );
+            {
+                UINT32 size_all = 0;
+                __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_get_Size( vec, &size_all );
+                ok( size_all == 1, "got size %u, expected 1\n", size_all );
+            }
+            __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_Release( vec );
+
+            /* Remove clears the entry for good */
+            hr = IPasswordCredentialFactory_CreatePasswordCredentialWithDefaultPassword( factory, hpres, husr,
+                                                                                         &cred );
+            ok( hr == S_OK, "CreatePasswordCredentialWithDefaultPassword failed, hr %#lx\n", hr );
+            hr = IPasswordVault_Remove( vault, cred );
+            ok( hr == S_OK, "Remove of a persisted credential failed, hr %#lx\n", hr );
+            IPasswordCredential_Release( cred );
+
+            hr = IPasswordVault_Retrieve( vault, hpres, husr, &cred );
+            ok( hr == HRESULT_FROM_WIN32( ERROR_NOT_FOUND ), "got hr %#lx, expected ERROR_NOT_FOUND\n", hr );
+        }
+        else
+        {
+            hr = IPasswordCredentialFactory_CreatePasswordCredential( factory, hpres, husr, hpass, &cred );
+            ok( hr == S_OK, "CreatePasswordCredential failed, hr %#lx\n", hr );
+            hr = IPasswordVault_Add( vault, cred );
+            ok( hr == S_OK, "Add of the persist entry failed, hr %#lx\n", hr );
+
+            hr = IPasswordVault_Retrieve( vault, hpres, husr, &cred );
+            ok( hr == S_OK, "Retrieve of the persist entry failed, hr %#lx\n", hr );
+            check_credential( cred, persist_resource, persist_user, persist_password );
+            IPasswordCredential_Release( cred );
+
+            /* a fresh vault object (second activation) sees the same store */
+            {
+                IPasswordVault *vault2;
+
+                hr = RoGetActivationFactory( hstr( RuntimeClass_Windows_Security_Credentials_PasswordVault ),
+                                             &IID_IPasswordVault, (void **)&vault2 );
+                ok( hr == S_OK, "RoGetActivationFactory(PasswordVault) #2 failed, hr %#lx\n", hr );
+                hr = IPasswordVault_Retrieve( vault2, hpres, husr, &cred );
+                ok( hr == S_OK, "Retrieve through the second vault failed, hr %#lx\n", hr );
+                check_credential( cred, persist_resource, persist_user, persist_password );
+                IPasswordCredential_Release( cred );
+                IPasswordVault_Release( vault2 );
+            }
+
+            hr = IPasswordVault_FindAllByResource( vault, hpres, &vec );
+            ok( hr == S_OK, "FindAllByResource failed, hr %#lx\n", hr );
+            expect_vector( vec, 1 );
+            hr = __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_GetAt( vec, 0, &elem );
+            ok( hr == S_OK, "GetAt failed, hr %#lx\n", hr );
+            check_credential( elem, persist_resource, persist_user, persist_password );
+            IPasswordCredential_Release( elem );
+            __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_Release( vec );
+
+            hr = IPasswordVault_FindAllByUserName( vault, husr, &vec );
+            ok( hr == S_OK, "FindAllByUserName failed, hr %#lx\n", hr );
+            {
+                UINT32 size_u = 0;
+                __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_get_Size( vec, &size_u );
+                ok( size_u == 1, "got size %u, expected 1\n", size_u );
+            }
+            __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_Release( vec );
+
+            hr = IPasswordVault_RetrieveAll( vault, &vec );
+            ok( hr == S_OK, "RetrieveAll failed, hr %#lx\n", hr );
+            {
+                UINT32 size_all = 0;
+                __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_get_Size( vec, &size_all );
+                ok( size_all >= 1, "got size %u, expected >= 1\n", size_all );
+            }
+            __FIVectorView_1_Windows__CSecurity__CCredentials__CPasswordCredential_Release( vec );
+
+            /* leave the persist entry behind for the phase-2 invocation */
+        }
+
+        WindowsDeleteString( hpres );
+        WindowsDeleteString( husr );
+        WindowsDeleteString( hpass );
+    }
 
     WindowsDeleteString( hresource );
     WindowsDeleteString( huser );

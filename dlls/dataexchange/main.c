@@ -28,6 +28,9 @@ static HRESULT create_core_dragdrop_target(IInspectable **out);
 /* Exported by combase, not declared by the fork's activation.h. */
 HRESULT WINAPI RoGetActivationFactory(HSTRING class_id, REFIID iid, void **factory);
 
+static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_statics_GetForCurrentView(ICoreDragDropManagerStatics *iface,
+                                                                                 ICoreDragDropManager **value);
+
 struct dataexchange
 {
     IActivationFactory IActivationFactory_iface;
@@ -117,8 +120,12 @@ static HRESULT STDMETHODCALLTYPE dataexchange_ActivateInstance(IActivationFactor
 {
     TRACE("iface %p, instance %p.\n", iface, instance);
 
-    /* Activating CoreDragDropTarget yields a fresh default drop target. */
-    return create_core_dragdrop_target(instance);
+    /* RoActivateInstance on CoreDragDropManager yields the manager of the
+     * current view, the same object the statics' GetForCurrentView hands out;
+     * the manager answers the class' default interface ICoreDragDropManager. */
+    if (!instance) return E_POINTER;
+    return core_dragdrop_manager_statics_GetForCurrentView( &impl_from_IActivationFactory( iface )->ICoreDragDropManagerStatics_iface,
+                                                            (ICoreDragDropManager **)instance );
 }
 
 static const struct IActivationFactoryVtbl activation_factory_vtbl =
@@ -674,10 +681,16 @@ struct core_dragdrop_manager
     BOOL registered;
     BOOL concurrent;
     ICoreDropOperationTarget *target;     /* default CoreDragDropTarget, created on demand */
-    ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs *handler;
-    int64_t token;                        /* token handed out for the registered handler */
+    struct list handlers;                 /* target_requested_registration entries, guarded by manager_cs */
     HWND hwnd;
     LONG ref;
+};
+
+struct target_requested_registration
+{
+    struct list entry;
+    ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs *handler;
+    int64_t token;                        /* token handed out for this registration */
 };
 
 struct manager_registry_entry
@@ -712,6 +725,7 @@ static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_QueryInterface(ICoreDragD
 
     if (IsEqualGUID(iid, &IID_IUnknown)
         || IsEqualGUID(iid, &IID_IInspectable)
+        || IsEqualGUID(iid, &IID_IAgileObject)
         || IsEqualGUID(iid, &IID_ICoreDragDropManager))
     {
         IUnknown_AddRef(iface);
@@ -746,10 +760,25 @@ static ULONG STDMETHODCALLTYPE core_dragdrop_manager_Release(ICoreDragDropManage
             EnterCriticalSection(&manager_cs);
             list_remove(&impl->registry_entry);
             LeaveCriticalSection(&manager_cs);
-            IUnknown_Release(impl->window);
+            if (impl->window)
+                IUnknown_Release(impl->window);
         }
-        ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs_Release(impl->handler);
-        ICoreDropOperationTarget_Release(impl->target);
+        if (!list_empty(&impl->handlers))
+        {
+            struct target_requested_registration *reg, *next;
+
+            EnterCriticalSection(&manager_cs);
+            LIST_FOR_EACH_ENTRY_SAFE( reg, next, &impl->handlers, struct target_requested_registration, entry )
+            {
+                list_remove(&reg->entry);
+                if (reg->handler)
+                    ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs_Release(reg->handler);
+                free(reg);
+            }
+            LeaveCriticalSection(&manager_cs);
+        }
+        if (impl->target)
+            ICoreDropOperationTarget_Release(impl->target);
         free(impl);
     }
 
@@ -759,22 +788,37 @@ static ULONG STDMETHODCALLTYPE core_dragdrop_manager_Release(ICoreDragDropManage
 static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_GetIids(ICoreDragDropManager *iface,
                                                                ULONG *iid_count, IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    static const IID *const list[] =
+    {
+        &IID_ICoreDragDropManager,
+        &IID_ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs,
+    };
+    IID *arr;
+    ULONG i;
+
+    if (!iid_count || !iids) return E_POINTER;
+    if (!(arr = CoTaskMemAlloc( ARRAY_SIZE( list ) * sizeof(*arr) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < ARRAY_SIZE( list ); i++) arr[i] = *list[i];
+    *iid_count = ARRAY_SIZE( list );
+    *iids = arr;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_GetRuntimeClassName(ICoreDragDropManager *iface,
                                                                            HSTRING *class_name)
 {
-    FIXME("iface %p, class_name %p stub!\n", iface, class_name);
-    return E_NOTIMPL;
+    static const WCHAR class[] = L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager";
+
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( class, ARRAY_SIZE( class ) - 1, class_name );
 }
 
 static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_GetTrustLevel(ICoreDragDropManager *iface,
                                                                      TrustLevel *trust_level)
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
-    return E_NOTIMPL;
+    if (!trust_level) return E_POINTER;
+    *trust_level = 0; /* TrustLevel_Base */
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_add_TargetRequested(ICoreDragDropManager *iface,
@@ -782,17 +826,23 @@ static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_add_TargetRequested(ICore
                                                                            EventRegistrationToken *return_value)
 {
     struct core_dragdrop_manager *impl = impl_from_ICoreDragDropManager(iface);
-    int64_t token;
+    struct target_requested_registration *reg;
 
     TRACE("iface %p, value %p, return_value %p.\n", iface, value, return_value);
 
-    /* Monotonic nonzero tokens, matching the Windows event registration. */
-    token = InterlockedIncrement64(&manager_token);
+    if (!value || !return_value) return E_POINTER;
+    if (!(reg = malloc( sizeof(*reg) ))) return E_OUTOFMEMORY;
+
+    /* Monotonic nonzero tokens, matching the Windows event registration;
+     * every registration is held (AddRef) until its token is removed. */
+    InitOnceExecuteOnce( &manager_cs_once, manager_cs_init, NULL, NULL );
+    reg->handler = value;
+    reg->token = InterlockedIncrement64(&manager_token);
     ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs_AddRef(value);
-    ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs_Release(impl->handler);
-    impl->handler = value;
-    impl->token = token;
-    return_value->value = token;
+    EnterCriticalSection( &manager_cs );
+    list_add_tail( &impl->handlers, &reg->entry );
+    LeaveCriticalSection( &manager_cs );
+    return_value->value = reg->token;
     return S_OK;
 }
 
@@ -800,15 +850,25 @@ static HRESULT STDMETHODCALLTYPE core_dragdrop_manager_remove_TargetRequested(IC
                                                                               EventRegistrationToken value)
 {
     struct core_dragdrop_manager *impl = impl_from_ICoreDragDropManager(iface);
+    struct target_requested_registration *reg;
 
     TRACE("iface %p, value %#I64x.\n", iface, value.value);
 
-    if (value.value != impl->token)
-        return E_INVALIDARG;
-
-    ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs_Release(impl->handler);
-    impl->handler = NULL;
-    impl->token = 0;
+    /* Removal is idempotent: an unknown (or already removed) token is a no-op. */
+    InitOnceExecuteOnce( &manager_cs_once, manager_cs_init, NULL, NULL );
+    EnterCriticalSection( &manager_cs );
+    LIST_FOR_EACH_ENTRY( reg, &impl->handlers, struct target_requested_registration, entry )
+    {
+        if (reg->token == value.value)
+        {
+            list_remove( &reg->entry );
+            LeaveCriticalSection( &manager_cs );
+            ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs_Release( reg->handler );
+            free( reg );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &manager_cs );
     return S_OK;
 }
 
@@ -879,18 +939,17 @@ static HRESULT create_core_dragdrop_manager(HWND hwnd, REFIID iid, void **out)
     struct core_dragdrop_manager *manager;
     HRESULT hr;
 
-    if (!IsWindow(hwnd))
-        return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
-
-    if (hwnd == GetDesktopWindow())
-        return E_ACCESSDENIED;
-
+    /* The window is only recorded, not validated: the projection hands
+     * GetForWindow its own HWND (a synthetic one included) and expects the
+     * manager back for it. */
     if (!(manager = calloc(1, sizeof(*manager))))
         return E_OUTOFMEMORY;
 
     manager->ICoreDragDropManager_iface.lpVtbl = &core_dragdrop_manager_vtbl;
     manager->hwnd = hwnd;
     manager->ref = 1;
+    manager->concurrent = TRUE;   /* AreConcurrentOperationsEnabled defaults to TRUE, as on Windows */
+    list_init( &manager->handlers );
     hr = ICoreDragDropManager_QueryInterface(&manager->ICoreDragDropManager_iface, iid, out);
     ICoreDragDropManager_Release(&manager->ICoreDragDropManager_iface);
     return hr;
@@ -928,6 +987,8 @@ static HRESULT manager_for_window( __x_ABI_CWindows_CUI_CCore_CICoreWindow *wind
     }
     manager->ICoreDragDropManager_iface.lpVtbl = &core_dragdrop_manager_vtbl;
     manager->ref = 1;
+    manager->concurrent = TRUE;   /* AreConcurrentOperationsEnabled defaults to TRUE, as on Windows */
+    list_init( &manager->handlers );
 
     if (!(entry = malloc( sizeof(*entry) )))
     {

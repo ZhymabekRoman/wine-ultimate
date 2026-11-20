@@ -22,6 +22,7 @@
 import "windows.system.idl";
 
 namespace Windows.System {
+    runtimeclass Launcher;
     runtimeclass User;
     namespace Diagnostics.Telemetry
     {

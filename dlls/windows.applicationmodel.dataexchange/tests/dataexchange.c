@@ -399,6 +399,179 @@ static const struct __FIIterable_1_Windows__CStorage__CIStorageItemVtbl iterable
 
 static __FIIterable_1_Windows__CStorage__CIStorageItem test_iterable = { &iterable_vtbl };
 
+/* Test-side IStorageItem over a fixed path (the SetStorageItems payload of
+ * the file round-trip: the module serializes get_Path() into CF_HDROP). */
+struct t_item
+{
+    const struct __x_ABI_CWindows_CStorage_CIStorageItemVtbl *lpVtbl;
+    const WCHAR *path;
+};
+
+static HRESULT WINAPI titem_QueryInterface( __x_ABI_CWindows_CStorage_CIStorageItem *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IStorageItem ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI titem_AddRef( __x_ABI_CWindows_CStorage_CIStorageItem *iface ) { return 2; }
+static ULONG WINAPI titem_Release( __x_ABI_CWindows_CStorage_CIStorageItem *iface ) { return 1; }
+static HRESULT WINAPI titem_GetIids( __x_ABI_CWindows_CStorage_CIStorageItem *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI titem_GetRuntimeClassName( __x_ABI_CWindows_CStorage_CIStorageItem *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Storage.StorageFile";
+    return WindowsCreateString( cls, ARRAY_SIZE( cls ) - 1, n );
+}
+
+static HRESULT WINAPI titem_GetTrustLevel( __x_ABI_CWindows_CStorage_CIStorageItem *iface, TrustLevel *l ) { return E_NOTIMPL; }
+static HRESULT WINAPI titem_RenameAsyncOverload( __x_ABI_CWindows_CStorage_CIStorageItem *iface, HSTRING name,
+                                                 __x_ABI_CWindows_CFoundation_CIAsyncAction **op ) { return E_NOTIMPL; }
+static HRESULT WINAPI titem_RenameAsync( __x_ABI_CWindows_CStorage_CIStorageItem *iface, HSTRING name,
+                                         enum __x_ABI_CWindows_CStorage_CNameCollisionOption o,
+                                         __x_ABI_CWindows_CFoundation_CIAsyncAction **op2 ) { return E_NOTIMPL; }
+static HRESULT WINAPI titem_DeleteAsyncOverload( __x_ABI_CWindows_CStorage_CIStorageItem *iface,
+                                                 __x_ABI_CWindows_CFoundation_CIAsyncAction **op ) { return E_NOTIMPL; }
+static HRESULT WINAPI titem_DeleteAsync( __x_ABI_CWindows_CStorage_CIStorageItem *iface,
+                                         enum __x_ABI_CWindows_CStorage_CStorageDeleteOption o,
+                                         __x_ABI_CWindows_CFoundation_CIAsyncAction **op2 ) { return E_NOTIMPL; }
+static HRESULT WINAPI titem_GetBasicPropertiesAsync( __x_ABI_CWindows_CStorage_CIStorageItem *iface,
+                                                     __FIAsyncOperation_1_Windows__CStorage__CFileProperties__CBasicProperties **op ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI titem_get_Name( __x_ABI_CWindows_CStorage_CIStorageItem *iface, HSTRING *value )
+{
+    struct t_item *impl = (struct t_item *)iface;
+    const WCHAR *p = wcsrchr( impl->path, L'\\' );
+
+    p = p ? p + 1 : impl->path;
+    return WindowsCreateString( p, lstrlenW( p ), value );
+}
+
+static HRESULT WINAPI titem_get_Path( __x_ABI_CWindows_CStorage_CIStorageItem *iface, HSTRING *value )
+{
+    struct t_item *impl = (struct t_item *)iface;
+
+    return WindowsCreateString( impl->path, lstrlenW( impl->path ), value );
+}
+
+static HRESULT WINAPI titem_get_Attributes( __x_ABI_CWindows_CStorage_CIStorageItem *iface,
+                                            enum __x_ABI_CWindows_CStorage_CFileAttributes *value )
+{
+    *value = FileAttributes_Normal;
+    return S_OK;
+}
+
+static HRESULT WINAPI titem_get_DateCreated( __x_ABI_CWindows_CStorage_CIStorageItem *iface,
+                                             struct __x_ABI_CWindows_CFoundation_CDateTime *value ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI titem_IsOfType( __x_ABI_CWindows_CStorage_CIStorageItem *iface,
+                                      enum __x_ABI_CWindows_CStorage_CStorageItemTypes type, boolean *value )
+{
+    *value = type == StorageItemTypes_File;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CStorage_CIStorageItemVtbl titem_vtbl =
+{
+    titem_QueryInterface, titem_AddRef, titem_Release, titem_GetIids, titem_GetRuntimeClassName, titem_GetTrustLevel,
+    titem_RenameAsyncOverload, titem_RenameAsync, titem_DeleteAsyncOverload, titem_DeleteAsync,
+    titem_GetBasicPropertiesAsync, titem_get_Name, titem_get_Path, titem_get_Attributes,
+    titem_get_DateCreated, titem_IsOfType,
+};
+
+static struct t_item t_item_a = { &titem_vtbl, NULL };
+static struct t_item t_item_b = { &titem_vtbl, NULL };
+static ULONG titer_pos;
+
+static HRESULT WINAPI titer_QueryInterface( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI titer_AddRef( __FIIterator_1_Windows__CStorage__CIStorageItem *iface ) { return 2; }
+static ULONG WINAPI titer_Release( __FIIterator_1_Windows__CStorage__CIStorageItem *iface ) { return 1; }
+static HRESULT WINAPI titer_GetIids( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI titer_GetRuntimeClassName( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, HSTRING *n ) { return E_NOTIMPL; }
+static HRESULT WINAPI titer_GetTrustLevel( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, TrustLevel *l ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI titer_get_Current( __FIIterator_1_Windows__CStorage__CIStorageItem *iface,
+                                         __x_ABI_CWindows_CStorage_CIStorageItem **value )
+{
+    *value = titer_pos == 0 ? (__x_ABI_CWindows_CStorage_CIStorageItem *)&t_item_a
+                            : (__x_ABI_CWindows_CStorage_CIStorageItem *)&t_item_b;
+    return S_OK;
+}
+
+static HRESULT WINAPI titer_get_HasCurrent( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, boolean *value )
+{
+    *value = titer_pos < 2;
+    return S_OK;
+}
+
+static HRESULT WINAPI titer_MoveNext( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, boolean *value )
+{
+    titer_pos++;
+    *value = titer_pos < 2;
+    return S_OK;
+}
+
+static HRESULT WINAPI titer_GetMany( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, UINT32 cap,
+                                     __x_ABI_CWindows_CStorage_CIStorageItem **items, UINT32 *count )
+{
+    *count = 0;
+    return S_OK;
+}
+
+static const struct __FIIterator_1_Windows__CStorage__CIStorageItemVtbl titer_vtbl =
+{
+    titer_QueryInterface, titer_AddRef, titer_Release, titer_GetIids, titer_GetRuntimeClassName, titer_GetTrustLevel,
+    titer_get_Current, titer_get_HasCurrent, titer_MoveNext, titer_GetMany,
+};
+
+static __FIIterator_1_Windows__CStorage__CIStorageItem t_iterator = { &titer_vtbl };
+
+static HRESULT WINAPI titerable_QueryInterface( __FIIterable_1_Windows__CStorage__CIStorageItem *iface,
+                                                REFIID iid, void **out )
+{
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI titerable_AddRef( __FIIterable_1_Windows__CStorage__CIStorageItem *iface ) { return 2; }
+static ULONG WINAPI titerable_Release( __FIIterable_1_Windows__CStorage__CIStorageItem *iface ) { return 1; }
+static HRESULT WINAPI titerable_GetIids( __FIIterable_1_Windows__CStorage__CIStorageItem *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI titerable_GetRuntimeClassName( __FIIterable_1_Windows__CStorage__CIStorageItem *iface, HSTRING *n ) { return E_NOTIMPL; }
+static HRESULT WINAPI titerable_GetTrustLevel( __FIIterable_1_Windows__CStorage__CIStorageItem *iface, TrustLevel *l ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI titerable_First( __FIIterable_1_Windows__CStorage__CIStorageItem *iface,
+                                       __FIIterator_1_Windows__CStorage__CIStorageItem **value )
+{
+    titer_pos = 0;
+    *value = &t_iterator;
+    return S_OK;
+}
+
+static const struct __FIIterable_1_Windows__CStorage__CIStorageItemVtbl titerable_vtbl =
+{
+    titerable_QueryInterface, titerable_AddRef, titerable_Release, titerable_GetIids, titerable_GetRuntimeClassName,
+    titerable_GetTrustLevel, titerable_First,
+};
+
+static __FIIterable_1_Windows__CStorage__CIStorageItem t_iterable = { &titerable_vtbl };
+
+/* The CF_HDROP header (include/shlobj.h:1750), declared locally. */
+typedef struct
+{
+    DWORD pFiles;
+    POINT pt;
+    BOOL  fNC;
+    BOOL  fWide;
+} t_dropfiles;
+
 static void test_data_package( void )
 {
     IDataPackageView2 *view2 = (void *)0xdeadbeef;
@@ -438,7 +611,7 @@ static void test_data_package( void )
 
     hr = IDataPackageView_get_RequestedOperation( view, &requested );
     check_hr( hr, S_OK );
-    ok( requested == DataPackageOperation_Link, "got operation %#lx.\n", requested );
+    ok( requested == DataPackageOperation_Link, "got operation %#lx.\n", (unsigned long)requested );
 
     hr = IDataPackageView_ReportOperationCompleted( view, DataPackageOperation_Copy );
     check_hr( hr, S_OK );
@@ -768,7 +941,7 @@ static void test_standard_formats( void )
     check_format( statics, IStandardDataFormatsStatics_get_Uri, L"Uri" );
     check_format( statics, IStandardDataFormatsStatics_get_Rtf, L"Rtf" );
     check_format( statics, IStandardDataFormatsStatics_get_Bitmap, L"Bitmap" );
-    check_format( statics, IStandardDataFormatsStatics_get_StorageItems, L"StorageItems" );
+    check_format( statics, IStandardDataFormatsStatics_get_StorageItems, L"Shell IDList Array" );
     check_format( (IStandardDataFormatsStatics *)statics2,
                   (HRESULT (STDMETHODCALLTYPE *)( IStandardDataFormatsStatics *, HSTRING * ))IStandardDataFormatsStatics2_get_WebLink,
                   L"WebLink" );
@@ -1280,6 +1453,104 @@ static void check_bitmap_ref_valid( __x_ABI_CWindows_CStorage_CStreams_CIRandomA
     __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( buf );
 }
 
+/* Verify a Bitmap stream reference carries our 4x4 32bpp BMP payload:
+ * full 'BM' file, image/bmp content type and the exact pixel dwords. */
+static void check_bitmap_ref_dib( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref,
+                                  DWORD expected_pixel )
+{
+    static const WCHAR buf_cls[] = L"Windows.Storage.Streams.Buffer";
+    static const WCHAR bmp_type[] = L"image/bmp";
+    __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType *open_op = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType *wct = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *stream = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIInputStream *input = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory *buf_factory = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer *buf = NULL, *read_buf = NULL;
+    __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 *read_op = NULL;
+    IBufferByteAccess *access = NULL;
+    UINT64 sz = 0;
+    UINT32 len = 0, i, bad = 0;
+    BYTE *bytes = NULL;
+    HSTRING hstr, ctype = NULL;
+    HRESULT hr;
+
+    ok( !!ref, "bitmap ref is NULL.\n" );
+    if (!ref) return;
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_OpenReadAsync( ref, &open_op );
+    check_hr( hr, S_OK );
+    hr = __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType_GetResults( open_op, &wct );
+    check_hr( hr, S_OK );
+    __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType_Release( open_op );
+    if (FAILED( hr ) || !wct) return;
+
+    /* Win11 C projection: get_ContentType sits at vtable slot 15 on the
+     * RandomAccessStreamWithContentType face (the tree's C header models the
+     * interface as bare IInspectable, so call the slot directly). */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, HSTRING *))*((void **)wct->lpVtbl + 15))( wct, &ctype );
+    check_hr( hr, S_OK );
+    ok( str_eq( ctype, bmp_type ), "got content type %s, expected image/bmp.\n",
+        debugstr_w( WindowsGetStringRawBuffer( ctype, NULL ) ) );
+    WindowsDeleteString( ctype );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType_QueryInterface(
+            wct, &IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream, (void **)&stream );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType_Release( wct );
+    if (FAILED( hr )) return;
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_get_Size( stream, &sz );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Seek( stream, 0 );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_QueryInterface(
+            stream, &IID___x_ABI_CWindows_CStorage_CStreams_CIInputStream, (void **)&input );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Release( stream );
+    if (FAILED( hr )) return;
+
+    hstr = str( buf_cls );
+    hr = RoGetActivationFactory( hstr, &IID___x_ABI_CWindows_CStorage_CStreams_CIBufferFactory, (void **)&buf_factory );
+    WindowsDeleteString( hstr );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory_Create( buf_factory, (UINT32)sz, &buf );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory_Release( buf_factory );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIInputStream_ReadAsync( input, buf, (UINT32)sz, InputStreamOptions_None, &read_op );
+    check_hr( hr, S_OK );
+    hr = __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32_GetResults( read_op, &read_buf );
+    check_hr( hr, S_OK );
+    __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32_Release( read_op );
+    __x_ABI_CWindows_CStorage_CStreams_CIInputStream_Release( input );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_get_Length( read_buf, &len );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_QueryInterface( read_buf, &IID_IBufferByteAccess, (void **)&access );
+    check_hr( hr, S_OK );
+    hr = IBufferByteAccess_Buffer( access, &bytes );
+    check_hr( hr, S_OK );
+    ok( len == sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + 4 * 4 * 4, "got %u bitmap bytes.\n", len );
+    if (len >= sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + 4 * 4 * 4)
+    {
+        const BITMAPFILEHEADER *bfh = (const BITMAPFILEHEADER *)bytes;
+        const BITMAPINFOHEADER *bih = (const BITMAPINFOHEADER *)(bytes + sizeof(BITMAPFILEHEADER));
+        const DWORD *px = (const DWORD *)(bih + 1);
+
+        ok( bfh->bfType == 0x4D42, "got bfType %#x.\n", bfh->bfType );
+        ok( bih->biSize == sizeof(*bih) && bih->biWidth == 4 && abs( bih->biHeight ) == 4 &&
+            bih->biBitCount == 32 && bih->biCompression == BI_RGB,
+            "got header size %lu, %ldx%ld, %u bpp, compression %#lx.\n",
+            bih->biSize, bih->biWidth, bih->biHeight, bih->biBitCount, bih->biCompression );
+        for (i = 0; i < 16; i++)
+            if (px[i] != expected_pixel) bad++;
+        ok( !bad, "%u of 16 pixels differ from %#lx.\n", bad, expected_pixel );
+    }
+    IBufferByteAccess_Release( access );
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( read_buf );
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( buf );
+}
+
 static void test_clipboard_roundtrip( void )
 {
     static const WCHAR wa_text[] = L"hello wa";
@@ -1417,6 +1688,33 @@ static void test_clipboard_roundtrip( void )
             ok( med.tymed == TYMED_GDI && med.hBitmap != NULL, "IDataObject CF_BITMAP missing.\n" );
             ReleaseStgMedium( &med );
         }
+
+        /* CF_DIB: the BMP stream payload minus the 14-byte file header. */
+        {
+            FORMATETC fmt_dib = { CF_DIB, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+            const BITMAPINFOHEADER *bih;
+            const DWORD *px;
+            SIZE_T sz;
+
+            memset( &med, 0, sizeof(med) );
+            hr = IDataObject_GetData( data_obj, &fmt_dib, &med );
+            check_hr( hr, S_OK );
+            if (SUCCEEDED( hr ) && med.tymed == TYMED_HGLOBAL)
+            {
+                sz = GlobalSize( med.hGlobal );
+                bih = GlobalLock( med.hGlobal );
+                ok( sz == sizeof(*bih) + 4 * 4 * 4, "CF_DIB is %lu bytes.\n", (unsigned long)sz );
+                if (bih && sz == sizeof(*bih) + 4 * 4 * 4)
+                {
+                    px = (const DWORD *)(bih + 1);
+                    ok( bih->biSize == sizeof(*bih) && bih->biWidth == 4 && bih->biBitCount == 32,
+                        "CF_DIB header %lu, %ldx%ld, %u bpp.\n", bih->biSize, bih->biWidth, bih->biHeight, bih->biBitCount );
+                    ok( px[0] == 0xFF112233 && px[15] == 0xFF112233, "CF_DIB pixels %#lx/%#lx.\n", px[0], px[15] );
+                }
+                GlobalUnlock( med.hGlobal );
+            }
+            ReleaseStgMedium( &med );
+        }
         IDataObject_Release( data_obj );
     }
 
@@ -1431,7 +1729,7 @@ static void test_clipboard_roundtrip( void )
             "StartFragment:0000000131\r\nEndFragment:0000000143\r\n"
             "<html><body>\r\n<!--StartFragment--><i>win32</i><!--EndFragment-->\r\n</body></html>";
         UINT cf_html = RegisterClipboardFormatW( L"HTML Format" );
-        HGLOBAL hg_txt, hg_html;
+        HGLOBAL hg_txt, hg_html, hg_dib;
         HBITMAP hbm;
         BYTE *bits = NULL;
         BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), 4, 4, 1, 32, BI_RGB } };
@@ -1456,6 +1754,15 @@ static void test_clipboard_roundtrip( void )
         ReleaseDC( NULL, hdc );
         if (bits) memset( bits, 0x7f, 4 * 4 * 4 );
         SetClipboardData( CF_BITMAP, hbm );
+
+        hg_dib = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, sizeof(BITMAPINFOHEADER) + 4 * 4 * 4 );
+        {
+            BYTE *p = GlobalLock( hg_dib );
+            memcpy( p, &bmi.bmiHeader, sizeof(BITMAPINFOHEADER) );
+            memset( p + sizeof(BITMAPINFOHEADER), 0x7f, 4 * 4 * 4 );
+            GlobalUnlock( hg_dib );
+        }
+        SetClipboardData( CF_DIB, hg_dib );
         CloseClipboard();
 
         wait_res = WaitForSingleObject( cc_event, 3000 );
@@ -1477,8 +1784,110 @@ static void test_clipboard_roundtrip( void )
         check_hr( IDataPackageView_GetBitmapAsync( view, &bmp_op ), S_OK );
         check_hr( __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_GetResults( bmp_op, &got_bmp ), S_OK );
         __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_Release( bmp_op );
-        check_bitmap_ref_valid( got_bmp );
+        check_bitmap_ref_dib( got_bmp, 0x7f7f7f7f );
         if (got_bmp) __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( got_bmp );
+        IDataPackageView_Release( view );
+    }
+
+    /* Win32 CF_DIB-only -> WinRT: the view must build the BMP stream from the
+     * raw DIB bytes (BITMAPFILEHEADER prefix, image/bmp, exact pixels). */
+    {
+        HGLOBAL hg_dib;
+
+        ResetEvent( cc_event );
+        ok( OpenClipboard( NULL ), "OpenClipboard failed.\n" );
+        EmptyClipboard();
+        hg_dib = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, sizeof(BITMAPINFOHEADER) + 4 * 4 * 4 );
+        {
+            BYTE *p = GlobalLock( hg_dib );
+            BITMAPINFOHEADER bmih = { sizeof(bmih), 4, 4, 1, 32, BI_RGB };
+            memcpy( p, &bmih, sizeof(bmih) );
+            memset( p + sizeof(bmih), 0xab, 4 * 4 * 4 );
+            GlobalUnlock( hg_dib );
+        }
+        SetClipboardData( CF_DIB, hg_dib );
+        CloseClipboard();
+
+        wait_res = WaitForSingleObject( cc_event, 3000 );
+        ok( wait_res == WAIT_OBJECT_0, "ContentChanged did not fire on CF_DIB set (wait %lu).\n", wait_res );
+
+        check_hr( IClipboardStatics_GetContent( statics, &view ), S_OK );
+        hstr = str( L"Bitmap" );
+        check_hr( IDataPackageView_Contains( view, hstr, &found ), S_OK );
+        ok( found, "Bitmap missing from CF_DIB-only clipboard view.\n" );
+        WindowsDeleteString( hstr );
+
+        check_hr( IDataPackageView_GetBitmapAsync( view, &bmp_op ), S_OK );
+        check_hr( __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_GetResults( bmp_op, &got_bmp ), S_OK );
+        __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_Release( bmp_op );
+        check_bitmap_ref_dib( got_bmp, 0xabababab );
+        if (got_bmp) __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( got_bmp );
+        IDataPackageView_Release( view );
+    }
+
+    /* WinRT DataPackage::SetBitmap -> Clipboard::SetContent -> Win32 CF_DIB. */
+    {
+        FORMATETC fmt_dib = { CF_DIB, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        STGMEDIUM med = { 0 };
+
+        ResetEvent( cc_event );
+        factory = get_factory( RuntimeClass_Windows_ApplicationModel_DataTransfer_DataPackage );
+        check_hr( IActivationFactory_ActivateInstance( factory, (IInspectable **)&package ), S_OK );
+        IActivationFactory_Release( factory );
+
+        bmp_ref = create_test_bitmap_ref();
+        ok( !!bmp_ref, "failed to create test bitmap ref.\n" );
+        check_hr( IDataPackage_SetBitmap( package, bmp_ref ), S_OK );
+        __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( bmp_ref );
+
+        check_hr( IClipboardStatics_SetContent( statics, package ), S_OK );
+        check_hr( IClipboardStatics_Flush( statics ), S_OK );
+        wait_res = WaitForSingleObject( cc_event, 3000 );
+        ok( wait_res == WAIT_OBJECT_0, "ContentChanged did not fire after bitmap SetContent/Flush (wait %lu).\n", wait_res );
+        IDataPackage_Release( package );
+
+        ok( OpenClipboard( NULL ), "OpenClipboard failed.\n" );
+        ok( IsClipboardFormatAvailable( CF_DIB ), "CF_DIB not offered by the WinRT clipboard push.\n" );
+        ok( IsClipboardFormatAvailable( CF_BITMAP ), "CF_BITMAP not offered by the WinRT clipboard push.\n" );
+        {
+            HGLOBAL hg = GetClipboardData( CF_DIB );
+            ok( !!hg, "GetClipboardData(CF_DIB) returned NULL.\n" );
+            if (hg)
+            {
+                const BITMAPINFOHEADER *bih = GlobalLock( hg );
+                SIZE_T sz = GlobalSize( hg );
+                ok( sz == sizeof(*bih) + 4 * 4 * 4, "Win32 CF_DIB is %lu bytes.\n", (unsigned long)sz );
+                if (bih && sz == sizeof(*bih) + 4 * 4 * 4)
+                {
+                    const DWORD *px = (const DWORD *)(bih + 1);
+                    ok( bih->biSize == sizeof(*bih) && bih->biWidth == 4 && abs( bih->biHeight ) == 4 &&
+                        bih->biBitCount == 32 && bih->biCompression == BI_RGB,
+                        "Win32 CF_DIB header %lu, %ldx%ld, %u bpp, compression %#lx.\n",
+                        bih->biSize, bih->biWidth, bih->biHeight, bih->biBitCount, bih->biCompression );
+                    ok( px[0] == 0xFF112233 && px[15] == 0xFF112233, "Win32 CF_DIB pixels %#lx/%#lx.\n", px[0], px[15] );
+                }
+                GlobalUnlock( hg );
+            }
+        }
+        CloseClipboard();
+
+        /* And through the view's IDataObject, exercising the same GetData path. */
+        check_hr( IClipboardStatics_GetContent( statics, &view ), S_OK );
+        hr = IDataPackageView_QueryInterface( view, &IID_IDataObject, (void **)&data_obj );
+        check_hr( hr, S_OK );
+        if (data_obj)
+        {
+            hr = IDataObject_GetData( data_obj, &fmt_dib, &med );
+            check_hr( hr, S_OK );
+            if (SUCCEEDED( hr ) && med.tymed == TYMED_HGLOBAL)
+            {
+                const BITMAPINFOHEADER *bih = GlobalLock( med.hGlobal );
+                ok( bih && bih->biWidth == 4, "view CF_DIB header missing.\n" );
+                GlobalUnlock( med.hGlobal );
+            }
+            ReleaseStgMedium( &med );
+            IDataObject_Release( data_obj );
+        }
         IDataPackageView_Release( view );
     }
 
@@ -1489,6 +1898,286 @@ static void test_clipboard_roundtrip( void )
     CloseHandle( cc_event );
     cc_event = NULL;
     IHtmlFormatHelperStatics_Release( helper );
+    IClipboardStatics_Release( statics );
+}
+
+/* Win32 CF_HDROP <-> WinRT StorageItems both directions: the wide and ANSI
+ * DROPFILES payloads, the StandardDataFormats::StorageItems name, the
+ * IStorageItem path/name/attributes, and the SetStorageItems -> SetContent ->
+ * GetClipboardData(CF_HDROP) serialization. */
+static HGLOBAL make_hdrop_wide( const WCHAR *p1, const WCHAR *p2 )
+{
+    SIZE_T l1 = lstrlenW( p1 ), l2 = p2 ? lstrlenW( p2 ) : 0;
+    SIZE_T size = sizeof(t_dropfiles) + (l1 + 1 + l2 + 1) * sizeof(WCHAR);
+    t_dropfiles *df;
+    WCHAR *dst;
+    HGLOBAL h;
+
+    if (!(h = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, size ))) return NULL;
+    df = GlobalLock( h );
+    df->pFiles = sizeof(t_dropfiles);
+    df->pt.x = df->pt.y = 0;
+    df->fNC = FALSE;
+    df->fWide = TRUE;
+    dst = (WCHAR *)(df + 1);
+    memcpy( dst, p1, (l1 + 1) * sizeof(WCHAR) );
+    dst += l1 + 1;
+    if (p2)
+    {
+        memcpy( dst, p2, (l2 + 1) * sizeof(WCHAR) );
+        dst += l2 + 1;
+    }
+    *dst = 0;
+    GlobalUnlock( h );
+    return h;
+}
+
+static HGLOBAL make_hdrop_ansi( const WCHAR *p1 )
+{
+    int alen = WideCharToMultiByte( CP_ACP, 0, p1, -1, NULL, 0, NULL, NULL );
+    SIZE_T size = sizeof(t_dropfiles) + alen + 1;
+    t_dropfiles *df;
+    char *dst;
+    HGLOBAL h;
+
+    if (!(h = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, size ))) return NULL;
+    df = GlobalLock( h );
+    df->pFiles = sizeof(t_dropfiles);
+    df->pt.x = df->pt.y = 0;
+    df->fNC = FALSE;
+    df->fWide = FALSE;
+    dst = (char *)(df + 1);
+    WideCharToMultiByte( CP_ACP, 0, p1, -1, dst, alen, NULL, NULL );
+    dst[alen] = '\0';
+    GlobalUnlock( h );
+    return h;
+}
+
+/* One IStorageItem from GetStorageItemsAsync: path, name, attributes, type. */
+static void check_storage_item( __x_ABI_CWindows_CStorage_CIStorageItem *item,
+                                const WCHAR *path, const WCHAR *name, BOOL is_dir )
+{
+    enum __x_ABI_CWindows_CStorage_CFileAttributes got_attrs = 0xdeadbeef;
+    enum __x_ABI_CWindows_CStorage_CStorageItemTypes type;
+    IStorageItem2 *item2 = NULL;
+    HSTRING hstr = NULL;
+    boolean is_type = FALSE;
+    HRESULT hr;
+
+    hr = __x_ABI_CWindows_CStorage_CIStorageItem_QueryInterface( item, &IID_IStorageItem2, (void **)&item2 );
+    check_hr( hr, E_NOINTERFACE );
+    if (item2) IStorageItem2_Release( item2 );
+
+    hr = __x_ABI_CWindows_CStorage_CIStorageItem_get_Path( item, &hstr );
+    check_hr( hr, S_OK );
+    ok( str_eq( hstr, path ), "got path %s, expected %s.\n",
+        debugstr_w( WindowsGetStringRawBuffer( hstr, NULL ) ), debugstr_w( path ) );
+    WindowsDeleteString( hstr );
+
+    hstr = NULL;
+    hr = __x_ABI_CWindows_CStorage_CIStorageItem_get_Name( item, &hstr );
+    check_hr( hr, S_OK );
+    ok( str_eq( hstr, name ), "got name %s, expected %s.\n",
+        debugstr_w( WindowsGetStringRawBuffer( hstr, NULL ) ), debugstr_w( name ) );
+    WindowsDeleteString( hstr );
+
+    hr = __x_ABI_CWindows_CStorage_CIStorageItem_get_Attributes( item, &got_attrs );
+    check_hr( hr, S_OK );
+    if (is_dir) ok( (got_attrs & FileAttributes_Directory) != 0, "got attributes %#lx.\n", (unsigned long)got_attrs );
+    else ok( !(got_attrs & FileAttributes_Directory) && (got_attrs & (FileAttributes_Normal | FileAttributes_Archive)),
+             "got attributes %#lx.\n", (unsigned long)got_attrs );
+
+    type = StorageItemTypes_File;
+    hr = __x_ABI_CWindows_CStorage_CIStorageItem_IsOfType( item, type, &is_type );
+    check_hr( hr, S_OK );
+    ok( is_type == !is_dir, "IsOfType(File) = %u.\n", is_type );
+    is_type = FALSE;
+    type = StorageItemTypes_Folder;
+    hr = __x_ABI_CWindows_CStorage_CIStorageItem_IsOfType( item, type, &is_type );
+    check_hr( hr, S_OK );
+    ok( is_type == !!is_dir, "IsOfType(Folder) = %u.\n", is_type );
+}
+
+static void test_clipboard_files( void )
+{
+    static const WCHAR file_name[] = L"wine-de-file-a.txt";
+    static const WCHAR dir_name[] = L"wine-de-dir-b";
+    __FIVectorView_1_Windows__CStorage__CIStorageItem *items = NULL;
+    IAsyncOperation_IVectorView_IStorageItem *items_op = NULL;
+    __x_ABI_CWindows_CStorage_CIStorageItem *item = NULL;
+    IStandardDataFormatsStatics *fmt_statics = NULL;
+    __FIVectorView_1_HSTRING *formats = NULL;
+    IDataPackage *package = NULL;
+    IDataPackageView *view = NULL;
+    IClipboardStatics *statics = NULL;
+    IActivationFactory *factory;
+    HSTRING path_h = NULL, fmt_name = NULL;
+    WCHAR path_a[MAX_PATH], path_dir[MAX_PATH], base[MAX_PATH];
+    HANDLE file;
+    boolean found = FALSE;
+    UINT32 size = 0;
+    HRESULT hr;
+
+    factory = get_factory( RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard );
+    ok( !!factory, "no Clipboard factory.\n" );
+    if (!factory) return;
+    check_hr( IActivationFactory_QueryInterface( factory, &IID_IClipboardStatics, (void **)&statics ), S_OK );
+    IActivationFactory_Release( factory );
+
+    factory = get_factory( RuntimeClass_Windows_ApplicationModel_DataTransfer_StandardDataFormats );
+    ok( !!factory, "no StandardDataFormats factory.\n" );
+    check_hr( IActivationFactory_QueryInterface( factory, &IID_IStandardDataFormatsStatics, (void **)&fmt_statics ), S_OK );
+    IActivationFactory_Release( factory );
+    check_hr( IStandardDataFormatsStatics_get_StorageItems( fmt_statics, &fmt_name ), S_OK );
+    ok( str_eq( fmt_name, L"Shell IDList Array" ), "got StorageItems name %s.\n",
+        debugstr_w( WindowsGetStringRawBuffer( fmt_name, NULL ) ) );
+
+    GetTempPathW( ARRAY_SIZE( base ), base );
+    lstrcpynW( path_a, base, ARRAY_SIZE( path_a ) );
+    lstrcatW( path_a, file_name );
+    lstrcpynW( path_dir, base, ARRAY_SIZE( path_dir ) );
+    lstrcatW( path_dir, dir_name );
+    file = CreateFileW( path_a, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFileW(%s) failed.\n", debugstr_w( path_a ) );
+    CloseHandle( file );
+    CreateDirectoryW( path_dir, NULL );
+
+    /* Win32 SetClipboardData(CF_HDROP) -> StorageItems, wide paths, in order. */
+    {
+        HGLOBAL hg = make_hdrop_wide( path_a, path_dir );
+
+        ok( OpenClipboard( NULL ), "OpenClipboard failed.\n" );
+        EmptyClipboard();
+        ok( !!SetClipboardData( CF_HDROP, hg ), "SetClipboardData(CF_HDROP) failed.\n" );
+        CloseClipboard();
+
+        check_hr( IClipboardStatics_GetContent( statics, &view ), S_OK );
+        check_hr( IDataPackageView_Contains( view, fmt_name, &found ), S_OK );
+        ok( found, "StorageItems missing from the CF_HDROP clipboard view.\n" );
+
+        hr = IDataPackageView_get_AvailableFormats( view, &formats );
+        check_hr( hr, S_OK );
+        {
+            HSTRING name = NULL;
+
+            hr = __FIVectorView_1_HSTRING_get_Size( formats, &size );
+            check_hr( hr, S_OK );
+            ok( size == 1, "got %u formats for the CF_HDROP clipboard.\n", size );
+            hr = __FIVectorView_1_HSTRING_GetAt( formats, 0, &name );
+            check_hr( hr, S_OK );
+            ok( str_eq( name, L"Shell IDList Array" ), "AvailableFormats[0] = %s.\n",
+                debugstr_w( WindowsGetStringRawBuffer( name, NULL ) ) );
+            WindowsDeleteString( name );
+        }
+        __FIVectorView_1_HSTRING_Release( formats );
+
+        check_hr( IDataPackageView_GetStorageItemsAsync( view, &items_op ), S_OK );
+        check_hr( IAsyncOperation_IVectorView_IStorageItem_GetResults( items_op, &items ), S_OK );
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_get_Size( items, &size ), S_OK );
+        ok( size == 2, "got %u storage items.\n", size );
+
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_GetAt( items, 0, &item ), S_OK );
+        check_storage_item( item, path_a, file_name, FALSE );
+        __x_ABI_CWindows_CStorage_CIStorageItem_Release( item );
+
+        item = NULL;
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_GetAt( items, 1, &item ), S_OK );
+        check_storage_item( item, path_dir, dir_name, TRUE );
+        __x_ABI_CWindows_CStorage_CIStorageItem_Release( item );
+
+        __FIVectorView_1_Windows__CStorage__CIStorageItem_Release( items );
+        IAsyncOperation_IVectorView_IStorageItem_Release( items_op );
+        IDataPackageView_Release( view );
+    }
+
+    /* ANSI DROPFILES (fWide = FALSE): the same single path comes back wide. */
+    {
+        HGLOBAL hg = make_hdrop_ansi( path_a );
+
+        ok( OpenClipboard( NULL ), "OpenClipboard failed.\n" );
+        EmptyClipboard();
+        ok( !!SetClipboardData( CF_HDROP, hg ), "SetClipboardData(CF_HDROP) failed.\n" );
+        CloseClipboard();
+
+        check_hr( IClipboardStatics_GetContent( statics, &view ), S_OK );
+        check_hr( IDataPackageView_GetStorageItemsAsync( view, &items_op ), S_OK );
+        check_hr( IAsyncOperation_IVectorView_IStorageItem_GetResults( items_op, &items ), S_OK );
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_get_Size( items, &size ), S_OK );
+        ok( size == 1, "got %u storage items for the ANSI drop list.\n", size );
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_GetAt( items, 0, &item ), S_OK );
+        check_storage_item( item, path_a, file_name, FALSE );
+        __x_ABI_CWindows_CStorage_CIStorageItem_Release( item );
+        __FIVectorView_1_Windows__CStorage__CIStorageItem_Release( items );
+        IAsyncOperation_IVectorView_IStorageItem_Release( items_op );
+        IDataPackageView_Release( view );
+    }
+
+    /* WinRT SetStorageItems -> SetContent/Flush -> Win32 CF_HDROP round-trip. */
+    {
+        t_dropfiles *df;
+        SIZE_T size_bytes;
+        HGLOBAL hg;
+
+        t_item_a.path = path_a;
+        t_item_b.path = path_dir;
+        factory = get_factory( RuntimeClass_Windows_ApplicationModel_DataTransfer_DataPackage );
+        check_hr( IActivationFactory_ActivateInstance( factory, (IInspectable **)&package ), S_OK );
+        IActivationFactory_Release( factory );
+        check_hr( IDataPackage_SetStorageItemsReadOnly( package, &t_iterable ), S_OK );
+        check_hr( IClipboardStatics_SetContent( statics, package ), S_OK );
+        check_hr( IClipboardStatics_Flush( statics ), S_OK );
+        IDataPackage_Release( package );
+
+        ok( OpenClipboard( NULL ), "OpenClipboard failed.\n" );
+        ok( IsClipboardFormatAvailable( CF_HDROP ), "CF_HDROP not offered by the WinRT clipboard push.\n" );
+        hg = GetClipboardData( CF_HDROP );
+        ok( !!hg, "GetClipboardData(CF_HDROP) returned NULL.\n" );
+        if (hg)
+        {
+            WCHAR *p;
+
+            size_bytes = GlobalSize( hg );
+            df = GlobalLock( hg );
+            ok( size_bytes >= sizeof(*df) + (lstrlenW( path_a ) + 1 + lstrlenW( path_dir ) + 1) * sizeof(WCHAR),
+                "CF_HDROP is %lu bytes.\n", (unsigned long)size_bytes );
+            ok( df && df->pFiles == sizeof(*df) && df->fWide,
+                "DROPFILES header pFiles %u, fWide %d.\n", df ? (UINT)df->pFiles : 0, df ? df->fWide : -1 );
+            p = (WCHAR *)((BYTE *)df + df->pFiles);
+            ok( !wcscmp( p, path_a ), "CF_HDROP path 1 %s.\n", debugstr_w( p ) );
+            p += lstrlenW( p ) + 1;
+            ok( !wcscmp( p, path_dir ), "CF_HDROP path 2 %s.\n", debugstr_w( p ) );
+            p += lstrlenW( p ) + 1;
+            ok( !*p, "CF_HDROP list not double-NUL terminated.\n" );
+            GlobalUnlock( hg );
+        }
+        CloseClipboard();
+
+        /* The WinRT side reads its own serialization back, in order. */
+        check_hr( IClipboardStatics_GetContent( statics, &view ), S_OK );
+        check_hr( IDataPackageView_Contains( view, fmt_name, &found ), S_OK );
+        ok( found, "StorageItems missing after the WinRT push.\n" );
+        check_hr( IDataPackageView_GetStorageItemsAsync( view, &items_op ), S_OK );
+        check_hr( IAsyncOperation_IVectorView_IStorageItem_GetResults( items_op, &items ), S_OK );
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_get_Size( items, &size ), S_OK );
+        ok( size == 2, "got %u items after the WinRT push.\n", size );
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_GetAt( items, 0, &item ), S_OK );
+        check_storage_item( item, path_a, file_name, FALSE );
+        __x_ABI_CWindows_CStorage_CIStorageItem_Release( item );
+        item = NULL;
+        check_hr( __FIVectorView_1_Windows__CStorage__CIStorageItem_GetAt( items, 1, &item ), S_OK );
+        check_storage_item( item, path_dir, dir_name, TRUE );
+        __x_ABI_CWindows_CStorage_CIStorageItem_Release( item );
+        __FIVectorView_1_Windows__CStorage__CIStorageItem_Release( items );
+        IAsyncOperation_IVectorView_IStorageItem_Release( items_op );
+        IDataPackageView_Release( view );
+    }
+
+    DeleteFileW( path_a );
+    RemoveDirectoryW( path_dir );
+    WindowsDeleteString( path_h );
+    WindowsDeleteString( fmt_name );
+    IStandardDataFormatsStatics_Release( fmt_statics );
+    check_hr( IClipboardStatics_Clear( statics ), S_OK );
     IClipboardStatics_Release( statics );
 }
 
@@ -1503,6 +2192,7 @@ START_TEST( dataexchange )
     test_data_package();
     test_clipboard();
     test_clipboard_roundtrip();
+    test_clipboard_files();
     test_standard_formats();
     test_format_keys();
     test_share_surface();

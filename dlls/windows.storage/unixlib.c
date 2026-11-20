@@ -49,7 +49,13 @@ WINE_DEFAULT_DEBUG_CHANNEL(storage);
 static int portal_enabled(void)
 {
     const char *env = getenv("WINE_USE_PORTAL_PICKER");
-    return (env && !strcmp(env, "1")) ? 1 : 0;
+    if (env)
+    {
+        if (!strcmp(env, "0")) return 0;
+        if (!strcmp(env, "1")) return 1;
+    }
+    env = getenv("DBUS_SESSION_BUS_ADDRESS");
+    return (env && *env) ? 1 : 0;
 }
 
 static NTSTATUS storage_portal_is_enabled(void *args)

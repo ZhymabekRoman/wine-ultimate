@@ -2849,3 +2849,288 @@ static struct path_io_statics path_io_statics_obj =
 };
 
 IActivationFactory *path_io_factory = &path_io_statics_obj.IActivationFactory_iface;
+
+/* -------------------------------------------------------------------------- */
+/* AppDataPaths                                                               */
+/* -------------------------------------------------------------------------- */
+
+struct app_data_paths
+{
+    IAppDataPaths IAppDataPaths_iface;
+    LONG ref;
+};
+
+static inline struct app_data_paths *impl_from_IAppDataPaths( IAppDataPaths *iface )
+{
+    return CONTAINING_RECORD( iface, struct app_data_paths, IAppDataPaths_iface );
+}
+
+static HRESULT app_data_paths_create_item( const WCHAR *env_var, const WCHAR *fallback,
+                                           const WCHAR *subdir, BOOL use_temp, IStorageItem **value )
+{
+    WCHAR path[STORAGE_MAX_PATH];
+    IStorageFolder *folder = NULL;
+    DWORD len = 0;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+
+    if (use_temp)
+    {
+        len = GetTempPathW( STORAGE_MAX_PATH, path );
+        while (len > 3 && path[len - 1] == '\\') path[--len] = 0;
+    }
+    else if (env_var)
+    {
+        len = GetEnvironmentVariableW( env_var, path, STORAGE_MAX_PATH );
+    }
+
+    if (!len || len >= STORAGE_MAX_PATH)
+        wcscpy( path, fallback );
+
+    if (subdir && wcslen( path ) + wcslen( subdir ) + 1 < STORAGE_MAX_PATH)
+        wcscat( path, subdir );
+
+    CreateDirectoryW( path, NULL );
+
+    if (FAILED(hr = storage_folder_create( path, &folder )))
+        return hr;
+
+    hr = IStorageFolder_QueryInterface( folder, &IID_IStorageItem, (void **)value );
+    IStorageFolder_Release( folder );
+    return hr;
+}
+
+static HRESULT WINAPI app_data_paths_QueryInterface( IAppDataPaths *iface, REFIID iid, void **out )
+{
+    struct app_data_paths *impl = impl_from_IAppDataPaths( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAppDataPaths ))
+    {
+        *out = &impl->IAppDataPaths_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI app_data_paths_AddRef( IAppDataPaths *iface )
+{
+    struct app_data_paths *impl = impl_from_IAppDataPaths( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI app_data_paths_Release( IAppDataPaths *iface )
+{
+    struct app_data_paths *impl = impl_from_IAppDataPaths( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI app_data_paths_GetIids( IAppDataPaths *iface, ULONG *iid_count, IID **iids )
+{
+    if (!iid_count || !iids) return E_INVALIDARG;
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI app_data_paths_GetRuntimeClassName( IAppDataPaths *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.Storage.AppDataPaths", 28, class_name );
+}
+
+static HRESULT WINAPI app_data_paths_GetTrustLevel( IAppDataPaths *iface, TrustLevel *trust_level )
+{
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI app_data_paths_get_Local( IAppDataPaths *iface, IStorageItem **value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return app_data_paths_create_item( L"LOCALAPPDATA", L"C:\\users\\Public\\AppData\\Local", NULL, FALSE, value );
+}
+
+static HRESULT WINAPI app_data_paths_get_Roaming( IAppDataPaths *iface, IStorageItem **value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return app_data_paths_create_item( L"APPDATA", L"C:\\users\\Public\\AppData\\Roaming", NULL, FALSE, value );
+}
+
+static HRESULT WINAPI app_data_paths_get_Temp( IAppDataPaths *iface, IStorageItem **value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return app_data_paths_create_item( NULL, L"C:\\windows\\temp", NULL, TRUE, value );
+}
+
+static HRESULT WINAPI app_data_paths_get_LocalCache( IAppDataPaths *iface, IStorageItem **value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return app_data_paths_create_item( L"LOCALAPPDATA", L"C:\\users\\Public\\AppData\\Local", L"\\Temp", FALSE, value );
+}
+
+static HRESULT WINAPI app_data_paths_get_RoamingCertificateStores( IAppDataPaths *iface, IStorageItem **value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return app_data_paths_create_item( L"APPDATA", L"C:\\users\\Public\\AppData\\Roaming", NULL, FALSE, value );
+}
+
+static HRESULT WINAPI app_data_paths_get_RoamingApplicationData( IAppDataPaths *iface, IStorageItem **value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return app_data_paths_create_item( L"APPDATA", L"C:\\users\\Public\\AppData\\Roaming", NULL, FALSE, value );
+}
+
+static const struct IAppDataPathsVtbl app_data_paths_vtbl =
+{
+    app_data_paths_QueryInterface,
+    app_data_paths_AddRef,
+    app_data_paths_Release,
+    app_data_paths_GetIids,
+    app_data_paths_GetRuntimeClassName,
+    app_data_paths_GetTrustLevel,
+    app_data_paths_get_Local,
+    app_data_paths_get_Roaming,
+    app_data_paths_get_Temp,
+    app_data_paths_get_LocalCache,
+    app_data_paths_get_RoamingCertificateStores,
+    app_data_paths_get_RoamingApplicationData,
+};
+
+struct app_data_paths_statics
+{
+    IActivationFactory IActivationFactory_iface;
+    IAppDataPathsStatics IAppDataPathsStatics_iface;
+    LONG ref;
+};
+
+static inline struct app_data_paths_statics *impl_from_IActivationFactory_AppDataPaths( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct app_data_paths_statics, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI app_data_paths_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct app_data_paths_statics *impl = impl_from_IActivationFactory_AppDataPaths( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &impl->IActivationFactory_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IAppDataPathsStatics ))
+    {
+        *out = &impl->IAppDataPathsStatics_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI app_data_paths_factory_AddRef( IActivationFactory *iface )
+{
+    struct app_data_paths_statics *impl = impl_from_IActivationFactory_AppDataPaths( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI app_data_paths_factory_Release( IActivationFactory *iface )
+{
+    struct app_data_paths_statics *impl = impl_from_IActivationFactory_AppDataPaths( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI app_data_paths_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
+{
+    if (!iid_count || !iids) return E_INVALIDARG;
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI app_data_paths_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.Storage.AppDataPaths", 28, class_name );
+}
+
+static HRESULT WINAPI app_data_paths_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
+{
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI app_data_paths_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    FIXME( "stub!\n" );
+    return E_NOTIMPL;
+}
+
+static const struct IActivationFactoryVtbl app_data_paths_factory_vtbl =
+{
+    app_data_paths_factory_QueryInterface,
+    app_data_paths_factory_AddRef,
+    app_data_paths_factory_Release,
+    app_data_paths_factory_GetIids,
+    app_data_paths_factory_GetRuntimeClassName,
+    app_data_paths_factory_GetTrustLevel,
+    app_data_paths_factory_ActivateInstance,
+};
+
+DEFINE_IINSPECTABLE( app_data_paths_statics, IAppDataPathsStatics, struct app_data_paths_statics, IActivationFactory_iface )
+
+static HRESULT WINAPI app_data_paths_statics_GetCurrent( IAppDataPathsStatics *iface, IAppDataPaths **value )
+{
+    struct app_data_paths *impl;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+
+    impl->IAppDataPaths_iface.lpVtbl = &app_data_paths_vtbl;
+    impl->ref = 1;
+    *value = &impl->IAppDataPaths_iface;
+    return S_OK;
+}
+
+static const struct IAppDataPathsStaticsVtbl app_data_paths_statics_vtbl =
+{
+    app_data_paths_statics_QueryInterface,
+    app_data_paths_statics_AddRef,
+    app_data_paths_statics_Release,
+    app_data_paths_statics_GetIids,
+    app_data_paths_statics_GetRuntimeClassName,
+    app_data_paths_statics_GetTrustLevel,
+    app_data_paths_statics_GetCurrent,
+};
+
+static struct app_data_paths_statics app_data_paths_statics_obj =
+{
+    {&app_data_paths_factory_vtbl},
+    {&app_data_paths_statics_vtbl},
+    1,
+};
+
+IActivationFactory *app_data_paths_factory = &app_data_paths_statics_obj.IActivationFactory_iface;

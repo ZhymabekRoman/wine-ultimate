@@ -21,11 +21,14 @@
 #include "wine/debug.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "winreg.h"
 #include "objbase.h"
+#include "ole2.h"
 #include "appmodel.h"
 #include "weakreference.h"
+#include <xmllite.h>
 
 static const GUID IID_IWeakReference_local =
     { 0x00000037, 0x0000, 0x0000, {0xc0,0x00,0x00,0x00,0x00,0x00,0x00,0x46} };
@@ -1982,44 +1985,109 @@ static HRESULT WINAPI package_get_IsFramework( IPackage *iface, boolean *value )
 static HRESULT create_package_vectorview( struct package **items, ULONG count, IVectorView_Package **value );
 
 /*
- * The dependency graph: <PackageDependency Name="..."/> names a package family,
- * and registration (manifest.c's process_dependencies) resolves each against the
- * staged framework set, writing the resolved full names into the package's own
- * AppModel\Packages\<FullName> Dependencies value. The rows IPackage::
- * Dependencies hands back are that graph, read through the same registration the
- * FindPackages calls answer from: HKCU's shadow over HKLM's, framework flag and
- * path from the framework's own key. A hand-seeded key naming only the family
- * resolves to the staged package prefixed by it.
+ * The dependency graph: <PackageDependency Name="..." MinVersion="..."/> names
+ * a package family and a version floor, and registration (manifest.c's
+ * process_dependencies) resolves each against the staged framework set,
+ * writing the resolved full name into a numbered
+ * AppModel\Packages\<FullName>\Dependencies\<index> subkey and, as the legacy
+ * shape, into the package's Dependencies multi-sz value. The rows IPackage::
+ * Dependencies hands back are that graph, read through the same registration
+ * the FindPackages calls answer from: HKCU's shadow over HKLM's, framework
+ * flag and path from the framework's own key. A hand-seeded key naming only
+ * the family resolves to the staged package prefixed by it, at a version at
+ * least the entry's MinVersion; with no recorded graph the package's own
+ * AppxManifest.xml <PackageDependency> entries answer.
  */
 
 #define APPMODEL_PACKAGES_KEY L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages"
 
-/* Family name in, staged full name out: the first package key prefixed by it. */
-static BOOL dependency_find_full_name( HKEY root, const WCHAR *family, WCHAR *full, DWORD cch )
+/* 'major.minor.build.revision' into a PackageVersion; short versions have
+ * implicit zero tails. */
+static void parse_pkg_version( const WCHAR *s, PackageVersion *v )
+{
+    WORD *fields = (WORD *)v;
+    int i;
+
+    v->Major = v->Minor = v->Build = v->Revision = 0;
+    for (i = 0; i < 4 && s && *s; i++)
+    {
+        WCHAR *end = NULL;
+        unsigned long n = wcstoul( s, &end, 10 );
+        if (!end || end == s) break;
+        fields[i] = (WORD)n;
+        s = end;
+        if (*s == L'.') s++;
+        else break;
+    }
+}
+
+/* -1 when a is older, 0 equal, 1 newer. */
+static int cmp_pkg_version( const PackageVersion *a, const PackageVersion *b )
+{
+    const WORD *fa = (const WORD *)a, *fb = (const WORD *)b;
+    int i;
+
+    for (i = 0; i < 4; i++)
+        if (fa[i] != fb[i]) return fa[i] < fb[i] ? -1 : 1;
+    return 0;
+}
+
+static BOOL pkg_version_satisfies( const PackageVersion *installed, const WCHAR *min )
+{
+    PackageVersion floor;
+
+    if (!min || !min[0]) return TRUE;
+    parse_pkg_version( min, &floor );
+    return cmp_pkg_version( installed, &floor ) >= 0;
+}
+
+/* Family name in, staged full name out: the package key prefixed by it whose
+ * version is the lowest one at least MinVersion (the framework the app was
+ * built against before its next compatible bump). */
+static BOOL dependency_find_full_name( HKEY root, const WCHAR *family, const WCHAR *min_version,
+                                       WCHAR *full, DWORD cch )
 {
     HKEY hkey;
     DWORD i = 0;
+    SIZE_T n = lstrlenW( family );
+    WCHAR best[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    PackageVersion best_ver;
+    BOOL have_best = FALSE;
 
     if (RegOpenKeyExW( root, APPMODEL_PACKAGES_KEY, 0, KEY_READ, &hkey )) return FALSE;
 
     for (;; i++)
     {
-        DWORD size = cch;
-        SIZE_T n = lstrlenW( family );
+        WCHAR cand[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+        DWORD size = ARRAY_SIZE(cand);
+        PackageVersion ver;
 
-        if (RegEnumKeyExW( hkey, i, full, &size, NULL, NULL, NULL, NULL )) break;
-        if (!wcsnicmp( full, family, n ) && full[n] == L'_')
-        {
-            RegCloseKey( hkey );
-            return TRUE;
-        }
+        if (RegEnumKeyExW( hkey, i, cand, &size, NULL, NULL, NULL, NULL )) break;
+        if (wcsnicmp( cand, family, n ) || cand[n] != L'_') continue;
+
+        ver.Major = ver.Minor = ver.Build = ver.Revision = 0;
+        split_full_name( cand, NULL, 0, &ver, NULL, NULL, 0 );
+        if (!pkg_version_satisfies( &ver, min_version )) continue;
+
+        if (have_best && cmp_pkg_version( &ver, &best_ver ) >= 0) continue;
+        lstrcpynW( best, cand, ARRAY_SIZE(best) );
+        best_ver = ver;
+        have_best = TRUE;
     }
 
     RegCloseKey( hkey );
-    return FALSE;
+    if (!have_best) return FALSE;
+    lstrcpynW( full, best, cch );
+    return TRUE;
 }
 
-static BOOL dependency_record_fill( const WCHAR *entry, struct package_record *rec )
+/*
+ * One graph row in, one record out. The entry is a full name (its own key
+ * answers) or a bare family (the staged package prefixed by it answers, at a
+ * version at least min_version). HKCU shadows HKLM.
+ */
+static BOOL dependency_record_fill( const WCHAR *entry, const WCHAR *min_version,
+                                    struct package_record *rec )
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     WCHAR full[PACKAGE_FULL_NAME_MAX_LENGTH + 1], subkey[640];
@@ -2032,9 +2100,24 @@ static BOOL dependency_record_fill( const WCHAR *entry, struct package_record *r
 
         lstrcpynW( full, entry, ARRAY_SIZE(full) );
         swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\%ls", APPMODEL_PACKAGES_KEY, full );
-        if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey ))
+        if (!RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey ))
         {
-            if (!dependency_find_full_name( roots[r], entry, full, ARRAY_SIZE(full) )) continue;
+            /* the entry is a full name and its key is present: the floor must
+             * be met by the version inside the name itself */
+            PackageVersion ver;
+
+            ver.Major = ver.Minor = ver.Build = ver.Revision = 0;
+            split_full_name( full, NULL, 0, &ver, NULL, NULL, 0 );
+            if (!pkg_version_satisfies( &ver, min_version ))
+            {
+                RegCloseKey( hkey );
+                continue;
+            }
+        }
+        else
+        {
+            if (!dependency_find_full_name( roots[r], entry, min_version, full, ARRAY_SIZE(full) ))
+                continue;
             swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\%ls", APPMODEL_PACKAGES_KEY, full );
             if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey )) continue;
         }
@@ -2044,6 +2127,7 @@ static BOOL dependency_record_fill( const WCHAR *entry, struct package_record *r
         lstrcpynW( rec->full_name, full, ARRAY_SIZE(rec->full_name) );
 
         len = sizeof(fw);
+        type = 0;
         if (RegQueryValueExW( hkey, L"Framework", NULL, &type, (BYTE *)&fw, &len ) == ERROR_SUCCESS
             && type == REG_DWORD)
             rec->framework = fw;
@@ -2067,6 +2151,189 @@ static BOOL dependency_record_fill( const WCHAR *entry, struct package_record *r
     return FALSE;
 }
 
+/* The numbered-subkey graph: Dependencies\0, \1, ... dense from 0, each
+ * carrying the resolved FullName (a Name naming the family answers too) and
+ * the MinVersion floor. Enumeration stops at the first missing index. */
+static ULONG dependency_read_subkeys( HKEY pkg_key, struct package **items, ULONG max )
+{
+    WCHAR slot[32];
+    HKEY hkey;
+    ULONG count = 0;
+
+    if (RegOpenKeyExW( pkg_key, L"Dependencies", 0, KEY_READ, &hkey )) return 0;
+
+    for (ULONG i = 0; count < max; i++)
+    {
+        WCHAR entry[PACKAGE_FULL_NAME_MAX_LENGTH + 1] = {0}, minv[64] = {0};
+        struct package_record rec;
+        HKEY sub;
+        DWORD size, type;
+
+        swprintf( slot, ARRAY_SIZE(slot), L"%lu", i );
+        if (RegOpenKeyExW( hkey, slot, 0, KEY_READ, &sub )) break;
+
+        size = sizeof(entry);
+        type = 0;
+        if (RegQueryValueExW( sub, L"FullName", NULL, &type, (BYTE *)entry, &size ) != ERROR_SUCCESS
+            || !entry[0])
+        {
+            size = sizeof(entry);
+            type = 0;
+            entry[0] = 0;
+            RegQueryValueExW( sub, L"Name", NULL, &type, (BYTE *)entry, &size );
+        }
+        entry[ARRAY_SIZE(entry) - 1] = 0;
+
+        size = sizeof(minv);
+        type = 0;
+        minv[0] = 0;
+        RegQueryValueExW( sub, L"MinVersion", NULL, &type, (BYTE *)minv, &size );
+        minv[ARRAY_SIZE(minv) - 1] = 0;
+        RegCloseKey( sub );
+
+        if (!entry[0]) continue;
+        if (!dependency_record_fill( entry, minv, &rec )) continue;
+        if (SUCCEEDED(package_create( &rec, &items[count] ))) count++;
+    }
+
+    RegCloseKey( hkey );
+    return count;
+}
+
+/* The legacy shape: the Dependencies REG_MULTI_SZ of resolved full names (a
+ * bare-family entry resolves to the staged package prefixed by it). */
+static ULONG dependency_read_value( HKEY pkg_key, struct package **items, ULONG max )
+{
+    WCHAR *buf = NULL, *p, *end;
+    DWORD size = 0, type = 0;
+    ULONG count = 0;
+
+    if (RegQueryValueExW( pkg_key, L"Dependencies", NULL, &type, NULL, &size ) != ERROR_SUCCESS
+        || type != REG_MULTI_SZ || size < sizeof(WCHAR) || !(buf = malloc( size + sizeof(WCHAR) )))
+        return 0;
+
+    size += sizeof(WCHAR);  /* room for the closing NUL a short value may omit */
+    type = 0;
+    if (RegQueryValueExW( pkg_key, L"Dependencies", NULL, &type, (BYTE *)buf, &size ) == ERROR_SUCCESS)
+    {
+        for (p = buf, end = (WCHAR *)((BYTE *)buf + size); p < end && *p && count < max;
+             p += lstrlenW( p ) + 1)
+        {
+            struct package_record rec;
+
+            if (!dependency_record_fill( p, NULL, &rec )) continue;
+            if (SUCCEEDED(package_create( &rec, &items[count] ))) count++;
+        }
+    }
+
+    free( buf );
+    return count;
+}
+
+/* No recorded graph: the package's own AppxManifest.xml answers, resolving its
+ * <PackageDependency Name MinVersion> entries against the staged set. */
+static ULONG dependency_read_manifest( HKEY pkg_key, struct package **items, ULONG max )
+{
+    WCHAR path[MAX_PATH + 32];
+    DWORD size = sizeof(path), type = 0;
+    HANDLE hFile;
+    DWORD file_size, read_bytes;
+    char *raw = NULL;
+    HGLOBAL hMem = NULL;
+    IStream *stream = NULL;
+    IXmlReader *reader = NULL;
+    XmlNodeType node_type;
+    BOOL in_dependencies = FALSE;
+    ULONG count = 0;
+
+    if (RegQueryValueExW( pkg_key, L"PackagePath", NULL, &type, (BYTE *)path, &size ) != ERROR_SUCCESS
+        || !path[0])
+        return 0;
+    path[ARRAY_SIZE(path) - 1] = 0;
+    path[ARRAY_SIZE(path) - 17] = 0; /* leave room for L"\\AppxManifest.xml" */
+    lstrcatW( path, L"\\AppxManifest.xml" );
+
+    hFile = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    if (hFile == INVALID_HANDLE_VALUE) return 0;
+    file_size = GetFileSize( hFile, NULL );
+    if (!file_size || file_size == INVALID_FILE_SIZE || !(raw = malloc( file_size ))
+        || !ReadFile( hFile, raw, file_size, &read_bytes, NULL ) || !read_bytes)
+    {
+        CloseHandle( hFile );
+        free( raw );
+        return 0;
+    }
+    CloseHandle( hFile );
+
+    if ((hMem = GlobalAlloc( GMEM_MOVEABLE, read_bytes )))
+    {
+        memcpy( GlobalLock( hMem ), raw, read_bytes );
+        GlobalUnlock( hMem );
+    }
+    free( raw );
+    if (!hMem) return 0;
+
+    if (FAILED(CreateStreamOnHGlobal( hMem, TRUE, &stream ))) { GlobalFree( hMem ); return 0; }
+    if (FAILED(CreateXmlReader( &IID_IXmlReader, (void **)&reader, NULL )))
+    {
+        IStream_Release( stream );
+        return 0;
+    }
+    if (FAILED(IXmlReader_SetInput( reader, (IUnknown *)stream ))) goto done;
+
+    while (IXmlReader_Read( reader, &node_type ) == S_OK)
+    {
+        const WCHAR *local_name = NULL;
+
+        if (node_type == XmlNodeType_EndElement)
+        {
+            IXmlReader_GetLocalName( reader, &local_name, NULL );
+            if (local_name && !wcscmp( local_name, L"Dependencies" )) in_dependencies = FALSE;
+            continue;
+        }
+        if (node_type != XmlNodeType_Element) continue;
+
+        IXmlReader_GetLocalName( reader, &local_name, NULL );
+        if (!local_name) continue;
+        if (!wcscmp( local_name, L"Dependencies" ))
+        {
+            in_dependencies = TRUE;
+            continue;
+        }
+        if (in_dependencies && !wcscmp( local_name, L"PackageDependency" ) && count < max)
+        {
+            WCHAR name[256] = {0}, minv[64] = {0};
+
+            if (IXmlReader_MoveToFirstAttribute( reader ) == S_OK)
+            {
+                do
+                {
+                    const WCHAR *aname = NULL, *aval = NULL;
+                    IXmlReader_GetLocalName( reader, &aname, NULL );
+                    IXmlReader_GetValue( reader, &aval, NULL );
+                    if (aname && aval)
+                    {
+                        if (!wcscmp( aname, L"Name" )) lstrcpynW( name, aval, ARRAY_SIZE(name) );
+                        else if (!wcscmp( aname, L"MinVersion" )) lstrcpynW( minv, aval, ARRAY_SIZE(minv) );
+                    }
+                } while (IXmlReader_MoveToNextAttribute( reader ) == S_OK);
+                IXmlReader_MoveToElement( reader );
+            }
+            if (name[0])
+            {
+                struct package_record rec;
+                if (dependency_record_fill( name, minv, &rec )
+                    && SUCCEEDED(package_create( &rec, &items[count] ))) count++;
+            }
+        }
+    }
+
+done:
+    IXmlReader_Release( reader );
+    IStream_Release( stream );
+    return count;
+}
+
 static HRESULT WINAPI package_get_Dependencies( IPackage *iface, IVectorView_Package **value )
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
@@ -2078,36 +2345,22 @@ static HRESULT WINAPI package_get_Dependencies( IPackage *iface, IVectorView_Pac
 
     if (!value) return E_INVALIDARG;
 
-    /* the first hive holding a graph answers; an unregistered package has none */
+    /* the first hive holding a graph answers; an unregistered package has none.
+     * inside one hive: the numbered subkeys, then the legacy value, then the
+     * package's own manifest. */
     for (r = 0; r < ARRAY_SIZE(roots) && !count; r++)
     {
-        WCHAR subkey[640], *buf = NULL, *p, *end;
-        DWORD size = 0, type = 0;
+        WCHAR subkey[640];
         HKEY hkey;
 
         swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\%ls", APPMODEL_PACKAGES_KEY, impl->rec.full_name );
         if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey )) continue;
 
-        if (RegQueryValueExW( hkey, L"Dependencies", NULL, &type, NULL, &size ) == ERROR_SUCCESS
-            && type == REG_MULTI_SZ && size >= sizeof(WCHAR) && (buf = malloc( size + sizeof(WCHAR) )))
-        {
-            size += sizeof(WCHAR);  /* room for the closing NUL a short value may omit */
-            type = 0;
-            if (RegQueryValueExW( hkey, L"Dependencies", NULL, &type, (BYTE *)buf, &size ) == ERROR_SUCCESS)
-            {
-                for (p = buf, end = (WCHAR *)((BYTE *)buf + size); p < end && *p && count < MAX_RECORDS;
-                     p += lstrlenW( p ) + 1)
-                {
-                    struct package_record rec;
-
-                    if (!dependency_record_fill( p, &rec )) continue;
-                    if (SUCCEEDED(package_create( &rec, &items[count] ))) count++;
-                }
-            }
-        }
-
+        if ((count = dependency_read_subkeys( hkey, items, MAX_RECORDS ))) goto done;
+        if ((count = dependency_read_value( hkey, items, MAX_RECORDS ))) goto done;
+        count = dependency_read_manifest( hkey, items, MAX_RECORDS );
+done:
         RegCloseKey( hkey );
-        free( buf );
     }
 
     hr = create_package_vectorview( items, count, value );
@@ -3189,7 +3442,11 @@ static HRESULT WINAPI package_vectorview_GetAt( IVectorView_Package *iface, UINT
     struct package_collection *impl = impl_from_IVectorView_Package( iface );
 
     if (!item) return E_INVALIDARG;
-    if (index >= impl->count) return E_BOUNDS;
+    if (index >= impl->count)
+    {
+        *item = NULL;
+        return E_BOUNDS;
+    }
 
     *item = &impl->items[index]->IPackage_iface;
     IPackage_AddRef( *item );

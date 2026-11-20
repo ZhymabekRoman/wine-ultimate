@@ -104,10 +104,12 @@ static void test_ICoreDragDropManagerStatics(void)
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     hr = IDragDropManagerInterop_GetForWindow(interop, NULL, &IID_IUnknown, (void **)&manager);
-    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE), "Got unexpected hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ICoreDragDropManager_Release(manager);
 
     hr = IDragDropManagerInterop_GetForWindow(interop, GetDesktopWindow(), &IID_IUnknown, (void **)&manager);
-    ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ICoreDragDropManager_Release(manager);
 
     hwnd = CreateWindowA("static", "test", WS_POPUP | WS_VISIBLE, 0, 0, 10, 10, 0, 0, 0, NULL);
     ok(!!hwnd, "Failed to create a test window, error %lu.\n", GetLastError());
@@ -262,6 +264,7 @@ static void test_core_dragdrop_target(void)
     static const WCHAR *class_name = L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager";
     __FIAsyncOperation_1_DataPackageOperation *operation = NULL;
     ICoreDragDropManagerStatics *statics = NULL;
+    ICoreDragDropManager *manager = NULL;
     ICoreDropOperationTarget *target = NULL;
     IActivationFactory *factory = NULL;
     DataPackageOperation op;
@@ -290,7 +293,11 @@ static void test_core_dragdrop_target(void)
     hr = ICoreDragDropManagerStatics_GetForCurrentView(statics, NULL);
     ok(hr == E_POINTER, "Got unexpected hr %#lx.\n", hr);
 
-    hr = IActivationFactory_ActivateInstance(factory, (IInspectable **)&target);
+    hr = IActivationFactory_ActivateInstance(factory, (IInspectable **)&manager);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!!manager, "Got unexpected pointer.\n");
+
+    hr = ICoreDragDropManager_get_Target(manager, &target);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ok(!!target, "Got unexpected pointer.\n");
 
@@ -309,6 +316,7 @@ static void test_core_dragdrop_target(void)
     __FIAsyncOperation_1_DataPackageOperation_Release(operation);
 
     ICoreDropOperationTarget_Release(target);
+    ICoreDragDropManager_Release(manager);
     IActivationFactory_Release(factory);
     RoUninitialize();
 }

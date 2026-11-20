@@ -720,6 +720,253 @@ static struct threadpool_statics *impl_from_statics_iface( void )
     return &statics;
 }
 
+/* ============================================================================
+ * Windows.System.Threading.ThreadPool (IThreadPoolStatics)
+ * ============================================================================ */
+
+static const GUID IID_IThreadPoolStatics_local =
+    { 0xb6bf67dd, 0x84bd, 0x44f8, {0xac, 0x1c, 0x93, 0xeb, 0xcb, 0x9d, 0xba, 0x91} };
+static const GUID IID_IAsyncAction_real =
+    { 0x5a648006, 0x843a, 0x4da9, {0x86, 0x5b, 0x9d, 0x26, 0xe5, 0xdf, 0xad, 0x7b} };
+static const GUID IID_IAsyncInfo_real =
+    { 0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46} };
+
+struct tp_async_action
+{
+    const void *lpVtbl_action;
+    const void *lpVtbl_info;
+    LONG ref;
+    SRWLOCK lock;
+    AsyncStatus status;
+    HRESULT error_code;
+    void *work_handler;
+    void *completed_handler;
+};
+
+static HRESULT WINAPI tpa_QI( void *iface, REFIID iid, void **out )
+{
+    struct tp_async_action *impl = CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_action );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncAction_real ))
+    {
+        *out = &impl->lpVtbl_action;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo_real ))
+    {
+        *out = &impl->lpVtbl_info;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI tpa_AddRef( void *iface )
+{
+    return InterlockedIncrement( &CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_action )->ref );
+}
+static ULONG WINAPI tpa_Release( void *iface )
+{
+    struct tp_async_action *impl = CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_action );
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r)
+    {
+        if (impl->work_handler) IUnknown_Release( (IUnknown *)impl->work_handler );
+        if (impl->completed_handler) IUnknown_Release( (IUnknown *)impl->completed_handler );
+        free( impl );
+    }
+    return r;
+}
+static HRESULT WINAPI tpa_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( 2 * sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_IAsyncAction_real;
+    (*i)[1] = IID_IAsyncInfo_real;
+    *c = 2;
+    return S_OK;
+}
+static HRESULT WINAPI tpa_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.IAsyncAction";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI tpa_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI tpa_put_Completed( void *iface, void *handler )
+{
+    struct tp_async_action *impl = CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_action );
+    AsyncStatus st;
+    AcquireSRWLockExclusive( &impl->lock );
+    if (impl->completed_handler) IUnknown_Release( (IUnknown *)impl->completed_handler );
+    impl->completed_handler = handler;
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    st = impl->status;
+    ReleaseSRWLockExclusive( &impl->lock );
+    if (handler && st != ASYNC_STATUS_STARTED)
+    {
+        HRESULT (WINAPI *invoke)(void *, void *, AsyncStatus) = (void *)(*(void ***)handler)[3];
+        if (invoke) invoke( handler, &impl->lpVtbl_action, st );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI tpa_get_Completed( void *iface, void **handler )
+{
+    struct tp_async_action *impl = CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_action );
+    if (!handler) return E_POINTER;
+    AcquireSRWLockShared( &impl->lock );
+    *handler = impl->completed_handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    ReleaseSRWLockShared( &impl->lock );
+    return S_OK;
+}
+static HRESULT WINAPI tpa_GetResults( void *iface )
+{
+    struct tp_async_action *impl = CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_action );
+    return impl->error_code;
+}
+
+static HRESULT WINAPI tpa_info_QI( void *iface, REFIID iid, void **out )
+{
+    return tpa_QI( &CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_info )->lpVtbl_action, iid, out );
+}
+static ULONG WINAPI tpa_info_AddRef( void *iface )
+{
+    return tpa_AddRef( &CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_info )->lpVtbl_action );
+}
+static ULONG WINAPI tpa_info_Release( void *iface )
+{
+    return tpa_Release( &CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_info )->lpVtbl_action );
+}
+static HRESULT WINAPI tpa_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI tpa_info_get_Status( void *iface, AsyncStatus *st )
+{
+    struct tp_async_action *impl = CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_info );
+    if (st) *st = impl->status;
+    return S_OK;
+}
+static HRESULT WINAPI tpa_info_get_ErrorCode( void *iface, HRESULT *hr )
+{
+    struct tp_async_action *impl = CONTAINING_RECORD( iface, struct tp_async_action, lpVtbl_info );
+    if (hr) *hr = impl->error_code;
+    return S_OK;
+}
+static HRESULT WINAPI tpa_info_Cancel( void *iface ) { return S_OK; }
+static HRESULT WINAPI tpa_info_Close( void *iface ) { return S_OK; }
+
+static const void * const tpa_action_vtbl[] =
+{
+    tpa_QI, tpa_AddRef, tpa_Release, tpa_GetIids, tpa_GetRuntimeClassName, tpa_GetTrustLevel,
+    tpa_put_Completed, tpa_get_Completed, tpa_GetResults,
+};
+static const void * const tpa_info_vtbl[] =
+{
+    tpa_info_QI, tpa_info_AddRef, tpa_info_Release, tpa_GetIids, tpa_GetRuntimeClassName, tpa_GetTrustLevel,
+    tpa_info_get_Id, tpa_info_get_Status, tpa_info_get_ErrorCode, tpa_info_Cancel, tpa_info_Close,
+};
+
+static DWORD WINAPI tp_work_proc( void *param )
+{
+    struct tp_async_action *impl = (struct tp_async_action *)param;
+    HRESULT hr = S_OK;
+    void *completed = NULL;
+    AsyncStatus st;
+
+    if (impl->work_handler)
+    {
+        HRESULT (WINAPI *invoke)(void *, void *) = (void *)(*(void ***)impl->work_handler)[3];
+        if (invoke) hr = invoke( impl->work_handler, &impl->lpVtbl_action );
+    }
+    AcquireSRWLockExclusive( &impl->lock );
+    impl->error_code = hr;
+    impl->status = SUCCEEDED(hr) ? ASYNC_STATUS_COMPLETED : ASYNC_STATUS_ERROR;
+    st = impl->status;
+    completed = impl->completed_handler;
+    if (completed) IUnknown_AddRef( (IUnknown *)completed );
+    ReleaseSRWLockExclusive( &impl->lock );
+
+    if (completed)
+    {
+        HRESULT (WINAPI *invoke)(void *, void *, AsyncStatus) = (void *)(*(void ***)completed)[3];
+        if (invoke) invoke( completed, &impl->lpVtbl_action, st );
+        IUnknown_Release( (IUnknown *)completed );
+    }
+    tpa_Release( &impl->lpVtbl_action );
+    return 0;
+}
+
+struct tp_factory
+{
+    const void *lpVtbl_factory;
+    const void *lpVtbl_statics;
+};
+static struct tp_factory tp_factory_obj;
+
+static HRESULT WINAPI tp_fac_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &tp_factory_obj.lpVtbl_factory;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IThreadPoolStatics_local ))
+    {
+        *out = &tp_factory_obj.lpVtbl_statics;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI tp_fac_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI tp_fac_Release( void *iface ) { return 1; }
+static HRESULT WINAPI tp_fac_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI tp_fac_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.System.Threading.ThreadPool";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI tp_fac_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI tp_fac_ActivateInstance( void *iface, IInspectable **out ) { if (out) *out = NULL; return E_NOTIMPL; }
+
+static HRESULT WINAPI tp_st_RunWithPriorityAndOptionsAsync( void *iface, void *handler, INT32 priority, UINT32 options, void **op )
+{
+    struct tp_async_action *impl;
+    if (!op) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->lpVtbl_action = tpa_action_vtbl;
+    impl->lpVtbl_info = tpa_info_vtbl;
+    impl->ref = 2; /* 1 for caller, 1 for worker */
+    InitializeSRWLock( &impl->lock );
+    impl->status = ASYNC_STATUS_STARTED;
+    impl->work_handler = handler;
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    if (!QueueUserWorkItem( tp_work_proc, impl, WT_EXECUTEDEFAULT ))
+    {
+        tpa_Release( &impl->lpVtbl_action );
+        tpa_Release( &impl->lpVtbl_action );
+        *op = NULL;
+        return HRESULT_FROM_WIN32( GetLastError() );
+    }
+    *op = &impl->lpVtbl_action;
+    return S_OK;
+}
+static HRESULT WINAPI tp_st_RunWithPriorityAsync( void *iface, void *handler, INT32 priority, void **op )
+{
+    return tp_st_RunWithPriorityAndOptionsAsync( iface, handler, priority, 0, op );
+}
+static HRESULT WINAPI tp_st_RunAsync( void *iface, void *handler, void **op )
+{
+    return tp_st_RunWithPriorityAndOptionsAsync( iface, handler, 0, 0, op );
+}
+
+static const void * const tp_fac_vtbl[] = { tp_fac_QI, tp_fac_AddRef, tp_fac_Release, tp_fac_GetIids, tp_fac_GetRuntimeClassName, tp_fac_GetTrustLevel, tp_fac_ActivateInstance };
+static const void * const tp_st_vtbl[] = { tp_fac_QI, tp_fac_AddRef, tp_fac_Release, tp_fac_GetIids, tp_fac_GetRuntimeClassName, tp_fac_GetTrustLevel, tp_st_RunAsync, tp_st_RunWithPriorityAsync, tp_st_RunWithPriorityAndOptionsAsync };
+static struct tp_factory tp_factory_obj = { tp_fac_vtbl, tp_st_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *name = WindowsGetStringRawBuffer( classid, NULL );
@@ -734,6 +981,11 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
         InterlockedIncrement( &impl->ref );
         *factory = &impl->IActivationFactory_iface;
+        return S_OK;
+    }
+    if (name && !wcscmp( name, L"Windows.System.Threading.ThreadPool" ))
+    {
+        *factory = (IActivationFactory *)&tp_factory_obj.lpVtbl_factory;
         return S_OK;
     }
 

@@ -1,0 +1,194 @@
+/*
+ * Copyright (C) 2026 Zhymabek Roman
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.foundation.collections.idl";
+
+namespace Windows.UI.Popups {
+    interface IMessageDialog;
+    interface IMessageDialogFactory;
+    interface IPopupMenu;
+    interface IUICommand;
+    interface IUICommandFactory;
+    runtimeclass MessageDialog;
+    runtimeclass PopupMenu;
+    runtimeclass UICommand;
+    runtimeclass UICommandSeparator;
+    typedef enum MessageDialogOptions MessageDialogOptions;
+    typedef enum Placement Placement;
+
+    declare {
+        interface Windows.Foundation.Collections.IIterable<Windows.UI.Popups.IUICommand *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.UI.Popups.IUICommand *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.UI.Popups.IUICommand *>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.UI.Popups.IUICommand *>;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(daf77a4f-c27a-4298-9ac6-2922c45e7da6)
+    ]
+    delegate void UICommandInvokedHandler([in] Windows.UI.Popups.IUICommand *command);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum MessageDialogOptions
+    {
+        None,
+        AcceptUserInputAfterDelay
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0)
+    ]
+    enum Placement
+    {
+        Default,
+        Above,
+        Below,
+        Left,
+        Right
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(33f59b01-5325-43ab-9ab3-bdae440e4121)
+    ]
+    interface IMessageDialog : IInspectable
+    {
+        [propget] HRESULT Title([out, retval] HSTRING *value);
+        [propput] HRESULT Title([in] HSTRING value);
+        [propget] HRESULT Commands([out, retval] Windows.Foundation.Collections.IIterable<Windows.UI.Popups.IUICommand*> **value);
+        [propget] HRESULT DefaultCommandIndex([out, retval] UINT32 *value);
+        [propput] HRESULT DefaultCommandIndex([in] UINT32 value);
+        [propget] HRESULT CancelCommandIndex([out, retval] UINT32 *value);
+        [propput] HRESULT CancelCommandIndex([in] UINT32 value);
+        [propget] HRESULT Content([out, retval] HSTRING *value);
+        [propput] HRESULT Content([in] HSTRING value);
+        HRESULT ShowAsync([out, retval] Windows.Foundation.IAsyncOperation<Windows.UI.Popups.IUICommand*> **action);
+        [propget] HRESULT Options([out, retval] MessageDialogOptions *value);
+        [propput] HRESULT Options([in] MessageDialogOptions value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Popups.MessageDialog),
+        uuid(2d161777-a66f-4ea5-bb87-793ffa4941f2)
+    ]
+    interface IMessageDialogFactory : IInspectable
+    {
+        HRESULT Create([in] HSTRING content, [out, retval] Windows.UI.Popups.MessageDialog **dialog);
+        HRESULT CreateWithTitle([in] HSTRING content, [in] HSTRING title, [out, retval] Windows.UI.Popups.MessageDialog **dialog);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(4e9bc6dc-880d-47fc-a0a1-72b639e62559)
+    ]
+    interface IPopupMenu : IInspectable
+    {
+        [propget] HRESULT Commands([out, retval] Windows.Foundation.Collections.IIterable<Windows.UI.Popups.IUICommand*> **value);
+        HRESULT ShowAsync([in] Windows.Foundation.Point invocationPoint,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.UI.Popups.IUICommand*> **action);
+        HRESULT ShowAsyncWithRect([in] Windows.Foundation.Rect selection,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.UI.Popups.IUICommand*> **action);
+        HRESULT ShowAsyncWithRectAndPlacement([in] Windows.Foundation.Rect selection, [in] Placement preferredPlacement,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.UI.Popups.IUICommand*> **action);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(4ff93a75-4145-47ff-ac7f-dff1c1fa5b0f)
+    ]
+    interface IUICommand : IInspectable
+    {
+        [propget] HRESULT Label([out, retval] HSTRING *value);
+        [propput] HRESULT Label([in] HSTRING value);
+        [propget] HRESULT Invoked([out, retval] Windows.UI.Popups.UICommandInvokedHandler **value);
+        [propput] HRESULT Invoked([in] Windows.UI.Popups.UICommandInvokedHandler *value);
+        [propget] HRESULT Id([out, retval] IInspectable **value);
+        [propput] HRESULT Id([in] IInspectable *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Popups.UICommand),
+        uuid(a21a8189-26b0-4676-ae94-54041bc125e8)
+    ]
+    interface IUICommandFactory : IInspectable
+    {
+        HRESULT Create([in] HSTRING label, [out, retval] Windows.UI.Popups.UICommand **command);
+        HRESULT CreateWithHandler([in] HSTRING label, [in] Windows.UI.Popups.UICommandInvokedHandler *action,
+                [out, retval] Windows.UI.Popups.UICommand **command);
+        HRESULT CreateWithHandlerAndId([in] HSTRING label, [in] Windows.UI.Popups.UICommandInvokedHandler *action,
+                [in] IInspectable *commandId, [out, retval] Windows.UI.Popups.UICommand **command);
+    }
+
+    [
+        activatable(Windows.UI.Popups.IMessageDialogFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass MessageDialog
+    {
+        [default] interface Windows.UI.Popups.IMessageDialog;
+        interface Windows.Foundation.Collections.IIterable<Windows.UI.Popups.IUICommand*>;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass PopupMenu
+    {
+        [default] interface Windows.UI.Popups.IPopupMenu;
+        interface Windows.Foundation.Collections.IIterable<Windows.UI.Popups.IUICommand*>;
+    }
+
+    [
+        activatable(Windows.UI.Popups.IUICommandFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass UICommand
+    {
+        [default] interface Windows.UI.Popups.IUICommand;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass UICommandSeparator
+    {
+        [default] interface Windows.UI.Popups.IUICommand;
+    }
+}

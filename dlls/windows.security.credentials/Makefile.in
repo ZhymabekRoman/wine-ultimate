@@ -1,6 +1,6 @@
 MODULE  = windows.security.credentials.dll
 ENABLE_ARCHS = x86_64
-IMPORTS = combase advapi32 uuid
+IMPORTS = combase advapi32 crypt32 uuid
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 

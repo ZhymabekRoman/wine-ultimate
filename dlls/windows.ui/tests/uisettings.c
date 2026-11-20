@@ -173,6 +173,104 @@ static void test_AccentColor( IUISettings3 *uisettings3 )
     if (default_palette_len) set_accent_palette( default_palette, default_palette_len );
 }
 
+static BOOL get_dwm_accent_color( DWORD *color )
+{
+    DWORD type, len = sizeof(*color);
+    HKEY hkey;
+    BOOL ret = TRUE;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_QUERY_VALUE, &hkey )) return FALSE;
+    if (RegQueryValueExW( hkey, L"AccentColor", NULL, &type, (BYTE *)color, &len ) || type != REG_DWORD) ret = FALSE;
+    RegCloseKey( hkey );
+    return ret;
+}
+
+static BOOL set_dwm_accent_color( DWORD color )
+{
+    HKEY hkey;
+
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, NULL, 0, KEY_SET_VALUE, NULL, &hkey, NULL )) return FALSE;
+    if (RegSetValueExW( hkey, L"AccentColor", 0, REG_DWORD, (const BYTE *)&color, sizeof(color) ))
+    {
+        RegCloseKey( hkey );
+        return FALSE;
+    }
+    RegCloseKey( hkey );
+    return TRUE;
+}
+
+static void delete_dwm_accent_color( void )
+{
+    HKEY hkey;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_SET_VALUE, &hkey )) return;
+    RegDeleteValueW( hkey, L"AccentColor" );
+    RegCloseKey( hkey );
+}
+
+/* HSL lightness of the color: the accent ramp scales lightness, so order the
+ * ramp by it. Perceived luminance weights would be hue-biased. */
+static float color_lightness( const Color *c )
+{
+    float r = c->R / 255.0f, g = c->G / 255.0f, b = c->B / 255.0f;
+    float max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    float min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+
+    return (max + min) / 2.0f;
+}
+
+/* With no AccentPalette the ramp must be derived from the DWM AccentColor:
+ * Accent is exact, Light1..3 get progressively lighter, Dark1..3 progressively darker,
+ * and the derived palette is persisted to the registry. */
+static void test_AccentColorDerived( IUISettings3 *uisettings3 )
+{
+    static const DWORD test_accent = 0x00f0820a; /* BGR of RGB(10, 130, 240) */
+    DWORD default_accent = 0, palette[8] = {0}, palette_len = sizeof(palette);
+    Color accent, light1, light2, light3, dark1, dark2, dark3;
+    BOOL had_accent = get_dwm_accent_color( &default_accent );
+
+    delete_accent_palette();
+    ok( set_dwm_accent_color( test_accent ), "failed to set DWM AccentColor.\n" );
+
+    memset( &accent, 0, sizeof(accent) );
+    ok( IUISettings3_GetColorValue( uisettings3, UIColorType_Accent, &accent ) == S_OK, "GetColorValue failed.\n" );
+    ok( compare_dword_color( accent, test_accent ),
+        "Accent got %d %d %d, expected 10 130 240.\n", accent.R, accent.G, accent.B );
+
+    memset( &light1, 0xff, sizeof(light1) );
+    ok( IUISettings3_GetColorValue( uisettings3, UIColorType_AccentLight1, &light1 ) == S_OK, "GetColorValue failed.\n" );
+    ok( IUISettings3_GetColorValue( uisettings3, UIColorType_AccentLight2, &light2 ) == S_OK, "GetColorValue failed.\n" );
+    ok( IUISettings3_GetColorValue( uisettings3, UIColorType_AccentLight3, &light3 ) == S_OK, "GetColorValue failed.\n" );
+    ok( IUISettings3_GetColorValue( uisettings3, UIColorType_AccentDark1, &dark1 ) == S_OK, "GetColorValue failed.\n" );
+    ok( IUISettings3_GetColorValue( uisettings3, UIColorType_AccentDark2, &dark2 ) == S_OK, "GetColorValue failed.\n" );
+    ok( IUISettings3_GetColorValue( uisettings3, UIColorType_AccentDark3, &dark3 ) == S_OK, "GetColorValue failed.\n" );
+
+    ok( color_lightness( &light3 ) > color_lightness( &light2 ), "Light3 not lighter than Light2.\n" );
+    ok( color_lightness( &light2 ) > color_lightness( &light1 ), "Light2 not lighter than Light1.\n" );
+    ok( color_lightness( &light1 ) > color_lightness( &accent ), "Light1 not lighter than Accent.\n" );
+    ok( color_lightness( &accent ) > color_lightness( &dark1 ), "Accent not lighter than Dark1.\n" );
+    ok( color_lightness( &dark1 ) > color_lightness( &dark2 ), "Dark1 not darker than Dark2.\n" );
+    ok( color_lightness( &dark2 ) > color_lightness( &dark3 ), "Dark2 not darker than Dark3.\n" );
+
+    ok( light1.A == 0xff && light1.R < 255, "Light1 alpha/channel got %d %d.\n", light1.A, light1.R );
+
+    /* the derived palette must be persisted for consumers reading the registry */
+    ok( get_accent_palette( palette, &palette_len ), "AccentPalette was not written.\n" );
+    ok( palette_len == sizeof(palette), "AccentPalette len %lu, expected %lu.\n", palette_len, (DWORD)sizeof(palette) );
+    ok( compare_dword_color( light3, palette[0] ), "palette[0] does not match Light3.\n" );
+    ok( compare_dword_color( light2, palette[1] ), "palette[1] does not match Light2.\n" );
+    ok( compare_dword_color( light1, palette[2] ), "palette[2] does not match Light1.\n" );
+    ok( compare_dword_color( accent, palette[3] ), "palette[3] does not match Accent.\n" );
+    ok( compare_dword_color( dark1, palette[4] ), "palette[4] does not match Dark1.\n" );
+    ok( compare_dword_color( dark2, palette[5] ), "palette[5] does not match Dark2.\n" );
+    ok( compare_dword_color( dark3, palette[6] ), "palette[6] does not match Dark3.\n" );
+
+    /* restore registry state */
+    if (had_accent) set_dwm_accent_color( default_accent );
+    else delete_dwm_accent_color();
+    delete_accent_palette();
+}
+
 static void test_UIElementColor( IUISettings *uisettings )
 {
     static const struct
@@ -326,6 +424,9 @@ static void test_UISettings(void)
     check_interface( inspectable, &IID_IUISettings, TRUE );
     check_interface( inspectable, &IID_IUISettings2, TRUE );
     check_interface( inspectable, &IID_IUISettings3, TRUE );
+    check_interface( inspectable, &IID_IUISettings4, TRUE );
+    check_interface( inspectable, &IID_IUISettings5, TRUE );
+    check_interface( inspectable, &IID_IUISettings6, TRUE );
     check_interface( inspectable, &IID_IWeakReferenceSource, TRUE );
     check_interface( inspectable, &IID_IWeakReference, FALSE );
 
@@ -343,6 +444,7 @@ static void test_UISettings(void)
 
     test_AnimationsEnabled( uisettings );
     test_AccentColor( uisettings3 );
+    test_AccentColorDerived( uisettings3 );
 
     default_theme = get_app_theme();
 

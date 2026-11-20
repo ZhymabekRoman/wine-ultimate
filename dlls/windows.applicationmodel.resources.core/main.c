@@ -2128,6 +2128,13 @@ static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
             key_release( tmp, owned );
             return S_OK;
         }
+    if (raw && !wcsnicmp( raw, L"Microsoft.UI.Xaml", 17 ) && impl->count > 0)
+    {
+        TRACE( "rmv_Get fallback %s -> main map %p\n", debugstr_w( raw ), impl->entries[0].map );
+        *map = impl->entries[0].map;
+        key_release( tmp, owned );
+        return S_OK;
+    }
     key_release( tmp, owned );
     return ELEMENT_NOT_FOUND_E;
 }

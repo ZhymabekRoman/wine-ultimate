@@ -20,6 +20,7 @@
 #include "private.h"
 #include "roapi.h"
 #include "wine/exception.h"
+#include "shellapi.h"
 #define WIDL_using_Windows_UI_Core
 #include "windows.ui.core.h"
 #define WIDL_using_Windows_ApplicationModel_Activation
@@ -65,6 +66,7 @@ struct factory
     ICoreApplicationUnhandledError ICoreApplicationUnhandledError_iface;
     IStaticLifetime IStaticLifetime_iface;
     IWineSessionProperties IWineSessionProperties_iface;
+    ICoreImmersiveApplication ICoreImmersiveApplication_iface;
     __FIMap_2_HSTRING_IInspectable *static_map;
     LONG ref;
 };
@@ -120,6 +122,13 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
     {
         IActivationFactory_AddRef( &impl->IActivationFactory_iface );
         *out = &impl->ICoreApplicationUnhandledError_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ICoreImmersiveApplication ))
+    {
+        IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+        *out = &impl->ICoreImmersiveApplication_iface;
         return S_OK;
     }
 
@@ -194,25 +203,49 @@ static const GUID IID_ICoreApplicationView2_custom = {0x68eb7adf, 0x917f, 0x4885
 static const GUID IID_ICoreApplicationView3_custom = {0x07ebe1b3, 0xa4cf, 0x4550, {0xab, 0x70, 0xb0, 0x7e, 0x85, 0x33, 0x0b, 0xc8}};
 static const GUID IID_ICoreApplicationViewTitleBar_custom = {0x08d17364, 0x4e43, 0x40e2, {0xa4, 0x70, 0x36, 0x64, 0xf0, 0xe0, 0xb9, 0x6c}};
 
+#define TB_EVENT __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable
+
+struct tb_handler_entry
+{
+    EventRegistrationToken token;
+    TB_EVENT *handler;
+};
+
+struct tb_event_list
+{
+    CRITICAL_SECTION cs;
+    struct tb_handler_entry *entries;
+    ULONG count;
+    ULONG size;
+};
+
 struct core_application_view_title_bar
 {
     ICoreApplicationViewTitleBar ICoreApplicationViewTitleBar_iface;
     const void *IWeakReferenceSource_iface;
     LONG ref;
     boolean extend_view_into_title_bar;
-    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable *is_visible_changed_handler;
-    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable *layout_metrics_changed_handler;
+    boolean is_visible;
+    DOUBLE height;
+    HWND hwnd;
+    struct tb_event_list layout_metrics_changed;
+    struct tb_event_list is_visible_changed;
 };
 
 static HRESULT core_application_view_title_bar_create( ICoreApplicationViewTitleBar **value );
+
+static const GUID IID_ICoreApplicationView6_custom =
+    { 0x2bc095a8, 0x8ef0, 0x446d, { 0x9e, 0x60, 0x3a, 0x3e, 0x04, 0x28, 0xc6, 0x71 } };
 
 struct core_application_view
 {
     ICoreApplicationView ICoreApplicationView_iface;
     ICoreApplicationView2 ICoreApplicationView2_iface;
     ICoreApplicationView3 ICoreApplicationView3_iface;
+    IInspectable ICoreApplicationView6_iface;
     LONG ref;
     ICoreApplicationViewTitleBar *title_bar;
+    __FIMap_2_HSTRING_IInspectable *properties;
 };
 
 static inline struct core_application_view *impl_from_ICoreApplicationView( ICoreApplicationView *iface )
@@ -228,6 +261,11 @@ static inline struct core_application_view *impl_from_ICoreApplicationView2( ICo
 static inline struct core_application_view *impl_from_ICoreApplicationView3( ICoreApplicationView3 *iface )
 {
     return CONTAINING_RECORD( iface, struct core_application_view, ICoreApplicationView3_iface );
+}
+
+static inline struct core_application_view *impl_from_ICoreApplicationView6( IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_application_view, ICoreApplicationView6_iface );
 }
 
 static HRESULT WINAPI core_application_view_QueryInterface( ICoreApplicationView *iface, REFIID iid, void **out )
@@ -259,6 +297,13 @@ static HRESULT WINAPI core_application_view_QueryInterface( ICoreApplicationView
     {
         ICoreApplicationView_AddRef( &impl->ICoreApplicationView_iface );
         *out = &impl->ICoreApplicationView3_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ICoreApplicationView6_custom ))
+    {
+        ICoreApplicationView_AddRef( &impl->ICoreApplicationView_iface );
+        *out = &impl->ICoreApplicationView6_iface;
         return S_OK;
     }
 
@@ -303,6 +348,8 @@ static HRESULT WINAPI core_application_view_GetTrustLevel( ICoreApplicationView 
     if (level) *level = BaseTrust;
     return S_OK;
 }
+static __x_ABI_CWindows_CUI_CCore_CICoreWindow *cached_main_core_window;
+
 static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView *iface, __x_ABI_CWindows_CUI_CCore_CICoreWindow **value )
 {
     IActivationFactory *cwf = NULL;
@@ -327,6 +374,21 @@ static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView
         IActivationFactory_Release( cwf );
     }
     WindowsDeleteString( class_id );
+    if (*value)
+    {
+        if (!cached_main_core_window)
+        {
+            __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( *value );
+            if (InterlockedCompareExchangePointer( (void *volatile *)&cached_main_core_window, *value, NULL ))
+                __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( *value );
+        }
+    }
+    else if (cached_main_core_window)
+    {
+        *value = cached_main_core_window;
+        __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( *value );
+        hr = S_OK;
+    }
     return hr;
 }
 static const GUID IID_ILaunchActivatedEventArgs = {0xfbc93e26, 0xa14a, 0x4b4f, {0x82, 0xb0, 0x33, 0xbe, 0xd9, 0x20, 0xaf, 0x52}};
@@ -338,6 +400,8 @@ static const GUID IID_IApplicationViewActivatedEventArgs = {0x930cef4b, 0xb829, 
 static const GUID IID_IViewSwitcherProvider = {0x33f288a6, 0x5c2c, 0x4d27, {0xba, 0xc7, 0x75, 0x36, 0x08, 0x8f, 0x12, 0x19}};
 static const GUID IID_IUserStandIn = {0xdf9a26c6, 0xe746, 0x4bcd, {0xb5, 0xd4, 0x12, 0x01, 0x03, 0xc4, 0x20, 0x9b}};
 static const GUID IID_ISplashScreen = {0xca4d975c, 0xd4d6, 0x43f0, {0x97, 0xc0, 0x08, 0x33, 0xc6, 0x39, 0x1c, 0x24}};
+/* Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs */
+static const GUID IID_IProtocolActivatedEventArgs = {0x6095f4dd, 0xb7c0, 0x46ab, {0x81, 0xfe, 0xd9, 0x0f, 0x36, 0xd0, 0x0d, 0x24}};
 
 struct activated_event_args
 {
@@ -348,9 +412,12 @@ struct activated_event_args
     const void *IActivatedEventArgsWithUser_vtbl;
     const void *IApplicationViewActivatedEventArgs_vtbl;
     const void *IViewSwitcherProvider_vtbl;
+    const void *IProtocolActivatedEventArgs_vtbl;
     void *splash;
     LONG ref;
+    HSTRING uri; /* set for ActivationKind_Protocol; source for IProtocolActivatedEventArgs::Uri */
     __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind kind;
+    __x_ABI_CWindows_CApplicationModel_CActivation_CApplicationExecutionState prev_state;
 };
 
 static inline struct activated_event_args *impl_from_IActivatedEventArgs( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface )
@@ -386,6 +453,11 @@ static inline struct activated_event_args *impl_from_IApplicationViewActivatedEv
 static inline struct activated_event_args *impl_from_IViewSwitcherProvider( void *iface )
 {
     return CONTAINING_RECORD( iface, struct activated_event_args, IViewSwitcherProvider_vtbl );
+}
+
+static inline struct activated_event_args *impl_from_IProtocolActivatedEventArgs( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, IProtocolActivatedEventArgs_vtbl );
 }
 
 static ULONG WINAPI splash_AddRef( void *iface );
@@ -440,6 +512,12 @@ static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApp
         *out = &impl->IViewSwitcherProvider_vtbl;
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IProtocolActivatedEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IProtocolActivatedEventArgs_vtbl;
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_ISplashScreen ))
     {
         if (impl->splash)
@@ -465,6 +543,7 @@ static ULONG WINAPI activated_event_args_Release( __x_ABI_CWindows_CApplicationM
     if (!ref)
     {
         if (impl->splash) splash_Release( impl->splash );
+        WindowsDeleteString( impl->uri );
         free( impl );
     }
     return ref;
@@ -473,8 +552,23 @@ static HRESULT WINAPI activated_event_args_GetIids( __x_ABI_CWindows_CApplicatio
 { FIXME( "stub\n" ); return E_NOTIMPL; }
 static HRESULT WINAPI activated_event_args_GetRuntimeClassName( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, HSTRING *name )
 {
+    static const WCHAR launch_class[] = L"Windows.ApplicationModel.Activation.LaunchActivatedEventArgs";
+    static const WCHAR protocol_class[] = L"Windows.ApplicationModel.Activation.ProtocolActivatedEventArgs";
+    const WCHAR *str;
+    UINT32 len;
+
     if (!name) return E_POINTER;
-    return WindowsCreateString( L"Windows.ApplicationModel.Activation.LaunchActivatedEventArgs", 59, name );
+    if (impl_from_IActivatedEventArgs( iface )->uri)
+    {
+        str = protocol_class;
+        len = ARRAY_SIZE( protocol_class ) - 1;
+    }
+    else
+    {
+        str = launch_class;
+        len = 59;
+    }
+    return WindowsCreateString( str, len, name );
 }
 static HRESULT WINAPI activated_event_args_GetTrustLevel( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, TrustLevel *level )
 {
@@ -492,8 +586,9 @@ static HRESULT WINAPI activated_event_args_get_Kind( __x_ABI_CWindows_CApplicati
 static HRESULT WINAPI activated_event_args_get_PreviousExecutionState( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface,
         __x_ABI_CWindows_CApplicationModel_CActivation_CApplicationExecutionState *value )
 {
+    struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
     if (!value) return E_POINTER;
-    *value = 0; /* NotRunning */
+    *value = impl->prev_state;
     return S_OK;
 }
 struct splash_handler_vtbl
@@ -699,7 +794,7 @@ static ULONG WINAPI launch_activated_event_args_Release( void *iface )
 static HRESULT WINAPI launch_activated_event_args_get_Arguments( void *iface, HSTRING *value )
 {
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"none", 4, value );
+    return WindowsCreateString( L"", 0, value );
 }
 static HRESULT WINAPI launch_activated_event_args_get_TileId( void *iface, HSTRING *value )
 {
@@ -895,6 +990,54 @@ static const void *viewswitch_vtbl_array[] =
     viewswitch_get_ViewSwitcher,
 };
 
+/* IProtocolActivatedEventArgs: a thin face over activated_event_args that hands
+ * back the launch URI as a Windows.Foundation.Uri. The Uri object is built
+ * lazily through the WinRT Uri activation factory (CreateUri) so callers get a
+ * real IUriRuntimeClass, not a stub. */
+static HRESULT WINAPI protocol_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_IProtocolActivatedEventArgs( iface );
+    return activated_event_args_QueryInterface( &impl->IActivatedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI protocol_AddRef( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IProtocolActivatedEventArgs( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI protocol_Release( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IProtocolActivatedEventArgs( iface );
+    return activated_event_args_Release( &impl->IActivatedEventArgs_iface );
+}
+static HRESULT WINAPI protocol_get_Uri( void *iface, __x_ABI_CWindows_CFoundation_CIUriRuntimeClass **value )
+{
+    struct activated_event_args *impl = impl_from_IProtocolActivatedEventArgs( iface );
+    __x_ABI_CWindows_CFoundation_CIUriRuntimeClassFactory *factory = NULL;
+    HSTRING class_id = NULL;
+    HRESULT hr = S_OK;
+
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!impl->uri) return S_OK;
+
+    WindowsCreateString( RuntimeClass_Windows_Foundation_Uri, wcslen( RuntimeClass_Windows_Foundation_Uri ), &class_id );
+    hr = RoGetActivationFactory( class_id, &IID_IUriRuntimeClassFactory, (void **)&factory );
+    if (SUCCEEDED( hr ) && factory)
+    {
+        hr = IUriRuntimeClassFactory_CreateUri( factory, impl->uri, value );
+        IUriRuntimeClassFactory_Release( factory );
+    }
+    WindowsDeleteString( class_id );
+    return hr;
+}
+static const void *protocol_vtbl_array[] =
+{
+    protocol_QueryInterface, protocol_AddRef, protocol_Release,
+    activated_event_args_GetIids, activated_event_args_GetRuntimeClassName, activated_event_args_GetTrustLevel,
+    protocol_get_Uri,
+};
+
 static const struct __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgsVtbl activated_event_args_vtbl =
 {
     activated_event_args_QueryInterface,
@@ -919,10 +1062,23 @@ static __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *acti
     impl->IActivatedEventArgsWithUser_vtbl = withuser_vtbl_array;
     impl->IApplicationViewActivatedEventArgs_vtbl = appview_vtbl_array;
     impl->IViewSwitcherProvider_vtbl = viewswitch_vtbl_array;
+    impl->IProtocolActivatedEventArgs_vtbl = protocol_vtbl_array;
     impl->splash = create_splash_screen();
     impl->ref = 1;
     impl->kind = kind;
     return &impl->IActivatedEventArgs_iface;
+}
+
+/* ProtocolActivatedEventArgs for an AppUri activation (AppInstance redirect /
+ * browser protocol launch): kind 4 (ActivationKind_Protocol) with the URI kept
+ * for IProtocolActivatedEventArgs::Uri. */
+static __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *activated_event_args_create_protocol( const WCHAR *uri )
+{
+    __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args;
+
+    if (!(args = activated_event_args_create( 4 /* ActivationKind_Protocol */ ))) return NULL;
+    if (uri) WindowsCreateString( uri, wcslen( uri ), &impl_from_IActivatedEventArgs( args )->uri );
+    return args;
 }
 
 static __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *view_activated_handler;
@@ -981,6 +1137,165 @@ static const struct ICoreApplicationViewVtbl core_application_view_vtbl =
 static inline struct core_application_view_title_bar *impl_from_ICoreApplicationViewTitleBar( ICoreApplicationViewTitleBar *iface )
 {
     return CONTAINING_RECORD( iface, struct core_application_view_title_bar, ICoreApplicationViewTitleBar_iface );
+}
+
+static INT64 tb_next_token;
+
+static void tb_event_list_init( struct tb_event_list *list )
+{
+    InitializeCriticalSection( &list->cs );
+    list->entries = NULL;
+    list->count = 0;
+    list->size = 0;
+}
+
+static void tb_event_list_clear( struct tb_event_list *list )
+{
+    ULONG i;
+
+    for (i = 0; i < list->count; ++i)
+        if (list->entries[i].handler) __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( list->entries[i].handler );
+    free( list->entries );
+    list->entries = NULL;
+    list->count = list->size = 0;
+}
+
+static void tb_event_list_done( struct tb_event_list *list )
+{
+    tb_event_list_clear( list );
+    DeleteCriticalSection( &list->cs );
+}
+
+static HRESULT tb_event_list_add( struct tb_event_list *list, TB_EVENT *handler, EventRegistrationToken *token )
+{
+    struct tb_handler_entry *entries;
+    HRESULT hr = S_OK;
+
+    TRACE( "list %p, handler %p, token %p\n", list, handler, token );
+
+    if (!token) return E_POINTER;
+
+    EnterCriticalSection( &list->cs );
+    if (list->count == list->size)
+    {
+        ULONG size = list->size ? list->size * 2 : 4;
+        if (!(entries = realloc( list->entries, size * sizeof(*entries) )))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        list->entries = entries;
+        list->size = size;
+    }
+    if (handler) __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_AddRef( handler );
+    list->entries[list->count].handler = handler;
+    list->entries[list->count].token.value = InterlockedIncrement64( &tb_next_token );
+    *token = list->entries[list->count].token;
+    list->count++;
+done:
+    LeaveCriticalSection( &list->cs );
+    return hr;
+}
+
+static HRESULT tb_event_list_remove( struct tb_event_list *list, EventRegistrationToken token )
+{
+    TB_EVENT *handler = NULL;
+    ULONG i;
+
+    TRACE( "list %p, token %s\n", list, wine_dbgstr_longlong( token.value ) );
+
+    EnterCriticalSection( &list->cs );
+    for (i = 0; i < list->count; ++i)
+    {
+        if (list->entries[i].token.value == token.value)
+        {
+            handler = list->entries[i].handler;
+            list->entries[i] = list->entries[list->count - 1];
+            list->count--;
+            break;
+        }
+    }
+    LeaveCriticalSection( &list->cs );
+
+    if (handler) __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( handler );
+    return S_OK;
+}
+
+static void tb_event_list_raise( struct tb_event_list *list, void *sender )
+{
+    struct tb_handler_entry *snapshot;
+    ULONG i, count;
+
+    EnterCriticalSection( &list->cs );
+    count = list->count;
+    snapshot = count ? malloc( count * sizeof(*snapshot) ) : NULL;
+    if (snapshot)
+    {
+        memcpy( snapshot, list->entries, count * sizeof(*snapshot) );
+        for (i = 0; i < count; ++i)
+            if (snapshot[i].handler) __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_AddRef( snapshot[i].handler );
+    }
+    LeaveCriticalSection( &list->cs );
+
+    if (!snapshot) return;
+    for (i = 0; i < count; ++i)
+    {
+        if (snapshot[i].handler)
+        {
+            HRESULT hr = snapshot[i].handler->lpVtbl->Invoke( snapshot[i].handler, sender, NULL );
+            if (FAILED(hr)) WARN( "handler %p invoke failed, hr %#lx\n", snapshot[i].handler, hr );
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( snapshot[i].handler );
+        }
+    }
+    free( snapshot );
+}
+
+/* Cache the view's top-level window, mirroring application_view.c: prefer the
+ * thread's active window, fall back to the foreground window. */
+static HWND title_bar_get_hwnd( struct core_application_view_title_bar *impl )
+{
+    HWND hwnd;
+
+    if (impl->hwnd && IsWindow( impl->hwnd )) return impl->hwnd;
+
+    if ((hwnd = GetActiveWindow()) && IsWindow( hwnd ))
+    {
+        impl->hwnd = hwnd;
+        return hwnd;
+    }
+    if ((hwnd = GetForegroundWindow()) && IsWindow( hwnd ))
+    {
+        impl->hwnd = hwnd;
+        return hwnd;
+    }
+    impl->hwnd = NULL;
+    return NULL;
+}
+
+/* ExtendViewIntoTitleBar maps to a DWM top-frame margin sized to the titlebar
+ * height so the client area covers the caption. Resolved at runtime: dwmapi is
+ * not in the module import list. */
+static void title_bar_apply_dwm( struct core_application_view_title_bar *impl )
+{
+    static HMODULE hmodule;
+    struct tb_margins { LONG cxLeftWidth, cxRightWidth, cyTopHeight, cyBottomHeight; };
+    static HRESULT (WINAPI *pDwmExtendFrameIntoClientArea)( HWND, const struct tb_margins * );
+    struct tb_margins margins = {0, 0, 0, 0};
+    HWND hwnd;
+
+    if (!(hwnd = title_bar_get_hwnd( impl ))) return;
+
+    if (!hmodule)
+    {
+        if (!(hmodule = GetModuleHandleW( L"dwmapi.dll" )))
+            hmodule = LoadLibraryW( L"dwmapi.dll" );
+        if (hmodule)
+            pDwmExtendFrameIntoClientArea = (void *)GetProcAddress( hmodule, "DwmExtendFrameIntoClientArea" );
+    }
+    if (!pDwmExtendFrameIntoClientArea) return;
+
+    margins.cyTopHeight = impl->extend_view_into_title_bar ? (int)impl->height : 0;
+    pDwmExtendFrameIntoClientArea( hwnd, &margins );
 }
 
 static const GUID IID_IWeakReference_tb = {0x00000037, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
@@ -1125,10 +1440,8 @@ static ULONG WINAPI core_application_view_title_bar_Release( ICoreApplicationVie
     TRACE( "iface %p, ref %lu\n", iface, ref );
     if (!ref)
     {
-        if (impl->is_visible_changed_handler)
-            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->is_visible_changed_handler );
-        if (impl->layout_metrics_changed_handler)
-            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->layout_metrics_changed_handler );
+        tb_event_list_done( &impl->layout_metrics_changed );
+        tb_event_list_done( &impl->is_visible_changed );
         free( impl );
     }
     return ref;
@@ -1161,7 +1474,10 @@ static HRESULT WINAPI core_application_view_title_bar_put_ExtendViewIntoTitleBar
 {
     struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
     TRACE( "iface %p, value %d\n", iface, value );
+    if (impl->extend_view_into_title_bar == value) return S_OK;
     impl->extend_view_into_title_bar = value;
+    title_bar_apply_dwm( impl );
+    tb_event_list_raise( &impl->layout_metrics_changed, (IInspectable *)iface );
     return S_OK;
 }
 
@@ -1187,18 +1503,21 @@ static HRESULT WINAPI core_application_view_title_bar_get_SystemOverlayLeftInset
 static HRESULT WINAPI core_application_view_title_bar_get_SystemOverlayRightInset( ICoreApplicationViewTitleBar *iface,
         DOUBLE *value )
 {
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = 0.0;
+    /* Standard Windows min/max/close caption button cluster width. */
+    *value = impl->extend_view_into_title_bar ? 138.0 : 0.0;
     return S_OK;
 }
 
 static HRESULT WINAPI core_application_view_title_bar_get_Height( ICoreApplicationViewTitleBar *iface,
         DOUBLE *value )
 {
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = 32.0;
+    *value = impl->is_visible ? impl->height : 0.0;
     return S_OK;
 }
 
@@ -1207,37 +1526,23 @@ static HRESULT WINAPI core_application_view_title_bar_add_LayoutMetricsChanged( 
         EventRegistrationToken *token )
 {
     struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
-    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
-    if (token) token->value = 1;
-    if (handler)
-    {
-        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_AddRef( handler );
-        if (impl->layout_metrics_changed_handler)
-            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->layout_metrics_changed_handler );
-        impl->layout_metrics_changed_handler = handler;
-    }
-    return S_OK;
+    return tb_event_list_add( &impl->layout_metrics_changed, handler, token );
 }
 
 static HRESULT WINAPI core_application_view_title_bar_remove_LayoutMetricsChanged( ICoreApplicationViewTitleBar *iface,
         EventRegistrationToken token )
 {
     struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
-    TRACE( "iface %p, token %#I64x\n", iface, token.value );
-    if (impl->layout_metrics_changed_handler)
-    {
-        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->layout_metrics_changed_handler );
-        impl->layout_metrics_changed_handler = NULL;
-    }
-    return S_OK;
+    return tb_event_list_remove( &impl->layout_metrics_changed, token );
 }
 
 static HRESULT WINAPI core_application_view_title_bar_get_IsVisible( ICoreApplicationViewTitleBar *iface,
         boolean *value )
 {
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = TRUE;
+    *value = impl->is_visible;
     return S_OK;
 }
 
@@ -1246,29 +1551,14 @@ static HRESULT WINAPI core_application_view_title_bar_add_IsVisibleChanged( ICor
         EventRegistrationToken *token )
 {
     struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
-    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
-    if (token) token->value = 1;
-    if (handler)
-    {
-        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_AddRef( handler );
-        if (impl->is_visible_changed_handler)
-            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->is_visible_changed_handler );
-        impl->is_visible_changed_handler = handler;
-    }
-    return S_OK;
+    return tb_event_list_add( &impl->is_visible_changed, handler, token );
 }
 
 static HRESULT WINAPI core_application_view_title_bar_remove_IsVisibleChanged( ICoreApplicationViewTitleBar *iface,
         EventRegistrationToken token )
 {
     struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
-    TRACE( "iface %p, token %#I64x\n", iface, token.value );
-    if (impl->is_visible_changed_handler)
-    {
-        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->is_visible_changed_handler );
-        impl->is_visible_changed_handler = NULL;
-    }
-    return S_OK;
+    return tb_event_list_remove( &impl->is_visible_changed, token );
 }
 
 static const struct ICoreApplicationViewTitleBarVtbl core_application_view_title_bar_vtbl =
@@ -1298,6 +1588,12 @@ static HRESULT core_application_view_title_bar_create( ICoreApplicationViewTitle
     impl->ICoreApplicationViewTitleBar_iface.lpVtbl = &core_application_view_title_bar_vtbl;
     impl->IWeakReferenceSource_iface = tb_wrs_vtbl;
     impl->ref = 1;
+    impl->extend_view_into_title_bar = FALSE;
+    impl->is_visible = TRUE;
+    impl->height = 32.0;
+    impl->hwnd = NULL;
+    tb_event_list_init( &impl->layout_metrics_changed );
+    tb_event_list_init( &impl->is_visible_changed );
     *value = &impl->ICoreApplicationViewTitleBar_iface;
     return S_OK;
 }
@@ -1470,6 +1766,58 @@ static const struct ICoreApplicationView3Vtbl core_application_view3_vtbl =
  * MUST return the same object or FrameworkUdk fail-fasts. */
 static ICoreApplicationView *the_application_view;
 
+static HRESULT WINAPI core_application_view6_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    return core_application_view_QueryInterface( &impl_from_ICoreApplicationView6( iface )->ICoreApplicationView_iface, iid, out );
+}
+static ULONG WINAPI core_application_view6_AddRef( IInspectable *iface )
+{
+    return core_application_view_AddRef( &impl_from_ICoreApplicationView6( iface )->ICoreApplicationView_iface );
+}
+static ULONG WINAPI core_application_view6_Release( IInspectable *iface )
+{
+    return core_application_view_Release( &impl_from_ICoreApplicationView6( iface )->ICoreApplicationView_iface );
+}
+static HRESULT WINAPI core_application_view6_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    return core_application_view_GetIids( &impl_from_ICoreApplicationView6( iface )->ICoreApplicationView_iface, count, iids );
+}
+static HRESULT WINAPI core_application_view6_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return core_application_view_GetRuntimeClassName( &impl_from_ICoreApplicationView6( iface )->ICoreApplicationView_iface, name );
+}
+static HRESULT WINAPI core_application_view6_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    return core_application_view_GetTrustLevel( &impl_from_ICoreApplicationView6( iface )->ICoreApplicationView_iface, level );
+}
+static HRESULT WINAPI core_application_view6_get_DispatcherQueue( IInspectable *iface, void **value )
+{
+    /* {2bc095a8-8ef0-446d-9e60-3a3e0428c671} is ICoreApplicationViewProperties::get_Properties
+     * returning an IPropertySet / IMap<HSTRING, IInspectable*> ({1b0d3570-...}). */
+    struct core_application_view *impl = impl_from_ICoreApplicationView6( iface );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!impl->properties)
+    {
+        HRESULT hr = static_lifetime_map_create( &impl->properties );
+        if (FAILED(hr)) return hr;
+    }
+    *value = impl->properties;
+    if (*value) IUnknown_AddRef( (IUnknown *)*value );
+    TRACE( "iface %p -> properties %p\n", iface, *value );
+    return S_OK;
+}
+static const void *core_application_view6_vtbl[] =
+{
+    core_application_view6_QueryInterface,
+    core_application_view6_AddRef,
+    core_application_view6_Release,
+    core_application_view6_GetIids,
+    core_application_view6_GetRuntimeClassName,
+    core_application_view6_GetTrustLevel,
+    core_application_view6_get_DispatcherQueue,
+};
+
 static ICoreApplicationView *core_application_view_get(void)
 {
     if (!the_application_view)
@@ -1479,6 +1827,7 @@ static ICoreApplicationView *core_application_view_get(void)
         impl->ICoreApplicationView_iface.lpVtbl = &core_application_view_vtbl;
         impl->ICoreApplicationView2_iface.lpVtbl = &core_application_view2_vtbl;
         impl->ICoreApplicationView3_iface.lpVtbl = &core_application_view3_vtbl;
+        impl->ICoreApplicationView6_iface.lpVtbl = (const IInspectableVtbl *)core_application_view6_vtbl;
         impl->ref = 1;
         the_application_view = &impl->ICoreApplicationView_iface;
     }
@@ -3035,6 +3384,9 @@ static HRESULT core_application_broker_handshake( IFrameworkView *view, ICoreApp
     return hr;
 }
 
+static BOOL core_app_try_single_instance_redirect( void );
+static const WCHAR *app_activation_current_uri( void );
+
 static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkViewSource *view_source )
 {
     ICoreApplicationView *app_view;
@@ -3046,6 +3398,12 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
     FIXME( "iface %p, view_source %p semi-stub.\n", iface, view_source );
 
     if (!view_source) return E_INVALIDARG;
+
+    if (core_app_try_single_instance_redirect())
+    {
+        TRACE( "redirected activation to primary UWP instance; exiting secondary.\n" );
+        ExitProcess( 0 );
+    }
 
     core_properties_ensure( NULL );
     ensure_focus_watcher_started();
@@ -3121,17 +3479,25 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
         }
         WindowsDeleteString( class_id );
 
+        if (cw && !cached_main_core_window)
+        {
+            __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( cw );
+            if (InterlockedCompareExchangePointer( (void *volatile *)&cached_main_core_window, cw, NULL ))
+                __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( cw );
+        }
         hr = IFrameworkView_SetWindow( view, cw );
         if (cw) __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( cw );
     }
     if (!brokered && SUCCEEDED(hr)) hr = IFrameworkView_Load( view, NULL );
     if (!brokered && view_activated_handler)
     {
+        const WCHAR *uri = app_activation_current_uri();
         __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args =
-            activated_event_args_create( 0 /* ActivationKind_Launch */ );
+            uri ? activated_event_args_create_protocol( uri )
+                : activated_event_args_create( 0 /* ActivationKind_Launch */ );
         if (args)
         {
-            TRACE( "invoking Activated handler %p\n", view_activated_handler );
+            TRACE( "invoking Activated handler %p (uri %s)\n", view_activated_handler, debugstr_w( uri ) );
             __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_Invoke(
                 view_activated_handler, app_view, args );
             __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_Release( args );
@@ -3442,6 +3808,48 @@ static const struct IWineSessionPropertiesVtbl factory_session_vtbl =
     factory_session_Reload,
 };
 
+DEFINE_IINSPECTABLE( immersive_app, ICoreImmersiveApplication, struct factory, IActivationFactory_iface )
+
+static HRESULT WINAPI immersive_app_get_Views( ICoreImmersiveApplication *iface,
+        __FIVectorView_1_Windows__CApplicationModel__CCore__CCoreApplicationView **value )
+{
+    FIXME( "iface %p, value %p stub!\n", iface, value );
+    if (value) *value = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI immersive_app_CreateNewView( ICoreImmersiveApplication *iface,
+        HSTRING runtime_type, HSTRING entry_point, ICoreApplicationView **view )
+{
+    TRACE( "iface %p, runtime_type %s, entry_point %s, view %p\n",
+           iface, debugstr_hstring( runtime_type ), debugstr_hstring( entry_point ), view );
+    if (!view) return E_POINTER;
+    *view = core_application_view_get();
+    return *view ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI immersive_app_get_MainView( ICoreImmersiveApplication *iface,
+        ICoreApplicationView **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = core_application_view_get();
+    return *value ? S_OK : E_OUTOFMEMORY;
+}
+
+static const struct ICoreImmersiveApplicationVtbl immersive_app_vtbl =
+{
+    immersive_app_QueryInterface,
+    immersive_app_AddRef,
+    immersive_app_Release,
+    immersive_app_GetIids,
+    immersive_app_GetRuntimeClassName,
+    immersive_app_GetTrustLevel,
+    immersive_app_get_Views,
+    immersive_app_CreateNewView,
+    immersive_app_get_MainView,
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
@@ -3450,6 +3858,7 @@ static struct factory factory =
     {&unhandled_error_vtbl},
     {&static_lifetime_vtbl},
     {&factory_session_vtbl},
+    {&immersive_app_vtbl},
     NULL,
     1,
 };
@@ -3622,8 +4031,34 @@ static HRESULT WINAPI app_instance_QueryInterface( IInspectable *iface, REFIID i
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI app_instance_AddRef( IInspectable *iface ) { return 2; }
-static ULONG WINAPI app_instance_Release( IInspectable *iface ) { return 1; }
+static const void *app_instance_vtbl[];
+struct current_app_instance_impl
+{
+    const void *vtbl;
+    HSTRING key;        /* registered RedirectionKind key, NULL until registered */
+    DWORD pid;          /* owning process (primary) pid */
+    boolean is_current; /* TRUE for the instance living in this process */
+    BOOL heap;          /* secondary-instance face: ref-owned, freeable */
+    LONG ref;
+};
+static struct current_app_instance_impl current_app_instance = { app_instance_vtbl, NULL, 0, TRUE, FALSE, 1 };
+
+static ULONG WINAPI app_instance_AddRef( IInspectable *iface )
+{
+    struct current_app_instance_impl *impl = (struct current_app_instance_impl *)iface;
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_instance_Release( IInspectable *iface )
+{
+    struct current_app_instance_impl *impl = (struct current_app_instance_impl *)iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref && impl->heap)
+    {
+        WindowsDeleteString( impl->key );
+        free( impl );
+    }
+    return ref;
+}
 static HRESULT WINAPI app_instance_GetIids( IInspectable *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 static HRESULT WINAPI app_instance_GetRuntimeClassName( IInspectable *iface, HSTRING *n )
 {
@@ -3668,17 +4103,67 @@ static HRESULT WINAPI app_activation_args_GetRuntimeClassName( void *iface, HSTR
     return WindowsCreateString( L"Microsoft.Windows.AppLifecycle.AppActivationArguments", 53, n );
 }
 static HRESULT WINAPI app_activation_args_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+/* The activation this process was started with: a browser protocol launch
+ * passes the shapr3d://... (any scheme://...) URI as a command-line argument,
+ * which is what AppInstance.GetCurrent().GetActivatedEventArgs() must report.
+ * While an AppInstance.Activated event handler runs, g_current_uri overrides it
+ * with the redirected event's URI, matching Windows' "current" semantics. */
+static HSTRING g_cmdline_uri;
+static BOOL g_cmdline_uri_done;
+static HSTRING g_current_uri;
+
+static void app_inst_init_cmdline_uri( void )
+{
+    WCHAR **argv;
+    int argc, i;
+
+    if (g_cmdline_uri_done) return;
+    g_cmdline_uri_done = TRUE;
+    if ((argv = CommandLineToArgvW( GetCommandLineW(), &argc )))
+    {
+        for (i = 1; i < argc; i++)
+        {
+            if (wcsstr( argv[i], L"://" ))
+            {
+                WindowsCreateString( argv[i], wcslen( argv[i] ), &g_cmdline_uri );
+                break;
+            }
+        }
+        LocalFree( argv );
+    }
+}
+
+static const WCHAR *app_activation_current_uri( void )
+{
+    const WCHAR *raw;
+
+    app_inst_init_cmdline_uri();
+    if (!(raw = WindowsGetStringRawBuffer( g_current_uri ? g_current_uri : g_cmdline_uri, NULL ))) return NULL;
+    return raw[0] ? raw : NULL;
+}
+
+static void app_activation_set_current_uri( const WCHAR *uri )
+{
+    HSTRING str = NULL;
+    if (uri) WindowsCreateString( uri, wcslen( uri ), &str );
+    WindowsDeleteString( g_current_uri );
+    g_current_uri = str;
+}
+
 static HRESULT WINAPI app_activation_args_get_Kind( void *iface, UINT32 *kind )
 {
     TRACE( "app_activation_args_get_Kind called\n" );
-    if (kind) *kind = 0 /* ExtendedActivationKind_Launch */;
+    if (kind) *kind = app_activation_current_uri() ? 4 /* ExtendedActivationKind_Protocol */
+                                                   : 0 /* ExtendedActivationKind_Launch */;
     return S_OK;
 }
 static HRESULT WINAPI app_activation_args_get_Data( void *iface, void **data )
 {
-    TRACE( "app_activation_args_get_Data called\n" );
+    const WCHAR *uri = app_activation_current_uri();
+
+    TRACE( "app_activation_args_get_Data called, uri %s\n", debugstr_w( uri ) );
     if (!data) return E_POINTER;
-    *data = (void *)activated_event_args_create( 0 );
+    *data = (void *)(uri ? activated_event_args_create_protocol( uri ) : activated_event_args_create( 0 ));
     return S_OK;
 }
 static const void *app_activation_args_vtbl[] =
@@ -3694,15 +4179,334 @@ static const void *app_activation_args_vtbl[] =
 };
 static struct { const void *vtbl; } app_activation_args_obj = { app_activation_args_vtbl };
 
-static const void *app_instance_vtbl[];
-struct current_app_instance_impl
-{
-    const void *vtbl;
-};
-static struct current_app_instance_impl current_app_instance = { app_instance_vtbl };
-
 static HRESULT WINAPI app_instance_UnregisterKey( IInspectable *iface ) { return S_OK; }
-static HRESULT WINAPI app_instance_RedirectActivationToAsync( IInspectable *iface, void *args, void **action ) { return E_NOTIMPL; }
+
+/* Completed IAsyncAction handed out by RedirectActivationToAsync: the redirect
+ * is done as soon as the primary instance acknowledged the pipe message, so the
+ * action is already completed and get_Completed fires the callback inline. */
+struct completed_action
+{
+    __x_ABI_CWindows_CFoundation_CIAsyncAction IAsyncAction_iface;
+    LONG ref;
+    __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler *handler;
+};
+
+static inline struct completed_action *impl_from_IAsyncAction( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface )
+{
+    return CONTAINING_RECORD( iface, struct completed_action, IAsyncAction_iface );
+}
+
+static HRESULT WINAPI completed_action_QueryInterface( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface, REFIID iid, void **out )
+{
+    struct completed_action *impl = impl_from_IAsyncAction( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncAction ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IAsyncAction_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI completed_action_AddRef( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface )
+{
+    struct completed_action *impl = impl_from_IAsyncAction( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI completed_action_Release( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface )
+{
+    struct completed_action *impl = impl_from_IAsyncAction( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->handler) __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler_Release( impl->handler );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI completed_action_GetIids( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI completed_action_GetRuntimeClassName( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.AsyncAction", 30, name );
+}
+static HRESULT WINAPI completed_action_GetTrustLevel( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI completed_action_put_Completed( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface,
+        __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler *handler )
+{
+    struct completed_action *impl = impl_from_IAsyncAction( iface );
+    if (impl->handler) __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler_Release( impl->handler );
+    if ((impl->handler = handler))
+    {
+        __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler_AddRef( handler );
+        __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler_Invoke( handler, iface, Completed );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI completed_action_get_Completed( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface,
+        __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler **handler )
+{
+    struct completed_action *impl = impl_from_IAsyncAction( iface );
+    if (!handler) return E_POINTER;
+    if (impl->handler) __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler_AddRef( impl->handler );
+    *handler = impl->handler;
+    return S_OK;
+}
+static HRESULT WINAPI completed_action_GetResults( __x_ABI_CWindows_CFoundation_CIAsyncAction *iface ) { return S_OK; }
+static const struct __x_ABI_CWindows_CFoundation_CIAsyncActionVtbl completed_action_vtbl =
+{
+    completed_action_QueryInterface,
+    completed_action_AddRef,
+    completed_action_Release,
+    completed_action_GetIids,
+    completed_action_GetRuntimeClassName,
+    completed_action_GetTrustLevel,
+    completed_action_put_Completed,
+    completed_action_get_Completed,
+    completed_action_GetResults,
+    /* widl's IAsyncAction flattens IAsyncInfo at these 9 slots; Cancel and
+     * get_Status stay as the trailing methods below the widl view. */
+};
+
+static __x_ABI_CWindows_CFoundation_CIAsyncAction *completed_action_create( void )
+{
+    struct completed_action *action;
+    if (!(action = calloc( 1, sizeof(*action) ))) return NULL;
+    action->IAsyncAction_iface.lpVtbl = &completed_action_vtbl;
+    action->ref = 1;
+    return &action->IAsyncAction_iface;
+}
+
+/* ---- cross-process single-instancing -------------------------------
+ * The primary instance for a key owns a named pipe named after the key.
+ * Second instances connect to it: "P\n" asks for the owner pid,
+ * "A <uri>\n" redirects a protocol activation, "L\n" a launch activation.
+ * The primary's listener thread posts the URI to a message-only window
+ * created on the thread that registered, so the Activated handlers run on the
+ * primary UI thread (the CoreDispatcher's conversation). */
+static const WCHAR app_inst_default_key[] = L"61E9B470-92E6-482B-AFD8-38C1FB464FB5";
+static HANDLE app_inst_pipe;
+static HWND app_inst_msg_hwnd;
+static struct current_app_instance_impl *app_inst_remote;
+static CRITICAL_SECTION app_inst_cs;
+static INIT_ONCE app_inst_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK app_inst_init_cs( INIT_ONCE *once, void *param, void **context )
+{
+    InitializeCriticalSection( &app_inst_cs );
+    return TRUE;
+}
+
+static void app_inst_lock( void )
+{
+    InitOnceExecuteOnce( &app_inst_once, app_inst_init_cs, NULL, NULL );
+    EnterCriticalSection( &app_inst_cs );
+}
+
+static void app_inst_unlock( void )
+{
+    LeaveCriticalSection( &app_inst_cs );
+}
+
+static DWORD app_inst_key_hash( const WCHAR *key )
+{
+    DWORD h = 2166136261;
+    while (*key)
+    {
+        WCHAR c = *key++;
+        h = (h ^ (BYTE)c) * 16777619;
+        h = (h ^ (BYTE)(c >> 8)) * 16777619;
+    }
+    return h;
+}
+
+static void app_inst_pipe_name( WCHAR *buf, size_t size, const WCHAR *key )
+{
+    if (!key || !*key) key = app_inst_default_key;
+    swprintf( buf, size, L"\\\\.\\pipe\\wine_appinst_%08lx", app_inst_key_hash( key ) );
+}
+
+static WCHAR *app_inst_dup_wstr( const WCHAR *s )
+{
+    size_t len = wcslen( s ) + 1;
+    WCHAR *d = calloc( len, sizeof(*d) );
+    if (d) memcpy( d, s, len * sizeof(*d) );
+    return d;
+}
+
+/* Message-mode pipe: one UTF-16 line per request, one reply per request. */
+static BOOL app_inst_read_msg( HANDLE h, WCHAR *buf, DWORD max_chars )
+{
+    DWORD got;
+
+    if (!ReadFile( h, buf, max_chars * sizeof(WCHAR), &got, NULL )) return FALSE;
+    buf[got / sizeof(WCHAR)] = 0;
+    return got != 0;
+}
+
+static BOOL app_inst_write_msg( HANDLE h, const WCHAR *msg )
+{
+    DWORD len = wcslen( msg ) + 1, sent;
+
+    return WriteFile( h, msg, len * sizeof(WCHAR), &sent, NULL );
+}
+
+static HANDLE app_inst_connect( const WCHAR *key )
+{
+    WCHAR name[64];
+    HANDLE h;
+    int i;
+
+    app_inst_pipe_name( name, ARRAYSIZE( name ), key );
+    for (i = 0; i < 4; i++)
+    {
+        h = CreateFileW( name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+        if (h != INVALID_HANDLE_VALUE) return h;
+        if (GetLastError() != ERROR_PIPE_BUSY) break;
+        WaitNamedPipeW( name, 100 );
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+/* ---- the caller-facing interfaces we consume, as callable faces ----------
+ * Microsoft.Windows.AppLifecycle.AppActivationArguments: IInspectable +
+ * get_Data (slot 6) + get_Kind (slot 7). */
+struct app_activation_args_face
+{
+    const struct app_activation_args_face_vtbl *lpVtbl;
+};
+struct app_activation_args_face_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( struct app_activation_args_face *, REFIID, void ** );
+    ULONG (STDMETHODCALLTYPE *AddRef)( struct app_activation_args_face * );
+    ULONG (STDMETHODCALLTYPE *Release)( struct app_activation_args_face * );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( struct app_activation_args_face *, ULONG *, IID ** );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( struct app_activation_args_face *, HSTRING * );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( struct app_activation_args_face *, TrustLevel * );
+    HRESULT (STDMETHODCALLTYPE *get_Data)( struct app_activation_args_face *, IInspectable ** );
+    HRESULT (STDMETHODCALLTYPE *get_Kind)( struct app_activation_args_face *, UINT32 * );
+};
+
+/* Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs:
+ * IInspectable + get_Uri (slot 6). */
+struct protocol_args_face
+{
+    const struct protocol_args_face_vtbl *lpVtbl;
+};
+struct protocol_args_face_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( struct protocol_args_face *, REFIID, void ** );
+    ULONG (STDMETHODCALLTYPE *AddRef)( struct protocol_args_face * );
+    ULONG (STDMETHODCALLTYPE *Release)( struct protocol_args_face * );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( struct protocol_args_face *, ULONG *, IID ** );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( struct protocol_args_face *, HSTRING * );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( struct protocol_args_face *, TrustLevel * );
+    HRESULT (STDMETHODCALLTYPE *get_Uri)( struct protocol_args_face *, __x_ABI_CWindows_CFoundation_CIUriRuntimeClass ** );
+};
+
+/* AppInstance.Activated handler: IUnknown + Invoke(sender, args). */
+struct app_instance_activated_handler
+{
+    const struct app_instance_activated_handler_vtbl *lpVtbl;
+};
+struct app_instance_activated_handler_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( struct app_instance_activated_handler *, REFIID, void ** );
+    ULONG (STDMETHODCALLTYPE *AddRef)( struct app_instance_activated_handler * );
+    ULONG (STDMETHODCALLTYPE *Release)( struct app_instance_activated_handler * );
+    HRESULT (STDMETHODCALLTYPE *Invoke)( struct app_instance_activated_handler *, IInspectable *, IInspectable * );
+};
+
+/* Extract the redirect payload from AppActivationArguments: returns a heap
+ * wide string ("A" protocol uri / "L" launch) owned by the caller. */
+static WCHAR *app_inst_args_to_line( void *args )
+{
+    struct app_activation_args_face *face = (struct app_activation_args_face *)args;
+    WCHAR *line = NULL;
+    UINT32 kind = 0;
+    IInspectable *data = NULL;
+
+    if (FAILED( face->lpVtbl->get_Kind( face, &kind ) )) kind = 0;
+    if (kind == 4 && SUCCEEDED( face->lpVtbl->get_Data( face, &data ) ) && data)
+    {
+        struct protocol_args_face *proto = NULL;
+
+        if (SUCCEEDED( IInspectable_QueryInterface( data, &IID_IProtocolActivatedEventArgs, (void **)&proto ) ) && proto)
+        {
+            __x_ABI_CWindows_CFoundation_CIUriRuntimeClass *uriobj = NULL;
+            HSTRING hstr = NULL;
+            const WCHAR *raw = NULL;
+
+            if (SUCCEEDED( proto->lpVtbl->get_Uri( proto, &uriobj ) ) && uriobj)
+            {
+                if (SUCCEEDED( __x_ABI_CWindows_CFoundation_CIUriRuntimeClass_get_AbsoluteUri( uriobj, &hstr ) ))
+                    raw = WindowsGetStringRawBuffer( hstr, NULL );
+                if (raw && raw[0])
+                {
+                    size_t len = wcslen( raw ) + 3;
+                    if ((line = calloc( len, sizeof(*line) ))) swprintf( line, len, L"A%ls", raw );
+                }
+                if (hstr) WindowsDeleteString( hstr );
+                __x_ABI_CWindows_CFoundation_CIUriRuntimeClass_Release( uriobj );
+            }
+            IInspectable_Release( (IInspectable *)proto );
+        }
+        IInspectable_Release( data );
+        if (line) return line;
+    }
+    else if (data) IInspectable_Release( data );
+    return app_inst_dup_wstr( L"L" );
+}
+
+static HRESULT WINAPI app_instance_RedirectActivationToAsync( IInspectable *iface, void *args, void **action )
+{
+    struct current_app_instance_impl *impl = (struct current_app_instance_impl *)iface;
+    const WCHAR *key = (const WCHAR *)WindowsGetStringRawBuffer( impl->key, NULL );
+    WCHAR *line;
+    HANDLE h;
+
+    TRACE( "iface %p, args %p, action %p\n", iface, args, action );
+    if (!action) return E_POINTER;
+
+    *action = (void *)completed_action_create();
+    if (!*action) return E_OUTOFMEMORY;
+    if (impl->is_current) return S_OK; /* redirect to self lands where it is */
+
+    line = args ? app_inst_args_to_line( args ) : NULL;
+    if (!line || !wcscmp( line, L"L" ))
+    {
+        const WCHAR *uri = app_activation_current_uri();
+        free( line );
+        line = NULL;
+        if (uri)
+        {
+            size_t len = wcslen( uri ) + 3;
+            if ((line = calloc( len, sizeof(*line) ))) swprintf( line, len, L"A%ls", uri );
+        }
+        if (!line && !(line = app_inst_dup_wstr( L"L" ))) return E_OUTOFMEMORY;
+    }
+
+    h = app_inst_connect( key );
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        WCHAR reply[16];
+        app_inst_write_msg( h, line );
+        app_inst_read_msg( h, reply, ARRAYSIZE( reply ) ); /* await primary ack */
+        CloseHandle( h );
+    }
+    else WARN( "no primary instance listening on key %s\n", debugstr_w( key ) );
+    free( line );
+    return S_OK;
+}
 static HRESULT WINAPI app_instance_GetActivatedEventArgs( IInspectable *iface, void **result )
 {
     TRACE( "app_instance_GetActivatedEventArgs called\n" );
@@ -3712,16 +4516,20 @@ static HRESULT WINAPI app_instance_GetActivatedEventArgs( IInspectable *iface, v
 }
 static HRESULT WINAPI app_instance_get_IsCurrent( IInspectable *iface, boolean *value )
 {
-    if (value) *value = TRUE;
+    struct current_app_instance_impl *impl = (struct current_app_instance_impl *)iface;
+    if (value) *value = impl->is_current;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_get_Key( IInspectable *iface, HSTRING *value )
 {
-    return WindowsCreateString( L"61E9B470-92E6-482B-AFD8-38C1FB464FB5", 36, value );
+    struct current_app_instance_impl *impl = (struct current_app_instance_impl *)iface;
+    if (impl->key) return WindowsDuplicateString( impl->key, value );
+    return WindowsCreateString( app_inst_default_key, wcslen( app_inst_default_key ), value );
 }
 static HRESULT WINAPI app_instance_get_ProcessId( IInspectable *iface, UINT32 *value )
 {
-    if (value) *value = GetCurrentProcessId();
+    struct current_app_instance_impl *impl = (struct current_app_instance_impl *)iface;
+    if (value) *value = impl->pid ? impl->pid : GetCurrentProcessId();
     return S_OK;
 }
 
@@ -3754,6 +4562,156 @@ static HRESULT WINAPI app_instance_remove_Activated( IInspectable *iface, EventR
     return S_OK;
 }
 
+/* Deliver a redirected activation on the primary's UI thread: fire
+ * CoreApplicationView::Activated (what XAML's Application.OnLaunched sits on)
+ * and AppInstance.Activated (the AppLifecycle event) with the URI set as the
+ * process' current activation. */
+static void app_inst_fire( const WCHAR *uri )
+{
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *handler = view_activated_handler;
+    __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args;
+    struct app_instance_activated_handler *app_handler = g_activated_handler;
+    ICoreApplicationView *view = NULL;
+
+    TRACE( "firing Activated, uri %s\n", debugstr_w( uri ) );
+    app_activation_set_current_uri( uri );
+
+    if (handler && (args = (uri && uri[0]) ? activated_event_args_create_protocol( uri )
+                                           : activated_event_args_create( 0 )))
+    {
+        impl_from_IActivatedEventArgs( args )->prev_state = 1; /* ApplicationExecutionState_Running */
+        if ((view = core_application_view_get()))
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_Invoke( handler, view, args );
+        ICoreApplicationView_Release( view );
+        __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_Release( args );
+    }
+    if (app_handler)
+        app_handler->lpVtbl->Invoke( app_handler, (IInspectable *)&current_app_instance,
+                                     (IInspectable *)&app_activation_args_obj );
+}
+
+static LRESULT CALLBACK app_inst_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
+{
+    if (msg == WM_APP + 1)
+    {
+        WCHAR *uri = (WCHAR *)lp;
+        app_inst_fire( uri );
+        free( uri );
+        return 0;
+    }
+    return DefWindowProcW( hwnd, msg, wp, lp );
+}
+
+static void app_inst_ensure_window( void )
+{
+    static const WCHAR class_name[] = L"WineAppInstanceMessageWindow";
+    static ATOM atom;
+    WNDCLASSW wc;
+
+    if (app_inst_msg_hwnd) return;
+    if (!atom)
+    {
+        wc.style = 0;
+        wc.lpfnWndProc = app_inst_wndproc;
+        wc.cbClsExtra = 0;
+        wc.cbWndExtra = 0;
+        wc.hInstance = 0;
+        wc.hIcon = 0;
+        wc.hCursor = 0;
+        wc.hbrBackground = 0;
+        wc.lpszMenuName = 0;
+        wc.lpszClassName = class_name;
+        if (!(atom = RegisterClassW( &wc ))) return;
+    }
+    app_inst_msg_hwnd = CreateWindowExW( 0, class_name, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, 0 );
+}
+
+/* Primary side: accept one connection per loop, reply, and hand the payload to
+ * the window's thread. Runs for the lifetime of the process. */
+static DWORD WINAPI app_inst_listener_thread( void *arg )
+{
+    WCHAR buf[2048];
+
+    for (;;)
+    {
+        if (!ConnectNamedPipe( app_inst_pipe, NULL ) && GetLastError() != ERROR_PIPE_CONNECTED) break;
+        if (app_inst_read_msg( app_inst_pipe, buf, ARRAYSIZE( buf ) ))
+        {
+            if (buf[0] == L'P')
+            {
+                WCHAR reply[16];
+                swprintf( reply, ARRAYSIZE( reply ), L"%u", GetCurrentProcessId() );
+                app_inst_write_msg( app_inst_pipe, reply );
+            }
+            else if (buf[0] == L'A')
+            {
+                app_inst_write_msg( app_inst_pipe, L"OK" );
+                if (app_inst_msg_hwnd)
+                    PostMessageW( app_inst_msg_hwnd, WM_APP + 1, 0, (LPARAM)app_inst_dup_wstr( buf + 1 ) );
+                else
+                    app_inst_fire( buf + 1 );
+            }
+            else if (buf[0] == L'L')
+            {
+                app_inst_write_msg( app_inst_pipe, L"OK" );
+                if (app_inst_msg_hwnd)
+                    PostMessageW( app_inst_msg_hwnd, WM_APP + 1, 0, (LPARAM)app_inst_dup_wstr( L"" ) );
+                else
+                    app_inst_fire( L"" );
+            }
+            FlushFileBuffers( app_inst_pipe );
+        }
+        DisconnectNamedPipe( app_inst_pipe );
+    }
+    return 0;
+}
+
+static BOOL core_app_try_single_instance_redirect( void )
+{
+    WCHAR exe[MAX_PATH], name[64], msg[2048], reply[64];
+    const WCHAR *uri;
+    HANDLE h, thread;
+    DWORD i;
+
+    if (app_inst_pipe) return FALSE; /* already registered via AppInstance */
+    if (!GetModuleFileNameW( NULL, exe, ARRAYSIZE( exe ) )) return FALSE;
+    for (i = 0; exe[i]; i++)
+        if (exe[i] >= L'A' && exe[i] <= L'Z') exe[i] += L'a' - L'A';
+
+    if ((h = app_inst_connect( exe )) != INVALID_HANDLE_VALUE)
+    {
+        BOOL ok;
+        uri = app_activation_current_uri();
+        swprintf( msg, ARRAYSIZE( msg ), L"A%s", uri ? uri : L"" );
+        reply[0] = 0;
+        ok = app_inst_write_msg( h, msg ) &&
+             app_inst_read_msg( h, reply, ARRAYSIZE( reply ) ) &&
+             !wcscmp( reply, L"OK" );
+        CloseHandle( h );
+        if (ok)
+        {
+            WARN( "single-instance redirected to primary (key=%s, uri=%s)\n", debugstr_w( exe ), debugstr_w( uri ) );
+            return TRUE;
+        }
+        WARN( "single-instance pipe stale/no-OK (key=%s); continuing as primary\n", debugstr_w( exe ) );
+    }
+
+    app_inst_pipe_name( name, ARRAYSIZE( name ), exe );
+    app_inst_pipe = CreateNamedPipeW( name, PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, NULL );
+    if (app_inst_pipe == INVALID_HANDLE_VALUE)
+    {
+        app_inst_pipe = NULL;
+        return FALSE;
+    }
+    app_inst_ensure_window();
+    if ((thread = CreateThread( NULL, 0, app_inst_listener_thread, NULL, 0, NULL )))
+        CloseHandle( thread );
+    TRACE( "primary single-instance pipe listening on %s\n", debugstr_w( name ) );
+    return FALSE;
+}
+
 static const void *app_instance_vtbl[] =
 {
     /* IInspectable */
@@ -3775,6 +4733,65 @@ static const void *app_instance_vtbl[] =
 };
 
 
+static const GUID IID_IVectorView_AppInstance = {0x9ba4c764, 0xcaaa, 0x6e5c, {0x6c, 0x53, 0xbd, 0xd5, 0x9d, 0x76, 0xd5, 0xc2}};
+
+/* IVectorView<AppInstance> over the single registered instance. */
+static HRESULT WINAPI app_instances_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IVectorView_AppInstance ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_instances_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI app_instances_Release( void *iface ) { return 1; }
+static HRESULT WINAPI app_instances_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_instances_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Microsoft.Windows.AppLifecycle.AppInstance>", 82, name );
+}
+static HRESULT WINAPI app_instances_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI app_instances_IndexOf( void *iface, IInspectable *value, UINT32 *index, boolean *found )
+{
+    if (!index || !found) return E_POINTER;
+    *found = (value == (IInspectable *)&current_app_instance);
+    *index = 0;
+    return S_OK;
+}
+static HRESULT WINAPI app_instances_GetAt( void *iface, UINT32 index, IInspectable **value )
+{
+    if (!value) return E_POINTER;
+    if (index) return E_BOUNDS;
+    *value = (IInspectable *)&current_app_instance;
+    return S_OK;
+}
+static HRESULT WINAPI app_instances_Size( void *iface, UINT32 *size )
+{
+    if (!size) return E_POINTER;
+    *size = 1;
+    return S_OK;
+}
+static const void *app_instances_vtbl[] =
+{
+    app_instances_QueryInterface, app_instances_AddRef, app_instances_Release,
+    app_instances_GetIids, app_instances_GetRuntimeClassName, app_instances_GetTrustLevel,
+    app_instances_IndexOf, app_instances_GetAt, app_instances_Size,
+};
+static const void *app_instances_obj = app_instances_vtbl;
+
 static HRESULT WINAPI app_instance_statics_get_RecommendedInstance( IInspectable *iface, IInspectable **value )
 {
     TRACE( "app_instance_statics_get_RecommendedInstance called\n" );
@@ -3785,15 +4802,87 @@ static HRESULT WINAPI app_instance_statics_get_RecommendedInstance( IInspectable
 static HRESULT WINAPI app_instance_statics_GetInstances( IInspectable *iface, IInspectable **value )
 {
     TRACE( "app_instance_statics_GetInstances called\n" );
-    if (value) *value = NULL;
+    if (!value) return E_POINTER;
+    *value = (IInspectable *)&app_instances_obj;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_FindOrRegisterInstanceForKey( IInspectable *iface, HSTRING key, IInspectable **result )
 {
+    const WCHAR *keyw = WindowsGetStringRawBuffer( key, NULL );
+    WCHAR name[64];
+    HANDLE h;
+    HRESULT hr = S_OK;
+
     TRACE( "app_instance_statics_FindOrRegisterInstanceForKey called: key %s\n", debugstr_hstring( key ) );
     if (!result) return E_POINTER;
-    *result = (IInspectable *)&current_app_instance;
-    return S_OK;
+
+    app_inst_lock();
+    if (app_inst_pipe || app_inst_remote)
+    {
+        /* key registration is process-wide; repeats hand back the found face */
+        *result = app_inst_pipe ? (IInspectable *)&current_app_instance : (IInspectable *)app_inst_remote;
+        app_inst_unlock();
+        return S_OK;
+    }
+    if (!keyw || !*keyw) keyw = app_inst_default_key;
+
+    h = app_inst_connect( keyw );
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        /* primary lives in another process: hand out a face for it */
+        DWORD pid = 0;
+        WCHAR reply[32];
+        struct current_app_instance_impl *remote;
+
+        app_inst_write_msg( h, L"P" );
+        if (app_inst_read_msg( h, reply, ARRAYSIZE( reply ) )) pid = wcstoul( reply, NULL, 10 );
+        CloseHandle( h );
+
+        if ((remote = calloc( 1, sizeof(*remote) )))
+        {
+            remote->vtbl = app_instance_vtbl;
+            remote->is_current = FALSE;
+            remote->heap = TRUE;
+            remote->ref = 1;
+            remote->pid = pid;
+            WindowsCreateString( keyw, wcslen( keyw ), &remote->key );
+            app_inst_remote = remote;
+            *result = (IInspectable *)remote;
+        }
+        else
+        {
+            hr = E_OUTOFMEMORY;
+        }
+    }
+    else
+    {
+        /* we are the primary for this key: own the pipe, listen, and
+         * pump Activated events on this (the UI) thread */
+        HANDLE thread;
+
+        app_inst_pipe_name( name, ARRAYSIZE( name ), keyw );
+        app_inst_pipe = CreateNamedPipeW( name, PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, NULL );
+        if (app_inst_pipe == INVALID_HANDLE_VALUE)
+        {
+            app_inst_pipe = NULL;
+            WARN( "failed to create app instance pipe %s, err %lu\n", debugstr_w( name ), GetLastError() );
+        }
+        else
+        {
+            app_inst_ensure_window();
+            if (!(thread = CreateThread( NULL, 0, app_inst_listener_thread, NULL, 0, NULL )))
+                WARN( "failed to create app instance listener, err %lu\n", GetLastError() );
+            else CloseHandle( thread );
+        }
+        WindowsCreateString( keyw, wcslen( keyw ), &current_app_instance.key );
+        current_app_instance.pid = GetCurrentProcessId();
+        current_app_instance.is_current = TRUE;
+        *result = (IInspectable *)&current_app_instance;
+    }
+    app_inst_unlock();
+    return hr;
 }
 static HRESULT WINAPI app_instance_statics_Unregister( IInspectable *iface )
 {

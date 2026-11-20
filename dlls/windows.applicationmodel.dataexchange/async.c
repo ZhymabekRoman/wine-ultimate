@@ -55,6 +55,7 @@ struct async_op
     const IID *iid;
     const WCHAR *class_name;
     void *handler;        /* IAsyncOperationCompletedHandler`1<T> * / IAsyncActionCompletedHandler *, owned */
+    void *progress;       /* IAsyncOperationProgressHandler`2<T,U> *, owned (progress ops only) */
     void *result;         /* per kind, owned */
     enum op_result_kind kind;
 };
@@ -171,6 +172,7 @@ static ULONG WINAPI op_Release( const void *iface )
     if (!ref)
     {
         if (impl->handler) IUnknown_Release( (IUnknown *)impl->handler );
+        if (impl->progress) IUnknown_Release( (IUnknown *)impl->progress );
         release_result( impl );
         free( impl );
     }
@@ -225,6 +227,33 @@ static HRESULT WINAPI op_get_Completed( const void *iface, void **handler )
     return S_OK;
 }
 
+/* IAsyncOperationWithProgress`2<T,U> inserts the Progress property between the
+ * IInspectable and the Completed accessors; the born-completed stream ReadAsync
+ * operations (the bitmap stream) store the delegate and report it back. */
+static HRESULT WINAPI op_put_Progress( const void *iface, void *handler )
+{
+    struct async_op *impl = impl_from_self( iface );
+
+    TRACE( "iface %p, handler %p.\n", iface, handler );
+
+    if (impl->progress) IUnknown_Release( (IUnknown *)impl->progress );
+    impl->progress = handler;
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI op_get_Progress( const void *iface, void **handler )
+{
+    struct async_op *impl = impl_from_self( iface );
+
+    TRACE( "iface %p, handler %p.\n", iface, handler );
+
+    if (!handler) return E_POINTER;
+    *handler = impl->progress;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
 static HRESULT WINAPI op_GetResults( const void *iface, void *results )
 {
     struct async_op *impl = impl_from_self( iface );
@@ -272,6 +301,21 @@ const void *async_action_vtbl[] =
     op_GetTrustLevel,
     op_put_Completed,
     op_get_Completed,
+};
+
+const void *async_op_progress_vtbl[] =
+{
+    op_QueryInterface,
+    op_AddRef,
+    op_Release,
+    op_GetIids,
+    op_GetRuntimeClassName,
+    op_GetTrustLevel,
+    op_put_Progress,
+    op_get_Progress,
+    op_put_Completed,
+    op_get_Completed,
+    op_GetResults,
 };
 
 static HRESULT WINAPI info_QueryInterface( const void *iface, REFIID iid, void **out )
@@ -390,6 +434,16 @@ struct async_op *create_async_op( const IID *iid, const WCHAR *class_name, void 
     }
 
     TRACE( "created op %p, result %p.\n", impl, result );
+    return impl;
+}
+
+/* Born-completed IAsyncOperationWithProgress`2<T,UINT32>: the stream ReadAsync
+ * shape the bitmap stream reference hands out (the result is the filled IBuffer). */
+struct async_op *create_async_op_progress( const IID *iid, const WCHAR *class_name, void *result )
+{
+    struct async_op *impl = create_async_op( iid, class_name, result, OP_RESULT_COM );
+
+    if (impl) impl->self_vtbl = async_op_progress_vtbl;
     return impl;
 }
 

@@ -20,14 +20,17 @@
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
+#define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Storage_Streams
 #define WIDL_using_Windows_System
 #include "windows.foundation.h"
 #include "windows.foundation.collections.h"
+#include "windows.storage.h"
 #include "windows.storage.streams.h"
 #include "windows.system.h"
 
 extern IActivationFactory *user_factory;
+extern IActivationFactory *launcher_factory;
 
 /*
  * WinRT asynchronous operations that are born completed; same shape as
