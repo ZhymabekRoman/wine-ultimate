@@ -1734,6 +1734,14 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         impl->last_measured_h = 0.0f;
         uwp_invalidate_window();
     }
+    else
+    {
+        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0] &&
+            (!wcscmp( dpl->name, L"ItemsSource" ) || !wcscmp( dpl->name, L"Content" ) ||
+             !wcscmp( dpl->name, L"Text" ) || !wcscmp( dpl->name, L"Visibility" )))
+            uwp_invalidate_window();
+    }
 
     if (old_val) IInspectable_Release( old_val );
     return S_OK;

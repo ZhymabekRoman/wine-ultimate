@@ -127,6 +127,7 @@ struct xaml_window
     IDCompositionVisual2 *dcomp_overlay_visual;
     IDXGISwapChain1 *swapchain;
     BOOL swapchain_is_composition;
+    BOOL scp_timer_armed;
     ID3D11Device *d3d11_dev;
     ID3D11DeviceContext *d3d11_ctx;
     HWND target_hwnd;
@@ -5106,6 +5107,14 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             xaml_window_refresh_present( hwnd );
         return ret;
     }
+#define XAML_SCP_DIRTY_TIMER_ID 0x58534350
+
+    if (msg == WM_TIMER && wparam == XAML_SCP_DIRTY_TIMER_ID)
+    {
+        if (g_active_scp_swapchain && InterlockedCompareExchange( &g_xaml_window_dirty, 0, 0 ))
+            xaml_window_present( &global_xaml_window );
+        return 0;
+    }
     if (msg == WM_APP_WV2_START)
     {
         ERR( "xaml_corewindow_wndproc: WM_APP_WV2_START hwnd %p\n", hwnd );
@@ -5639,6 +5648,11 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     /* 8. Commit the DirectComposition tree (skip when GPU swapchain presents directly to hwnd) */
     if (!impl->gpu_active || g_active_scp_swapchain)
         IDCompositionDesktopDevice_Commit( impl->dcomp_device );
+    if (g_active_scp_swapchain && !impl->scp_timer_armed && IsWindow( hwnd ))
+    {
+        SetTimer( hwnd, XAML_SCP_DIRTY_TIMER_ID, 200, NULL );
+        impl->scp_timer_armed = TRUE;
+    }
 
     /* 9. Blit the retained DIB into the top-level window DC for UWP / non-DComp backing store.
      * On WinUI 3 with an active DComp tree, DComp composites child visuals (e.g.
