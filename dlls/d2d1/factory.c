@@ -1738,9 +1738,14 @@ static void d2d_settings_init(void)
         RegCloseKey(default_key);
 }
 
+#include "wine/unixlib.h"
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
 {
     if (reason == DLL_PROCESS_ATTACH)
+    {
+        __wine_init_unix_call();
         d2d_settings_init();
+    }
     return TRUE;
 }

@@ -85,11 +85,19 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
 
     src = mapped_texture.pData;
 
-    for (i = 0; i < render_target->height; ++i)
     {
-        memcpy(dst, src, render_target->bpp * render_target->width);
-        src += mapped_texture.RowPitch;
-        dst += dst_pitch;
+        unsigned int nz = 0;
+        for (i = 0; i < render_target->height; ++i)
+        {
+            unsigned int j;
+            memcpy(dst, src, render_target->bpp * render_target->width);
+            for (j = 0; j < render_target->bpp * render_target->width; ++j)
+                if (src[j]) nz++;
+            src += mapped_texture.RowPitch;
+            dst += dst_pitch;
+        }
+        TRACE("wic_present %ux%u bpp=%u nonzero_bytes=%u.\n",
+                render_target->width, render_target->height, render_target->bpp, nz);
     }
 
     ID3D10Texture2D_Unmap(render_target->readback_texture, 0);

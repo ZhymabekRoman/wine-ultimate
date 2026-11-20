@@ -17,6 +17,8 @@
  */
 
 #include "d2d1_private.h"
+#include "unixlib.h"
+#include <math.h>
 #include <d3dcompiler.h>
 #include <objidl.h>
 
@@ -117,6 +119,228 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
     --stack->count;
 }
 
+static const char msaa_blit_vs_code[] =
+    "float4 main(float2 position : POSITION) : SV_POSITION\n"
+    "{\n"
+    "    return float4(position, 0.0f, 1.0f);\n"
+    "}\n";
+
+static const char msaa_blit_ps_code[] =
+    "Texture2D<float4> src : register(t0);\n"
+    "float4 main(float4 pos : SV_POSITION) : SV_TARGET\n"
+    "{\n"
+    "    return src.Load(int3(pos.xy, 0));\n"
+    "}\n";
+
+static void d2d_device_context_release_msaa_resources(struct d2d_device_context *context)
+{
+    if (context->msaa_sync_srv)
+    {
+        ID3D11ShaderResourceView_Release(context->msaa_sync_srv);
+        context->msaa_sync_srv = NULL;
+    }
+    if (context->msaa_sync_tex)
+    {
+        ID3D11Texture2D_Release(context->msaa_sync_tex);
+        context->msaa_sync_tex = NULL;
+    }
+    if (context->msaa_rtv)
+    {
+        ID3D11RenderTargetView_Release(context->msaa_rtv);
+        context->msaa_rtv = NULL;
+    }
+    if (context->msaa_tex)
+    {
+        ID3D11Texture2D_Release(context->msaa_tex);
+        context->msaa_tex = NULL;
+    }
+    context->msaa_width = 0;
+    context->msaa_height = 0;
+    context->msaa_samples = 0;
+    context->msaa_format = DXGI_FORMAT_UNKNOWN;
+    context->msaa_dirty = FALSE;
+}
+
+void d2d_device_context_resolve_msaa(struct d2d_device_context *context)
+{
+    ID3D11DeviceContext *d3d_ctx;
+
+    if (!context || !context->msaa_dirty)
+        return;
+
+    if (context->target.type == D2D_TARGET_BITMAP && context->target.bitmap
+            && context->target.bitmap->resource && context->msaa_tex)
+    {
+        ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_ctx);
+        ID3D11DeviceContext_ResolveSubresource(d3d_ctx, context->target.bitmap->resource, 0,
+                (ID3D11Resource *)context->msaa_tex, 0, context->msaa_format);
+        ID3D11DeviceContext_Release(d3d_ctx);
+    }
+    context->msaa_dirty = FALSE;
+}
+
+static BOOL d2d_device_context_ensure_msaa(struct d2d_device_context *render_target,
+        ID3D11DeviceContext1 *context)
+{
+    ID3D11Device1 *device = render_target->d3d_device;
+    struct d2d_bitmap *target_bm = render_target->target.bitmap;
+    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc;
+    D3D11_TEXTURE2D_DESC tdesc;
+    ID3D11Texture2D *target_tex = NULL;
+    ID3D11ShaderResourceView *src_srv = NULL;
+    UINT samples = 0, q = 0;
+
+    if (!target_bm || !target_bm->rtv || !target_bm->resource || !render_target->rs_msaa)
+        return FALSE;
+
+    ID3D11RenderTargetView_GetDesc(target_bm->rtv, &rtv_desc);
+    if (rtv_desc.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || rtv_desc.Texture2D.MipSlice != 0)
+        return FALSE;
+
+    if (FAILED(ID3D11Resource_QueryInterface(target_bm->resource, &IID_ID3D11Texture2D, (void **)&target_tex)))
+        return FALSE;
+    ID3D11Texture2D_GetDesc(target_tex, &tdesc);
+    ID3D11Texture2D_Release(target_tex);
+
+    if (tdesc.SampleDesc.Count != 1 || tdesc.ArraySize != 1 || tdesc.MipLevels != 1
+            || !tdesc.Width || !tdesc.Height)
+        return FALSE;
+
+    if (render_target->msaa_tex && render_target->msaa_width == tdesc.Width
+            && render_target->msaa_height == tdesc.Height && render_target->msaa_format == tdesc.Format)
+    {
+        samples = render_target->msaa_samples;
+    }
+    else
+    {
+        if (SUCCEEDED(ID3D11Device1_CheckMultisampleQualityLevels(device, tdesc.Format, 4, &q)) && q > 0)
+            samples = 4;
+        else if (SUCCEEDED(ID3D11Device1_CheckMultisampleQualityLevels(device, tdesc.Format, 2, &q)) && q > 0)
+            samples = 2;
+        else
+            return FALSE;
+
+        d2d_device_context_release_msaa_resources(render_target);
+
+        {
+            D3D11_TEXTURE2D_DESC mdesc = {0};
+            mdesc.Width = tdesc.Width;
+            mdesc.Height = tdesc.Height;
+            mdesc.MipLevels = 1;
+            mdesc.ArraySize = 1;
+            mdesc.Format = tdesc.Format;
+            mdesc.SampleDesc.Count = samples;
+            mdesc.SampleDesc.Quality = 0;
+            mdesc.Usage = D3D11_USAGE_DEFAULT;
+            mdesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+            if (FAILED(ID3D11Device1_CreateTexture2D(device, &mdesc, NULL, &render_target->msaa_tex)))
+                return FALSE;
+            if (FAILED(ID3D11Device1_CreateRenderTargetView(device, (ID3D11Resource *)render_target->msaa_tex,
+                    NULL, &render_target->msaa_rtv)))
+            {
+                d2d_device_context_release_msaa_resources(render_target);
+                return FALSE;
+            }
+            render_target->msaa_width = tdesc.Width;
+            render_target->msaa_height = tdesc.Height;
+            render_target->msaa_samples = samples;
+            render_target->msaa_format = tdesc.Format;
+        }
+    }
+
+    if (!render_target->blit_vs || !render_target->blit_ps)
+    {
+        ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
+        if (SUCCEEDED(D3DCompile(msaa_blit_vs_code, sizeof(msaa_blit_vs_code) - 1, "msaa_blit_vs",
+                NULL, NULL, "main", "vs_4_0", 0, 0, &vs_blob, NULL)))
+        {
+            ID3D11Device1_CreateVertexShader(device, ID3D10Blob_GetBufferPointer(vs_blob),
+                    ID3D10Blob_GetBufferSize(vs_blob), NULL, &render_target->blit_vs);
+            ID3D10Blob_Release(vs_blob);
+        }
+        if (SUCCEEDED(D3DCompile(msaa_blit_ps_code, sizeof(msaa_blit_ps_code) - 1, "msaa_blit_ps",
+                NULL, NULL, "main", "ps_4_0", 0, 0, &ps_blob, NULL)))
+        {
+            ID3D11Device1_CreatePixelShader(device, ID3D10Blob_GetBufferPointer(ps_blob),
+                    ID3D10Blob_GetBufferSize(ps_blob), NULL, &render_target->blit_ps);
+            ID3D10Blob_Release(ps_blob);
+        }
+        if (!render_target->blit_vs || !render_target->blit_ps)
+            return FALSE;
+    }
+
+    if (!render_target->msaa_dirty)
+    {
+        D3D11_VIEWPORT full_vp = { 0.0f, 0.0f, (float)tdesc.Width, (float)tdesc.Height, 0.0f, 1.0f };
+        D3D11_RECT full_sc = { 0, 0, (LONG)tdesc.Width, (LONG)tdesc.Height };
+        ID3D11ShaderResourceView *null_srv = NULL;
+
+        if (target_bm->srv)
+        {
+            src_srv = target_bm->srv;
+        }
+        else
+        {
+            if (!render_target->msaa_sync_tex)
+            {
+                D3D11_TEXTURE2D_DESC sdesc = {0};
+                sdesc.Width = tdesc.Width;
+                sdesc.Height = tdesc.Height;
+                sdesc.MipLevels = 1;
+                sdesc.ArraySize = 1;
+                sdesc.Format = tdesc.Format;
+                sdesc.SampleDesc.Count = 1;
+                sdesc.Usage = D3D11_USAGE_DEFAULT;
+                sdesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                if (SUCCEEDED(ID3D11Device1_CreateTexture2D(device, &sdesc, NULL, &render_target->msaa_sync_tex)))
+                {
+                    if (FAILED(ID3D11Device1_CreateShaderResourceView(device,
+                            (ID3D11Resource *)render_target->msaa_sync_tex, NULL, &render_target->msaa_sync_srv)))
+                    {
+                        ID3D11Texture2D_Release(render_target->msaa_sync_tex);
+                        render_target->msaa_sync_tex = NULL;
+                    }
+                }
+            }
+            if (!render_target->msaa_sync_srv)
+                return FALSE;
+            ID3D11DeviceContext1_CopyResource(context, (ID3D11Resource *)render_target->msaa_sync_tex,
+                    target_bm->resource);
+            src_srv = render_target->msaa_sync_srv;
+        }
+
+        {
+            unsigned int blit_offset = 0;
+            UINT num_scissors = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            D3D11_RECT saved_scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+
+            ID3D11DeviceContext1_RSGetScissorRects(context, &num_scissors, saved_scissors);
+            ID3D11DeviceContext1_OMSetRenderTargets(context, 1, &render_target->msaa_rtv, NULL);
+            ID3D11DeviceContext1_OMSetBlendState(context, NULL, NULL, D3D11_DEFAULT_SAMPLE_MASK);
+            ID3D11DeviceContext1_IASetInputLayout(context, render_target->shape_resources[D2D_SHAPE_TYPE_TRIANGLE].il);
+            ID3D11DeviceContext1_IASetPrimitiveTopology(context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ID3D11DeviceContext1_IASetIndexBuffer(context, render_target->ib, DXGI_FORMAT_R16_UINT, 0);
+            ID3D11DeviceContext1_IASetVertexBuffers(context, 0, 1, &render_target->vb,
+                    &render_target->vb_stride, &blit_offset);
+            ID3D11DeviceContext1_VSSetShader(context, render_target->blit_vs, NULL, 0);
+            ID3D11DeviceContext1_PSSetShader(context, render_target->blit_ps, NULL, 0);
+            ID3D11DeviceContext1_PSSetShaderResources(context, 0, 1, &src_srv);
+            ID3D11DeviceContext1_RSSetViewports(context, 1, &full_vp);
+            ID3D11DeviceContext1_RSSetScissorRects(context, 1, &full_sc);
+            ID3D11DeviceContext1_RSSetState(context, render_target->rs_msaa);
+            ID3D11DeviceContext1_DrawIndexed(context, 6, 0, 0);
+            ID3D11DeviceContext1_PSSetShaderResources(context, 0, 1, &null_srv);
+            if (num_scissors)
+                ID3D11DeviceContext1_RSSetScissorRects(context, num_scissors, saved_scissors);
+        }
+
+        render_target->msaa_dirty = TRUE;
+    }
+
+    return TRUE;
+}
+
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
         struct d2d_brush *brush, struct d2d_brush *opacity_brush)
@@ -126,9 +350,12 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     ID3D11Device1 *device = render_target->d3d_device;
     ID3D11DeviceContext1 *context;
     ID3D11Buffer *vs_cb = render_target->vs_cb, *ps_cb = render_target->ps_cb;
+    ID3D11RenderTargetView *rtv;
+    ID3D11RasterizerState *rs;
     D3D11_RECT scissor_rect;
     unsigned int offset;
     D3D11_VIEWPORT vp;
+    BOOL use_msaa = FALSE;
 
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
@@ -142,6 +369,15 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
 
     ID3D11Device1_GetImmediateContext1(device, &context);
     ID3D11DeviceContext1_SwapDeviceContextState(context, render_target->d3d_state, &prev_state);
+
+    if (brush && !opacity_brush && brush->type != D2D_BRUSH_TYPE_BITMAP
+            && render_target->drawing_state.antialiasMode != D2D1_ANTIALIAS_MODE_ALIASED)
+    {
+        use_msaa = d2d_device_context_ensure_msaa(render_target, context);
+    }
+
+    rtv = use_msaa ? render_target->msaa_rtv : render_target->target.bitmap->rtv;
+    rs = use_msaa ? render_target->rs_msaa : render_target->rs;
 
     ID3D11DeviceContext1_IASetInputLayout(context, shape_resources->il);
     ID3D11DeviceContext1_IASetPrimitiveTopology(context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -170,9 +406,35 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
         scissor_rect.right = render_target->pixel_size.width;
         scissor_rect.bottom = render_target->pixel_size.height;
     }
+    if (render_target->has_priv_clip)
+    {
+        LONG pl = (LONG)floorf(render_target->priv_clip.left + 0.5f);
+        LONG pt = (LONG)floorf(render_target->priv_clip.top + 0.5f);
+        LONG pr = (LONG)floorf(render_target->priv_clip.right + 0.5f);
+        LONG pb = (LONG)floorf(render_target->priv_clip.bottom + 0.5f);
+        if (pl > scissor_rect.left) scissor_rect.left = pl;
+        if (pt > scissor_rect.top) scissor_rect.top = pt;
+        if (pr < scissor_rect.right) scissor_rect.right = pr;
+        if (pb < scissor_rect.bottom) scissor_rect.bottom = pb;
+        if (scissor_rect.right < scissor_rect.left) scissor_rect.right = scissor_rect.left;
+        if (scissor_rect.bottom < scissor_rect.top) scissor_rect.bottom = scissor_rect.top;
+    }
+    if (render_target->has_subrect)
+    {
+        if (render_target->target_subrect.left > scissor_rect.left)
+            scissor_rect.left = render_target->target_subrect.left;
+        if (render_target->target_subrect.top > scissor_rect.top)
+            scissor_rect.top = render_target->target_subrect.top;
+        if (render_target->target_subrect.right < scissor_rect.right)
+            scissor_rect.right = render_target->target_subrect.right;
+        if (render_target->target_subrect.bottom < scissor_rect.bottom)
+            scissor_rect.bottom = render_target->target_subrect.bottom;
+        if (scissor_rect.right < scissor_rect.left) scissor_rect.right = scissor_rect.left;
+        if (scissor_rect.bottom < scissor_rect.top) scissor_rect.bottom = scissor_rect.top;
+    }
     ID3D11DeviceContext1_RSSetScissorRects(context, 1, &scissor_rect);
-    ID3D11DeviceContext1_RSSetState(context, render_target->rs);
-    ID3D11DeviceContext1_OMSetRenderTargets(context, 1, &render_target->target.bitmap->rtv, NULL);
+    ID3D11DeviceContext1_RSSetState(context, rs);
+    ID3D11DeviceContext1_OMSetRenderTargets(context, 1, &rtv, NULL);
     if (brush)
     {
         ID3D11DeviceContext1_OMSetBlendState(context, render_target->bs, NULL, D3D11_DEFAULT_SAMPLE_MASK);
@@ -189,6 +451,13 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
         ID3D11DeviceContext1_DrawIndexed(context, index_count, 0, 0);
     else
         ID3D11DeviceContext1_Draw(context, index_count, 0);
+
+    if (use_msaa)
+    {
+        ID3D11DeviceContext1_ResolveSubresource(context, render_target->target.bitmap->resource, 0,
+                (ID3D11Resource *)render_target->msaa_tex, 0, render_target->msaa_format);
+        render_target->msaa_dirty = FALSE;
+    }
 
     ID3D11DeviceContext1_SwapDeviceContextState(context, prev_state, NULL);
     ID3D11DeviceContext1_Release(context);
@@ -216,6 +485,257 @@ static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1Devic
     return CONTAINING_RECORD(iface, struct d2d_device_context, ID2D1DeviceContext6_iface);
 }
 
+static const GUID IID_ID2D1PrivateCompositorDeviceContext =
+    {0x2ea67ed7, 0xd42e, 0x4c07, {0x9d, 0xd5, 0xa9, 0x1e, 0xa2, 0x3e, 0x01, 0xd2}};
+
+static inline struct d2d_device_context *impl_from_ID2D1PrivateCompositorDeviceContext(
+        ID2D1PrivateCompositorDeviceContext *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_device_context, ID2D1PrivateCompositorDeviceContext_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_priv_dc_QueryInterface(
+        ID2D1PrivateCompositorDeviceContext *iface, REFIID iid, void **out)
+{
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+    return IUnknown_QueryInterface(context->outer_unknown, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_priv_dc_AddRef(ID2D1PrivateCompositorDeviceContext *iface)
+{
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+    return IUnknown_AddRef(context->outer_unknown);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_priv_dc_Release(ID2D1PrivateCompositorDeviceContext *iface)
+{
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+    return IUnknown_Release(context->outer_unknown);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_priv_dc_CreatePrimitiveGroupCommandList(
+        ID2D1PrivateCompositorDeviceContext *iface, void *cmd_buf, void *prim_buf,
+        void **images, UINT32 image_count, void **bitmaps, UINT32 bitmap_count,
+        void *reserved1, UINT32 reserved2, void **out)
+{
+    TRACE("iface %p, out %p stub.\n", iface, out);
+    if (out) *out = NULL;
+    return S_OK;
+}
+
+static void STDMETHODCALLTYPE d2d_priv_dc_DrawPrimitiveGroupCommandList(
+        ID2D1PrivateCompositorDeviceContext *iface, void *cmd_list, void *p2,
+        const D2D_MATRIX_4X4_F *transform, UINT32 composite_mode, UINT32 flags)
+{
+    TRACE("iface %p, cmd_list %p stub.\n", iface, cmd_list);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_priv_dc_stub(ID2D1PrivateCompositorDeviceContext *iface)
+{
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_priv_dc_CreateBitmapFromDxgiSurface(
+        ID2D1PrivateCompositorDeviceContext *iface, IDXGISurface *surface,
+        const D2D1_BITMAP_PROPERTIES1 *desc, ID2D1Bitmap1 **bitmap)
+{
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+    ID2D1Bitmap1 *src_bitmap = NULL;
+    IDXGISurface *dxgi_surface = NULL;
+    HRESULT hr;
+
+    TRACE("iface %p, surface %p, desc %p, bitmap %p.\n", iface, surface, desc, bitmap);
+
+    if (surface && SUCCEEDED(IUnknown_QueryInterface((IUnknown *)surface, &IID_ID2D1Bitmap1, (void **)&src_bitmap)))
+    {
+        hr = ID2D1Bitmap1_GetSurface(src_bitmap, &dxgi_surface);
+        ID2D1Bitmap1_Release(src_bitmap);
+        if (SUCCEEDED(hr) && dxgi_surface)
+        {
+            hr = ID2D1DeviceContext6_CreateBitmapFromDxgiSurface(&context->ID2D1DeviceContext6_iface,
+                    dxgi_surface, desc, bitmap);
+            IDXGISurface_Release(dxgi_surface);
+            return hr;
+        }
+    }
+    return ID2D1DeviceContext6_CreateBitmapFromDxgiSurface(&context->ID2D1DeviceContext6_iface, surface, desc, bitmap);
+}
+
+static void STDMETHODCALLTYPE d2d_priv_dc_SetTarget(ID2D1PrivateCompositorDeviceContext *iface,
+        ID2D1Image *target, IUnknown *depth_buffer)
+{
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+
+    TRACE("iface %p, target %p, depth_buffer %p.\n", iface, target, depth_buffer);
+    ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, target);
+}
+
+static void STDMETHODCALLTYPE d2d_priv_dc_SetTargetSubRect(ID2D1PrivateCompositorDeviceContext *iface,
+        ID2D1Image *target, const RECT *subrect)
+{
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+
+    TRACE("iface %p, target %p, subrect %s.\n", iface, target, wine_dbgstr_rect(subrect));
+    if (subrect)
+    {
+        context->has_subrect = TRUE;
+        context->target_subrect = *subrect;
+    }
+    else
+    {
+        context->has_subrect = FALSE;
+    }
+}
+
+static void STDMETHODCALLTYPE d2d_priv_dc_SetClip(ID2D1PrivateCompositorDeviceContext *iface,
+        const D2D1_RECT_F *clip_rect, D2D1_ANTIALIAS_MODE aa_mode)
+{
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+
+    TRACE("iface %p, clip_rect %s, aa_mode %u.\n", iface, debug_d2d_rect_f(clip_rect), aa_mode);
+    if (clip_rect)
+    {
+        context->has_priv_clip = TRUE;
+        context->priv_clip = *clip_rect;
+    }
+    else
+    {
+        context->has_priv_clip = FALSE;
+    }
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *d2d_priv_batch_render_fn)(IUnknown *batch);
+
+static HRESULT STDMETHODCALLTYPE d2d_priv_dc_ExecuteDrawListBatch(ID2D1PrivateCompositorDeviceContext *iface,
+        IUnknown *batch)
+{
+    static const GUID iid_partner = {0x26c5dc23, 0xe49c, 0x4b0a, {0x8f, 0x79, 0xe7, 0xb1, 0xac, 0x80, 0x4d, 0x32}};
+    struct d2d_device_context *context = impl_from_ID2D1PrivateCompositorDeviceContext(iface);
+    IUnknown *partner = NULL;
+    ID3D11Texture2D *guard_tex = NULL;
+    HRESULT hr = S_OK;
+
+    TRACE("iface %p, batch %p.\n", iface, batch);
+
+    if (!batch)
+        return S_OK;
+
+    if (context->target.type == D2D_TARGET_BITMAP && context->target.bitmap && context->target.bitmap->rtv)
+    {
+        ID3D11DeviceContext *d3d_ctx = NULL;
+        D3D11_VIEWPORT vp;
+        D3D11_RECT scissor;
+
+        d2d_device_context_resolve_msaa(context);
+        ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_ctx);
+        if (d3d_ctx)
+        {
+            vp.TopLeftX = 0.0f;
+            vp.TopLeftY = 0.0f;
+            vp.Width = (float)context->pixel_size.width;
+            vp.Height = (float)context->pixel_size.height;
+            vp.MinDepth = 0.0f;
+            vp.MaxDepth = 1.0f;
+            scissor.left = 0;
+            scissor.top = 0;
+            scissor.right = context->pixel_size.width;
+            scissor.bottom = context->pixel_size.height;
+            if (context->clip_stack.count)
+            {
+                const D2D1_RECT_F *clip_rect = &context->clip_stack.stack[context->clip_stack.count - 1];
+                LONG cl = (LONG)ceilf(clip_rect->left - 0.5f);
+                LONG ct = (LONG)ceilf(clip_rect->top - 0.5f);
+                LONG cr = (LONG)ceilf(clip_rect->right - 0.5f);
+                LONG cb = (LONG)ceilf(clip_rect->bottom - 0.5f);
+                if (cl > scissor.left) scissor.left = cl;
+                if (ct > scissor.top) scissor.top = ct;
+                if (cr < scissor.right) scissor.right = cr;
+                if (cb < scissor.bottom) scissor.bottom = cb;
+            }
+            if (context->has_priv_clip)
+            {
+                LONG pl = (LONG)floorf(context->priv_clip.left + 0.5f);
+                LONG pt = (LONG)floorf(context->priv_clip.top + 0.5f);
+                LONG pr = (LONG)floorf(context->priv_clip.right + 0.5f);
+                LONG pb = (LONG)floorf(context->priv_clip.bottom + 0.5f);
+                if (pl > scissor.left) scissor.left = pl;
+                if (pt > scissor.top) scissor.top = pt;
+                if (pr < scissor.right) scissor.right = pr;
+                if (pb < scissor.bottom) scissor.bottom = pb;
+            }
+            if (context->has_subrect)
+            {
+                if (context->target_subrect.left > scissor.left) scissor.left = context->target_subrect.left;
+                if (context->target_subrect.top > scissor.top) scissor.top = context->target_subrect.top;
+                if (context->target_subrect.right < scissor.right) scissor.right = context->target_subrect.right;
+                if (context->target_subrect.bottom < scissor.bottom) scissor.bottom = context->target_subrect.bottom;
+            }
+            if (scissor.right < scissor.left) scissor.right = scissor.left;
+            if (scissor.bottom < scissor.top) scissor.bottom = scissor.top;
+            if ((context->clip_stack.count || context->has_priv_clip || context->has_subrect)
+                    && context->target.bitmap->resource
+                    && SUCCEEDED(ID3D11Resource_QueryInterface(context->target.bitmap->resource,
+                            &IID_ID3D11Texture2D, (void **)&guard_tex))
+                    && SUCCEEDED(ID3D11Device1_QueryInterface(context->d3d_device, &iid_partner, (void **)&partner)))
+            {
+                HRESULT (STDMETHODCALLTYPE *set_guard)(IUnknown *, ID3D11Texture2D *, const RECT *) =
+                        (*(void ***)partner)[6];
+                set_guard(partner, guard_tex, &scissor);
+            }
+            ID3D11DeviceContext_OMSetRenderTargets(d3d_ctx, 1, &context->target.bitmap->rtv, NULL);
+            ID3D11DeviceContext_RSSetViewports(d3d_ctx, 1, &vp);
+            ID3D11DeviceContext_RSSetScissorRects(d3d_ctx, 1, &scissor);
+            ID3D11DeviceContext_Release(d3d_ctx);
+        }
+    }
+
+    {
+        void **vtbl = *(void ***)batch;
+        d2d_priv_batch_render_fn render_fn = (d2d_priv_batch_render_fn)vtbl[3];
+        if (render_fn)
+            hr = render_fn(batch);
+    }
+
+    if (partner && guard_tex)
+    {
+        HRESULT (STDMETHODCALLTYPE *remove_guard)(IUnknown *, ID3D11Texture2D *) = (*(void ***)partner)[8];
+        remove_guard(partner, guard_tex);
+    }
+    if (guard_tex) ID3D11Texture2D_Release(guard_tex);
+    if (partner) IUnknown_Release(partner);
+
+    return hr;
+}
+
+static const ID2D1PrivateCompositorDeviceContextVtbl d2d_priv_dc_vtbl =
+{
+    d2d_priv_dc_QueryInterface,
+    d2d_priv_dc_AddRef,
+    d2d_priv_dc_Release,
+    d2d_priv_dc_CreatePrimitiveGroupCommandList,
+    d2d_priv_dc_DrawPrimitiveGroupCommandList,
+    d2d_priv_dc_stub,
+    d2d_priv_dc_stub,
+    d2d_priv_dc_SetTarget,                   /* 7 (+0x38) */
+    d2d_priv_dc_stub,
+    d2d_priv_dc_SetTargetSubRect,            /* 9 (+0x48) */
+    d2d_priv_dc_SetClip,                     /* 10 (+0x50) */
+    d2d_priv_dc_stub,
+    d2d_priv_dc_CreateBitmapFromDxgiSurface, /* 12 (+0x60) */
+    d2d_priv_dc_stub, /* 13 */
+    d2d_priv_dc_stub, /* 14 */
+    d2d_priv_dc_ExecuteDrawListBatch,        /* 15 (+0x78) */
+    d2d_priv_dc_stub, /* 16 */
+    d2d_priv_dc_stub, /* 17 */
+    d2d_priv_dc_stub, /* 18 */
+    d2d_priv_dc_stub, /* 19 */
+    d2d_priv_dc_stub, /* 20 */
+    d2d_priv_dc_stub, /* 21 */
+    d2d_priv_dc_stub, /* 22 */
+    d2d_priv_dc_stub, /* 23 */
+};
+
 static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknown *iface, REFIID iid, void **out)
 {
     struct d2d_device_context *context = impl_from_IUnknown(iface);
@@ -242,6 +762,12 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknow
     {
         ID2D1GdiInteropRenderTarget_AddRef(&context->ID2D1GdiInteropRenderTarget_iface);
         *out = &context->ID2D1GdiInteropRenderTarget_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID(iid, &IID_ID2D1PrivateCompositorDeviceContext))
+    {
+        ID2D1DeviceContext6_AddRef(&context->ID2D1DeviceContext6_iface);
+        *out = &context->ID2D1PrivateCompositorDeviceContext_iface;
         return S_OK;
     }
 
@@ -273,11 +799,20 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         unsigned int i, j, k;
 
         d2d_clip_stack_cleanup(&context->clip_stack);
+        if (context->last_svg_doc)
+            IUnknown_Release((IUnknown *)context->last_svg_doc);
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
         if (context->text_rendering_params)
             IDWriteRenderingParams_Release(context->text_rendering_params);
         if (context->bs)
             ID3D11BlendState_Release(context->bs);
+        d2d_device_context_release_msaa_resources(context);
+        if (context->blit_ps)
+            ID3D11PixelShader_Release(context->blit_ps);
+        if (context->blit_vs)
+            ID3D11VertexShader_Release(context->blit_vs);
+        if (context->rs_msaa)
+            ID3D11RasterizerState_Release(context->rs_msaa);
         ID3D11RasterizerState_Release(context->rs);
         ID3D11Buffer_Release(context->vb);
         ID3D11Buffer_Release(context->ib);
@@ -790,8 +1325,8 @@ static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *contex
     cb_data = map_desc.pData;
     cb_data->outline = outline;
     cb_data->is_arc = is_arc;
-    cb_data->pad[0] = 0;
-    cb_data->pad[1] = 0;
+    cb_data->antialias = (context->drawing_state.antialiasMode != D2D1_ANTIALIAS_MODE_ALIASED);
+    cb_data->pad = 0;
     if (!d2d_brush_fill_cb(brush, &cb_data->colour_brush))
         WARN("Failed to initialize colour brush buffer.\n");
     if (!d2d_brush_fill_cb(opacity_brush, &cb_data->opacity_brush))
@@ -1832,12 +2367,72 @@ static void STDMETHODCALLTYPE d2d_device_context_GetTags(ID2D1DeviceContext6 *if
     *tag2 = render_target->drawing_state.tag2;
 }
 
+static void d2d_device_context_push_layer_clip(struct d2d_device_context *context,
+        const D2D1_RECT_F *content_bounds, ID2D1Geometry *geometric_mask,
+        const D2D1_MATRIX_3X2_F *mask_transform)
+{
+    D2D1_RECT_F bounds, mask_bounds, transformed_rect;
+    float x_scale, y_scale;
+    D2D1_POINT_2F point;
+    BOOL has_bounds = FALSE;
+
+    if (content_bounds && fabsf(content_bounds->left) < 1e30f && fabsf(content_bounds->top) < 1e30f
+            && fabsf(content_bounds->right) < 1e30f && fabsf(content_bounds->bottom) < 1e30f)
+    {
+        bounds = *content_bounds;
+        has_bounds = TRUE;
+    }
+
+    if (geometric_mask && SUCCEEDED(ID2D1Geometry_GetBounds(geometric_mask, mask_transform, &mask_bounds))
+            && fabsf(mask_bounds.left) < 1e30f && fabsf(mask_bounds.top) < 1e30f
+            && fabsf(mask_bounds.right) < 1e30f && fabsf(mask_bounds.bottom) < 1e30f)
+    {
+        if (has_bounds)
+        {
+            if (mask_bounds.left > bounds.left) bounds.left = mask_bounds.left;
+            if (mask_bounds.top > bounds.top) bounds.top = mask_bounds.top;
+            if (mask_bounds.right < bounds.right) bounds.right = mask_bounds.right;
+            if (mask_bounds.bottom < bounds.bottom) bounds.bottom = mask_bounds.bottom;
+        }
+        else
+        {
+            bounds = mask_bounds;
+            has_bounds = TRUE;
+        }
+    }
+
+    if (!has_bounds)
+    {
+        d2d_rect_set(&transformed_rect, -1e7f, -1e7f, 1e7f, 1e7f);
+    }
+    else
+    {
+        x_scale = context->desc.dpiX / 96.0f;
+        y_scale = context->desc.dpiY / 96.0f;
+        d2d_point_transform(&point, &context->drawing_state.transform,
+                bounds.left * x_scale, bounds.top * y_scale);
+        d2d_rect_set(&transformed_rect, point.x, point.y, point.x, point.y);
+        d2d_point_transform(&point, &context->drawing_state.transform,
+                bounds.left * x_scale, bounds.bottom * y_scale);
+        d2d_rect_expand(&transformed_rect, &point);
+        d2d_point_transform(&point, &context->drawing_state.transform,
+                bounds.right * x_scale, bounds.top * y_scale);
+        d2d_rect_expand(&transformed_rect, &point);
+        d2d_point_transform(&point, &context->drawing_state.transform,
+                bounds.right * x_scale, bounds.bottom * y_scale);
+        d2d_rect_expand(&transformed_rect, &point);
+    }
+
+    if (!d2d_clip_stack_push(&context->clip_stack, &transformed_rect))
+        WARN("Failed to push layer clip rect.\n");
+}
+
 static void STDMETHODCALLTYPE d2d_device_context_PushLayer(ID2D1DeviceContext6 *iface,
         const D2D1_LAYER_PARAMETERS *layer_parameters, ID2D1Layer *layer)
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
-    FIXME("iface %p, layer_parameters %p, layer %p stub!\n", iface, layer_parameters, layer);
+    TRACE("iface %p, layer_parameters %p, layer %p.\n", iface, layer_parameters, layer);
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
     {
@@ -1847,16 +2442,23 @@ static void STDMETHODCALLTYPE d2d_device_context_PushLayer(ID2D1DeviceContext6 *
         parameters.layerOptions = D2D1_LAYER_OPTIONS1_NONE;
         d2d_command_list_push_layer(context->target.command_list, context, &parameters);
     }
+
+    d2d_device_context_push_layer_clip(context,
+            layer_parameters ? &layer_parameters->contentBounds : NULL,
+            layer_parameters ? layer_parameters->geometricMask : NULL,
+            layer_parameters ? &layer_parameters->maskTransform : NULL);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_PopLayer(ID2D1DeviceContext6 *iface)
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
-    FIXME("iface %p stub!\n", iface);
+    TRACE("iface %p.\n", iface);
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_pop_layer(context->target.command_list);
+
+    d2d_clip_stack_pop(&context->clip_stack);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *iface, D2D1_TAG *tag1, D2D1_TAG *tag2)
@@ -1864,6 +2466,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
     FIXME("iface %p, tag1 %p, tag2 %p stub!\n", iface, tag1, tag2);
+
+    d2d_device_context_resolve_msaa(context);
 
     if (context->ops && context->ops->device_context_present)
         context->ops->device_context_present(context->outer_unknown);
@@ -2082,6 +2686,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
         *tag1 = context->error.tag1;
     if (tag2)
         *tag2 = context->error.tag2;
+
+    d2d_device_context_resolve_msaa(context);
 
     if (context->ops && context->ops->device_context_present)
     {
@@ -2546,6 +3152,7 @@ static void d2d_device_context_reset_target(struct d2d_device_context *context)
     if (!context->target.object)
         return;
 
+    d2d_device_context_resolve_msaa(context);
     IUnknown_Release(context->target.object);
     memset(&context->target, 0, sizeof(context->target));
 
@@ -2572,6 +3179,7 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
 
     if (!target)
     {
+        context->has_subrect = FALSE;
         d2d_device_context_reset_target(context);
         return;
     }
@@ -2753,6 +3361,18 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
         return;
     }
 
+    {
+        ID2D1Effect *effect;
+        if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Effect, (void **)&effect)))
+        {
+            static const D2D1_COLOR_F transparent = { 0.0f, 0.0f, 0.0f, 0.0f };
+            TRACE("Clearing target for unhandled ID2D1Effect %p.\n", effect);
+            d2d_device_context_Clear(iface, &transparent);
+            ID2D1Effect_Release(effect);
+            return;
+        }
+    }
+
     FIXME("Unhandled image %p.\n", image);
 }
 
@@ -2800,10 +3420,15 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_PushLayer(ID
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
-    FIXME("iface %p, layer_parameters %p, layer %p stub!\n", iface, layer_parameters, layer);
+    TRACE("iface %p, layer_parameters %p, layer %p.\n", iface, layer_parameters, layer);
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_push_layer(context->target.command_list, context, layer_parameters);
+
+    d2d_device_context_push_layer_clip(context,
+            layer_parameters ? &layer_parameters->contentBounds : NULL,
+            layer_parameters ? layer_parameters->geometricMask : NULL,
+            layer_parameters ? &layer_parameters->maskTransform : NULL);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_InvalidateEffectInputRectangle(ID2D1DeviceContext6 *iface,
@@ -3126,19 +3751,553 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetSvgGlyphImage(ID2D1Device
     return E_NOTIMPL;
 }
 
+static const GUID IID_ID2D1SvgDocument_local =
+        {0x86b88e4d, 0xafa4, 0x4d7b, {0x88, 0xe4, 0x68, 0xa5, 0x1c, 0x4a, 0x0a, 0xec}};
+static const GUID IID_ID2D1SvgElement_local =
+        {0xac7b67a6, 0x183e, 0x49c1, {0xa8, 0x23, 0x0e, 0xbe, 0x40, 0xb0, 0xdb, 0x29}};
+
+struct d2d_svg_document;
+
+struct d2d_svg_root_element
+{
+    const void * const *lpVtbl;
+    struct d2d_svg_document *doc;
+};
+
+struct d2d_svg_document
+{
+    const void * const *lpVtbl;
+    LONG refcount;
+    ID2D1Factory *factory;
+    D2D1_SIZE_F viewport_size;
+    float vb_x, vb_y, vb_w, vb_h;
+    BOOL has_vb;
+    char *xml_data;
+    UINT32 xml_len;
+    ID2D1Bitmap1 *cached_bitmap;
+    ID2D1DeviceContext6 *cached_ctx;
+    UINT32 cached_w;
+    UINT32 cached_h;
+    struct d2d_svg_document *source_doc;
+    struct d2d_svg_root_element root;
+};
+
+static inline struct d2d_svg_document *svg_doc_from_iface(ID2D1SvgDocument *iface)
+{
+    return (struct d2d_svg_document *)iface;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_doc_QueryInterface(ID2D1SvgDocument *iface, REFIID iid, void **out)
+{
+    if (IsEqualGUID(iid, &IID_ID2D1SvgDocument_local)
+            || IsEqualGUID(iid, &IID_ID2D1Resource)
+            || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        IUnknown_AddRef((IUnknown *)iface);
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_doc_AddRef(ID2D1SvgDocument *iface)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    return InterlockedIncrement(&doc->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_doc_Release(ID2D1SvgDocument *iface)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    ULONG ref = InterlockedDecrement(&doc->refcount);
+    if (!ref)
+    {
+        if (doc->cached_bitmap)
+            ID2D1Bitmap1_Release(doc->cached_bitmap);
+        free(doc->xml_data);
+        if (doc->source_doc)
+            d2d_svg_doc_Release((ID2D1SvgDocument *)doc->source_doc);
+        if (doc->factory)
+            ID2D1Factory_Release(doc->factory);
+        free(doc);
+    }
+    return ref;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_doc_GetFactory(ID2D1SvgDocument *iface, ID2D1Factory **factory)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    if (factory)
+    {
+        *factory = doc->factory;
+        if (*factory)
+            ID2D1Factory_AddRef(*factory);
+    }
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_doc_SetViewportSize(ID2D1SvgDocument *iface, D2D1_SIZE_F size)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    doc->viewport_size = size;
+    return S_OK;
+}
+
+static D2D1_SIZE_F * STDMETHODCALLTYPE d2d_svg_doc_GetViewportSize(ID2D1SvgDocument *iface, D2D1_SIZE_F *size)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    *size = doc->viewport_size;
+    return size;
+}
+
+static const void * const d2d_svg_elem_vtbl[];
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_doc_SetRoot(ID2D1SvgDocument *iface, void *root)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    struct d2d_svg_root_element *elem = root;
+
+    if (doc->source_doc)
+    {
+        d2d_svg_doc_Release((ID2D1SvgDocument *)doc->source_doc);
+        doc->source_doc = NULL;
+    }
+    if (elem && elem->lpVtbl == d2d_svg_elem_vtbl && elem->doc && elem->doc != doc)
+    {
+        doc->source_doc = elem->doc;
+        InterlockedIncrement(&doc->source_doc->refcount);
+    }
+    return S_OK;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_doc_GetRoot(ID2D1SvgDocument *iface, void **root)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    if (!root) return;
+    InterlockedIncrement(&doc->refcount);
+    *root = &doc->root;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_doc_FindElementById(ID2D1SvgDocument *iface, const WCHAR *id, void **elem)
+{
+    if (elem) *elem = NULL;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_doc_Serialize(ID2D1SvgDocument *iface,
+        IStream *output_xml_stream, void *subtree)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+    struct d2d_svg_document *src = (doc && doc->source_doc) ? doc->source_doc : doc;
+    ULONG written = 0;
+
+    if (!output_xml_stream)
+        return E_INVALIDARG;
+    if (src && src->xml_data && src->xml_len)
+        return IStream_Write(output_xml_stream, src->xml_data, src->xml_len, &written);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_doc_Deserialize(ID2D1SvgDocument *iface,
+        IStream *input_xml_stream, void **subtree)
+{
+    struct d2d_svg_document *doc = svg_doc_from_iface(iface);
+
+    if (subtree)
+    {
+        InterlockedIncrement(&doc->refcount);
+        *subtree = &doc->root;
+    }
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_doc_stub(ID2D1SvgDocument *iface)
+{
+    FIXME("iface %p stub!\n", iface);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_elem_QueryInterface(struct d2d_svg_root_element *iface, REFIID iid, void **out)
+{
+    if (IsEqualGUID(iid, &IID_ID2D1SvgElement_local)
+            || IsEqualGUID(iid, &IID_ID2D1Resource)
+            || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        InterlockedIncrement(&iface->doc->refcount);
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_elem_AddRef(struct d2d_svg_root_element *iface)
+{
+    return InterlockedIncrement(&iface->doc->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_elem_Release(struct d2d_svg_root_element *iface)
+{
+    return d2d_svg_doc_Release((ID2D1SvgDocument *)iface->doc);
+}
+
+static void STDMETHODCALLTYPE d2d_svg_elem_GetFactory(struct d2d_svg_root_element *iface, ID2D1Factory **factory)
+{
+    d2d_svg_doc_GetFactory((ID2D1SvgDocument *)iface->doc, factory);
+}
+
+static void STDMETHODCALLTYPE d2d_svg_elem_GetDocument(struct d2d_svg_root_element *iface, ID2D1SvgDocument **doc)
+{
+    if (!doc) return;
+    InterlockedIncrement(&iface->doc->refcount);
+    *doc = (ID2D1SvgDocument *)iface->doc;
+}
+
+static BOOL STDMETHODCALLTYPE d2d_svg_elem_IsAttributeSpecified(struct d2d_svg_root_element *iface,
+        const WCHAR *name, BOOL *inherited)
+{
+    if (inherited) *inherited = FALSE;
+    if (!name) return FALSE;
+    if (!wcscmp(name, L"viewBox")) return iface->doc->has_vb;
+    if (!wcscmp(name, L"width") || !wcscmp(name, L"height")) return !iface->doc->has_vb;
+    return FALSE;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_elem_GetAttributeValue(struct d2d_svg_root_element *iface,
+        const WCHAR *name, UINT32 type, void *value, UINT32 value_size)
+{
+    if (!name || !value) return E_INVALIDARG;
+    if (!wcscmp(name, L"viewBox") && value_size >= 16)
+    {
+        float *f = value;
+        f[0] = iface->doc->vb_x;
+        f[1] = iface->doc->vb_y;
+        f[2] = iface->doc->vb_w;
+        f[3] = iface->doc->vb_h;
+        return S_OK;
+    }
+    if (!wcscmp(name, L"width") && value_size >= 4)
+    {
+        float *f = value;
+        f[0] = iface->doc->has_vb ? iface->doc->vb_w : iface->doc->viewport_size.width;
+        if (value_size >= 8) ((UINT32 *)value)[1] = 0; /* D2D1_SVG_LENGTH_UNITS_NUMBER */
+        return S_OK;
+    }
+    if (!wcscmp(name, L"height") && value_size >= 4)
+    {
+        float *f = value;
+        f[0] = iface->doc->has_vb ? iface->doc->vb_h : iface->doc->viewport_size.height;
+        if (value_size >= 8) ((UINT32 *)value)[1] = 0; /* D2D1_SVG_LENGTH_UNITS_NUMBER */
+        return S_OK;
+    }
+    return D2DERR_INVALID_PROPERTY;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_elem_AppendChild(struct d2d_svg_root_element *iface, void *child)
+{
+    struct d2d_svg_root_element *ce = child;
+    if (ce && ce->lpVtbl == d2d_svg_elem_vtbl && ce->doc && ce->doc != iface->doc)
+        return d2d_svg_doc_SetRoot((ID2D1SvgDocument *)iface->doc, child);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_elem_GetTagName(struct d2d_svg_root_element *iface,
+        WCHAR *name, UINT32 name_count)
+{
+    if (!name || !name_count) return E_INVALIDARG;
+    lstrcpynW(name, L"svg", name_count);
+    return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE d2d_svg_elem_GetTagNameLength(struct d2d_svg_root_element *iface)
+{
+    return 3;
+}
+
+static BOOL STDMETHODCALLTYPE d2d_svg_elem_return_false(struct d2d_svg_root_element *iface)
+{
+    return FALSE;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_elem_out_null(struct d2d_svg_root_element *iface, void **out)
+{
+    if (out) *out = NULL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_elem_sibling_null(struct d2d_svg_root_element *iface,
+        void *ref, void **out)
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE d2d_svg_elem_GetSpecifiedAttributeCount(struct d2d_svg_root_element *iface)
+{
+    return 0;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_elem_GetAttributeValueLength(struct d2d_svg_root_element *iface,
+        const WCHAR *name, UINT32 type, UINT32 *len)
+{
+    if (len) *len = 0;
+    return D2DERR_INVALID_PROPERTY;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_elem_stub(struct d2d_svg_root_element *iface)
+{
+    return S_OK;
+}
+
+/* ID2D1SvgElement vtable (slots 0..33) */
+static const void * const d2d_svg_elem_vtbl[] =
+{
+    d2d_svg_elem_QueryInterface,       /* 0 */
+    d2d_svg_elem_AddRef,               /* 1 */
+    d2d_svg_elem_Release,              /* 2 */
+    d2d_svg_elem_GetFactory,           /* 3 */
+    d2d_svg_elem_GetDocument,          /* 4 */
+    d2d_svg_elem_GetTagName,           /* 5 GetTagName */
+    d2d_svg_elem_GetTagNameLength,     /* 6 GetTagNameLength */
+    d2d_svg_elem_return_false,         /* 7 IsTextContent */
+    d2d_svg_elem_out_null,             /* 8 GetParent */
+    d2d_svg_elem_return_false,         /* 9 HasChildren */
+    d2d_svg_elem_out_null,             /* 10 GetFirstChild */
+    d2d_svg_elem_out_null,             /* 11 GetLastChild */
+    d2d_svg_elem_sibling_null,         /* 12 GetPreviousChild */
+    d2d_svg_elem_sibling_null,         /* 13 GetNextChild */
+    d2d_svg_elem_stub,                 /* 14 InsertChildBefore */
+    d2d_svg_elem_AppendChild,          /* 15 AppendChild */
+    d2d_svg_elem_stub,                 /* 16 ReplaceChild */
+    d2d_svg_elem_stub,                 /* 17 RemoveChild */
+    d2d_svg_elem_stub,                 /* 18 CreateChild */
+    d2d_svg_elem_IsAttributeSpecified, /* 19 */
+    d2d_svg_elem_GetSpecifiedAttributeCount, /* 20 GetSpecifiedAttributeCount */
+    d2d_svg_elem_stub,                 /* 21 GetSpecifiedAttributeName */
+    d2d_svg_elem_stub,                 /* 22 GetSpecifiedAttributeNameLength */
+    d2d_svg_elem_stub,                 /* 23 RemoveAttribute */
+    d2d_svg_elem_stub,                 /* 24 SetTextValue */
+    d2d_svg_elem_stub,                 /* 25 GetTextValue */
+    d2d_svg_elem_stub,                 /* 26 GetTextValueLength */
+    d2d_svg_elem_stub,                 /* 27 SetAttributeValue(str) */
+    d2d_svg_elem_stub,                 /* 28 GetAttributeValue(str) */
+    d2d_svg_elem_GetAttributeValueLength, /* 29 GetAttributeValueLength */
+    d2d_svg_elem_stub,                 /* 30 SetAttributeValue(pod) */
+    d2d_svg_elem_GetAttributeValue,    /* 31 GetAttributeValue(pod) */
+    d2d_svg_elem_stub,                 /* 32 SetAttributeValue(obj) */
+    d2d_svg_elem_stub,                 /* 33 GetAttributeValue(obj) */
+};
+
+static const void * const d2d_svg_doc_vtbl[] =
+{
+    d2d_svg_doc_QueryInterface,
+    d2d_svg_doc_AddRef,
+    d2d_svg_doc_Release,
+    d2d_svg_doc_GetFactory,
+    d2d_svg_doc_SetViewportSize,
+    d2d_svg_doc_GetViewportSize,
+    d2d_svg_doc_SetRoot,
+    d2d_svg_doc_GetRoot,
+    d2d_svg_doc_FindElementById,
+    d2d_svg_doc_Serialize,
+    d2d_svg_doc_Deserialize,
+    d2d_svg_doc_stub,
+    d2d_svg_doc_stub,
+    d2d_svg_doc_stub,
+    d2d_svg_doc_stub,
+};
+
 static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateSvgDocument(ID2D1DeviceContext6 *iface,
         IStream *input_xml_stream, D2D1_SIZE_F viewport_size, ID2D1SvgDocument **svg_document)
 {
-    FIXME("iface %p, input_xml_stream %p, svg_document %p stub!\n", iface, input_xml_stream,
-            svg_document);
+    struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+    struct d2d_svg_document *doc;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, input_xml_stream %p, viewport_size {%.2f, %.2f}, svg_document %p.\n",
+            iface, input_xml_stream, viewport_size.width, viewport_size.height, svg_document);
+
+    if (!svg_document)
+        return E_INVALIDARG;
+    *svg_document = NULL;
+
+    if (!(doc = calloc(1, sizeof(*doc))))
+        return E_OUTOFMEMORY;
+
+    doc->lpVtbl = d2d_svg_doc_vtbl;
+    doc->refcount = 1;
+    doc->factory = context->factory;
+    if (doc->factory)
+        ID2D1Factory_AddRef(doc->factory);
+    doc->viewport_size = viewport_size;
+    doc->root.lpVtbl = d2d_svg_elem_vtbl;
+    doc->root.doc = doc;
+
+    if (input_xml_stream)
+    {
+        LARGE_INTEGER zero = { .QuadPart = 0 };
+        size_t cap = 8192, len = 0;
+        char *buf = malloc(cap);
+
+        IStream_Seek(input_xml_stream, zero, STREAM_SEEK_SET, NULL);
+        if (buf)
+        {
+            for (;;)
+            {
+                ULONG got = 0;
+                HRESULT hr;
+                if (len + 4096 >= cap)
+                {
+                    char *nb;
+                    if (cap >= 16u * 1024u * 1024u)
+                        break;
+                    cap *= 2;
+                    if (!(nb = realloc(buf, cap)))
+                        break;
+                    buf = nb;
+                }
+                hr = IStream_Read(input_xml_stream, buf + len, 4096, &got);
+                len += got;
+                if (FAILED(hr) || got == 0)
+                    break;
+            }
+            buf[len] = 0;
+            if (len > 0)
+            {
+                struct d2d1_svg_dimensions_params dim_params;
+
+                doc->xml_data = buf;
+                doc->xml_len = (UINT32)len;
+
+                memset(&dim_params, 0, sizeof(dim_params));
+                dim_params.xml = doc->xml_data;
+                dim_params.xml_len = doc->xml_len;
+                if (!D2D1_UNIX_CALL(svg_get_dimensions, &dim_params) && dim_params.has_vb)
+                {
+                    doc->has_vb = TRUE;
+                    doc->vb_x = dim_params.vb_x;
+                    doc->vb_y = dim_params.vb_y;
+                    doc->vb_w = dim_params.vb_w;
+                    doc->vb_h = dim_params.vb_h;
+                }
+            }
+            else
+            {
+                free(buf);
+            }
+        }
+
+        if (doc->xml_len)
+        {
+            if (context->last_svg_doc)
+                d2d_svg_doc_Release(context->last_svg_doc);
+            context->last_svg_doc = (ID2D1SvgDocument *)doc;
+            InterlockedIncrement(&doc->refcount);
+        }
+    }
+    else if (context->last_svg_doc)
+    {
+        doc->source_doc = svg_doc_from_iface(context->last_svg_doc);
+        InterlockedIncrement(&doc->source_doc->refcount);
+    }
+
+    TRACE("Created SVG document %p (xml_len %u, vb %.1f %.1f %.1f %.1f).\n",
+            doc, doc->xml_len, doc->vb_x, doc->vb_y, doc->vb_w, doc->vb_h);
+    *svg_document = (ID2D1SvgDocument *)doc;
+    return S_OK;
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_DrawSvgDocument(ID2D1DeviceContext6 *iface,
         ID2D1SvgDocument *svg_document)
 {
-    FIXME("iface %p, svg_document %p stub!\n", iface, svg_document);
+    struct d2d_svg_document *doc = svg_doc_from_iface(svg_document);
+    struct d2d_svg_document *src = (doc && doc->source_doc) ? doc->source_doc : doc;
+    D2D1_MATRIX_3X2_F xf;
+    D2D1_RECT_F dest_rect;
+    float dpi_x = 96.0f, dpi_y = 96.0f;
+    float scale_x, scale_y, vp_w, vp_h;
+    UINT32 px_w, px_h;
+
+    TRACE("iface %p, svg_document %p (src %p, xml_len %u).\n",
+            iface, svg_document, src, src ? src->xml_len : 0);
+
+    if (!doc || !src || !src->xml_data || !src->xml_len)
+        return;
+
+    vp_w = doc->viewport_size.width > 0.0f ? doc->viewport_size.width : (src->has_vb && src->vb_w > 0.0f ? src->vb_w : 24.0f);
+    vp_h = doc->viewport_size.height > 0.0f ? doc->viewport_size.height : (src->has_vb && src->vb_h > 0.0f ? src->vb_h : 24.0f);
+
+    ID2D1DeviceContext6_GetTransform(iface, &xf);
+    ID2D1DeviceContext6_GetDpi(iface, &dpi_x, &dpi_y);
+    if (dpi_x <= 0.0f) dpi_x = 96.0f;
+    if (dpi_y <= 0.0f) dpi_y = 96.0f;
+
+    scale_x = hypotf(xf._11, xf._12) * (dpi_x / 96.0f);
+    scale_y = hypotf(xf._21, xf._22) * (dpi_y / 96.0f);
+    if (scale_x < 1.0f) scale_x = 1.0f;
+    if (scale_y < 1.0f) scale_y = 1.0f;
+
+    px_w = (UINT32)ceilf(vp_w * scale_x);
+    px_h = (UINT32)ceilf(vp_h * scale_y);
+    if (px_w < 1) px_w = 1;
+    if (px_h < 1) px_h = 1;
+    if (px_w > 2048) px_w = 2048;
+    if (px_h > 2048) px_h = 2048;
+
+    if (!doc->cached_bitmap || doc->cached_ctx != iface || doc->cached_w != px_w || doc->cached_h != px_h)
+    {
+        UINT32 stride = px_w * 4;
+        void *bgra = malloc((size_t)stride * px_h);
+
+        if (doc->cached_bitmap)
+        {
+            ID2D1Bitmap1_Release(doc->cached_bitmap);
+            doc->cached_bitmap = NULL;
+        }
+        doc->cached_ctx = NULL;
+        doc->cached_w = 0;
+        doc->cached_h = 0;
+
+        if (bgra)
+        {
+            struct d2d1_svg_rasterize_params rparams;
+            rparams.xml = src->xml_data;
+            rparams.xml_len = src->xml_len;
+            rparams.width = px_w;
+            rparams.height = px_h;
+            rparams.out_bgra = bgra;
+            rparams.out_stride = stride;
+
+            if (!D2D1_UNIX_CALL(svg_rasterize, &rparams))
+            {
+                D2D1_BITMAP_PROPERTIES1 bmp_props;
+                D2D1_SIZE_U bmp_size = { px_w, px_h };
+
+                memset(&bmp_props, 0, sizeof(bmp_props));
+                bmp_props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                bmp_props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+                bmp_props.dpiX = dpi_x;
+                bmp_props.dpiY = dpi_y;
+
+                if (SUCCEEDED(ID2D1DeviceContext6_CreateBitmap(iface, bmp_size, bgra, stride,
+                        &bmp_props, &doc->cached_bitmap)))
+                {
+                    doc->cached_ctx = iface;
+                    doc->cached_w = px_w;
+                    doc->cached_h = px_h;
+                }
+            }
+            free(bgra);
+        }
+    }
+
+    if (!doc->cached_bitmap)
+        return;
+
+    dest_rect.left = 0.0f;
+    dest_rect.top = 0.0f;
+    dest_rect.right = vp_w;
+    dest_rect.bottom = vp_h;
+    ID2D1DeviceContext6_DrawBitmap(iface, (ID2D1Bitmap *)doc->cached_bitmap, &dest_rect, 1.0f,
+            D2D1_INTERPOLATION_MODE_LINEAR, NULL, NULL);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateColorContextFromDxgiColorSpace(
@@ -3658,6 +4817,8 @@ static HRESULT STDMETHODCALLTYPE d2d_gdi_interop_render_target_GetDC(ID2D1GdiInt
     if (render_target->target.hdc)
         return D2DERR_WRONG_STATE;
 
+    d2d_device_context_resolve_msaa(render_target);
+
     if (FAILED(hr = d2d_gdi_interop_get_surface(render_target, &surface)))
         return hr;
 
@@ -3979,6 +5140,7 @@ static const char shape_ps_code[] =
     "\n"
     "bool outline;\n"
     "bool is_arc;\n"
+    "bool antialias;\n"
     "struct brush\n"
     "{\n"
     "    uint type;\n"
@@ -4147,27 +5309,57 @@ static const char shape_ps_code[] =
     "            df = 2.0f * uv.x * du - dv;\n"
     "\n"
     "            clip(dot(df, uv.zw));\n"
-    "            clip(length(mul(i.stroke_transform, df)) - abs(uv.x * uv.x - uv.y));\n"
+    "            float dist = length(mul(i.stroke_transform, df)) - abs(uv.x * uv.x - uv.y);\n"
+    "            if (antialias)\n"
+    "            {\n"
+    "                float cov = saturate(0.5f + dist / max(length(df), 1e-6f));\n"
+    "                clip(cov - 1e-4f);\n"
+    "                colour *= cov;\n"
+    "            }\n"
+    "            else\n"
+    "            {\n"
+    "                clip(dist);\n"
+    "            }\n"
     "        }\n"
     "        else\n"
     "        {\n"
     "            df = 2.0f * uv.x * du + 2.0f * uv.y * dv;\n"
     "\n"
     "            clip(dot(df, uv.zw));\n"
-    "            clip(length(mul(i.stroke_transform, df)) - abs(uv.x * uv.x + uv.y * uv.y - 1.0f));\n"
+    "            float dist = length(mul(i.stroke_transform, df)) - abs(uv.x * uv.x + uv.y * uv.y - 1.0f);\n"
+    "            if (antialias)\n"
+    "            {\n"
+    "                float cov = saturate(0.5f + dist / max(length(df), 1e-6f));\n"
+    "                clip(cov - 1e-4f);\n"
+    "                colour *= cov;\n"
+    "            }\n"
+    "            else\n"
+    "            {\n"
+    "                clip(dist);\n"
+    "            }\n"
     "        }\n"
     "    }\n"
     "    else\n"
     "    {\n"
     "        /* Evaluate the implicit form of the curve in texture space.\n"
     "         * \"i.b.z\" determines which side of the curve is shaded. */\n"
-    "        if (!is_arc)\n"
+    "        if (i.b.z != 0.0f)\n"
     "        {\n"
-    "            clip((i.b.x * i.b.x - i.b.y) * i.b.z);\n"
-    "        }\n"
-    "        else\n"
-    "        {\n"
-    "            clip((i.b.x * i.b.x + i.b.y * i.b.y - 1.0) * i.b.z);\n"
+    "            float signed_f = (is_arc ? (i.b.x * i.b.x + i.b.y * i.b.y - 1.0f)\n"
+    "                    : (i.b.x * i.b.x - i.b.y)) * i.b.z;\n"
+    "            if (antialias)\n"
+    "            {\n"
+    "                float2 du = float2(ddx(i.b.x), ddy(i.b.x));\n"
+    "                float2 dv = float2(ddx(i.b.y), ddy(i.b.y));\n"
+    "                float2 df = is_arc ? (2.0f * i.b.x * du + 2.0f * i.b.y * dv) : (2.0f * i.b.x * du - dv);\n"
+    "                float cov = saturate(0.5f + signed_f / max(length(df), 1e-6f));\n"
+    "                clip(cov - 1e-4f);\n"
+    "                colour *= cov;\n"
+    "            }\n"
+    "            else\n"
+    "            {\n"
+    "                clip(signed_f);\n"
+    "            }\n"
     "        }\n"
     "    }\n"
     "\n"
@@ -4225,6 +5417,7 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
     render_target->ID2D1DeviceContext6_iface.lpVtbl = &d2d_device_context_vtbl;
     render_target->ID2D1GdiInteropRenderTarget_iface.lpVtbl = &d2d_gdi_interop_render_target_vtbl;
     render_target->IDWriteTextRenderer_iface.lpVtbl = &d2d_text_renderer_vtbl;
+    render_target->ID2D1PrivateCompositorDeviceContext_iface.lpVtbl = &d2d_priv_dc_vtbl;
     render_target->IUnknown_iface.lpVtbl = &d2d_device_context_inner_unknown_vtbl;
     render_target->refcount = 1;
     ID2D1Device1_GetFactory((ID2D1Device1 *)&device->ID2D1Device6_iface, &render_target->factory);
@@ -4356,6 +5549,12 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
         WARN("Failed to create clear rasteriser state, hr %#lx.\n", hr);
         goto err;
     }
+    rs_desc.MultisampleEnable = TRUE;
+    if (FAILED(hr = ID3D11Device1_CreateRasterizerState(render_target->d3d_device, &rs_desc, &render_target->rs_msaa)))
+    {
+        WARN("Failed to create MSAA rasteriser state, hr %#lx.\n", hr);
+        render_target->rs_msaa = NULL;
+    }
 
     if (FAILED(hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
             &IID_IDWriteFactory, (IUnknown **)&dwrite_factory)))
@@ -4483,9 +5682,70 @@ HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *su
     return S_OK;
 }
 
+static const GUID IID_ID2D1PrivateCompositorDevice_local =
+    {0x46fdbfea, 0x53f8, 0x440c, {0xb9, 0xe2, 0x81, 0xdf, 0xec, 0x61, 0x2a, 0x72}};
+
+static inline struct d2d_device *impl_from_ID2D1PrivateCompositorDevice(IUnknown *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_device, ID2D1PrivateCompositorDevice_iface);
+}
+
+static HRESULT WINAPI d2d_priv_dev_QueryInterface(IUnknown *iface, REFIID iid, void **out)
+{
+    struct d2d_device *device = impl_from_ID2D1PrivateCompositorDevice(iface);
+    return ID2D1Device6_QueryInterface(&device->ID2D1Device6_iface, iid, out);
+}
+
+static ULONG WINAPI d2d_priv_dev_AddRef(IUnknown *iface)
+{
+    struct d2d_device *device = impl_from_ID2D1PrivateCompositorDevice(iface);
+    return ID2D1Device6_AddRef(&device->ID2D1Device6_iface);
+}
+
+static ULONG WINAPI d2d_priv_dev_Release(IUnknown *iface)
+{
+    struct d2d_device *device = impl_from_ID2D1PrivateCompositorDevice(iface);
+    return ID2D1Device6_Release(&device->ID2D1Device6_iface);
+}
+
+static HRESULT WINAPI d2d_priv_dev_stub(IUnknown *iface)
+{
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
+}
+
+static const void * const d2d_priv_dev_vtbl[] =
+{
+    d2d_priv_dev_QueryInterface,
+    d2d_priv_dev_AddRef,
+    d2d_priv_dev_Release,
+    d2d_priv_dev_stub, /* 3 */
+    d2d_priv_dev_stub, /* 4 */
+    d2d_priv_dev_stub, /* 5 */
+    d2d_priv_dev_stub, /* 6 */
+    d2d_priv_dev_stub, /* 7 */
+    d2d_priv_dev_stub, /* 8 */
+    d2d_priv_dev_stub, /* 9 */
+    d2d_priv_dev_stub, /* 10 */
+    d2d_priv_dev_stub, /* 11 */
+    d2d_priv_dev_stub, /* 12 */
+    d2d_priv_dev_stub, /* 13 */
+    d2d_priv_dev_stub, /* 14 */
+    d2d_priv_dev_stub, /* 15 */
+};
+
 static HRESULT WINAPI d2d_device_QueryInterface(ID2D1Device6 *iface, REFIID iid, void **out)
 {
+    struct d2d_device *device = impl_from_ID2D1Device(iface);
+
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &IID_ID2D1PrivateCompositorDevice_local))
+    {
+        ID2D1Device6_AddRef(iface);
+        *out = &device->ID2D1PrivateCompositorDevice_iface;
+        return S_OK;
+    }
 
     if (IsEqualGUID(iid, &IID_ID2D1Device6)
             || IsEqualGUID(iid, &IID_ID2D1Device5)
@@ -4780,6 +6040,7 @@ HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGI
     ID3D10Blob *compiled;
 
     device->ID2D1Device6_iface.lpVtbl = &d2d_device_vtbl;
+    device->ID2D1PrivateCompositorDevice_iface.lpVtbl = (const IUnknownVtbl *)d2d_priv_dev_vtbl;
     device->refcount = 1;
     device->factory = factory;
     ID2D1Factory1_AddRef(device->factory);
@@ -5005,35 +6266,12 @@ static ULONG STDMETHODCALLTYPE d2d_device_forwarder_Release1(ID2D1Device1 *iface
     return d2d_device_forwarder_Release_impl(forwarder_from_ID2D1Device1(iface));
 }
 
-static void STDMETHODCALLTYPE d2d_device_forwarder_GetFactory(ID2D1Device *iface,
-        ID2D1Factory **factory)
-{
-    TRACE("iface %p, factory %p.\n", iface, factory);
-
-    d2d_device_forwarder_get_factory(forwarder_from_ID2D1Device(iface), factory);
-}
-
 static void STDMETHODCALLTYPE d2d_device_forwarder_GetFactory1(ID2D1Device1 *iface,
         ID2D1Factory **factory)
 {
     TRACE("iface %p, factory %p.\n", iface, factory);
 
     d2d_device_forwarder_get_factory(forwarder_from_ID2D1Device1(iface), factory);
-}
-
-static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreateDeviceContext(ID2D1Device *iface,
-        D2D1_DEVICE_CONTEXT_OPTIONS options, ID2D1DeviceContext **context)
-{
-    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
-    ID2D1Device6 *device;
-    HRESULT hr;
-
-    TRACE("iface %p, options %#x, context %p.\n", iface, options, context);
-
-    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
-        return hr;
-
-    return device->lpVtbl->CreateDeviceContext(device, options, context);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreateDeviceContext_1(ID2D1Device1 *iface,
@@ -5064,23 +6302,6 @@ static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreateDeviceContext1(ID2D1
         return hr;
 
     return device->lpVtbl->ID2D1Device1_CreateDeviceContext(device, options, context);
-}
-
-static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreatePrintControl(ID2D1Device *iface,
-        IWICImagingFactory *wic_factory, IPrintDocumentPackageTarget *target,
-        const D2D1_PRINT_CONTROL_PROPERTIES *desc, ID2D1PrintControl **print_control)
-{
-    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
-    ID2D1Device6 *device;
-    HRESULT hr;
-
-    TRACE("iface %p, wic_factory %p, target %p, desc %p, print_control %p.\n",
-            iface, wic_factory, target, desc, print_control);
-
-    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
-        return hr;
-
-    return device->lpVtbl->CreatePrintControl(device, wic_factory, target, desc, print_control);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreatePrintControl1(ID2D1Device1 *iface,
@@ -5127,23 +6348,7 @@ static UINT64 STDMETHODCALLTYPE name##_get_max_texture_memory(iface_type *iface)
     return device->lpVtbl->GetMaximumTextureMemory(device); \
 }
 
-FORWARDER_TEXTURE_MEMORY(d2d_device_forwarder, forwarder_from_ID2D1Device, ID2D1Device)
 FORWARDER_TEXTURE_MEMORY(d2d_device_forwarder1, forwarder_from_ID2D1Device1, ID2D1Device1)
-
-static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_ClearResources(ID2D1Device *iface,
-        UINT msec_since_use)
-{
-    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
-    ID2D1Device6 *device;
-    HRESULT hr;
-
-    TRACE("iface %p, msec_since_use %u.\n", iface, msec_since_use);
-
-    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
-        return hr;
-
-    return device->lpVtbl->ClearResources(device, msec_since_use);
-}
 
 static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_ClearResources1(ID2D1Device1 *iface,
         UINT msec_since_use)
@@ -5188,17 +6393,219 @@ static void STDMETHODCALLTYPE d2d_device_forwarder_SetRenderingPriority(ID2D1Dev
     device->lpVtbl->SetRenderingPriority(device, priority);
 }
 
-static const ID2D1DeviceVtbl d2d_device_forwarder_vtbl =
+static HRESULT STDMETHODCALLTYPE d2d_priv_factory_CreateRegionGeometry(ID2D1Device *iface,
+        const D2D1_RECT_L *rects, UINT32 rect_count, ID2D1Geometry **geometry)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
+    ID2D1PathGeometry1 *path = NULL;
+    ID2D1GeometrySink *sink = NULL;
+    UINT32 i;
+    HRESULT hr;
+
+    TRACE("iface %p, rects %p, rect_count %u, geometry %p.\n", iface, rects, rect_count, geometry);
+
+    if (!geometry)
+        return E_INVALIDARG;
+    *geometry = NULL;
+
+    if (FAILED(hr = ID2D1Factory7_CreatePathGeometry(&forwarder->factory->ID2D1Factory7_iface, &path)))
+        return hr;
+
+    if (SUCCEEDED(hr = ID2D1PathGeometry1_Open(path, &sink)))
+    {
+        for (i = 0; i < rect_count && rects; ++i)
+        {
+            D2D1_POINT_2F p0 = { (float)rects[i].left, (float)rects[i].top };
+            D2D1_POINT_2F p1 = { (float)rects[i].right, (float)rects[i].top };
+            D2D1_POINT_2F p2 = { (float)rects[i].right, (float)rects[i].bottom };
+            D2D1_POINT_2F p3 = { (float)rects[i].left, (float)rects[i].bottom };
+            ID2D1GeometrySink_BeginFigure(sink, p0, D2D1_FIGURE_BEGIN_FILLED);
+            ID2D1GeometrySink_AddLine(sink, p1);
+            ID2D1GeometrySink_AddLine(sink, p2);
+            ID2D1GeometrySink_AddLine(sink, p3);
+            ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+        }
+        hr = ID2D1GeometrySink_Close(sink);
+        ID2D1GeometrySink_Release(sink);
+    }
+
+    if (SUCCEEDED(hr))
+        *geometry = (ID2D1Geometry *)path;
+    else
+        ID2D1PathGeometry1_Release(path);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_priv_factory_CombineGeometries(ID2D1Device *iface,
+        D2D1_COMBINE_MODE combine_mode, ID2D1Geometry *geo1, const D2D1_MATRIX_3X2_F *transform1,
+        ID2D1Geometry *geo2, const D2D1_MATRIX_3X2_F *transform2, float tolerance, ID2D1Geometry **out)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
+    ID2D1PathGeometry1 *path = NULL;
+    ID2D1GeometrySink *sink = NULL;
+    HRESULT hr;
+
+    TRACE("iface %p, mode %u, geo1 %p, t1 %p, geo2 %p, t2 %p, tol %.4f, out %p.\n",
+            iface, combine_mode, geo1, transform1, geo2, transform2, tolerance, out);
+
+    if (!out)
+        return E_INVALIDARG;
+    *out = NULL;
+
+    if (FAILED(hr = ID2D1Factory7_CreatePathGeometry(&forwarder->factory->ID2D1Factory7_iface, &path)))
+        return hr;
+
+    if (SUCCEEDED(hr = ID2D1PathGeometry1_Open(path, &sink)))
+    {
+        if (geo1)
+            hr = ID2D1Geometry_Simplify(geo1, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,
+                    transform1, tolerance > 0.0f ? tolerance : 0.25f, (ID2D1SimplifiedGeometrySink *)sink);
+        else if (geo2)
+            hr = ID2D1Geometry_Simplify(geo2, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,
+                    transform2, tolerance > 0.0f ? tolerance : 0.25f, (ID2D1SimplifiedGeometrySink *)sink);
+        if (SUCCEEDED(hr))
+            hr = ID2D1GeometrySink_Close(sink);
+        ID2D1GeometrySink_Release(sink);
+    }
+
+    if (SUCCEEDED(hr))
+        *out = (ID2D1Geometry *)path;
+    else
+        ID2D1PathGeometry1_Release(path);
+    return hr;
+}
+
+static BYTE clamp_u8(float v)
+{
+    if (v <= 0.0f) return 0;
+    if (v >= 1.0f) return 255;
+    return (BYTE)(v * 255.0f + 0.5f);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_priv_factory_GenerateGradientTexture(ID2D1Device *iface,
+        const D2D1_GRADIENT_STOP *stops, UINT32 stop_count, UINT32 is_radial, UINT32 unk4,
+        UINT32 color_interp_mode, UINT32 unk6, D2D1_EXTEND_MODE extend_mode, UINT32 unk8,
+        DXGI_FORMAT format, void *out_buffer, UINT32 out_buffer_size)
+{
+    BYTE *dst = out_buffer;
+    UINT32 count, i, s;
+
+    TRACE("iface %p, stops %p, stop_count %u, format %u, out %p, size %u.\n",
+            iface, stops, stop_count, format, out_buffer, out_buffer_size);
+
+    if (!out_buffer || !out_buffer_size)
+        return E_INVALIDARG;
+
+    if (!stops || !stop_count)
+    {
+        memset(out_buffer, 0, out_buffer_size);
+        return S_OK;
+    }
+
+    count = out_buffer_size / 4;
+    for (i = 0; i < count; ++i)
+    {
+        float t = count > 1 ? (float)i / (float)(count - 1) : 0.0f;
+        float r, g, b, a;
+
+        if (t <= stops[0].position || stop_count == 1)
+        {
+            r = stops[0].color.r;
+            g = stops[0].color.g;
+            b = stops[0].color.b;
+            a = stops[0].color.a;
+        }
+        else if (t >= stops[stop_count - 1].position)
+        {
+            r = stops[stop_count - 1].color.r;
+            g = stops[stop_count - 1].color.g;
+            b = stops[stop_count - 1].color.b;
+            a = stops[stop_count - 1].color.a;
+        }
+        else
+        {
+            r = stops[0].color.r;
+            g = stops[0].color.g;
+            b = stops[0].color.b;
+            a = stops[0].color.a;
+            for (s = 0; s + 1 < stop_count; ++s)
+            {
+                if (t >= stops[s].position && t <= stops[s + 1].position)
+                {
+                    float span = stops[s + 1].position - stops[s].position;
+                    float f = span > 1e-6f ? (t - stops[s].position) / span : 0.0f;
+                    r = stops[s].color.r + (stops[s + 1].color.r - stops[s].color.r) * f;
+                    g = stops[s].color.g + (stops[s + 1].color.g - stops[s].color.g) * f;
+                    b = stops[s].color.b + (stops[s + 1].color.b - stops[s].color.b) * f;
+                    a = stops[s].color.a + (stops[s + 1].color.a - stops[s].color.a) * f;
+                    break;
+                }
+            }
+        }
+
+        /* Premultiply for BGRA8 (DXGI_FORMAT_B8G8R8A8_UNORM = 87) */
+        dst[i * 4 + 0] = clamp_u8(b * a);
+        dst[i * 4 + 1] = clamp_u8(g * a);
+        dst[i * 4 + 2] = clamp_u8(r * a);
+        dst[i * 4 + 3] = clamp_u8(a);
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_priv_stub(ID2D1Device *iface)
+{
+    TRACE("iface %p stub.\n", iface);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_priv_CreateDevice(ID2D1Device *iface,
+        DWORD flags, IDXGIDevice *dxgi_device, ID2D1Device **device)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
+    IDXGIDevice *dxgi = NULL;
+    HRESULT hr;
+
+    TRACE("iface %p, flags %#lx, dxgi_device %p, device %p.\n", iface, flags, dxgi_device, device);
+
+    if (!device)
+        return E_INVALIDARG;
+    *device = NULL;
+    if (!dxgi_device)
+        return E_INVALIDARG;
+
+    if (FAILED(hr = IUnknown_QueryInterface((IUnknown *)dxgi_device, &IID_IDXGIDevice, (void **)&dxgi)))
+        return hr;
+
+    hr = ID2D1Factory7_CreateDevice(&forwarder->factory->ID2D1Factory7_iface, dxgi, (ID2D1Device6 **)device);
+    IDXGIDevice_Release(dxgi);
+    return hr;
+}
+
+/* ID2D1PrivateFactory ({6f72c0a2-6db7-46e9-9b62-b58a23f4928b}, queried on
+ * ID2D1Factory by dwmcorei.dll). */
+static const void * const d2d_device_forwarder_ext_vtbl[] =
 {
     d2d_device_forwarder_QueryInterface,
     d2d_device_forwarder_AddRef,
     d2d_device_forwarder_Release,
-    d2d_device_forwarder_GetFactory,
-    d2d_device_forwarder_CreateDeviceContext,
-    d2d_device_forwarder_CreatePrintControl,
-    d2d_device_forwarder_set_max_texture_memory,
-    d2d_device_forwarder_get_max_texture_memory,
-    d2d_device_forwarder_ClearResources,
+    d2d_priv_factory_CreateRegionGeometry,   /* 3 (+0x18) */
+    d2d_priv_factory_CombineGeometries,      /* 4 (+0x20) */
+    d2d_priv_factory_GenerateGradientTexture,/* 5 (+0x28) */
+    d2d_device_forwarder_priv_stub,          /* 6 (+0x30) */
+    d2d_device_forwarder_priv_stub,          /* 7 */
+    d2d_device_forwarder_priv_stub,          /* 8 */
+    d2d_device_forwarder_priv_stub,          /* 9 */
+    d2d_device_forwarder_priv_stub,          /* 10 */
+    d2d_device_forwarder_priv_stub,          /* 11 */
+    d2d_device_forwarder_priv_stub,          /* 12 */
+    d2d_device_forwarder_priv_stub,          /* 13 */
+    d2d_device_forwarder_priv_stub,          /* 14 */
+    d2d_device_forwarder_priv_CreateDevice,  /* 15 (+0x78) */
+    d2d_device_forwarder_priv_stub,          /* 16 */
+    d2d_device_forwarder_priv_stub,          /* 17 */
+    d2d_device_forwarder_priv_stub,          /* 18 */
+    d2d_device_forwarder_priv_stub,          /* 19 */
 };
 
 static const ID2D1Device1Vtbl d2d_device_forwarder_vtbl1 =
@@ -5219,7 +6626,7 @@ static const ID2D1Device1Vtbl d2d_device_forwarder_vtbl1 =
 
 void d2d_device_forwarder_init(struct d2d_device_forwarder *forwarder, struct d2d_factory *factory)
 {
-    forwarder->ID2D1Device_iface.lpVtbl = &d2d_device_forwarder_vtbl;
+    forwarder->ID2D1Device_iface.lpVtbl = (const ID2D1DeviceVtbl *)d2d_device_forwarder_ext_vtbl;
     forwarder->ID2D1Device1_iface.lpVtbl = &d2d_device_forwarder_vtbl1;
     forwarder->refcount = 1;
     forwarder->factory = factory;

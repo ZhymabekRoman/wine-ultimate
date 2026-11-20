@@ -199,6 +199,11 @@ static HRESULT STDMETHODCALLTYPE d2d_bitmap_CopyFromRenderTarget(ID2D1Bitmap1 *i
         return hr;
     }
 
+    {
+        struct d2d_device_context *dc_impl = CONTAINING_RECORD(device_context, struct d2d_device_context, ID2D1DeviceContext6_iface);
+        d2d_device_context_resolve_msaa(dc_impl);
+    }
+
     ID2D1DeviceContext_GetTarget(device_context, &target);
     ID2D1DeviceContext_Release(device_context);
 

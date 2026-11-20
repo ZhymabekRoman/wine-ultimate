@@ -11667,6 +11667,286 @@ static void test_geometry_group(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+static ID2D1Geometry *create_rect_geometry(ID2D1Factory *factory, float left, float top,
+        float right, float bottom)
+{
+    ID2D1RectangleGeometry *geometry;
+    D2D1_RECT_F rect;
+    HRESULT hr;
+
+    set_rect(&rect, left, top, right, bottom);
+    hr = ID2D1Factory_CreateRectangleGeometry(factory, &rect, &geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    return (ID2D1Geometry *)geometry;
+}
+
+static ID2D1PathGeometry *combine_with_geometry(ID2D1Factory *factory, ID2D1Geometry *geometry,
+        ID2D1Geometry *geometry2, D2D1_COMBINE_MODE mode, const D2D1_MATRIX_3X2_F *transform)
+{
+    ID2D1GeometrySink *sink;
+    ID2D1PathGeometry *path;
+    HRESULT hr;
+
+    hr = ID2D1Factory_CreatePathGeometry(factory, &path);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1PathGeometry_Open(path, &sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1Geometry_CombineWithGeometry(geometry, geometry2, mode, transform,
+            0.0001f, (ID2D1SimplifiedGeometrySink *)sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
+
+    return path;
+}
+
+static void check_fill_contains(ID2D1Geometry *geometry, float x, float y, BOOL expect,
+        unsigned int line)
+{
+    D2D1_POINT_2F point;
+    BOOL contains;
+    HRESULT hr;
+
+    set_point(&point, x, y);
+    hr = ID2D1Geometry_FillContainsPoint(geometry, point, NULL, 0.0f, &contains);
+    ok_(__FILE__, line)(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok_(__FILE__, line)(contains == expect, "Unexpected contains %d for point (%g, %g), expected %d.\n",
+            contains, x, y, expect);
+}
+#define check_fill_contains(g, x, y, e) check_fill_contains(g, x, y, e, __LINE__)
+
+static void check_fill_bounds(ID2D1Geometry *geometry, float left, float top, float right,
+        float bottom, unsigned int line)
+{
+    D2D1_RECT_F rect;
+    BOOL match;
+    HRESULT hr;
+
+    hr = ID2D1Geometry_GetBounds(geometry, NULL, &rect);
+    ok_(__FILE__, line)(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    match = compare_rect(&rect, left, top, right, bottom, 16);
+    ok_(__FILE__, line)(match, "Got unexpected rectangle {%.8e, %.8e, %.8e, %.8e}.\n",
+            rect.left, rect.top, rect.right, rect.bottom);
+}
+#define check_fill_bounds(g, l, t, r, b) check_fill_bounds(g, l, t, r, b, __LINE__)
+
+static void test_combine_with_geometry(BOOL d3d11)
+{
+    ID2D1RoundedRectangleGeometry *rrect, *rrect2;
+    struct d2d1_test_context ctx;
+    ID2D1Geometry *geometries[2];
+    ID2D1GeometryGroup *group;
+    ID2D1PathGeometry *path;
+    D2D1_MATRIX_3X2_F matrix;
+    ID2D1Geometry *a, *b;
+    D2D1_ROUNDED_RECT rr;
+    D2D1_RECT_F rect;
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+
+    /* Overlapping rectangles. */
+    a = create_rect_geometry(ctx.factory, 0.0f, 0.0f, 10.0f, 10.0f);
+    b = create_rect_geometry(ctx.factory, 5.0f, 5.0f, 15.0f, 15.0f);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_UNION, NULL);
+    check_fill_bounds((ID2D1Geometry *)path, 0.0f, 0.0f, 15.0f, 15.0f);
+    check_fill_contains((ID2D1Geometry *)path, 2.0f, 2.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 7.0f, 7.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 12.0f, 12.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 12.0f, 2.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, -1.0f, 5.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, 17.0f, 7.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_INTERSECT, NULL);
+    check_fill_bounds((ID2D1Geometry *)path, 5.0f, 5.0f, 10.0f, 10.0f);
+    check_fill_contains((ID2D1Geometry *)path, 7.0f, 7.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 2.0f, 2.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, 12.0f, 12.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_XOR, NULL);
+    check_fill_bounds((ID2D1Geometry *)path, 0.0f, 0.0f, 15.0f, 15.0f);
+    check_fill_contains((ID2D1Geometry *)path, 2.0f, 2.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 12.0f, 12.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 7.0f, 7.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_EXCLUDE, NULL);
+    check_fill_bounds((ID2D1Geometry *)path, 0.0f, 0.0f, 10.0f, 10.0f);
+    check_fill_contains((ID2D1Geometry *)path, 2.0f, 2.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 7.0f, 7.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, 12.0f, 12.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    ID2D1Geometry_Release(a);
+    ID2D1Geometry_Release(b);
+
+    /* Disjoint rectangles. */
+    a = create_rect_geometry(ctx.factory, 0.0f, 0.0f, 10.0f, 10.0f);
+    b = create_rect_geometry(ctx.factory, 20.0f, 0.0f, 30.0f, 10.0f);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_UNION, NULL);
+    check_fill_bounds((ID2D1Geometry *)path, 0.0f, 0.0f, 30.0f, 10.0f);
+    check_fill_contains((ID2D1Geometry *)path, 5.0f, 5.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 25.0f, 5.0f, TRUE);
+    ID2D1PathGeometry_Release(path);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_INTERSECT, NULL);
+    check_fill_contains((ID2D1Geometry *)path, 5.0f, 5.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, 25.0f, 5.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_XOR, NULL);
+    check_fill_contains((ID2D1Geometry *)path, 5.0f, 5.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 25.0f, 5.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 15.0f, 5.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_EXCLUDE, NULL);
+    check_fill_bounds((ID2D1Geometry *)path, 0.0f, 0.0f, 10.0f, 10.0f);
+    check_fill_contains((ID2D1Geometry *)path, 5.0f, 5.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 25.0f, 5.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    ID2D1Geometry_Release(a);
+    ID2D1Geometry_Release(b);
+
+    /* input_geometry_transform applies to geometry2. */
+    a = create_rect_geometry(ctx.factory, 0.0f, 0.0f, 10.0f, 10.0f);
+    b = create_rect_geometry(ctx.factory, 0.0f, 0.0f, 10.0f, 10.0f);
+    set_matrix_identity(&matrix);
+    translate_matrix(&matrix, 20.0f, 0.0f);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_UNION, &matrix);
+    check_fill_bounds((ID2D1Geometry *)path, 0.0f, 0.0f, 30.0f, 10.0f);
+    check_fill_contains((ID2D1Geometry *)path, 25.0f, 5.0f, TRUE);
+    ID2D1PathGeometry_Release(path);
+
+    path = combine_with_geometry(ctx.factory, a, b, D2D1_COMBINE_MODE_INTERSECT, &matrix);
+    check_fill_contains((ID2D1Geometry *)path, 5.0f, 5.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, 25.0f, 5.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    ID2D1Geometry_Release(a);
+    ID2D1Geometry_Release(b);
+
+    /* Concentric rounded rectangles: the WinUI 3 MenuFlyout border pattern. */
+    set_rect(&rect, 0.0f, 0.0f, 100.0f, 100.0f);
+    rr.rect = rect;
+    rr.radiusX = rr.radiusY = 10.0f;
+    hr = ID2D1Factory_CreateRoundedRectangleGeometry(ctx.factory, &rr, &rrect);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    set_rect(&rect, 10.0f, 10.0f, 90.0f, 90.0f);
+    rr.rect = rect;
+    rr.radiusX = rr.radiusY = 5.0f;
+    hr = ID2D1Factory_CreateRoundedRectangleGeometry(ctx.factory, &rr, &rrect2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    path = combine_with_geometry(ctx.factory, (ID2D1Geometry *)rrect, (ID2D1Geometry *)rrect2,
+            D2D1_COMBINE_MODE_EXCLUDE, NULL);
+    check_fill_bounds((ID2D1Geometry *)path, 0.0f, -10.0f, 100.0f, 110.0f);
+    check_fill_contains((ID2D1Geometry *)path, 5.0f, 50.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 50.0f, 5.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 50.0f, 50.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, 20.0f, 50.0f, FALSE);
+    check_fill_contains((ID2D1Geometry *)path, -5.0f, 50.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    ID2D1RoundedRectangleGeometry_Release(rrect);
+    ID2D1RoundedRectangleGeometry_Release(rrect2);
+
+    /* Ellipse union rectangle (exercises the bezier flattening path). */
+    {
+        ID2D1EllipseGeometry *ellipse;
+        D2D1_ELLIPSE e;
+
+        set_point(&e.point, 5.0f, 5.0f);
+        e.radiusX = e.radiusY = 5.0f;
+        hr = ID2D1Factory_CreateEllipseGeometry(ctx.factory, &e, &ellipse);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        b = create_rect_geometry(ctx.factory, 5.0f, 5.0f, 15.0f, 15.0f);
+
+        path = combine_with_geometry(ctx.factory, (ID2D1Geometry *)ellipse, b,
+                D2D1_COMBINE_MODE_UNION, NULL);
+        check_fill_contains((ID2D1Geometry *)path, 1.0f, 5.0f, TRUE);
+        check_fill_contains((ID2D1Geometry *)path, 7.0f, 7.0f, TRUE);
+        check_fill_contains((ID2D1Geometry *)path, 12.0f, 12.0f, TRUE);
+        check_fill_contains((ID2D1Geometry *)path, 14.0f, 2.0f, FALSE);
+        ID2D1PathGeometry_Release(path);
+
+        path = combine_with_geometry(ctx.factory, (ID2D1Geometry *)ellipse, b,
+                D2D1_COMBINE_MODE_INTERSECT, NULL);
+        check_fill_contains((ID2D1Geometry *)path, 7.0f, 7.0f, TRUE);
+        check_fill_contains((ID2D1Geometry *)path, 1.0f, 5.0f, FALSE);
+        ID2D1PathGeometry_Release(path);
+
+        ID2D1Geometry_Release(b);
+        ID2D1EllipseGeometry_Release(ellipse);
+    }
+
+    /* Geometry group (2 rectangles) excluded by a rectangle. */
+    geometries[0] = create_rect_geometry(ctx.factory, 0.0f, 0.0f, 4.0f, 4.0f);
+    geometries[1] = create_rect_geometry(ctx.factory, 6.0f, 6.0f, 10.0f, 10.0f);
+    hr = ID2D1Factory_CreateGeometryGroup(ctx.factory, D2D1_FILL_MODE_ALTERNATE, geometries, 2, &group);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    b = create_rect_geometry(ctx.factory, 3.0f, 3.0f, 7.0f, 7.0f);
+
+    path = combine_with_geometry(ctx.factory, (ID2D1Geometry *)group, b,
+            D2D1_COMBINE_MODE_EXCLUDE, NULL);
+    check_fill_contains((ID2D1Geometry *)path, 1.0f, 1.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 8.0f, 8.0f, TRUE);
+    check_fill_contains((ID2D1Geometry *)path, 5.0f, 5.0f, FALSE);
+    ID2D1PathGeometry_Release(path);
+
+    ID2D1Geometry_Release(b);
+    ID2D1GeometryGroup_Release(group);
+    ID2D1Geometry_Release(geometries[0]);
+    ID2D1Geometry_Release(geometries[1]);
+
+    /* Transformed geometry as geometry1. */
+    a = create_rect_geometry(ctx.factory, 0.0f, 0.0f, 10.0f, 10.0f);
+    set_matrix_identity(&matrix);
+    translate_matrix(&matrix, 20.0f, 0.0f);
+    {
+        ID2D1TransformedGeometry *transformed;
+        ID2D1Factory *factory = ctx.factory;
+
+        hr = ID2D1Factory_CreateTransformedGeometry(factory, a, &matrix, &transformed);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        b = create_rect_geometry(ctx.factory, 25.0f, 0.0f, 35.0f, 10.0f);
+
+        path = combine_with_geometry(ctx.factory, (ID2D1Geometry *)transformed, b,
+                D2D1_COMBINE_MODE_INTERSECT, NULL);
+        check_fill_contains((ID2D1Geometry *)path, 27.0f, 5.0f, TRUE);
+        check_fill_contains((ID2D1Geometry *)path, 21.0f, 5.0f, FALSE);
+        ID2D1PathGeometry_Release(path);
+
+        ID2D1Geometry_Release(b);
+        ID2D1TransformedGeometry_Release(transformed);
+    }
+    ID2D1Geometry_Release(a);
+
+    /* Argument validation. */
+    a = create_rect_geometry(ctx.factory, 0.0f, 0.0f, 10.0f, 10.0f);
+    b = create_rect_geometry(ctx.factory, 5.0f, 5.0f, 15.0f, 15.0f);
+    hr = ID2D1Geometry_CombineWithGeometry(a, NULL, D2D1_COMBINE_MODE_UNION, NULL, 0.0001f, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Geometry_CombineWithGeometry(a, b, (D2D1_COMBINE_MODE)4, NULL, 0.0001f, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Geometry_Release(a);
+    ID2D1Geometry_Release(b);
+
+    release_test_context(&ctx);
+}
+
 static DWORD WINAPI mt_factory_test_thread_func(void *param)
 {
     ID2D1Multithread *multithread = param;
@@ -18082,6 +18362,7 @@ START_TEST(d2d1)
     queue_d3d10_test(test_math);
     queue_d3d10_test(test_colour_space);
     queue_d3d10_test(test_geometry_group);
+    queue_d3d10_test(test_combine_with_geometry);
     queue_test(test_mt_factory);
     queue_d3d10_test(test_effect_register);
     queue_test(test_effect_context);

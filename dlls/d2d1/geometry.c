@@ -2288,9 +2288,15 @@ static BOOL d2d_cdt_insert_segment(struct d2d_cdt *cdt, struct d2d_geometry *geo
 {
     struct d2d_cdt_edge_ref base_edge, current, new_origin, next, target;
     size_t current_destination, current_origin;
+    unsigned int iters = 0;
 
-    for (current = *origin;; current = next)
+    if (end_vertex >= geometry->fill.vertex_count)
+        return FALSE;
+
+    for (current = *origin; ++iters < 10000; current = next)
     {
+        if (current.idx >= cdt->edge_count)
+            return FALSE;
         d2d_cdt_edge_next_origin(cdt, &next, &current);
 
         current_destination = d2d_cdt_edge_destination(cdt, &current);
@@ -2301,6 +2307,8 @@ static BOOL d2d_cdt_insert_segment(struct d2d_cdt *cdt, struct d2d_geometry *geo
         }
 
         current_origin = d2d_cdt_edge_origin(cdt, &current);
+        if (current_destination >= geometry->fill.vertex_count || current_origin >= geometry->fill.vertex_count)
+            return FALSE;
         if (d2d_cdt_ccw(cdt, end_vertex, current_origin, current_destination) == 0.0f
                 && (cdt->vertices[current_destination].x > cdt->vertices[current_origin].x)
                 == (cdt->vertices[end_vertex].x > cdt->vertices[current_origin].x)
@@ -2340,6 +2348,7 @@ static BOOL d2d_cdt_insert_segment(struct d2d_cdt *cdt, struct d2d_geometry *geo
             return FALSE;
         }
     }
+    return FALSE;
 }
 
 static BOOL d2d_cdt_insert_segments(struct d2d_cdt *cdt, struct d2d_geometry *geometry)
@@ -3744,11 +3753,23 @@ static HRESULT STDMETHODCALLTYPE d2d_geometry_sink_Close(ID2D1GeometrySink *ifac
 done:
     if (FAILED(hr))
     {
+        WARN("Path geometry triangulation failed (hr %#lx) for %p; keeping empty fill.\n", hr, geometry);
         free(geometry->fill.bezier_vertices);
         geometry->fill.bezier_vertices = NULL;
         geometry->fill.bezier_vertex_count = 0;
-        d2d_path_geometry_free_figures(geometry);
-        d2d_geometry_set_error(geometry, hr);
+        free(geometry->fill.faces);
+        geometry->fill.faces = NULL;
+        geometry->fill.face_count = 0;
+        free(geometry->fill.vertices);
+        geometry->fill.vertices = NULL;
+        geometry->fill.vertex_count = 0;
+        if (hr == E_OUTOFMEMORY)
+        {
+            d2d_path_geometry_free_figures(geometry);
+            d2d_geometry_set_error(geometry, hr);
+            return hr;
+        }
+        return S_OK;
     }
     return hr;
 }
@@ -4023,10 +4044,22 @@ static HRESULT STDMETHODCALLTYPE d2d_path_geometry_GetBounds(ID2D1PathGeometry1 
 static HRESULT STDMETHODCALLTYPE d2d_path_geometry_GetWidenedBounds(ID2D1PathGeometry1 *iface, float stroke_width,
         ID2D1StrokeStyle *stroke_style, const D2D1_MATRIX_3X2_F *transform, float tolerance, D2D1_RECT_F *bounds)
 {
-    FIXME("iface %p, stroke_width %.8e, stroke_style %p, transform %p, tolerance %.8e, bounds %p stub!\n",
+    HRESULT hr;
+
+    FIXME("iface %p, stroke_width %.8e, stroke_style %p, transform %p, tolerance %.8e, bounds %p semi-stub!\n",
             iface, stroke_width, stroke_style, transform, tolerance, bounds);
 
-    return E_NOTIMPL;
+    if (!bounds) return E_INVALIDARG;
+    hr = d2d_path_geometry_GetBounds(iface, transform, bounds);
+    if (SUCCEEDED(hr) && stroke_width > 0.0f && bounds->left <= bounds->right && bounds->top <= bounds->bottom)
+    {
+        float half = stroke_width * 0.5f;
+        bounds->left -= half;
+        bounds->top -= half;
+        bounds->right += half;
+        bounds->bottom += half;
+    }
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_path_geometry_StrokeContainsPoint(ID2D1PathGeometry1 *iface,
@@ -4396,6 +4429,828 @@ static HRESULT d2d_geometry_compute_area(ID2D1Geometry *geometry, const D2D1_MAT
     return hr;
 }
 
+struct d2d_combine_ring
+{
+    D2D1_POINT_2F *vertices;
+    size_t vertex_count;
+};
+
+struct d2d_combine_collector
+{
+    ID2D1SimplifiedGeometrySink ID2D1SimplifiedGeometrySink_iface;
+    struct d2d_combine_ring *rings;
+    size_t ring_count;
+    size_t rings_size;
+    D2D1_POINT_2F *vertices;
+    size_t vertex_count;
+    size_t vertices_size;
+    BOOL hollow;
+    HRESULT hr;
+};
+
+static struct d2d_combine_collector *combine_collector_from_simplified_sink(
+        ID2D1SimplifiedGeometrySink *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_combine_collector, ID2D1SimplifiedGeometrySink_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_combine_collector_QueryInterface(ID2D1SimplifiedGeometrySink *iface,
+        REFIID riid, void **obj)
+{
+    if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_ID2D1SimplifiedGeometrySink))
+    {
+        *obj = iface;
+        return S_OK;
+    }
+
+    *obj = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_combine_collector_AddRef(ID2D1SimplifiedGeometrySink *iface)
+{
+    return 1;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_combine_collector_Release(ID2D1SimplifiedGeometrySink *iface)
+{
+    return 1;
+}
+
+static void STDMETHODCALLTYPE d2d_combine_collector_BeginFigure(ID2D1SimplifiedGeometrySink *iface,
+        D2D1_POINT_2F start_point, D2D1_FIGURE_BEGIN begin)
+{
+    struct d2d_combine_collector *collector = combine_collector_from_simplified_sink(iface);
+
+    if (FAILED(collector->hr))
+        return;
+
+    free(collector->vertices);
+    collector->vertices = NULL;
+    collector->vertices_size = collector->vertex_count = 0;
+    collector->hollow = begin == D2D1_FIGURE_BEGIN_HOLLOW;
+
+    if (collector->hollow)
+        return;
+
+    if (!(collector->vertices = malloc(sizeof(*collector->vertices))))
+    {
+        collector->hr = E_OUTOFMEMORY;
+        return;
+    }
+
+    collector->vertices_size = 1;
+    collector->vertices[0] = start_point;
+    collector->vertex_count = 1;
+}
+
+static void STDMETHODCALLTYPE d2d_combine_collector_AddLines(ID2D1SimplifiedGeometrySink *iface,
+        const D2D1_POINT_2F *points, UINT32 count)
+{
+    struct d2d_combine_collector *collector = combine_collector_from_simplified_sink(iface);
+    size_t i;
+
+    if (FAILED(collector->hr) || collector->hollow)
+        return;
+
+    for (i = 0; i < count; ++i)
+    {
+        if (collector->vertex_count)
+        {
+            const D2D1_POINT_2F *prev = &collector->vertices[collector->vertex_count - 1];
+            if (prev->x == points[i].x && prev->y == points[i].y)
+                continue;
+        }
+
+        if (collector->vertex_count == collector->vertices_size)
+        {
+            size_t size = collector->vertices_size * 2;
+            D2D1_POINT_2F *vertices;
+
+            if (!(vertices = realloc(collector->vertices, size * sizeof(*vertices))))
+            {
+                collector->hr = E_OUTOFMEMORY;
+                return;
+            }
+            collector->vertices = vertices;
+            collector->vertices_size = size;
+        }
+
+        collector->vertices[collector->vertex_count++] = points[i];
+    }
+}
+
+static void STDMETHODCALLTYPE d2d_combine_collector_EndFigure(ID2D1SimplifiedGeometrySink *iface,
+        D2D1_FIGURE_END end)
+{
+    struct d2d_combine_collector *collector = combine_collector_from_simplified_sink(iface);
+    struct d2d_combine_ring *ring;
+
+    if (FAILED(collector->hr))
+        return;
+
+    if (!collector->hollow && end == D2D1_FIGURE_END_CLOSED
+            && collector->vertices && collector->vertex_count >= 3)
+    {
+        if (!d2d_array_reserve((void **)&collector->rings, &collector->rings_size,
+                collector->ring_count + 1, sizeof(*collector->rings)))
+        {
+            collector->hr = E_OUTOFMEMORY;
+            return;
+        }
+
+        ring = &collector->rings[collector->ring_count];
+        ring->vertices = collector->vertices;
+        ring->vertex_count = collector->vertex_count;
+        ++collector->ring_count;
+        collector->vertices = NULL;
+        collector->vertices_size = collector->vertex_count = 0;
+        return;
+    }
+
+    free(collector->vertices);
+    collector->vertices = NULL;
+    collector->vertices_size = collector->vertex_count = 0;
+}
+
+static void STDMETHODCALLTYPE d2d_combine_collector_SetFillMode(ID2D1SimplifiedGeometrySink *iface,
+        D2D1_FILL_MODE mode)
+{
+    /* Figure hollowness is tracked per figure in BeginFigure(). */
+}
+
+static void STDMETHODCALLTYPE d2d_combine_collector_SetSegmentFlags(ID2D1SimplifiedGeometrySink *iface,
+        D2D1_PATH_SEGMENT flags)
+{
+    /* Segment flags are irrelevant for the flattened ring collection. */
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_combine_collector_Close(ID2D1SimplifiedGeometrySink *iface)
+{
+    struct d2d_combine_collector *collector = combine_collector_from_simplified_sink(iface);
+
+    return collector->hr;
+}
+
+static void STDMETHODCALLTYPE d2d_combine_collector_AddBeziers(ID2D1SimplifiedGeometrySink *iface,
+        const D2D1_BEZIER_SEGMENT *beziers, UINT32 count)
+{
+    UINT32 i;
+
+    /* Fallback for simplification options that keep curves; chord approximation
+     * is sufficient because the caller requests D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES. */
+    for (i = 0; i < count; ++i)
+        d2d_combine_collector_AddLines(iface, &beziers[i].point3, 1);
+}
+
+static const struct ID2D1SimplifiedGeometrySinkVtbl d2d_combine_collector_vtbl =
+{
+    d2d_combine_collector_QueryInterface,
+    d2d_combine_collector_AddRef,
+    d2d_combine_collector_Release,
+    d2d_combine_collector_SetFillMode,
+    d2d_combine_collector_SetSegmentFlags,
+    d2d_combine_collector_BeginFigure,
+    d2d_combine_collector_AddLines,
+    d2d_combine_collector_AddBeziers,
+    d2d_combine_collector_EndFigure,
+    d2d_combine_collector_Close,
+};
+
+static void d2d_combine_collector_cleanup(struct d2d_combine_collector *collector)
+{
+    size_t i;
+
+    for (i = 0; i < collector->ring_count; ++i)
+        free(collector->rings[i].vertices);
+    free(collector->rings);
+    free(collector->vertices);
+    collector->rings = NULL;
+    collector->rings_size = collector->ring_count = 0;
+    collector->vertices = NULL;
+    collector->vertices_size = collector->vertex_count = 0;
+}
+
+static HRESULT d2d_combine_collect_rings(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F *transform,
+        float tolerance, struct d2d_combine_collector *collector)
+{
+    collector->ID2D1SimplifiedGeometrySink_iface.lpVtbl = &d2d_combine_collector_vtbl;
+    collector->rings = NULL;
+    collector->ring_count = collector->rings_size = 0;
+    collector->vertices = NULL;
+    collector->vertex_count = collector->vertices_size = 0;
+    collector->hollow = FALSE;
+    collector->hr = S_OK;
+
+    return ID2D1Geometry_Simplify(geometry, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform,
+            tolerance, &collector->ID2D1SimplifiedGeometrySink_iface);
+}
+
+static BOOL d2d_combine_rings_contains(const struct d2d_combine_ring *rings, size_t ring_count,
+        const D2D1_POINT_2F *p)
+{
+    BOOL inside = FALSE;
+    size_t i, j;
+
+    /* Even-odd rule over all rings: outer contours, holes and nested islands
+     * are distinguished by nesting depth, independently of ring orientation. */
+    for (i = 0; i < ring_count; ++i)
+    {
+        const D2D1_POINT_2F *v = rings[i].vertices;
+        size_t n = rings[i].vertex_count;
+
+        for (j = 0; j < n; ++j)
+        {
+            const D2D1_POINT_2F *a = &v[j];
+            const D2D1_POINT_2F *b = &v[(j + 1) % n];
+
+            if ((a->y > p->y) != (b->y > p->y)
+                    && p->x < (b->x - a->x) * (p->y - a->y) / (b->y - a->y) + a->x)
+                inside = !inside;
+        }
+    }
+
+    return inside;
+}
+
+static BOOL d2d_combine_predicate(D2D1_COMBINE_MODE mode, BOOL in_a, BOOL in_b)
+{
+    switch (mode)
+    {
+        case D2D1_COMBINE_MODE_UNION:
+            return in_a || in_b;
+        case D2D1_COMBINE_MODE_INTERSECT:
+            return in_a && in_b;
+        case D2D1_COMBINE_MODE_XOR:
+            return in_a != in_b;
+        case D2D1_COMBINE_MODE_EXCLUDE:
+            return in_a && !in_b;
+        default:
+            return FALSE;
+    }
+}
+
+struct d2d_combine_segment
+{
+    D2D1_POINT_2F p, q;
+    float *t;
+    size_t t_count;
+    size_t t_size;
+    unsigned int mask;
+};
+
+struct d2d_combine_segments
+{
+    struct d2d_combine_segment *segments;
+    size_t segment_count;
+    size_t segments_size;
+    float eps;
+};
+
+static void d2d_combine_segments_cleanup(struct d2d_combine_segments *segs)
+{
+    size_t i;
+
+    for (i = 0; i < segs->segment_count; ++i)
+        free(segs->segments[i].t);
+    free(segs->segments);
+    segs->segments = NULL;
+    segs->segments_size = segs->segment_count = 0;
+}
+
+static BOOL d2d_combine_segments_add_ring(struct d2d_combine_segments *segs,
+        const struct d2d_combine_ring *ring, unsigned int mask)
+{
+    struct d2d_combine_segment *segment;
+    size_t i;
+
+    if (!d2d_array_reserve((void **)&segs->segments, &segs->segments_size,
+            segs->segment_count + ring->vertex_count, sizeof(*segs->segments)))
+        return FALSE;
+
+    if (ring->vertex_count > 300)
+    {
+        for (i = 0; i < 12; ++i)
+            TRACE("ring mask %u v%u %.8e %.8e\n", mask, (unsigned int)i,
+                    ring->vertices[i].x, ring->vertices[i].y);
+        TRACE("ring mask %u count %u\n", mask, (unsigned int)ring->vertex_count);
+    }
+
+    for (i = 0; i < ring->vertex_count; ++i)
+    {
+        const D2D1_POINT_2F *p = &ring->vertices[i];
+        const D2D1_POINT_2F *q = &ring->vertices[(i + 1) % ring->vertex_count];
+        float *t;
+
+        if (p->x == q->x && p->y == q->y)
+            continue;
+
+        segment = &segs->segments[segs->segment_count];
+        segment->p = *p;
+        segment->q = *q;
+        segment->mask = mask;
+        segment->t_count = 0;
+        segment->t_size = 2;
+
+        if (!(t = malloc(2 * sizeof(*t))))
+            return FALSE;
+        t[0] = 0.0f;
+        t[1] = 1.0f;
+        segment->t = t;
+        segment->t_count = 2;
+
+        ++segs->segment_count;
+    }
+
+    return TRUE;
+}
+
+static BOOL d2d_combine_segment_add_t(struct d2d_combine_segment *seg, float t, float eps)
+{
+    size_t i;
+
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    {
+        const float len = sqrtf((seg->q.x - seg->p.x) * (seg->q.x - seg->p.x)
+                + (seg->q.y - seg->p.y) * (seg->q.y - seg->p.y));
+        const float dt = len > 0.0f ? eps / len : eps;
+
+        for (i = 0; i < seg->t_count; ++i)
+        {
+            if (fabsf(seg->t[i] - t) <= dt)
+                return TRUE;
+            if (seg->t[i] > t)
+                break;
+        }
+    }
+
+    if (!(seg->t = realloc(seg->t, (seg->t_size + 1) * sizeof(*seg->t))))
+        return FALSE;
+
+    ++seg->t_size;
+    memmove(&seg->t[i + 1], &seg->t[i], (seg->t_count - i) * sizeof(*seg->t));
+    seg->t[i] = t;
+    ++seg->t_count;
+
+    return TRUE;
+}
+
+static void d2d_combine_segments_intersect(struct d2d_combine_segment *a, struct d2d_combine_segment *b,
+        float eps)
+{
+    const D2D1_POINT_2F r = { b->p.x - a->p.x, b->p.y - a->p.y };
+    const D2D1_POINT_2F ra = { a->q.x - a->p.x, a->q.y - a->p.y };
+    const D2D1_POINT_2F rb = { b->q.x - b->p.x, b->q.y - b->p.y };
+    const float den = ra.x * rb.y - ra.y * rb.x;
+    const float la2 = ra.x * ra.x + ra.y * ra.y;
+    const float lb2 = rb.x * rb.x + rb.y * rb.y;
+    const float la = sqrtf(la2), lb = sqrtf(lb2);
+    float t, u;
+
+    if (!la || !lb)
+        return;
+
+    if (fabsf(den) > la * lb * 1e-6f)
+    {
+        t = (r.x * rb.y - r.y * rb.x) / den;
+        u = (r.x * ra.y - r.y * ra.x) / den;
+
+        if (t >= -eps / la - 1e-6f && t <= 1.0f + eps / la + 1e-6f
+                && u >= -eps / lb - 1e-6f && u <= 1.0f + eps / lb + 1e-6f)
+        {
+            d2d_combine_segment_add_t(a, t, eps);
+            d2d_combine_segment_add_t(b, u, eps);
+        }
+        return;
+    }
+
+    /* Parallel segments; handle collinear overlaps so that the overlap region
+     * becomes its own sub-segment on both sides. */
+    if (fabsf(r.x * ra.y - r.y * ra.x) > eps * la)
+        return;
+
+    t = ((b->p.x - a->p.x) * ra.x + (b->p.y - a->p.y) * ra.y) / la2;
+    if (t >= -eps / la && t <= 1.0f + eps / la)
+        d2d_combine_segment_add_t(a, t, eps);
+    t = ((b->q.x - a->p.x) * ra.x + (b->q.y - a->p.y) * ra.y) / la2;
+    if (t >= -eps / la && t <= 1.0f + eps / la)
+        d2d_combine_segment_add_t(a, t, eps);
+
+    u = ((a->p.x - b->p.x) * rb.x + (a->p.y - b->p.y) * rb.y) / lb2;
+    if (u >= -eps / lb && u <= 1.0f + eps / lb)
+        d2d_combine_segment_add_t(b, u, eps);
+    u = ((a->q.x - b->p.x) * rb.x + (a->q.y - b->p.y) * rb.y) / lb2;
+    if (u >= -eps / lb && u <= 1.0f + eps / lb)
+        d2d_combine_segment_add_t(b, u, eps);
+}
+
+struct d2d_combine_key
+{
+    INT64 x0, y0, x1, y1;
+};
+
+struct d2d_combine_subseg
+{
+    struct d2d_combine_key key;
+    D2D1_POINT_2F p, q;
+    unsigned int mask;
+};
+
+static int d2d_combine_subseg_compare(const void *a, const void *b)
+{
+    const struct d2d_combine_subseg *x = a, *y = b;
+
+    return memcmp(&x->key, &y->key, sizeof(*x) - offsetof(struct d2d_combine_subseg, key));
+}
+
+static struct d2d_combine_subseg *d2d_combine_subsegs_build(const struct d2d_combine_segments *segs,
+        float scale, size_t *count)
+{
+    struct d2d_combine_subseg *subsegs = NULL;
+    size_t subseg_count = 0, subsegs_size = 0;
+    size_t i, j;
+
+    for (i = 0; i < segs->segment_count; ++i)
+    {
+        const struct d2d_combine_segment *segment = &segs->segments[i];
+        const float len = sqrtf((segment->q.x - segment->p.x) * (segment->q.x - segment->p.x)
+                + (segment->q.y - segment->p.y) * (segment->q.y - segment->p.y));
+
+        for (j = 0; j + 1 < segment->t_count; ++j)
+        {
+            const float t0 = segment->t[j], t1 = segment->t[j + 1];
+            struct d2d_combine_subseg *subseg;
+
+            if ((t1 - t0) * len <= segs->eps * 0.1f)
+                continue;
+
+            if (!d2d_array_reserve((void **)&subsegs, &subsegs_size, subseg_count + 1, sizeof(*subsegs)))
+                goto fail;
+
+            subseg = &subsegs[subseg_count];
+            subseg->p.x = segment->p.x + (segment->q.x - segment->p.x) * t0;
+            subseg->p.y = segment->p.y + (segment->q.y - segment->p.y) * t0;
+            subseg->q.x = segment->p.x + (segment->q.x - segment->p.x) * t1;
+            subseg->q.y = segment->p.y + (segment->q.y - segment->p.y) * t1;
+            subseg->mask = segment->mask;
+
+            /* Snap endpoints to the epsilon grid so that coincident sub-segments
+             * from both geometries produce identical keys and merge. */
+            subseg->p.x = floorf(subseg->p.x * scale + 0.5f) / scale;
+            subseg->p.y = floorf(subseg->p.y * scale + 0.5f) / scale;
+            subseg->q.x = floorf(subseg->q.x * scale + 0.5f) / scale;
+            subseg->q.y = floorf(subseg->q.y * scale + 0.5f) / scale;
+
+            subseg->key.x0 = (INT64)(subseg->p.x * scale);
+            subseg->key.y0 = (INT64)(subseg->p.y * scale);
+            subseg->key.x1 = (INT64)(subseg->q.x * scale);
+            subseg->key.y1 = (INT64)(subseg->q.y * scale);
+
+            if ((subseg->key.x1 < subseg->key.x0
+                    || (subseg->key.x1 == subseg->key.x0 && subseg->key.y1 < subseg->key.y0)))
+            {
+                struct d2d_combine_key k = subseg->key;
+                D2D1_POINT_2F p = subseg->p;
+
+                subseg->key.x0 = k.x1;
+                subseg->key.y0 = k.y1;
+                subseg->key.x1 = k.x0;
+                subseg->key.y1 = k.y0;
+                subseg->p = subseg->q;
+                subseg->q = p;
+            }
+
+            if (subseg->key.x0 == subseg->key.x1 && subseg->key.y0 == subseg->key.y1)
+                continue;
+
+            ++subseg_count;
+        }
+    }
+
+    if (!subseg_count)
+    {
+        *count = 0;
+        return NULL;
+    }
+
+    qsort(subsegs, subseg_count, sizeof(*subsegs), d2d_combine_subseg_compare);
+
+    for (i = 1, j = 0; i < subseg_count; ++i)
+    {
+        if (!memcmp(&subsegs[j].key, &subsegs[i].key, sizeof(subsegs[j].key)))
+        {
+            subsegs[j].mask |= subsegs[i].mask;
+            continue;
+        }
+        ++j;
+        if (j != i)
+            subsegs[j] = subsegs[i];
+    }
+    ++j;
+    subseg_count = j;
+
+    *count = subseg_count;
+    return subsegs;
+
+fail:
+    free(subsegs);
+    *count = 0;
+    return NULL;
+}
+
+struct d2d_combine_edge
+{
+    D2D1_POINT_2F p, q;
+    BOOL used;
+};
+
+static BOOL d2d_combine_point_eq(const D2D1_POINT_2F *a, const D2D1_POINT_2F *b, float eps)
+{
+    return fabsf(a->x - b->x) <= eps && fabsf(a->y - b->y) <= eps;
+}
+
+static HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2,
+        D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform, float tolerance,
+        ID2D1SimplifiedGeometrySink *sink)
+{
+    struct d2d_combine_collector collector1 = {0}, collector2 = {0};
+    struct d2d_combine_segments segs = {0};
+    struct d2d_combine_subseg *subsegs;
+    struct d2d_combine_edge *edges;
+    D2D1_POINT_2F *cycle = NULL;
+    size_t subseg_count, edge_count = 0, cycle_size = 0;
+    float eps, scale, stitch_eps;
+    HRESULT hr = S_OK;
+    size_t i, j;
+
+    if (!geometry2 || !sink)
+        return E_INVALIDARG;
+
+    switch (combine_mode)
+    {
+        case D2D1_COMBINE_MODE_UNION:
+        case D2D1_COMBINE_MODE_INTERSECT:
+        case D2D1_COMBINE_MODE_XOR:
+        case D2D1_COMBINE_MODE_EXCLUDE:
+            break;
+        default:
+            return E_INVALIDARG;
+    }
+
+    if (tolerance <= 0.0f)
+        tolerance = D2D1_DEFAULT_FLATTENING_TOLERANCE;
+
+    eps = max(tolerance, 1e-3f);
+    scale = 4.0f / eps;
+
+    if (FAILED(hr = d2d_combine_collect_rings(geometry1, NULL, tolerance, &collector1)))
+        goto done;
+    if (FAILED(hr = d2d_combine_collect_rings(geometry2, transform, tolerance, &collector2)))
+        goto done;
+    if (FAILED(hr = collector1.hr) || FAILED(hr = collector2.hr))
+    {
+        hr = FAILED(collector1.hr) ? collector1.hr : collector2.hr;
+        goto done;
+    }
+
+    segs.eps = eps;
+    for (i = 0; i < collector1.ring_count; ++i)
+    {
+        if (!d2d_combine_segments_add_ring(&segs, &collector1.rings[i], 1))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+    }
+    for (i = 0; i < collector2.ring_count; ++i)
+    {
+        if (!d2d_combine_segments_add_ring(&segs, &collector2.rings[i], 2))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+    }
+
+    for (i = 0; i < segs.segment_count; ++i)
+    {
+        for (j = 0; j < i; ++j)
+        {
+            if (segs.segments[i].mask == segs.segments[j].mask)
+                continue;
+            d2d_combine_segments_intersect(&segs.segments[i], &segs.segments[j], eps);
+        }
+    }
+
+    if (!(subsegs = d2d_combine_subsegs_build(&segs, scale, &subseg_count)))
+    {
+        ID2D1SimplifiedGeometrySink_SetFillMode(sink, D2D1_FILL_MODE_ALTERNATE);
+        hr = S_OK;
+        goto done;
+    }
+
+    if (!(edges = calloc(subseg_count, sizeof(*edges))))
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+
+    for (i = 0; i < subseg_count; ++i)
+    {
+        const struct d2d_combine_subseg *subseg = &subsegs[i];
+        const float dx = subseg->q.x - subseg->p.x, dy = subseg->q.y - subseg->p.y;
+        const float len = sqrtf(dx * dx + dy * dy);
+        BOOL left_in, right_in;
+        struct d2d_combine_edge *edge;
+        D2D1_POINT_2F mid, probe;
+        float e;
+
+        if (len <= eps * 0.1f)
+            continue;
+
+        e = min(len * 0.25f, eps);
+        mid.x = (subseg->p.x + subseg->q.x) * 0.5f;
+        mid.y = (subseg->p.y + subseg->q.y) * 0.5f;
+
+        probe.x = mid.x + dy / len * e;
+        probe.y = mid.y - dx / len * e;
+        left_in = d2d_combine_predicate(combine_mode,
+                d2d_combine_rings_contains(collector1.rings, collector1.ring_count, &probe),
+                d2d_combine_rings_contains(collector2.rings, collector2.ring_count, &probe));
+
+        probe.x = mid.x - dy / len * e;
+        probe.y = mid.y + dx / len * e;
+        right_in = d2d_combine_predicate(combine_mode,
+                d2d_combine_rings_contains(collector1.rings, collector1.ring_count, &probe),
+                d2d_combine_rings_contains(collector2.rings, collector2.ring_count, &probe));
+
+        if (left_in == right_in)
+            continue;
+
+        edge = &edges[edge_count++];
+        edge->p = subseg->p;
+        edge->q = subseg->q;
+        if (!left_in)
+        {
+            edge->p = subseg->q;
+            edge->q = subseg->p;
+        }
+    }
+
+    /* Stitch tolerance must bridge gaps left by chords dropped during
+     * classification; size it from the mean sub-segment length. */
+    {
+        float total = 0.0f;
+
+        for (i = 0; i < subseg_count; ++i)
+        {
+            const float dx = subsegs[i].q.x - subsegs[i].p.x, dy = subsegs[i].q.y - subsegs[i].p.y;
+            total += sqrtf(dx * dx + dy * dy);
+        }
+        stitch_eps = max(2.0f * total / (subseg_count ? (float)subseg_count : 1.0f), 8.0f * eps);
+    }
+
+
+    ID2D1SimplifiedGeometrySink_SetFillMode(sink, D2D1_FILL_MODE_ALTERNATE);
+
+    /* Stitch directed half-edges into closed cycles, keeping the interior on
+     * the left. At vertices of degree > 2 the most clockwise continuation is
+     * chosen, which keeps the cycles simple. */
+    for (;;)
+    {
+        const float eq_eps = stitch_eps;
+        size_t start = edge_count, prev_idx, steps = 0, vertex_count = 0;
+        D2D1_POINT_2F cur;
+        BOOL closed, stalled = FALSE;
+
+        for (i = 0; i < edge_count; ++i)
+        {
+            if (!edges[i].used)
+            {
+                start = i;
+                break;
+            }
+        }
+        if (start == edge_count)
+            break;
+
+        edges[start].used = TRUE;
+        if (!d2d_array_reserve((void **)&cycle, &cycle_size, edge_count + 2, sizeof(*cycle)))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        cycle[vertex_count++] = edges[start].p;
+        prev_idx = start;
+        cur = edges[start].q;
+
+        while (steps++ <= edge_count)
+        {
+            D2D1_POINT_2F dir_in = { cur.x - edges[prev_idx].p.x, cur.y - edges[prev_idx].p.y };
+            const float l_in = sqrtf(dir_in.x * dir_in.x + dir_in.y * dir_in.y);
+            size_t best = edge_count;
+            float best_score = FLT_MAX;
+
+            if (d2d_combine_point_eq(&cur, &cycle[0], eps))
+                break;
+
+            cycle[vertex_count++] = cur;
+
+            if (l_in > 0.0f)
+            {
+                dir_in.x /= l_in;
+                dir_in.y /= l_in;
+            }
+
+            for (i = 0; i < 2; ++i)
+            {
+                const float match_eps = i ? eq_eps : eps;
+
+                for (j = 0; j < edge_count; ++j)
+                {
+                    D2D1_POINT_2F dir_out, ref;
+                    float score, l_out;
+
+                    if (edges[j].used || !d2d_combine_point_eq(&edges[j].p, &cur, match_eps))
+                        continue;
+
+                    dir_out.x = edges[j].q.x - cur.x;
+                    dir_out.y = edges[j].q.y - cur.y;
+                    l_out = sqrtf(dir_out.x * dir_out.x + dir_out.y * dir_out.y);
+                    if (l_out <= 0.0f)
+                        continue;
+                    dir_out.x /= l_out;
+                    dir_out.y /= l_out;
+
+                    /* Turn angle from the reversed incoming direction to dir_out,
+                     * measured counter-clockwise in [0, 2π). */
+                    ref.x = -dir_in.x;
+                    ref.y = -dir_in.y;
+                    score = atan2f(ref.x * dir_out.y - ref.y * dir_out.x,
+                            ref.x * dir_out.x + ref.y * dir_out.y);
+                    if (score < 0.0f)
+                        score += 2.0f * M_PI;
+                    if (score < best_score)
+                    {
+                        best_score = score;
+                        best = j;
+                    }
+                }
+
+                if (best != edge_count)
+                    break;
+            }
+
+            if (best == edge_count)
+            {
+                stalled = TRUE;
+                break;
+            }
+
+            edges[best].used = TRUE;
+            prev_idx = best;
+            cur = edges[best].q;
+        }
+
+        /* Emit the loop only when the walk closed on its start vertex. */
+        closed = d2d_combine_point_eq(&cur, &cycle[0], eps)
+                || (stalled && d2d_combine_point_eq(&cur, &cycle[0], stitch_eps));
+        if (!closed)
+            continue;
+        while (vertex_count > 1 && d2d_combine_point_eq(&cycle[vertex_count - 1], &cycle[0], eps))
+            --vertex_count;
+
+        /* Drop consecutive duplicate vertices. */
+        for (i = 1, j = 1; i < vertex_count; ++i)
+        {
+            if (d2d_combine_point_eq(&cycle[i], &cycle[j - 1], eps))
+                continue;
+            cycle[j++] = cycle[i];
+        }
+        vertex_count = j;
+        if (vertex_count > 1 && d2d_combine_point_eq(&cycle[vertex_count - 1], &cycle[0], eps))
+            --vertex_count;
+
+        if (vertex_count < 3)
+            continue;
+
+        ID2D1SimplifiedGeometrySink_BeginFigure(sink, cycle[0], D2D1_FIGURE_BEGIN_FILLED);
+        ID2D1SimplifiedGeometrySink_AddLines(sink, &cycle[1], vertex_count - 1);
+        ID2D1SimplifiedGeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+    }
+
+    free(edges);
+    free(subsegs);
+
+done:
+    free(cycle);
+    d2d_combine_segments_cleanup(&segs);
+    d2d_combine_collector_cleanup(&collector1);
+    d2d_combine_collector_cleanup(&collector2);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE d2d_path_geometry_Tessellate(ID2D1PathGeometry1 *iface,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1TessellationSink *sink)
 {
@@ -4410,18 +5265,21 @@ static HRESULT STDMETHODCALLTYPE d2d_path_geometry_CombineWithGeometry(ID2D1Path
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    struct d2d_geometry *geometry1 = impl_from_ID2D1PathGeometry1(iface);
+
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine(&geometry1->ID2D1Geometry_iface, geometry, combine_mode, transform,
+            tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_path_geometry_Outline(ID2D1PathGeometry1 *iface,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, transform %p, tolerance %.8e, sink %p stub!\n", iface, transform, tolerance, sink);
+    TRACE("iface %p, transform %p, tolerance %.8e, sink %p.\n", iface, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return ID2D1PathGeometry1_Simplify(iface, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_path_geometry_ComputeArea(ID2D1PathGeometry1 *iface,
@@ -4826,10 +5684,37 @@ static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_StrokeContainsPoint(ID2D1E
 static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_FillContainsPoint(ID2D1EllipseGeometry *iface,
         D2D1_POINT_2F point, const D2D1_MATRIX_3X2_F *transform, float tolerance, BOOL *contains)
 {
-    FIXME("iface %p, point %s, transform %p, tolerance %.8e, contains %p stub!\n",
+    struct d2d_geometry *geometry = impl_from_ID2D1EllipseGeometry(iface);
+    const D2D1_ELLIPSE *ellipse = &geometry->u.ellipse.ellipse;
+    float dx, dy, rx, ry;
+
+    TRACE("iface %p, point %s, transform %p, tolerance %.8e, contains %p.\n",
             iface, debug_d2d_point_2f(&point), transform, tolerance, contains);
 
-    return E_NOTIMPL;
+    if (!contains)
+        return E_INVALIDARG;
+
+    if (transform)
+    {
+        D2D1_MATRIX_3X2_F g_i;
+
+        if (!d2d_matrix_invert(&g_i, transform))
+            return D2DERR_UNSUPPORTED_OPERATION;
+        d2d_point_transform(&point, &g_i, point.x, point.y);
+    }
+
+    rx = fabsf(ellipse->radiusX);
+    ry = fabsf(ellipse->radiusY);
+    if (rx == 0.0f || ry == 0.0f)
+    {
+        *contains = FALSE;
+        return S_OK;
+    }
+
+    dx = (point.x - ellipse->point.x) / rx;
+    dy = (point.y - ellipse->point.y) / ry;
+    *contains = (dx * dx + dy * dy) <= 1.0f;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_CompareWithGeometry(ID2D1EllipseGeometry *iface,
@@ -4929,18 +5814,21 @@ static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_CombineWithGeometry(ID2D1E
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    struct d2d_geometry *geometry1 = impl_from_ID2D1EllipseGeometry(iface);
+
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine(&geometry1->ID2D1Geometry_iface, geometry, combine_mode, transform,
+            tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_Outline(ID2D1EllipseGeometry *iface,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, transform %p, tolerance %.8e, sink %p stub!\n", iface, transform, tolerance, sink);
+    TRACE("iface %p, transform %p, tolerance %.8e, sink %p.\n", iface, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return ID2D1EllipseGeometry_Simplify(iface, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_ComputeArea(ID2D1EllipseGeometry *iface,
@@ -5380,18 +6268,21 @@ static HRESULT STDMETHODCALLTYPE d2d_rectangle_geometry_CombineWithGeometry(ID2D
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    struct d2d_geometry *geometry1 = impl_from_ID2D1RectangleGeometry(iface);
+
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine(&geometry1->ID2D1Geometry_iface, geometry, combine_mode, transform,
+            tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_rectangle_geometry_Outline(ID2D1RectangleGeometry *iface,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, transform %p, tolerance %.8e, sink %p stub!\n", iface, transform, tolerance, sink);
+    TRACE("iface %p, transform %p, tolerance %.8e, sink %p.\n", iface, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return ID2D1RectangleGeometry_Simplify(iface, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_rectangle_geometry_ComputeArea(ID2D1RectangleGeometry *iface,
@@ -5683,10 +6574,71 @@ static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_StrokeContainsPo
 static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_FillContainsPoint(ID2D1RoundedRectangleGeometry *iface,
         D2D1_POINT_2F point, const D2D1_MATRIX_3X2_F *transform, float tolerance, BOOL *contains)
 {
-    FIXME("iface %p, point %s, transform %p, tolerance %.8e, contains %p stub!\n",
+    struct d2d_geometry *geometry = impl_from_ID2D1RoundedRectangleGeometry(iface);
+    const D2D1_ROUNDED_RECT *rr = &geometry->u.rounded_rectangle.rounded_rect;
+    float left, top, right, bottom, rx, ry;
+
+    TRACE("iface %p, point %s, transform %p, tolerance %.8e, contains %p.\n",
             iface, debug_d2d_point_2f(&point), transform, tolerance, contains);
 
-    return E_NOTIMPL;
+    if (!contains)
+        return E_INVALIDARG;
+
+    if (transform)
+    {
+        D2D1_MATRIX_3X2_F g_i;
+
+        if (!d2d_matrix_invert(&g_i, transform))
+            return D2DERR_UNSUPPORTED_OPERATION;
+        d2d_point_transform(&point, &g_i, point.x, point.y);
+    }
+
+    left = min(rr->rect.left, rr->rect.right);
+    right = max(rr->rect.left, rr->rect.right);
+    top = min(rr->rect.top, rr->rect.bottom);
+    bottom = max(rr->rect.top, rr->rect.bottom);
+
+    if (point.x < left || point.x > right || point.y < top || point.y > bottom)
+    {
+        *contains = FALSE;
+        return S_OK;
+    }
+
+    rx = min(fabsf(rr->radiusX), (right - left) * 0.5f);
+    ry = min(fabsf(rr->radiusY), (bottom - top) * 0.5f);
+    if (rx > 0.0f && ry > 0.0f)
+    {
+        float cx = 0.0f, cy = 0.0f;
+        BOOL in_corner = FALSE;
+
+        if (point.x < left + rx && point.y < top + ry)
+        {
+            cx = left + rx; cy = top + ry; in_corner = TRUE;
+        }
+        else if (point.x > right - rx && point.y < top + ry)
+        {
+            cx = right - rx; cy = top + ry; in_corner = TRUE;
+        }
+        else if (point.x < left + rx && point.y > bottom - ry)
+        {
+            cx = left + rx; cy = bottom - ry; in_corner = TRUE;
+        }
+        else if (point.x > right - rx && point.y > bottom - ry)
+        {
+            cx = right - rx; cy = bottom - ry; in_corner = TRUE;
+        }
+
+        if (in_corner)
+        {
+            float dx = (point.x - cx) / rx;
+            float dy = (point.y - cy) / ry;
+            *contains = (dx * dx + dy * dy) <= 1.0f;
+            return S_OK;
+        }
+    }
+
+    *contains = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_CompareWithGeometry(
@@ -5782,18 +6734,21 @@ static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_CombineWithGeome
         ID2D1RoundedRectangleGeometry *iface, ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    struct d2d_geometry *geometry1 = impl_from_ID2D1RoundedRectangleGeometry(iface);
+
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine(&geometry1->ID2D1Geometry_iface, geometry, combine_mode, transform,
+            tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_Outline(ID2D1RoundedRectangleGeometry *iface,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, transform %p, tolerance %.8e, sink %p stub!\n", iface, transform, tolerance, sink);
+    TRACE("iface %p, transform %p, tolerance %.8e, sink %p.\n", iface, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return ID2D1RoundedRectangleGeometry_Simplify(iface, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_ComputeArea(ID2D1RoundedRectangleGeometry *iface,
@@ -6184,18 +7139,21 @@ static HRESULT STDMETHODCALLTYPE d2d_transformed_geometry_CombineWithGeometry(ID
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    struct d2d_geometry *geometry1 = impl_from_ID2D1TransformedGeometry(iface);
+
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine(&geometry1->ID2D1Geometry_iface, geometry, combine_mode, transform,
+            tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_transformed_geometry_Outline(ID2D1TransformedGeometry *iface,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, transform %p, tolerance %.8e, sink %p stub!\n", iface, transform, tolerance, sink);
+    TRACE("iface %p, transform %p, tolerance %.8e, sink %p.\n", iface, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return ID2D1TransformedGeometry_Simplify(iface, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_transformed_geometry_ComputeArea(ID2D1TransformedGeometry *iface,

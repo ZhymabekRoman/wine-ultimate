@@ -1,4 +1,5 @@
 MODULE    = d2d1.dll
+UNIXLIB   = d2d1.so
 IMPORTLIB = d2d1
 IMPORTS   = d3d10_1 dxguid uuid gdi32 user32 advapi32 d3dcompiler
 DELAYIMPORTS = dwrite xmllite ole32
@@ -21,4 +22,5 @@ SOURCES = \
 	mesh.c \
 	state_block.c \
 	stroke.c \
+	unixlib.c \
 	wic_render_target.c

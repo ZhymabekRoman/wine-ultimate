@@ -120,7 +120,8 @@ struct d2d_ps_cb
 {
     BOOL outline;
     BOOL is_arc;
-    BOOL pad[2];
+    BOOL antialias;
+    BOOL pad;
     struct d2d_brush_cb colour_brush;
     struct d2d_brush_cb opacity_brush;
 };
@@ -170,11 +171,55 @@ struct d2d_indexed_objects
     size_t count;
 };
 
+/* Undocumented ID2D1PrivateCompositorDeviceContext used by WinUI 3 dcompi.dll / dwmcorei.dll */
+typedef struct ID2D1PrivateCompositorDeviceContext ID2D1PrivateCompositorDeviceContext;
+typedef struct ID2D1PrivateCompositorDeviceContextVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ID2D1PrivateCompositorDeviceContext *iface, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ID2D1PrivateCompositorDeviceContext *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *CreatePrimitiveGroupCommandList)(ID2D1PrivateCompositorDeviceContext *iface,
+            void *cmd_buf, void *prim_buf, void **images, UINT32 image_count, void **bitmaps, UINT32 bitmap_count,
+            void *reserved1, UINT32 reserved2, void **out);
+    void (STDMETHODCALLTYPE *DrawPrimitiveGroupCommandList)(ID2D1PrivateCompositorDeviceContext *iface,
+            void *cmd_list, void *p2, const D2D_MATRIX_4X4_F *transform, UINT32 composite_mode, UINT32 flags);
+    HRESULT (STDMETHODCALLTYPE *Slot5)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot6)(ID2D1PrivateCompositorDeviceContext *iface);
+    void (STDMETHODCALLTYPE *SetTarget)(ID2D1PrivateCompositorDeviceContext *iface,
+            ID2D1Image *target, IUnknown *depth_buffer);
+    HRESULT (STDMETHODCALLTYPE *Slot8)(ID2D1PrivateCompositorDeviceContext *iface);
+    void (STDMETHODCALLTYPE *SetTargetSubRect)(ID2D1PrivateCompositorDeviceContext *iface,
+            ID2D1Image *target, const RECT *subrect);
+    void (STDMETHODCALLTYPE *SetClip)(ID2D1PrivateCompositorDeviceContext *iface,
+            const D2D1_RECT_F *clip_rect, D2D1_ANTIALIAS_MODE aa_mode);
+    HRESULT (STDMETHODCALLTYPE *Slot11)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *CreateBitmapFromDxgiSurface)(ID2D1PrivateCompositorDeviceContext *iface,
+            IDXGISurface *surface, const D2D1_BITMAP_PROPERTIES1 *desc, ID2D1Bitmap1 **bitmap);
+    HRESULT (STDMETHODCALLTYPE *Slot13)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot14)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *ExecuteDrawListBatch)(ID2D1PrivateCompositorDeviceContext *iface,
+            IUnknown *batch);
+    HRESULT (STDMETHODCALLTYPE *Slot16)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot17)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot18)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot19)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot20)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot21)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot22)(ID2D1PrivateCompositorDeviceContext *iface);
+    HRESULT (STDMETHODCALLTYPE *Slot23)(ID2D1PrivateCompositorDeviceContext *iface);
+} ID2D1PrivateCompositorDeviceContextVtbl;
+
+struct ID2D1PrivateCompositorDeviceContext
+{
+    const ID2D1PrivateCompositorDeviceContextVtbl *lpVtbl;
+};
+
 struct d2d_device_context
 {
     ID2D1DeviceContext6 ID2D1DeviceContext6_iface;
     ID2D1GdiInteropRenderTarget ID2D1GdiInteropRenderTarget_iface;
     IDWriteTextRenderer IDWriteTextRenderer_iface;
+    ID2D1PrivateCompositorDeviceContext ID2D1PrivateCompositorDeviceContext_iface;
     IUnknown IUnknown_iface;
     LONG refcount;
 
@@ -205,6 +250,18 @@ struct d2d_device_context
     unsigned int vb_stride;
     ID3D11Buffer *vb;
     ID3D11RasterizerState *rs;
+    ID3D11RasterizerState *rs_msaa;
+    ID3D11VertexShader *blit_vs;
+    ID3D11PixelShader *blit_ps;
+    ID3D11Texture2D *msaa_tex;
+    ID3D11RenderTargetView *msaa_rtv;
+    ID3D11Texture2D *msaa_sync_tex;
+    ID3D11ShaderResourceView *msaa_sync_srv;
+    UINT msaa_width;
+    UINT msaa_height;
+    UINT msaa_samples;
+    DXGI_FORMAT msaa_format;
+    BOOL msaa_dirty;
     ID3D11BlendState *bs;
     ID3D11SamplerState *sampler_states
             [D2D_SAMPLER_INTERPOLATION_MODE_COUNT]
@@ -219,6 +276,11 @@ struct d2d_device_context
     D2D1_RENDER_TARGET_PROPERTIES desc;
     D2D1_SIZE_U pixel_size;
     struct d2d_clip_stack clip_stack;
+    BOOL has_priv_clip;
+    D2D1_RECT_F priv_clip;
+    BOOL has_subrect;
+    RECT target_subrect;
+    ID2D1SvgDocument *last_svg_doc;
 
     struct d2d_indexed_objects vertex_buffers;
 };
@@ -451,6 +513,7 @@ struct d2d_bitmap
     D2D1_BITMAP_OPTIONS options;
 };
 
+void d2d_device_context_resolve_msaa(struct d2d_device_context *context);
 HRESULT d2d_bitmap_create(struct d2d_device_context *context, D2D1_SIZE_U size, const void *src_data,
         UINT32 pitch, const D2D1_BITMAP_PROPERTIES1 *desc, struct d2d_bitmap **bitmap);
 HRESULT d2d_bitmap_create_shared(struct d2d_device_context *context, REFIID iid, void *data,
@@ -653,6 +716,7 @@ struct d2d_geometry_realization *unsafe_impl_from_ID2D1GeometryRealization(ID2D1
 struct d2d_device
 {
     ID2D1Device6 ID2D1Device6_iface;
+    IUnknown ID2D1PrivateCompositorDevice_iface;
     LONG refcount;
     ID2D1Factory1 *factory;
     IDXGIDevice *dxgi_device;
