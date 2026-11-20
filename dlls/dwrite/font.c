@@ -5865,6 +5865,7 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
     for (i = 0; i < analysis->run.glyphCount; i++) {
         RECT *bbox = &glyph_bitmap.bbox;
         UINT32 bitmap_size;
+        int orig_x, orig_y;
 
         glyph_bitmap.glyph = analysis->run.glyphIndices[i];
         dwrite_fontface_get_glyph_bbox(analysis->run.fontFace, &glyph_bitmap);
@@ -5874,7 +5875,11 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
         if (bitmap_size > analysis->max_glyph_bitmap_size)
             analysis->max_glyph_bitmap_size = bitmap_size;
 
-        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
+        orig_x = analysis->origins[i].x;
+        orig_y = analysis->origins[i].y;
+        if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 && bbox->top + orig_y == -1)
+            orig_y++;
+        OffsetRect(bbox, orig_x, orig_y);
         UnionRect(&analysis->bounds, &analysis->bounds, bbox);
     }
 
@@ -5970,7 +5975,13 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
             continue;
         }
 
-        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
+        {
+            int orig_x = analysis->origins[i].x;
+            int orig_y = analysis->origins[i].y;
+            if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 && bbox->top + orig_y == -1)
+                orig_y++;
+            OffsetRect(bbox, orig_x, orig_y);
+        }
 
         /* blit to analysis bitmap */
         dst = get_pixel_ptr(analysis->bitmap, analysis->texture_type, bbox, &analysis->bounds);
