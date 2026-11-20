@@ -31,4 +31,5 @@
 @ stub TF_IsCtfmonRunning
 @ stub TF_IsInMarshaling
 @ stub TF_MlngInfoCount
+@ stdcall TF_Notify(long ptr ptr)
 @ stub TF_RunInputCPL

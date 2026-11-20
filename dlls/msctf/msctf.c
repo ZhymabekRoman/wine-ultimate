@@ -675,3 +675,12 @@ HRESULT WINAPI TF_InitMlngInfo(void)
     FIXME("stub\n");
     return S_OK;
 }
+
+/***********************************************************************
+ *              TF_Notify (MSCTF.@)
+ */
+BOOL WINAPI TF_Notify(UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    TRACE("(%#x, %#Ix, %#Ix)\n", msg, wParam, lParam);
+    return TRUE;
+}

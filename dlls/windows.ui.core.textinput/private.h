@@ -47,6 +47,7 @@ struct vector_iids
 extern HRESULT vector_create(const struct vector_iids *iids, void **out);
 
 extern IActivationFactory *core_text_services_manager_factory;
+extern HRESULT core_text_edit_context_create( ICoreTextEditContext **out );
 
 #define DEFINE_IINSPECTABLE_(pfx, iface_type, impl_type, impl_from, iface_mem, expr)        \
     static inline impl_type *impl_from(iface_type *iface)                                   \
