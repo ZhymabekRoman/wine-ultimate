@@ -18,6 +18,7 @@
 #define COBJMACROS
 #include "initguid.h"
 #include <stdarg.h>
+#include <string.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -34,6 +35,84 @@
 #include "systemmediatransportcontrolsinterop.h"
 
 #include "wine/test.h"
+
+struct test_handler
+{
+    ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs_iface;
+    LONG ref;
+    ULONG calls;
+    SystemMediaTransportControlsButton last_button;
+};
+
+static struct test_handler *test_handler_from_iface(
+        ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct test_handler,
+            ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs_iface );
+}
+
+static HRESULT WINAPI test_handler_QueryInterface(
+        ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs *iface,
+        REFIID iid, void **out )
+{
+    struct test_handler *impl = test_handler_from_iface( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs ))
+    {
+        *out = &impl->ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI test_handler_AddRef(
+        ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs *iface )
+{
+    struct test_handler *impl = test_handler_from_iface( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI test_handler_Release(
+        ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs *iface )
+{
+    struct test_handler *impl = test_handler_from_iface( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI test_handler_Invoke(
+        ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs *iface,
+        ISystemMediaTransportControls *sender,
+        ISystemMediaTransportControlsButtonPressedEventArgs *args )
+{
+    struct test_handler *impl = test_handler_from_iface( iface );
+
+    impl->calls++;
+    ISystemMediaTransportControlsButtonPressedEventArgs_get_Button( args, &impl->last_button );
+    return S_OK;
+}
+
+static const struct ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgsVtbl
+        test_handler_vtbl =
+{
+    test_handler_QueryInterface,
+    test_handler_AddRef,
+    test_handler_Release,
+    test_handler_Invoke,
+};
+
+static void init_test_handler( struct test_handler *handler )
+{
+    handler->ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs_iface.lpVtbl = &test_handler_vtbl;
+    handler->ref = 1;
+    handler->calls = 0;
+    handler->last_button = (SystemMediaTransportControlsButton)-1;
+}
 
 #define check_interface( obj, iid ) check_interface_( __LINE__, obj, iid )
 static void check_interface_( unsigned int line, void *obj, const IID *iid )
@@ -257,6 +336,285 @@ done:
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_ButtonPressed( void )
+{
+    ISystemMediaTransportControlsStatics *statics = NULL;
+    ISystemMediaTransportControls *control = NULL;
+    IActivationFactory *factory;
+    struct test_handler handler1, handler2;
+    EventRegistrationToken token1 = {0}, token2 = {0};
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( L"Windows.Media.SystemMediaTransportControls", 42, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ISystemMediaTransportControlsStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsStatics_GetForCurrentView( statics, &control );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    init_test_handler( &handler1 );
+    init_test_handler( &handler2 );
+
+    hr = ISystemMediaTransportControls_add_ButtonPressed( control,
+            &handler1.ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs_iface, &token1 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( token1.value != 0, "got token %#I64x.\n", token1.value );
+
+    hr = ISystemMediaTransportControls_add_ButtonPressed( control,
+            &handler2.ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs_iface, &token2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( token2.value != 0, "got token %#I64x.\n", token2.value );
+    ok( token1.value != token2.value, "got same tokens %#I64x, %#I64x.\n", token1.value, token2.value );
+
+    hr = ISystemMediaTransportControls_remove_ButtonPressed( control, token1 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_remove_ButtonPressed( control, token1 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_remove_ButtonPressed( control, token2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    ISystemMediaTransportControls_Release( control );
+    ISystemMediaTransportControlsStatics_Release( statics );
+    IActivationFactory_Release( factory );
+}
+
+static void test_DisplayUpdater_state( void )
+{
+    ISystemMediaTransportControlsStatics *statics = NULL;
+    ISystemMediaTransportControlsDisplayUpdater *updater = NULL, *updater2 = NULL;
+    IMusicDisplayProperties2 *music2 = NULL;
+    IMusicDisplayProperties *music = NULL, *music_b = NULL;
+    IVideoDisplayProperties *video = NULL;
+    ISystemMediaTransportControls *control = NULL;
+    IActivationFactory *factory;
+    HSTRING_HEADER header;
+    HSTRING str, ret_str;
+    UINT32 len;
+    HRESULT hr;
+    INT32 res;
+
+    hr = WindowsCreateString( L"Windows.Media.SystemMediaTransportControls", 42, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ISystemMediaTransportControlsStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsStatics_GetForCurrentView( statics, &control );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = ISystemMediaTransportControls_get_DisplayUpdater( control, &updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_get_DisplayUpdater( control, &updater2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( updater == updater2, "got updaters %p, %p.\n", updater, updater2 );
+    ISystemMediaTransportControlsDisplayUpdater_Release( updater2 );
+
+    hr = ISystemMediaTransportControlsDisplayUpdater_put_Type( updater, MediaPlaybackType_Music );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = ISystemMediaTransportControlsDisplayUpdater_get_MusicProperties( updater, &music );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsDisplayUpdater_get_MusicProperties( updater, &music_b );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( music == music_b, "got music properties %p, %p.\n", music, music_b );
+    IMusicDisplayProperties_Release( music_b );
+
+    hr = WindowsCreateStringReference( L"Voice Note", 10, &header, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IMusicDisplayProperties_put_Title( music, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IMusicDisplayProperties_put_Artist( music, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IMusicDisplayProperties_put_AlbumArtist( music, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IMusicDisplayProperties_get_AlbumArtist( music, &ret_str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = WindowsCompareStringOrdinal( str, ret_str, &res );
+    ok( hr == S_OK && !res, "got album artist %s.\n", wine_dbgstr_w( WindowsGetStringRawBuffer( ret_str, &len ) ) );
+    WindowsDeleteString( ret_str );
+
+    hr = IMusicDisplayProperties_QueryInterface( music, &IID_IMusicDisplayProperties2, (void **)&music2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IMusicDisplayProperties2_put_AlbumTitle( music2, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IMusicDisplayProperties2_Release( music2 );
+
+    hr = ISystemMediaTransportControlsDisplayUpdater_get_VideoProperties( updater, &video );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IVideoDisplayProperties_put_Title( video, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IVideoDisplayProperties_put_Subtitle( video, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IVideoDisplayProperties_get_Subtitle( video, &ret_str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( ret_str );
+
+    hr = ISystemMediaTransportControlsDisplayUpdater_Update( updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = ISystemMediaTransportControlsDisplayUpdater_ClearAll( updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IMusicDisplayProperties_get_Title( music, &ret_str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( WindowsGetStringLen( ret_str ) == 0, "got title %s.\n", wine_dbgstr_w( WindowsGetStringRawBuffer( ret_str, &len ) ) );
+    WindowsDeleteString( ret_str );
+
+    hr = ISystemMediaTransportControlsDisplayUpdater_Update( updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    IVideoDisplayProperties_Release( video );
+    IMusicDisplayProperties_Release( music );
+    ISystemMediaTransportControlsDisplayUpdater_Release( updater );
+    ISystemMediaTransportControls_Release( control );
+    ISystemMediaTransportControlsStatics_Release( statics );
+    IActivationFactory_Release( factory );
+}
+
+static void test_playback_status( void )
+{
+    ISystemMediaTransportControlsDisplayUpdater *updater = NULL;
+    ISystemMediaTransportControls *control = NULL;
+    ISystemMediaTransportControlsStatics *statics = NULL;
+    IActivationFactory *factory;
+    MediaPlaybackStatus status;
+    HSTRING str;
+    BOOLEAN value;
+    HRESULT hr;
+
+    hr = WindowsCreateString( L"Windows.Media.SystemMediaTransportControls", 42, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ISystemMediaTransportControlsStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsStatics_GetForCurrentView( statics, &control );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* exercise the D-Bus push paths with the controls enabled and disabled */
+    hr = ISystemMediaTransportControls_put_IsEnabled( control, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    value = FALSE;
+    hr = ISystemMediaTransportControls_get_IsEnabled( control, &value );
+    ok( hr == S_OK && value == TRUE, "got value %d.\n", value );
+
+    hr = ISystemMediaTransportControls_put_PlaybackStatus( control, MediaPlaybackStatus_Playing );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    status = MediaPlaybackStatus_Closed;
+    hr = ISystemMediaTransportControls_get_PlaybackStatus( control, &status );
+    ok( hr == S_OK && status == MediaPlaybackStatus_Playing, "got status %d.\n", status );
+
+    hr = ISystemMediaTransportControls_put_PlaybackStatus( control, MediaPlaybackStatus_Paused );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_put_PlaybackStatus( control, MediaPlaybackStatus_Stopped );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = ISystemMediaTransportControls_put_IsPlayEnabled( control, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_put_IsNextEnabled( control, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_put_IsPreviousEnabled( control, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_put_IsPauseEnabled( control, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_put_IsStopEnabled( control, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = ISystemMediaTransportControls_get_DisplayUpdater( control, &updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsDisplayUpdater_Update( updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ISystemMediaTransportControlsDisplayUpdater_Release( updater );
+
+    hr = ISystemMediaTransportControls_put_IsEnabled( control, FALSE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    ISystemMediaTransportControls_Release( control );
+    ISystemMediaTransportControlsStatics_Release( statics );
+    IActivationFactory_Release( factory );
+}
+
+static struct test_handler live_handler;
+
+static void test_live( void )
+{
+    ISystemMediaTransportControlsStatics *statics = NULL;
+    ISystemMediaTransportControlsDisplayUpdater *updater = NULL;
+    IMusicDisplayProperties *music = NULL;
+    ISystemMediaTransportControls *control = NULL;
+    IActivationFactory *factory;
+    EventRegistrationToken token;
+    HSTRING_HEADER header;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( L"Windows.Media.SystemMediaTransportControls", 42, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &IID_ISystemMediaTransportControlsStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsStatics_GetForCurrentView( statics, &control );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    init_test_handler( &live_handler );
+    token.value = 0;
+    hr = ISystemMediaTransportControls_add_ButtonPressed( control,
+            &live_handler.ITypedEventHandler_SystemMediaTransportControls_SystemMediaTransportControlsButtonPressedEventArgs_iface,
+            &token );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = ISystemMediaTransportControls_get_DisplayUpdater( control, &updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsDisplayUpdater_put_Type( updater, MediaPlaybackType_Music );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsDisplayUpdater_get_MusicProperties( updater, &music );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = WindowsCreateStringReference( L"MPRIS Title", 11, &header, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IMusicDisplayProperties_put_Title( music, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IMusicDisplayProperties_put_Artist( music, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControlsDisplayUpdater_Update( updater );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = ISystemMediaTransportControls_put_IsEnabled( control, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ISystemMediaTransportControls_put_IsPlayEnabled( control, TRUE );
+    hr = ISystemMediaTransportControls_put_IsPauseEnabled( control, TRUE );
+    hr = ISystemMediaTransportControls_put_IsStopEnabled( control, TRUE );
+    hr = ISystemMediaTransportControls_put_IsNextEnabled( control, TRUE );
+    hr = ISystemMediaTransportControls_put_IsPreviousEnabled( control, TRUE );
+    hr = ISystemMediaTransportControls_put_PlaybackStatus( control, MediaPlaybackStatus_Playing );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    for (unsigned int i = 0; i < 60; i++)
+    {
+        printf( "LIVE tick %u calls %lu last %d\n", i, live_handler.calls, live_handler.last_button );
+        fflush( stdout );
+        Sleep( 500 );
+    }
+
+    ISystemMediaTransportControls_remove_ButtonPressed( control, token );
+    IMusicDisplayProperties_Release( music );
+    ISystemMediaTransportControlsDisplayUpdater_Release( updater );
+    ISystemMediaTransportControls_Release( control );
+    ISystemMediaTransportControlsStatics_Release( statics );
+    IActivationFactory_Release( factory );
+}
+
 START_TEST(mediacontrol)
 {
     HRESULT hr;
@@ -264,7 +622,17 @@ START_TEST(mediacontrol)
     hr = RoInitialize( RO_INIT_MULTITHREADED );
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
+    if (strstr( GetCommandLineA(), "live" ))
+    {
+        test_live();
+        RoUninitialize();
+        return;
+    }
+
     test_MediaControlStatics();
+    test_ButtonPressed();
+    test_DisplayUpdater_state();
+    test_playback_status();
 
     RoUninitialize();
 }

@@ -1,6 +1,9 @@
 MODULE  = windows.media.mediacontrol.dll
-IMPORTS = combase
+UNIXLIB = windows.media.mediacontrol.so
+IMPORTS = combase user32
+UNIX_CFLAGS = $(DBUS_CFLAGS)
 
 SOURCES = \
 	classes.idl \
-	main.c
+	main.c \
+	unixlib.c
