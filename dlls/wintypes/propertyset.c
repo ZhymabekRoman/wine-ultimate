@@ -1573,3 +1573,1029 @@ static struct propertyset_factory propertyset_factory =
 };
 
 IActivationFactory *property_set_factory = &propertyset_factory.IActivationFactory_iface;
+
+/* ============================================================================
+ * Windows.Foundation.Collections.StringMap
+ * ============================================================================ */
+
+static const GUID SM_IID_IMap_HSTRING_HSTRING =
+    { 0xf6d1f700, 0x49c2, 0x52ae, {0x81, 0x54, 0x82, 0x6f, 0x99, 0x08, 0x77, 0x3c} };
+static const GUID SM_IID_IObservableMap_HSTRING_HSTRING =
+    { 0x1e036276, 0x2f60, 0x55f6, {0xb7, 0xf3, 0xf8, 0x60, 0x79, 0xe6, 0x90, 0x0b} };
+static const GUID SM_IID_IMapView_HSTRING_HSTRING =
+    { 0xac7f26f2, 0xfeb7, 0x5b2a, {0x8a, 0xc4, 0x34, 0x5b, 0xc6, 0x2c, 0xae, 0xde} };
+static const GUID SM_IID_IKeyValuePair_HSTRING_HSTRING =
+    { 0x60310303, 0x49c5, 0x52e6, {0xab, 0xc6, 0xa9, 0xb3, 0x6e, 0xcc, 0xc7, 0x16} };
+static const GUID SM_IID_IIterable_IKeyValuePair_HSTRING_HSTRING =
+    { 0xe9bdaaf0, 0xcbf6, 0x5c72, {0xbe, 0x90, 0x29, 0xcb, 0xf3, 0xa1, 0x31, 0x9b} };
+static const GUID SM_IID_IIterator_IKeyValuePair_HSTRING_HSTRING =
+    { 0x05eb86f1, 0x7140, 0x5517, {0xb8, 0x8d, 0xcb, 0xae, 0xbe, 0x57, 0xe6, 0xb1} };
+
+struct stringmap_entry
+{
+    HSTRING key;
+    HSTRING value;
+};
+
+struct stringmap_kvp
+{
+    const void *lpVtbl;
+    LONG ref;
+    HSTRING key;
+    HSTRING value;
+};
+
+struct stringmap_iter
+{
+    const void *lpVtbl;
+    LONG ref;
+    struct stringmap_entry *entries;
+    UINT32 count;
+    UINT32 index;
+};
+
+struct stringmap_view
+{
+    const void *lpVtbl_view;
+    const void *lpVtbl_iterable;
+    LONG ref;
+    struct stringmap_entry *entries;
+    UINT32 count;
+};
+
+struct stringmap_handler
+{
+    INT64 token;
+    IUnknown *handler;
+};
+
+struct stringmap
+{
+    const void *lpVtbl_map;
+    const void *lpVtbl_obs;
+    const void *lpVtbl_iterable;
+    LONG ref;
+    SRWLOCK lock;
+    struct stringmap_entry *entries;
+    UINT32 count;
+    UINT32 capacity;
+    struct stringmap_handler *handlers;
+    UINT32 handler_count;
+    INT64 next_token;
+};
+
+static HRESULT stringmap_kvp_create( HSTRING key, HSTRING value, void **out );
+static HRESULT stringmap_iter_create( const struct stringmap_entry *src, UINT32 count, void **out );
+static HRESULT stringmap_view_create( const struct stringmap_entry *src, UINT32 count, void **out );
+
+/* --- IKeyValuePair<HSTRING, HSTRING> --- */
+
+static HRESULT WINAPI sm_kvp_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct stringmap_kvp *impl = (struct stringmap_kvp *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &SM_IID_IKeyValuePair_HSTRING_HSTRING ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI sm_kvp_AddRef( void *iface )
+{
+    struct stringmap_kvp *impl = (struct stringmap_kvp *)iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI sm_kvp_Release( void *iface )
+{
+    struct stringmap_kvp *impl = (struct stringmap_kvp *)iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->key );
+        WindowsDeleteString( impl->value );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI sm_kvp_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *iids = CoTaskMemAlloc( sizeof(IID) );
+    if (!*iids) { *count = 0; return E_OUTOFMEMORY; }
+    (*iids)[0] = SM_IID_IKeyValuePair_HSTRING_HSTRING;
+    *count = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_kvp_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.IKeyValuePair`2<String, String>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI sm_kvp_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_kvp_get_Key( void *iface, HSTRING *key )
+{
+    struct stringmap_kvp *impl = (struct stringmap_kvp *)iface;
+    if (!key) return E_POINTER;
+    return WindowsDuplicateString( impl->key, key );
+}
+
+static HRESULT WINAPI sm_kvp_get_Value( void *iface, HSTRING *value )
+{
+    struct stringmap_kvp *impl = (struct stringmap_kvp *)iface;
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->value, value );
+}
+
+static const void * const sm_kvp_vtbl[] =
+{
+    sm_kvp_QueryInterface,
+    sm_kvp_AddRef,
+    sm_kvp_Release,
+    sm_kvp_GetIids,
+    sm_kvp_GetRuntimeClassName,
+    sm_kvp_GetTrustLevel,
+    sm_kvp_get_Key,
+    sm_kvp_get_Value,
+};
+
+static HRESULT stringmap_kvp_create( HSTRING key, HSTRING value, void **out )
+{
+    struct stringmap_kvp *impl;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->lpVtbl = sm_kvp_vtbl;
+    impl->ref = 1;
+    if (FAILED(hr = WindowsDuplicateString( key, &impl->key )) ||
+        FAILED(hr = WindowsDuplicateString( value, &impl->value )))
+    {
+        WindowsDeleteString( impl->key );
+        free( impl );
+        return hr;
+    }
+    *out = impl;
+    return S_OK;
+}
+
+/* --- IIterator<IKeyValuePair<HSTRING, HSTRING>> --- */
+
+static HRESULT WINAPI sm_iter_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct stringmap_iter *impl = (struct stringmap_iter *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &SM_IID_IIterator_IKeyValuePair_HSTRING_HSTRING ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI sm_iter_AddRef( void *iface )
+{
+    struct stringmap_iter *impl = (struct stringmap_iter *)iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI sm_iter_Release( void *iface )
+{
+    struct stringmap_iter *impl = (struct stringmap_iter *)iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < impl->count; i++)
+        {
+            WindowsDeleteString( impl->entries[i].key );
+            WindowsDeleteString( impl->entries[i].value );
+        }
+        free( impl->entries );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI sm_iter_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *iids = CoTaskMemAlloc( sizeof(IID) );
+    if (!*iids) { *count = 0; return E_OUTOFMEMORY; }
+    (*iids)[0] = SM_IID_IIterator_IKeyValuePair_HSTRING_HSTRING;
+    *count = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_iter_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.IIterator`1<Windows.Foundation.Collections.IKeyValuePair`2<String, String>>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI sm_iter_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_iter_get_Current( void *iface, void **current )
+{
+    struct stringmap_iter *impl = (struct stringmap_iter *)iface;
+    if (!current) return E_POINTER;
+    *current = NULL;
+    if (impl->index >= impl->count) return E_BOUNDS;
+    return stringmap_kvp_create( impl->entries[impl->index].key, impl->entries[impl->index].value, current );
+}
+
+static HRESULT WINAPI sm_iter_get_HasCurrent( void *iface, boolean *has_current )
+{
+    struct stringmap_iter *impl = (struct stringmap_iter *)iface;
+    if (!has_current) return E_POINTER;
+    *has_current = (impl->index < impl->count);
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_iter_MoveNext( void *iface, boolean *has_current )
+{
+    struct stringmap_iter *impl = (struct stringmap_iter *)iface;
+    if (!has_current) return E_POINTER;
+    if (impl->index < impl->count) impl->index++;
+    *has_current = (impl->index < impl->count);
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_iter_GetMany( void *iface, UINT32 capacity, void **items, UINT32 *actual )
+{
+    struct stringmap_iter *impl = (struct stringmap_iter *)iface;
+    UINT32 n = 0;
+    if (!actual) return E_POINTER;
+    *actual = 0;
+    while (n < capacity && impl->index < impl->count)
+    {
+        HRESULT hr = stringmap_kvp_create( impl->entries[impl->index].key, impl->entries[impl->index].value, &items[n] );
+        if (FAILED(hr)) return hr;
+        impl->index++;
+        n++;
+    }
+    *actual = n;
+    return S_OK;
+}
+
+static const void * const sm_iter_vtbl[] =
+{
+    sm_iter_QueryInterface,
+    sm_iter_AddRef,
+    sm_iter_Release,
+    sm_iter_GetIids,
+    sm_iter_GetRuntimeClassName,
+    sm_iter_GetTrustLevel,
+    sm_iter_get_Current,
+    sm_iter_get_HasCurrent,
+    sm_iter_MoveNext,
+    sm_iter_GetMany,
+};
+
+static HRESULT stringmap_iter_create( const struct stringmap_entry *src, UINT32 count, void **out )
+{
+    struct stringmap_iter *impl;
+    UINT32 i;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->lpVtbl = sm_iter_vtbl;
+    impl->ref = 1;
+    if (count)
+    {
+        if (!(impl->entries = calloc( count, sizeof(*impl->entries) )))
+        {
+            free( impl );
+            return E_OUTOFMEMORY;
+        }
+        for (i = 0; i < count; i++)
+        {
+            if (FAILED(hr = WindowsDuplicateString( src[i].key, &impl->entries[i].key )) ||
+                FAILED(hr = WindowsDuplicateString( src[i].value, &impl->entries[i].value )))
+            {
+                impl->count = i + 1;
+                sm_iter_Release( impl );
+                return hr;
+            }
+        }
+        impl->count = count;
+    }
+    *out = impl;
+    return S_OK;
+}
+
+/* --- IMapView<HSTRING, HSTRING> --- */
+
+static inline struct stringmap_view *sm_view_from_view( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct stringmap_view, lpVtbl_view );
+}
+
+static inline struct stringmap_view *sm_view_from_iter( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct stringmap_view, lpVtbl_iterable );
+}
+
+static HRESULT WINAPI sm_view_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct stringmap_view *impl = sm_view_from_view( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &SM_IID_IMapView_HSTRING_HSTRING ))
+    {
+        *out = &impl->lpVtbl_view;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &SM_IID_IIterable_IKeyValuePair_HSTRING_HSTRING ))
+    {
+        *out = &impl->lpVtbl_iterable;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI sm_view_AddRef( void *iface )
+{
+    struct stringmap_view *impl = sm_view_from_view( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI sm_view_Release( void *iface )
+{
+    struct stringmap_view *impl = sm_view_from_view( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < impl->count; i++)
+        {
+            WindowsDeleteString( impl->entries[i].key );
+            WindowsDeleteString( impl->entries[i].value );
+        }
+        free( impl->entries );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI sm_view_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *iids = CoTaskMemAlloc( 2 * sizeof(IID) );
+    if (!*iids) { *count = 0; return E_OUTOFMEMORY; }
+    (*iids)[0] = SM_IID_IMapView_HSTRING_HSTRING;
+    (*iids)[1] = SM_IID_IIterable_IKeyValuePair_HSTRING_HSTRING;
+    *count = 2;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_view_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.IMapView`2<String, String>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI sm_view_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_view_Lookup( void *iface, HSTRING key, HSTRING *value )
+{
+    struct stringmap_view *impl = sm_view_from_view( iface );
+    UINT32 i;
+    INT32 cmp;
+    if (!value) return E_POINTER;
+    *value = NULL;
+    for (i = 0; i < impl->count; i++)
+    {
+        if (SUCCEEDED(WindowsCompareStringOrdinal( impl->entries[i].key, key, &cmp )) && cmp == 0)
+            return WindowsDuplicateString( impl->entries[i].value, value );
+    }
+    return E_BOUNDS;
+}
+
+static HRESULT WINAPI sm_view_get_Size( void *iface, UINT32 *size )
+{
+    struct stringmap_view *impl = sm_view_from_view( iface );
+    if (!size) return E_POINTER;
+    *size = impl->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_view_HasKey( void *iface, HSTRING key, boolean *found )
+{
+    struct stringmap_view *impl = sm_view_from_view( iface );
+    UINT32 i;
+    INT32 cmp;
+    if (!found) return E_POINTER;
+    *found = FALSE;
+    for (i = 0; i < impl->count; i++)
+    {
+        if (SUCCEEDED(WindowsCompareStringOrdinal( impl->entries[i].key, key, &cmp )) && cmp == 0)
+        {
+            *found = TRUE;
+            return S_OK;
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_view_Split( void *iface, void **first, void **second )
+{
+    struct stringmap_view *impl = sm_view_from_view( iface );
+    UINT32 mid;
+    HRESULT hr;
+    if (!first || !second) return E_POINTER;
+    *first = *second = NULL;
+    if (impl->count < 2) return S_OK;
+    mid = impl->count / 2;
+    if (FAILED(hr = stringmap_view_create( impl->entries, mid, first ))) return hr;
+    if (FAILED(hr = stringmap_view_create( impl->entries + mid, impl->count - mid, second )))
+    {
+        sm_view_Release( *first );
+        *first = NULL;
+        return hr;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_view_iter_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return sm_view_QueryInterface( &sm_view_from_iter( iface )->lpVtbl_view, iid, out );
+}
+static ULONG WINAPI sm_view_iter_AddRef( void *iface )
+{
+    return sm_view_AddRef( &sm_view_from_iter( iface )->lpVtbl_view );
+}
+static ULONG WINAPI sm_view_iter_Release( void *iface )
+{
+    return sm_view_Release( &sm_view_from_iter( iface )->lpVtbl_view );
+}
+static HRESULT WINAPI sm_view_iter_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return sm_view_GetIids( &sm_view_from_iter( iface )->lpVtbl_view, c, i );
+}
+static HRESULT WINAPI sm_view_iter_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return sm_view_GetRuntimeClassName( &sm_view_from_iter( iface )->lpVtbl_view, n );
+}
+static HRESULT WINAPI sm_view_iter_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return sm_view_GetTrustLevel( &sm_view_from_iter( iface )->lpVtbl_view, l );
+}
+static HRESULT WINAPI sm_view_iter_First( void *iface, void **first )
+{
+    struct stringmap_view *impl = sm_view_from_iter( iface );
+    return stringmap_iter_create( impl->entries, impl->count, first );
+}
+
+static const void * const sm_view_vtbl[] =
+{
+    sm_view_QueryInterface,
+    sm_view_AddRef,
+    sm_view_Release,
+    sm_view_GetIids,
+    sm_view_GetRuntimeClassName,
+    sm_view_GetTrustLevel,
+    sm_view_Lookup,
+    sm_view_get_Size,
+    sm_view_HasKey,
+    sm_view_Split,
+};
+
+static const void * const sm_view_iter_vtbl[] =
+{
+    sm_view_iter_QueryInterface,
+    sm_view_iter_AddRef,
+    sm_view_iter_Release,
+    sm_view_iter_GetIids,
+    sm_view_iter_GetRuntimeClassName,
+    sm_view_iter_GetTrustLevel,
+    sm_view_iter_First,
+};
+
+static HRESULT stringmap_view_create( const struct stringmap_entry *src, UINT32 count, void **out )
+{
+    struct stringmap_view *impl;
+    UINT32 i;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->lpVtbl_view = sm_view_vtbl;
+    impl->lpVtbl_iterable = sm_view_iter_vtbl;
+    impl->ref = 1;
+    if (count)
+    {
+        if (!(impl->entries = calloc( count, sizeof(*impl->entries) )))
+        {
+            free( impl );
+            return E_OUTOFMEMORY;
+        }
+        for (i = 0; i < count; i++)
+        {
+            if (FAILED(hr = WindowsDuplicateString( src[i].key, &impl->entries[i].key )) ||
+                FAILED(hr = WindowsDuplicateString( src[i].value, &impl->entries[i].value )))
+            {
+                impl->count = i + 1;
+                sm_view_Release( &impl->lpVtbl_view );
+                return hr;
+            }
+        }
+        impl->count = count;
+    }
+    *out = &impl->lpVtbl_view;
+    return S_OK;
+}
+
+/* --- StringMap (IMap + IObservableMap + IIterable) --- */
+
+static inline struct stringmap *sm_from_map( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct stringmap, lpVtbl_map );
+}
+
+static inline struct stringmap *sm_from_obs( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct stringmap, lpVtbl_obs );
+}
+
+static inline struct stringmap *sm_from_iter( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct stringmap, lpVtbl_iterable );
+}
+
+static HRESULT WINAPI sm_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &SM_IID_IMap_HSTRING_HSTRING ))
+    {
+        *out = &impl->lpVtbl_map;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &SM_IID_IObservableMap_HSTRING_HSTRING ))
+    {
+        *out = &impl->lpVtbl_obs;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &SM_IID_IIterable_IKeyValuePair_HSTRING_HSTRING ))
+    {
+        *out = &impl->lpVtbl_iterable;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI sm_AddRef( void *iface )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI sm_Release( void *iface )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < impl->count; i++)
+        {
+            WindowsDeleteString( impl->entries[i].key );
+            WindowsDeleteString( impl->entries[i].value );
+        }
+        free( impl->entries );
+        for (i = 0; i < impl->handler_count; i++)
+        {
+            if (impl->handlers[i].handler) IUnknown_Release( impl->handlers[i].handler );
+        }
+        free( impl->handlers );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI sm_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *iids = CoTaskMemAlloc( 3 * sizeof(IID) );
+    if (!*iids) { *count = 0; return E_OUTOFMEMORY; }
+    (*iids)[0] = SM_IID_IMap_HSTRING_HSTRING;
+    (*iids)[1] = SM_IID_IObservableMap_HSTRING_HSTRING;
+    (*iids)[2] = SM_IID_IIterable_IKeyValuePair_HSTRING_HSTRING;
+    *count = 3;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.StringMap";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI sm_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_Lookup( void *iface, HSTRING key, HSTRING *value )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    UINT32 i;
+    INT32 cmp;
+    HRESULT hr = E_BOUNDS;
+    if (!value) return E_POINTER;
+    *value = NULL;
+    AcquireSRWLockShared( &impl->lock );
+    for (i = 0; i < impl->count; i++)
+    {
+        if (SUCCEEDED(WindowsCompareStringOrdinal( impl->entries[i].key, key, &cmp )) && cmp == 0)
+        {
+            hr = WindowsDuplicateString( impl->entries[i].value, value );
+            break;
+        }
+    }
+    ReleaseSRWLockShared( &impl->lock );
+    return hr;
+}
+
+static HRESULT WINAPI sm_get_Size( void *iface, UINT32 *size )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    if (!size) return E_POINTER;
+    AcquireSRWLockShared( &impl->lock );
+    *size = impl->count;
+    ReleaseSRWLockShared( &impl->lock );
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_HasKey( void *iface, HSTRING key, boolean *found )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    UINT32 i;
+    INT32 cmp;
+    if (!found) return E_POINTER;
+    *found = FALSE;
+    AcquireSRWLockShared( &impl->lock );
+    for (i = 0; i < impl->count; i++)
+    {
+        if (SUCCEEDED(WindowsCompareStringOrdinal( impl->entries[i].key, key, &cmp )) && cmp == 0)
+        {
+            *found = TRUE;
+            break;
+        }
+    }
+    ReleaseSRWLockShared( &impl->lock );
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_GetView( void *iface, void **view )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    HRESULT hr;
+    AcquireSRWLockShared( &impl->lock );
+    hr = stringmap_view_create( impl->entries, impl->count, view );
+    ReleaseSRWLockShared( &impl->lock );
+    return hr;
+}
+
+static HRESULT WINAPI sm_Insert( void *iface, HSTRING key, HSTRING value, boolean *replaced )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    HSTRING key_dup = NULL, val_dup = NULL;
+    UINT32 i;
+    INT32 cmp;
+    HRESULT hr;
+
+    if (replaced) *replaced = FALSE;
+    if (FAILED(hr = WindowsDuplicateString( value, &val_dup ))) return hr;
+
+    AcquireSRWLockExclusive( &impl->lock );
+    for (i = 0; i < impl->count; i++)
+    {
+        if (SUCCEEDED(WindowsCompareStringOrdinal( impl->entries[i].key, key, &cmp )) && cmp == 0)
+        {
+            WindowsDeleteString( impl->entries[i].value );
+            impl->entries[i].value = val_dup;
+            if (replaced) *replaced = TRUE;
+            ReleaseSRWLockExclusive( &impl->lock );
+            return S_OK;
+        }
+    }
+    if (FAILED(hr = WindowsDuplicateString( key, &key_dup )))
+    {
+        ReleaseSRWLockExclusive( &impl->lock );
+        WindowsDeleteString( val_dup );
+        return hr;
+    }
+    if (impl->count == impl->capacity)
+    {
+        UINT32 new_cap = impl->capacity ? impl->capacity * 2 : 16;
+        struct stringmap_entry *new_entries = realloc( impl->entries, new_cap * sizeof(*new_entries) );
+        if (!new_entries)
+        {
+            ReleaseSRWLockExclusive( &impl->lock );
+            WindowsDeleteString( key_dup );
+            WindowsDeleteString( val_dup );
+            return E_OUTOFMEMORY;
+        }
+        impl->entries = new_entries;
+        impl->capacity = new_cap;
+    }
+    impl->entries[impl->count].key = key_dup;
+    impl->entries[impl->count].value = val_dup;
+    impl->count++;
+    ReleaseSRWLockExclusive( &impl->lock );
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_Remove( void *iface, HSTRING key )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    UINT32 i;
+    INT32 cmp;
+    AcquireSRWLockExclusive( &impl->lock );
+    for (i = 0; i < impl->count; i++)
+    {
+        if (SUCCEEDED(WindowsCompareStringOrdinal( impl->entries[i].key, key, &cmp )) && cmp == 0)
+        {
+            WindowsDeleteString( impl->entries[i].key );
+            WindowsDeleteString( impl->entries[i].value );
+            if (i + 1 < impl->count)
+                memmove( &impl->entries[i], &impl->entries[i + 1],
+                         (impl->count - i - 1) * sizeof(*impl->entries) );
+            impl->count--;
+            ReleaseSRWLockExclusive( &impl->lock );
+            return S_OK;
+        }
+    }
+    ReleaseSRWLockExclusive( &impl->lock );
+    return E_BOUNDS;
+}
+
+static HRESULT WINAPI sm_Clear( void *iface )
+{
+    struct stringmap *impl = sm_from_map( iface );
+    UINT32 i;
+    AcquireSRWLockExclusive( &impl->lock );
+    for (i = 0; i < impl->count; i++)
+    {
+        WindowsDeleteString( impl->entries[i].key );
+        WindowsDeleteString( impl->entries[i].value );
+    }
+    impl->count = 0;
+    ReleaseSRWLockExclusive( &impl->lock );
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_obs_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return sm_QueryInterface( &sm_from_obs( iface )->lpVtbl_map, iid, out );
+}
+static ULONG WINAPI sm_obs_AddRef( void *iface )
+{
+    return sm_AddRef( &sm_from_obs( iface )->lpVtbl_map );
+}
+static ULONG WINAPI sm_obs_Release( void *iface )
+{
+    return sm_Release( &sm_from_obs( iface )->lpVtbl_map );
+}
+static HRESULT WINAPI sm_obs_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return sm_GetIids( &sm_from_obs( iface )->lpVtbl_map, c, i );
+}
+static HRESULT WINAPI sm_obs_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return sm_GetRuntimeClassName( &sm_from_obs( iface )->lpVtbl_map, n );
+}
+static HRESULT WINAPI sm_obs_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return sm_GetTrustLevel( &sm_from_obs( iface )->lpVtbl_map, l );
+}
+static HRESULT WINAPI sm_obs_add_MapChanged( void *iface, IUnknown *handler, EventRegistrationToken *token )
+{
+    struct stringmap *impl = sm_from_obs( iface );
+    struct stringmap_handler *nh;
+    if (!token) return E_POINTER;
+    AcquireSRWLockExclusive( &impl->lock );
+    nh = realloc( impl->handlers, (impl->handler_count + 1) * sizeof(*nh) );
+    if (!nh)
+    {
+        ReleaseSRWLockExclusive( &impl->lock );
+        return E_OUTOFMEMORY;
+    }
+    impl->handlers = nh;
+    token->value = ++impl->next_token;
+    impl->handlers[impl->handler_count].token = token->value;
+    impl->handlers[impl->handler_count].handler = handler;
+    if (handler) IUnknown_AddRef( handler );
+    impl->handler_count++;
+    ReleaseSRWLockExclusive( &impl->lock );
+    return S_OK;
+}
+static HRESULT WINAPI sm_obs_remove_MapChanged( void *iface, EventRegistrationToken token )
+{
+    struct stringmap *impl = sm_from_obs( iface );
+    UINT32 i;
+    AcquireSRWLockExclusive( &impl->lock );
+    for (i = 0; i < impl->handler_count; i++)
+    {
+        if (impl->handlers[i].token == token.value)
+        {
+            if (impl->handlers[i].handler) IUnknown_Release( impl->handlers[i].handler );
+            if (i + 1 < impl->handler_count)
+                memmove( &impl->handlers[i], &impl->handlers[i + 1],
+                         (impl->handler_count - i - 1) * sizeof(*impl->handlers) );
+            impl->handler_count--;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive( &impl->lock );
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_iter_iface_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return sm_QueryInterface( &sm_from_iter( iface )->lpVtbl_map, iid, out );
+}
+static ULONG WINAPI sm_iter_iface_AddRef( void *iface )
+{
+    return sm_AddRef( &sm_from_iter( iface )->lpVtbl_map );
+}
+static ULONG WINAPI sm_iter_iface_Release( void *iface )
+{
+    return sm_Release( &sm_from_iter( iface )->lpVtbl_map );
+}
+static HRESULT WINAPI sm_iter_iface_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return sm_GetIids( &sm_from_iter( iface )->lpVtbl_map, c, i );
+}
+static HRESULT WINAPI sm_iter_iface_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return sm_GetRuntimeClassName( &sm_from_iter( iface )->lpVtbl_map, n );
+}
+static HRESULT WINAPI sm_iter_iface_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    return sm_GetTrustLevel( &sm_from_iter( iface )->lpVtbl_map, l );
+}
+static HRESULT WINAPI sm_iter_iface_First( void *iface, void **first )
+{
+    struct stringmap *impl = sm_from_iter( iface );
+    HRESULT hr;
+    AcquireSRWLockShared( &impl->lock );
+    hr = stringmap_iter_create( impl->entries, impl->count, first );
+    ReleaseSRWLockShared( &impl->lock );
+    return hr;
+}
+
+static const void * const sm_map_vtbl[] =
+{
+    sm_QueryInterface,
+    sm_AddRef,
+    sm_Release,
+    sm_GetIids,
+    sm_GetRuntimeClassName,
+    sm_GetTrustLevel,
+    sm_Lookup,
+    sm_get_Size,
+    sm_HasKey,
+    sm_GetView,
+    sm_Insert,
+    sm_Remove,
+    sm_Clear,
+};
+
+static const void * const sm_obs_vtbl[] =
+{
+    sm_obs_QueryInterface,
+    sm_obs_AddRef,
+    sm_obs_Release,
+    sm_obs_GetIids,
+    sm_obs_GetRuntimeClassName,
+    sm_obs_GetTrustLevel,
+    sm_obs_add_MapChanged,
+    sm_obs_remove_MapChanged,
+};
+
+static const void * const sm_iterable_vtbl[] =
+{
+    sm_iter_iface_QueryInterface,
+    sm_iter_iface_AddRef,
+    sm_iter_iface_Release,
+    sm_iter_iface_GetIids,
+    sm_iter_iface_GetRuntimeClassName,
+    sm_iter_iface_GetTrustLevel,
+    sm_iter_iface_First,
+};
+
+/* --- StringMap Activation Factory --- */
+
+static HRESULT WINAPI sm_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI sm_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI sm_factory_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI sm_factory_GetIids( IActivationFactory *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *c = 0;
+    *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI sm_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.StringMap";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI sm_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *l )
+{
+    if (!l) return E_POINTER;
+    *l = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI sm_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    struct stringmap *impl;
+    if (!instance) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->lpVtbl_map = sm_map_vtbl;
+    impl->lpVtbl_obs = sm_obs_vtbl;
+    impl->lpVtbl_iterable = sm_iterable_vtbl;
+    impl->ref = 1;
+    InitializeSRWLock( &impl->lock );
+    *instance = (IInspectable *)&impl->lpVtbl_map;
+    return S_OK;
+}
+
+static const IActivationFactoryVtbl sm_factory_vtbl =
+{
+    sm_factory_QueryInterface,
+    sm_factory_AddRef,
+    sm_factory_Release,
+    sm_factory_GetIids,
+    sm_factory_GetRuntimeClassName,
+    sm_factory_GetTrustLevel,
+    sm_factory_ActivateInstance,
+};
+
+static IActivationFactory stringmap_factory_obj = { &sm_factory_vtbl };
+IActivationFactory *string_map_factory = &stringmap_factory_obj;
+

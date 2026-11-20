@@ -165,6 +165,7 @@ struct hstring_vector
 {
     IVectorView_HSTRING IVectorView_HSTRING_iface;
     IIterable_HSTRING IIterable_HSTRING_iface;
+    IVector_HSTRING IVector_HSTRING_iface;
     LONG ref;
 
     ULONG count;
@@ -198,6 +199,13 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_QueryInterface(IVectorView_HSTRI
     {
         IUnknown_AddRef(iface);
         *out = &impl->IIterable_HSTRING_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID(iid, &IID_IVector_HSTRING))
+    {
+        IUnknown_AddRef(iface);
+        *out = &impl->IVector_HSTRING_iface;
         return S_OK;
     }
 
@@ -337,6 +345,7 @@ static const struct IVectorView_HSTRINGVtbl hstring_vector_vtbl =
 };
 
 static const struct IIterable_HSTRINGVtbl iterable_view_hstring_vtbl;
+static const struct IVector_HSTRINGVtbl hstring_ivector_vtbl;
 
 HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out)
 {
@@ -347,6 +356,7 @@ HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING
 
     impl->IVectorView_HSTRING_iface.lpVtbl = &hstring_vector_vtbl;
     impl->IIterable_HSTRING_iface.lpVtbl = &iterable_view_hstring_vtbl;
+    impl->IVector_HSTRING_iface.lpVtbl = &hstring_ivector_vtbl;
     impl->count = count;
     memcpy(impl->values, values, count * sizeof(HSTRING));
 
@@ -393,6 +403,137 @@ static const struct IIterable_HSTRINGVtbl iterable_view_hstring_vtbl =
     iterable_view_hstring_GetTrustLevel,
     /* IIterable<HSTRING> methods */
     iterable_view_hstring_First,
+};
+
+/*
+ *
+ * IVector<HSTRING> (Windows.Foundation.Collections.IVector`1<String>,
+ * IID {98b9acc1-4b56-532e-ac73-03d5291cca90}). Shares the hstring_vector
+ * buffer; mutation methods resize it with realloc().
+ *
+ */
+
+DEFINE_IINSPECTABLE_(hstring_ivector, IVector_HSTRING, struct hstring_vector,
+                     impl_from_IVector_HSTRING, IVector_HSTRING_iface, &impl->IVectorView_HSTRING_iface)
+
+static HRESULT WINAPI hstring_ivector_GetAt( IVector_HSTRING *iface, UINT32 index, HSTRING *value )
+{
+    return IVectorView_HSTRING_GetAt( &impl_from_IVector_HSTRING(iface)->IVectorView_HSTRING_iface, index, value );
+}
+
+static HRESULT WINAPI hstring_ivector_get_Size( IVector_HSTRING *iface, UINT32 *value )
+{
+    return IVectorView_HSTRING_get_Size( &impl_from_IVector_HSTRING(iface)->IVectorView_HSTRING_iface, value );
+}
+
+static HRESULT WINAPI hstring_ivector_GetView( IVector_HSTRING *iface, IVectorView_HSTRING **value )
+{
+    struct hstring_vector *impl = impl_from_IVector_HSTRING(iface);
+    TRACE("iface %p, value %p.\n", iface, value);
+    if (!value) return E_POINTER;
+    *value = &impl->IVectorView_HSTRING_iface;
+    IUnknown_AddRef(*value);
+    return S_OK;
+}
+
+static HRESULT WINAPI hstring_ivector_IndexOf( IVector_HSTRING *iface, HSTRING element,
+                                               UINT32 *index, boolean *found )
+{
+    return IVectorView_HSTRING_IndexOf( &impl_from_IVector_HSTRING(iface)->IVectorView_HSTRING_iface,
+                                        element, index, found );
+}
+
+static HRESULT WINAPI hstring_ivector_SetAt( IVector_HSTRING *iface, UINT32 index, HSTRING value )
+{
+    struct hstring_vector *impl = impl_from_IVector_HSTRING(iface);
+    TRACE("iface %p, index %u, value %p.\n", iface, index, value);
+    if (index >= impl->count) return E_BOUNDS;
+    WindowsDuplicateString(value, &impl->values[index]);
+    return S_OK;
+}
+
+static HRESULT hstring_vector_insert( struct hstring_vector *impl, UINT32 index, HSTRING value )
+{
+    struct hstring_vector *grown;
+
+    if (index > impl->count) return E_BOUNDS;
+    grown = realloc(impl, offsetof(struct hstring_vector, values[impl->count + 1]));
+    if (!grown) return E_OUTOFMEMORY;
+    impl = grown;
+    memmove(grown->values + index + 1, grown->values + index,
+            (grown->count - index) * sizeof(*grown->values));
+    WindowsDuplicateString(value, &grown->values[index]);
+    grown->count++;
+    impl->IVectorView_HSTRING_iface.lpVtbl = &hstring_vector_vtbl;
+    impl->IIterable_HSTRING_iface.lpVtbl = &iterable_view_hstring_vtbl;
+    impl->IVector_HSTRING_iface.lpVtbl = &hstring_ivector_vtbl;
+    return S_OK;
+}
+
+static HRESULT WINAPI hstring_ivector_InsertAt( IVector_HSTRING *iface, UINT32 index, HSTRING value )
+{
+    return hstring_vector_insert(impl_from_IVector_HSTRING(iface), index, value);
+}
+
+static HRESULT WINAPI hstring_ivector_RemoveAt( IVector_HSTRING *iface, UINT32 index )
+{
+    struct hstring_vector *impl = impl_from_IVector_HSTRING(iface);
+
+    TRACE("iface %p, index %u.\n", iface, index);
+    if (index >= impl->count) return E_BOUNDS;
+    WindowsDeleteString(impl->values[index]);
+    impl->count--;
+    memmove(impl->values + index, impl->values + index + 1,
+            (impl->count - index) * sizeof(*impl->values));
+    return S_OK;
+}
+
+static HRESULT WINAPI hstring_ivector_Append( IVector_HSTRING *iface, HSTRING value )
+{
+    struct hstring_vector *impl = impl_from_IVector_HSTRING(iface);
+    return hstring_vector_insert(impl, impl->count, value);
+}
+
+static HRESULT WINAPI hstring_ivector_RemoveAtEnd( IVector_HSTRING *iface )
+{
+    struct hstring_vector *impl = impl_from_IVector_HSTRING(iface);
+
+    TRACE("iface %p.\n", iface);
+    if (!impl->count) return E_BOUNDS;
+    WindowsDeleteString(impl->values[--impl->count]);
+    return S_OK;
+}
+
+static HRESULT WINAPI hstring_ivector_Clear( IVector_HSTRING *iface )
+{
+    struct hstring_vector *impl = impl_from_IVector_HSTRING(iface);
+
+    TRACE("iface %p.\n", iface);
+    while (impl->count) WindowsDeleteString(impl->values[--impl->count]);
+    return S_OK;
+}
+
+static const struct IVector_HSTRINGVtbl hstring_ivector_vtbl =
+{
+    /* IUnknown methods */
+    hstring_ivector_QueryInterface,
+    hstring_ivector_AddRef,
+    hstring_ivector_Release,
+    /* IInspectable methods */
+    hstring_ivector_GetIids,
+    hstring_ivector_GetRuntimeClassName,
+    hstring_ivector_GetTrustLevel,
+    /* IVector<HSTRING> methods */
+    hstring_ivector_GetAt,
+    hstring_ivector_get_Size,
+    hstring_ivector_GetView,
+    hstring_ivector_IndexOf,
+    hstring_ivector_SetAt,
+    hstring_ivector_InsertAt,
+    hstring_ivector_RemoveAt,
+    hstring_ivector_Append,
+    hstring_ivector_RemoveAtEnd,
+    hstring_ivector_Clear,
 };
 
 /* CoreCLR's ComWrappers shader reads IInspectable::GetIids output as an array
@@ -1719,6 +1860,7 @@ struct decimal_formatter
     INT32 integer_digits;
     INT32 significant_digits;
     BOOLEAN is_grouping_enabled;
+    BOOL is_percent;
     IUnknown *number_rounder;
 };
 
@@ -1846,25 +1988,42 @@ static HRESULT WINAPI decimal_formatter_GetTrustLevel( void *iface, TrustLevel *
 /* Face 1: INumberFormatter / INumberFormatter2 */
 static HRESULT WINAPI decimal_formatter_FormatInt( void *iface, INT64 value, HSTRING *result )
 {
+    struct decimal_formatter *impl = impl_from_formatter( iface );
     WCHAR buf[64];
     if (!result) return E_POINTER;
-    swprintf( buf, ARRAY_SIZE(buf), L"%lld", (long long)value );
+    if (impl->is_percent)
+        swprintf( buf, ARRAY_SIZE(buf), L"%lld%%", (long long)(value * 100) );
+    else
+        swprintf( buf, ARRAY_SIZE(buf), L"%lld", (long long)value );
     return WindowsCreateString( buf, wcslen(buf), result );
 }
 
 static HRESULT WINAPI decimal_formatter_FormatUInt( void *iface, UINT64 value, HSTRING *result )
 {
+    struct decimal_formatter *impl = impl_from_formatter( iface );
     WCHAR buf[64];
     if (!result) return E_POINTER;
-    swprintf( buf, ARRAY_SIZE(buf), L"%llu", (unsigned long long)value );
+    if (impl->is_percent)
+        swprintf( buf, ARRAY_SIZE(buf), L"%llu%%", (unsigned long long)(value * 100) );
+    else
+        swprintf( buf, ARRAY_SIZE(buf), L"%llu", (unsigned long long)value );
     return WindowsCreateString( buf, wcslen(buf), result );
 }
 
 static HRESULT WINAPI decimal_formatter_FormatDouble( void *iface, double value, HSTRING *result )
 {
+    struct decimal_formatter *impl = impl_from_formatter( iface );
     WCHAR buf[64];
     if (!result) return E_POINTER;
-    if (value == floor( value ) && fabs( value ) < 1e14)
+    if (impl->is_percent)
+    {
+        double pct = value * 100.0;
+        if (impl->fraction_digits > 0)
+            swprintf( buf, ARRAY_SIZE(buf), L"%.*f%%", impl->fraction_digits, pct );
+        else
+            swprintf( buf, ARRAY_SIZE(buf), L"%.0f%%", pct );
+    }
+    else if (value == floor( value ) && fabs( value ) < 1e14)
         swprintf( buf, ARRAY_SIZE(buf), L"%.0f", value );
     else
         swprintf( buf, ARRAY_SIZE(buf), L"%.10g", value );
@@ -1992,6 +2151,97 @@ static ULONG WINAPI parser_Release( void *iface )
     return decimal_formatter_Release( (void *)&impl_from_parser( iface )->vtbl_formatter );
 }
 
+static const GUID IID_IReference_double =
+    { 0x2f2d6c29, 0x5473, 0x5f3e, { 0x92, 0xe7, 0x96, 0x57, 0x2b, 0xb9, 0x90, 0xe2 } };
+
+struct iref_double
+{
+    const void *lpVtbl;
+    LONG ref;
+    double value;
+};
+
+static HRESULT WINAPI iref_double_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IReference_double ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct iref_double *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI iref_double_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct iref_double *)iface)->ref );
+}
+static ULONG WINAPI iref_double_Release( void *iface )
+{
+    struct iref_double *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI iref_double_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI iref_double_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.IReference`1<Double>", 38, name );
+}
+static HRESULT WINAPI iref_double_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI iref_double_get_Value( void *iface, double *value )
+{
+    if (!value) return E_POINTER;
+    *value = ((struct iref_double *)iface)->value;
+    return S_OK;
+}
+static const void *iref_double_vtbl[] =
+{
+    iref_double_QI, iref_double_AddRef, iref_double_Release,
+    iref_double_GetIids, iref_double_GetRuntimeClassName, iref_double_GetTrustLevel,
+    iref_double_get_Value,
+};
+
+static HRESULT WINAPI parser_ParseDouble( void *iface, HSTRING text, void **result )
+{
+    struct decimal_formatter *impl = impl_from_parser( iface );
+    const WCHAR *str;
+    WCHAR *end = NULL;
+    double val;
+    struct iref_double *ref;
+
+    if (!result) return E_POINTER;
+    *result = NULL;
+    str = WindowsGetStringRawBuffer( text, NULL );
+    if (!str || !*str) return S_OK;
+
+    val = wcstod( str, &end );
+    if (end == str) return S_OK;
+    if (impl->is_percent)
+    {
+        while (*end == ' ' || *end == '\t') end++;
+        if (*end == '%') val /= 100.0;
+    }
+
+    if (!(ref = malloc( sizeof(*ref) ))) return E_OUTOFMEMORY;
+    ref->lpVtbl = iref_double_vtbl;
+    ref->ref = 1;
+    ref->value = val;
+    *result = ref;
+    return S_OK;
+}
+
 static HRESULT WINAPI decimal_formatter_stub_zero( void *iface, ... )
 {
     va_list args;
@@ -2099,7 +2349,7 @@ static const void *parser_vtbl[] =
     /* INumberParser */
     decimal_formatter_stub_zero,
     decimal_formatter_stub_zero,
-    decimal_formatter_stub_zero,
+    parser_ParseDouble,
     decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
     decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
     decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
@@ -2164,7 +2414,7 @@ static const void *rounder_opt_vtbl[] =
     rounder_opt_put_NumberRounder,
 };
 
-static HRESULT decimal_formatter_create( void **instance )
+static HRESULT decimal_formatter_create( BOOL is_percent, void **instance )
 {
     struct decimal_formatter *impl = calloc( 1, sizeof(*impl) );
     if (!impl) return E_OUTOFMEMORY;
@@ -2178,6 +2428,7 @@ static HRESULT decimal_formatter_create( void **instance )
     impl->fraction_digits = 0;
     impl->significant_digits = 0;
     impl->is_grouping_enabled = FALSE;
+    impl->is_percent = is_percent;
     *instance = (void *)&impl->vtbl_formatter;
     return S_OK;
 }
@@ -2187,6 +2438,7 @@ struct decimal_formatter_factory_impl
 {
     const void *vtbl_activation;
     const void *vtbl_factory;
+    BOOL is_percent;
 };
 
 static inline struct decimal_formatter_factory_impl *impl_from_df_activation( void *iface )
@@ -2230,7 +2482,8 @@ static HRESULT WINAPI df_factory_GetTrustLevel( void *iface, TrustLevel *level )
 /* Face 1: IActivationFactory */
 static HRESULT WINAPI df_factory_ActivateInstance( void *iface, IInspectable **instance )
 {
-    return decimal_formatter_create( (void **)instance );
+    struct decimal_formatter_factory_impl *impl = impl_from_df_activation( iface );
+    return decimal_formatter_create( impl->is_percent, (void **)instance );
 }
 static const void *df_activation_vtbl[] =
 {
@@ -2259,17 +2512,19 @@ static ULONG WINAPI df_factory2_Release( void *iface )
 }
 static HRESULT WINAPI df_factory_CreateDecimalFormatter( void *iface, void *languages, HSTRING geographicregion, void **result )
 {
+    struct decimal_formatter_factory_impl *impl = impl_from_df_factory( iface );
     TRACE( "CreateDecimalFormatter iface %p languages %p region %s out %p\n",
            iface, languages, debugstr_hstring(geographicregion), result );
-    return decimal_formatter_create( result );
+    return decimal_formatter_create( impl->is_percent, result );
 }
 static HRESULT WINAPI df_factory_CreateDecimalFormatterWithDigits( void *iface, void *languages,
         INT32 integer_digits, INT32 fraction_digits, INT32 significant_digits,
         HSTRING geographicregion, void **result )
 {
+    struct decimal_formatter_factory_impl *impl = impl_from_df_factory( iface );
     TRACE( "CreateDecimalFormatterWithDigits iface %p integer %d fraction %d significant %d region %s out %p\n",
            iface, integer_digits, fraction_digits, significant_digits, debugstr_hstring(geographicregion), result );
-    return decimal_formatter_create( result );
+    return decimal_formatter_create( impl->is_percent, result );
 }
 static const void *df_factory_vtbl[] =
 {
@@ -2287,6 +2542,14 @@ static struct decimal_formatter_factory_impl decimal_formatter_factory_inst =
 {
     df_activation_vtbl,
     df_factory_vtbl,
+    FALSE,
+};
+
+static struct decimal_formatter_factory_impl percent_formatter_factory_inst =
+{
+    df_activation_vtbl,
+    df_factory_vtbl,
+    TRUE,
 };
 
 /* Windows.Globalization.CalendarIdentifiers */
@@ -3059,10 +3322,13 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         *factory = (IActivationFactory *)&clk_id_factory_obj;
     }
     else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter") ||
-             !wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter") ||
-             !wcscmp(name, L"Windows.Globalization.NumberFormatting.PercentFormatter"))
+             !wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter"))
     {
         *factory = (IActivationFactory *)&decimal_formatter_factory_inst.vtbl_activation;
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.PercentFormatter"))
+    {
+        *factory = (IActivationFactory *)&percent_formatter_factory_inst.vtbl_activation;
     }
     else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.IncrementNumberRounder"))
     {

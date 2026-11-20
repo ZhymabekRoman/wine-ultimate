@@ -7,6 +7,7 @@ struct json_array
 {
     IJsonArray IJsonArray_iface;
     IJsonValueInternal IJsonValueInternal_iface;
+    __FIVector_1_Windows__CData__CJson__CIJsonValue IVector_iface;
     LONG ref;
 
     cJSON *node;
@@ -23,6 +24,175 @@ static inline struct json_array *impl_from_IJsonValueInternal( IJsonValueInterna
 {
     return CONTAINING_RECORD( iface, struct json_array, IJsonValueInternal_iface );
 }
+
+static inline struct json_array *impl_from_IVector( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface )
+{
+    return CONTAINING_RECORD( iface, struct json_array, IVector_iface );
+}
+
+static HRESULT WINAPI json_array_vec_QueryInterface( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, REFIID iid, void **out )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return IJsonArray_QueryInterface( &impl->IJsonArray_iface, iid, out );
+}
+
+static ULONG WINAPI json_array_vec_AddRef( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return IJsonArray_AddRef( &impl->IJsonArray_iface );
+}
+
+static ULONG WINAPI json_array_vec_Release( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return IJsonArray_Release( &impl->IJsonArray_iface );
+}
+
+static HRESULT WINAPI json_array_vec_GetIids( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, ULONG *iid_count, IID **iids )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return IJsonArray_GetIids( &impl->IJsonArray_iface, iid_count, iids );
+}
+
+static HRESULT WINAPI json_array_vec_GetRuntimeClassName( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, HSTRING *class_name )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return IJsonArray_GetRuntimeClassName( &impl->IJsonArray_iface, class_name );
+}
+
+static HRESULT WINAPI json_array_vec_GetTrustLevel( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, TrustLevel *trust_level )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return IJsonArray_GetTrustLevel( &impl->IJsonArray_iface, trust_level );
+}
+
+static HRESULT WINAPI json_array_vec_GetAt( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, UINT32 index, IJsonValue **value )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    cJSON *child;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    child = cJSON_GetArrayItem( impl->node, (int)index );
+    if (!child) return E_BOUNDS;
+    return create_json_value( child, impl->root, value );
+}
+
+static HRESULT WINAPI json_array_vec_get_Size( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, UINT32 *value )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    if (!value) return E_POINTER;
+    *value = (UINT32)cJSON_GetArraySize( impl->node );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_array_vec_GetView( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface,
+        __FIVectorView_1_Windows__CData__CJson__CIJsonValue **value )
+{
+    FIXME( "iface %p, value %p stub!\n", iface, value );
+    if (value) *value = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI json_array_vec_IndexOf( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface,
+        IJsonValue *element, UINT32 *index, BOOLEAN *value )
+{
+    if (index) *index = 0;
+    if (value) *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI json_array_vec_SetAt( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, UINT32 index, IJsonValue *value )
+{
+    FIXME( "iface %p, index %u, value %p stub!\n", iface, index, value );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI json_array_vec_InsertAt( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, UINT32 index, IJsonValue *value )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return json_array_push( &impl->IJsonArray_iface, value );
+}
+
+static HRESULT WINAPI json_array_vec_RemoveAt( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, UINT32 index )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    cJSON_DeleteItemFromArray( impl->node, (int)index );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_array_vec_Append( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface, IJsonValue *value )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    return json_array_push( &impl->IJsonArray_iface, value );
+}
+
+static HRESULT WINAPI json_array_vec_RemoveAtEnd( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    int sz = cJSON_GetArraySize( impl->node );
+    if (sz <= 0) return E_BOUNDS;
+    cJSON_DeleteItemFromArray( impl->node, sz - 1 );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_array_vec_Clear( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    while (cJSON_GetArraySize( impl->node ) > 0)
+        cJSON_DeleteItemFromArray( impl->node, 0 );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_array_vec_GetMany( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface,
+        UINT32 start_index, UINT32 items_size, IJsonValue **items, UINT32 *value )
+{
+    struct json_array *impl = impl_from_IVector( iface );
+    UINT32 count = 0, total = (UINT32)cJSON_GetArraySize( impl->node );
+
+    if (!value) return E_POINTER;
+    *value = 0;
+    while (count < items_size && start_index + count < total)
+    {
+        HRESULT hr = json_array_vec_GetAt( iface, start_index + count, &items[count] );
+        if (FAILED(hr)) break;
+        count++;
+    }
+    *value = count;
+    return S_OK;
+}
+
+static HRESULT WINAPI json_array_vec_ReplaceAll( __FIVector_1_Windows__CData__CJson__CIJsonValue *iface,
+        UINT32 count, IJsonValue **items )
+{
+    UINT32 i;
+    json_array_vec_Clear( iface );
+    for (i = 0; i < count; i++)
+        json_array_vec_Append( iface, items[i] );
+    return S_OK;
+}
+
+static const __FIVector_1_Windows__CData__CJson__CIJsonValueVtbl json_array_vec_vtbl =
+{
+    json_array_vec_QueryInterface,
+    json_array_vec_AddRef,
+    json_array_vec_Release,
+    json_array_vec_GetIids,
+    json_array_vec_GetRuntimeClassName,
+    json_array_vec_GetTrustLevel,
+    json_array_vec_GetAt,
+    json_array_vec_get_Size,
+    json_array_vec_GetView,
+    json_array_vec_IndexOf,
+    json_array_vec_SetAt,
+    json_array_vec_InsertAt,
+    json_array_vec_RemoveAt,
+    json_array_vec_Append,
+    json_array_vec_RemoveAtEnd,
+    json_array_vec_Clear,
+    json_array_vec_GetMany,
+    json_array_vec_ReplaceAll,
+};
 
 static HRESULT WINAPI json_array_internal_QueryInterface( IJsonValueInternal *iface, REFIID iid, void **out )
 {
@@ -93,6 +263,13 @@ static HRESULT WINAPI json_array_QueryInterface( IJsonArray *iface, REFIID iid, 
     if (IsEqualGUID( iid, &IID_IJsonValueInternal ))
     {
         *out = &impl->IJsonValueInternal_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID___FIVector_1_Windows__CData__CJson__CIJsonValue ))
+    {
+        *out = &impl->IVector_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -258,6 +435,7 @@ HRESULT create_json_array( cJSON *node, struct json_root *root, IJsonArray **out
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IJsonArray_iface.lpVtbl = &json_array_vtbl;
     impl->IJsonValueInternal_iface.lpVtbl = &json_array_internal_vtbl;
+    impl->IVector_iface.lpVtbl = &json_array_vec_vtbl;
     impl->ref = 1;
     impl->node = node;
     impl->root = root;

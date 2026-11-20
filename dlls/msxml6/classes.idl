@@ -14,6 +14,7 @@ import "windows.data.xml.dom.idl";
 
 namespace Windows.Data.Xml.Dom {
     runtimeclass XmlDocument;
+    runtimeclass XmlLoadSettings;
 }
 namespace Windows.Data.Xml.Xsl {
     runtimeclass XsltProcessor;

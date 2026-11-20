@@ -5817,9 +5817,11 @@ static void saxreader_parse_doctype(struct saxlocator *locator)
 {
     BSTR name, sysid, pubid;
 
-    if (locator->saxreader->features & ProhibitDTD)
-        return saxreader_set_error(locator, E_SAX_INVALIDATROOTLEVEL);
-
+    /* ProhibitDTD selects the DTD parsing mode, not "reject doctypes": with the
+     * flag set the document's internal subset is parsed and only the external
+     * DTD subset (below) is skipped.  A document that declares a doctype with
+     * an external id (e.g. an Apple plist <!DOCTYPE plist PUBLIC ... "....dtd">)
+     * must still parse. */
     if (!(locator->dtd = saxreader_new_dtd(locator)))
         return;
 

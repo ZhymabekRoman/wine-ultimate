@@ -258,11 +258,22 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
         IApiInformationStatics *iface, HSTRING type_name, HSTRING property_name, BOOLEAN *value)
 {
+    const WCHAR *type_str = WindowsGetStringRawBuffer( type_name, NULL );
+    const WCHAR *prop_str = WindowsGetStringRawBuffer( property_name, NULL );
+
     FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
             debugstr_hstring(type_name), debugstr_hstring(property_name), value);
 
-    if (!type_name)
+    if (!type_name || !value)
         return E_INVALIDARG;
+
+    if (type_str && prop_str &&
+        !wcscmp( type_str, L"Windows.ApplicationModel.Package" ) &&
+        !wcscmp( prop_str, L"SourceUriSchemeName" ))
+    {
+        *value = FALSE;
+        return S_OK;
+    }
 
     *value = TRUE;
     return S_OK;
@@ -3704,12 +3715,16 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_AddRef((*factory = &property_value_statics.IActivationFactory_iface));
     if (!wcscmp(buffer, L"Windows.Foundation.Collections.PropertySet"))
         IActivationFactory_AddRef((*factory = property_set_factory));
+    if (!wcscmp(buffer, L"Windows.Foundation.Collections.StringMap"))
+        IActivationFactory_AddRef((*factory = string_map_factory));
     if (!wcscmp(buffer, L"Windows.Storage.Streams.Buffer"))
         IActivationFactory_AddRef((*factory = buffer_activation_factory));
     if (!wcscmp(buffer, L"Windows.Storage.Streams.DataWriter"))
         IActivationFactory_AddRef((*factory = data_writer_activation_factory));
     if (!wcscmp(buffer, L"Windows.Foundation.Uri"))
         IActivationFactory_AddRef((*factory = uri_activation_factory));
+    if (!wcscmp(buffer, L"Windows.Foundation.WwwFormUrlDecoder"))
+        IActivationFactory_AddRef((*factory = www_form_url_decoder_factory));
     if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingFields"))
         IActivationFactory_AddRef((*factory = logging_fields_activation_factory));
     if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.AsyncCausalityTracer"))

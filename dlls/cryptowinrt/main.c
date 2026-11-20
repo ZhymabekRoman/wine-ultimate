@@ -549,7 +549,10 @@ static HRESULT STDMETHODCALLTYPE cryptobuffer_statics_EncodeToBase64String(
     if (!CryptBinaryToStringW(data, length, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &ret_length))
         return E_FAIL;
 
-    if (FAILED(hr = WindowsPreallocateStringBuffer(ret_length, &str, &str_buffer)))
+    if (!ret_length)
+        return WindowsCreateString(NULL, 0, value);
+
+    if (FAILED(hr = WindowsPreallocateStringBuffer(ret_length - 1, &str, &str_buffer)))
         return hr;
 
     if (!CryptBinaryToStringW(data, length, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, str, &ret_length))

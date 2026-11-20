@@ -23,6 +23,8 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
 
 #define COBJMACROS
 #include "windef.h"
@@ -62,6 +64,7 @@ struct async_http_op;
 HRESULT create_async_http_op_ex( void *result_obj, HSTRING result_str, BOOL is_str,
                                  BOOL handler_at_0x10, void **out );
 HRESULT create_async_http_op( void *result_obj, HSTRING result_str, BOOL is_str, void **out );
+HRESULT create_async_http_op_u64( UINT64 val, void **out );
 HRESULT create_http_response( INT32 status_code, void **out );
 HRESULT create_http_request( void *method, void *uri, void **out );
 HRESULT create_http_string_content( HSTRING content, void **out );
@@ -139,7 +142,9 @@ struct async_http_op
     LONG ref;
     IInspectable *result_obj;
     HSTRING result_str;
+    UINT64 result_u64;
     BOOL is_str;
+    BOOL is_u64;
     BOOL handler_at_0x10; /* WPM awaiter delegate keeps its vtbl at +0x10 */
 };
 
@@ -153,6 +158,8 @@ struct http_headers
 {
     const struct http_headers_vtbl *vtbl_headers;
     const struct http_headers_map_vtbl *vtbl_map;
+    const void *const *vtbl_imap;
+    const void *const *vtbl_req_headers;
     LONG ref;
     GUID iid;
     struct hdr_pair *pairs;
@@ -451,9 +458,15 @@ static inline struct http_request_message *impl_from_request( void *iface )
 struct dstr_pv
 {
     const IPropertyValueVtbl *vtbl;
+    const void *const *vtbl_iter;  /* {c312da8d-c82f-51c9-b705-5a26d52fbee6} face */
     LONG ref;
     HSTRING str;
 };
+
+static inline struct dstr_pv *dstr_pv_from_iter( void *iface )
+{
+    return (struct dstr_pv *)((char *)iface - offsetof( struct dstr_pv, vtbl_iter ));
+}
 
 /* --- cross-file vtable exports (defined next to their implementations) --- */
 extern const struct http_headers_map_vtbl http_headers_map_vtbl;

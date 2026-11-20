@@ -105,8 +105,8 @@ static void windows_uri_destroy( struct windows_uri *impl )
 
 static void uri_parse( struct windows_uri *impl )
 {
-    const WCHAR *raw = impl->raw, *p = raw, *scheme_end = NULL, *rest;
-    WCHAR *fragment = NULL, *query = NULL, *path;
+    const WCHAR *raw = impl->raw, *p = raw, *scheme_end = NULL;
+    WCHAR *rest, *fragment = NULL, *query = NULL, *path;
 
     impl->port = 80;
 
@@ -240,14 +240,10 @@ static HRESULT WINAPI uri_QueryInterface( IUriRuntimeClass *iface, REFIID iid, v
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
-    static const GUID IID_Uri_RuntimeClass =
-        { 0x44a9796f, 0x723e, 0x4fdf, { 0xa2, 0x18, 0x03, 0x3e, 0x75, 0xb0, 0xc0, 0x84 } };
-
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IUriRuntimeClass ) ||
-        IsEqualGUID( iid, &IID_Uri_RuntimeClass ))
+        IsEqualGUID( iid, &IID_IUriRuntimeClass ))
     {
         IInspectable_AddRef( (*out = &impl->IUriRuntimeClass_iface) );
         return S_OK;
@@ -344,10 +340,18 @@ static HRESULT WINAPI uri_get_AbsoluteUri( IUriRuntimeClass *iface, HSTRING *val
     return WindowsCreateString( impl->raw, hash ? hash - impl->raw : lstrlenW( impl->raw ), value );
 }
 
+static HRESULT create_www_form_url_decoder( HSTRING query, IWwwFormUrlDecoderRuntimeClass **out );
+
 static HRESULT WINAPI uri_get_QueryParsed( IUriRuntimeClass *iface, IWwwFormUrlDecoderRuntimeClass **decoder )
 {
-    FIXME( "iface %p, decoder %p stub!\n", iface, decoder );
-    return E_NOTIMPL;
+    HSTRING query = NULL;
+    HRESULT hr;
+    if (!decoder) return E_POINTER;
+    hr = uri_get_Query( iface, &query );
+    if (FAILED( hr )) return hr;
+    hr = create_www_form_url_decoder( query, decoder );
+    WindowsDeleteString( query );
+    return hr;
 }
 
 static HRESULT WINAPI uri_get_Port( IUriRuntimeClass *iface, INT32 *value )
@@ -996,3 +1000,602 @@ static struct uri_statics uri_statics =
 };
 
 IActivationFactory *uri_activation_factory = &uri_statics.IActivationFactory_iface;
+
+/* ============================================================================
+ * Windows.Foundation.WwwFormUrlDecoder
+ * ============================================================================ */
+
+struct www_entry
+{
+    IWwwFormUrlDecoderEntry IWwwFormUrlDecoderEntry_iface;
+    LONG ref;
+    HSTRING name;
+    HSTRING value;
+};
+
+static inline struct www_entry *www_entry_from_iface( IWwwFormUrlDecoderEntry *iface )
+{
+    return CONTAINING_RECORD( iface, struct www_entry, IWwwFormUrlDecoderEntry_iface );
+}
+
+static HRESULT WINAPI www_entry_QI( IWwwFormUrlDecoderEntry *iface, REFIID iid, void **out )
+{
+    struct www_entry *impl = www_entry_from_iface( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IWwwFormUrlDecoderEntry ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI www_entry_AddRef( IWwwFormUrlDecoderEntry *iface )
+{
+    return InterlockedIncrement( &www_entry_from_iface( iface )->ref );
+}
+static ULONG WINAPI www_entry_Release( IWwwFormUrlDecoderEntry *iface )
+{
+    struct www_entry *impl = www_entry_from_iface( iface );
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r)
+    {
+        WindowsDeleteString( impl->name );
+        WindowsDeleteString( impl->value );
+        free( impl );
+    }
+    return r;
+}
+static HRESULT WINAPI www_entry_GetIids( IWwwFormUrlDecoderEntry *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_IWwwFormUrlDecoderEntry;
+    *c = 1;
+    return S_OK;
+}
+static HRESULT WINAPI www_entry_GetRuntimeClassName( IWwwFormUrlDecoderEntry *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.WwwFormUrlDecoderEntry";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI www_entry_GetTrustLevel( IWwwFormUrlDecoderEntry *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI www_entry_get_Name( IWwwFormUrlDecoderEntry *iface, HSTRING *val )
+{
+    return WindowsDuplicateString( www_entry_from_iface( iface )->name, val );
+}
+static HRESULT WINAPI www_entry_get_Value( IWwwFormUrlDecoderEntry *iface, HSTRING *val )
+{
+    return WindowsDuplicateString( www_entry_from_iface( iface )->value, val );
+}
+
+static const IWwwFormUrlDecoderEntryVtbl www_entry_vtbl =
+{
+    www_entry_QI, www_entry_AddRef, www_entry_Release,
+    www_entry_GetIids, www_entry_GetRuntimeClassName, www_entry_GetTrustLevel,
+    www_entry_get_Name, www_entry_get_Value,
+};
+
+struct www_decoder
+{
+    IWwwFormUrlDecoderRuntimeClass IWwwFormUrlDecoderRuntimeClass_iface;
+    IVectorView_IWwwFormUrlDecoderEntry IVectorView_iface;
+    IIterable_IWwwFormUrlDecoderEntry IIterable_iface;
+    LONG ref;
+    struct www_entry **entries;
+    UINT32 count;
+};
+
+struct www_iter
+{
+    IIterator_IWwwFormUrlDecoderEntry IIterator_iface;
+    LONG ref;
+    struct www_decoder *dec;
+    UINT32 idx;
+};
+
+static inline struct www_iter *www_iter_from_iface( IIterator_IWwwFormUrlDecoderEntry *iface )
+{
+    return CONTAINING_RECORD( iface, struct www_iter, IIterator_iface );
+}
+static HRESULT WINAPI www_iter_QI( IIterator_IWwwFormUrlDecoderEntry *iface, REFIID iid, void **out )
+{
+    struct www_iter *impl = www_iter_from_iface( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_IWwwFormUrlDecoderEntry ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI www_iter_AddRef( IIterator_IWwwFormUrlDecoderEntry *iface )
+{
+    return InterlockedIncrement( &www_iter_from_iface( iface )->ref );
+}
+static ULONG WINAPI www_iter_Release( IIterator_IWwwFormUrlDecoderEntry *iface )
+{
+    struct www_iter *impl = www_iter_from_iface( iface );
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r)
+    {
+        IWwwFormUrlDecoderRuntimeClass_Release( &impl->dec->IWwwFormUrlDecoderRuntimeClass_iface );
+        free( impl );
+    }
+    return r;
+}
+static HRESULT WINAPI www_iter_GetIids( IIterator_IWwwFormUrlDecoderEntry *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI www_iter_GetRuntimeClassName( IIterator_IWwwFormUrlDecoderEntry *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.IIterator`1<Windows.Foundation.IWwwFormUrlDecoderEntry>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI www_iter_GetTrustLevel( IIterator_IWwwFormUrlDecoderEntry *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI www_iter_get_Current( IIterator_IWwwFormUrlDecoderEntry *iface, IWwwFormUrlDecoderEntry **val )
+{
+    struct www_iter *impl = www_iter_from_iface( iface );
+    if (!val) return E_POINTER;
+    if (impl->idx >= impl->dec->count) { *val = NULL; return E_BOUNDS; }
+    *val = &impl->dec->entries[impl->idx]->IWwwFormUrlDecoderEntry_iface;
+    IWwwFormUrlDecoderEntry_AddRef( *val );
+    return S_OK;
+}
+static HRESULT WINAPI www_iter_get_HasCurrent( IIterator_IWwwFormUrlDecoderEntry *iface, boolean *val )
+{
+    struct www_iter *impl = www_iter_from_iface( iface );
+    if (!val) return E_POINTER;
+    *val = impl->idx < impl->dec->count;
+    return S_OK;
+}
+static HRESULT WINAPI www_iter_MoveNext( IIterator_IWwwFormUrlDecoderEntry *iface, boolean *val )
+{
+    struct www_iter *impl = www_iter_from_iface( iface );
+    if (!val) return E_POINTER;
+    if (impl->idx < impl->dec->count) impl->idx++;
+    *val = impl->idx < impl->dec->count;
+    return S_OK;
+}
+static HRESULT WINAPI www_iter_GetMany( IIterator_IWwwFormUrlDecoderEntry *iface, UINT32 cap,
+                                        IWwwFormUrlDecoderEntry **items, UINT32 *actual )
+{
+    struct www_iter *impl = www_iter_from_iface( iface );
+    UINT32 n = 0;
+    if (!actual) return E_POINTER;
+    while (n < cap && impl->idx < impl->dec->count)
+    {
+        items[n] = &impl->dec->entries[impl->idx++]->IWwwFormUrlDecoderEntry_iface;
+        IWwwFormUrlDecoderEntry_AddRef( items[n] );
+        n++;
+    }
+    *actual = n;
+    return S_OK;
+}
+static const IIterator_IWwwFormUrlDecoderEntryVtbl www_iter_vtbl =
+{
+    www_iter_QI, www_iter_AddRef, www_iter_Release,
+    www_iter_GetIids, www_iter_GetRuntimeClassName, www_iter_GetTrustLevel,
+    www_iter_get_Current, www_iter_get_HasCurrent, www_iter_MoveNext, www_iter_GetMany,
+};
+
+static inline struct www_decoder *www_dec_from_iface( IWwwFormUrlDecoderRuntimeClass *iface )
+{
+    return CONTAINING_RECORD( iface, struct www_decoder, IWwwFormUrlDecoderRuntimeClass_iface );
+}
+static inline struct www_decoder *www_dec_from_vec( IVectorView_IWwwFormUrlDecoderEntry *iface )
+{
+    return CONTAINING_RECORD( iface, struct www_decoder, IVectorView_iface );
+}
+static inline struct www_decoder *www_dec_from_iter( IIterable_IWwwFormUrlDecoderEntry *iface )
+{
+    return CONTAINING_RECORD( iface, struct www_decoder, IIterable_iface );
+}
+
+static HRESULT www_dec_QI_impl( struct www_decoder *impl, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IWwwFormUrlDecoderRuntimeClass ))
+    {
+        *out = &impl->IWwwFormUrlDecoderRuntimeClass_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IVectorView_IWwwFormUrlDecoderEntry ))
+    {
+        *out = &impl->IVectorView_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_IWwwFormUrlDecoderEntry ))
+    {
+        *out = &impl->IIterable_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG www_dec_Release_impl( struct www_decoder *impl )
+{
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r)
+    {
+        UINT32 i;
+        for (i = 0; i < impl->count; i++)
+            IWwwFormUrlDecoderEntry_Release( &impl->entries[i]->IWwwFormUrlDecoderEntry_iface );
+        free( impl->entries );
+        free( impl );
+    }
+    return r;
+}
+
+static HRESULT WINAPI www_dec_QI( IWwwFormUrlDecoderRuntimeClass *iface, REFIID iid, void **out )
+{
+    return www_dec_QI_impl( www_dec_from_iface( iface ), iid, out );
+}
+static ULONG WINAPI www_dec_AddRef( IWwwFormUrlDecoderRuntimeClass *iface )
+{
+    return InterlockedIncrement( &www_dec_from_iface( iface )->ref );
+}
+static ULONG WINAPI www_dec_Release( IWwwFormUrlDecoderRuntimeClass *iface )
+{
+    return www_dec_Release_impl( www_dec_from_iface( iface ) );
+}
+static HRESULT WINAPI www_dec_GetIids( IWwwFormUrlDecoderRuntimeClass *iface, ULONG *c, IID **i )
+{
+    if (!c || !i) return E_POINTER;
+    *i = CoTaskMemAlloc( 3 * sizeof(IID) );
+    if (!*i) { *c = 0; return E_OUTOFMEMORY; }
+    (*i)[0] = IID_IWwwFormUrlDecoderRuntimeClass;
+    (*i)[1] = IID_IVectorView_IWwwFormUrlDecoderEntry;
+    (*i)[2] = IID_IIterable_IWwwFormUrlDecoderEntry;
+    *c = 3;
+    return S_OK;
+}
+static HRESULT WINAPI www_dec_GetRuntimeClassName( IWwwFormUrlDecoderRuntimeClass *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.WwwFormUrlDecoder";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI www_dec_GetTrustLevel( IWwwFormUrlDecoderRuntimeClass *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI www_dec_GetFirstValueByName( IWwwFormUrlDecoderRuntimeClass *iface, HSTRING name, HSTRING *val )
+{
+    struct www_decoder *impl = www_dec_from_iface( iface );
+    const WCHAR *target = WindowsGetStringRawBuffer( name, NULL );
+    UINT32 i;
+    if (!val) return E_POINTER;
+    *val = NULL;
+    if (!target) return E_INVALIDARG;
+    for (i = 0; i < impl->count; i++)
+    {
+        const WCHAR *en = WindowsGetStringRawBuffer( impl->entries[i]->name, NULL );
+        if (en && !wcscmp( en, target ))
+            return WindowsDuplicateString( impl->entries[i]->value, val );
+    }
+    return E_INVALIDARG;
+}
+static const IWwwFormUrlDecoderRuntimeClassVtbl www_dec_vtbl =
+{
+    www_dec_QI, www_dec_AddRef, www_dec_Release,
+    www_dec_GetIids, www_dec_GetRuntimeClassName, www_dec_GetTrustLevel,
+    www_dec_GetFirstValueByName,
+};
+
+static HRESULT WINAPI www_vec_QI( IVectorView_IWwwFormUrlDecoderEntry *iface, REFIID iid, void **out )
+{
+    return www_dec_QI_impl( www_dec_from_vec( iface ), iid, out );
+}
+static ULONG WINAPI www_vec_AddRef( IVectorView_IWwwFormUrlDecoderEntry *iface )
+{
+    return InterlockedIncrement( &www_dec_from_vec( iface )->ref );
+}
+static ULONG WINAPI www_vec_Release( IVectorView_IWwwFormUrlDecoderEntry *iface )
+{
+    return www_dec_Release_impl( www_dec_from_vec( iface ) );
+}
+static HRESULT WINAPI www_vec_GetIids( IVectorView_IWwwFormUrlDecoderEntry *iface, ULONG *c, IID **i )
+{
+    return www_dec_GetIids( &www_dec_from_vec( iface )->IWwwFormUrlDecoderRuntimeClass_iface, c, i );
+}
+static HRESULT WINAPI www_vec_GetRuntimeClassName( IVectorView_IWwwFormUrlDecoderEntry *iface, HSTRING *n )
+{
+    return www_dec_GetRuntimeClassName( &www_dec_from_vec( iface )->IWwwFormUrlDecoderRuntimeClass_iface, n );
+}
+static HRESULT WINAPI www_vec_GetTrustLevel( IVectorView_IWwwFormUrlDecoderEntry *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI www_vec_GetAt( IVectorView_IWwwFormUrlDecoderEntry *iface, UINT32 idx, IWwwFormUrlDecoderEntry **val )
+{
+    struct www_decoder *impl = www_dec_from_vec( iface );
+    if (!val) return E_POINTER;
+    if (idx >= impl->count) { *val = NULL; return E_BOUNDS; }
+    *val = &impl->entries[idx]->IWwwFormUrlDecoderEntry_iface;
+    IWwwFormUrlDecoderEntry_AddRef( *val );
+    return S_OK;
+}
+static HRESULT WINAPI www_vec_get_Size( IVectorView_IWwwFormUrlDecoderEntry *iface, UINT32 *size )
+{
+    if (!size) return E_POINTER;
+    *size = www_dec_from_vec( iface )->count;
+    return S_OK;
+}
+static HRESULT WINAPI www_vec_IndexOf( IVectorView_IWwwFormUrlDecoderEntry *iface, IWwwFormUrlDecoderEntry *val,
+                                       UINT32 *idx, boolean *found )
+{
+    struct www_decoder *impl = www_dec_from_vec( iface );
+    UINT32 i;
+    if (!found || !idx) return E_POINTER;
+    for (i = 0; i < impl->count; i++)
+    {
+        if (&impl->entries[i]->IWwwFormUrlDecoderEntry_iface == val) { *idx = i; *found = TRUE; return S_OK; }
+    }
+    *idx = 0;
+    *found = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI www_vec_GetMany( IVectorView_IWwwFormUrlDecoderEntry *iface, UINT32 start, UINT32 cap,
+                                       IWwwFormUrlDecoderEntry **items, UINT32 *actual )
+{
+    struct www_decoder *impl = www_dec_from_vec( iface );
+    UINT32 n = 0;
+    if (!actual) return E_POINTER;
+    while (n < cap && start + n < impl->count)
+    {
+        items[n] = &impl->entries[start + n]->IWwwFormUrlDecoderEntry_iface;
+        IWwwFormUrlDecoderEntry_AddRef( items[n] );
+        n++;
+    }
+    *actual = n;
+    return S_OK;
+}
+static const IVectorView_IWwwFormUrlDecoderEntryVtbl www_vec_vtbl =
+{
+    www_vec_QI, www_vec_AddRef, www_vec_Release,
+    www_vec_GetIids, www_vec_GetRuntimeClassName, www_vec_GetTrustLevel,
+    www_vec_GetAt, www_vec_get_Size, www_vec_IndexOf, www_vec_GetMany,
+};
+
+static HRESULT WINAPI www_it_QI( IIterable_IWwwFormUrlDecoderEntry *iface, REFIID iid, void **out )
+{
+    return www_dec_QI_impl( www_dec_from_iter( iface ), iid, out );
+}
+static ULONG WINAPI www_it_AddRef( IIterable_IWwwFormUrlDecoderEntry *iface )
+{
+    return InterlockedIncrement( &www_dec_from_iter( iface )->ref );
+}
+static ULONG WINAPI www_it_Release( IIterable_IWwwFormUrlDecoderEntry *iface )
+{
+    return www_dec_Release_impl( www_dec_from_iter( iface ) );
+}
+static HRESULT WINAPI www_it_GetIids( IIterable_IWwwFormUrlDecoderEntry *iface, ULONG *c, IID **i )
+{
+    return www_dec_GetIids( &www_dec_from_iter( iface )->IWwwFormUrlDecoderRuntimeClass_iface, c, i );
+}
+static HRESULT WINAPI www_it_GetRuntimeClassName( IIterable_IWwwFormUrlDecoderEntry *iface, HSTRING *n )
+{
+    return www_dec_GetRuntimeClassName( &www_dec_from_iter( iface )->IWwwFormUrlDecoderRuntimeClass_iface, n );
+}
+static HRESULT WINAPI www_it_GetTrustLevel( IIterable_IWwwFormUrlDecoderEntry *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI www_it_First( IIterable_IWwwFormUrlDecoderEntry *iface, IIterator_IWwwFormUrlDecoderEntry **first )
+{
+    struct www_decoder *dec = www_dec_from_iter( iface );
+    struct www_iter *it;
+    if (!first) return E_POINTER;
+    if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
+    it->IIterator_iface.lpVtbl = &www_iter_vtbl;
+    it->ref = 1;
+    it->dec = dec;
+    InterlockedIncrement( &dec->ref );
+    *first = &it->IIterator_iface;
+    return S_OK;
+}
+static const IIterable_IWwwFormUrlDecoderEntryVtbl www_it_vtbl =
+{
+    www_it_QI, www_it_AddRef, www_it_Release,
+    www_it_GetIids, www_it_GetRuntimeClassName, www_it_GetTrustLevel,
+    www_it_First,
+};
+
+static int hex_val( WCHAR c )
+{
+    if (c >= L'0' && c <= L'9') return c - L'0';
+    if (c >= L'a' && c <= L'f') return 10 + (c - L'a');
+    if (c >= L'A' && c <= L'F') return 10 + (c - L'A');
+    return -1;
+}
+
+static HSTRING url_decode_segment( const WCHAR *s, size_t len )
+{
+    char *utf8 = malloc( len * 3 + 1 );
+    WCHAR *wbuf;
+    size_t i = 0, o = 0;
+    int wlen;
+    HSTRING out = NULL;
+
+    if (!utf8) return NULL;
+    while (i < len)
+    {
+        if (s[i] == L'+')
+        {
+            utf8[o++] = ' ';
+            i++;
+        }
+        else if (s[i] == L'%' && i + 2 < len && hex_val( s[i + 1] ) >= 0 && hex_val( s[i + 2] ) >= 0)
+        {
+            utf8[o++] = (char)((hex_val( s[i + 1] ) << 4) | hex_val( s[i + 2] ));
+            i += 3;
+        }
+        else if (s[i] < 0x80)
+        {
+            utf8[o++] = (char)s[i++];
+        }
+        else
+        {
+            int n = WideCharToMultiByte( CP_UTF8, 0, &s[i], 1, utf8 + o, 4, NULL, NULL );
+            if (n > 0) o += n;
+            i++;
+        }
+    }
+    wlen = MultiByteToWideChar( CP_UTF8, 0, utf8, (int)o, NULL, 0 );
+    wbuf = malloc( (wlen + 1) * sizeof(WCHAR) );
+    if (wbuf)
+    {
+        MultiByteToWideChar( CP_UTF8, 0, utf8, (int)o, wbuf, wlen );
+        WindowsCreateString( wbuf, wlen, &out );
+        free( wbuf );
+    }
+    free( utf8 );
+    return out;
+}
+
+static HRESULT create_www_form_url_decoder( HSTRING query, IWwwFormUrlDecoderRuntimeClass **out )
+{
+    const WCHAR *raw = WindowsGetStringRawBuffer( query, NULL );
+    struct www_decoder *dec;
+    UINT32 cap = 8;
+
+    if (!out) return E_POINTER;
+    if (!(dec = calloc( 1, sizeof(*dec) ))) return E_OUTOFMEMORY;
+    dec->IWwwFormUrlDecoderRuntimeClass_iface.lpVtbl = &www_dec_vtbl;
+    dec->IVectorView_iface.lpVtbl = &www_vec_vtbl;
+    dec->IIterable_iface.lpVtbl = &www_it_vtbl;
+    dec->ref = 1;
+    dec->entries = calloc( cap, sizeof(*dec->entries) );
+
+    if (raw)
+    {
+        if (*raw == L'?') raw++;
+        while (*raw)
+        {
+            const WCHAR *amp = wcschr( raw, L'&' );
+            size_t seg_len = amp ? (size_t)(amp - raw) : wcslen( raw );
+            if (seg_len > 0)
+            {
+                const WCHAR *eq = wmemchr( raw, L'=', seg_len );
+                struct www_entry *e = calloc( 1, sizeof(*e) );
+                if (e)
+                {
+                    e->IWwwFormUrlDecoderEntry_iface.lpVtbl = &www_entry_vtbl;
+                    e->ref = 1;
+                    if (eq)
+                    {
+                        e->name = url_decode_segment( raw, (size_t)(eq - raw) );
+                        e->value = url_decode_segment( eq + 1, seg_len - (size_t)(eq - raw) - 1 );
+                    }
+                    else
+                    {
+                        e->name = url_decode_segment( raw, seg_len );
+                        WindowsCreateString( L"", 0, &e->value );
+                    }
+                    if (dec->count == cap)
+                    {
+                        cap *= 2;
+                        dec->entries = realloc( dec->entries, cap * sizeof(*dec->entries) );
+                    }
+                    dec->entries[dec->count++] = e;
+                }
+            }
+            if (!amp) break;
+            raw = amp + 1;
+        }
+    }
+    *out = &dec->IWwwFormUrlDecoderRuntimeClass_iface;
+    return S_OK;
+}
+
+struct www_factory
+{
+    IActivationFactory IActivationFactory_iface;
+    IWwwFormUrlDecoderRuntimeClassFactory IWwwFormUrlDecoderRuntimeClassFactory_iface;
+};
+static struct www_factory www_factory_obj;
+
+static HRESULT WINAPI www_fac_QI( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &www_factory_obj.IActivationFactory_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IWwwFormUrlDecoderRuntimeClassFactory ))
+    {
+        *out = &www_factory_obj.IWwwFormUrlDecoderRuntimeClassFactory_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI www_fac_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI www_fac_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI www_fac_GetIids( IActivationFactory *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI www_fac_GetRuntimeClassName( IActivationFactory *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.WwwFormUrlDecoder";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI www_fac_GetTrustLevel( IActivationFactory *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI www_fac_ActivateInstance( IActivationFactory *iface, IInspectable **out ) { if (out) *out = NULL; return E_NOTIMPL; }
+
+static HRESULT WINAPI www_cf_QI( IWwwFormUrlDecoderRuntimeClassFactory *iface, REFIID iid, void **out )
+{
+    return www_fac_QI( &www_factory_obj.IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI www_cf_AddRef( IWwwFormUrlDecoderRuntimeClassFactory *iface ) { return 2; }
+static ULONG WINAPI www_cf_Release( IWwwFormUrlDecoderRuntimeClassFactory *iface ) { return 1; }
+static HRESULT WINAPI www_cf_GetIids( IWwwFormUrlDecoderRuntimeClassFactory *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI www_cf_GetRuntimeClassName( IWwwFormUrlDecoderRuntimeClassFactory *iface, HSTRING *n )
+{
+    return www_fac_GetRuntimeClassName( &www_factory_obj.IActivationFactory_iface, n );
+}
+static HRESULT WINAPI www_cf_GetTrustLevel( IWwwFormUrlDecoderRuntimeClassFactory *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI www_cf_CreateWwwFormUrlDecoder( IWwwFormUrlDecoderRuntimeClassFactory *iface,
+                                                      HSTRING query, IWwwFormUrlDecoderRuntimeClass **instance )
+{
+    return create_www_form_url_decoder( query, instance );
+}
+
+static const IActivationFactoryVtbl www_fac_vtbl =
+{
+    www_fac_QI, www_fac_AddRef, www_fac_Release,
+    www_fac_GetIids, www_fac_GetRuntimeClassName, www_fac_GetTrustLevel,
+    www_fac_ActivateInstance,
+};
+static const IWwwFormUrlDecoderRuntimeClassFactoryVtbl www_cf_vtbl =
+{
+    www_cf_QI, www_cf_AddRef, www_cf_Release,
+    www_cf_GetIids, www_cf_GetRuntimeClassName, www_cf_GetTrustLevel,
+    www_cf_CreateWwwFormUrlDecoder,
+};
+static struct www_factory www_factory_obj = { { &www_fac_vtbl }, { &www_cf_vtbl } };
+IActivationFactory *www_form_url_decoder_factory = &www_factory_obj.IActivationFactory_iface;

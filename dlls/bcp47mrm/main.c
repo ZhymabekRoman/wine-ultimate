@@ -426,12 +426,48 @@ WORD WINAPI GetCompositeRegionCode( const WCHAR *region )
 HRESULT WINAPI GetDistanceOfClosestLanguageInList( const WCHAR *language, const WCHAR *languages_list,
                                                    WCHAR delimiter, double *distance )
 {
-    FIXME( "language %s, languages_list %s, delimiter %lc, distance %p stub!\n",
+    const WCHAR *p, *sep, *lang_dash;
+    size_t lang_len, lang_prefix_len;
+    double best = 0.0;
+
+    TRACE( "language %s, languages_list %s, delimiter %lc, distance %p\n",
            debugstr_w( language ), debugstr_w( languages_list ), delimiter, distance );
 
     if (!language || !languages_list || !distance) return E_POINTER;
-    *distance = 0;
-    return HRESULT_FROM_WIN32( ERROR_NO_MATCH );
+
+    lang_len = wcslen( language );
+    lang_dash = wcschr( language, '-' );
+    lang_prefix_len = lang_dash ? (size_t)(lang_dash - language) : lang_len;
+
+    p = languages_list;
+    while (*p)
+    {
+        size_t item_len, item_prefix_len;
+        const WCHAR *item_dash;
+
+        sep = delimiter ? wcschr( p, delimiter ) : NULL;
+        item_len = sep ? (size_t)(sep - p) : wcslen( p );
+        if (item_len > 0)
+        {
+            if (item_len == lang_len && !wcsnicmp( p, language, lang_len ))
+            {
+                *distance = 1.0;
+                return S_OK;
+            }
+            item_dash = wcschr( p, '-' );
+            if (item_dash && (size_t)(item_dash - p) >= item_len) item_dash = NULL;
+            item_prefix_len = item_dash ? (size_t)(item_dash - p) : item_len;
+            if (item_prefix_len == lang_prefix_len && !wcsnicmp( p, language, lang_prefix_len ))
+            {
+                if (best < 0.75) best = 0.75;
+            }
+        }
+        if (!sep) break;
+        p = sep + 1;
+    }
+
+    *distance = best;
+    return best > 0.0 ? S_OK : HRESULT_FROM_WIN32( ERROR_NO_MATCH );
 }
 
 /***********************************************************************

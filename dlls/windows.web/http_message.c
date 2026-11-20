@@ -231,8 +231,19 @@ static HRESULT WINAPI content_BufferAllAsync( IHttpContent *This, void **op )
 }
 static HRESULT WINAPI content_ReadAsBufferAsync( IHttpContent *This, void **op )
 {
+    struct http_string_content *impl = impl_from_content( This );
+    void *buffer = NULL;
+    HRESULT hr;
+
     WDBG( "content_ReadAsBufferAsync\n" );
-    return content_BufferAllAsync( This, op );
+    if (impl->raw_bytes)
+        hr = create_mem_buffer_from_bytes( impl->raw_bytes, impl->raw_len, &buffer );
+    else
+        hr = create_mem_buffer_from_hstring( impl->content, &buffer );
+    if (FAILED( hr )) return hr;
+    hr = create_async_http_op( buffer, NULL, FALSE, op );
+    IUnknown_Release( (IUnknown *)buffer );
+    return hr;
 }
 static HRESULT WINAPI content_ReadAsInputStreamAsync( IHttpContent *This, void **op )
 {
@@ -285,8 +296,46 @@ static HRESULT WINAPI content_TryComputeLength( IHttpContent *This, UINT64 *leng
 }
 static HRESULT WINAPI content_WriteToStreamAsync( IHttpContent *This, void *stream, void **op )
 {
-    WDBG( "content_WriteToStreamAsync\n" );
-    return create_async_http_op( NULL, NULL, FALSE, op );
+    static const GUID IID_IOutputStream_m =
+        { 0x905a0fe6, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+    struct http_string_content *impl = impl_from_content( This );
+    void *buffer = NULL, *out_stream = NULL, *write_op = NULL;
+    UINT64 written = 0;
+    HRESULT hr;
+
+    WDBG( "content_WriteToStreamAsync stream %p raw_len %lu\n", stream, (unsigned long)impl->raw_len );
+    if (stream)
+    {
+        if (impl->raw_bytes && impl->raw_len)
+        {
+            hr = create_mem_buffer_from_bytes( impl->raw_bytes, impl->raw_len, &buffer );
+            written = impl->raw_len;
+        }
+        else if (impl->content)
+        {
+            UINT32 wlen = 0;
+            const WCHAR *wbuf = WindowsGetStringRawBuffer( impl->content, &wlen );
+            hr = create_mem_buffer_from_hstring( impl->content, &buffer );
+            written = (UINT64)WideCharToMultiByte( CP_UTF8, 0, wbuf, wlen, NULL, 0, NULL, NULL );
+        }
+        else
+            hr = E_FAIL;
+
+        if (SUCCEEDED( hr ) && buffer)
+        {
+            if (SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)stream, &IID_IOutputStream_m, &out_stream ) ) && out_stream)
+            {
+                /* IOutputStream::WriteAsync is slot 6 */
+                HRESULT (WINAPI *write_async)( void *, void *, void ** ) =
+                    (void *)((void *const *)(*(void *const **)out_stream))[6];
+                if (SUCCEEDED( write_async( out_stream, buffer, &write_op ) ) && write_op)
+                    IUnknown_Release( (IUnknown *)write_op );
+                IUnknown_Release( (IUnknown *)out_stream );
+            }
+            IUnknown_Release( (IUnknown *)buffer );
+        }
+    }
+    return create_async_http_op_u64( written, op );
 }
 HRESULT WINAPI content_get_Headers( void *iface, void **headers )
 {
@@ -330,22 +379,17 @@ static const struct http_content_vtbl http_content_vtbl = {
     content_GetIids,
     content_GetRuntimeClassName,
     content_GetTrustLevel,
-    /* Windows 8.1-era IHttpContent ABI (as consumed by WindowsPackageManager):
-     * methods first,
-    properties (ContentLength/ContentType/Headers) last. */
-    (HRESULT (STDMETHODCALLTYPE *)(IHttpContent *, __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_HttpProgress**))content_BufferAllAsync,
-    /* 6  GetBufferAsync */
-    content_TryComputeLength,
-    /* 7  TryComputeLength */
-    (HRESULT (STDMETHODCALLTYPE *)(IHttpContent *, __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIInputStream_HttpProgress**))content_ReadAsInputStreamAsync,
-    /* 8  ReadAsInputStreamAsync */
-    (HRESULT (STDMETHODCALLTYPE *)(IHttpContent *, __FIAsyncOperationWithProgress_2_HSTRING_HttpProgress**))content_ReadAsStringAsync,
-    /* 9  ReadAsStringAsync */
-    (HRESULT (STDMETHODCALLTYPE *)(IHttpContent *, IRAS *, __FIAsyncOperationWithProgress_2_UINT64_UINT64**))content_WriteToStreamAsync,
-    /* 10 WriteToStreamAsync */
-    content_get_ContentLength,
-    /* 11 ContentLength */
-    content_get_ContentType
+    /* Standard WinRT IHttpContent ({6B14A441-FBA7-4BD2-AF0A-839DE7C295DA}) ABI:
+     * 6 get_Headers, 7 BufferAllAsync, 8 ReadAsBufferAsync,
+     * 9 ReadAsInputStreamAsync, 10 ReadAsStringAsync,
+     * 11 TryComputeLength, 12 WriteToStreamAsync. */
+    (void *)content_get_Headers,
+    (void *)content_BufferAllAsync,
+    (void *)content_ReadAsBufferAsync,
+    (void *)content_ReadAsInputStreamAsync,
+    (void *)content_ReadAsStringAsync,
+    (void *)content_TryComputeLength,
+    (void *)content_WriteToStreamAsync
   },
   {
     /* 12 ContentType */
@@ -461,6 +505,70 @@ HRESULT create_http_string_content( HSTRING content, void **out )
     impl->vtbl_stringable = &http_content_stringable_vtbl;
     impl->ref = 1;
     if (content) WindowsDuplicateString( content, &impl->content );
+    *out = &impl->vtbl_content;
+    return S_OK;
+}
+
+HRESULT create_http_buffer_content( void *ibuf, UINT32 offset, UINT32 count, BOOL has_range, void **out )
+{
+    static const GUID IID_IBufferByteAccess_local =
+        { 0x905a0fef, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+    struct http_string_content *impl;
+    BYTE *src = NULL;
+    UINT32 len = 0;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl_content = &http_content_vtbl;
+    impl->vtbl_closable = &http_content_closable_vtbl;
+    impl->vtbl_stringable = &http_content_stringable_vtbl;
+    impl->ref = 1;
+
+    if (ibuf)
+    {
+        /* IBuffer::get_Length is slot 7 */
+        HRESULT (WINAPI *get_len)( void *, UINT32 * ) =
+            (void *)((void *const *)(*(void *const **)ibuf))[7];
+        void *bba = NULL;
+        if (get_len) get_len( ibuf, &len );
+        if (SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)ibuf, &IID_IBufferByteAccess_local, &bba ) ) && bba)
+        {
+            /* IBufferByteAccess::Buffer is slot 3 */
+            HRESULT (WINAPI *get_buf)( void *, BYTE ** ) =
+                (void *)((void *const *)(*(void *const **)bba))[3];
+            if (get_buf) get_buf( bba, &src );
+            IUnknown_Release( (IUnknown *)bba );
+        }
+    }
+    if (src && len > 0)
+    {
+        UINT32 start = has_range ? min( offset, len ) : 0;
+        UINT32 avail = len - start;
+        UINT32 take = has_range ? min( count, avail ) : avail;
+        if (take > 0)
+        {
+            impl->raw_bytes = malloc( take );
+            if (impl->raw_bytes)
+            {
+                int wlen;
+                memcpy( impl->raw_bytes, src + start, take );
+                impl->raw_len = take;
+                wlen = MultiByteToWideChar( CP_UTF8, 0, (const char *)impl->raw_bytes, take, NULL, 0 );
+                if (wlen > 0)
+                {
+                    WCHAR *wbuf = malloc( (wlen + 1) * sizeof(WCHAR) );
+                    if (wbuf)
+                    {
+                        MultiByteToWideChar( CP_UTF8, 0, (const char *)impl->raw_bytes, take, wbuf, wlen );
+                        wbuf[wlen] = 0;
+                        WindowsCreateString( wbuf, wlen, &impl->content );
+                        free( wbuf );
+                    }
+                }
+            }
+        }
+    }
     *out = &impl->vtbl_content;
     return S_OK;
 }
@@ -1160,10 +1268,20 @@ static inline struct uri_obj *impl_from_uri( void *iface ) { return (struct uri_
 static HRESULT WINAPI uri_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct uri_obj *impl = impl_from_uri( iface );
-    WDBG( "uri_QueryInterface\n" );
-    *out = &impl->vtbl;
-    InterlockedIncrement( &impl->ref );
-    return S_OK;
+    WDBG( "uri_QueryInterface %s\n", debugstr_guid( iid ) );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IUriRuntimeClass ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI uri_AddRef( void *iface ) { return InterlockedIncrement( &impl_from_uri( iface )->ref ); }
 static ULONG WINAPI uri_Release( void *iface )

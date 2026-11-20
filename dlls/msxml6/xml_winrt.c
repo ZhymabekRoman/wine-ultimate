@@ -69,6 +69,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(msxml6);
 
 #define XSLT_PROCESSOR_CLASS L"Windows.Data.Xml.Xsl.XsltProcessor"
+#define XML_LOAD_SETTINGS_CLASS L"Windows.Data.Xml.Dom.XmlLoadSettings"
 
 static inline BOOL is_element( IXMLDOMNode *node )
 {
@@ -2206,11 +2207,32 @@ static HRESULT WINAPI document_io_LoadXml( IXmlDocumentIO *iface, HSTRING xml )
 static HRESULT WINAPI document_io_LoadXmlWithSettings( IXmlDocumentIO *iface, HSTRING xml,
                                                        IXmlLoadSettings *load_settings )
 {
-    /* The settings msxml6 exposes by default (no DTD validation, no external
-     * resolution, synchronous load) are the XmlLoadSettings defaults, so the
-     * settings object carries no behaviour this load path has to apply. */
+    struct xml_document *impl = impl_from_IXmlDocumentIO( iface );
+    HRESULT hr;
+
     TRACE( "iface %p, xml %s, load_settings %p.\n", iface, debugstr_hstring( xml ), load_settings );
-    return document_io_LoadXml( iface, xml );
+
+    /* Project the XmlLoadSettings flags onto the msxml DOM before parsing.  The
+     * flags drive the libxml2 load: resolveExternals=FALSE stops the parser
+     * fetching a document's external DTD subset (Apple plist resources declare
+     * one by DOCTYPE, and the external fetch is what makes the parse fail),
+     * validateOnParse turns on schema validation, and ElementContentWhiteSpace
+     * maps to preserveWhiteSpace.  A NULL settings object leaves the DOM at its
+     * own defaults. */
+    if (load_settings && impl->document)
+    {
+        boolean b;
+
+        if (SUCCEEDED( IXmlLoadSettings_get_ValidateOnParse( load_settings, &b )))
+            IXMLDOMDocument_put_validateOnParse( impl->document, b ? VARIANT_TRUE : VARIANT_FALSE );
+        if (SUCCEEDED( IXmlLoadSettings_get_ResolveExternals( load_settings, &b )))
+            IXMLDOMDocument_put_resolveExternals( impl->document, b ? VARIANT_TRUE : VARIANT_FALSE );
+        if (SUCCEEDED( IXmlLoadSettings_get_ElementContentWhiteSpace( load_settings, &b )))
+            IXMLDOMDocument_put_preserveWhiteSpace( impl->document, b ? VARIANT_TRUE : VARIANT_FALSE );
+    }
+
+    hr = document_io_LoadXml( iface, xml );
+    return hr;
 }
 
 static HRESULT WINAPI document_io_SaveToFileAsync( IXmlDocumentIO *iface,
@@ -2802,6 +2824,288 @@ static struct xslt_processor_factory xslt_processor_factory =
     1
 };
 
+/* Windows.Data.Xml.Dom.XmlLoadSettings.  A property-bag activatable class: the
+ * settings it carries (max element depth, DTD/external/validation flags, the
+ * white-space-preserving flag) are consumed by XmlDocument's WithSettings load
+ * paths.  Defaults match Windows: depth 256, DTD prohibited, externals not
+ * resolved, no validation, element-content white space preserved. */
+struct xml_load_settings
+{
+    IXmlLoadSettings IXmlLoadSettings_iface;
+    LONG ref;
+    UINT32 max_element_depth;
+    boolean prohibit_dtd;
+    boolean resolve_externals;
+    boolean validate_on_parse;
+    boolean element_content_white_space;
+};
+
+static inline struct xml_load_settings *impl_from_xml_load_settings( IXmlLoadSettings *iface )
+{
+    return CONTAINING_RECORD( iface, struct xml_load_settings, IXmlLoadSettings_iface );
+}
+
+static HRESULT WINAPI xml_load_settings_QueryInterface( IXmlLoadSettings *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown )
+            || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject )
+            || IsEqualGUID( iid, &IID_IXmlLoadSettings ))
+    {
+        IUnknown_AddRef( iface );
+        *out = iface;
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI xml_load_settings_AddRef( IXmlLoadSettings *iface )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI xml_load_settings_Release( IXmlLoadSettings *iface )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        TRACE( "destroying %p\n", iface );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI xml_load_settings_GetIids( IXmlLoadSettings *iface, ULONG *iid_count, IID **iids )
+{
+    if (!iid_count || !iids) return E_POINTER;
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_GetRuntimeClassName( IXmlLoadSettings *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( XML_LOAD_SETTINGS_CLASS, wcslen( XML_LOAD_SETTINGS_CLASS ), class_name );
+}
+
+static HRESULT WINAPI xml_load_settings_GetTrustLevel( IXmlLoadSettings *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_get_MaxElementDepth( IXmlLoadSettings *iface, UINT32 *value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    if (!value) return E_POINTER;
+    *value = impl->max_element_depth;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_put_MaxElementDepth( IXmlLoadSettings *iface, UINT32 value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    impl->max_element_depth = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_get_ProhibitDtd( IXmlLoadSettings *iface, boolean *value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    if (!value) return E_POINTER;
+    *value = impl->prohibit_dtd;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_put_ProhibitDtd( IXmlLoadSettings *iface, boolean value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    impl->prohibit_dtd = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_get_ResolveExternals( IXmlLoadSettings *iface, boolean *value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    if (!value) return E_POINTER;
+    *value = impl->resolve_externals;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_put_ResolveExternals( IXmlLoadSettings *iface, boolean value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    impl->resolve_externals = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_get_ValidateOnParse( IXmlLoadSettings *iface, boolean *value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    if (!value) return E_POINTER;
+    *value = impl->validate_on_parse;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_put_ValidateOnParse( IXmlLoadSettings *iface, boolean value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    impl->validate_on_parse = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_get_ElementContentWhiteSpace( IXmlLoadSettings *iface, boolean *value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    if (!value) return E_POINTER;
+    *value = impl->element_content_white_space;
+    return S_OK;
+}
+
+static HRESULT WINAPI xml_load_settings_put_ElementContentWhiteSpace( IXmlLoadSettings *iface, boolean value )
+{
+    struct xml_load_settings *impl = impl_from_xml_load_settings( iface );
+    impl->element_content_white_space = value;
+    return S_OK;
+}
+
+static const IXmlLoadSettingsVtbl xml_load_settings_vtbl =
+{
+    xml_load_settings_QueryInterface,
+    xml_load_settings_AddRef,
+    xml_load_settings_Release,
+    xml_load_settings_GetIids,
+    xml_load_settings_GetRuntimeClassName,
+    xml_load_settings_GetTrustLevel,
+    xml_load_settings_get_MaxElementDepth,
+    xml_load_settings_put_MaxElementDepth,
+    xml_load_settings_get_ProhibitDtd,
+    xml_load_settings_put_ProhibitDtd,
+    xml_load_settings_get_ResolveExternals,
+    xml_load_settings_put_ResolveExternals,
+    xml_load_settings_get_ValidateOnParse,
+    xml_load_settings_put_ValidateOnParse,
+    xml_load_settings_get_ElementContentWhiteSpace,
+    xml_load_settings_put_ElementContentWhiteSpace,
+};
+
+static HRESULT create_xml_load_settings( struct xml_load_settings **out )
+{
+    struct xml_load_settings *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+
+    impl->IXmlLoadSettings_iface.lpVtbl = &xml_load_settings_vtbl;
+    impl->ref = 1;
+    impl->max_element_depth = 256;
+    impl->prohibit_dtd = TRUE;
+    impl->resolve_externals = FALSE;
+    impl->validate_on_parse = FALSE;
+    impl->element_content_white_space = TRUE;
+    *out = impl;
+    return S_OK;
+}
+
+struct xml_load_settings_factory
+{
+    IActivationFactory IActivationFactory_iface;
+    LONG ref;
+};
+
+static inline struct xml_load_settings_factory *impl_from_load_settings_factory( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct xml_load_settings_factory, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI load_settings_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown )
+            || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject )
+            || IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        IUnknown_AddRef( iface );
+        *out = iface;
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI load_settings_factory_AddRef( IActivationFactory *iface )
+{
+    struct xml_load_settings_factory *impl = impl_from_load_settings_factory( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI load_settings_factory_Release( IActivationFactory *iface )
+{
+    struct xml_load_settings_factory *impl = impl_from_load_settings_factory( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI load_settings_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
+{
+    if (!iid_count || !iids) return E_POINTER;
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI load_settings_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( XML_LOAD_SETTINGS_CLASS, wcslen( XML_LOAD_SETTINGS_CLASS ), class_name );
+}
+
+static HRESULT WINAPI load_settings_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI load_settings_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    struct xml_load_settings *impl;
+    HRESULT hr;
+
+    TRACE( "iface %p, instance %p.\n", iface, instance );
+
+    if (!instance) return E_POINTER;
+    if (FAILED( hr = create_xml_load_settings( &impl ))) return hr;
+
+    *instance = (IInspectable *)&impl->IXmlLoadSettings_iface;
+    return S_OK;
+}
+
+static const IActivationFactoryVtbl load_settings_factory_vtbl =
+{
+    load_settings_factory_QueryInterface,
+    load_settings_factory_AddRef,
+    load_settings_factory_Release,
+    load_settings_factory_GetIids,
+    load_settings_factory_GetRuntimeClassName,
+    load_settings_factory_GetTrustLevel,
+    load_settings_factory_ActivateInstance,
+};
+
+static struct xml_load_settings_factory xml_load_settings_factory =
+{
+    { &load_settings_factory_vtbl },
+    1
+};
+
 /* ------------------------------------------------------------------ exports */
 
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
@@ -2822,6 +3126,11 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     {
         IUnknown_AddRef( (IUnknown *)&xslt_processor_factory.IActivationFactory_iface );
         *factory = &xslt_processor_factory.IActivationFactory_iface;
+    }
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Data_Xml_Dom_XmlLoadSettings ))
+    {
+        IUnknown_AddRef( (IUnknown *)&xml_load_settings_factory.IActivationFactory_iface );
+        *factory = &xml_load_settings_factory.IActivationFactory_iface;
     }
 
     if (*factory) return S_OK;

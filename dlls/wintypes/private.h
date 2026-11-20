@@ -70,7 +70,9 @@ struct com_interface_entry
 extern IActivationFactory *data_writer_activation_factory;
 extern IActivationFactory *buffer_activation_factory;
 extern IActivationFactory *property_set_factory;
+extern IActivationFactory *string_map_factory;
 extern IActivationFactory *uri_activation_factory;
+extern IActivationFactory *www_form_url_decoder_factory;
 extern HRESULT create_double_property_value( double val, IInspectable **out );
 extern HRESULT create_boolean_property_value( boolean val, IInspectable **out );
 

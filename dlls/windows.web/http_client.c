@@ -168,7 +168,11 @@ static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri,
 {
     static const WCHAR ua[] = L"WinGet/1.29";
     URL_COMPONENTS uc = { sizeof(uc) };
-    WCHAR host[256], path[2048], extra[1024];
+    WCHAR host[256];
+    DWORD uri_len = uri ? lstrlenW( uri ) : 0;
+    DWORD path_cap = uri_len + 256;
+    DWORD extra_cap = uri_len + 256;
+    WCHAR *path = NULL, *extra = NULL;
     WCHAR *hdr = NULL;
     char *body = NULL;
     WCHAR *bodyW = NULL;
@@ -180,24 +184,32 @@ static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri,
 
     WDBG( "http_fetch %s %s\n", debugstr_w( method ), debugstr_w( uri ) );
 
+    if (!(path = malloc( path_cap * sizeof(WCHAR) )) ||
+        !(extra = malloc( extra_cap * sizeof(WCHAR) )))
+    {
+        free( path );
+        free( extra );
+        return E_OUTOFMEMORY;
+    }
+
     uc.lpszHostName = host;
     uc.dwHostNameLength = ARRAYSIZE(host);
     uc.lpszUrlPath = path;
-    uc.dwUrlPathLength = ARRAYSIZE(path);
+    uc.dwUrlPathLength = path_cap;
     uc.lpszExtraInfo = extra;
-    uc.dwExtraInfoLength = ARRAYSIZE(extra);
+    uc.dwExtraInfoLength = extra_cap;
 
     /* the winhttp builtin's TLS connect is intermittently flaky (12029 cannot-connect),
      * retry the whole exchange a few times before giving up */
     for (unsigned attempt = 0; attempt < 3; attempt++)
     {
     uc.dwHostNameLength = ARRAYSIZE(host);
-    uc.dwUrlPathLength = ARRAYSIZE(path);
-    uc.dwExtraInfoLength = ARRAYSIZE(extra);
+    uc.dwUrlPathLength = path_cap;
+    uc.dwExtraInfoLength = extra_cap;
     if (session) { WinHttpCloseHandle( session ); session = NULL; }
     if (!(session = WinHttpOpen( ua, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
                                  WINHTTP_NO_PROXY_BYPASS, 0 )))
-        return E_FAIL;
+        goto done;
     if (!WinHttpCrackUrl( uri, 0, 0, &uc ))
         goto done;
     if (!(conn = WinHttpConnect( session, host, uc.nPort, 0 )))
@@ -368,6 +380,8 @@ done:
     if (req) WinHttpCloseHandle( req );
     if (conn) WinHttpCloseHandle( conn );
     if (session) WinHttpCloseHandle( session );
+    free( path );
+    free( extra );
     free( hdr );
     free( body );
     free( bodyW );
@@ -643,15 +657,22 @@ static const struct http_client_factory_impl http_client_factory_obj =
 IActivationFactory *http_client_factory = (IActivationFactory *)&http_client_factory_obj;
 
 /* HttpRequestMessage factory */
+static const void *http_request_activation_obj;
+static const void *http_request_factory_obj;
+
 static HRESULT WINAPI http_request_factory_QueryInterface( IActivationFactory *This, REFIID iid, void **out )
 {
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IHttpRequestMessageFactory ))
+        IsEqualGUID( iid, &IID_IActivationFactory ))
     {
-        *out = This;
+        *out = &http_request_activation_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpRequestMessageFactory ))
+    {
+        *out = &http_request_factory_obj;
         return S_OK;
     }
     *out = NULL;
@@ -677,6 +698,15 @@ static HRESULT WINAPI http_request_factory_Create( IActivationFactory *This, voi
     return create_http_request( a, b, (void **)c );
 }
 
+static const IActivationFactoryVtbl http_request_activation_vtbl = {
+    http_request_factory_QueryInterface,
+    http_request_factory_AddRef,
+    http_request_factory_Release,
+    http_request_factory_GetIids,
+    http_request_factory_GetRuntimeClassName,
+    http_request_factory_GetTrustLevel,
+    http_request_factory_ActivateInstance,
+};
 static const struct request_factory_vtbl http_request_factory_vtbl = {
   {
     http_request_factory_QueryInterface,
@@ -692,8 +722,9 @@ static const struct request_factory_vtbl http_request_factory_vtbl = {
     http_request_factory_Create
   }
 };
+static const void *http_request_activation_obj = (const void *)&http_request_activation_vtbl;
 static const void *http_request_factory_obj = (const void *)&http_request_factory_vtbl;
-IActivationFactory *http_request_factory = (IActivationFactory *)&http_request_factory_obj;
+IActivationFactory *http_request_factory = (IActivationFactory *)&http_request_activation_obj;
 
 /* HttpResponseMessage factory */
 static HRESULT WINAPI http_response_factory_QueryInterface( IActivationFactory *This, REFIID iid, void **out )
@@ -806,13 +837,84 @@ static const struct string_content_factory_vtbl http_string_content_factory_vtbl
     (HRESULT (STDMETHODCALLTYPE *)(IActivationFactory *, IInspectable **))http_string_content_factory_CreateFromString
   },
   {
-    http_string_content_factory_ActivateInstance,
     http_string_content_factory_CreateFromStringWithEncoding,
-    http_string_content_factory_CreateFromStringWithEncodingAndMediaType
+    http_string_content_factory_CreateFromStringWithEncodingAndMediaType,
+    http_string_content_factory_ActivateInstance
   }
 };
 static const void *http_string_content_factory_obj = (const void *)&http_string_content_factory_vtbl;
 IActivationFactory *http_string_content_factory = (IActivationFactory *)&http_string_content_factory_obj;
+
+/* HttpBufferContent factory (IHttpBufferContentFactory {bc20c193-c41f-4ff7-9123-6435736eadc2}) */
+HRESULT create_http_buffer_content( void *ibuf, UINT32 offset, UINT32 count, BOOL has_range, void **out );
+static const GUID IID_IHttpBufferContentFactory =
+    { 0xbc20c193, 0xc41f, 0x4ff7, { 0x91, 0x23, 0x64, 0x35, 0x73, 0x6e, 0xad, 0xc2 } };
+static const void *http_buffer_content_activation_obj;
+static const void *http_buffer_content_factory_obj;
+
+static HRESULT WINAPI http_buffer_content_factory_QueryInterface( IActivationFactory *This, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &http_buffer_content_activation_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpBufferContentFactory ))
+    {
+        *out = &http_buffer_content_factory_obj;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI http_buffer_content_factory_AddRef( IActivationFactory *This ) { return 2; }
+static ULONG WINAPI http_buffer_content_factory_Release( IActivationFactory *This ) { return 1; }
+static HRESULT WINAPI http_buffer_content_factory_GetIids( IActivationFactory *This, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI http_buffer_content_factory_GetRuntimeClassName( IActivationFactory *This, HSTRING *n )
+{
+    static const WCHAR class_name[] = L"Windows.Web.Http.HttpBufferContent";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
+}
+static HRESULT WINAPI http_buffer_content_factory_GetTrustLevel( IActivationFactory *This, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI http_buffer_content_factory_ActivateInstance( IActivationFactory *This, IInspectable **instance )
+{
+    return create_http_buffer_content( NULL, 0, 0, FALSE, (void **)instance );
+}
+static HRESULT WINAPI http_buffer_content_factory_CreateFromBuffer( void *This, void *content, void **value )
+{
+    return create_http_buffer_content( content, 0, 0, FALSE, value );
+}
+static HRESULT WINAPI http_buffer_content_factory_CreateFromBufferWithOffset( void *This, void *content, UINT32 offset, UINT32 count, void **value )
+{
+    return create_http_buffer_content( content, offset, count, TRUE, value );
+}
+static const void *http_buffer_content_activation_vtbl[7] =
+{
+    http_buffer_content_factory_QueryInterface,
+    http_buffer_content_factory_AddRef,
+    http_buffer_content_factory_Release,
+    http_buffer_content_factory_GetIids,
+    http_buffer_content_factory_GetRuntimeClassName,
+    http_buffer_content_factory_GetTrustLevel,
+    http_buffer_content_factory_ActivateInstance,
+};
+static const void *http_buffer_content_factory_vtbl[8] =
+{
+    http_buffer_content_factory_QueryInterface,
+    http_buffer_content_factory_AddRef,
+    http_buffer_content_factory_Release,
+    http_buffer_content_factory_GetIids,
+    http_buffer_content_factory_GetRuntimeClassName,
+    http_buffer_content_factory_GetTrustLevel,
+    http_buffer_content_factory_CreateFromBuffer,
+    http_buffer_content_factory_CreateFromBufferWithOffset,
+};
+static const void *http_buffer_content_activation_obj = (const void *)http_buffer_content_activation_vtbl;
+static const void *http_buffer_content_factory_obj = (const void *)http_buffer_content_factory_vtbl;
+IActivationFactory *http_buffer_content_factory = (IActivationFactory *)&http_buffer_content_activation_obj;
 
 /* HttpMethod factory */
 static const void *http_method_activation_obj;

@@ -3,10 +3,37 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(web);
 
+static const GUID IID_IJsonObjectWithDefaultValues_local =
+    {0xd960d2a2, 0xb7f0, 0x4f00, {0x8e, 0x44, 0xd8, 0x2c, 0xf4, 0x15, 0xea, 0x13}};
+
+typedef struct IJsonObjectWithDefaultValues_local IJsonObjectWithDefaultValues_local;
+typedef struct IJsonObjectWithDefaultValues_localVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IJsonObjectWithDefaultValues_local *iface, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IJsonObjectWithDefaultValues_local *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(IJsonObjectWithDefaultValues_local *iface);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IJsonObjectWithDefaultValues_local *iface, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IJsonObjectWithDefaultValues_local *iface, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IJsonObjectWithDefaultValues_local *iface, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *GetNamedValue)(IJsonObjectWithDefaultValues_local *iface, HSTRING name, IJsonValue *def, IJsonValue **out);
+    HRESULT (STDMETHODCALLTYPE *GetNamedObject)(IJsonObjectWithDefaultValues_local *iface, HSTRING name, IJsonObject *def, IJsonObject **out);
+    HRESULT (STDMETHODCALLTYPE *GetNamedString)(IJsonObjectWithDefaultValues_local *iface, HSTRING name, HSTRING def, HSTRING *out);
+    HRESULT (STDMETHODCALLTYPE *GetNamedArray)(IJsonObjectWithDefaultValues_local *iface, HSTRING name, IJsonArray *def, IJsonArray **out);
+    HRESULT (STDMETHODCALLTYPE *GetNamedNumber)(IJsonObjectWithDefaultValues_local *iface, HSTRING name, DOUBLE def, DOUBLE *out);
+    HRESULT (STDMETHODCALLTYPE *GetNamedBoolean)(IJsonObjectWithDefaultValues_local *iface, HSTRING name, boolean def, boolean *out);
+} IJsonObjectWithDefaultValues_localVtbl;
+
+struct IJsonObjectWithDefaultValues_local
+{
+    const IJsonObjectWithDefaultValues_localVtbl *lpVtbl;
+};
+
 struct json_object
 {
     IJsonObject IJsonObject_iface;
     IJsonValueInternal IJsonValueInternal_iface;
+    IJsonObjectWithDefaultValues_local IJsonObjectWithDefaultValues_iface;
+    __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue IMap_iface;
     LONG ref;
 
     cJSON *node;
@@ -75,6 +102,20 @@ static HRESULT WINAPI json_object_QueryInterface( IJsonObject *iface, REFIID iid
     if (IsEqualGUID( iid, &IID_IJsonValueInternal ))
     {
         *out = &impl->IJsonValueInternal_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IJsonObjectWithDefaultValues_local ))
+    {
+        *out = &impl->IJsonObjectWithDefaultValues_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID___FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue ))
+    {
+        *out = &impl->IMap_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -311,6 +352,220 @@ static const struct IJsonObjectVtbl json_object_vtbl =
     json_object_GetNamedBoolean,
 };
 
+static inline struct json_object *impl_from_IJsonObjectWithDefaultValues( IJsonObjectWithDefaultValues_local *iface )
+{
+    return CONTAINING_RECORD( iface, struct json_object, IJsonObjectWithDefaultValues_iface );
+}
+
+static HRESULT WINAPI json_obj_def_QueryInterface( IJsonObjectWithDefaultValues_local *iface, REFIID iid, void **out )
+{
+    return IJsonObject_QueryInterface( &impl_from_IJsonObjectWithDefaultValues( iface )->IJsonObject_iface, iid, out );
+}
+
+static ULONG WINAPI json_obj_def_AddRef( IJsonObjectWithDefaultValues_local *iface )
+{
+    return IJsonObject_AddRef( &impl_from_IJsonObjectWithDefaultValues( iface )->IJsonObject_iface );
+}
+
+static ULONG WINAPI json_obj_def_Release( IJsonObjectWithDefaultValues_local *iface )
+{
+    return IJsonObject_Release( &impl_from_IJsonObjectWithDefaultValues( iface )->IJsonObject_iface );
+}
+
+static HRESULT WINAPI json_obj_def_GetIids( IJsonObjectWithDefaultValues_local *iface, ULONG *count, IID **iids )
+{
+    return IJsonObject_GetIids( &impl_from_IJsonObjectWithDefaultValues( iface )->IJsonObject_iface, count, iids );
+}
+
+static HRESULT WINAPI json_obj_def_GetRuntimeClassName( IJsonObjectWithDefaultValues_local *iface, HSTRING *name )
+{
+    return IJsonObject_GetRuntimeClassName( &impl_from_IJsonObjectWithDefaultValues( iface )->IJsonObject_iface, name );
+}
+
+static HRESULT WINAPI json_obj_def_GetTrustLevel( IJsonObjectWithDefaultValues_local *iface, TrustLevel *level )
+{
+    return IJsonObject_GetTrustLevel( &impl_from_IJsonObjectWithDefaultValues( iface )->IJsonObject_iface, level );
+}
+
+static HRESULT WINAPI json_obj_def_GetNamedValue( IJsonObjectWithDefaultValues_local *iface, HSTRING name, IJsonValue *def, IJsonValue **out )
+{
+    struct json_object *impl = impl_from_IJsonObjectWithDefaultValues( iface );
+    if (SUCCEEDED(json_object_GetNamedValue( &impl->IJsonObject_iface, name, out )))
+        return S_OK;
+    *out = def;
+    if (def) IJsonValue_AddRef( def );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_obj_def_GetNamedObject( IJsonObjectWithDefaultValues_local *iface, HSTRING name, IJsonObject *def, IJsonObject **out )
+{
+    struct json_object *impl = impl_from_IJsonObjectWithDefaultValues( iface );
+    if (SUCCEEDED(json_object_GetNamedObject( &impl->IJsonObject_iface, name, out )))
+        return S_OK;
+    *out = def;
+    if (def) IJsonObject_AddRef( def );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_obj_def_GetNamedString( IJsonObjectWithDefaultValues_local *iface, HSTRING name, HSTRING def, HSTRING *out )
+{
+    struct json_object *impl = impl_from_IJsonObjectWithDefaultValues( iface );
+    if (SUCCEEDED(json_object_GetNamedString( &impl->IJsonObject_iface, name, out )))
+        return S_OK;
+    return WindowsDuplicateString( def, out );
+}
+
+static HRESULT WINAPI json_obj_def_GetNamedArray( IJsonObjectWithDefaultValues_local *iface, HSTRING name, IJsonArray *def, IJsonArray **out )
+{
+    struct json_object *impl = impl_from_IJsonObjectWithDefaultValues( iface );
+    if (SUCCEEDED(json_object_GetNamedArray( &impl->IJsonObject_iface, name, out )))
+        return S_OK;
+    *out = def;
+    if (def) IJsonArray_AddRef( def );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_obj_def_GetNamedNumber( IJsonObjectWithDefaultValues_local *iface, HSTRING name, DOUBLE def, DOUBLE *out )
+{
+    struct json_object *impl = impl_from_IJsonObjectWithDefaultValues( iface );
+    if (SUCCEEDED(json_object_GetNamedNumber( &impl->IJsonObject_iface, name, out )))
+        return S_OK;
+    *out = def;
+    return S_OK;
+}
+
+static HRESULT WINAPI json_obj_def_GetNamedBoolean( IJsonObjectWithDefaultValues_local *iface, HSTRING name, boolean def, boolean *out )
+{
+    struct json_object *impl = impl_from_IJsonObjectWithDefaultValues( iface );
+    if (SUCCEEDED(json_object_GetNamedBoolean( &impl->IJsonObject_iface, name, out )))
+        return S_OK;
+    *out = def;
+    return S_OK;
+}
+
+static const IJsonObjectWithDefaultValues_localVtbl json_object_def_vtbl =
+{
+    json_obj_def_QueryInterface,
+    json_obj_def_AddRef,
+    json_obj_def_Release,
+    json_obj_def_GetIids,
+    json_obj_def_GetRuntimeClassName,
+    json_obj_def_GetTrustLevel,
+    json_obj_def_GetNamedValue,
+    json_obj_def_GetNamedObject,
+    json_obj_def_GetNamedString,
+    json_obj_def_GetNamedArray,
+    json_obj_def_GetNamedNumber,
+    json_obj_def_GetNamedBoolean,
+};
+
+static inline struct json_object *impl_from_IMap( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface )
+{
+    return CONTAINING_RECORD( iface, struct json_object, IMap_iface );
+}
+
+static HRESULT WINAPI json_obj_map_QueryInterface( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, REFIID iid, void **out )
+{
+    return IJsonObject_QueryInterface( &impl_from_IMap( iface )->IJsonObject_iface, iid, out );
+}
+
+static ULONG WINAPI json_obj_map_AddRef( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface )
+{
+    return IJsonObject_AddRef( &impl_from_IMap( iface )->IJsonObject_iface );
+}
+
+static ULONG WINAPI json_obj_map_Release( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface )
+{
+    return IJsonObject_Release( &impl_from_IMap( iface )->IJsonObject_iface );
+}
+
+static HRESULT WINAPI json_obj_map_GetIids( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, ULONG *count, IID **iids )
+{
+    return IJsonObject_GetIids( &impl_from_IMap( iface )->IJsonObject_iface, count, iids );
+}
+
+static HRESULT WINAPI json_obj_map_GetRuntimeClassName( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, HSTRING *name )
+{
+    return IJsonObject_GetRuntimeClassName( &impl_from_IMap( iface )->IJsonObject_iface, name );
+}
+
+static HRESULT WINAPI json_obj_map_GetTrustLevel( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, TrustLevel *level )
+{
+    return IJsonObject_GetTrustLevel( &impl_from_IMap( iface )->IJsonObject_iface, level );
+}
+
+static HRESULT WINAPI json_obj_map_Lookup( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, HSTRING key, IJsonValue **value )
+{
+    return json_object_GetNamedValue( &impl_from_IMap( iface )->IJsonObject_iface, key, value );
+}
+
+static HRESULT WINAPI json_obj_map_get_Size( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, unsigned int *size )
+{
+    struct json_object *impl = impl_from_IMap( iface );
+    if (!size) return E_POINTER;
+    *size = (unsigned int)cJSON_GetArraySize( impl->node );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_obj_map_HasKey( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, HSTRING key, boolean *found )
+{
+    IJsonValue *val = NULL;
+    if (!found) return E_POINTER;
+    if (SUCCEEDED(json_object_GetNamedValue( &impl_from_IMap( iface )->IJsonObject_iface, key, &val )))
+    {
+        if (val) IJsonValue_Release( val );
+        *found = TRUE;
+    }
+    else
+        *found = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI json_obj_map_GetView( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface,
+        __FIMapView_2_HSTRING_Windows__CData__CJson__CIJsonValue **view )
+{
+    if (view) *view = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI json_obj_map_Insert( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface,
+        HSTRING key, IJsonValue *value, boolean *replaced )
+{
+    boolean had = FALSE;
+    HRESULT hr;
+    json_obj_map_HasKey( iface, key, &had );
+    hr = json_object_SetNamedValue( &impl_from_IMap( iface )->IJsonObject_iface, key, value );
+    if (replaced) *replaced = had;
+    return hr;
+}
+
+static HRESULT WINAPI json_obj_map_Remove( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface, HSTRING key )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI json_obj_map_Clear( __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue *iface )
+{
+    return S_OK;
+}
+
+static const __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValueVtbl json_object_map_vtbl =
+{
+    json_obj_map_QueryInterface,
+    json_obj_map_AddRef,
+    json_obj_map_Release,
+    json_obj_map_GetIids,
+    json_obj_map_GetRuntimeClassName,
+    json_obj_map_GetTrustLevel,
+    json_obj_map_Lookup,
+    json_obj_map_get_Size,
+    json_obj_map_HasKey,
+    json_obj_map_GetView,
+    json_obj_map_Insert,
+    json_obj_map_Remove,
+    json_obj_map_Clear,
+};
+
 HRESULT create_json_object( cJSON *node, struct json_root *root, IJsonObject **out )
 {
     struct json_object *impl;
@@ -322,6 +577,8 @@ HRESULT create_json_object( cJSON *node, struct json_root *root, IJsonObject **o
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IJsonObject_iface.lpVtbl = &json_object_vtbl;
     impl->IJsonValueInternal_iface.lpVtbl = &json_object_internal_vtbl;
+    impl->IJsonObjectWithDefaultValues_iface.lpVtbl = &json_object_def_vtbl;
+    impl->IMap_iface.lpVtbl = &json_object_map_vtbl;
     impl->ref = 1;
     impl->node = node;
     impl->root = root;

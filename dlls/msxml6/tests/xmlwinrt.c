@@ -44,6 +44,8 @@ static const IID IID_IXmlDocumentIO2_loc     = {0x5d034661, 0x7bd8, 0x4ad5, {0x9
 static const IID IID_IXmlDocumentIO_loc      = {0x6cd0e74e, 0xee65, 0x4489, {0x9e,0xbf, 0xca,0x43,0xe8,0x7b,0xa6,0x37}};
 /* :197 IXmlDocument */
 static const IID IID_IXmlDocument_loc        = {0xf7f3a506, 0x1e87, 0x42d6, {0xbc,0xfb, 0xb8,0xc8,0x09,0xfa,0x54,0x94}};
+/* :351 IXmlLoadSettings */
+static const IID IID_IXmlLoadSettings_loc    = {0x58aa07a8, 0xfed6, 0x46f7, {0xb4,0xc5, 0xfb,0x1b,0xa7,0x21,0x08,0xd6}};
 /* :314 IXmlElement */
 static const IID IID_IXmlElement_loc         = {0x2dfb8a1f, 0x6b10, 0x4ef8, {0x9f,0x83, 0xef,0xcc,0xe8,0xfa,0xec,0x37}};
 /* :370 IXmlNamedNodeMap */
@@ -317,6 +319,102 @@ static void test_XsltProcessor(void)
     IActivationFactory_Release( factory );
 }
 
+static void test_XmlLoadSettings(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_Data_Xml_Dom_XmlLoadSettings;
+    IXmlLoadSettings *settings;
+    IInspectable *instance;
+    IActivationFactory *factory;
+    HSTRING str;
+    boolean b;
+    UINT32 depth;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory_loc, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    hr = IActivationFactory_ActivateInstance( factory, &instance );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    check_interface( instance, &IID_IInspectable_loc, TRUE );
+    check_interface( instance, &IID_IAgileObject_loc, TRUE );
+    check_interface( instance, &IID_IXmlLoadSettings_loc, TRUE );
+
+    hr = IInspectable_QueryInterface( instance, &IID_IXmlLoadSettings_loc, (void **)&settings );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* Windows defaults: depth 256, DTD prohibited, externals unresolved, no
+     * validation, element-content white space preserved. */
+    depth = 0;
+    hr = IXmlLoadSettings_get_MaxElementDepth( settings, &depth );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( depth == 256, "got depth %u.\n", depth );
+
+    b = FALSE;
+    hr = IXmlLoadSettings_get_ProhibitDtd( settings, &b );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( b == TRUE, "got prohibit_dtd %d.\n", b );
+
+    b = TRUE;
+    hr = IXmlLoadSettings_get_ResolveExternals( settings, &b );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( b == FALSE, "got resolve_externals %d.\n", b );
+
+    b = TRUE;
+    hr = IXmlLoadSettings_get_ValidateOnParse( settings, &b );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( b == FALSE, "got validate_on_parse %d.\n", b );
+
+    b = FALSE;
+    hr = IXmlLoadSettings_get_ElementContentWhiteSpace( settings, &b );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( b == TRUE, "got element_content_white_space %d.\n", b );
+
+    /* every property round-trips */
+    hr = IXmlLoadSettings_put_MaxElementDepth( settings, 42 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    depth = 0;
+    hr = IXmlLoadSettings_get_MaxElementDepth( settings, &depth );
+    ok( hr == S_OK && depth == 42, "got hr %#lx depth %u.\n", hr, depth );
+
+    hr = IXmlLoadSettings_put_ProhibitDtd( settings, FALSE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    b = TRUE;
+    hr = IXmlLoadSettings_get_ProhibitDtd( settings, &b );
+    ok( hr == S_OK && b == FALSE, "got hr %#lx b %d.\n", hr, b );
+
+    hr = IXmlLoadSettings_put_ResolveExternals( settings, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    b = FALSE;
+    hr = IXmlLoadSettings_get_ResolveExternals( settings, &b );
+    ok( hr == S_OK && b == TRUE, "got hr %#lx b %d.\n", hr, b );
+
+    hr = IXmlLoadSettings_put_ValidateOnParse( settings, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    b = FALSE;
+    hr = IXmlLoadSettings_get_ValidateOnParse( settings, &b );
+    ok( hr == S_OK && b == TRUE, "got hr %#lx b %d.\n", hr, b );
+
+    hr = IXmlLoadSettings_put_ElementContentWhiteSpace( settings, FALSE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    b = TRUE;
+    hr = IXmlLoadSettings_get_ElementContentWhiteSpace( settings, &b );
+    ok( hr == S_OK && b == FALSE, "got hr %#lx b %d.\n", hr, b );
+
+    IXmlLoadSettings_Release( settings );
+    IInspectable_Release( instance );
+    IActivationFactory_Release( factory );
+}
+
 START_TEST(xmlwinrt)
 {
     HRESULT hr;
@@ -326,6 +424,7 @@ START_TEST(xmlwinrt)
 
     test_XmlDocument();
     test_XsltProcessor();
+    test_XmlLoadSettings();
 
     RoUninitialize();
 }

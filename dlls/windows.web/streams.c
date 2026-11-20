@@ -38,12 +38,14 @@ static HRESULT WINAPI ras_ReadAsync( void *iface, void *buffer, void **op );
 struct mem_buffer
 {
     const void *vtbl;
+    const void *vtbl_byte_access;
     LONG ref;
     BYTE *data;
     ULONG len;
 };
 
 static const void *mem_buffer_vtbl[];
+static const void *mem_buffer_ba_vtbl[];
 
 struct buffer_iter
 {
@@ -53,13 +55,48 @@ struct buffer_iter
     ULONG pos;
 };
 
+static const GUID IID_IBuffer_s =
+    { 0x905a0fe0, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+static const GUID IID_IRandomAccessStream_s =
+    { 0x905a0fe1, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+static const GUID IID_IInputStream_s =
+    { 0x905a0fe2, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+static const GUID IID_IBufferByteAccess_s =
+    { 0x905a0fef, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+static const GUID IID_IBufferFactory_s =
+    { 0x71af914d, 0xc10f, 0x484b, { 0xbc, 0x50, 0x14, 0xbc, 0x62, 0x3b, 0x3a, 0x27 } };
+static const GUID IID_IDataReader_s =
+    { 0xe2b50029, 0xb4c1, 0x4314, { 0xa4, 0xb8, 0xfb, 0x81, 0x3a, 0x2f, 0x27, 0x5e } };
+static const GUID IID_IDataReaderFactory_s =
+    { 0xd7527847, 0x57da, 0x4e15, { 0x91, 0x4c, 0x06, 0x80, 0x66, 0x99, 0xa0, 0x98 } };
+static const GUID IID_IDataReaderStatics_s =
+    { 0x11fcbefc, 0xfd05, 0x4181, { 0x9f, 0x31, 0x65, 0x6e, 0x75, 0x04, 0x92, 0x1e } };
+static const GUID IID_IIterator_Byte_s =
+    { 0x40556131, 0xa2a1, 0x5fab, { 0xaa, 0xee, 0x5f, 0x35, 0x26, 0x8c, 0xa2, 0x6b } };
+
 static HRESULT WINAPI buffer_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    SDBG( "buffer_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2, iid->Data3,
-           iid->Data4[6], iid->Data4[7] );
-    *out = iface;
-    InterlockedIncrement( &((struct mem_buffer *)iface)->ref );
-    return S_OK;
+    struct mem_buffer *impl = iface;
+    SDBG( "buffer_QI %s\n", debugstr_guid( iid ) );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IBuffer_s ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IBufferByteAccess_s ))
+    {
+        *out = &impl->vtbl_byte_access;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI buffer_AddRef( void *iface )
 {
@@ -97,7 +134,7 @@ static HRESULT WINAPI buffer_GetTrustLevel( void *iface, int *level )
 static HRESULT WINAPI buffer_get_Length( void *iface, ULONG *value )
 {
     struct mem_buffer *impl = iface;
-    SDBG( "buffer_get_Length %u\n", impl->len );
+    SDBG( "buffer_get_Length %lu\n", impl->len );
     if (!value) return E_POINTER;
     *value = impl->len;
     return S_OK;
@@ -114,9 +151,19 @@ static const void *buffer_iter_vtbl[];
 
 static HRESULT WINAPI biter_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    *out = iface;
-    InterlockedIncrement( &((struct buffer_iter *)iface)->ref );
-    return S_OK;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IIterator_Byte_s ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct buffer_iter *)iface)->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI biter_AddRef( void *iface )
 {
@@ -178,7 +225,7 @@ static HRESULT WINAPI buffer_rdc( void *iface, BYTE *dst, ULONG off, ULONG len )
 static HRESULT WINAPI buffer_First( void *iface, void **out )
 {
     struct mem_buffer *impl = iface;
-    SDBG( "buffer_Start len %u\n", impl->len );
+    SDBG( "buffer_Start len %lu\n", impl->len );
     if (!out) return E_POINTER;
     /* Windows 8.1 IBuffer`1<Byte> slot 8 is the Start property getter
      * (raw BYTE*), not Win10's First(); WPM dereferences it as a pointer. */
@@ -195,13 +242,43 @@ static const void *mem_buffer_vtbl[] =
     buffer_wrpc,        /* 9 Wine-internal: write bytes into the buffer */
     buffer_rdc,         /* 10 Wine-internal: read bytes out (dst, offset, len) */
 };
-static const void *buffer_iter_vtbl[] =
+static const void *buffer_iter_vtbl[] __attribute__((unused)) =
 {
     biter_QueryInterface, biter_AddRef, biter_Release,
     biter_QueryInterface, biter_AddRef, biter_Release, /* IInspectable slots */
     biter_MoveNext,   /* 6 */
     biter_get_Current,/* 7 */
     biter_HasCurrent, /* 8 */
+};
+
+static HRESULT WINAPI buf_ba_QI( void *iface, REFIID iid, void **out )
+{
+    struct mem_buffer *impl = CONTAINING_RECORD( iface, struct mem_buffer, vtbl_byte_access );
+    return buffer_QueryInterface( impl, iid, out );
+}
+static ULONG WINAPI buf_ba_AddRef( void *iface )
+{
+    struct mem_buffer *impl = CONTAINING_RECORD( iface, struct mem_buffer, vtbl_byte_access );
+    return buffer_AddRef( impl );
+}
+static ULONG WINAPI buf_ba_Release( void *iface )
+{
+    struct mem_buffer *impl = CONTAINING_RECORD( iface, struct mem_buffer, vtbl_byte_access );
+    return buffer_Release( impl );
+}
+static HRESULT WINAPI buf_ba_Buffer( void *iface, BYTE **value )
+{
+    struct mem_buffer *impl = CONTAINING_RECORD( iface, struct mem_buffer, vtbl_byte_access );
+    if (!value) return E_POINTER;
+    *value = impl->data;
+    return S_OK;
+}
+static const void *mem_buffer_ba_vtbl[] =
+{
+    buf_ba_QI,
+    buf_ba_AddRef,
+    buf_ba_Release,
+    buf_ba_Buffer,
 };
 
 static HRESULT create_mem_buffer( const void *data, ULONG len, void **out )
@@ -211,6 +288,7 @@ static HRESULT create_mem_buffer( const void *data, ULONG len, void **out )
     *out = NULL;
     if (!impl) return E_OUTOFMEMORY;
     impl->vtbl = mem_buffer_vtbl;
+    impl->vtbl_byte_access = mem_buffer_ba_vtbl;
     impl->ref = 1;
     impl->len = len;
     if (len)
@@ -274,11 +352,20 @@ struct data_reader
 
 static HRESULT WINAPI reader_QI( void *iface, REFIID iid, void **out )
 {
-    SDBG( "reader_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2, iid->Data3,
-           iid->Data4[6], iid->Data4[7] );
-    *out = iface;
-    InterlockedIncrement( &((struct data_reader *)iface)->ref );
-    return S_OK;
+    SDBG( "reader_QI %s\n", debugstr_guid( iid ) );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDataReader_s ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct data_reader *)iface)->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI reader_AddRef( void *iface )
 {
@@ -345,7 +432,7 @@ static HRESULT WINAPI reader_ReadByte( void *iface, BYTE *value )
 static HRESULT WINAPI reader_ReadBytes( void *iface, ULONG count, BYTE *value )
 {
     struct data_reader *impl = iface;
-    SDBG( "reader_ReadBytes count %u pos %u len %u\n", count, impl->pos,
+    SDBG( "reader_ReadBytes count %lu pos %lu len %lu\n", count, impl->pos,
            impl->buf ? impl->buf->len : 0 );
     if (!value) return E_POINTER;
     if (!impl->buf || impl->pos + count > impl->buf->len) return 0x8000000c /* E_BOUNDS */;
@@ -474,11 +561,22 @@ struct reader_factory
 
 static HRESULT WINAPI factory_QI( void *iface, REFIID iid, void **out )
 {
-    SDBG( "reader_factory_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2,
-           iid->Data3, iid->Data4[6], iid->Data4[7] );
-    *out = iface;
-    InterlockedIncrement( &((struct reader_factory *)iface)->ref );
-    return S_OK;
+    SDBG( "reader_factory_QI %s\n", debugstr_guid( iid ) );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IDataReaderFactory_s ) ||
+        IsEqualGUID( iid, &IID_IDataReaderStatics_s ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct reader_factory *)iface)->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI factory_AddRef( void *iface )
 {
@@ -523,7 +621,7 @@ static HRESULT WINAPI factory_ActivateInstance( void *iface, void *arg1, void *a
         impl->buf = buf;
         buffer_AddRef( buf );
         out = arg2;
-        SDBG( "reader FromBuffer len %u\n", buf->len );
+        SDBG( "reader FromBuffer len %lu\n", buf->len );
     }
     else
     {
@@ -567,18 +665,45 @@ void *create_data_reader_factory( void )
 struct ras_stream
 {
     const void *vtbl;
+    const void *vtbl_input;
+    const void *vtbl_closable;
     LONG ref;
     struct mem_buffer *buf;
     ULONG pos;
 };
 
+static const void *ras_input_vtbl[];
+static const void *ras_closable_vtbl[];
+
 static HRESULT WINAPI ras_QI( void *iface, REFIID iid, void **out )
 {
-    SDBG( "ras_QI {%08x-%04x-%04x-%02x%02x}\n", iid->Data1, iid->Data2, iid->Data3,
-          iid->Data4[6], iid->Data4[7] );
-    *out = iface;
-    InterlockedIncrement( &((struct ras_stream *)iface)->ref );
-    return S_OK;
+    struct ras_stream *impl = iface;
+    SDBG( "ras_QI %s\n", debugstr_guid( iid ) );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IRandomAccessStream_s ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IInputStream_s ))
+    {
+        *out = &impl->vtbl_input;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IClosable ))
+    {
+        *out = &impl->vtbl_closable;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI ras_AddRef( void *iface )
 {
@@ -635,6 +760,8 @@ static HRESULT WINAPI ras_GetInputStreamAt( void *iface, UINT64 pos, void **out 
      * own position (WPM pumps the body in chunks via GetInputStreamAt+ReadAsync). */
     if (!(clone = calloc( 1, sizeof(*clone) ))) return E_OUTOFMEMORY;
     clone->vtbl = impl->vtbl;
+    clone->vtbl_input = ras_input_vtbl;
+    clone->vtbl_closable = ras_closable_vtbl;
     clone->ref = 1;
     clone->buf = impl->buf;
     clone->pos = (ULONG)pos;
@@ -735,7 +862,7 @@ static HRESULT WINAPI ras_ReadAsync_impl( struct ras_stream *impl, void *buffer,
         if (FAILED( hr )) return hr;
     }
     impl->pos += n;
-    SDBG( "ras_ReadAsync n %u pos %u\n", n, impl->pos );
+    SDBG( "ras_ReadAsync n %u pos %lu\n", n, impl->pos );
     return create_async_http_op_obj( buffer, op );
 }
 
@@ -758,7 +885,7 @@ static HRESULT WINAPI ras_ReadAsyncAt( void *iface, void **op, void *buffer, ULO
 {
     struct ras_stream *impl = iface;
     (void)count; /* destination Capacity bounds the read; count is the WPM chunk size */
-    SDBG( "ras_ReadAsyncAt count %u pos %u\n", count, impl->pos );
+    SDBG( "ras_ReadAsyncAt count %lu pos %lu\n", count, impl->pos );
     return ras_ReadAsync( iface, buffer, op );
 }
 /* Win11 projection GetResults on the stream face shares the async-op object
@@ -829,6 +956,56 @@ static const void *ras_stream_vtbl[] =
     ras_op_GetResults2,     /* 36 */
 };
 
+static HRESULT WINAPI ras_in_QI( void *iface, REFIID iid, void **out )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_input ));
+    return ras_QI( impl, iid, out );
+}
+static ULONG WINAPI ras_in_AddRef( void *iface )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_input ));
+    return ras_AddRef( impl );
+}
+static ULONG WINAPI ras_in_Release( void *iface )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_input ));
+    return ras_Release( impl );
+}
+static HRESULT WINAPI ras_in_ReadAsync( void *iface, void *buffer, UINT32 count, UINT32 options, void **op )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_input ));
+    (void)options;
+    return ras_ReadAsync_impl( impl, buffer, count, op );
+}
+static const void *ras_input_vtbl[] =
+{
+    ras_in_QI, ras_in_AddRef, ras_in_Release,
+    ras_GetIids, ras_GetRuntimeClassName, ras_GetTrustLevel,
+    ras_in_ReadAsync,
+};
+
+static HRESULT WINAPI ras_cl_QI( void *iface, REFIID iid, void **out )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_closable ));
+    return ras_QI( impl, iid, out );
+}
+static ULONG WINAPI ras_cl_AddRef( void *iface )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_closable ));
+    return ras_AddRef( impl );
+}
+static ULONG WINAPI ras_cl_Release( void *iface )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_closable ));
+    return ras_Release( impl );
+}
+static const void *ras_closable_vtbl[] =
+{
+    ras_cl_QI, ras_cl_AddRef, ras_cl_Release,
+    ras_GetIids, ras_GetRuntimeClassName, ras_GetTrustLevel,
+    ras_Close,
+};
+
 HRESULT create_ras_stream_from_buffer( void *buffer, void **out )
 {
     struct ras_stream *impl;
@@ -836,6 +1013,8 @@ HRESULT create_ras_stream_from_buffer( void *buffer, void **out )
     *out = NULL;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->vtbl = ras_stream_vtbl;
+    impl->vtbl_input = ras_input_vtbl;
+    impl->vtbl_closable = ras_closable_vtbl;
     impl->ref = 1;
     impl->buf = (struct mem_buffer *)buffer;
     buffer_AddRef( impl->buf );
@@ -854,10 +1033,20 @@ struct buffer_factory
 
 static HRESULT WINAPI bfac_QI( void *iface, REFIID iid, void **out )
 {
-    (void)iid;
-    *out = iface;
-    InterlockedIncrement( &((struct buffer_factory *)iface)->ref );
-    return S_OK;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IBufferFactory_s ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct buffer_factory *)iface)->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI bfac_AddRef( void *iface )
 {

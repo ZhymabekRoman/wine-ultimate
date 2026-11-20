@@ -42,6 +42,10 @@ static inline struct async_http_op *impl_from_async_info( IAsyncInfo *This )
 
 static HRESULT WINAPI async_http_op_QueryInterface( IAsyncInfo *This, REFIID iid, void **out )
 {
+    static const GUID IID_IAsyncOpWithProg_IBuffer_UINT32 =
+        { 0xd26b2819, 0x897f, 0x5c7d, { 0x84, 0xd6, 0x56, 0xd7, 0x96, 0x56, 0x14, 0x31 } };
+    static const GUID IID_IAsyncOpWithProg_UINT64_UINT64 =
+        { 0x8f1db6e3, 0x6556, 0x5516, { 0xb2, 0x5c, 0x10, 0x21, 0xee, 0x27, 0xcd, 0x0c } };
     struct async_http_op *impl = impl_from_async_op( This );
 
     WDBG( "op_QI {%08x-%04x-%04x-%02x%02x}\n", (unsigned)iid->Data1, iid->Data2, iid->Data3, (unsigned)iid->Data4[6], (unsigned)iid->Data4[7] );
@@ -74,6 +78,8 @@ static HRESULT WINAPI async_http_op_QueryInterface( IAsyncInfo *This, REFIID iid
         IsEqualGUID( iid, &IID___FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_HttpProgress ) ||
         IsEqualGUID( iid, &IID___FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIInputStream_HttpProgress ) ||
         IsEqualGUID( iid, &IID___FIAsyncOperationWithProgress_2_HSTRING_HttpProgress ) ||
+        IsEqualGUID( iid, &IID_IAsyncOpWithProg_IBuffer_UINT32 ) ||
+        IsEqualGUID( iid, &IID_IAsyncOpWithProg_UINT64_UINT64 ) ||
         IsEqualGUID( iid, &IID___FIAsyncOperation_1_Windows__CWeb__CHttp__CHttpResponseMessage ) ||
         IsEqualGUID( iid, &IID___FIAsyncOperation_1_Windows__CStorage__CStreams__CIBuffer ) ||
         IsEqualGUID( iid, &IID___FIAsyncOperation_1_Windows__CStorage__CStreams__CIInputStream ) ||
@@ -158,6 +164,11 @@ static HRESULT WINAPI async_http_op_GetResults( IAsyncInfo *This, void *results 
     WDBG( "async GetResults results %p is_str %d\n", results, impl->is_str );
 
     if (!results) return E_POINTER;
+    if (impl->is_u64)
+    {
+        *(UINT64 *)results = impl->result_u64;
+        return S_OK;
+    }
     if (impl->is_str)
     {
         HSTRING *out_str = results;
@@ -199,7 +210,10 @@ static HRESULT WINAPI async_http_op_GetResults2( IAsyncInfo *This, void *results
 
 static HRESULT WINAPI async_http_op_get_Id( IAsyncInfo *This, UINT32 *id )
 {
-    return async_http_info_get_Id( (IAsyncInfo *)((BYTE *)This + sizeof(void *)), id );
+    /* Slot 6 of IAsyncOperationWithProgress is put_Progress(handler); do NOT
+     * overwrite *id (which would clobber the handler's vtable pointer). */
+    WDBG( "async_http_op slot6 (put_Progress / get_Id) arg %p\n", id );
+    return S_OK;
 }
 static HRESULT WINAPI async_http_op_get_Status( IAsyncInfo *This, AsyncStatus *status )
 {
@@ -347,6 +361,19 @@ HRESULT create_async_http_op( void *result_obj, HSTRING result_str, BOOL is_str,
 HRESULT create_async_http_op_obj( void *result_obj, void **out )
 {
     return create_async_http_op_ex( result_obj, NULL, FALSE, FALSE, out );
+}
+HRESULT create_async_http_op_u64( UINT64 val, void **out )
+{
+    struct async_http_op *impl;
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl_op = &async_http_op_vtbl;
+    impl->vtbl_info = &async_http_info_vtbl;
+    impl->ref = 1;
+    impl->is_u64 = TRUE;
+    impl->result_u64 = val;
+    *out = &impl->vtbl_op;
+    return S_OK;
 }
 HRESULT create_async_http_op_ex( void *result_obj, HSTRING result_str, BOOL is_str,
                                  BOOL handler_at_0x10, void **out )

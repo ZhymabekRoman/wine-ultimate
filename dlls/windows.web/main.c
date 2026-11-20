@@ -53,6 +53,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( http_response_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, L"Windows.Web.Http.HttpStringContent" ))
         IActivationFactory_QueryInterface( http_string_content_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Web.Http.HttpBufferContent" ))
+        IActivationFactory_QueryInterface( http_buffer_content_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, L"Windows.Web.Http.HttpStreamContent" ))
         IActivationFactory_QueryInterface( http_stream_content_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, L"Windows.Web.Http.HttpMethod" ))
