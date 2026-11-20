@@ -437,11 +437,22 @@ static struct x11drv_win_data *alloc_win_data( Display *display, HWND hwnd )
  *
  * Check if a given window should be managed
  */
+static const WCHAR dcomp_captured_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','u','r','e','d','_','h','w','n','d',0};
+static const WCHAR dwm_cloaked_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','c','l','o','a','k','e','d',0};
+
+static BOOL is_window_cloaked( HWND hwnd )
+{
+    return NtUserGetProp( hwnd, dcomp_captured_prop ) || NtUserGetProp( hwnd, dwm_cloaked_prop );
+}
+
 static BOOL is_window_managed( HWND hwnd, UINT swp_flags, BOOL fullscreen )
 {
     DWORD style, ex_style;
 
     if (!managed_mode) return FALSE;
+    if (is_window_cloaked( hwnd )) return FALSE;
 
     /* child windows are not managed */
     style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
@@ -552,13 +563,13 @@ static void sync_window_input_shape( struct x11drv_win_data *data )
 
     if (!data->whole_window) return;
 
-    if (ex_style & WS_EX_TRANSPARENT)
+    if ((ex_style & WS_EX_TRANSPARENT) || is_window_cloaked( data->hwnd ))
     {
-        /* For transparent windows, set an empty input shape to allow mouse pass-through */
+        /* For transparent or cloaked windows, set an empty input shape to allow mouse pass-through */
         static XRectangle empty_rect;
         XShapeCombineRectangles( data->display, data->whole_window, ShapeInput, 0, 0,
                                  &empty_rect, 1, ShapeSet, YXBanded );
-        TRACE( "window %p/%lx set empty input shape for WS_EX_TRANSPARENT\n",
+        TRACE( "window %p/%lx set empty input shape\n",
                data->hwnd, data->whole_window );
     }
     else
@@ -1358,9 +1369,11 @@ static void update_net_wm_fullscreen_monitors( struct x11drv_win_data *data )
 
 static void window_set_net_wm_state( struct x11drv_win_data *data, UINT new_state )
 {
+    static const UINT skip_taskbar_mask = (1 << NET_WM_STATE_SKIP_TASKBAR) | (1 << NET_WM_STATE_SKIP_PAGER);
+    UINT wm_mask = x11drv_init_thread_data()->net_wm_state_mask;
     UINT i, count, old_state = data->pending_state.net_wm_state;
 
-    new_state &= x11drv_init_thread_data()->net_wm_state_mask;
+    new_state &= (wm_mask | skip_taskbar_mask);
     data->desired_state.net_wm_state = new_state;
     if (!data->whole_window || !data->managed || data->embedded) return; /* no window or not managed, nothing to update */
     if (data->wm_state_serial) return; /* another WM_STATE update is pending, wait for it to complete */
@@ -1374,7 +1387,7 @@ static void window_set_net_wm_state( struct x11drv_win_data *data, UINT new_stat
     }
 
     if (data->pending_state.wm_state == IconicState) return; /* window is iconic and may be mapped or not, don't update its state now */
-    if (data->pending_state.wm_state == WithdrawnState)  /* set the _NET_WM_STATE atom directly */
+    if (data->pending_state.wm_state == WithdrawnState || !wm_mask)  /* set the _NET_WM_STATE atom directly */
     {
         Atom atoms[NB_NET_WM_STATES + 1];
 
@@ -1387,7 +1400,8 @@ static void window_set_net_wm_state( struct x11drv_win_data *data, UINT new_stat
         }
 
         data->pending_state.net_wm_state = new_state;
-        data->net_wm_state_serial = NextRequest( data->display );
+        if (wm_mask)
+            data->net_wm_state_serial = NextRequest( data->display );
         TRACE( "window %p/%lx, requesting _NET_WM_STATE %#x serial %lu\n", data->hwnd, data->whole_window,
                data->pending_state.net_wm_state, data->net_wm_state_serial );
         XChangeProperty( data->display, data->whole_window, x11drv_atom(_NET_WM_STATE), XA_ATOM,
@@ -1407,17 +1421,39 @@ static void window_set_net_wm_state( struct x11drv_win_data *data, UINT new_stat
         xev.xclient.data.l[3] = 1;
         xev.xclient.data.l[4] = 0;
 
+        /* Send non-geometry state changes (SKIP_TASKBAR / SKIP_PAGER / SKIP_SWITCHER)
+         * immediately without blocking behind net_wm_state_serial, so an ignored
+         * _KDE_NET_WM_STATE_SKIP_SWITCHER cannot stall SKIP_TASKBAR on KWin. */
+        for (i = NB_NET_WM_STATES; i-- > 0; )
+        {
+            UINT bit = 1u << i;
+            if (bit & config_notify_mask) continue;
+            if (!((old_state ^ new_state) & bit)) continue;
+
+            xev.xclient.data.l[0] = (new_state & bit) ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE;
+            xev.xclient.data.l[1] = X11DRV_Atoms[net_wm_state_atoms[i] - FIRST_XATOM];
+            xev.xclient.data.l[2] = 0;
+
+            data->pending_state.net_wm_state ^= bit;
+            TRACE( "window %p/%lx, requesting _NET_WM_STATE %#x (non-config)\n",
+                   data->hwnd, data->whole_window, data->pending_state.net_wm_state );
+            XSendEvent( data->display, DefaultRootWindow( data->display ), False,
+                        SubstructureRedirectMask | SubstructureNotifyMask, &xev );
+        }
+
         for (i = 0; i < NB_NET_WM_STATES; i++)
         {
+            UINT bit = 1u << i;
+            if (!(bit & config_notify_mask)) continue;
             if (data->net_wm_state_serial) break; /* another _NET_WM_STATE update is pending, wait for it to complete */
-            if (!((old_state ^ new_state) & (1 << i))) continue;
+            if (!((old_state ^ new_state) & bit)) continue;
 
-            xev.xclient.data.l[0] = (new_state & (1 << i)) ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE;
+            xev.xclient.data.l[0] = (new_state & bit) ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE;
             xev.xclient.data.l[1] = X11DRV_Atoms[net_wm_state_atoms[i] - FIRST_XATOM];
             xev.xclient.data.l[2] = ((net_wm_state_atoms[i] == XATOM__NET_WM_STATE_MAXIMIZED_VERT) ?
                                      x11drv_atom(_NET_WM_STATE_MAXIMIZED_HORZ) : 0);
 
-            data->pending_state.net_wm_state ^= (1 << i);
+            data->pending_state.net_wm_state ^= bit;
             data->net_wm_state_serial = NextRequest( data->display );
             TRACE( "window %p/%lx, requesting _NET_WM_STATE %#x serial %lu\n", data->hwnd, data->whole_window,
                    data->pending_state.net_wm_state, data->net_wm_state_serial );
@@ -1490,6 +1526,32 @@ static void window_set_config( struct x11drv_win_data *data, RECT rect, BOOL abo
     {
         changes.stack_mode = Above;
         mask |= CWStackMode;
+    }
+
+    /* if the window manager has already applied the geometry we are requesting, skip the
+     * request entirely; this avoids an app/WM ping-pong where an app re-issues the same
+     * maximized rect on every WM_SIZE (e.g. custom-skinned windows with Motif decorations
+     * off, where the WM frame offset never converges to the requested window rect) */
+    if (mask && data->managed && !is_virtual_desktop() && !data->configure_serial &&
+        !data->wm_state_serial && !data->net_wm_state_serial)
+    {
+        const RECT *cur = &data->current_state.rect;
+        int want_w = new_rect->right - new_rect->left, want_h = new_rect->bottom - new_rect->top;
+        BOOL size_match = cur->right - cur->left == want_w && cur->bottom - cur->top == want_h;
+        /* when maximized the window manager owns the geometry: accept its position
+         * as long as the size it applied is the one we requested */
+        BOOL pos_ok = !(mask & CWX) || (cur->left == changes.x && cur->top == changes.y) ||
+                      ((style & WS_MAXIMIZE) && !(mask & CWWidth) && size_match);
+        BOOL size_ok = !(mask & CWWidth) || size_match;
+
+        if (pos_ok && size_ok)
+        {
+            TRACE( "window %p/%lx, config %s already applied by WM, skipping request\n",
+                   data->hwnd, data->whole_window, wine_dbgstr_rect(new_rect) );
+            data->pending_state.rect = *new_rect;
+            data->pending_state.above = above;
+            return;
+        }
     }
 
     data->pending_state.rect = *new_rect;
@@ -2471,6 +2533,14 @@ static void create_whole_window( struct x11drv_win_data *data )
     }
     data->shaped = (win_rgn != 0);
 
+    if (argb_visual.visual && data->vis.visualid == default_visual.visualid
+            && (NtUserGetWindowLongW( data->hwnd, GWL_EXSTYLE ) & WS_EX_NOREDIRECTIONBITMAP)
+            && (NtUserGetWindowLongW( data->hwnd, GWL_STYLE ) & WS_POPUP))
+    {
+        data->vis = argb_visual;
+        data->use_alpha = TRUE;
+    }
+
     if (data->vis.visualid != default_visual.visualid)
         data->whole_colormap = XCreateColormap( data->display, root_window, data->vis.visual, AllocNone );
 
@@ -2631,6 +2701,47 @@ void X11DRV_SetWindowText( HWND hwnd, LPCWSTR text )
  *
  * Update the X state of a window to reflect a style change
  */
+static void apply_window_cloak( struct x11drv_win_data *data )
+{
+    if (!data->whole_window || data->embedded || !is_window_cloaked( data->hwnd ))
+        return;
+
+    /* Transition a DComp-captured / DWM-cloaked window to override_redirect so
+     * KWin/Plasma removes it from the taskbar, Alt+Tab, and Overview, while
+     * keeping it mapped with a 1x1 ShapeBounding + 0x0 ShapeInput (no
+     * XLowerWindow / no Win32 HWND_BOTTOM) so XWayland and Chromium's
+     * WindowOcclusionTrackerWin keep rendering at full speed. */
+    if (data->managed)
+    {
+        XSetWindowAttributes attr;
+        BOOL was_mapped = (data->pending_state.wm_state != WithdrawnState);
+
+        if (was_mapped)
+            XWithdrawWindow( data->display, data->whole_window, data->vis.screen );
+        attr.override_redirect = True;
+        XChangeWindowAttributes( data->display, data->whole_window, CWOverrideRedirect, &attr );
+        data->managed = FALSE;
+        data->wm_state_serial = 0;
+        data->net_wm_state_serial = 0;
+        if (was_mapped)
+        {
+            XMapWindow( data->display, data->whole_window );
+            data->pending_state.wm_state = NormalState;
+            data->current_state.wm_state = NormalState;
+        }
+    }
+#ifdef HAVE_LIBXSHAPE
+    {
+        static XRectangle one_px = { 0, 0, 1, 1 };
+        static XRectangle empty_rect = { 0, 0, 0, 0 };
+        XShapeCombineRectangles( data->display, data->whole_window, ShapeBounding, 0, 0,
+                                 &one_px, 1, ShapeSet, YXBanded );
+        XShapeCombineRectangles( data->display, data->whole_window, ShapeInput, 0, 0,
+                                 &empty_rect, 1, ShapeSet, YXBanded );
+    }
+#endif
+}
+
 void X11DRV_SetWindowStyle( HWND hwnd, INT offset, STYLESTRUCT *style )
 {
     struct x11drv_win_data *data;
@@ -2656,6 +2767,12 @@ void X11DRV_SetWindowStyle( HWND hwnd, INT offset, STYLESTRUCT *style )
             sync_window_opacity( data->display, data->whole_window, 0, 0 );
         }
         if (changed & WS_EX_TRANSPARENT) sync_window_style( data );
+        if (changed & (WS_EX_TOOLWINDOW | WS_EX_APPWINDOW | WS_EX_NOACTIVATE))
+        {
+            set_wm_hints( data );
+            update_net_wm_states( data );
+            apply_window_cloak( data );
+        }
         flush = TRUE;
     }
 
@@ -3287,7 +3404,7 @@ BOOL X11DRV_GetWindowStyleMasks( HWND hwnd, UINT style, UINT ex_style, UINT *sty
 }
 
 
-static BOOL get_desired_wm_state( DWORD style, const struct window_rects *rects )
+static BOOL get_desired_wm_state( HWND hwnd, DWORD style, const struct window_rects *rects )
 {
     if (style & WS_VISIBLE)
     {
@@ -3367,7 +3484,8 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 #endif
     }
 
-    window_set_wm_state( data, get_desired_wm_state( new_style, new_rects ), activate );
+    window_set_wm_state( data, get_desired_wm_state( hwnd, new_style, new_rects ), activate );
+    apply_window_cloak( data );
     if (!data->wm_state_serial && data->pending_state.wm_state != WithdrawnState)
     {
         if (swp_flags & (SWP_FRAMECHANGED | SWP_STATECHANGED)) set_wm_hints( data );
