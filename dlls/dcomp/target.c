@@ -257,7 +257,9 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     target->hwnd = hwnd;
     {
         WCHAR cls[64];
-        if (GetClassNameW(hwnd, cls, ARRAY_SIZE(cls)) && !wcscmp(cls, L"DcppUserAdapterWindowClass"))
+        if (GetClassNameW(hwnd, cls, ARRAY_SIZE(cls)) &&
+                (!wcscmp(cls, L"DcppUserAdapterWindowClass") ||
+                 !wcscmp(cls, L"Microsoft.UI.Content.DesktopChildSiteBridge")))
             target->composite_hwnd = NULL;
         else
             target->composite_hwnd = CreateWindowExW(WS_EX_TRANSPARENT, L"static", NULL,
