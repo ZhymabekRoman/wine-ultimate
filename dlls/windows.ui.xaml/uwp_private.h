@@ -325,6 +325,9 @@ struct uwp_element
     IInspectable ISplitView2_iface;
     IInspectable IEasingFunctionBase_iface;
     IInspectable IMediaPlayerElement_iface;
+    IInspectable IBitmapImage_iface;
+    IInspectable IBitmapSource_iface;
+    IInspectable IImage_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
     IDispatch IDispatch_iface;
     IInspectable IReferenceTrackerTarget_iface;
@@ -394,6 +397,7 @@ struct uwp_element
     double min_width, max_width;
     double min_height, max_height;
     double actual_w, actual_h;
+    double last_sc_w, last_sc_h;
     double margin_l, margin_t, margin_r, margin_b;
     double padding_l, padding_t, padding_r, padding_b;
     int h_align;       /* 0=Left, 1=Center, 2=Right, 3=Stretch */
@@ -514,10 +518,12 @@ struct uwp_element
     double vsm_eval_width;
     double vsm_eval_height;
     BOOL vsm_eval_valid;
-    WCHAR image_src[256];
+    WCHAR image_src[512];
+    IInspectable *img_source;
     BYTE *img_pixels;
     UINT img_w, img_h;
     BOOL img_loaded;
+    volatile LONG img_loading;
     struct uwp_element *next_reg;
     int adopted_faulted_ctor;
     IInspectable *provider_inst;
@@ -727,6 +733,7 @@ struct uwp_class_factory
     IInspectable IStatics_iface;
     const WCHAR *class_name;
     IInspectable IDpStatics_iface;
+    IInspectable IBitmapImageFactory_iface;
 };
 
 struct uwp_key_routed_args
@@ -1163,6 +1170,8 @@ HRESULT WINAPI uwp_cf_GetTrustLevel( IActivationFactory *iface, TrustLevel *lvl 
 HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out );
 ULONG WINAPI uwp_cf_Release( IActivationFactory *iface );
 extern const void *uwp_cf_comp_vtbl[64];
+extern const void *uwp_bitmap_image_factory_vtbl[16];
+void uwp_extract_uri_string( IInspectable *uri_obj, WCHAR *out, size_t cap );
 void uwp_close_flyout_popup( BOOL fire_closed );
 HRESULT WINAPI uwp_ctrl_ApplyTemplate( void *iface, boolean *ret );
 HRESULT WINAPI uwp_ctrl_Focus( void *iface, int state, boolean *ret );

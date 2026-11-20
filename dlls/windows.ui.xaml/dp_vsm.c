@@ -1599,8 +1599,19 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     IInspectable *old_val = NULL;
     WCHAR str_val[256] = {0};
     int i;
+    static struct { struct uwp_element *el; void *dp; } setval_stack[32];
+    static int setval_depth = 0;
+    BOOL found_existing = FALSE;
+    int si;
 
     if (!impl || !dp) return S_OK;
+    for (si = 0; si < setval_depth; si++)
+    {
+        if (setval_stack[si].el == impl && setval_stack[si].dp == dp)
+            return S_OK;
+    }
+    if (setval_depth >= (int)ARRAY_SIZE(setval_stack))
+        return S_OK;
 
     /* Check if val is a string (e.g. CalculationResult.DisplayValue or Content) */
     if (val && uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
@@ -1678,13 +1689,16 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     {
         if (impl->dp_store[i].dp == dp)
         {
+            found_existing = TRUE;
             old_val = impl->dp_store[i].value;
+            if (old_val == val)
+                return S_OK;
             impl->dp_store[i].value = val;
             if (val) IInspectable_AddRef( val );
             break;
         }
     }
-    if (i == impl->dp_cnt)
+    if (!found_existing)
     {
         if (!xaml_vec_grow( (void **)&impl->dp_store, &impl->dp_cap, impl->dp_cnt + 1, sizeof(*impl->dp_store), 24 ))
             return E_OUTOFMEMORY;
@@ -1694,11 +1708,36 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         impl->dp_cnt++;
     }
 
+    setval_stack[setval_depth].el = impl;
+    setval_stack[setval_depth].dp = dp;
+    setval_depth++;
+
     /* Fire PropertyMetadata PropertyChangedCallback if present */
     {
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
         if (dpl && dpl->name[0])
             uwp_sync_template_presenter( impl, dpl->name, val );
+        if (impl->kind == UWP_KIND_IMAGE && dpl && !wcscmp( dpl->name, L"Source" ))
+        {
+            if (impl->img_source != val)
+            {
+                if (impl->img_source) IInspectable_Release( impl->img_source );
+                impl->img_source = val;
+                if (impl->img_source) IInspectable_AddRef( impl->img_source );
+            }
+            impl->image_src[0] = 0;
+            if (val)
+            {
+                struct uwp_element *src_el = uwp_elem_from_any( val );
+                if (src_el && src_el->image_src[0])
+                    lstrcpynW( impl->image_src, src_el->image_src, ARRAY_SIZE(impl->image_src) );
+                else if (!uwp_unbox_string( val, impl->image_src, ARRAY_SIZE(impl->image_src) ))
+                    uwp_extract_uri_string( val, impl->image_src, ARRAY_SIZE(impl->image_src) );
+            }
+            impl->img_loaded = FALSE;
+            InterlockedExchange( &impl->img_loading, 0 );
+            uwp_invalidate_window();
+        }
         if (dpl && wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
         {
             HSTRING hvc = NULL;
@@ -1777,6 +1816,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 WARN( "TileList dp_cb[%d] dp=%p -> hr %#lx\n", i, dp, cb_hr );
         }
     }
+    if (setval_depth > 0) setval_depth--;
 
     if (wcsstr( impl->class_name, L"ItemsRepeater" ))
     {

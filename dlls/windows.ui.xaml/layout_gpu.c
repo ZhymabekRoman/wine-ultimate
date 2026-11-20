@@ -2283,6 +2283,15 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             return S_OK;
         }
     }
+    {
+        static const GUID IID_IBitmapImageFactory_UWP =
+            { 0xc9132978, 0x4810, 0x4e5e, { 0x80, 0x87, 0x03, 0x67, 0x1e, 0xe6, 0x0d, 0x85 } };
+        if (IsEqualGUID( iid, &IID_IBitmapImageFactory_UWP ) && f && f->IBitmapImageFactory_iface.lpVtbl)
+        {
+            *out = (void *)&f->IBitmapImageFactory_iface;
+            return S_OK;
+        }
+    }
     if (IsEqualGUID( iid, &IID_IFrameFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IPageFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IUserControlFactory_UWP ) ||
@@ -2349,7 +2358,8 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
          wcsstr( f->class_name, L"Command" ) ||
          wcsstr( f->class_name, L"Timer" ) ||
          wcsstr( f->class_name, L"Configuration" ) ||
-         wcsstr( f->class_name, L"Collection" )))
+         wcsstr( f->class_name, L"Collection" ) ||
+         wcsstr( f->class_name, L"Shadow" )))
     {
         WARN( "uwp_cf_QI(%s) unknown iid %s -> ComposableFactory fallback\n",
               debugstr_w(f->class_name), debugstr_guid(iid) );

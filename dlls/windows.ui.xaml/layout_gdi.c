@@ -1093,6 +1093,219 @@ const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp,
 
 COLORREF g_paint_page_bg = RGB( 31, 31, 31 );
 
+static SRWLOCK g_http_img_cache_lock = SRWLOCK_INIT;
+static struct
+{
+    WCHAR url[512];
+    BYTE *pixels;
+    UINT w, h;
+    BOOL done;
+} g_http_img_cache[128];
+static int g_http_img_cache_cnt = 0;
+
+static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, BYTE **out_pixels, UINT *out_w, UINT *out_h )
+{
+    IWICImagingFactory *wic = NULL;
+    IWICStream *stream = NULL;
+    IWICBitmapDecoder *dec = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICFormatConverter *conv = NULL;
+    UINT w = 0, h = 0;
+    BOOL ok = FALSE;
+
+    if (!data || !len) return FALSE;
+    if (SUCCEEDED(CoCreateInstance( &CLSID_WICImagingFactory_local, NULL, CLSCTX_INPROC_SERVER,
+                                    &IID_IWICImagingFactory_local, (void **)&wic )) && wic)
+    {
+        if (SUCCEEDED(IWICImagingFactory_CreateStream( wic, &stream )) && stream)
+        {
+            if (SUCCEEDED(IWICStream_InitializeFromMemory( stream, (BYTE *)data, len )) &&
+                SUCCEEDED(IWICImagingFactory_CreateDecoderFromStream( wic, (IStream *)stream, NULL,
+                                                                      WICDecodeMetadataCacheOnLoad, &dec )) && dec)
+            {
+                if (SUCCEEDED(IWICBitmapDecoder_GetFrame( dec, 0, &frame )) && frame)
+                {
+                    if (SUCCEEDED(IWICImagingFactory_CreateFormatConverter( wic, &conv )) && conv)
+                    {
+                        if (SUCCEEDED(IWICFormatConverter_Initialize( conv, (IWICBitmapSource *)frame,
+                                                                      &GUID_WICPixelFormat32bppBGRA_local,
+                                                                      WICBitmapDitherTypeNone, NULL, 0.0,
+                                                                      WICBitmapPaletteTypeCustom )) &&
+                            SUCCEEDED(IWICFormatConverter_GetSize( conv, &w, &h )) &&
+                            w > 0 && h > 0 && w <= 4096 && h <= 4096)
+                        {
+                            BYTE *buf = malloc( (size_t)w * h * 4 );
+                            if (buf)
+                            {
+                                if (SUCCEEDED(IWICFormatConverter_CopyPixels( conv, NULL, w * 4, w * h * 4, buf )))
+                                {
+                                    size_t npix = (size_t)w * h, px;
+                                    BYTE pbr = GetRValue( g_paint_page_bg );
+                                    BYTE pbg = GetGValue( g_paint_page_bg );
+                                    BYTE pbb = GetBValue( g_paint_page_bg );
+                                    for (px = 0; px < npix; px++)
+                                    {
+                                        BYTE b = buf[px * 4 + 0];
+                                        BYTE g = buf[px * 4 + 1];
+                                        BYTE r = buf[px * 4 + 2];
+                                        BYTE a = buf[px * 4 + 3];
+                                        buf[px * 4 + 0] = (BYTE)((b * a + pbb * (255 - a)) / 255);
+                                        buf[px * 4 + 1] = (BYTE)((g * a + pbg * (255 - a)) / 255);
+                                        buf[px * 4 + 2] = (BYTE)((r * a + pbr * (255 - a)) / 255);
+                                        buf[px * 4 + 3] = 255;
+                                    }
+                                    *out_pixels = buf;
+                                    *out_w = w;
+                                    *out_h = h;
+                                    ok = TRUE;
+                                }
+                                else free( buf );
+                            }
+                        }
+                        IWICFormatConverter_Release( conv );
+                    }
+                    IWICBitmapFrameDecode_Release( frame );
+                }
+                IWICBitmapDecoder_Release( dec );
+            }
+            IWICStream_Release( stream );
+        }
+        IWICImagingFactory_Release( wic );
+    }
+    return ok;
+}
+
+static DWORD WINAPI uwp_http_image_worker( LPVOID param )
+{
+    struct uwp_element *el = (struct uwp_element *)param;
+    HMODULE hwh;
+    WCHAR url[512];
+    typedef void *HINTERNET_t;
+    HINTERNET_t (WINAPI *pOpen)( LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD );
+    HINTERNET_t (WINAPI *pConnect)( HINTERNET_t, LPCWSTR, WORD, DWORD );
+    HINTERNET_t (WINAPI *pOpenReq)( HINTERNET_t, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR *, DWORD );
+    BOOL (WINAPI *pSendReq)( HINTERNET_t, LPCWSTR, DWORD, LPVOID, DWORD, DWORD, DWORD_PTR );
+    BOOL (WINAPI *pRecvResp)( HINTERNET_t, LPVOID );
+    BOOL (WINAPI *pReadData)( HINTERNET_t, LPVOID, DWORD, LPDWORD );
+    BOOL (WINAPI *pClose)( HINTERNET_t );
+    BOOL (WINAPI *pCrackUrl)( LPCWSTR, DWORD, DWORD, void * );
+    struct
+    {
+        DWORD dwStructSize;
+        LPWSTR lpszScheme;
+        DWORD dwSchemeLength;
+        int nScheme;
+        LPWSTR lpszHostName;
+        DWORD dwHostNameLength;
+        WORD nPort;
+        LPWSTR lpszUserName;
+        DWORD dwUserNameLength;
+        LPWSTR lpszPassword;
+        DWORD dwPasswordLength;
+        LPWSTR lpszUrlPath;
+        DWORD dwUrlPathLength;
+        LPWSTR lpszExtraInfo;
+        DWORD dwExtraInfoLength;
+    } uc = {0};
+    WCHAR host[256] = {0}, path[512] = {0};
+    BYTE *buf = NULL;
+    DWORD cap = 0, len = 0;
+
+    if (!el) return 0;
+    lstrcpynW( url, el->image_src, ARRAY_SIZE(url) );
+    CoInitializeEx( NULL, COINIT_MULTITHREADED );
+
+    hwh = LoadLibraryW( L"winhttp.dll" );
+    if (hwh)
+    {
+        pOpen = (void *)GetProcAddress( hwh, "WinHttpOpen" );
+        pConnect = (void *)GetProcAddress( hwh, "WinHttpConnect" );
+        pOpenReq = (void *)GetProcAddress( hwh, "WinHttpOpenRequest" );
+        pSendReq = (void *)GetProcAddress( hwh, "WinHttpSendRequest" );
+        pRecvResp = (void *)GetProcAddress( hwh, "WinHttpReceiveResponse" );
+        pReadData = (void *)GetProcAddress( hwh, "WinHttpReadData" );
+        pClose = (void *)GetProcAddress( hwh, "WinHttpCloseHandle" );
+        pCrackUrl = (void *)GetProcAddress( hwh, "WinHttpCrackUrl" );
+        if (pOpen && pConnect && pOpenReq && pSendReq && pRecvResp && pReadData && pClose && pCrackUrl)
+        {
+            uc.dwStructSize = sizeof(uc);
+            uc.lpszHostName = host; uc.dwHostNameLength = ARRAY_SIZE(host);
+            uc.lpszUrlPath = path; uc.dwUrlPathLength = ARRAY_SIZE(path);
+            if (pCrackUrl( url, 0, 0, &uc ) && host[0])
+            {
+                HINTERNET_t ses = pOpen( L"WineStoreXAML/1.0", 0, NULL, NULL, 0 );
+                if (ses)
+                {
+                    HINTERNET_t con = pConnect( ses, host, uc.nPort ? uc.nPort : (uc.nScheme == 2 ? 443 : 80), 0 );
+                    if (con)
+                    {
+                        DWORD flags = (uc.nScheme == 2) ? 0x00800000 : 0; /* WINHTTP_FLAG_SECURE */
+                        HINTERNET_t req = pOpenReq( con, L"GET", path[0] ? path : L"/", NULL, NULL, NULL, flags );
+                        if (req)
+                        {
+                            if (pSendReq( req, NULL, 0, NULL, 0, 0, 0 ) && pRecvResp( req, NULL ))
+                            {
+                                BYTE chunk[16384];
+                                DWORD got = 0;
+                                while (pReadData( req, chunk, sizeof(chunk), &got ) && got > 0)
+                                {
+                                    if (len + got > 8 * 1024 * 1024) break;
+                                    if (len + got > cap)
+                                    {
+                                        DWORD ncap = cap ? cap * 2 : 65536;
+                                        BYTE *nb;
+                                        while (ncap < len + got) ncap *= 2;
+                                        nb = realloc( buf, ncap );
+                                        if (!nb) break;
+                                        buf = nb; cap = ncap;
+                                    }
+                                    memcpy( buf + len, chunk, got );
+                                    len += got;
+                                }
+                            }
+                            pClose( req );
+                        }
+                        pClose( con );
+                    }
+                    pClose( ses );
+                }
+            }
+        }
+    }
+
+    if (buf && len > 0)
+    {
+        BYTE *px = NULL;
+        UINT pw = 0, ph = 0;
+        if (uwp_wic_decode_memory( buf, len, &px, &pw, &ph ) && px)
+        {
+            AcquireSRWLockExclusive( &g_http_img_cache_lock );
+            if (g_http_img_cache_cnt < (int)ARRAY_SIZE(g_http_img_cache))
+            {
+                int idx = g_http_img_cache_cnt++;
+                lstrcpynW( g_http_img_cache[idx].url, url, ARRAY_SIZE(g_http_img_cache[idx].url) );
+                g_http_img_cache[idx].pixels = px;
+                g_http_img_cache[idx].w = pw;
+                g_http_img_cache[idx].h = ph;
+                g_http_img_cache[idx].done = TRUE;
+            }
+            ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+            if (!wcscmp( el->image_src, url ))
+            {
+                el->img_pixels = px;
+                el->img_w = pw;
+                el->img_h = ph;
+                el->img_loaded = TRUE;
+                uwp_invalidate_window();
+            }
+        }
+    }
+    free( buf );
+    el->img_loaded = TRUE;
+    CoUninitialize();
+    return 0;
+}
+
 void uwp_load_image_asset( struct uwp_element *el )
 {
     WCHAR rel[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0}, candidate[MAX_PATH] = {0};
@@ -1107,6 +1320,31 @@ void uwp_load_image_asset( struct uwp_element *el )
     UINT w = 0, h = 0;
 
     if (!el || el->img_loaded || !el->image_src[0]) return;
+    if (!wcsncmp( p, L"http://", 7 ) || !wcsncmp( p, L"https://", 8 ))
+    {
+        int ci;
+        AcquireSRWLockShared( &g_http_img_cache_lock );
+        for (ci = 0; ci < g_http_img_cache_cnt; ci++)
+        {
+            if (g_http_img_cache[ci].done && !wcscmp( g_http_img_cache[ci].url, p ))
+            {
+                el->img_pixels = g_http_img_cache[ci].pixels;
+                el->img_w = g_http_img_cache[ci].w;
+                el->img_h = g_http_img_cache[ci].h;
+                el->img_loaded = TRUE;
+                ReleaseSRWLockShared( &g_http_img_cache_lock );
+                return;
+            }
+        }
+        ReleaseSRWLockShared( &g_http_img_cache_lock );
+        if (InterlockedCompareExchange( &el->img_loading, 1, 0 ) == 0)
+        {
+            HANDLE th = CreateThread( NULL, 0, uwp_http_image_worker, el, 0, NULL );
+            if (th) CloseHandle( th );
+            else el->img_loaded = TRUE;
+        }
+        return;
+    }
     el->img_loaded = TRUE;
 
     if (!wcsncmp( p, L"ms-appx:///", 11 )) p += 11;
