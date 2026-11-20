@@ -77,6 +77,7 @@ struct get_glyph_bitmap_params
     unsigned int simulations;
     unsigned int glyph;
     unsigned int mode;
+    unsigned int cleartype;
     float emsize;
     MATRIX_2X2 m;
     RECT bbox;
@@ -95,6 +96,20 @@ struct get_design_glyph_metrics_params
     DWRITE_GLYPH_METRICS *metrics;
 };
 
+struct fontconfig_fallback_params
+{
+    UINT32 ch;
+    UINT32 weight;
+    UINT32 style;
+    UINT32 stretch;
+    const char *locale;
+    char *family;
+    UINT32 family_size;
+    char *file;
+    UINT32 file_size;
+    UINT32 *face_index;
+};
+
 enum font_backend_funcs
 {
     unix_process_attach,
@@ -107,6 +122,7 @@ enum font_backend_funcs
     unix_get_glyph_bbox,
     unix_get_glyph_bitmap,
     unix_get_design_glyph_metrics,
+    unix_fontconfig_fallback,
     unix_funcs_count,
 };
 

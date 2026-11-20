@@ -384,6 +384,38 @@ BOOL X11DRV_DisplayDevices_SupportEventHandlers(void)
     return !!host_handler.register_event_handlers;
 }
 
+static UINT get_xft_dpi( UINT fallback_dpi )
+{
+    const char *res_str, *p;
+
+    if (fallback_dpi != USER_DEFAULT_SCREEN_DPI || !gdi_display)
+        return fallback_dpi;
+
+    res_str = XResourceManagerString( gdi_display );
+    if (!res_str)
+        return fallback_dpi;
+
+    for (p = res_str; *p; )
+    {
+        const char *line_end = strchr( p, '\n' );
+        if (!strncmp( p, "Xft.dpi:", 8 ))
+        {
+            char *endptr = NULL;
+            double val = strtod( p + 8, &endptr );
+            if (endptr && endptr != p + 8 && val >= 48.0 && val <= 480.0)
+            {
+                UINT xft_dpi = (UINT)(val + 0.5);
+                TRACE( "Using Xft.dpi %u (raw %.2f)\n", xft_dpi, val );
+                return xft_dpi;
+            }
+        }
+        if (!line_end) break;
+        p = line_end + 1;
+    }
+
+    return fallback_dpi;
+}
+
 UINT X11DRV_UpdateDisplayDevices( const struct gdi_device_manager *device_manager, void *param )
 {
     INT gpu_count, adapter_count, monitor_count, current_adapter_count = 0;
@@ -415,7 +447,7 @@ UINT X11DRV_UpdateDisplayDevices( const struct gdi_device_manager *device_manage
             char buffer[32];
             x11drv_settings_id settings_id;
             BOOL is_primary = adapters[adapter].state_flags & DISPLAY_DEVICE_PRIMARY_DEVICE;
-            UINT dpi = NtUserGetSystemDpiForProcess( NULL );
+            UINT dpi = get_xft_dpi( NtUserGetSystemDpiForProcess( NULL ) );
 
             sprintf( buffer, "%04lx", adapters[adapter].id );
             device_manager->add_source( buffer, adapters[adapter].state_flags, dpi, param );

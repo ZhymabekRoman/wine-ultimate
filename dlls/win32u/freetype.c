@@ -3541,7 +3541,9 @@ static FT_Int get_load_flags( UINT format )
     case GGO_GRAY4_BITMAP:
     case GGO_GRAY8_BITMAP:
     case WINE_GGO_GRAY16_BITMAP:
-        load_flags |= FT_LOAD_TARGET_NORMAL;
+        /* Light hinting keeps stem widths consistent across glyph runs,
+         * matching the way Windows renders grayscale ClearType. */
+        load_flags |= FT_LOAD_TARGET_LIGHT;
         break;
     case WINE_GGO_HRGB_BITMAP:
     case WINE_GGO_HBGR_BITMAP:

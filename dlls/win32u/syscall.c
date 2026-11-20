@@ -145,6 +145,12 @@ ALL_SYSCALL_STUBS
 static NTSTATUS NtCreateCompositionInputSink( const void *desc, HANDLE *sink_handle )
 {
     if (!sink_handle) return STATUS_INVALID_PARAMETER;
+    if (desc)
+    {
+        HWND hwnd = ((const HWND *)desc)[2];
+        if (hwnd && is_window( hwnd ) && (!g_mit_input_hwnd || !is_window( g_mit_input_hwnd )))
+            g_mit_input_hwnd = hwnd;
+    }
     *sink_handle = (HANDLE)0x10001;
     return STATUS_SUCCESS;
 }

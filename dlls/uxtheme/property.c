@@ -293,3 +293,42 @@ HRESULT WINAPI GetThemePropertyOrigin(HTHEME hTheme, int iPartId, int iStateId,
     *pOrigin = tp->origin;
     return S_OK;
 }
+
+/***********************************************************************
+ *      GetThemeAnimationProperty                           (UXTHEME.@)
+ */
+HRESULT WINAPI GetThemeAnimationProperty(HTHEME hTheme, int iStoryboardId, int iTargetId,
+                                         int eProperty, void *pvProperty, DWORD cbSize,
+                                         DWORD *pcbSizeOut)
+{
+    FIXME("(%p, %d, %d, %d, %p, %lu, %p) stub\n",
+          hTheme, iStoryboardId, iTargetId, eProperty, pvProperty, cbSize, pcbSizeOut);
+    if (pcbSizeOut) *pcbSizeOut = 0;
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+/***********************************************************************
+ *      GetThemeAnimationTransform                          (UXTHEME.@)
+ */
+HRESULT WINAPI GetThemeAnimationTransform(HTHEME hTheme, int iStoryboardId, int iTargetId,
+                                          DWORD dwTransformIndex, void *pTransform,
+                                          DWORD cbSize, DWORD *pcbSizeOut)
+{
+    FIXME("(%p, %d, %d, %lu, %p, %lu, %p) stub\n",
+          hTheme, iStoryboardId, iTargetId, dwTransformIndex, pTransform, cbSize, pcbSizeOut);
+    if (pcbSizeOut) *pcbSizeOut = 0;
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+/***********************************************************************
+ *      GetThemeTimingFunction                              (UXTHEME.@)
+ */
+HRESULT WINAPI GetThemeTimingFunction(HTHEME hTheme, int iTimingFunctionId,
+                                      void *pTimingFunction, DWORD cbSize,
+                                      DWORD *pcbSizeOut)
+{
+    FIXME("(%p, %d, %p, %lu, %p) stub\n",
+          hTheme, iTimingFunctionId, pTimingFunction, cbSize, pcbSizeOut);
+    if (pcbSizeOut) *pcbSizeOut = 0;
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}

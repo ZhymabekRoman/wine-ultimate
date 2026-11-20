@@ -527,6 +527,8 @@ BOOL WINAPI GetPointerType(UINT32 id, POINTER_INPUT_TYPE *type)
 
 BOOL WINAPI GetPointerInfo(UINT32 id, POINTER_INFO *info)
 {
+    UINT32 entries = 1, pointers = 1;
+
     TRACE("(%d %p)\n", id, info);
 
     if (!info)
@@ -535,12 +537,85 @@ BOOL WINAPI GetPointerInfo(UINT32 id, POINTER_INFO *info)
         return FALSE;
     }
 
-    memset(info, 0, sizeof(*info));
-    info->pointerType = PT_MOUSE;
-    info->pointerId = id;
-    info->pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_PRIMARY;
-    GetCursorPos(&info->ptPixelLocation);
-    info->ptHimetricLocation = info->ptPixelLocation;
+    return NtUserGetPointerInfoList(id, PT_POINTER, 0, 0, sizeof(*info), &entries, &pointers, info);
+}
+
+BOOL WINAPI GetPointerFrameInfo(UINT32 id, UINT32 *pointer_count, POINTER_INFO *info)
+{
+    UINT32 entries = 1;
+
+    TRACE("(%d %p %p)\n", id, pointer_count, info);
+
+    if (!pointer_count)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!info)
+    {
+        *pointer_count = 1;
+        return TRUE;
+    }
+
+    if (*pointer_count < 1)
+    {
+        *pointer_count = 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    return NtUserGetPointerInfoList(id, PT_POINTER, 0, 0, sizeof(*info), &entries, pointer_count, info);
+}
+
+BOOL WINAPI GetPointerFrameInfoHistory(UINT32 id, UINT32 *entries_count, UINT32 *pointer_count, POINTER_INFO *info)
+{
+    TRACE("(%d %p %p %p)\n", id, entries_count, pointer_count, info);
+
+    if (!entries_count || !pointer_count)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!info)
+    {
+        *entries_count = 1;
+        *pointer_count = 1;
+        return TRUE;
+    }
+
+    if (*entries_count < 1 || *pointer_count < 1)
+    {
+        *entries_count = 1;
+        *pointer_count = 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    return NtUserGetPointerInfoList(id, PT_POINTER, 0, 0, sizeof(*info), entries_count, pointer_count, info);
+}
+
+BOOL WINAPI GetPointerInputTransform(UINT32 id, UINT32 history_count, INPUT_TRANSFORM *transform)
+{
+    UINT32 i;
+
+    TRACE("(%d %u %p)\n", id, history_count, transform);
+
+    if (!transform || !history_count)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    for (i = 0; i < history_count; ++i)
+    {
+        memset(&transform[i], 0, sizeof(transform[i]));
+        transform[i]._11 = 1.0f;
+        transform[i]._22 = 1.0f;
+        transform[i]._33 = 1.0f;
+        transform[i]._44 = 1.0f;
+    }
     return TRUE;
 }
 
@@ -559,6 +634,10 @@ LRESULT WINAPI ImeWndProcW( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 HANDLE WINAPI InitThreadCoreMessagingIocp2( HANDLE a1, void *a2 )
 {
     FIXME("(%p, %p) stub\n", a1, a2);
+    if (a2)
+    {
+        *(DWORD *)a2 = 0;
+    }
     return CreateIoCompletionPort( INVALID_HANDLE_VALUE, NULL, 0, 0 );
 }
 
@@ -566,4 +645,10 @@ BOOL WINAPI DrainThreadCoreMessagingCompletions2( HANDLE h )
 {
     FIXME("(%p) stub\n", h);
     return TRUE;
+}
+
+BOOL WINAPI IsImmersiveProcess( HANDLE process )
+{
+    FIXME("(%p) stub\n", process);
+    return FALSE;
 }

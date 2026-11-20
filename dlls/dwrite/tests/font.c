@@ -5787,6 +5787,14 @@ static void test_CreateRenderingParams(void)
 
     mode = IDWriteRenderingParams_GetRenderingMode(params);
     ok(mode == DWRITE_RENDERING_MODE_DEFAULT, "got %d\n", mode);
+    ok(IDWriteRenderingParams_GetGamma(params) >= 1.0f && IDWriteRenderingParams_GetGamma(params) <= 2.2f,
+            "unexpected gamma %.2f\n", IDWriteRenderingParams_GetGamma(params));
+    ok(IDWriteRenderingParams_GetEnhancedContrast(params) == 0.5f,
+            "unexpected enhanced contrast %.2f\n", IDWriteRenderingParams_GetEnhancedContrast(params));
+    ok(IDWriteRenderingParams_GetClearTypeLevel(params) == 1.0f,
+            "unexpected ClearType level %.2f\n", IDWriteRenderingParams_GetClearTypeLevel(params));
+    ok(IDWriteRenderingParams_GetPixelGeometry(params) == DWRITE_PIXEL_GEOMETRY_RGB,
+            "unexpected pixel geometry %d\n", IDWriteRenderingParams_GetPixelGeometry(params));
     IDWriteRenderingParams_Release(params);
 
     hr = IDWriteFactory_QueryInterface(factory, &IID_IDWriteFactory3, (void**)&factory3);

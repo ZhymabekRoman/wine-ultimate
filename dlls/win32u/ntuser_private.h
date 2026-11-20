@@ -146,9 +146,16 @@ struct user_thread_info
     DWORD                         clipping_reset;         /* time when clipping was last reset */
     struct session_thread_data   *session_data;           /* shared session thread data */
     struct mouse_tracking_info   *mouse_tracking_info;    /* NtUserTrackMouseEvent handling */
+    POINTER_INFO                  last_pointer_info;      /* synthesized pointer info for WM_POINTER* */
+    BOOL                          has_pointer_info;
+    UINT32                        pointer_frame_id;
 };
 
 extern struct user_thread_info *get_user_thread_info(void);
+extern HWND g_mit_input_hwnd;
+extern POINTER_INFO g_last_pointer_info;
+extern BOOL g_has_pointer_info;
+extern UINT32 g_pointer_frame_id;
 
 struct hook_extra_info
 {

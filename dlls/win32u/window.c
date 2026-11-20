@@ -6148,10 +6148,13 @@ static UINT window_min_maximize( HWND hwnd, UINT cmd, RECT *rect )
         }
 
         old_style = set_window_style_bits( hwnd, WS_MINIMIZE, WS_MAXIMIZE );
+        if (!(old_style & WS_MINIMIZE))
+        {
+            NtUserShowOwnedPopups( hwnd, FALSE );
+            swp_flags |= SWP_STATECHANGED;
+        }
 
         wpl.ptMinPosition = get_minimized_pos( hwnd, wpl.ptMinPosition );
-
-        if (!(old_style & WS_MINIMIZE)) swp_flags |= SWP_STATECHANGED;
         SetRect( rect, wpl.ptMinPosition.x, wpl.ptMinPosition.y,
                  wpl.ptMinPosition.x + get_system_metrics(SM_CXMINIMIZED),
                  wpl.ptMinPosition.y + get_system_metrics(SM_CYMINIMIZED) );
@@ -6166,7 +6169,10 @@ static UINT window_min_maximize( HWND hwnd, UINT cmd, RECT *rect )
 
         old_style = set_window_style_bits( hwnd, WS_MAXIMIZE, WS_MINIMIZE );
         if (old_style & WS_MINIMIZE)
+        {
             win_set_flags( hwnd, WIN_RESTORE_MAX, 0 );
+            NtUserShowOwnedPopups( hwnd, TRUE );
+        }
 
         if (!(old_style & WS_MAXIMIZE)) swp_flags |= SWP_STATECHANGED;
         SetRect( rect, minmax.ptMaxPosition.x, minmax.ptMaxPosition.y,
@@ -6183,6 +6189,7 @@ static UINT window_min_maximize( HWND hwnd, UINT cmd, RECT *rect )
         old_style = set_window_style_bits( hwnd, 0, WS_MINIMIZE | WS_MAXIMIZE );
         if (old_style & WS_MINIMIZE)
         {
+            NtUserShowOwnedPopups( hwnd, TRUE );
             if (win_get_flags( hwnd ) & WIN_RESTORE_MAX)
             {
                 /* Restore to maximized position */
@@ -6535,7 +6542,8 @@ BOOL WINAPI NtUserShowOwnedPopups( HWND owner, BOOL show )
     while (win_array[count]) count++;
     while (--count >= 0)
     {
-        if (get_window_relative( win_array[count], GW_OWNER ) != owner) continue;
+        HWND win_owner = get_window_relative( win_array[count], GW_OWNER );
+        if (win_owner != owner && (!win_owner || NtUserGetAncestor( win_owner, GA_ROOT ) != owner)) continue;
         if (show)
         {
             if (win_get_flags( win_array[count] ) & WIN_NEEDS_SHOW_OWNEDPOPUP)

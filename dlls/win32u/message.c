@@ -2817,6 +2817,30 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
  *
  * returns TRUE if the contents of 'msg' should be passed to the application
  */
+static BOOL is_input_site_window( HWND hwnd )
+{
+    static const WCHAR input_siteW[] = { 'I','n','p','u','t','S','i','t','e','W','i','n','d','o','w','C','l','a','s','s',0 };
+    WCHAR buf[32];
+    UNICODE_STRING str = { 0, sizeof(buf), buf };
+    INT len = NtUserGetClassName( hwnd, FALSE, &str );
+    return len == ARRAY_SIZE(input_siteW) - 1 && !memcmp( buf, input_siteW, len * sizeof(WCHAR) );
+}
+
+/* WinUI 3 / IslandInputSite hosts a hidden 0x0 InputSiteWindowClass child under
+ * DesktopChildSiteBridge that receives pointer/mouse input via DComp InputSink on Windows.
+ * Without DWM visual hit-testing, redirect client-area mouse/pointer messages to it. */
+static HWND find_input_site_child( HWND parent )
+{
+    HWND child;
+
+    for (child = get_window_relative( parent, GW_CHILD ); child; child = get_window_relative( child, GW_HWNDNEXT ))
+    {
+        if (is_input_site_window( child ))
+            return child;
+    }
+    return NULL;
+}
+
 static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, HWND hwnd_filter,
                                    UINT first, UINT last, BOOL remove )
 {
@@ -2865,8 +2889,13 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
     set_thread_dpi_awareness_context( get_window_dpi_awareness_context( msg->hwnd ));
 
-    if ((extra_info & 0xffffff00) != 0xff515700 && is_mouse_in_pointer_enabled( msg->hwnd ))
+    if ((extra_info & 0xffffff00) != 0xff515700 &&
+        (is_mouse_in_pointer_enabled( msg->hwnd ) ||
+         (hittest == HTCLIENT && g_mit_input_hwnd && is_window( g_mit_input_hwnd ) && find_input_site_child( msg->hwnd ))))
     {
+        static BOOL mit_entered = FALSE;
+        HWND pointer_target = (hittest == HTCLIENT && g_mit_input_hwnd && is_window( g_mit_input_hwnd ) &&
+                               find_input_site_child( msg->hwnd )) ? g_mit_input_hwnd : msg->hwnd;
         WORD flags = POINTER_MESSAGE_FLAG_INRANGE, pointer_button_flags;
         DWORD message = 0;
 
@@ -2912,7 +2941,72 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             break;
         }
 
-        if (message) send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+        if (message && remove)
+        {
+            POINTER_INFO *pi = &g_last_pointer_info;
+            POINTER_FLAGS pflags = POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY | POINTER_FLAG_CONFIDENCE;
+            POINTER_BUTTON_CHANGE_TYPE change = POINTER_CHANGE_NONE;
+            LARGE_INTEGER qpc;
+            WORD mk = LOWORD( msg->wParam );
+
+            if (message != WM_POINTERWHEEL && message != WM_POINTERHWHEEL)
+                flags |= POINTER_MESSAGE_FLAG_PRIMARY;
+
+            if (mk & MK_LBUTTON) pflags |= POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_INCONTACT;
+            if (mk & MK_RBUTTON) pflags |= POINTER_FLAG_SECONDBUTTON | POINTER_FLAG_INCONTACT;
+            if (mk & MK_MBUTTON) pflags |= POINTER_FLAG_THIRDBUTTON | POINTER_FLAG_INCONTACT;
+            if (mk & MK_XBUTTON1) pflags |= POINTER_FLAG_FOURTHBUTTON | POINTER_FLAG_INCONTACT;
+            if (mk & MK_XBUTTON2) pflags |= POINTER_FLAG_FIFTHBUTTON | POINTER_FLAG_INCONTACT;
+
+            switch (msg->message)
+            {
+            case WM_LBUTTONDOWN: change = POINTER_CHANGE_FIRSTBUTTON_DOWN; break;
+            case WM_LBUTTONUP:   change = POINTER_CHANGE_FIRSTBUTTON_UP;   break;
+            case WM_RBUTTONDOWN: change = POINTER_CHANGE_SECONDBUTTON_DOWN; break;
+            case WM_RBUTTONUP:   change = POINTER_CHANGE_SECONDBUTTON_UP;   break;
+            case WM_MBUTTONDOWN: change = POINTER_CHANGE_THIRDBUTTON_DOWN; break;
+            case WM_MBUTTONUP:   change = POINTER_CHANGE_THIRDBUTTON_UP;   break;
+            default: break;
+            }
+
+            if (message == WM_POINTERDOWN)       pflags |= POINTER_FLAG_DOWN;
+            else if (message == WM_POINTERUP)    pflags |= POINTER_FLAG_UP;
+            else if (message == WM_POINTERWHEEL) pflags |= POINTER_FLAG_WHEEL | POINTER_FLAG_UPDATE;
+            else if (message == WM_POINTERHWHEEL) pflags |= POINTER_FLAG_HWHEEL | POINTER_FLAG_UPDATE;
+            else                                 pflags |= POINTER_FLAG_UPDATE;
+
+            memset( pi, 0, sizeof(*pi) );
+            pi->pointerType = PT_MOUSE;
+            pi->pointerId = 1;
+            pi->frameId = ++g_pointer_frame_id;
+            pi->pointerFlags = pflags;
+            pi->sourceDevice = (HANDLE)(ULONG_PTR)1;
+            pi->hwndTarget = pointer_target;
+            pi->ptPixelLocation = msg->pt;
+            pi->ptHimetricLocation = msg->pt;
+            pi->ptPixelLocationRaw = msg->pt;
+            pi->ptHimetricLocationRaw = msg->pt;
+            pi->dwTime = msg->time;
+            pi->historyCount = 1;
+            pi->InputData = (message == WM_POINTERWHEEL || message == WM_POINTERHWHEEL) ? (SHORT)HIWORD( msg->wParam ) : 0;
+            pi->dwKeyStates = ((mk & MK_SHIFT) ? POINTER_MOD_SHIFT : 0) | ((mk & MK_CONTROL) ? POINTER_MOD_CTRL : 0);
+            NtQueryPerformanceCounter( &qpc, NULL );
+            pi->PerformanceCount = qpc.QuadPart;
+            pi->ButtonChangeType = change;
+            g_has_pointer_info = TRUE;
+
+            if (pointer_target == g_mit_input_hwnd && !mit_entered)
+            {
+                POINTER_FLAGS saved_flags = pi->pointerFlags;
+                pi->pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY | POINTER_FLAG_CONFIDENCE | POINTER_FLAG_NEW;
+                mit_entered = TRUE;
+                send_message( pointer_target, WM_POINTERENTER, MAKELONG( 1, flags | POINTER_MESSAGE_FLAG_NEW ), MAKELONG( msg->pt.x, msg->pt.y ) );
+                pi->pointerFlags = saved_flags;
+                pi->frameId = ++g_pointer_frame_id;
+            }
+
+            send_message( pointer_target, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+        }
     }
 
     /* FIXME: is this really the right place for this hook? */
@@ -3789,11 +3883,27 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
         struct msg_shm_queue *shm_slot = queue_in_set ? msg_shm_get_self_slot() : NULL;
         BOOL shm_waiting = FALSE;
 
-        if (shm_slot && msg_shm_spin_lock( &shm_slot->lock ))
+        if (shm_slot && type != WaitAll && msg_shm_spin_lock( &shm_slot->lock ))
         {
             if (shm_slot->tail != shm_slot->owner_seen_tail)
             {
                 msg_shm_spin_unlock( &shm_slot->lock );
+                if (count > 1)
+                {
+                    LARGE_INTEGER zero = { .QuadPart = 0 };
+                    ret = NtWaitForMultipleObjects( count - 1, handles, WaitAny,
+                                                    !!(flags & MWMO_ALERTABLE), &zero );
+                    if (ret != STATUS_TIMEOUT)
+                    {
+                        if (HIWORD(ret))
+                        {
+                            RtlSetLastWin32Error( RtlNtStatusToDosError(ret) );
+                            ret = WAIT_FAILED;
+                        }
+                        KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
+                        return ret;
+                    }
+                }
                 KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
                 return count - 1;
             }

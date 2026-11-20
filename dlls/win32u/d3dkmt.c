@@ -710,6 +710,17 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
         *value = KMT_DRIVERVERSION_WDDM_3_1;
         return STATUS_SUCCESS;
     }
+    case KMTQAITYPE_ADAPTERTYPE:
+    {
+        UINT *value = desc->pPrivateDriverData;
+
+        if (desc->PrivateDriverDataSize < sizeof(*value))
+            return STATUS_INVALID_PARAMETER;
+
+        /* RenderSupported (bit 0) | DisplaySupported (bit 1) */
+        *value = 0x3;
+        return STATUS_SUCCESS;
+    }
     default:
     {
         FIXME( "type %d not handled.\n", desc->Type );

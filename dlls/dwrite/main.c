@@ -1127,18 +1127,56 @@ static HRESULT WINAPI dwritefactory_CreateRenderingParams(IDWriteFactory7 *iface
 static HRESULT WINAPI dwritefactory_CreateMonitorRenderingParams(IDWriteFactory7 *iface, HMONITOR monitor,
     IDWriteRenderingParams **params)
 {
+    DWRITE_PIXEL_GEOMETRY geometry = DWRITE_PIXEL_GEOMETRY_RGB;
+    float gamma = 1.8f, contrast = 0.5f, grayscale_contrast = 1.0f, cleartype_level = 1.0f;
     IDWriteRenderingParams3 *params3;
-    static int fixme_once = 0;
+    HKEY hkey;
     HRESULT hr;
 
     TRACE("%p, %p, %p.\n", iface, monitor, params);
 
-    if (!fixme_once++)
-        FIXME("(%p): monitor setting ignored\n", monitor);
+    if (!RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", 0, KEY_QUERY_VALUE, &hkey))
+    {
+        DWORD val, type, size;
+        WCHAR buf[16];
 
-    /* FIXME: use actual per-monitor gamma factor */
-    hr = IDWriteFactory7_CreateCustomRenderingParams(iface, 2.0f, 0.0f, 1.0f, 0.0f, DWRITE_PIXEL_GEOMETRY_FLAT,
-        DWRITE_RENDERING_MODE1_DEFAULT, DWRITE_GRID_FIT_MODE_DEFAULT, &params3);
+        size = sizeof(val);
+        if (!RegQueryValueExW(hkey, L"FontSmoothingGamma", NULL, &type, (BYTE *)&val, &size)
+                && type == REG_DWORD && val > 0)
+        {
+            gamma = (float)val / 1000.0f;
+            if (gamma < 1.0f) gamma = 1.0f;
+            else if (gamma > 2.2f) gamma = 2.2f;
+        }
+
+        size = sizeof(val);
+        if (!RegQueryValueExW(hkey, L"FontSmoothingOrientation", NULL, &type, (BYTE *)&val, &size)
+                && type == REG_DWORD)
+        {
+            geometry = (val == 0) ? DWRITE_PIXEL_GEOMETRY_BGR : DWRITE_PIXEL_GEOMETRY_RGB;
+        }
+
+        size = sizeof(val);
+        if (!RegQueryValueExW(hkey, L"FontSmoothingType", NULL, &type, (BYTE *)&val, &size)
+                && type == REG_DWORD && val == 0)
+        {
+            cleartype_level = 0.0f;
+            geometry = DWRITE_PIXEL_GEOMETRY_FLAT;
+        }
+
+        size = sizeof(buf);
+        if (!RegQueryValueExW(hkey, L"FontSmoothing", NULL, &type, (BYTE *)buf, &size)
+                && type == REG_SZ && buf[0] == '0' && buf[1] == 0)
+        {
+            cleartype_level = 0.0f;
+            geometry = DWRITE_PIXEL_GEOMETRY_FLAT;
+        }
+
+        RegCloseKey(hkey);
+    }
+
+    hr = IDWriteFactory7_CreateCustomRenderingParams(iface, gamma, contrast, grayscale_contrast, cleartype_level,
+            geometry, DWRITE_RENDERING_MODE1_DEFAULT, DWRITE_GRID_FIT_MODE_DEFAULT, &params3);
     *params = (IDWriteRenderingParams*)params3;
     return hr;
 }

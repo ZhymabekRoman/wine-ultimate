@@ -192,8 +192,8 @@ static const WCHAR font_assoc_keyW[] =
     '\\','F','o','n','t','A','s','s','o','c'
 };
 
-static UINT font_smoothing = GGO_BITMAP;
-static UINT subpixel_orientation = GGO_GRAY4_BITMAP;
+static UINT font_smoothing = WINE_GGO_HRGB_BITMAP;   /* ClearType, matching the Windows 10/11 default */
+static UINT subpixel_orientation = WINE_GGO_HRGB_BITMAP;
 static BOOL antialias_fakes = TRUE;
 static struct font_gamma_ramp font_gamma_ramp;
 
@@ -4720,7 +4720,7 @@ static UINT init_font_options(void)
     char value_buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data[20 * sizeof(WCHAR)])];
     KEY_VALUE_PARTIAL_INFORMATION *info = (void *)value_buffer;
     HKEY key;
-    DWORD i, val, gamma = 1400;
+    DWORD i, val, gamma = 1700; /* slightly darker thin stems at 96 DPI, like Windows ClearType */
     UINT dpi = 0;
 
     if (query_reg_ascii_value( wine_fonts_key, "AntialiasFakeBoldOrItalic",
@@ -4745,12 +4745,15 @@ static UINT init_font_options(void)
                 break;
             }
         }
-        if (get_key_value( key, "FontSmoothing", &val ) && val /* enabled */)
+        /* Windows 10/11 ship ClearType enabled with no explicit keys; treat missing keys the
+         * same way so that GDI text gets subpixel AA (and its even, subpixel advance widths)
+         * instead of the coarser 17-level grayscale. */
+        if (!get_key_value( key, "FontSmoothing", &val ) || val /* enabled */)
         {
-            if (get_key_value( key, "FontSmoothingType", &val ) && val == 2 /* FE_FONTSMOOTHINGCLEARTYPE */)
+            if (!get_key_value( key, "FontSmoothingType", &val ) || val == 2 /* FE_FONTSMOOTHINGCLEARTYPE */)
                 font_smoothing = subpixel_orientation;
             else
-                font_smoothing = GGO_GRAY4_BITMAP;
+                font_smoothing = GGO_GRAY8_BITMAP; /* standard AA: 256 levels, not 17 */
         }
         if (get_key_value( key, "FontSmoothingGamma", &val ) && val)
         {

@@ -496,18 +496,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
 
             if (surface->dst_window == window && (pixmap = pXCompositeNameWindowPixmap( gdi_display, surface->window )))
             {
-                if (usexpresent && pXPresentPixmap && !clipped &&
-                    dst_w == src_w && dst_h == src_h &&
-                    surface->depth == surface->dst_depth)
-                {
-                    pXPresentPixmap( gdi_display, window, pixmap, ++surface->present_serial,
-                                     None, None, rect_dst.left, rect_dst.top,
-                                     None, None, None, 1 /* PresentOptionAsync */,
-                                     0, 0, 0, NULL, 0 );
-                    XFreePixmap( gdi_display, pixmap );
-                    XFlush( gdi_display );
-                    goto done;
-                }
+                /* XRenderComposite uses window-relative coords (avoids XWayland XPresentPixmap root-origin shift). */
                 if (x11drv_xrender_present_pixmap( pixmap, surface->depth, src_w, src_h,
                                                    window, surface->dst_depth, &rect_dst,
                                                    clipped ? region : NULL ))
@@ -551,7 +540,8 @@ Window x11drv_client_surface_create( HWND hwnd, int format, struct client_surfac
     XVisualInfo visual = default_visual;
     Colormap colormap;
 
-    if (format && !visual_from_pixel_format( format, &visual )) return None;
+    if (format == -1 && argb_visual.visual) visual = argb_visual;
+    else if (format > 0 && !visual_from_pixel_format( format, &visual )) return None;
 
     if (visual.visualid == default_visual.visualid) colormap = default_colormap;
     else colormap = XCreateColormap( gdi_display, get_dummy_parent(), visual.visual, visual_class_alloc( visual.class ) );

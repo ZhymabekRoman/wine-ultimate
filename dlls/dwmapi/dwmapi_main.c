@@ -102,6 +102,18 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
 {
     static BOOL once;
 
+    if (attributenum == DWMWA_CLOAK && hwnd && attribute && size >= sizeof(BOOL))
+    {
+        BOOL cloak = *(const BOOL *)attribute;
+        if (cloak)
+            SetPropW(hwnd, L"__wine_dwm_cloaked", (HANDLE)1);
+        else
+            RemovePropW(hwnd, L"__wine_dwm_cloaked");
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS);
+        return S_OK;
+    }
+
     if (!once++) FIXME("(%p, %lx, %p, %lx) stub\n", hwnd, attributenum, attribute, size);
 
     return S_OK;

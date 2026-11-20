@@ -2744,13 +2744,56 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
 /**********************************************************************
  *       NtUserGetPointerInfoList    (win32u.@)
  */
+HWND g_mit_input_hwnd = NULL;
+POINTER_INFO g_last_pointer_info;
+BOOL g_has_pointer_info = FALSE;
+UINT32 g_pointer_frame_id = 0;
+
 BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_PTR unk0, UINT_PTR unk1, SIZE_T size,
                                       UINT32 *entry_count, UINT32 *pointer_count, void *pointer_info )
 {
-    FIXME( "id %#x, type %#x, unk0 %#lx, unk1 %#lx, size %#lx, entry_count %p, pointer_count %p, pointer_info %p stub!\n",
-           id, type, (long)unk0, (long)unk1, size, entry_count, pointer_count, pointer_info );
-    RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    POINTER_INFO info;
+
+    TRACE( "id %#x, type %#x, size %#lx, entry_count %p, pointer_count %p, pointer_info %p\n",
+           id, type, size, entry_count, pointer_count, pointer_info );
+
+    if (!entry_count || !pointer_count || !pointer_info || size < sizeof(POINTER_INFO))
+    {
+        RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (g_has_pointer_info)
+    {
+        info = g_last_pointer_info;
+        info.pointerId = id ? id : 1;
+    }
+    else
+    {
+        POINT pt = { 0, 0 };
+        LARGE_INTEGER qpc;
+        memset( &info, 0, sizeof(info) );
+        NtUserGetCursorPos( &pt );
+        info.pointerType = PT_MOUSE;
+        info.pointerId = id ? id : 1;
+        info.frameId = ++g_pointer_frame_id;
+        info.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY | POINTER_FLAG_CONFIDENCE | POINTER_FLAG_UPDATE;
+        info.sourceDevice = (HANDLE)(ULONG_PTR)1;
+        info.ptPixelLocation = pt;
+        info.ptHimetricLocation = pt;
+        info.ptPixelLocationRaw = pt;
+        info.ptHimetricLocationRaw = pt;
+        info.dwTime = NtGetTickCount();
+        info.historyCount = 1;
+        NtQueryPerformanceCounter( &qpc, NULL );
+        info.PerformanceCount = qpc.QuadPart;
+    }
+
+    *entry_count = 1;
+    *pointer_count = 1;
+    memset( pointer_info, 0, size );
+    memcpy( pointer_info, &info, sizeof(POINTER_INFO) );
+    return TRUE;
 }
 
 static BOOL get_clip_cursor( RECT *rect, UINT dpi, MONITOR_DPI_TYPE type )

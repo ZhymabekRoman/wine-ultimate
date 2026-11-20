@@ -213,6 +213,7 @@ enum glx_swap_control_method
 
 static struct glx_pixel_format *pixel_formats;
 static int nb_pixel_formats, nb_onscreen_formats;
+static GLXFBConfig argb_fbconfig;
 static const struct egl_platform *egl;
 static BOOL (*p_egl_describe_pixel_format)( int format, struct wgl_pixel_format *pf );
 
@@ -519,15 +520,58 @@ static BOOL x11drv_egl_describe_pixel_format( int format, struct wgl_pixel_forma
     return TRUE;
 }
 
+static BOOL hwnd_wants_argb_surface( HWND hwnd )
+{
+    if (!argb_visual.visual || !hwnd) return FALSE;
+    return (NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ) & WS_EX_NOREDIRECTIONBITMAP)
+            && (NtUserGetWindowLongW( hwnd, GWL_STYLE ) & WS_POPUP);
+}
+
+static int find_argb_egl_format( int format )
+{
+    EGLConfig orig_cfg = egl_config_for_format( format );
+    EGLint orig_depth = 0, orig_stencil = 0, i;
+
+    funcs->p_eglGetConfigAttrib( egl->display, orig_cfg, EGL_DEPTH_SIZE, &orig_depth );
+    funcs->p_eglGetConfigAttrib( egl->display, orig_cfg, EGL_STENCIL_SIZE, &orig_stencil );
+
+    for (i = 1; i <= egl->config_count; i++)
+    {
+        EGLint alpha = 0, surf_type = 0, depth = 0, stencil = 0;
+        EGLConfig cfg = egl_config_for_format( i );
+        XVisualInfo vis;
+        funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_SURFACE_TYPE, &surf_type );
+        funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_ALPHA_SIZE, &alpha );
+        funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_DEPTH_SIZE, &depth );
+        funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_STENCIL_SIZE, &stencil );
+        if ((surf_type & EGL_WINDOW_BIT) && alpha >= 8 && depth == orig_depth && stencil == orig_stencil
+                && visual_from_pixel_format( i, &vis ) && vis.depth == 32 && vis.class == TrueColor)
+            return i;
+    }
+    for (i = 1; i <= egl->config_count; i++)
+    {
+        EGLint alpha = 0, surf_type = 0;
+        EGLConfig cfg = egl_config_for_format( i );
+        XVisualInfo vis;
+        funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_SURFACE_TYPE, &surf_type );
+        funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_ALPHA_SIZE, &alpha );
+        if ((surf_type & EGL_WINDOW_BIT) && alpha >= 8
+                && visual_from_pixel_format( i, &vis ) && vis.depth == 32 && vis.class == TrueColor)
+            return i;
+    }
+    return format;
+}
+
 static BOOL x11drv_egl_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
 {
     struct opengl_drawable *previous;
     struct client_surface *client;
     struct gl_drawable *gl;
     Window window;
+    int surface_format = hwnd_wants_argb_surface( hwnd ) ? find_argb_egl_format( format ) : format;
 
     if ((previous = *drawable) && previous->format == format) return TRUE;
-    if (!(window = x11drv_client_surface_create( hwnd, format, &client ))) return FALSE;
+    if (!(window = x11drv_client_surface_create( hwnd, surface_format, &client ))) return FALSE;
     gl = opengl_drawable_create( sizeof(*gl), &x11drv_egl_surface_funcs, format, client );
     client_surface_release( client );
     if (!gl) return FALSE;
@@ -537,7 +581,7 @@ static BOOL x11drv_egl_surface_create( HWND hwnd, int format, struct opengl_draw
     opengl_drawable_map_buffer( &gl->base, GL_FRONT_AND_BACK, GL_BACK );
     if (gl->base.stereo) opengl_drawable_map_buffer( &gl->base, GL_FRONT_RIGHT, GL_BACK_RIGHT );
 
-    if (!(gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, egl_config_for_format( format ),
+    if (!(gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, egl_config_for_format( surface_format ),
                                                               (void *)window, NULL )))
     {
         opengl_drawable_release( &gl->base );
@@ -833,6 +877,14 @@ static UINT x11drv_init_pixel_formats( UINT *onscreen_count )
                  * list formats with the same depth. */
                 if(visinfo->depth != default_visual.depth)
                 {
+                    if (!argb_fbconfig && argb_visual.visual && visinfo->visualid == argb_visual.visualid)
+                    {
+                        int db = 0, alpha = 0;
+                        pglXGetFBConfigAttrib( gdi_display, cfgs[i], GLX_DOUBLEBUFFER, &db );
+                        pglXGetFBConfigAttrib( gdi_display, cfgs[i], GLX_ALPHA_SIZE, &alpha );
+                        if (db && alpha >= 8)
+                            argb_fbconfig = cfgs[i];
+                    }
                     XFree(visinfo);
                     continue;
                 }
@@ -973,19 +1025,21 @@ static GLXContext create_glxcontext( int format, GLXContext share, const int *at
 
 static BOOL x11drv_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
 {
+    BOOL use_argb = hwnd_wants_argb_surface( hwnd ) && argb_fbconfig;
     struct glx_pixel_format *fmt = glx_pixel_format_from_format( format );
+    GLXFBConfig fbconfig = use_argb ? argb_fbconfig : fmt->fbconfig;
     struct opengl_drawable *previous;
     struct client_surface *client;
     struct gl_drawable *gl;
     Window window;
 
     if ((previous = *drawable) && previous->format == format) return TRUE;
-    if (!(window = x11drv_client_surface_create( hwnd, format, &client ))) return FALSE;
+    if (!(window = x11drv_client_surface_create( hwnd, use_argb ? -1 : format, &client ))) return FALSE;
     gl = opengl_drawable_create( sizeof(*gl), &x11drv_surface_funcs, format, client );
     client_surface_release( client );
     if (!gl) return FALSE;
 
-    if (!(gl->drawable = pglXCreateWindow( gdi_display, fmt->fbconfig, window, NULL )))
+    if (!(gl->drawable = pglXCreateWindow( gdi_display, fbconfig, window, NULL )))
     {
         opengl_drawable_release( &gl->base );
         return FALSE;

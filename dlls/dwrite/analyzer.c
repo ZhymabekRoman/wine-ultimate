@@ -25,6 +25,7 @@
 
 #include "dwrite_private.h"
 #include "scripts.h"
+#include "unixlib.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwrite);
 
@@ -2756,6 +2757,61 @@ static void fallback_map_default_font(const struct dwrite_fontfallback *fallback
     }
 }
 
+/* System FontConfig fallback for codepoints not covered by hardcoded Windows font mappings
+   or registry FontLink entries. Only used for the system fallback object. */
+static BOOL fallback_map_fontconfig(const struct dwrite_fontfallback *fallback, UINT32 first_ch,
+        const WCHAR *locale_name, IDWriteTextAnalysisSource *source, UINT32 position, UINT32 length,
+        DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch,
+        IDWriteFont **ret_font, UINT32 *ret_length, float *scale)
+{
+    struct fontconfig_fallback_params params;
+    char locale_utf8[32], family_utf8[256], file_utf8[512];
+    WCHAR familyW[256];
+    UINT32 face_index = 0, mapped;
+    IDWriteFont3 *font;
+
+    if (fallback->data.count != ~0u || !fallback->systemcollection || !length || !first_ch)
+        return FALSE;
+
+    locale_utf8[0] = 0;
+    if (locale_name && *locale_name)
+        WideCharToMultiByte(CP_UTF8, 0, locale_name, -1, locale_utf8, sizeof(locale_utf8), NULL, NULL);
+
+    params.ch = first_ch;
+    params.weight = weight;
+    params.style = style;
+    params.stretch = stretch;
+    params.locale = locale_utf8;
+    params.family = family_utf8;
+    params.family_size = sizeof(family_utf8);
+    params.file = file_utf8;
+    params.file_size = sizeof(file_utf8);
+    params.face_index = &face_index;
+
+    if (UNIX_CALL(fontconfig_fallback, &params) || !family_utf8[0])
+        return FALSE;
+
+    if (!MultiByteToWideChar(CP_UTF8, 0, family_utf8, -1, familyW, ARRAY_SIZE(familyW)))
+        return FALSE;
+
+    if (SUCCEEDED(create_matching_font(fallback->systemcollection, familyW, weight, style, stretch,
+            &IID_IDWriteFont3, (void **)&font)))
+    {
+        if ((mapped = fallback_font_get_supported_length(font, source, position, length)))
+        {
+            *ret_font = (IDWriteFont *)font;
+            *ret_length = mapped;
+            *scale = 1.0f;
+            return TRUE;
+        }
+        IDWriteFont3_Release(font);
+    }
+
+    TRACE("FontConfig matched %s (%s) for U+%04X, not resolvable in system collection.\n",
+            debugstr_a(family_utf8), debugstr_a(file_utf8), first_ch);
+    return FALSE;
+}
+
 static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallback, IDWriteTextAnalysisSource *source,
         UINT32 position, UINT32 text_length, const WCHAR *base_family, DWRITE_FONT_WEIGHT weight,
         DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length, float *scale)
@@ -2806,6 +2862,8 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
         if (!fallback_ch_is_uvs(first_ch))
         {
             if (!fallback_map_family_links(fallback, data, base_family, locale_name, source, position, mapped,
+                    weight, style, stretch, ret_font, ret_length, scale) &&
+                !fallback_map_fontconfig(fallback, first_ch, locale_name, source, position, mapped,
                     weight, style, stretch, ret_font, ret_length, scale))
                 fallback_map_default_font(fallback, source, position, mapped, weight, style, stretch, ret_font, ret_length);
         }
@@ -2833,10 +2891,12 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
     }
 
     /* Mapping was found, but either font couldn't be created or there's no font that supports given input.
-       Try per-family registry links, then fall back to the default UI font. */
+       Try per-family registry links, FontConfig system fallback, then fall back to the default UI font. */
     *ret_font = NULL;
     *ret_length = length;
     if (!fallback_map_family_links(fallback, data, base_family, locale_name, source, position, length,
+            weight, style, stretch, ret_font, ret_length, scale) &&
+        !fallback_map_fontconfig(fallback, first_ch, locale_name, source, position, length,
             weight, style, stretch, ret_font, ret_length, scale))
         fallback_map_default_font(fallback, source, position, length, weight, style, stretch, ret_font, ret_length);
 
@@ -3206,7 +3266,7 @@ static HRESULT WINAPI fontfallbackbuilder_AddMappings(IDWriteFontFallbackBuilder
 {
     FIXME("%p, %p stub.\n", iface, fallback);
 
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static HRESULT fallbackbuilder_init_fallback_data(const struct dwrite_fontfallback_builder *builder,

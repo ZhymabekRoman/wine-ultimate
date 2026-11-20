@@ -5634,6 +5634,87 @@ static void test_system_fallback(void)
     IDWriteFactory2_Release(factory);
 }
 
+static void test_fontconfig_fallback(void)
+{
+    static const WCHAR test_chars[] = {
+        0x4e2d, /* 中 CJK */
+        0x65e5, /* 日 CJK */
+        0xd55c, /* 한 Hangul */
+        0x221e, /* ∞ Math */
+        0x2605, /* ★ Misc Symbol */
+        0x2764, /* ❤ Dingbat/Emoji */
+    };
+    static const WCHAR emoji_surrogate[] = { 0xd83d, 0xde00, 0 }; /* 😀 U+1F600 */
+    IDWriteFontFallback *fallback;
+    IDWriteFactory2 *factory;
+    IDWriteFont *font;
+    UINT32 i, length;
+    WCHAR name[256];
+    BOOL exists;
+    float scale;
+    HRESULT hr;
+
+    if (!(factory = create_factory_iid(&IID_IDWriteFactory2)))
+    {
+        win_skip("System font fallback API is not supported.\n");
+        return;
+    }
+
+    hr = IDWriteFactory2_GetSystemFontFallback(factory, &fallback);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    for (i = 0; i < ARRAY_SIZE(test_chars); ++i)
+    {
+        WCHAR buf[2] = { test_chars[i], 0 };
+
+        font = NULL;
+        length = 0;
+        scale = 0.0f;
+        g_source = buf;
+        hr = IDWriteFontFallback_MapCharacters(fallback, &analysissource, 0, 1, NULL, L"NonExistentBaseFont",
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                &length, &font, &scale);
+        ok(hr == S_OK, "U+%04X: unexpected hr %#lx.\n", test_chars[i], hr);
+        ok(length == 1, "U+%04X: unexpected mapped length %u.\n", test_chars[i], length);
+        ok(font != NULL, "U+%04X: got NULL font.\n", test_chars[i]);
+        if (font)
+        {
+            exists = FALSE;
+            get_font_name(font, name, ARRAY_SIZE(name));
+            hr = IDWriteFont_HasCharacter(font, test_chars[i], &exists);
+            ok(hr == S_OK, "U+%04X: HasCharacter hr %#lx.\n", test_chars[i], hr);
+            ok(exists, "U+%04X: font %s missing character.\n", test_chars[i], wine_dbgstr_w(name));
+            trace("U+%04X -> %s (HasCharacter=%d)\n", test_chars[i], wine_dbgstr_w(name), exists);
+            IDWriteFont_Release(font);
+        }
+    }
+
+    /* U+1F600 😀 via surrogate pair */
+    font = NULL;
+    length = 0;
+    scale = 0.0f;
+    g_source = emoji_surrogate;
+    hr = IDWriteFontFallback_MapCharacters(fallback, &analysissource, 0, 2, NULL, L"NonExistentBaseFont",
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            &length, &font, &scale);
+    ok(hr == S_OK, "U+1F600: unexpected hr %#lx.\n", hr);
+    ok(length == 2, "U+1F600: unexpected mapped length %u.\n", length);
+    ok(font != NULL, "U+1F600: got NULL font.\n");
+    if (font)
+    {
+        exists = FALSE;
+        get_font_name(font, name, ARRAY_SIZE(name));
+        hr = IDWriteFont_HasCharacter(font, 0x1f600, &exists);
+        ok(hr == S_OK, "U+1F600: HasCharacter hr %#lx.\n", hr);
+        ok(exists, "U+1F600: font %s missing character.\n", wine_dbgstr_w(name));
+        trace("U+1F600 -> %s (HasCharacter=%d)\n", wine_dbgstr_w(name), exists);
+        IDWriteFont_Release(font);
+    }
+
+    IDWriteFontFallback_Release(fallback);
+    IDWriteFactory2_Release(factory);
+}
+
 static void test_FontFallbackBuilder(void)
 {
     IDWriteFontFallback *fallback, *fallback2;
@@ -8149,6 +8230,7 @@ START_TEST(layout)
     test_SetWordWrapping();
     test_MapCharacters();
     test_system_fallback();
+    test_fontconfig_fallback();
     test_FontFallbackBuilder();
     test_SetTypography();
     test_SetLastLineWrapping();

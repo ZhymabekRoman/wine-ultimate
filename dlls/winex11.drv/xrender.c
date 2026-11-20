@@ -2269,7 +2269,12 @@ BOOL x11drv_xrender_present_pixmap( Pixmap src, int src_depth, int src_w, int sr
         return FALSE;
 
     if (src_depth == 32)
-        src_fmt = pict_formats[WXR_FORMAT_X8R8G8B8] ? pict_formats[WXR_FORMAT_X8R8G8B8] : pict_formats[WXR_FORMAT_A8R8G8B8];
+    {
+        if (dst_depth == 32 && pict_formats[WXR_FORMAT_A8R8G8B8])
+            src_fmt = pict_formats[WXR_FORMAT_A8R8G8B8];
+        else
+            src_fmt = pict_formats[WXR_FORMAT_X8R8G8B8] ? pict_formats[WXR_FORMAT_X8R8G8B8] : pict_formats[WXR_FORMAT_A8R8G8B8];
+    }
     else if (src_depth == default_visual.depth)
         src_fmt = pict_formats[WXR_FORMAT_ROOT];
 

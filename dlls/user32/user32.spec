@@ -632,8 +632,8 @@
 @ stdcall GetPointerDeviceProperties(ptr ptr ptr)
 @ stdcall GetPointerDeviceRects(ptr ptr ptr)
 @ stdcall GetPointerDevices(ptr ptr)
-# @ stub GetPointerFrameInfo
-# @ stub GetPointerFrameInfoHistory
+@ stdcall GetPointerFrameInfo(long ptr ptr)
+@ stdcall GetPointerFrameInfoHistory(long ptr ptr ptr)
 # @ stub GetPointerFramePenInfo
 # @ stub GetPointerFramePenInfoHistory
 # @ stub GetPointerFrameTimes
@@ -641,7 +641,7 @@
 # @ stub GetPointerFrameTouchInfoHistory
 @ stdcall GetPointerInfo(long ptr)
 # @ stub GetPointerInfoHistory
-# @ stub GetPointerInputTransform
+@ stdcall GetPointerInputTransform(long long ptr)
 @ stdcall GetPointerPenInfo(long ptr)
 # @ stub GetPointerPenInfoHistory
 @ stdcall GetPointerTouchInfo(long ptr)
@@ -785,7 +785,7 @@
 @ stdcall IsGUIThread(long)
 @ stdcall IsHungAppWindow(long)
 @ stdcall IsIconic(long)
-# @ stub IsImmersiveProcess
+@ stdcall IsImmersiveProcess(ptr)
 # @ stub IsInDesktopWindowBand
 @ stdcall IsMenu(long)
 @ stdcall IsMouseInPointerEnabled() NtUserIsMouseInPointerEnabled

@@ -5598,9 +5598,9 @@ static HRESULT WINAPI dwritetextlayout3_GetLineMetrics(IDWriteTextLayout4 *iface
 static HRESULT WINAPI dwritetextlayout4_SetFontAxisValues(IDWriteTextLayout4 *iface,
         DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 num_values, DWRITE_TEXT_RANGE range)
 {
-    FIXME("%p, %p, %u, %s.\n", iface, axis_values, num_values, debugstr_range(&range));
+    FIXME("%p, %p, %u, %s stub.\n", iface, axis_values, num_values, debugstr_range(&range));
 
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static UINT32 WINAPI dwritetextlayout4_GetFontAxisValueCount(IDWriteTextLayout4 *iface, UINT32 pos)
