@@ -92,6 +92,7 @@ BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *con
                              ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain );
 void xaml_gpu_release_rtv( void );
 void xaml_gpu_shutdown( void );
+BOOL xaml_has_active_swapchain_panel( void );
 BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
                            UINT width, UINT height, COLORREF clear_color );
 void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,

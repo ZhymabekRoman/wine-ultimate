@@ -187,6 +187,7 @@ struct composition_target
      * producing device or the content size changes. */
     ID3D11Device *composite_device;         /* device composite_swapchain was created on */
     IDXGISwapChain1 *composite_swapchain;   /* presents to the target window */
+    HWND composite_hwnd;                    /* dedicated child HWND to avoid drawable collision */
     ID3D11RenderTargetView *composite_rtv;  /* render target view of the back buffer */
     UINT composite_width;
     UINT composite_height;

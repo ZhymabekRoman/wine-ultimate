@@ -567,10 +567,20 @@ BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwa
         g_gpu.rtv_height = height;
     }
 
-    clear_rgba[0] = (float)GetRValue( clear_color ) / 255.0f;
-    clear_rgba[1] = (float)GetGValue( clear_color ) / 255.0f;
-    clear_rgba[2] = (float)GetBValue( clear_color ) / 255.0f;
-    clear_rgba[3] = 1.0f;
+    if (xaml_has_active_swapchain_panel())
+    {
+        clear_rgba[0] = 0.0f;
+        clear_rgba[1] = 0.0f;
+        clear_rgba[2] = 0.0f;
+        clear_rgba[3] = 0.0f;
+    }
+    else
+    {
+        clear_rgba[0] = (float)GetRValue( clear_color ) / 255.0f;
+        clear_rgba[1] = (float)GetGValue( clear_color ) / 255.0f;
+        clear_rgba[2] = (float)GetBValue( clear_color ) / 255.0f;
+        clear_rgba[3] = 1.0f;
+    }
 
     ID3D11DeviceContext_OMSetRenderTargets( ctx, 1, &g_gpu.rtv, NULL );
     ID3D11DeviceContext_ClearRenderTargetView( ctx, g_gpu.rtv, clear_rgba );
@@ -605,10 +615,20 @@ BOOL xaml_gpu_begin_frame_rtv( ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D
         g_gpu.rtv_height = height;
     }
 
-    clear_rgba[0] = (float)GetRValue( clear_color ) / 255.0f;
-    clear_rgba[1] = (float)GetGValue( clear_color ) / 255.0f;
-    clear_rgba[2] = (float)GetBValue( clear_color ) / 255.0f;
-    clear_rgba[3] = 1.0f;
+    if (xaml_has_active_swapchain_panel())
+    {
+        clear_rgba[0] = 0.0f;
+        clear_rgba[1] = 0.0f;
+        clear_rgba[2] = 0.0f;
+        clear_rgba[3] = 0.0f;
+    }
+    else
+    {
+        clear_rgba[0] = (float)GetRValue( clear_color ) / 255.0f;
+        clear_rgba[1] = (float)GetGValue( clear_color ) / 255.0f;
+        clear_rgba[2] = (float)GetBValue( clear_color ) / 255.0f;
+        clear_rgba[3] = 1.0f;
+    }
 
     ID3D11DeviceContext_OMSetRenderTargets( ctx, 1, &g_gpu.rtv, NULL );
     ID3D11DeviceContext_ClearRenderTargetView( ctx, g_gpu.rtv, clear_rgba );

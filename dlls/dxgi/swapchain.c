@@ -1224,16 +1224,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
     d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
     wined3d_mutex_unlock();
 
-    if (SUCCEEDED(hr) && width > 100 && height > 100)
-    {
-        HWND sc_hwnd = d3d11_swapchain_get_hwnd(swapchain);
-        if (sc_hwnd && GetParent(sc_hwnd))
-        {
-            SetWindowPos(sc_hwnd, HWND_TOP, 0, 48, (int)width, (int)height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        }
-    }
-
     return hr;
 }
 

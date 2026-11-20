@@ -478,6 +478,9 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
         {
             target->composite_width = width;
             target->composite_height = height;
+            if (target->composite_hwnd && IsWindow(target->composite_hwnd))
+                SetWindowPos(target->composite_hwnd, HWND_TOP, 0, 0, (int)width, (int)height,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
             return S_OK;
         }
     }
@@ -495,6 +498,10 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
         return hr;
     }
 
+    if (target->composite_hwnd && IsWindow(target->composite_hwnd))
+        SetWindowPos(target->composite_hwnd, HWND_TOP, 0, 0, (int)width, (int)height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
+
     memset(&desc, 0, sizeof(desc));
     desc.Width = width;
     desc.Height = height;
@@ -504,7 +511,8 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     desc.Flags = 0;
-    hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)device, target->hwnd,
+    hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)device,
+            target->composite_hwnd ? target->composite_hwnd : target->hwnd,
             &desc, NULL, NULL, &target->composite_swapchain);
     if (FAILED(hr))
     {
@@ -1219,6 +1227,69 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
                     0.0f, 0.0f, (float)dst_w, (float)dst_h, &proj_matrix);
     }
 
+    if (batch && target->composite_batch_cleared && target->composite_device
+            && target->composite_device != (ID3D11Device *)d3d11_device)
+    {
+        /* Cross-device visual in the same batch (e.g. XAML overlay on its own D3D11 device
+         * composited over a SwapChainPanel 3D device): copy via staging into target->composite_device
+         * so we preserve the already-drawn lower visuals in target->composite_swapchain. */
+        D3D11_TEXTURE2D_DESC src_desc, stg_desc, dst_desc;
+        ID3D11Texture2D *staging = NULL, *comp_tex = NULL;
+        ID3D11Device1 *comp_dev1 = NULL;
+        ID3D11DeviceContext *comp_ctx = NULL;
+        D3D11_MAPPED_SUBRESOURCE mapped;
+
+        ID3D11Texture2D_GetDesc(texture, &src_desc);
+        stg_desc = src_desc;
+        stg_desc.Usage = D3D11_USAGE_STAGING;
+        stg_desc.BindFlags = 0;
+        stg_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stg_desc.MiscFlags = 0;
+        stg_desc.MipLevels = 1;
+        stg_desc.ArraySize = 1;
+        stg_desc.SampleDesc.Count = 1;
+        stg_desc.SampleDesc.Quality = 0;
+
+        if (SUCCEEDED(ID3D11Device1_CreateTexture2D(d3d11_device, &stg_desc, NULL, &staging)))
+        {
+            ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, (ID3D11Resource *)staging, 0,
+                    0, 0, 0, (ID3D11Resource *)texture, 0, NULL);
+            if (SUCCEEDED(ID3D11DeviceContext_Map(d3d11_device_context, (ID3D11Resource *)staging, 0,
+                    D3D11_MAP_READ, 0, &mapped)))
+            {
+                D3D11_SUBRESOURCE_DATA init_data = { mapped.pData, mapped.RowPitch, mapped.DepthPitch };
+                dst_desc = stg_desc;
+                dst_desc.Usage = D3D11_USAGE_DEFAULT;
+                dst_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                dst_desc.CPUAccessFlags = 0;
+                if (SUCCEEDED(ID3D11Device_CreateTexture2D(target->composite_device, &dst_desc, &init_data, &comp_tex)))
+                {
+                    if (SUCCEEDED(ID3D11Device_QueryInterface(target->composite_device, &IID_ID3D11Device1, (void **)&comp_dev1)))
+                    {
+                        ID3D11Device_GetImmediateContext(target->composite_device, &comp_ctx);
+                        hr = composite_surface_to_backbuffer(target, NULL, comp_dev1, comp_ctx,
+                                comp_tex, surface_desc.Width, surface_desc.Height, buf_w, buf_h,
+                                &proj_matrix, opacity, effective_clip, FALSE, (POINT){dst_x, dst_y});
+                        if (comp_ctx) ID3D11DeviceContext_Release(comp_ctx);
+                        ID3D11Device1_Release(comp_dev1);
+                    }
+                    ID3D11Texture2D_Release(comp_tex);
+                }
+                ID3D11DeviceContext_Unmap(d3d11_device_context, (ID3D11Resource *)staging, 0);
+            }
+            ID3D11Texture2D_Release(staging);
+        }
+        if (SUCCEEDED(hr))
+        {
+            RECT r;
+            SetRect(&r, dst_x, dst_y, dst_x + (LONG)dst_w, dst_y + (LONG)dst_h);
+            UnionRect(&target->composite_batch_rect, &target->composite_batch_rect, &r);
+            target->composite_root_hwnd = root_hwnd;
+            ok = TRUE;
+        }
+        goto done;
+    }
+
     if (FAILED(hr = ensure_composite_swapchain(target, (ID3D11Device *)d3d11_device,
             batch ? buf_w : dst_w, batch ? buf_h : dst_h)))
     {
@@ -1348,10 +1419,12 @@ static void composite_target_end(struct composition_target *target)
     if ((wined3d_swapchain = dxgi_get_wined3d_swapchain((struct IDXGISwapChain *)target->composite_swapchain))
             && target->composite_root_hwnd && rect.right > rect.left && rect.bottom > rect.top)
     {
-        wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, target->composite_root_hwnd, 0, 0);
-        TRACE("DCOMP: batch-presented %ldx%ld at %ld,%ld to root_hwnd %p\n",
+        HWND present_hwnd = (target->composite_hwnd && IsWindow(target->composite_hwnd))
+                ? target->composite_hwnd : target->composite_root_hwnd;
+        wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, present_hwnd, 0, 0);
+        TRACE("DCOMP: batch-presented %ldx%ld at %ld,%ld to hwnd %p\n",
                 rect.right - rect.left, rect.bottom - rect.top, rect.left, rect.top,
-                target->composite_root_hwnd);
+                present_hwnd);
     }
 }
 
@@ -2467,34 +2540,16 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain1, (void **)&swapchain)))
     {
-        DXGI_SWAP_CHAIN_DESC1 desc;
-        UINT idx = 0, present_count = 0;
-
-        /* The front buffer is the last back buffer because the composition swapchain must
-         * be created with DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL */
-        if (SUCCEEDED(IDXGISwapChain1_GetDesc1(swapchain, &desc)) && desc.BufferCount > 1
-                && (desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
-                    || desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD)
-                && SUCCEEDED(IDXGISwapChain1_GetLastPresentCount(swapchain, &present_count))
-                && present_count > 0)
-            idx = desc.BufferCount - 1;
-        hr = IDXGISwapChain1_GetBuffer(swapchain, idx, &IID_IDXGISurface, (void **)&dxgi_surface);
+        /* Composition swapchains skip X11 SwapBuffers in dxgi Present1, so the
+         * rendered frame stays in buffer 0 rather than rotating to BufferCount - 1. */
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
         IDXGISwapChain1_Release(swapchain);
         if (FAILED(hr))
-            ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
+            ERR("Failed to get the swapchain buffer 0, hr %#lx.\n", hr);
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain_v1)))
     {
-        DXGI_SWAP_CHAIN_DESC desc;
-        UINT idx = 0, present_count = 0;
-
-        if (SUCCEEDED(IDXGISwapChain_GetDesc(swapchain_v1, &desc)) && desc.BufferCount > 1
-                && (desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
-                    || desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD)
-                && SUCCEEDED(IDXGISwapChain_GetLastPresentCount(swapchain_v1, &present_count))
-                && present_count > 0)
-            idx = desc.BufferCount - 1;
-        hr = IDXGISwapChain_GetBuffer(swapchain_v1, idx, &IID_IDXGISurface, (void **)&dxgi_surface);
+        hr = IDXGISwapChain_GetBuffer(swapchain_v1, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
         IDXGISwapChain_Release(swapchain_v1);
         if (FAILED(hr))
             ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);

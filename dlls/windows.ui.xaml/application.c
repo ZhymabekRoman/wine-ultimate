@@ -124,7 +124,9 @@ struct xaml_window
     IDCompositionDesktopDevice *dcomp_device;
     IDCompositionTarget *dcomp_target;
     IDCompositionVisual2 *dcomp_root_visual;
+    IDCompositionVisual2 *dcomp_overlay_visual;
     IDXGISwapChain1 *swapchain;
+    BOOL swapchain_is_composition;
     ID3D11Device *d3d11_dev;
     ID3D11DeviceContext *d3d11_ctx;
     HWND target_hwnd;
@@ -4841,19 +4843,27 @@ void xaml_get_host_window_size( UINT *out_w, UINT *out_h )
     if (out_h) *out_h = h;
 }
 
+BOOL xaml_has_active_swapchain_panel( void )
+{
+    return g_active_scp_swapchain != NULL;
+}
+
 void xaml_set_active_swapchain_panel( void *el, void *sc )
 {
     struct xaml_window *impl = &global_xaml_window;
     g_active_scp_elem = sc ? el : NULL;
     g_active_scp_swapchain = sc;
-    if (sc && impl->swapchain)
+    if (sc && impl->swapchain && !impl->swapchain_is_composition)
     {
         xaml_gpu_release_rtv();
         if (impl->d3d11_ctx)
             ID3D11DeviceContext_Flush( impl->d3d11_ctx );
         IDXGISwapChain1_Release( impl->swapchain );
         impl->swapchain = NULL;
-        ERR( "xaml_set_active_swapchain_panel: released XAML HWND swapchain for SwapChainPanel sc=%p\n", sc );
+        impl->gpu_active = FALSE;
+        impl->gpu_rendered_once = FALSE;
+        InterlockedExchange( &g_xaml_window_dirty, 1 );
+        ERR( "xaml_set_active_swapchain_panel: switched XAML swapchain to DComp overlay mode for sc=%p\n", sc );
     }
 }
 
@@ -4873,8 +4883,9 @@ HRESULT xaml_attach_swapchain_panel_content( IUnknown *content, IDCompositionVis
     {
         hr = IDCompositionDesktopDevice_CreateVisual( impl->dcomp_device, slot );
         if (FAILED(hr) || !*slot) return hr;
+        /* Insert below all existing visuals (including XAML overlay visual) */
         IDCompositionVisual_AddVisual( (IDCompositionVisual *)impl->dcomp_root_visual,
-                                       (IDCompositionVisual *)*slot, TRUE, NULL );
+                                       (IDCompositionVisual *)*slot, FALSE, NULL );
     }
     hr = IDCompositionVisual_SetContent( (IDCompositionVisual *)*slot, content );
     IDCompositionDesktopDevice_Commit( impl->dcomp_device );
@@ -4912,7 +4923,7 @@ static void xaml_window_refresh_present( HWND hwnd )
         return;
 
     in_refresh = TRUE;
-    if (impl->swapchain && !xaml_get_app_caps()->winui3 && !g_active_scp_swapchain)
+    if (impl->swapchain && !xaml_get_app_caps()->winui3)
     {
         HWND target = impl->target_hwnd && IsWindow( impl->target_hwnd ) ? impl->target_hwnd : hwnd;
         GetClientRect( target, &rc );
@@ -5472,7 +5483,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (g_active_scp_elem && width > 1 && height > 1)
             uwp_notify_swapchain_panel_resize( g_active_scp_elem, width, height );
     }
-    if (!impl->swapchain && !xaml_get_app_caps()->winui3 && !d3d11_create_failed && !g_active_scp_swapchain)
+    if (!impl->swapchain && !xaml_get_app_caps()->winui3 && !d3d11_create_failed)
     {
         static const D3D_FEATURE_LEVEL feature_levels[] =
         {
@@ -5524,10 +5535,45 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                     hr = IDXGIAdapter_GetParent( dxgi_adapter, &IID_IDXGIFactory2, (void **)&dxgi_factory );
                     if (SUCCEEDED(hr))
                     {
-                        /* Present directly to the top-level XAML CoreWindow HWND so Present()
-                         * blits the rendered UWP tree onscreen without relying on DComp target. */
-                        hr = IDXGIFactory2_CreateSwapChainForHwnd( dxgi_factory, (IUnknown *)impl->d3d11_dev,
-                                                                   hwnd, &desc, NULL, NULL, &impl->swapchain );
+                        if (g_active_scp_swapchain)
+                        {
+                            desc.BufferCount = 2;
+                            desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT;
+                            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                            desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+                            hr = IDXGIFactory2_CreateSwapChainForComposition( dxgi_factory, (IUnknown *)impl->d3d11_dev,
+                                                                              &desc, NULL, &impl->swapchain );
+                            if (SUCCEEDED(hr) && impl->swapchain)
+                            {
+                                impl->swapchain_is_composition = TRUE;
+                                if (impl->dcomp_device && impl->dcomp_root_visual)
+                                {
+                                    if (!impl->dcomp_overlay_visual)
+                                    {
+                                        if (SUCCEEDED(IDCompositionDesktopDevice_CreateVisual( impl->dcomp_device, &impl->dcomp_overlay_visual ))
+                                            && impl->dcomp_overlay_visual)
+                                        {
+                                            IDCompositionVisual_AddVisual( (IDCompositionVisual *)impl->dcomp_root_visual,
+                                                                           (IDCompositionVisual *)impl->dcomp_overlay_visual, TRUE, NULL );
+                                        }
+                                    }
+                                    if (impl->dcomp_overlay_visual)
+                                    {
+                                        IDCompositionVisual_SetContent( (IDCompositionVisual *)impl->dcomp_overlay_visual,
+                                                                        (IUnknown *)impl->swapchain );
+                                        IDCompositionDesktopDevice_Commit( impl->dcomp_device );
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            /* Present directly to the top-level XAML CoreWindow HWND so Present()
+                             * blits the rendered UWP tree onscreen without relying on DComp target. */
+                            hr = IDXGIFactory2_CreateSwapChainForHwnd( dxgi_factory, (IUnknown *)impl->d3d11_dev,
+                                                                       hwnd, &desc, NULL, NULL, &impl->swapchain );
+                            impl->swapchain_is_composition = FALSE;
+                        }
                         IDXGIFactory2_Release( dxgi_factory );
                     }
                     IDXGIAdapter_Release( dxgi_adapter );
@@ -5546,7 +5592,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 
         QueryPerformanceFrequency( &freq );
         QueryPerformanceCounter( &t0 );
-        if (impl->swapchain && impl->d3d11_dev && impl->d3d11_ctx && !xaml_get_app_caps()->winui3 && !g_active_scp_swapchain)
+        if (impl->swapchain && impl->d3d11_dev && impl->d3d11_ctx && !xaml_get_app_caps()->winui3)
         {
             BOOL dirty = InterlockedExchange( &g_xaml_window_dirty, 0 ) != 0;
             BOOL size_changed = (width != prev_width || height != prev_height || !impl->gpu_rendered_once);
@@ -5591,13 +5637,13 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
 
     /* 8. Commit the DirectComposition tree (skip when GPU swapchain presents directly to hwnd) */
-    if (!impl->gpu_active)
+    if (!impl->gpu_active || g_active_scp_swapchain)
         IDCompositionDesktopDevice_Commit( impl->dcomp_device );
 
     /* 9. Blit the retained DIB into the top-level window DC for UWP / non-DComp backing store.
      * On WinUI 3 with an active DComp tree, DComp composites child visuals (e.g.
      * ElementCompositionPreview) above the XAML visual; a direct GDI BitBlt would overwrite them. */
-    if (impl->retained_valid && impl->retained_dc && (!xaml_get_app_caps()->winui3 || !impl->dcomp_device))
+    if (impl->retained_valid && impl->retained_dc && !g_active_scp_swapchain && (!xaml_get_app_caps()->winui3 || !impl->dcomp_device))
     {
         HWND root = GetAncestor( hwnd, GA_ROOT );
         HDC hdc = root ? GetDC( root ) : NULL;

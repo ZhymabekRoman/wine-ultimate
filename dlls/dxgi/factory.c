@@ -597,35 +597,27 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
         }
     }
 
-    if (!hwnd)
-        hwnd = CreateWindowA("static", NULL, WS_POPUP, 0, 0, swapchain_desc.Width, swapchain_desc.Height, 0, 0, 0, NULL);
+    /* Always back composition swapchains with a hidden offscreen popup HWND so
+     * they never occlude the CoreWindow or collide with DComp's target drawable.
+     * d3d11_swapchain_mark_composition() skips X11 SwapBuffers while still
+     * advancing present_count for DComp's composite thread. */
+    hwnd = CreateWindowExW(0, L"static", NULL, WS_POPUP,
+            0, 0, swapchain_desc.Width > 0 ? swapchain_desc.Width : 1,
+            swapchain_desc.Height > 0 ? swapchain_desc.Height : 1,
+            NULL, NULL, NULL, NULL);
+    core_window = FALSE;
 
-    if (core_window || hwnd)
+    if (hwnd)
     {
         swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         if (swapchain_desc.BufferCount < 2)
             swapchain_desc.BufferCount = 2;
     }
 
-    if (hwnd)
-    {
-        HWND child = CreateWindowExW(0, L"static", NULL,
-                WS_CHILD | WS_CLIPSIBLINGS,
-                0, 48, swapchain_desc.Width > 0 ? swapchain_desc.Width : 1,
-                swapchain_desc.Height > 0 ? swapchain_desc.Height : 1,
-                hwnd, NULL, NULL, NULL);
-        if (child)
-        {
-            ERR("CreateSwapChainForComposition created child hwnd %p inside %p\n", child, hwnd);
-            hwnd = child;
-            core_window = TRUE;
-        }
-    }
-
-    ERR("CreateSwapChainForComposition using hwnd %p (size %ux%u)\n", hwnd, swapchain_desc.Width, swapchain_desc.Height);
+    ERR("CreateSwapChainForComposition using offscreen hwnd %p (size %ux%u)\n", hwnd, swapchain_desc.Width, swapchain_desc.Height);
     {
         HRESULT hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, &swapchain_desc, NULL, output, swapchain);
-        if (SUCCEEDED(hr) && !core_window && swapchain && *swapchain)
+        if (SUCCEEDED(hr) && swapchain && *swapchain)
             d3d11_swapchain_mark_composition(*swapchain);
         return hr;
     }

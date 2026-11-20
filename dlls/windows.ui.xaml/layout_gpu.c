@@ -1059,9 +1059,12 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
     }
     else if (el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON && el->kind != UWP_KIND_TEXT_BLOCK)
     {
-        if ((el->has_bg && el->bg_alpha > 0) || (el->has_border && el->border_alpha > 0))
+        BOOL skip_fullscreen_bg = xaml_has_active_swapchain_panel() &&
+            (el->bounds.right - el->bounds.left) >= 1000 &&
+            (el->bounds.bottom - el->bounds.top) >= 600;
+        if ((!skip_fullscreen_bg && el->has_bg && el->bg_alpha > 0) || (el->has_border && el->border_alpha > 0))
         {
-            UINT32 fill_c = (el->has_bg && el->bg_alpha > 0) ? cr_to_argb( blend_argb_over( el->bg_argb, surface_bg ) ) : 0;
+            UINT32 fill_c = (!skip_fullscreen_bg && el->has_bg && el->bg_alpha > 0) ? cr_to_argb( blend_argb_over( el->bg_argb, surface_bg ) ) : 0;
             UINT32 bord_c = (el->has_border && el->border_alpha > 0) ? cr_to_argb( blend_argb_over( el->border_argb, surface_bg ) ) : 0;
             float bw = (el->has_border && el->border_alpha > 0) ? 1.0f : 0.0f;
             xaml_gpu_push_rect( (float)el->bounds.left, (float)el->bounds.top, (float)el->bounds.right, (float)el->bounds.bottom,
