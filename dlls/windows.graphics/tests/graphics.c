@@ -17,16 +17,35 @@
  */
 
 #include <stdarg.h>
+#include <math.h>
 #define COBJMACROS
 #include "initguid.h"
 #include "windef.h"
 #include "winbase.h"
+#include "wingdi.h"
+#include "winuser.h"
 #include "winstring.h"
 #include "roapi.h"
 #include "wine/test.h"
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Graphics_Display
 #include "windows.graphics.display.h"
+
+DEFINE_GUID( IID_IDisplayInformationInterop, 0x7449121c, 0x382b, 0x4705, 0x8d, 0xa7, 0xa7, 0x95, 0xba, 0x48, 0x20, 0x13 );
+
+typedef struct IDisplayInformationInterop IDisplayInformationInterop;
+typedef struct IDisplayInformationInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IDisplayInformationInterop *iface, REFIID riid, void **out );
+    ULONG (WINAPI *AddRef)( IDisplayInformationInterop *iface );
+    ULONG (WINAPI *Release)( IDisplayInformationInterop *iface );
+    HRESULT (WINAPI *GetIids)( IDisplayInformationInterop *iface, ULONG *iid_count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IDisplayInformationInterop *iface, HSTRING *class_name );
+    HRESULT (WINAPI *GetTrustLevel)( IDisplayInformationInterop *iface, TrustLevel *trust_level );
+    HRESULT (WINAPI *GetForWindow)( IDisplayInformationInterop *iface, HWND window, REFIID riid, void **display_info );
+    HRESULT (WINAPI *GetForMonitor)( IDisplayInformationInterop *iface, HMONITOR monitor, REFIID riid, void **display_info );
+} IDisplayInformationInteropVtbl;
+struct IDisplayInformationInterop { const IDisplayInformationInteropVtbl *lpVtbl; };
 
 struct dummy_handler
 {
@@ -154,6 +173,7 @@ static void test_DisplayInformationStatics(void)
     ok( hr == S_OK, "QI IDisplayInformation2 failed, hr %#lx\n", hr );
     hr = IDisplayInformation2_get_RawPixelsPerViewPixel( info2, &raw_px );
     ok( hr == S_OK && raw_px > 0.0, "get_RawPixelsPerViewPixel failed, hr %#lx, val %f\n", hr, raw_px );
+    ok( fabs( raw_px - (DOUBLE)dpi / 96.0 ) < 1e-6, "RawPixelsPerViewPixel %f != dpi/96 (%f)\n", raw_px, (DOUBLE)dpi / 96.0 );
     IDisplayInformation2_Release( info2 );
 
     hr = IDisplayInformation_QueryInterface( info, &IID_IDisplayInformation4, (void **)&info4 );
@@ -190,6 +210,88 @@ static void test_DisplayInformationStatics(void)
 
     IDisplayInformation_Release( info );
     IDisplayInformationStatics_Release( statics );
+
+    /* Test IDisplayInformationInterop (GetForWindow & GetForMonitor) */
+    {
+        IDisplayInformationInterop *interop = NULL;
+        IDisplayInformation *win_info = NULL, *mon_info = NULL;
+        IDisplayInformation2 *win_info2 = NULL;
+        IDisplayInformation4 *win_info4 = NULL;
+        HWND hwnd;
+        HMONITOR hmon;
+        FLOAT win_dpi = 0.0f, mon_dpi = 0.0f;
+        DOUBLE win_scale = 0.0;
+        UINT32 win_w = 0, win_h = 0;
+        ResolutionScale win_res_scale = ResolutionScale_Invalid;
+        EventRegistrationToken win_tok = {0};
+
+        HMODULE user32 = LoadLibraryW( L"user32.dll" );
+        HWND (WINAPI *pCreateWindowExW)( DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID ) =
+            user32 ? (void *)GetProcAddress( user32, "CreateWindowExW" ) : NULL;
+        BOOL (WINAPI *pDestroyWindow)( HWND ) = user32 ? (void *)GetProcAddress( user32, "DestroyWindow" ) : NULL;
+        HMONITOR (WINAPI *pMonitorFromWindow)( HWND, DWORD ) = user32 ? (void *)GetProcAddress( user32, "MonitorFromWindow" ) : NULL;
+
+        hr = IActivationFactory_QueryInterface( factory, &IID_IDisplayInformationInterop, (void **)&interop );
+        ok( hr == S_OK && interop != NULL, "QI IDisplayInformationInterop failed, hr %#lx\n", hr );
+        if (SUCCEEDED( hr ) && pCreateWindowExW && pDestroyWindow && pMonitorFromWindow)
+        {
+            hr = interop->lpVtbl->GetForWindow( interop, NULL, &IID_IDisplayInformation, (void **)&win_info );
+            ok( hr == E_INVALIDARG, "GetForWindow(NULL) got hr %#lx\n", hr );
+
+            hwnd = pCreateWindowExW( 0, L"static", L"dpi_test", WS_POPUP, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+            ok( hwnd != NULL, "CreateWindowExW failed\n" );
+            if (hwnd)
+            {
+                hr = interop->lpVtbl->GetForWindow( interop, hwnd, &IID_IDisplayInformation, (void **)&win_info );
+                ok( hr == S_OK && win_info != NULL, "GetForWindow failed, hr %#lx\n", hr );
+                if (SUCCEEDED( hr ))
+                {
+                    hr = IDisplayInformation_get_LogicalDpi( win_info, &win_dpi );
+                    ok( hr == S_OK && win_dpi >= 48.0f && win_dpi <= 480.0f, "win LogicalDpi hr %#lx dpi %f\n", hr, win_dpi );
+                    hr = IDisplayInformation_get_ResolutionScale( win_info, &win_res_scale );
+                    ok( hr == S_OK && win_res_scale >= ResolutionScale_Scale100Percent, "win ResolutionScale hr %#lx scale %d\n", hr, win_res_scale );
+
+                    hr = IDisplayInformation_QueryInterface( win_info, &IID_IDisplayInformation2, (void **)&win_info2 );
+                    ok( hr == S_OK, "QI win IDisplayInformation2 hr %#lx\n", hr );
+                    hr = IDisplayInformation2_get_RawPixelsPerViewPixel( win_info2, &win_scale );
+                    ok( hr == S_OK && fabs( win_scale - (DOUBLE)win_dpi / 96.0 ) < 1e-6,
+                        "win RawPixelsPerViewPixel %f != %f\n", win_scale, (DOUBLE)win_dpi / 96.0 );
+                    IDisplayInformation2_Release( win_info2 );
+
+                    hr = IDisplayInformation_QueryInterface( win_info, &IID_IDisplayInformation4, (void **)&win_info4 );
+                    ok( hr == S_OK, "QI win IDisplayInformation4 hr %#lx\n", hr );
+                    hr = IDisplayInformation4_get_ScreenWidthInRawPixels( win_info4, &win_w );
+                    ok( hr == S_OK && win_w > 0, "win ScreenWidthInRawPixels hr %#lx w %u\n", hr, win_w );
+                    hr = IDisplayInformation4_get_ScreenHeightInRawPixels( win_info4, &win_h );
+                    ok( hr == S_OK && win_h > 0, "win ScreenHeightInRawPixels hr %#lx h %u\n", hr, win_h );
+                    IDisplayInformation4_Release( win_info4 );
+
+                    hr = IDisplayInformation_add_DpiChanged( win_info, &handler.ITypedEventHandler_DisplayInformation_IInspectable_iface, &win_tok );
+                    ok( hr == S_OK && win_tok.value != 0, "win add_DpiChanged hr %#lx\n", hr );
+                    hr = IDisplayInformation_remove_DpiChanged( win_info, win_tok );
+                    ok( hr == S_OK, "win remove_DpiChanged hr %#lx\n", hr );
+                    ok( handler.ref == 1, "unexpected handler ref %ld after win remove\n", handler.ref );
+
+                    IDisplayInformation_Release( win_info );
+                }
+                hmon = pMonitorFromWindow( hwnd, MONITOR_DEFAULTTOPRIMARY );
+                ok( hmon != NULL, "MonitorFromWindow failed\n" );
+                if (hmon)
+                {
+                    hr = interop->lpVtbl->GetForMonitor( interop, hmon, &IID_IDisplayInformation, (void **)&mon_info );
+                    ok( hr == S_OK && mon_info != NULL, "GetForMonitor failed, hr %#lx\n", hr );
+                    if (SUCCEEDED( hr ))
+                    {
+                        hr = IDisplayInformation_get_LogicalDpi( mon_info, &mon_dpi );
+                        ok( hr == S_OK && mon_dpi >= 48.0f && mon_dpi <= 480.0f, "mon LogicalDpi hr %#lx dpi %f\n", hr, mon_dpi );
+                        IDisplayInformation_Release( mon_info );
+                    }
+                }
+                pDestroyWindow( hwnd );
+            }
+            interop->lpVtbl->Release( interop );
+        }
+    }
 
     ref = IActivationFactory_Release( factory );
     ok(ref == 1, "Got unexpected refcount %ld.\n", ref);

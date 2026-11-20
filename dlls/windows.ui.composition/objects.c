@@ -721,10 +721,10 @@ static const void *kfa_vtbl[] =
     kfa_get_IterationCount,
     kfa_put_IterationCount,
     kfa_get_KeyFrameCount,
-    kfa_InsertExpressionKeyFrame,
-    kfa_InsertExpressionKeyFrameWithEasingFunction,
     kfa_get_StopBehavior,
     kfa_put_StopBehavior,
+    kfa_InsertExpressionKeyFrame,
+    kfa_InsertExpressionKeyFrameWithEasingFunction,
 };
 
 static inline struct keyframe_animation *impl_from_kfa2( void *iface )
@@ -911,7 +911,8 @@ static HRESULT WINAPI expression_QueryInterface( struct ICompositionAnimation *i
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IKeyFrameAnimation5_local ))
+    if (IsEqualGUID( iid, &IID_IKeyFrameAnimation2_local )
+        || IsEqualGUID( iid, &IID_IKeyFrameAnimation5_local ))
     {
         *out = &impl->ICompositionAnimation5_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -3444,6 +3445,49 @@ static HRESULT WINAPI scoped_batch_get_IsEnded( struct ICompositionScopedBatch *
     return S_OK;
 }
 
+static const GUID IID_ICompositionBatchCompletedEventArgs_local =
+    { 0x0d00dad0, 0x9464, 0x450a, { 0xa5, 0x62, 0x2e, 0x26, 0x98, 0xb0, 0xa8, 0x12 } };
+
+static HRESULT WINAPI batch_completed_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ICompositionObject ) ||
+        IsEqualGUID( iid, &IID_ICompositionBatchCompletedEventArgs_local ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI batch_completed_args_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI batch_completed_args_Release( void *iface ) { return 1; }
+static HRESULT WINAPI batch_completed_args_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI batch_completed_args_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.UI.Composition.CompositionBatchCompletedEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI batch_completed_args_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static const void *const batch_completed_args_vtbl[] =
+{
+    batch_completed_args_QI, batch_completed_args_AddRef, batch_completed_args_Release,
+    batch_completed_args_GetIids, batch_completed_args_GetRuntimeClassName, batch_completed_args_GetTrustLevel,
+};
+static struct { const void *const *vtbl; } batch_completed_args_obj = { batch_completed_args_vtbl };
+
+static void scoped_batch_fire_completed( struct scoped_batch *impl )
+{
+    __FITypedEventHandler_2_IInspectable_Windows__CUI__CComposition__CCompositionBatchCompletedEventArgs *h;
+    if (!impl || !impl->completed_handler) return;
+    h = impl->completed_handler;
+    impl->completed_handler = NULL;
+    h->lpVtbl->Invoke( h, (IInspectable *)&impl->ICompositionScopedBatch_iface,
+                       (struct ICompositionBatchCompletedEventArgs *)&batch_completed_args_obj );
+    h->lpVtbl->Release( h );
+}
+
 static HRESULT WINAPI scoped_batch_End( struct ICompositionScopedBatch *iface )
 {
     struct scoped_batch *impl = impl_from_ICompositionScopedBatch( iface );
@@ -3451,6 +3495,7 @@ static HRESULT WINAPI scoped_batch_End( struct ICompositionScopedBatch *iface )
     TRACE( "iface %p.\n", iface );
     impl->active = FALSE;
     impl->ended = TRUE;
+    scoped_batch_fire_completed( impl );
     return S_OK;
 }
 
@@ -3476,15 +3521,29 @@ static HRESULT WINAPI scoped_batch_add_Completed( struct ICompositionScopedBatch
         __FITypedEventHandler_2_IInspectable_Windows__CUI__CComposition__CCompositionBatchCompletedEventArgs *handler,
         EventRegistrationToken *token )
 {
-    FIXME( "iface %p, handler %p, token %p stub!\n", iface, handler, token );
+    struct scoped_batch *impl = impl_from_ICompositionScopedBatch( iface );
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
     if (token) token->value = 1;
+    if (!handler) return S_OK;
+    if (impl->completed_handler)
+        IUnknown_Release( (IUnknown *)impl->completed_handler );
+    impl->completed_handler = handler;
+    IUnknown_AddRef( (IUnknown *)handler );
+    if (impl->ended)
+        scoped_batch_fire_completed( impl );
     return S_OK;
 }
 
 static HRESULT WINAPI scoped_batch_remove_Completed( struct ICompositionScopedBatch *iface,
         EventRegistrationToken token )
 {
-    TRACE( "iface %p, token %s stub!\n", iface, wine_dbgstr_longlong( token.value ) );
+    struct scoped_batch *impl = impl_from_ICompositionScopedBatch( iface );
+    TRACE( "iface %p, token %s.\n", iface, wine_dbgstr_longlong( token.value ) );
+    if (impl->completed_handler)
+    {
+        IUnknown_Release( (IUnknown *)impl->completed_handler );
+        impl->completed_handler = NULL;
+    }
     return S_OK;
 }
 

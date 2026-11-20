@@ -71,3 +71,25 @@
 
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
+
+/* Windows.Graphics.Display.IDisplayInformationInterop ({7449121c-382b-4705-8da7-a795ba482013}) */
+DEFINE_GUID( IID_IDisplayInformationInterop, 0x7449121c, 0x382b, 0x4705, 0x8d, 0xa7, 0xa7, 0x95, 0xba, 0x48, 0x20, 0x13 );
+
+typedef struct IDisplayInformationInterop IDisplayInformationInterop;
+
+typedef struct IDisplayInformationInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IDisplayInformationInterop *iface, REFIID riid, void **out );
+    ULONG (WINAPI *AddRef)( IDisplayInformationInterop *iface );
+    ULONG (WINAPI *Release)( IDisplayInformationInterop *iface );
+    HRESULT (WINAPI *GetIids)( IDisplayInformationInterop *iface, ULONG *iid_count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IDisplayInformationInterop *iface, HSTRING *class_name );
+    HRESULT (WINAPI *GetTrustLevel)( IDisplayInformationInterop *iface, TrustLevel *trust_level );
+    HRESULT (WINAPI *GetForWindow)( IDisplayInformationInterop *iface, HWND window, REFIID riid, void **display_info );
+    HRESULT (WINAPI *GetForMonitor)( IDisplayInformationInterop *iface, HMONITOR monitor, REFIID riid, void **display_info );
+} IDisplayInformationInteropVtbl;
+
+struct IDisplayInformationInterop
+{
+    const IDisplayInformationInteropVtbl *lpVtbl;
+};

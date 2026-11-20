@@ -109,10 +109,13 @@ struct compositor
     struct ICompositor ICompositor_iface;
     struct IInspectable ICompositor2_iface;
     struct IInspectable ICompositorWithVisualSurface_iface;
+    struct IInspectable ICompositorWithBlurredWallpaper_iface;
+    struct IInspectable ICompositor4_iface;
     struct IInspectable ICompositor5_iface;
     struct IInspectable ICompositor6_iface;
     struct ICompositorInterop ICompositorInterop_iface;
     struct ICompositorDesktopInterop ICompositorDesktopInterop_iface;
+    struct IInspectable ICompositorPartner_iface;
     struct IClosable IClosable_iface;
     LONG ref;
     /* Lazily created DirectComposition bridge. */
@@ -205,6 +208,7 @@ struct inset_clip
     LONG ref;
     struct compositor *compositor;
     struct prop_set *properties;
+    struct visual *owner;
     FLOAT left, top, right, bottom;
 };
 
@@ -330,6 +334,7 @@ struct scoped_batch
     struct compositor *compositor;
     struct prop_set *properties;
     BOOL active, ended;
+    void *completed_handler;
 };
 
 struct commit_batch
@@ -355,6 +360,7 @@ struct visual
     struct IInspectable IVisual3_iface;
     struct ICompositionObject ICompositionObject_iface;
     struct IInspectable ICompositionObject2_iface;
+    struct IInspectable ICompositionObject4_iface;
     struct IClosable IClosable_iface;
     LONG ref;
     struct compositor *compositor;
@@ -393,6 +399,7 @@ struct visual_collection
     struct IVisualCollection IVisualCollection_iface;
     struct ICompositionObject ICompositionObject_iface;
     struct IClosable IClosable_iface;
+    struct IInspectable IIterable_iface;
     LONG ref;
     struct compositor *compositor;
     struct visual *owner;
@@ -413,6 +420,7 @@ struct expression_animation *expression_animation_create( struct compositor *com
 struct easing_function *cubic_bezier_easing_create( struct compositor *compositor, Vector2 point1, Vector2 point2 );
 struct easing_function *linear_easing_create( struct compositor *compositor );
 struct inset_clip *inset_clip_create( struct compositor *compositor, FLOAT left, FLOAT top, FLOAT right, FLOAT bottom );
+void visual_sync_dcomp_clip( struct visual *impl );
 struct geometric_clip *geometric_clip_create( struct compositor *compositor, void *geometry );
 struct color_brush *color_brush_create( struct compositor *compositor, Color color );
 struct surface_brush *surface_brush_create( struct compositor *compositor, struct ICompositionSurface *surface );

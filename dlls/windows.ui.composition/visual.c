@@ -106,10 +106,20 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
             { 0x588c9664, 0x997a, 0x4850, { 0x91, 0xfe, 0x53, 0xcb, 0x58, 0xf8, 0x1c, 0xe9 } };
         static const GUID IID_ICompositionObject2_local =
             { 0x3052b611, 0x56c3, 0x4c3e, { 0x8b, 0xf3, 0xf6, 0xe1, 0xad, 0x47, 0x3f, 0x06 } };
+        static const GUID IID_ICompositionObject2_winrt =
+            { 0xef874ea1, 0x5cff, 0x4b68, { 0x9e, 0x30, 0xa1, 0x51, 0x9d, 0x08, 0xba, 0x03 } };
+        static const GUID IID_ICompositionObject4_local =
+            { 0xf2bd13c3, 0xba7e, 0x4b0f, { 0x91, 0x26, 0xff, 0xb7, 0x53, 0x6b, 0x81, 0x76 } };
         static const GUID IID_IVisual3_local =
             { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } };
         static const GUID IID_IVisual_Calc4_local =
             { 0x9476bf11, 0xe24b, 0x5bf9, { 0x9e, 0xbe, 0x62, 0x74, 0x10, 0x9b, 0x27, 0x11 } };
+        if (IsEqualGUID( iid, &IID_ICompositionObject4_local ))
+        {
+            *out = &impl->ICompositionObject4_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
         if (IsEqualGUID( iid, &IID_IVisual2_local ))
         {
             *out = &impl->IVisual2_iface;
@@ -128,7 +138,8 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
             IInspectable_AddRef( (IInspectable *)*out );
             return S_OK;
         }
-        if (IsEqualGUID( iid, &IID_ICompositionObject2_local ))
+        if (IsEqualGUID( iid, &IID_ICompositionObject2_local ) ||
+            IsEqualGUID( iid, &IID_ICompositionObject2_winrt ))
         {
             *out = &impl->ICompositionObject2_iface;
             IInspectable_AddRef( (IInspectable *)*out );
@@ -175,13 +186,16 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
 static ULONG WINAPI visual_AddRef( struct IVisual *iface )
 {
     struct visual *impl = impl_from_IVisual( iface );
-    return InterlockedIncrement( &impl->ref );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
+    return ref;
 }
 
 static ULONG WINAPI visual_Release( struct IVisual *iface )
 {
     struct visual *impl = impl_from_IVisual( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
 
     if (!ref)
     {
@@ -324,11 +338,48 @@ static HRESULT WINAPI visual_get_Size( struct IVisual *iface, Vector2 *value )
     return S_OK;
 }
 
+void visual_sync_dcomp_clip( struct visual *impl )
+{
+    struct IInsetClip *inset = NULL;
+    D2D_RECT_F rect;
+    FLOAT l = 0, t = 0, r = 0, b = 0;
+
+    if (!impl || !impl->dcomp_visual) return;
+
+    if (!impl->clip)
+    {
+        IDCompositionVisual_SetClip( impl->dcomp_visual, NULL );
+        return;
+    }
+
+    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)impl->clip, &IID_IInsetClip, (void **)&inset )) && inset)
+    {
+        IInsetClip_get_LeftInset( inset, &l );
+        IInsetClip_get_TopInset( inset, &t );
+        IInsetClip_get_RightInset( inset, &r );
+        IInsetClip_get_BottomInset( inset, &b );
+        IInsetClip_Release( inset );
+
+        if (impl->size.X > 0.0f && impl->size.Y > 0.0f)
+        {
+            rect.left = l;
+            rect.top = t;
+            rect.right = impl->size.X - r;
+            rect.bottom = impl->size.Y - b;
+            if (rect.right > rect.left && rect.bottom > rect.top)
+                IDCompositionVisual_SetClip( impl->dcomp_visual, &rect );
+            else
+                IDCompositionVisual_SetClip( impl->dcomp_visual, NULL );
+        }
+    }
+}
+
 static HRESULT WINAPI visual_put_Size( struct IVisual *iface, Vector2 value )
 {
     struct visual *impl = impl_from_IVisual( iface );
     TRACE( "iface %p, value %g, %g.\n", iface, value.X, value.Y );
     impl->size = value;
+    visual_sync_dcomp_clip( impl );
     return S_OK;
 }
 
@@ -353,6 +404,7 @@ static HRESULT WINAPI visual_put_Clip( struct IVisual *iface, struct ICompositio
     if (impl->clip) IInspectable_Release( (IInspectable *)impl->clip );
     impl->clip = value;
     if (impl->clip) IInspectable_AddRef( (IInspectable *)impl->clip );
+    visual_sync_dcomp_clip( impl );
     return S_OK;
 }
 
@@ -1033,6 +1085,29 @@ static const void *visual_obj2_vtbl[] =
     visual_obj2_StopAnimationGroup,
 };
 
+static inline struct visual *visual_from_co4( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct visual, ICompositionObject4_iface );
+}
+static HRESULT WINAPI visual_obj4_QI( void *iface, REFIID iid, void **out ) { return visual_QueryInterface( &visual_from_co4(iface)->IVisual_iface, iid, out ); }
+static ULONG WINAPI visual_obj4_AddRef( void *iface ) { return visual_AddRef( &visual_from_co4(iface)->IVisual_iface ); }
+static ULONG WINAPI visual_obj4_Release( void *iface ) { return visual_Release( &visual_from_co4(iface)->IVisual_iface ); }
+static HRESULT WINAPI visual_obj4_GetIids( void *iface, ULONG *c, IID **i ) { return visual_GetIids( &visual_from_co4(iface)->IVisual_iface, c, i ); }
+static HRESULT WINAPI visual_obj4_GetRuntimeClassName( void *iface, HSTRING *n ) { return visual_GetRuntimeClassName( &visual_from_co4(iface)->IVisual_iface, n ); }
+static HRESULT WINAPI visual_obj4_GetTrustLevel( void *iface, TrustLevel *l ) { return visual_GetTrustLevel( &visual_from_co4(iface)->IVisual_iface, l ); }
+static HRESULT WINAPI visual_obj4_TryGetAnimationController( void *iface, HSTRING prop, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = comp5_stub_create_public( L"Windows.UI.Composition.AnimationController" );
+    return *out ? S_OK : E_OUTOFMEMORY;
+}
+static const void *const visual_obj4_vtbl[] =
+{
+    visual_obj4_QI, visual_obj4_AddRef, visual_obj4_Release,
+    visual_obj4_GetIids, visual_obj4_GetRuntimeClassName, visual_obj4_GetTrustLevel,
+    visual_obj4_TryGetAnimationController,
+};
+
 static struct visual *visual_create( struct compositor *compositor, BOOL is_sprite, BOOL is_shape )
 {
     struct visual *impl;
@@ -1048,6 +1123,7 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
     impl->ISpriteVisual2_iface.lpVtbl = (const struct IInspectableVtbl *)sprite_visual2_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &visual_object_vtbl;
     impl->ICompositionObject2_iface.lpVtbl = (const struct IInspectableVtbl *)visual_obj2_vtbl;
+    impl->ICompositionObject4_iface.lpVtbl = (const struct IInspectableVtbl *)visual_obj4_vtbl;
     impl->IClosable_iface.lpVtbl = &visual_closable_vtbl;
     impl->ref = 1;
     impl->compositor = compositor;
@@ -1113,6 +1189,12 @@ static HRESULT WINAPI collection_QueryInterface( struct IVisualCollection *iface
         || IsEqualGUID( iid, &IID_IVisualCollection ))
     {
         *out = &impl->IVisualCollection_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_Visual ))
+    {
+        *out = &impl->IIterable_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -1428,6 +1510,123 @@ static const struct IClosableVtbl collection_closable_vtbl =
     collection_closable_Close,
 };
 
+struct visual_iterator
+{
+    const void *const *vtbl;
+    LONG ref;
+    struct visual_collection *col;
+    unsigned int idx;
+};
+
+static HRESULT WINAPI visual_iter_QI( void *iface, REFIID iid, void **out )
+{
+    struct visual_iterator *it = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_Visual ))
+    {
+        *out = iface;
+        InterlockedIncrement( &it->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI visual_iter_AddRef( void *iface ) { return InterlockedIncrement( &((struct visual_iterator *)iface)->ref ); }
+static ULONG WINAPI visual_iter_Release( void *iface )
+{
+    struct visual_iterator *it = iface;
+    ULONG r = InterlockedDecrement( &it->ref );
+    if (!r)
+    {
+        if (it->col) IInspectable_Release( (IInspectable *)&it->col->IVisualCollection_iface );
+        free( it );
+    }
+    return r;
+}
+static HRESULT WINAPI visual_iter_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI visual_iter_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.IIterator`1<Windows.UI.Composition.Visual>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI visual_iter_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI visual_iter_get_Current( void *iface, void **out )
+{
+    struct visual_iterator *it = iface;
+    if (!out) return E_POINTER;
+    if (!it->col || it->idx >= it->col->count) { *out = NULL; return E_BOUNDS; }
+    *out = &it->col->items[it->idx]->IVisual_iface;
+    IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI visual_iter_get_HasCurrent( void *iface, boolean *has )
+{
+    struct visual_iterator *it = iface;
+    if (!has) return E_POINTER;
+    *has = (it->col && it->idx < it->col->count);
+    return S_OK;
+}
+static HRESULT WINAPI visual_iter_MoveNext( void *iface, boolean *has )
+{
+    struct visual_iterator *it = iface;
+    if (!has) return E_POINTER;
+    if (it->col && it->idx < it->col->count) it->idx++;
+    *has = (it->col && it->idx < it->col->count);
+    return S_OK;
+}
+static HRESULT WINAPI visual_iter_GetMany( void *iface, UINT32 cap, void **items, UINT32 *actual )
+{
+    struct visual_iterator *it = iface;
+    UINT32 n = 0;
+    if (!actual) return E_POINTER;
+    while (n < cap && it->col && it->idx < it->col->count)
+    {
+        items[n] = &it->col->items[it->idx]->IVisual_iface;
+        IInspectable_AddRef( (IInspectable *)items[n] );
+        it->idx++;
+        n++;
+    }
+    *actual = n;
+    return S_OK;
+}
+static const void *const visual_iter_vtbl[] =
+{
+    visual_iter_QI, visual_iter_AddRef, visual_iter_Release,
+    visual_iter_GetIids, visual_iter_GetRuntimeClassName, visual_iter_GetTrustLevel,
+    visual_iter_get_Current, visual_iter_get_HasCurrent, visual_iter_MoveNext, visual_iter_GetMany,
+};
+
+static inline struct visual_collection *col_from_iterable( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct visual_collection, IIterable_iface );
+}
+static HRESULT WINAPI col_iter_QI( void *iface, REFIID iid, void **out ) { return collection_QueryInterface( &col_from_iterable(iface)->IVisualCollection_iface, iid, out ); }
+static ULONG WINAPI col_iter_AddRef( void *iface ) { return collection_AddRef( &col_from_iterable(iface)->IVisualCollection_iface ); }
+static ULONG WINAPI col_iter_Release( void *iface ) { return collection_Release( &col_from_iterable(iface)->IVisualCollection_iface ); }
+static HRESULT WINAPI col_iter_GetIids( void *iface, ULONG *c, IID **i ) { return collection_GetIids( &col_from_iterable(iface)->IVisualCollection_iface, c, i ); }
+static HRESULT WINAPI col_iter_GetRuntimeClassName( void *iface, HSTRING *n ) { return collection_GetRuntimeClassName( &col_from_iterable(iface)->IVisualCollection_iface, n ); }
+static HRESULT WINAPI col_iter_GetTrustLevel( void *iface, TrustLevel *l ) { return collection_GetTrustLevel( &col_from_iterable(iface)->IVisualCollection_iface, l ); }
+static HRESULT WINAPI col_iter_First( void *iface, void **out )
+{
+    struct visual_collection *col = col_from_iterable( iface );
+    struct visual_iterator *it;
+    if (!out) return E_POINTER;
+    if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
+    it->vtbl = visual_iter_vtbl;
+    it->ref = 1;
+    it->col = col;
+    IInspectable_AddRef( (IInspectable *)&col->IVisualCollection_iface );
+    *out = it;
+    return S_OK;
+}
+static const void *const collection_iterable_vtbl[] =
+{
+    col_iter_QI, col_iter_AddRef, col_iter_Release,
+    col_iter_GetIids, col_iter_GetRuntimeClassName, col_iter_GetTrustLevel,
+    col_iter_First,
+};
+
 static struct visual_collection *visual_collection_create( struct compositor *compositor, struct visual *owner )
 {
     struct visual_collection *impl;
@@ -1436,6 +1635,7 @@ static struct visual_collection *visual_collection_create( struct compositor *co
     impl->IVisualCollection_iface.lpVtbl = &collection_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &collection_object_vtbl;
     impl->IClosable_iface.lpVtbl = &collection_closable_vtbl;
+    impl->IIterable_iface.lpVtbl = (const struct IInspectableVtbl *)collection_iterable_vtbl;
     impl->ref = 1;
     impl->compositor = compositor;
     impl->owner = owner;

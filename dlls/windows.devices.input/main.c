@@ -194,6 +194,73 @@ static struct pen_device_statics pen_device_statics =
     1,
 };
 
+static const GUID IID_IKeyboardCapabilities =
+    {0x3a3f9b56, 0x6798, 0x4bbc, {0x83, 0x3e, 0x0f, 0x34, 0xb1, 0x7c, 0x65, 0xff}};
+
+static HRESULT WINAPI kbd_caps_QI( void *iface, REFIID riid, void **out )
+{
+    if (IsEqualGUID( riid, &IID_IUnknown ) || IsEqualGUID( riid, &IID_IInspectable ) ||
+        IsEqualGUID( riid, &IID_IAgileObject ) || IsEqualGUID( riid, &IID_IKeyboardCapabilities ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI kbd_caps_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI kbd_caps_Release( void *iface ) { return 1; }
+static HRESULT WINAPI kbd_caps_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    *count = 0; *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI kbd_caps_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Devices.Input.KeyboardCapabilities", 42, name );
+}
+static HRESULT WINAPI kbd_caps_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI kbd_caps_get_KeyboardPresent( void *iface, INT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 1;
+    return S_OK;
+}
+static const void *kbd_caps_vtbl[] =
+{
+    kbd_caps_QI, kbd_caps_AddRef, kbd_caps_Release,
+    kbd_caps_GetIids, kbd_caps_GetRuntimeClassName, kbd_caps_GetTrustLevel,
+    kbd_caps_get_KeyboardPresent,
+};
+static struct { const void **vtbl; } kbd_caps_obj = { kbd_caps_vtbl };
+
+static HRESULT WINAPI kbd_caps_factory_QI( void *iface, REFIID riid, void **out )
+{
+    if (IsEqualGUID( riid, &IID_IUnknown ) || IsEqualGUID( riid, &IID_IInspectable ) ||
+        IsEqualGUID( riid, &IID_IAgileObject ) || IsEqualGUID( riid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI kbd_caps_factory_ActivateInstance( void *iface, IInspectable **out )
+{
+    if (!out) return E_POINTER;
+    *out = (IInspectable *)&kbd_caps_obj;
+    return S_OK;
+}
+static const void *kbd_caps_factory_vtbl[] =
+{
+    kbd_caps_factory_QI, kbd_caps_AddRef, kbd_caps_Release,
+    kbd_caps_GetIids, kbd_caps_GetRuntimeClassName, kbd_caps_GetTrustLevel,
+    kbd_caps_factory_ActivateInstance,
+};
+static struct { const void **vtbl; } kbd_caps_factory_obj = { kbd_caps_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *name = WindowsGetStringRawBuffer( classid, NULL );
@@ -206,6 +273,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( name, RuntimeClass_Windows_Devices_Input_PenDevice ))
         IActivationFactory_QueryInterface( &pen_device_statics.IActivationFactory_iface,
                                            &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( name, L"Windows.Devices.Input.KeyboardCapabilities" ))
+        *factory = (IActivationFactory *)&kbd_caps_factory_obj;
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

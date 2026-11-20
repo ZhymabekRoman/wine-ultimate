@@ -264,6 +264,90 @@ static const void *cpath_factory_vtbl[] =
 };
 static struct { const void **vtbl; } cpath_factory_obj = { cpath_factory_vtbl };
 
+static const GUID IID_ICompositionCapabilitiesStatics =
+    {0xf7b7a86e, 0x6416, 0x49e5, {0x8d,0xdf,0xaf,0xe9,0x49,0xe2,0x05,0x62}};
+static const GUID IID_ICompositionCapabilities =
+    {0x57070939, 0x67a0, 0x4169, {0x9f,0x7e,0x48,0x20,0x47,0x71,0x79,0xf0}};
+
+static HRESULT WINAPI ccaps_QI( void *iface, REFIID riid, void **out )
+{
+    if (IsEqualGUID( riid, &IID_IUnknown ) || IsEqualGUID( riid, &IID_IInspectable ) ||
+        IsEqualGUID( riid, &IID_IAgileObject ) || IsEqualGUID( riid, &IID_ICompositionCapabilities ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ccaps_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI ccaps_Release( void *iface ) { return 1; }
+static HRESULT WINAPI ccaps_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    *count = 0; *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI ccaps_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Composition.CompositionCapabilities", 46, name );
+}
+static HRESULT WINAPI ccaps_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI ccaps_AreEffectsSupported( void *iface, boolean *result )
+{
+    if (result) *result = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ccaps_AreEffectsFast( void *iface, boolean *result )
+{
+    if (result) *result = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ccaps_add_Changed( void *iface, void *handler, EventRegistrationToken *token )
+{
+    if (token) token->value = 1;
+    return S_OK;
+}
+static HRESULT WINAPI ccaps_remove_Changed( void *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+static const void *ccaps_vtbl[] =
+{
+    ccaps_QI, ccaps_AddRef, ccaps_Release,
+    ccaps_GetIids, ccaps_GetRuntimeClassName, ccaps_GetTrustLevel,
+    ccaps_AreEffectsSupported, ccaps_AreEffectsFast,
+    ccaps_add_Changed, ccaps_remove_Changed,
+};
+static struct { const void **vtbl; } ccaps_obj = { ccaps_vtbl };
+
+static HRESULT WINAPI ccaps_factory_QI( void *iface, REFIID riid, void **out )
+{
+    if (IsEqualGUID( riid, &IID_IUnknown ) || IsEqualGUID( riid, &IID_IInspectable ) ||
+        IsEqualGUID( riid, &IID_IAgileObject ) || IsEqualGUID( riid, &IID_IActivationFactory ) ||
+        IsEqualGUID( riid, &IID_ICompositionCapabilitiesStatics ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI ccaps_factory_GetForCurrentView( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = &ccaps_obj;
+    return S_OK;
+}
+static const void *ccaps_factory_vtbl[] =
+{
+    ccaps_factory_QI, ccaps_AddRef, ccaps_Release,
+    ccaps_GetIids, ccaps_GetRuntimeClassName, ccaps_GetTrustLevel,
+    ccaps_factory_GetForCurrentView,
+};
+static struct { const void **vtbl; } ccaps_factory_obj = { ccaps_factory_vtbl };
+
 HRESULT WINAPI DllCanUnloadNow( void )
 {
     return S_FALSE;
@@ -290,6 +374,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         *factory = (IActivationFactory *)&cesp_factory_obj;
     else if (name && !wcscmp( name, L"Windows.UI.Composition.CompositionPath" ))
         *factory = (IActivationFactory *)&cpath_factory_obj;
+    else if (name && !wcscmp( name, L"Windows.UI.Composition.CompositionCapabilities" ))
+        *factory = (IActivationFactory *)&ccaps_factory_obj;
 
     if (*factory) return S_OK;
 

@@ -30,7 +30,25 @@ struct interaction_context
 {
     BOOL filter_pointers;
     BOOL ui_feedback;
+    UINT32 measurement_units;
     INTERACTION_CONFIGURATION_FLAGS config_flags[INTERACTION_ID_CROSS_SLIDE];
+    INTERACTION_CONTEXT_OUTPUT_CALLBACK callback;
+    void *callback_data;
+
+    POINTER_INFO *packets;
+    UINT32 packet_count;
+    UINT32 packet_capacity;
+
+    BOOL down_active;
+    BOOL down_secondary;
+    UINT32 down_pointer_id;
+    POINTER_INPUT_TYPE down_type;
+    float down_x;
+    float down_y;
+    DWORD last_tap_time;
+    float last_tap_x;
+    float last_tap_y;
+    INTERACTION_STATE state;
 };
 
 static struct interaction_context *context_from_handle(HINTERACTIONCONTEXT handle)
@@ -38,10 +56,13 @@ static struct interaction_context *context_from_handle(HINTERACTIONCONTEXT handl
     return (struct interaction_context *)handle;
 }
 
-HRESULT WINAPI BufferPointerPacketsInteractionContext(HINTERACTIONCONTEXT context,
+HRESULT WINAPI BufferPointerPacketsInteractionContext(HINTERACTIONCONTEXT handle,
         UINT32 entries_count, const POINTER_INFO *pointer_info)
 {
-    FIXME("context %p, entries_count %u, pointer_info %p: stub!\n", context, entries_count, pointer_info);
+    struct interaction_context *context = context_from_handle(handle);
+    UINT32 needed;
+
+    TRACE("context %p, entries_count %u, pointer_info %p.\n", context, entries_count, pointer_info);
 
     if (!context)
         return E_HANDLE;
@@ -50,6 +71,19 @@ HRESULT WINAPI BufferPointerPacketsInteractionContext(HINTERACTIONCONTEXT contex
     if (!pointer_info)
         return E_POINTER;
 
+    needed = context->packet_count + entries_count;
+    if (needed > context->packet_capacity)
+    {
+        UINT32 new_cap = max(needed, context->packet_capacity ? context->packet_capacity * 2 : 16);
+        POINTER_INFO *new_buf = realloc(context->packets, new_cap * sizeof(*new_buf));
+        if (!new_buf)
+            return E_OUTOFMEMORY;
+        context->packets = new_buf;
+        context->packet_capacity = new_cap;
+    }
+
+    memcpy(&context->packets[context->packet_count], pointer_info, entries_count * sizeof(*pointer_info));
+    context->packet_count += entries_count;
     return S_OK;
 }
 
@@ -84,6 +118,7 @@ HRESULT WINAPI DestroyInteractionContext(HINTERACTIONCONTEXT handle)
     if (!context)
         return E_HANDLE;
 
+    free(context->packets);
     free(context);
     return S_OK;
 }
@@ -103,9 +138,8 @@ HRESULT WINAPI GetPropertyInteractionContext(HINTERACTIONCONTEXT handle,
     switch (property)
     {
         case INTERACTION_CONTEXT_PROPERTY_MEASUREMENT_UNITS:
-            FIXME("Unhandled property %#x.\n", property);
-            *value = 0;
-            return E_NOTIMPL;
+            *value = context->measurement_units;
+            return S_OK;
 
         case INTERACTION_CONTEXT_PROPERTY_INTERACTION_UI_FEEDBACK:
             *value = context->ui_feedback;
@@ -121,17 +155,19 @@ HRESULT WINAPI GetPropertyInteractionContext(HINTERACTIONCONTEXT handle,
     }
 }
 
-HRESULT WINAPI GetStateInteractionContext(HINTERACTIONCONTEXT context,
+HRESULT WINAPI GetStateInteractionContext(HINTERACTIONCONTEXT handle,
         const POINTER_INFO *pointer_info, INTERACTION_STATE *state)
 {
-    FIXME("context %p, pointer_info %p, state %p: stub!.\n", context, pointer_info, state);
+    struct interaction_context *context = context_from_handle(handle);
+
+    TRACE("context %p, pointer_info %p, state %p.\n", context, pointer_info, state);
 
     if (!context)
         return E_HANDLE;
     if (!state)
         return E_POINTER;
 
-    *state = INTERACTION_STATE_IDLE;
+    *state = context->state;
     return S_OK;
 }
 
@@ -148,8 +184,8 @@ HRESULT WINAPI SetPropertyInteractionContext(HINTERACTIONCONTEXT handle,
     switch (property)
     {
         case INTERACTION_CONTEXT_PROPERTY_MEASUREMENT_UNITS:
-            FIXME("Unhandled property %#x.\n", property);
-            return E_NOTIMPL;
+            context->measurement_units = value;
+            return S_OK;
 
         case INTERACTION_CONTEXT_PROPERTY_INTERACTION_UI_FEEDBACK:
             if (value != FALSE && value != TRUE)
@@ -234,21 +270,125 @@ HRESULT WINAPI RegisterOutputCallbackInteractionContext(HINTERACTIONCONTEXT hand
 {
     struct interaction_context *context = context_from_handle(handle);
 
-    FIXME("context %p, callback %p, data %p: stub!.\n", context, callback, data);
+    TRACE("context %p, callback %p, data %p.\n", context, callback, data);
 
     if (!context)
         return E_HANDLE;
 
+    context->callback = callback;
+    context->callback_data = data;
     return S_OK;
 }
 
-HRESULT WINAPI ProcessBufferedPacketsInteractionContext(HINTERACTIONCONTEXT context)
+HRESULT WINAPI ProcessBufferedPacketsInteractionContext(HINTERACTIONCONTEXT handle)
 {
-    FIXME("context %p: stub!\n", context);
+    struct interaction_context *context = context_from_handle(handle);
+    POINTER_INFO *packets;
+    UINT32 count, i;
+
+    TRACE("context %p.\n", context);
 
     if (!context)
         return E_HANDLE;
 
+    if (!context->packet_count)
+        return S_OK;
+
+    /* Detach buffered packets before firing callbacks to handle re-entrancy safely. */
+    count = context->packet_count;
+    packets = malloc(count * sizeof(*packets));
+    if (!packets)
+        return E_OUTOFMEMORY;
+    memcpy(packets, context->packets, count * sizeof(*packets));
+    context->packet_count = 0;
+
+    for (i = 0; i < count; i++)
+    {
+        const POINTER_INFO *p = &packets[i];
+        float x = (context->measurement_units == 1) ? (float)p->ptPixelLocation.x : (float)p->ptHimetricLocation.x;
+        float y = (context->measurement_units == 1) ? (float)p->ptPixelLocation.y : (float)p->ptHimetricLocation.y;
+        BOOL in_contact = (p->pointerFlags & POINTER_FLAG_INCONTACT) != 0;
+        BOOL is_down = (p->pointerFlags & POINTER_FLAG_DOWN)
+                || p->ButtonChangeType == POINTER_CHANGE_FIRSTBUTTON_DOWN
+                || p->ButtonChangeType == POINTER_CHANGE_SECONDBUTTON_DOWN
+                || (!context->down_active && in_contact);
+        BOOL is_up = (p->pointerFlags & POINTER_FLAG_UP)
+                || p->ButtonChangeType == POINTER_CHANGE_FIRSTBUTTON_UP
+                || p->ButtonChangeType == POINTER_CHANGE_SECONDBUTTON_UP
+                || (context->down_active && !in_contact);
+
+        TRACE("pkt[%u] type=%lu id=%u flags=%#x btn=%u px=(%ld,%ld) him=(%ld,%ld) tap_cfg=%#x\n",
+                i, (unsigned long)p->pointerType, p->pointerId, p->pointerFlags, p->ButtonChangeType,
+                p->ptPixelLocation.x, p->ptPixelLocation.y,
+                p->ptHimetricLocation.x, p->ptHimetricLocation.y,
+                context->config_flags[INTERACTION_ID_TAP - 1]);
+
+        if (is_down)
+        {
+            context->down_active = TRUE;
+            context->down_secondary = (p->ButtonChangeType == POINTER_CHANGE_SECONDBUTTON_DOWN)
+                    || ((p->pointerFlags & POINTER_FLAG_SECONDBUTTON) && !(p->pointerFlags & POINTER_FLAG_FIRSTBUTTON));
+            context->down_pointer_id = p->pointerId;
+            context->down_type = p->pointerType ? p->pointerType : PT_MOUSE;
+            context->down_x = x;
+            context->down_y = y;
+            context->state = INTERACTION_STATE_IN_INTERACTION;
+        }
+        else if (is_up && context->down_active)
+        {
+            float dx = x - context->down_x;
+            float dy = y - context->down_y;
+            BOOL secondary = context->down_secondary
+                    || (p->ButtonChangeType == POINTER_CHANGE_SECONDBUTTON_UP);
+            POINTER_INPUT_TYPE input_type = p->pointerType ? p->pointerType : context->down_type;
+
+            context->down_active = FALSE;
+            context->state = INTERACTION_STATE_IDLE;
+
+            if (context->callback && (dx * dx + dy * dy <= 1000.0f * 1000.0f))
+            {
+                INTERACTION_CONTEXT_OUTPUT out;
+                memset(&out, 0, sizeof(out));
+                out.interactionFlags = INTERACTION_FLAG_BEGIN | INTERACTION_FLAG_END;
+                out.inputType = input_type;
+                out.x = x;
+                out.y = y;
+
+                if (secondary && (context->config_flags[INTERACTION_ID_SECONDARY_TAP - 1]
+                        & INTERACTION_CONFIGURATION_FLAG_SECONDARY_TAP))
+                {
+                    out.interactionId = INTERACTION_ID_SECONDARY_TAP;
+                    out.arguments.tap.count = 1;
+                    TRACE("firing SECONDARY_TAP at (%.1f, %.1f)\n", x, y);
+                    context->callback(context->callback_data, &out);
+                }
+                else if (!secondary && (context->config_flags[INTERACTION_ID_TAP - 1]
+                        & INTERACTION_CONFIGURATION_FLAG_TAP))
+                {
+                    DWORD now = p->dwTime ? p->dwTime : GetTickCount();
+                    UINT32 tap_count = 1;
+                    if ((context->config_flags[INTERACTION_ID_TAP - 1] & INTERACTION_CONFIGURATION_FLAG_TAP_DOUBLE)
+                            && context->last_tap_time && (now - context->last_tap_time) <= 500)
+                    {
+                        float tdx = x - context->last_tap_x;
+                        float tdy = y - context->last_tap_y;
+                        if (tdx * tdx + tdy * tdy <= 1000.0f * 1000.0f)
+                            tap_count = 2;
+                    }
+                    context->last_tap_time = (tap_count == 2) ? 0 : now;
+                    context->last_tap_x = x;
+                    context->last_tap_y = y;
+
+                    out.interactionId = INTERACTION_ID_TAP;
+                    out.arguments.tap.count = tap_count;
+                    TRACE("firing TAP count=%u at (%.1f, %.1f)\n", tap_count, x, y);
+                    context->callback(context->callback_data, &out);
+                }
+            }
+        }
+    }
+
+    free(packets);
     return S_OK;
 }
 
@@ -256,6 +396,61 @@ HRESULT WINAPI ProcessInertiaInteractionContext(HINTERACTIONCONTEXT context)
 {
     FIXME("context %p: stub!\n", context);
     return E_NOTIMPL;
+}
+
+HRESULT WINAPI SetMouseWheelParameterInteractionContext(HINTERACTIONCONTEXT handle,
+        UINT32 parameter, float value)
+{
+    struct interaction_context *context = context_from_handle(handle);
+
+    FIXME("context %p, parameter %u, value %f: stub!\n", context, parameter, value);
+
+    if (!context)
+        return E_HANDLE;
+
+    return S_OK;
+}
+
+HRESULT WINAPI ProcessPointerFramesInteractionContext(HINTERACTIONCONTEXT handle,
+        UINT32 entries_count, UINT32 pointer_count, const POINTER_INFO *pointer_info)
+{
+    struct interaction_context *context = context_from_handle(handle);
+
+    FIXME("context %p, entries_count %u, pointer_count %u, pointer_info %p: stub!\n",
+            context, entries_count, pointer_count, pointer_info);
+
+    if (!context)
+        return E_HANDLE;
+    if (!pointer_info && entries_count && pointer_count)
+        return E_POINTER;
+
+    return S_OK;
+}
+
+HRESULT WINAPI ResetInteractionContext(HINTERACTIONCONTEXT handle)
+{
+    struct interaction_context *context = context_from_handle(handle);
+
+    TRACE("context %p.\n", context);
+
+    if (!context)
+        return E_HANDLE;
+
+    context->packet_count = 0;
+    context->down_active = FALSE;
+    return S_OK;
+}
+
+HRESULT WINAPI StopInteractionContext(HINTERACTIONCONTEXT handle)
+{
+    struct interaction_context *context = context_from_handle(handle);
+
+    TRACE("context %p.\n", context);
+
+    if (!context)
+        return E_HANDLE;
+
+    return S_OK;
 }
 
 /* Undocumented function at ordinal 2502 */

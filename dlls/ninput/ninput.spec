@@ -11,17 +11,17 @@
 @ stdcall GetStateInteractionContext(ptr ptr ptr)
 @ stdcall ProcessBufferedPacketsInteractionContext(ptr)
 @ stdcall ProcessInertiaInteractionContext(ptr)
-@ stub ProcessPointerFramesInteractionContext
+@ stdcall ProcessPointerFramesInteractionContext(ptr long long ptr)
 @ stdcall RegisterOutputCallbackInteractionContext(ptr ptr ptr)
 @ stub RemovePointerInteractionContext
-@ stub ResetInteractionContext
+@ stdcall ResetInteractionContext(ptr)
 @ stub SetCrossSlideParametersInteractionContext
 @ stub SetInertiaParameterInteractionContext
 @ stdcall SetInteractionConfigurationInteractionContext(ptr long ptr)
-@ stub SetMouseWheelParameterInteractionContext
+@ stdcall SetMouseWheelParameterInteractionContext(ptr long float)
 @ stub SetPivotInteractionContext
 @ stdcall SetPropertyInteractionContext(ptr long long)
-@ stub StopInteractionContext
+@ stdcall StopInteractionContext(ptr)
 
 2500 stub @
 2501 stub @
