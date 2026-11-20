@@ -333,6 +333,7 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
     if (!el || el->visibility != 0 || depth > 14) return FALSE;
     if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
     if (el->text[0] || el->img_pixels || el->img_loaded) return TRUE;
+    if (wcsstr( el->class_name, L"Spotlight" )) return TRUE;
     if (wcsstr( el->class_name, L"ItemsRepeater" ))
     {
         if (el->data_context || el->dp_cnt >= 2) return TRUE;
@@ -455,7 +456,25 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
             c_type[i] = cd ? cd->grid_len_type : 2;
             c_val[i]  = cd ? cd->grid_len_val  : 1.0;
             if (c_type[i] == 2 && c_val[i] <= 0.001) { c_type[i] = 1; c_val[i] = 0; }
-            if (c_type[i] == 0) { c_type[i] = 1; c_val[i] = 0; }
+            if (c_type[i] == 0)
+            {
+                double auto_w = 0.0;
+                for (k = 0; k < children->count; k++)
+                {
+                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                    if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                        ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                        ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
+                        ch->grid_col == i && ch->grid_col_span == 1)
+                    {
+                        double cw = (ch->width > 0.0 && !isnan( ch->width )) ? ch->width
+                                  : (ch->min_width > 0.0 ? ch->min_width : 160.0);
+                        if (cw > auto_w) auto_w = cw;
+                    }
+                }
+                c_type[i] = 1;
+                c_val[i] = min( auto_w, (double)w );
+            }
             if (c_type[i] == 1)
             {
                 if (cd && cd->max_width > 0.0 && c_val[i] > cd->max_width) c_val[i] = cd->max_width;
