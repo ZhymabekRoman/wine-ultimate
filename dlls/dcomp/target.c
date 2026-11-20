@@ -255,9 +255,15 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
     target->ref = 1;
     target->hwnd = hwnd;
-    target->composite_hwnd = CreateWindowExW(WS_EX_TRANSPARENT, L"static", NULL,
-            WS_CHILD | WS_CLIPSIBLINGS | WS_DISABLED,
-            0, 0, 1, 1, hwnd, NULL, NULL, NULL);
+    {
+        WCHAR cls[64];
+        if (GetClassNameW(hwnd, cls, ARRAY_SIZE(cls)) && !wcscmp(cls, L"DcppUserAdapterWindowClass"))
+            target->composite_hwnd = NULL;
+        else
+            target->composite_hwnd = CreateWindowExW(WS_EX_TRANSPARENT, L"static", NULL,
+                    WS_CHILD | WS_CLIPSIBLINGS,
+                    0, 0, 1, 1, hwnd, NULL, NULL, NULL);
+    }
     target->topmost = topmost;
     target->device = &device->IDCompositionDevice_iface;
     *new_target = &target->IDCompositionTarget_iface;
