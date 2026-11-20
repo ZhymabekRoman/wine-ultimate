@@ -1125,9 +1125,27 @@ static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, BYTE **out_pixel
             {
                 if (SUCCEEDED(IWICBitmapDecoder_GetFrame( dec, 0, &frame )) && frame)
                 {
+                    IWICBitmapSource *src_bmp = (IWICBitmapSource *)frame;
+                    IWICBitmapScaler *scaler = NULL;
+                    if (SUCCEEDED(IWICBitmapFrameDecode_GetSize( frame, &w, &h )) &&
+                        (w > 192 || h > 192) && w > 0 && h > 0)
+                    {
+                        UINT nw = w >= h ? 192 : max( 1, (UINT)(192.0 * w / h) );
+                        UINT nh = h >= w ? 192 : max( 1, (UINT)(192.0 * h / w) );
+                        if (SUCCEEDED(IWICImagingFactory_CreateBitmapScaler( wic, &scaler )) && scaler)
+                        {
+                            if (SUCCEEDED(IWICBitmapScaler_Initialize( scaler, src_bmp, nw, nh, WICBitmapInterpolationModeFant )))
+                                src_bmp = (IWICBitmapSource *)scaler;
+                            else
+                            {
+                                IWICBitmapScaler_Release( scaler );
+                                scaler = NULL;
+                            }
+                        }
+                    }
                     if (SUCCEEDED(IWICImagingFactory_CreateFormatConverter( wic, &conv )) && conv)
                     {
-                        if (SUCCEEDED(IWICFormatConverter_Initialize( conv, (IWICBitmapSource *)frame,
+                        if (SUCCEEDED(IWICFormatConverter_Initialize( conv, src_bmp,
                                                                       &GUID_WICPixelFormat32bppBGRA_local,
                                                                       WICBitmapDitherTypeNone, NULL, 0.0,
                                                                       WICBitmapPaletteTypeCustom )) &&
@@ -1164,6 +1182,7 @@ static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, BYTE **out_pixel
                         }
                         IWICFormatConverter_Release( conv );
                     }
+                    if (scaler) IWICBitmapScaler_Release( scaler );
                     IWICBitmapFrameDecode_Release( frame );
                 }
                 IWICBitmapDecoder_Release( dec );

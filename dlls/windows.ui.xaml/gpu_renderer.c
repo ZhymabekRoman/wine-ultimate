@@ -515,7 +515,9 @@ static HFONT xaml_gpu_get_font( int height, int weight )
     return g_gpu.fonts[slot].hfont;
 }
 
-static BOOL atlas_alloc_rect( UINT w, UINT h, UINT *out_x, UINT *out_y )
+static BOOL xaml_gpu_draw_batch( ID3D11DeviceContext *ctx );
+
+static BOOL atlas_alloc_rect( ID3D11DeviceContext *ctx, UINT w, UINT h, UINT *out_x, UINT *out_y )
 {
     if (w == 0 || h == 0 || w + 1 > ATLAS_SIZE || h + 1 > ATLAS_SIZE)
         return FALSE;
@@ -527,6 +529,12 @@ static BOOL atlas_alloc_rect( UINT w, UINT h, UINT *out_x, UINT *out_y )
     }
     if (g_gpu.shelf_y + h + 1 > ATLAS_SIZE)
     {
+        /* Flush queued quads before overwriting atlas coordinates mid-frame */
+        if (ctx && g_gpu.instance_count > 0)
+        {
+            xaml_gpu_draw_batch( ctx );
+            g_gpu.instance_count = 0;
+        }
         /* Atlas full: reset shelf allocator and hash table */
         g_gpu.shelf_x = 0;
         g_gpu.shelf_y = 0;
@@ -777,7 +785,7 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
         HGDIOBJ old_font;
         D3D11_BOX dst_box;
 
-        if (!atlas_alloc_rect( bw, bh, &ax, &ay ))
+        if (!atlas_alloc_rect( ctx, bw, bh, &ax, &ay ))
             return;
 
         g_gpu.atlas_misses++;
@@ -892,7 +900,7 @@ void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *
     {
         UINT ax = 0, ay = 0;
         D3D11_BOX dst_box;
-        if (!atlas_alloc_rect( img_w, img_h, &ax, &ay )) return;
+        if (!atlas_alloc_rect( ctx, img_w, img_h, &ax, &ay )) return;
         g_gpu.atlas_misses++;
         dst_box.left = ax;
         dst_box.top = ay;

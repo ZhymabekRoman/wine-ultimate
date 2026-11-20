@@ -843,8 +843,10 @@ static inline UINT32 cr_to_argb( COLORREF cr )
     return 0xff000000u | ((UINT32)GetRValue( cr ) << 16) | ((UINT32)GetGValue( cr ) << 8) | (UINT32)GetBValue( cr );
 }
 
-static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
-                                      WCHAR *out, size_t out_len )
+static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth );
+
+static BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props, unsigned int count,
+                                            WCHAR *out, size_t out_len, int depth )
 {
     static const GUID IID_ICustomPropertyProvider_gpu =
         { 0x7c925755, 0x3e48, 0x42b4, { 0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f } };
@@ -865,7 +867,8 @@ static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *prop
                 IInspectable *pval = NULL;
                 if (uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, props[pi], vm, &pval ) && pval)
                 {
-                    uwp_unbox_string( pval, out, out_len );
+                    if (!uwp_unbox_string( pval, out, out_len ))
+                        uwp_vm_extract_nested_url( pval, out, out_len, depth );
                     IInspectable_Release( pval );
                 }
             }
@@ -875,6 +878,34 @@ static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *prop
     if (!out[0] && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICustomPropertyProvider_gpu, &cpp )) && cpp)
     {
         HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
+        HRESULT (WINAPI *get_type)(void *, TypeName *) = (void *)(*(void ***)cpp)[9];
+        if (get_type)
+        {
+            TypeName tn = {0};
+            if (SUCCEEDED(get_type( cpp, &tn )) && tn.Name)
+            {
+                WCHAR tcls[256] = {0};
+                WCHAR *comma;
+                const WCHAR *raw = WindowsGetStringRawBuffer( tn.Name, NULL );
+                if (raw) lstrcpynW( tcls, raw, ARRAY_SIZE(tcls) );
+                comma = wcschr( tcls, ',' );
+                if (comma) *comma = 0;
+                if (tcls[0])
+                {
+                    for (pi = 0; pi < count && !out[0]; pi++)
+                    {
+                        IInspectable *pval = NULL;
+                        if (uwp_get_custom_xaml_member( uwp_get_app_outer(), tcls, props[pi], vm, &pval ) && pval)
+                        {
+                            if (!uwp_unbox_string( pval, out, out_len ))
+                                uwp_vm_extract_nested_url( pval, out, out_len, depth );
+                            IInspectable_Release( pval );
+                        }
+                    }
+                }
+                WindowsDeleteString( tn.Name );
+            }
+        }
         for (pi = 0; pi < count && !out[0]; pi++)
         {
             HSTRING hp = NULL;
@@ -887,7 +918,8 @@ static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *prop
                     IInspectable *pval = NULL;
                     if (get_val && SUCCEEDED(get_val( cp, vm, &pval )) && pval)
                     {
-                        uwp_unbox_string( pval, out, out_len );
+                        if (!uwp_unbox_string( pval, out, out_len ))
+                            uwp_vm_extract_nested_url( pval, out, out_len, depth );
                         IInspectable_Release( pval );
                     }
                     IUnknown_Release( (IUnknown *)cp );
@@ -898,6 +930,100 @@ static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *prop
         IUnknown_Release( (IUnknown *)cpp );
     }
     return out[0] != 0;
+}
+
+static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth )
+{
+    static const WCHAR *const nested_url_props[] =
+        { L"Url", L"Uri", L"ImageUrl", L"ImageUri", L"Source", L"AbsoluteUri", L"RawUri", L"Location", L"Path",
+          L"UriString", L"UrlString", L"ImageSource", L"BitmapImage", L"ImageLinkUri", L"PrimaryImageUrl",
+          L"TileImage", L"RequestedImage", L"CurrentImage", L"DefaultImage", L"BackgroundImage", L"ForegroundImage",
+          L"SmallLogoImage", L"Icon", L"Image", L"Images" };
+    static const GUID IID_IVector_Insp_g =
+        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
+    static const GUID IID_IVectorView_Insp_g =
+        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
+    static const GUID IID_IBindableVector_g =
+        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
+    static const GUID IID_IBindableIterable_g =
+        { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
+    static const GUID IID_IIterable_Insp_g =
+        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
+    struct uwp_element *pel = uwp_elem_from_any( pval );
+    void *vec = NULL;
+
+    if (pel && pel->image_src[0])
+    {
+        lstrcpynW( out, pel->image_src, out_len );
+        return;
+    }
+    uwp_extract_uri_string( pval, out, out_len );
+    if (out[0] || depth <= 0) return;
+
+    if (SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVector_Insp_g, &vec )) ||
+        SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVectorView_Insp_g, &vec )) ||
+        SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IBindableVector_g, &vec )))
+    {
+        HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
+        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
+        unsigned int sz = 0, i;
+        if (get_sz && SUCCEEDED(get_sz( vec, &sz )))
+        {
+            for (i = 0; i < sz && i < 6 && !out[0]; i++)
+            {
+                void *it = NULL;
+                if (get_at && SUCCEEDED(get_at( vec, i, &it )) && it)
+                {
+                    if (!uwp_unbox_string( (IInspectable *)it, out, out_len ))
+                        uwp_vm_query_string_prop_depth( (IInspectable *)it, nested_url_props, ARRAY_SIZE(nested_url_props),
+                                                        out, out_len, depth - 1 );
+                    IUnknown_Release( (IUnknown *)it );
+                }
+            }
+        }
+        IUnknown_Release( (IUnknown *)vec );
+    }
+    else if ((SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IIterable_Insp_g, &vec )) ||
+              SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IBindableIterable_g, &vec ))) && vec)
+    {
+        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
+        void *iter = NULL;
+        if (first && SUCCEEDED(first( vec, &iter )) && iter)
+        {
+            HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
+            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
+            HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
+            boolean has = FALSE;
+            int cnt = 0;
+            if (has_cur && SUCCEEDED(has_cur( iter, &has )))
+            {
+                while (has && cnt < 6 && !out[0])
+                {
+                    void *it = NULL;
+                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
+                    {
+                        if (!uwp_unbox_string( (IInspectable *)it, out, out_len ))
+                            uwp_vm_query_string_prop_depth( (IInspectable *)it, nested_url_props, ARRAY_SIZE(nested_url_props),
+                                                            out, out_len, depth - 1 );
+                        IUnknown_Release( (IUnknown *)it );
+                    }
+                    has = FALSE;
+                    cnt++;
+                    if (move_next) move_next( iter, &has );
+                }
+            }
+            IUnknown_Release( (IUnknown *)iter );
+        }
+        IUnknown_Release( (IUnknown *)vec );
+    }
+    if (!out[0])
+        uwp_vm_query_string_prop_depth( pval, nested_url_props, ARRAY_SIZE(nested_url_props), out, out_len, depth - 1 );
+}
+
+static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
+                                      WCHAR *out, size_t out_len )
+{
+    return uwp_vm_query_string_prop_depth( vm, props, count, out, out_len, 0 );
 }
 
 static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el );
@@ -1492,8 +1618,9 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         {
             static const WCHAR *const title_props[] = { L"Title", L"ProductTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
             static const WCHAR *const sub_props[] = { L"DisplayPrice", L"PriceText", L"FormattedPrice", L"Price", L"Category", L"PublisherName", L"Publisher", L"Subtitle", L"Description" };
+            static const WCHAR *const img_props[] = { L"Images", L"TileImages", L"ProductImages", L"Icons", L"ImageUrl", L"IconUrl", L"IconUri", L"ImageUri", L"ProductImageUrl", L"HeroImageUrl", L"TileImageUrl", L"LogoUrl", L"ThumbnailUrl", L"BoxArtUrl", L"PosterUrl", L"ImageLinkUri", L"TileImage", L"ProductImage", L"IconImage", L"LogoImage", L"BackgroundImage", L"Icon", L"Image", L"ImageSource", L"Uri" };
             static const WCHAR *const nested_props[] = { L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
-            WCHAR title_buf[128] = {0}, sub_buf[128] = {0};
+            WCHAR title_buf[128] = {0}, sub_buf[128] = {0}, img_buf[512] = {0};
             IInspectable *vm = el->data_context;
             IInspectable *target_vm = vm;
             IInspectable *nested_vm = NULL;
@@ -1525,12 +1652,21 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     swprintf( el->text, ARRAY_SIZE(el->text), L"%.120s\n%.120s", title_buf, sub_buf );
                 else
                     lstrcpynW( el->text, title_buf, ARRAY_SIZE(el->text) );
+                if (!el->image_src[0])
+                {
+                    if (!uwp_vm_query_string_prop_depth( target_vm, img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
+                        nested_vm && target_vm != nested_vm)
+                        uwp_vm_query_string_prop_depth( nested_vm, img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 );
+                    if (img_buf[0])
+                        lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                }
             }
             if (nested_vm) IInspectable_Release( nested_vm );
         }
         if (el->text[0])
         {
             RECT brc = el->bounds, trc, src;
+            int text_left;
             const WCHAR *nl = wcschr( el->text, '\n' );
             WCHAR tline[128] = {0};
             size_t tlen = nl ? (size_t)(nl - el->text) : wcslen( el->text );
@@ -1541,12 +1677,24 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
                                 6.0f, cr_to_argb( el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ) ),
                                 cr_to_argb( RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
-            SetRect( &trc, brc.left + 14, brc.top + 14, brc.right - 14, brc.top + 48 );
+            text_left = brc.left + 14;
+            if (el->image_src[0])
+                uwp_load_image_asset( el );
+            if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+            {
+                int bh = brc.bottom - brc.top;
+                int isz = min( 56, max( 32, bh - 20 ) );
+                int iy = brc.top + (bh - isz) / 2;
+                RECT irc = { brc.left + 12, iy, brc.left + 12 + isz, iy + isz };
+                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                text_left = irc.right + 12;
+            }
+            SetRect( &trc, text_left, brc.top + 14, brc.right - 14, brc.top + 48 );
             xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                                 &trc, NULL, RGB( 255, 255, 255 ), 1.0f );
             if (nl)
             {
-                SetRect( &src, brc.left + 14, brc.top + 52, brc.right - 14, brc.bottom - 12 );
+                SetRect( &src, text_left, brc.top + 52, brc.right - 14, brc.bottom - 12 );
                 xaml_gpu_push_text( ctx, nl + 1, 12, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                                     &src, NULL, RGB( 180, 180, 180 ), 1.0f );
             }
