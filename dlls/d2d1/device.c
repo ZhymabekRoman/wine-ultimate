@@ -6457,12 +6457,36 @@ static HRESULT STDMETHODCALLTYPE d2d_priv_factory_CombineGeometries(ID2D1Device 
 
     if (SUCCEEDED(hr = ID2D1PathGeometry1_Open(path, &sink)))
     {
-        if (geo1)
+        float tol = tolerance > 0.0f ? tolerance : 0.25f;
+
+        if (geo1 && geo2)
+        {
+            ID2D1TransformedGeometry *tgeo1 = NULL;
+            ID2D1Geometry *src1 = geo1;
+
+            if (transform1)
+            {
+                hr = ID2D1Factory7_CreateTransformedGeometry(&forwarder->factory->ID2D1Factory7_iface,
+                        geo1, transform1, &tgeo1);
+                if (SUCCEEDED(hr))
+                    src1 = (ID2D1Geometry *)tgeo1;
+            }
+            if (SUCCEEDED(hr))
+                hr = ID2D1Geometry_CombineWithGeometry(src1, geo2, combine_mode, transform2,
+                        tol, (ID2D1SimplifiedGeometrySink *)sink);
+            if (tgeo1)
+                ID2D1TransformedGeometry_Release(tgeo1);
+        }
+        else if (geo1)
+        {
             hr = ID2D1Geometry_Simplify(geo1, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,
-                    transform1, tolerance > 0.0f ? tolerance : 0.25f, (ID2D1SimplifiedGeometrySink *)sink);
+                    transform1, tol, (ID2D1SimplifiedGeometrySink *)sink);
+        }
         else if (geo2)
+        {
             hr = ID2D1Geometry_Simplify(geo2, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,
-                    transform2, tolerance > 0.0f ? tolerance : 0.25f, (ID2D1SimplifiedGeometrySink *)sink);
+                    transform2, tol, (ID2D1SimplifiedGeometrySink *)sink);
+        }
         if (SUCCEEDED(hr))
             hr = ID2D1GeometrySink_Close(sink);
         ID2D1GeometrySink_Release(sink);
