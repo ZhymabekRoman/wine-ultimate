@@ -294,9 +294,40 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                             ctx->types[tid].short_name[0] &&
                             wcscmp( ctx->types[tid].short_name, L"XamlControlsResources" ))
                         {
-                            WCHAR xaml_name[128];
-                            swprintf( xaml_name, ARRAY_SIZE(xaml_name), L"%s.xaml", ctx->types[tid].short_name );
-                            uwp_load_res_xbf_into_bucket( ctx->base_xbf_dir, xaml_name, sub_rd );
+                            const WCHAR *ns = ctx->types[tid].xmlns + 6;
+                            const WCHAR *dot = wcschr( ns, L'.' );
+                            WCHAR xaml_name[256];
+                            BOOL loaded = FALSE;
+
+                            /* Try namespace-qualified path first (e.g. using:App.Resources -> Resources/Foo.xaml
+                             * or App/Resources/Foo.xaml) to avoid colliding with same-named XBFs in other assemblies. */
+                            if (dot && dot[1])
+                            {
+                                WCHAR rel_ns[128];
+                                int ni;
+                                lstrcpynW( rel_ns, dot + 1, ARRAY_SIZE(rel_ns) );
+                                for (ni = 0; rel_ns[ni]; ni++)
+                                    if (rel_ns[ni] == L'.') rel_ns[ni] = L'/';
+                                swprintf( xaml_name, ARRAY_SIZE(xaml_name), L"%s/%s.xaml", rel_ns, ctx->types[tid].short_name );
+                                uwp_load_res_xbf_into_bucket( ctx->base_xbf_dir, xaml_name, sub_rd );
+                                loaded = (sub_rd->count > 0 || sub_rd->merged_cnt > 0 || sub_rd->theme_dark || sub_rd->theme_default);
+                            }
+                            if (!loaded && ns[0])
+                            {
+                                WCHAR full_ns[128];
+                                int ni;
+                                lstrcpynW( full_ns, ns, ARRAY_SIZE(full_ns) );
+                                for (ni = 0; full_ns[ni]; ni++)
+                                    if (full_ns[ni] == L'.') full_ns[ni] = L'/';
+                                swprintf( xaml_name, ARRAY_SIZE(xaml_name), L"%s/%s.xaml", full_ns, ctx->types[tid].short_name );
+                                uwp_load_res_xbf_into_bucket( ctx->base_xbf_dir, xaml_name, sub_rd );
+                                loaded = (sub_rd->count > 0 || sub_rd->merged_cnt > 0 || sub_rd->theme_dark || sub_rd->theme_default);
+                            }
+                            if (!loaded)
+                            {
+                                swprintf( xaml_name, ARRAY_SIZE(xaml_name), L"%s.xaml", ctx->types[tid].short_name );
+                                uwp_load_res_xbf_into_bucket( ctx->base_xbf_dir, xaml_name, sub_rd );
+                            }
                         }
                     }
                 }

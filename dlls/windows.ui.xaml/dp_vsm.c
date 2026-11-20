@@ -64,6 +64,7 @@ IInspectable *box_double_value( double d )
 struct uwp_boxed_thickness
 {
     IInspectable IInspectable_iface;
+    IInspectable IPropertyValue_iface;
     LONG ref;
     double val[4];
 };
@@ -71,26 +72,56 @@ struct uwp_boxed_thickness
 static const GUID IID_IReference_Thickness_UWP =
     { 0xa19f7ba8, 0xd8cd, 0x5df2, { 0xab, 0x44, 0xfe, 0xfd, 0x26, 0x64, 0x44, 0x84 } };
 
+static HRESULT WINAPI uwp_bth_pv_get_Type( void *iface, INT32 *type )
+{
+    if (type) *type = 20; /* PropertyType_OtherType */
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_bth_pv_get_IsNumericScalar( void *iface, boolean *val )
+{
+    if (val) *val = FALSE;
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_bth_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
+    struct uwp_boxed_thickness *impl = CONTAINING_RECORD( iface, struct uwp_boxed_thickness, IInspectable_iface );
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IPropertyValue ) ||
         IsEqualGUID( iid, &IID_IReference_Thickness_UWP ))
     {
-        *out = iface;
-        IInspectable_AddRef( iface );
+        *out = &impl->IInspectable_iface;
+        IInspectable_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPropertyValue ))
+    {
+        *out = &impl->IPropertyValue_iface;
+        IInspectable_AddRef( &impl->IInspectable_iface );
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
 
+static HRESULT WINAPI uwp_bth_pv_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct uwp_boxed_thickness *impl = CONTAINING_RECORD( iface, struct uwp_boxed_thickness, IPropertyValue_iface );
+    return uwp_bth_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+
 static ULONG WINAPI uwp_bth_AddRef( IInspectable *iface )
 {
     struct uwp_boxed_thickness *impl = CONTAINING_RECORD( iface, struct uwp_boxed_thickness, IInspectable_iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI uwp_bth_pv_AddRef( IInspectable *iface )
+{
+    struct uwp_boxed_thickness *impl = CONTAINING_RECORD( iface, struct uwp_boxed_thickness, IPropertyValue_iface );
     return InterlockedIncrement( &impl->ref );
 }
 
@@ -100,6 +131,12 @@ static ULONG WINAPI uwp_bth_Release( IInspectable *iface )
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref) free( impl );
     return ref;
+}
+
+static ULONG WINAPI uwp_bth_pv_Release( IInspectable *iface )
+{
+    struct uwp_boxed_thickness *impl = CONTAINING_RECORD( iface, struct uwp_boxed_thickness, IPropertyValue_iface );
+    return uwp_bth_Release( &impl->IInspectable_iface );
 }
 
 static HRESULT WINAPI uwp_bth_GetIids( IInspectable *iface, ULONG *cnt, IID **iids )
@@ -139,11 +176,24 @@ static const void *uwp_bth_vtbl[16] =
     uwp_bth_get_Value,
 };
 
+static const void *uwp_bth_pv_vtbl[16] =
+{
+    uwp_bth_pv_QueryInterface,
+    uwp_bth_pv_AddRef,
+    uwp_bth_pv_Release,
+    uwp_bth_GetIids,
+    uwp_bth_GetRuntimeClassName,
+    uwp_bth_GetTrustLevel,
+    uwp_bth_pv_get_Type,
+    uwp_bth_pv_get_IsNumericScalar,
+};
+
 static IInspectable *box_thickness_value( const double vec4[4] )
 {
     struct uwp_boxed_thickness *impl = calloc( 1, sizeof(*impl) );
     if (!impl) return NULL;
     impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bth_vtbl;
+    impl->IPropertyValue_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bth_pv_vtbl;
     impl->ref = 1;
     if (vec4) memcpy( impl->val, vec4, sizeof(impl->val) );
     return &impl->IInspectable_iface;
@@ -1387,7 +1437,7 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
 extern HRESULT WINAPI RoActivateInstance( HSTRING activatableClassId, IInspectable **instance );
 
 const GUID IID_INotifyPropertyChanged_UWP =
-    { 0xcf75d69c, 0xf2f4, 0x4fb6, { 0xa7, 0xc3, 0x5f, 0x20, 0x42, 0x0f, 0x5d, 0x42 } };
+    { 0xcf75d69c, 0xf2f4, 0x486b, { 0xb3, 0x02, 0xbb, 0x4c, 0x09, 0xba, 0xeb, 0xfa } };
 const GUID IID_IPropertyChangedEventHandler_UWP =
     { 0x50f19c16, 0x0a22, 0x4d8e, { 0xa0, 0x89, 0x1e, 0xa9, 0x95, 0x16, 0x57, 0xd2 } };
 const GUID IID_IPropertyChangedEventArgs_UWP =
