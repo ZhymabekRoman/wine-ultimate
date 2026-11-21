@@ -6901,9 +6901,8 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
             if (el->loaded_handlers[i])
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)el->loaded_handlers[i];
-                if (xaml_has_active_swapchain_panel())
-                    ERR( "Firing Loaded handler[%d] on %s (%s)\n",
-                         i, debugstr_w(el->class_name), debugstr_w(el->name) );
+                TRACE( "Firing Loaded handler[%d] on %s (%s)\n",
+                       i, debugstr_w(el->class_name), debugstr_w(el->name) );
                 __TRY
                 {
                     HRESULT lhr = h->lpVtbl->Invoke( h, sender, g_routed_args() );
@@ -6956,14 +6955,14 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
     }
     if (el->layout_updated_cnt > 0)
     {
-        for (i = 0; i < el->layout_updated_cnt; i++)
+        int cnt = el->layout_updated_cnt;
+        for (i = 0; i < cnt && i < el->layout_updated_cnt; i++)
         {
             if (el->layout_updated_handlers[i])
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)el->layout_updated_handlers[i];
-                if (xaml_has_active_swapchain_panel())
-                    ERR( "Firing LayoutUpdated handler[%d] on %s (%s) w=%.0f h=%.0f\n",
-                         i, debugstr_w(el->class_name), debugstr_w(el->name), el->actual_w, el->actual_h );
+                TRACE( "Firing LayoutUpdated handler[%d] on %s (%s) w=%.0f h=%.0f\n",
+                       i, debugstr_w(el->class_name), debugstr_w(el->name), el->actual_w, el->actual_h );
                 IUnknown_AddRef( (IUnknown *)h );
                 __TRY
                 {
