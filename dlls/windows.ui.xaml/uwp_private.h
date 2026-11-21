@@ -382,6 +382,13 @@ struct uwp_element
     void *dc_bound_dps[8];
     struct uwp_element *dc_bound_bindings[8];
     int dc_bound_dp_cnt;
+    struct {
+        WCHAR owner_cls[128];
+        WCHAR prop_name[64];
+        WCHAR path[128];
+        IInspectable *source;
+    } xaml_bindings[4];
+    int xaml_binding_cnt;
     IInspectable *command;
     IInspectable *command_param;
     IInspectable *tag;
@@ -1295,6 +1302,7 @@ BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
                                   char *out_resolved, size_t out_resolved_sz );
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc );
 void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel );
+void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls, const WCHAR *prop_name, struct uwp_element *bel );
 struct xaml_type *uwp_provider_get_xaml_type_cached( struct xaml_metadata_provider *mp,
                                                             const WCHAR *owner_type_name );
 struct uwp_rd_bucket *uwp_rd_bucket_for_el( struct uwp_element *el, BOOL create );

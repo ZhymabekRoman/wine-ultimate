@@ -4682,8 +4682,9 @@ static IInspectable *uwp_resolve_binding_path( IInspectable *src, const WCHAR *p
         { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
     void *app_outer = uwp_get_app_outer();
     void *provider = NULL;
-    HSTRING h_cls = NULL, h_prop = NULL;
-    IInspectable *result = NULL;
+    IInspectable *cur = src;
+    BOOL cur_owned = FALSE;
+    const WCHAR *p = path;
 
     if (!src || !path || !path[0] || !app_outer) return NULL;
     if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_l, &provider )) || !provider)
@@ -4691,35 +4692,122 @@ static IInspectable *uwp_resolve_binding_path( IInspectable *src, const WCHAR *p
 
     __TRY
     {
-        if (SUCCEEDED(IInspectable_GetRuntimeClassName( src, &h_cls )) && h_cls)
+        while (cur && p && *p)
         {
-            const WCHAR *cls_name = WindowsGetStringRawBuffer( h_cls, NULL );
-            if (cls_name && cls_name[0])
+            const WCHAR *dot = wcschr( p, L'.' );
+            size_t seg_len = dot ? (size_t)(dot - p) : wcslen( p );
+            HSTRING h_cls = NULL, h_prop = NULL;
+            IInspectable *next = NULL;
+
+            if (seg_len > 0 && SUCCEEDED(IInspectable_GetRuntimeClassName( cur, &h_cls )) && h_cls)
             {
-                struct xaml_type *xt = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, cls_name );
-                if (xt && xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( path, wcslen( path ), &h_prop )))
+                const WCHAR *cls_name = WindowsGetStringRawBuffer( h_cls, NULL );
+                if (cls_name && cls_name[0])
                 {
-                    struct xaml_member *xm = NULL;
-                    if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, &xm )) && xm)
+                    struct xaml_type *xt = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, cls_name );
+                    if (xt && xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( p, (UINT32)seg_len, &h_prop )))
                     {
-                        if (xm->lpVtbl->GetValue)
-                            xm->lpVtbl->GetValue( xm, src, &result );
-                        IUnknown_Release( (IUnknown *)xm );
+                        struct xaml_member *xm = NULL;
+                        if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, &xm )) && xm)
+                        {
+                            if (xm->lpVtbl->GetValue)
+                                xm->lpVtbl->GetValue( xm, cur, &next );
+                            IUnknown_Release( (IUnknown *)xm );
+                        }
+                        WindowsDeleteString( h_prop );
                     }
-                    WindowsDeleteString( h_prop );
                 }
+                WindowsDeleteString( h_cls );
             }
-            WindowsDeleteString( h_cls );
+            if (cur_owned) IInspectable_Release( cur );
+            cur = next;
+            cur_owned = (cur != NULL);
+            p = dot ? dot + 1 : NULL;
         }
     }
     __EXCEPT_ALL
     {
-        result = NULL;
+        if (cur_owned && cur) IInspectable_Release( cur );
+        cur = NULL;
+        cur_owned = FALSE;
     }
     __ENDTRY;
 
     IUnknown_Release( (IUnknown *)provider );
-    return result;
+    return cur_owned ? cur : NULL;
+}
+
+static void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
+                                   const WCHAR *prop_name, const WCHAR *path, IInspectable *src )
+{
+    IInspectable *target;
+    void *app_outer = uwp_get_app_outer();
+    if (!tel || !owner_cls || !owner_cls[0] || !prop_name || !prop_name[0] || !src || !app_outer) return;
+    target = tel->outer ? tel->outer : &tel->IInspectable_iface;
+    if (!path || !path[0])
+    {
+        uwp_set_custom_xaml_member_obj( app_outer, owner_cls, prop_name, target, src );
+    }
+    else
+    {
+        IInspectable *resolved = uwp_resolve_binding_path( src, path );
+        if (resolved)
+        {
+            uwp_set_custom_xaml_member_obj( app_outer, owner_cls, prop_name, target, resolved );
+            IInspectable_Release( resolved );
+        }
+    }
+}
+
+void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
+                           const WCHAR *prop_name, struct uwp_element *bel )
+{
+    static const GUID IID_IPropertyPath_l =
+        { 0x300e5d8a, 0x1ff3, 0x4d2c, { 0x95, 0xec, 0x27, 0xf8, 0x1d, 0xeb, 0xac, 0xb8 } };
+    WCHAR path_buf[128] = { 0 };
+    IInspectable *src = NULL;
+
+    if (!tel || !owner_cls || !owner_cls[0] || !prop_name || !prop_name[0]) return;
+    if (bel && bel->tag)
+    {
+        void *pp = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( bel->tag, &IID_IPropertyPath_l, &pp )) && pp)
+        {
+            HSTRING h_path = NULL;
+            HRESULT (WINAPI *get_path)(void *, HSTRING *) = (void *)(*(void ***)pp)[6];
+            if (get_path && SUCCEEDED(get_path( pp, &h_path )) && h_path)
+            {
+                const WCHAR *raw = WindowsGetStringRawBuffer( h_path, NULL );
+                if (raw) lstrcpynW( path_buf, raw, ARRAY_SIZE(path_buf) );
+                WindowsDeleteString( h_path );
+            }
+            IUnknown_Release( (IUnknown *)pp );
+        }
+    }
+    if (!path_buf[0] && bel && bel->text[0])
+        lstrcpynW( path_buf, bel->text, ARRAY_SIZE(path_buf) );
+
+    if (bel && bel->data_context)
+    {
+        src = bel->data_context;
+    }
+    else
+    {
+        struct uwp_element *anc;
+        if (tel->xaml_binding_cnt < 4)
+        {
+            int idx = tel->xaml_binding_cnt++;
+            lstrcpynW( tel->xaml_bindings[idx].owner_cls, owner_cls, ARRAY_SIZE(tel->xaml_bindings[idx].owner_cls) );
+            lstrcpynW( tel->xaml_bindings[idx].prop_name, prop_name, ARRAY_SIZE(tel->xaml_bindings[idx].prop_name) );
+            lstrcpynW( tel->xaml_bindings[idx].path, path_buf, ARRAY_SIZE(tel->xaml_bindings[idx].path) );
+            tel->xaml_bindings[idx].source = NULL;
+        }
+        for (anc = tel; anc; anc = anc->parent)
+            if (anc->data_context) { src = anc->data_context; break; }
+    }
+
+    if (src)
+        uwp_eval_xaml_binding( tel, owner_cls, prop_name, path_buf, src );
 }
 
 void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel )
@@ -7037,6 +7125,13 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
     {
         if (impl->dc_bound_dps[i] && dc && dc != old_dc)
             uwp_apply_binding( impl, impl->dc_bound_dps[i], impl->dc_bound_bindings[i] );
+    }
+    for (i = 0; i < impl->xaml_binding_cnt; i++)
+    {
+        if (!impl->xaml_bindings[i].source && dc && dc != old_dc)
+            uwp_eval_xaml_binding( impl, impl->xaml_bindings[i].owner_cls,
+                                   impl->xaml_bindings[i].prop_name,
+                                   impl->xaml_bindings[i].path, dc );
     }
 
     for (i = 0; i < impl->dc_cnt; i++)

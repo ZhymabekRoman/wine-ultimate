@@ -1010,7 +1010,13 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                             wcscmp( pi->name, L"ContextFlyout" ) && wcscmp( pi->name, L"Background" ) &&
                             wcscmp( pi->name, L"Foreground" ) && wcscmp( pi->name, L"BorderBrush" ))
                         {
-                            if (uwp_set_custom_xaml_member_obj( ctx->app_outer, owner_cls, pi->name, target, last_popped.raw ))
+                            if (parent_el && last_popped.el &&
+                                !wcscmp( last_popped.el->class_name, L"Windows.UI.Xaml.Data.Binding" ))
+                            {
+                                uwp_add_xaml_binding( parent_el, owner_cls, pi->name, last_popped.el );
+                                handled_custom_obj = TRUE;
+                            }
+                            else if (uwp_set_custom_xaml_member_obj( ctx->app_outer, owner_cls, pi->name, target, last_popped.raw ))
                             {
                                 if (wcscmp( pi->name, L"Content" ) && wcscmp( pi->name, L"Child" ))
                                     handled_custom_obj = TRUE;
