@@ -2119,13 +2119,12 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             *out = &impl->IBitmapImage_iface;
         else if (IsEqualGUID( iid, &IID_IBitmapSource_UWP ))
             *out = &impl->IBitmapSource_iface;
-        else if (IsEqualGUID( iid, &IID_IStateTrigger_UWP ))
-            *out = &impl->IStateTriggerPub_iface;
         else if (IsEqualGUID( iid, &IID_IListViewBase2_UWP ) ||
                  IsEqualGUID( iid, &IID_IListViewBase4_UWP ) ||
                  IsEqualGUID( iid, &IID_IListView_UWP ) ||
                  IsEqualGUID( iid, &IID_IShape_UWP ) ||
                  IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
+                 IsEqualGUID( iid, &IID_IStateTrigger_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage3_UWP ))
@@ -5774,8 +5773,11 @@ static HRESULT WINAPI uwp_img_put_Stretch( void *iface, int val )
 static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->state_trigger_active = is_active;
-    if (impl && is_active)
+    boolean was_active;
+    if (!impl) return S_OK;
+    was_active = impl->state_trigger_active;
+    impl->state_trigger_active = is_active;
+    if (is_active != was_active)
     {
         struct uwp_element *p;
         for (p = impl->parent; p; p = p->parent)
@@ -5785,7 +5787,10 @@ static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
                 struct uwp_element *scope = p->owner_component ? p->owner_component : impl->owner_component;
                 if (scope)
                 {
-                    uwp_vsm_goto_state_on_tree( scope, p->name );
+                    if (is_active)
+                        uwp_vsm_goto_state_on_tree( scope, p->name );
+                    else
+                        uwp_vsm_leave_state_on_tree( scope, p->name );
                     g_layout_dirty = TRUE;
                 }
                 break;

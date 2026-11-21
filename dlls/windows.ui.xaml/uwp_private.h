@@ -1519,6 +1519,7 @@ struct uwp_vsm_group *uwp_vsm_add_group( struct uwp_element *el, const WCHAR *na
 
 struct uwp_vsm_state *uwp_vsm_add_state( struct uwp_vsm_group *g, const WCHAR *name );
 BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name );
+BOOL uwp_vsm_leave_state_on_tree( struct uwp_element *el, const WCHAR *state_name );
 
 void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h );
 

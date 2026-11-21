@@ -2775,6 +2775,26 @@ void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h )
     vsm_depth--;
 }
 
+BOOL uwp_vsm_leave_state_on_tree( struct uwp_element *el, const WCHAR *state_name )
+{
+    int g, s;
+    if (!el || !state_name || !state_name[0]) return FALSE;
+    for (g = 0; g < el->vsm_group_cnt; g++)
+    {
+        struct uwp_vsm_group *grp = &el->vsm_groups[g];
+        for (s = 0; s < grp->state_cnt; s++)
+        {
+            if (!wcscmp( grp->states[s].name, state_name ))
+            {
+                if (grp->active_state_idx == s)
+                    uwp_vsm_transition_group( el, grp, -1 );
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
 BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name )
 {
     int g, s;
