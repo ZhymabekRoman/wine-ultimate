@@ -413,6 +413,15 @@ static const GUID IID_IUIE_Extra[] =
     { 0xe5fff9e2, 0xb968, 0x49e7, { 0x97, 0xd4, 0x8c, 0xca, 0x2a, 0xc3, 0xae, 0x7c } },
     { 0x9c7dc0c6, 0x7a9f, 0x45b6, { 0x88, 0x18, 0x82, 0x2c, 0x54, 0x9b, 0xa0, 0x94 } },
     { 0xd45c1e6e, 0x3594, 0x460e, { 0x98, 0x1a, 0x32, 0x27, 0x1b, 0xd3, 0xaa, 0x06 } },
+    /* IRichTextBlock2..5 */
+    { 0x3f209013, 0x03e7, 0x4508, { 0x96, 0x4a, 0x91, 0xae, 0xda, 0xb3, 0xd1, 0x1e } },
+    { 0x63c1a3aa, 0x521a, 0x43f4, { 0xb8, 0xa5, 0xd6, 0xe3, 0xc3, 0xc9, 0xe2, 0xc4 } },
+    { 0x50f2b6dc, 0x4b94, 0x418f, { 0x9e, 0x2e, 0xb0, 0x6e, 0x33, 0xf2, 0xa8, 0xd5 } },
+    { 0x4172441c, 0x915a, 0x4361, { 0x99, 0x27, 0x44, 0x69, 0x27, 0x46, 0x23, 0xc1 } },
+    { 0x394b0030, 0x9f4e, 0x41e6, { 0x85, 0x2c, 0x22, 0x7a, 0x82, 0x02, 0x6f, 0x94 } },
+    /* IBlock, ITextElement */
+    { 0x4bce0016, 0xdd47, 0x4350, { 0x8c, 0xb0, 0xe1, 0x71, 0x60, 0x0a, 0xc8, 0x96 } },
+    { 0xf83ef59a, 0xfa61, 0x4bef, { 0xae, 0x33, 0x0b, 0x0a, 0xd7, 0x56, 0xa8, 0x4d } },
     { 0x7b01c14b, 0xe5e6, 0x3c6e, { 0x9d, 0x1b, 0x93, 0xa4, 0x7c, 0xbf, 0x7d, 0x96 } },
     /* DataTemplateSelector & StyleSelector interfaces */
     { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } },
@@ -1937,7 +1946,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IBorder_UWP ) ||
              IsEqualGUID( iid, &IID_IBorder2_Calc ))
         *out = &impl->IBorder_iface;
-    else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ))
+    else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ) ||
+             (iid->Data1 == 0xd45c1e6e && iid->Data2 == 0x3594 && iid->Data3 == 0x460e))
         *out = &impl->ITextBlock_iface;
     else if (IsEqualGUID( iid, &IID_IRowDefinition_UWP ))
         *out = &impl->IRowDefinition_iface;
@@ -2160,7 +2170,15 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             {
                 if (IsEqualGUID( iid, &IID_IUIE_Extra[k] ))
                 {
-                    *out = &impl->IStyle_iface;
+                    if (wcsstr( impl->class_name, L"RichTextBlock" ))
+                        *out = &impl->ITextBlock_iface;
+                    else if ((wcsstr( impl->class_name, L"Paragraph" ) ||
+                              wcsstr( impl->class_name, L"Span" ) ||
+                              wcsstr( impl->class_name, L"Hyperlink" )) &&
+                             iid->Data1 != 0xf83ef59a && iid->Data1 != 0x4bce0016)
+                        *out = &impl->IParagraph_iface;
+                    else
+                        *out = &impl->IStyle_iface;
                     break;
                 }
             }
@@ -3383,6 +3401,28 @@ static HRESULT WINAPI uwp_tbtn_put_IsChecked( void *iface, void *val )
 }
 
 /* --- ITextBlock (slot 26=get_Text, slot 27=put_Text) --- */
+HRESULT WINAPI uwp_tb_get_Inlines( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return S_OK;
+    if (!impl->inlines_coll)
+    {
+        uwp_vec_create( impl, &impl->inlines_coll );
+        if (impl->inlines_coll)
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( impl->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+            v->runtime_class = wcsstr( impl->class_name, L"RichTextBlock" )
+                ? L"Windows.UI.Xaml.Documents.BlockCollection"
+                : L"Windows.UI.Xaml.Documents.InlineCollection";
+        }
+    }
+    *out = impl->inlines_coll;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
 HRESULT WINAPI uwp_tb_get_Text( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -3482,6 +3522,14 @@ static const GUID IID_IIterable_UIElement_UWP =
     { 0x1d1f9d60, 0xd53b, 0x57f7, { 0xb1, 0x44, 0x8f, 0x7c, 0x48, 0x78, 0x46, 0xe8 } };
 static const GUID IID_IIterator_UIElement_UWP =
     { 0x42614e61, 0xb0aa, 0x5e72, { 0x93, 0x54, 0x27, 0x71, 0xf4, 0x32, 0x90, 0x78 } };
+static const GUID IID_IIterable_Block_UWP =
+    { 0xf7023b9a, 0xe6d1, 0x5e2d, { 0x8f, 0x41, 0xb2, 0x8c, 0x33, 0x32, 0x3e, 0x04 } };
+static const GUID IID_IIterator_Block_UWP =
+    { 0x798d518e, 0xa9f8, 0x5fc7, { 0x8c, 0xcc, 0x2a, 0x49, 0x06, 0x9a, 0xba, 0x05 } };
+static const GUID IID_IIterable_Inline_UWP =
+    { 0x10204650, 0xe804, 0x50be, { 0xbc, 0xeb, 0x27, 0xb0, 0x4f, 0x15, 0xd1, 0x98 } };
+static const GUID IID_IIterator_Inline_UWP =
+    { 0x3e57bafb, 0xc6c8, 0x5c7a, { 0x87, 0x73, 0x34, 0x49, 0x33, 0x42, 0x21, 0x6a } };
 
 static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 {
@@ -3499,7 +3547,9 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IIterable_PageStackEntry_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_IInspectable_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterable_UIElement_UWP ))
+        IsEqualGUID( iid, &IID_IIterable_UIElement_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_Block_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_Inline_UWP ))
     {
         *out = &v->IIterable_iface;
         IInspectable_AddRef( iface );
@@ -3521,8 +3571,9 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 }
 static HRESULT WINAPI uwp_vec_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    static const WCHAR cls[] = L"Windows.UI.Xaml.Controls.UIElementCollection";
-    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+    struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
+    const WCHAR *cls = (v && v->runtime_class) ? v->runtime_class : L"Windows.UI.Xaml.Controls.UIElementCollection";
+    return WindowsCreateString( cls, lstrlenW( cls ), name );
 }
 static ULONG WINAPI uwp_vec_AddRef( IInspectable *iface )
 {
@@ -3699,7 +3750,9 @@ static HRESULT WINAPI uwp_viter_QI( IInspectable *iface, REFIID iid, void **out 
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IIterator_PageStackEntry_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_IInspectable_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterator_UIElement_UWP ))
+        IsEqualGUID( iid, &IID_IIterator_UIElement_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_Block_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_Inline_UWP ))
     {
         *out = iface;
         IInspectable_AddRef( iface );
@@ -6494,6 +6547,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IGrid3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grid3_vtbl;
     impl->IBorder_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_border_vtbl;
     impl->ITextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb_vtbl;
+    impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_paragraph_vtbl;
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
@@ -7063,7 +7117,6 @@ void uwp_vsm_invalidate_eval_chain( struct uwp_element *el );
 void uwp_realize_empty_panel_defers( struct uwp_element *root )
 {
     int d;
-    return;
     if (!root) return;
     for (d = 0; d < root->defer_cnt; d++)
     {
@@ -8034,84 +8087,7 @@ void uwp_invoke_button( struct uwp_element *btn )
             {
                 /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
                 struct command_iface *cmd = (struct command_iface *)cmd_iface;
-                HRESULT ehr = E_NOTIMPL;
-                HMODULE mod = NULL;
-                boolean can_null = -1, can_dc = -1, can_content = -1;
-                HRESULT (WINAPI *can_exec)(void *, void *, boolean *) = (void *)(*(void ***)cmd)[8];
-                HSTRING hcmd_cls = NULL;
-                IInspectable_GetRuntimeClassName( (IInspectable *)cmd, &hcmd_cls );
-                if (can_exec)
-                {
-                    can_exec( cmd, btn->command_param, &can_null );
-                    if (btn->data_context) can_exec( cmd, btn->data_context, &can_dc );
-                    if (btn->content) can_exec( cmd, btn->content, &can_content );
-                }
-                GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                    (LPCSTR)cmd->lpVtbl->Execute, &mod );
-                if (cmd->lpVtbl->Execute) ehr = cmd->lpVtbl->Execute( cmd, btn->command_param );
-                WARN( "uwp_invoke_button: ICommand cls=%s cmd=%p can=(%d,%d,%d) fn=%p (+0x%lx) param=%p -> hr=%#lx\n",
-                      hcmd_cls ? debugstr_w(WindowsGetStringRawBuffer(hcmd_cls, NULL)) : "?",
-                      btn->command, (int)can_null, (int)can_dc, (int)can_content, cmd->lpVtbl->Execute,
-                      mod ? (unsigned long)((const char *)cmd->lpVtbl->Execute - (const char *)mod) : 0ul,
-                      btn->command_param, (unsigned long)ehr );
-                if (cmd->lpVtbl->Execute && !btn->command_param && btn->content)
-                {
-                    static const GUID IID_IStringable_u = { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
-                    void *strable = NULL;
-                    HSTRING hs_cmd = NULL, hs_dc = NULL, hs_cnt = NULL;
-                    IInspectable *sender_el = btn->outer ? btn->outer : &btn->IInspectable_iface;
-                    HRESULT ehr2, ehr3, ehr4;
-                    if (SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_IStringable_u, &strable )) && strable)
-                    {
-                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-                        if (to_str) to_str( strable, &hs_cmd );
-                        IUnknown_Release( (IUnknown *)strable );
-                        strable = NULL;
-                    }
-                    if (btn->data_context && SUCCEEDED(IInspectable_QueryInterface( btn->data_context, &IID_IStringable_u, &strable )) && strable)
-                    {
-                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-                        if (to_str) to_str( strable, &hs_dc );
-                        IUnknown_Release( (IUnknown *)strable );
-                        strable = NULL;
-                    }
-                    if (SUCCEEDED(IInspectable_QueryInterface( btn->content, &IID_IStringable_u, &strable )) && strable)
-                    {
-                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-                        if (to_str) to_str( strable, &hs_cnt );
-                        IUnknown_Release( (IUnknown *)strable );
-                    }
-                    ehr2 = cmd->lpVtbl->Execute( cmd, btn->content );
-                    ehr3 = btn->data_context ? cmd->lpVtbl->Execute( cmd, btn->data_context ) : E_FAIL;
-                    ehr4 = cmd->lpVtbl->Execute( cmd, sender_el );
-                    WARN( "uwp_invoke_button: ToString cmd=%s dc=%s cnt=%s | Exec(cnt)=%#lx Exec(dc)=%#lx Exec(card)=%#lx\n",
-                          hs_cmd ? debugstr_w(WindowsGetStringRawBuffer(hs_cmd, NULL)) : "?",
-                          hs_dc ? debugstr_w(WindowsGetStringRawBuffer(hs_dc, NULL)) : "?",
-                          hs_cnt ? debugstr_w(WindowsGetStringRawBuffer(hs_cnt, NULL)) : "?",
-                          (unsigned long)ehr2, (unsigned long)ehr3, (unsigned long)ehr4 );
-                    if (mod)
-                    {
-                        void *(*get_target)(void *) = (void *)((const char *)mod + 0x85f730);
-                        void **rcmd = (void **)get_target( cmd );
-                        void **act = rcmd ? (void **)rcmd[1] : NULL;
-                        void *mptr = act ? act[4] : NULL;
-                        void **tthis = act ? (void **)act[1] : NULL;
-                        HMODULE appmod = NULL;
-                        if (mptr) GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)mptr, &appmod );
-                        void *fn_fb0 = appmod ? *(void **)((const char *)appmod + 0x1767fb0) : NULL;
-                        void *dict_eb0 = appmod ? *(void **)((const char *)appmod + 0x1463eb0) : NULL;
-                        void *def_ed8 = appmod ? *(void **)((const char *)appmod + 0x1463ed8) : NULL;
-                        WARN( "  RelayCommand=%p act=%p mptr=%p (+0x%lx) this=%p this[6]=%p this[34]=%p this[49]=%p fn_fb0=%p (+0x%lx) eb0=%p ed8=%p\n",
-                              rcmd, act, mptr, appmod ? (unsigned long)((const char *)mptr - (const char *)appmod) : 0ul,
-                              tthis, tthis ? tthis[6] : NULL, tthis ? tthis[34] : NULL, tthis ? tthis[49] : NULL,
-                              fn_fb0, (appmod && fn_fb0) ? (unsigned long)((const char *)fn_fb0 - (const char *)appmod) : 0ul,
-                              dict_eb0, def_ed8 );
-                    }
-                    if (hs_cmd) WindowsDeleteString( hs_cmd );
-                    if (hs_dc) WindowsDeleteString( hs_dc );
-                    if (hs_cnt) WindowsDeleteString( hs_cnt );
-                }
-                if (hcmd_cls) WindowsDeleteString( hcmd_cls );
+                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, btn->command_param );
                 IUnknown_Release( (IUnknown *)cmd_iface );
             }
             else

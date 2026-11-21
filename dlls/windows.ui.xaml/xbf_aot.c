@@ -871,7 +871,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 {
                     const struct xbf_prop_info *pi = &fake_ctx.props[op->pid];
                     const WCHAR *owner_cls = fake_ctx.types[pi->owner_tid].full_name;
-                    IInspectable *target = parent_raw ? parent_raw : (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface);
+                    IInspectable *target = parent_raw ? parent_raw : (parent_el ? (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface) : NULL);
                     if (owner_cls[0] && target)
                         handled_custom = uwp_add_custom_xaml_collection_item( app_outer, owner_cls, pi->name, target, child_raw );
                 }
@@ -928,7 +928,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 {
                     const struct xbf_prop_info *pi = &fake_ctx.props[op->pid];
                     const WCHAR *owner_cls = fake_ctx.types[pi->owner_tid].full_name;
-                    IInspectable *target = parent_raw ? parent_raw : (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface);
+                    IInspectable *target = parent_raw ? parent_raw : (parent_el ? (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface) : NULL);
                     if (owner_cls[0] && target &&
                         wcscmp( pi->name, L"Style" ) && wcscmp( pi->name, L"Resources" ) &&
                         wcscmp( pi->name, L"MergedDictionaries" ) && wcscmp( pi->name, L"ThemeDictionaries" ) &&
@@ -988,6 +988,12 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 {
                     if (!parent_el->text[0])
                         lstrcpynW( parent_el->text, child_el->text, ARRAY_SIZE(parent_el->text) );
+                }
+                else if (child_raw &&
+                         (op->pid == XBF_PROP_DATACONTEXT ||
+                          (!(op->pid & 0x8000) && op->pid < hdr->prop_cnt && !wcscmp( fake_ctx.props[op->pid].name, L"DataContext" ))))
+                {
+                    uwp_fe_put_DataContext( &parent_el->IInspectable_iface, child_raw );
                 }
                 else if (child_raw &&
                          (op->pid == XBF_PROP_CONTEXT_FLYOUT ||

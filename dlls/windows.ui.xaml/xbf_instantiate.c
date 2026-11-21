@@ -927,7 +927,7 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                     {
                         const struct xbf_prop_info *pi = &ctx->props[pid];
                         const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
-                        IInspectable *target = parent_raw ? parent_raw : (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface);
+                        IInspectable *target = parent_raw ? parent_raw : (parent_el ? (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface) : NULL);
                         if (owner_cls[0] && target)
                             handled_custom = uwp_add_custom_xaml_collection_item( app_outer, owner_cls, pi->name, target, last_popped.raw );
                     }
@@ -1003,7 +1003,7 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                     {
                         const struct xbf_prop_info *pi = &ctx->props[pid];
                         const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
-                        IInspectable *target = parent_raw ? parent_raw : (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface);
+                        IInspectable *target = parent_raw ? parent_raw : (parent_el ? (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface) : NULL);
                         if (owner_cls[0] && target &&
                             wcscmp( pi->name, L"Style" ) && wcscmp( pi->name, L"Resources" ) &&
                             wcscmp( pi->name, L"MergedDictionaries" ) && wcscmp( pi->name, L"ThemeDictionaries" ) &&
@@ -1064,6 +1064,12 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                     {
                         if (!parent_el->text[0])
                             lstrcpynW( parent_el->text, last_popped.el->text, ARRAY_SIZE(parent_el->text) );
+                    }
+                    else if (last_popped.raw &&
+                             (pid == XBF_PROP_DATACONTEXT ||
+                              (!(pid & 0x8000) && ctx && pid < ctx->prop_cnt && !wcscmp( ctx->props[pid].name, L"DataContext" ))))
+                    {
+                        uwp_fe_put_DataContext( &parent_el->IInspectable_iface, last_popped.raw );
                     }
                     else if (last_popped.raw &&
                              (pid == XBF_PROP_CONTEXT_FLYOUT ||

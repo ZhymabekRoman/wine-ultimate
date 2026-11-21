@@ -284,6 +284,7 @@ struct uwp_element
     IInspectable IGrid3_iface;
     IInspectable IBorder_iface;
     IInspectable ITextBlock_iface;
+    IInspectable IParagraph_iface;
     IInspectable IRowDefinition_iface;
     IInspectable IColumnDefinition_iface;
     IInspectable IStyle_iface;
@@ -368,7 +369,8 @@ struct uwp_element
     IInspectable *pane;          /* SplitView.Pane */
     IInspectable *context_flyout; /* UIElement.ContextFlyout */
     IInspectable *flyout;         /* Button.Flyout */
-    IInspectable *children_coll; /* Panel.Children */
+    IInspectable *children_coll;
+    IInspectable *inlines_coll; /* Panel.Children */
     IInspectable *accelerators_coll; /* UIElement.KeyboardAccelerators */
     IInspectable *row_defs_coll; /* Grid.RowDefinitions */
     IInspectable *col_defs_coll; /* Grid.ColumnDefinitions */
@@ -901,6 +903,7 @@ struct uwp_vec_view
     unsigned int count;
     int cap;
     struct uwp_element *owner;
+    const WCHAR *runtime_class;
 };
 
 struct core_webview2
@@ -1315,6 +1318,7 @@ HRESULT WINAPI uwp_sub_GetTrustLevel( IInspectable *iface, TrustLevel *level );
 HRESULT WINAPI uwp_sub_QueryInterface( IInspectable *iface, REFIID iid, void **out );
 ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
 HRESULT WINAPI uwp_tb_get_Text( void *iface, HSTRING *out );
+HRESULT WINAPI uwp_tb_get_Inlines( void *iface, void **out );
 HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val );
 HRESULT WINAPI uwp_ui7_get_KeyboardAccelerators( void *iface, void **out );
 HRESULT WINAPI uwp_ui_event_add( void *iface, void *handler, EventRegistrationToken *tok );
@@ -2227,6 +2231,7 @@ ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
 ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
 
 extern const void *uwp_tb_vtbl[64];
+extern const void *uwp_paragraph_vtbl[32];
 
 extern const void *uwp_teachingtip_vtbl[64];
 

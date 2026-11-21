@@ -2806,10 +2806,26 @@ const void *uwp_tb_vtbl[64] =
     [5] = uwp_sub_GetTrustLevel,
     [6] = uwp_ctrl_get_FontSize,
     [7] = uwp_ctrl_put_FontSize,
-    [8 ... 25] = uwp_generic_noop,
+    [8 ... 23] = uwp_generic_noop,
+    [24] = uwp_tb_get_Inlines,
+    [25] = uwp_generic_noop,
     [26] = uwp_tb_get_Text,
     [27] = uwp_tb_put_Text,
-    [28 ... 63] = uwp_generic_noop,
+    [28 ... 33] = uwp_generic_noop,
+    [34] = uwp_tb_get_Inlines,
+    [35 ... 63] = uwp_generic_noop,
+};
+
+const void *uwp_paragraph_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_tb_get_Inlines,
+    [7 ... 31] = uwp_generic_noop,
 };
 
 const void *uwp_rowcol_vtbl[32] =
