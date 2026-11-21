@@ -3320,12 +3320,10 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
         TRACE( "uwp_cc_put_Content element on %s (%s) -> %s (%s)\n",
                debugstr_w(impl->class_name), debugstr_w(impl->name),
                debugstr_w(child_el->class_name), debugstr_w(child_el->name) );
-        if (impl->data_context && !child_el->data_context)
-            uwp_propagate_data_context( child_el, impl->data_context );
-        else if (child_el->binding_connector && !child_el->data_context && !impl->data_context)
+        if (!child_el->data_context)
         {
             struct uwp_element *dp_anc;
-            for (dp_anc = impl->parent; dp_anc; dp_anc = dp_anc->parent)
+            for (dp_anc = impl; dp_anc; dp_anc = dp_anc->parent)
                 if (dp_anc->data_context) { uwp_propagate_data_context( child_el, dp_anc->data_context ); break; }
         }
         {
