@@ -287,6 +287,7 @@ struct uwp_element
     IInspectable IParagraph_iface;
     IInspectable IRun_iface;
     IInspectable IBinding_iface;
+    IInspectable IPropertyPath_iface;
     IInspectable IRowDefinition_iface;
     IInspectable IColumnDefinition_iface;
     IInspectable IStyle_iface;
@@ -378,6 +379,9 @@ struct uwp_element
     IInspectable *col_defs_coll; /* Grid.ColumnDefinitions */
     IInspectable *resources_rd;  /* FrameworkElement.Resources */
     IInspectable *data_context;
+    void *dc_bound_dps[8];
+    struct uwp_element *dc_bound_bindings[8];
+    int dc_bound_dp_cnt;
     IInspectable *command;
     IInspectable *command_param;
     IInspectable *tag;
@@ -1290,6 +1294,7 @@ BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
                                   const BYTE **out_ptr, DWORD *out_sz,
                                   char *out_resolved, size_t out_resolved_sz );
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc );
+void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel );
 struct xaml_type *uwp_provider_get_xaml_type_cached( struct xaml_metadata_provider *mp,
                                                             const WCHAR *owner_type_name );
 struct uwp_rd_bucket *uwp_rd_bucket_for_el( struct uwp_element *el, BOOL create );
@@ -2236,6 +2241,7 @@ extern const void *uwp_tb_vtbl[64];
 extern const void *uwp_paragraph_vtbl[64];
 extern const void *uwp_run_vtbl[16];
 extern const void *uwp_binding_vtbl[32];
+extern const void *uwp_pp_vtbl[16];
 
 extern const void *uwp_teachingtip_vtbl[64];
 

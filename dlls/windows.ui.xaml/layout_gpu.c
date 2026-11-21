@@ -2675,8 +2675,23 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
     if (!wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" ) ||
         !wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" ))
     {
+        HRESULT hr;
         TRACE( "uwp_cf_CreateInstance(%s, arg1=%p, out=%p)\n", debugstr_w(cls), outer, inner );
-        return uwp_element_create( cls, NULL, NULL, (void **)inner );
+        hr = uwp_element_create( cls, NULL, NULL, (void **)inner );
+        if (SUCCEEDED(hr) && inner && *(void **)inner && !wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" ) &&
+            (ULONG_PTR)outer >= 0x10000)
+        {
+            struct uwp_element *pp_el = uwp_elem_from_any( *(void **)inner );
+            UINT32 len = 0;
+            const WCHAR *raw = WindowsGetStringRawBuffer( (HSTRING)outer, &len );
+            if (pp_el && raw && len > 0)
+            {
+                UINT32 cpy = len < ARRAY_SIZE(pp_el->text) - 1 ? len : ARRAY_SIZE(pp_el->text) - 1;
+                memcpy( pp_el->text, raw, cpy * sizeof(WCHAR) );
+                pp_el->text[cpy] = 0;
+            }
+        }
+        return hr;
     }
     /* If called as I*Statics::get_*Property(iface, IDependencyProperty **out)
      * (e.g. IPopupStatics on Controls.Primitives.Popup routed to the
@@ -3177,8 +3192,7 @@ static HRESULT WINAPI binding_ops_SetBinding( void *iface, void *target, void *d
     struct uwp_element *tel = uwp_elem_from_any( target );
     struct uwp_element *bel = uwp_elem_from_any( binding );
     TRACE( "binding_ops_SetBinding(target=%p, dp=%p, binding=%p)\n", target, dp, binding );
-    if (tel && dp && bel && bel->data_context)
-        uwp_do_SetValue( &tel->IDependencyObject_iface, dp, bel->data_context );
+    uwp_apply_binding( tel, dp, bel );
     return S_OK;
 }
 static const void *binding_ops_statics_vtbl[8] =

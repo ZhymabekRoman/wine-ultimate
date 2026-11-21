@@ -1961,6 +1961,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IRun_iface;
     else if (iid->Data1 == 0x3f7a0c6b && iid->Data2 == 0xd00f && iid->Data3 == 0x4730)     /* IBinding */
         *out = &impl->IBinding_iface;
+    else if (iid->Data1 == 0x300e5d8a && iid->Data2 == 0x1ff3 && iid->Data3 == 0x4d2c)     /* IPropertyPath */
+        *out = &impl->IPropertyPath_iface;
     else if (IsEqualGUID( iid, &IID_IRowDefinition_UWP ))
         *out = &impl->IRowDefinition_iface;
     else if (IsEqualGUID( iid, &IID_IColumnDefinition_UWP ))
@@ -4674,13 +4676,121 @@ HRESULT WINAPI uwp_fe_probe109( void *iface, ... ) { struct uwp_element *impl = 
 HRESULT WINAPI uwp_fe_probe110( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 110 hit on NavView\n" ); return S_OK; }
 HRESULT WINAPI uwp_fe_probe111( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 111 hit on NavView\n" ); return S_OK; }
 
+static IInspectable *uwp_resolve_binding_path( IInspectable *src, const WCHAR *path )
+{
+    static const GUID IID_IXamlMetadataProvider_l =
+        { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
+    void *app_outer = uwp_get_app_outer();
+    void *provider = NULL;
+    HSTRING h_cls = NULL, h_prop = NULL;
+    IInspectable *result = NULL;
+
+    if (!src || !path || !path[0] || !app_outer) return NULL;
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_l, &provider )) || !provider)
+        return NULL;
+
+    __TRY
+    {
+        if (SUCCEEDED(IInspectable_GetRuntimeClassName( src, &h_cls )) && h_cls)
+        {
+            const WCHAR *cls_name = WindowsGetStringRawBuffer( h_cls, NULL );
+            if (cls_name && cls_name[0])
+            {
+                struct xaml_type *xt = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, cls_name );
+                if (xt && xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( path, wcslen( path ), &h_prop )))
+                {
+                    struct xaml_member *xm = NULL;
+                    if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, &xm )) && xm)
+                    {
+                        if (xm->lpVtbl->GetValue)
+                            xm->lpVtbl->GetValue( xm, src, &result );
+                        IUnknown_Release( (IUnknown *)xm );
+                    }
+                    WindowsDeleteString( h_prop );
+                }
+            }
+            WindowsDeleteString( h_cls );
+        }
+    }
+    __EXCEPT_ALL
+    {
+        result = NULL;
+    }
+    __ENDTRY;
+
+    IUnknown_Release( (IUnknown *)provider );
+    return result;
+}
+
+void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel )
+{
+    static const GUID IID_IPropertyPath_l =
+        { 0x300e5d8a, 0x1ff3, 0x4d2c, { 0x95, 0xec, 0x27, 0xf8, 0x1d, 0xeb, 0xac, 0xb8 } };
+    HSTRING h_path = NULL;
+    const WCHAR *path_str = NULL;
+    IInspectable *src = NULL;
+    int i;
+
+    if (!tel || !dp) return;
+
+    if (bel && bel->tag)
+    {
+        void *pp = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( bel->tag, &IID_IPropertyPath_l, &pp )) && pp)
+        {
+            HRESULT (WINAPI *get_path)(void *, HSTRING *) = (void *)(*(void ***)pp)[6];
+            if (get_path && SUCCEEDED(get_path( pp, &h_path )) && h_path)
+                path_str = WindowsGetStringRawBuffer( h_path, NULL );
+            IUnknown_Release( (IUnknown *)pp );
+        }
+    }
+
+    if (bel && bel->data_context)
+    {
+        src = bel->data_context;
+    }
+    else
+    {
+        struct uwp_element *anc;
+        for (i = 0; i < tel->dc_bound_dp_cnt; i++)
+            if (tel->dc_bound_dps[i] == dp) break;
+        if (i == tel->dc_bound_dp_cnt && tel->dc_bound_dp_cnt < 8)
+        {
+            tel->dc_bound_dps[tel->dc_bound_dp_cnt] = dp;
+            tel->dc_bound_bindings[tel->dc_bound_dp_cnt] = bel;
+            if (bel) IInspectable_AddRef( &bel->IInspectable_iface );
+            tel->dc_bound_dp_cnt++;
+        }
+        for (anc = tel; anc; anc = anc->parent)
+            if (anc->data_context) { src = anc->data_context; break; }
+    }
+
+    if (src)
+    {
+        if (!path_str || !path_str[0])
+        {
+            uwp_do_SetValue( &tel->IDependencyObject_iface, dp, src );
+        }
+        else
+        {
+            IInspectable *resolved = uwp_resolve_binding_path( src, path_str );
+            if (resolved)
+            {
+                uwp_do_SetValue( &tel->IDependencyObject_iface, dp, resolved );
+                IInspectable_Release( resolved );
+            }
+        }
+    }
+
+    if (h_path) WindowsDeleteString( h_path );
+}
+
 static HRESULT WINAPI uwp_fe_SetBinding( void *iface, void *dp, void *binding )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     struct uwp_element *bel = uwp_elem_from_any( binding );
     TRACE( "uwp_fe_SetBinding(%p, dp=%p, binding=%p)\n", impl, dp, binding );
-    if (impl && dp && bel && bel->data_context)
-        uwp_do_SetValue( &impl->IDependencyObject_iface, dp, bel->data_context );
+    uwp_apply_binding( impl, dp, bel );
     return S_OK;
 }
 
@@ -6601,6 +6711,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_paragraph_vtbl;
     impl->IRun_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_run_vtbl;
     impl->IBinding_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_binding_vtbl;
+    impl->IPropertyPath_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pp_vtbl;
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
@@ -6920,6 +7031,12 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
             }
             IUnknown_Release( (IUnknown *)dte );
         }
+    }
+
+    for (i = 0; i < impl->dc_bound_dp_cnt; i++)
+    {
+        if (impl->dc_bound_dps[i] && dc && dc != old_dc)
+            uwp_apply_binding( impl, impl->dc_bound_dps[i], impl->dc_bound_bindings[i] );
     }
 
     for (i = 0; i < impl->dc_cnt; i++)

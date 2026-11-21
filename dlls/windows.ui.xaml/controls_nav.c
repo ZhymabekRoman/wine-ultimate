@@ -2871,6 +2871,28 @@ const void *uwp_run_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_binding_get_Path( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->tag : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_put_Path( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->tag != val)
+    {
+        if (impl->tag) IInspectable_Release( impl->tag );
+        impl->tag = val;
+        if (val) IInspectable_AddRef( val );
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_binding_get_Source( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -2901,10 +2923,34 @@ const void *uwp_binding_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 13] = uwp_generic_noop,
+    [6] = uwp_binding_get_Path,
+    [7] = uwp_binding_put_Path,
+    [8 ... 13] = uwp_generic_noop,
     [14] = uwp_binding_get_Source,
     [15] = uwp_binding_put_Source,
     [16 ... 31] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_pp_get_Path( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    if (impl && impl->text[0])
+        return WindowsCreateString( impl->text, wcslen( impl->text ), out );
+    *out = NULL;
+    return S_OK;
+}
+
+const void *uwp_pp_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_pp_get_Path,
+    [7 ... 15] = uwp_generic_noop,
 };
 
 const void *uwp_rowcol_vtbl[32] =
