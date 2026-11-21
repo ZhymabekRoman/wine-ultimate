@@ -1285,7 +1285,7 @@ static HRESULT WINAPI core_window_get_CustomProperties( ICoreWindow *iface, __x_
 static HRESULT WINAPI core_window_get_Dispatcher( ICoreWindow *iface, ICoreDispatcher **value )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
-    FIXME( "iface %p semi-stub.\n", iface );
+    TRACE( "iface %p semi-stub.\n", iface );
     if (value)
     {
         if (impl->dispatcher) ICoreDispatcher_AddRef( impl->dispatcher );
