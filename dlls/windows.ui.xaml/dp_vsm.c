@@ -1488,6 +1488,23 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
             WARN( "TAP GetValue on %s (%s) dp=%p\n", debugstr_w(impl->class_name), debugstr_w(impl->name), dp );
     }
 
+    {
+        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"DataContext" ))
+        {
+            struct uwp_element *cur;
+            for (cur = impl; cur; cur = cur->parent)
+            {
+                if (cur->data_context)
+                {
+                    *out = cur->data_context;
+                    IInspectable_AddRef( *out );
+                    return S_OK;
+                }
+            }
+        }
+    }
+
     for (i = 0; i < impl->dp_cnt; i++)
     {
         if (impl->dp_store[i].dp == dp)
@@ -1632,6 +1649,11 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                    debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_val) );
             uwp_invalidate_window();
         }
+    }
+    {
+        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"DataContext" ))
+            uwp_propagate_data_context( impl, val );
     }
     if (wcsstr( impl->class_name, L"TabView" ) && !wcsstr( impl->class_name, L"TabViewItem" ))
     {
