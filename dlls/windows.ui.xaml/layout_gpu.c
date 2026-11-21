@@ -1531,6 +1531,33 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                                     }
                                     IUnknown_Release( (IUnknown *)run_iface );
                                 }
+                                else
+                                {
+                                    static const GUID IID_ISpan_g =
+                                        { 0x54f03373, 0xc273, 0x4f3b, { 0xb3, 0x71, 0x6e, 0x2b, 0x4b, 0x2a, 0x96, 0x91 } };
+                                    void *span_iface = NULL;
+                                    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_g, &span_iface )) && span_iface)
+                                    {
+                                        void *sub_inlines = NULL;
+                                        HRESULT (WINAPI *get_inlines)(void *, void **) = (void *)(*(void ***)span_iface)[6];
+                                        if (get_inlines && SUCCEEDED(get_inlines( span_iface, &sub_inlines )) && sub_inlines)
+                                        {
+                                            struct uwp_vec_view *sv = CONTAINING_RECORD( sub_inlines, struct uwp_vec_view, IInspectable_iface );
+                                            unsigned int k;
+                                            for (k = 0; sv && k < sv->count && pos + 2 < ARRAY_SIZE(rich_buf); k++)
+                                            {
+                                                struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
+                                                if (sub && sub->text[0])
+                                                {
+                                                    lstrcpynW( rich_buf + pos, sub->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
+                                                    pos += wcslen( rich_buf + pos );
+                                                }
+                                            }
+                                            IInspectable_Release( (IInspectable *)sub_inlines );
+                                        }
+                                        IUnknown_Release( (IUnknown *)span_iface );
+                                    }
+                                }
                             }
                             else if (inl && inl->text[0])
                             {

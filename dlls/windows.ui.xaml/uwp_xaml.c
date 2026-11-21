@@ -6716,6 +6716,103 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
  * 5. DataContext Propagation, Loaded & OnApplyTemplate Dispatch, Frame Navigate
  * ============================================================================ */
 
+struct uwp_ccc_args
+{
+    const void *vtbl;
+    LONG ref;
+    IInspectable *item;
+    UINT32 phase;
+    boolean in_recycle;
+    boolean handled;
+};
+
+static HRESULT WINAPI uwp_ccc_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IContainerContentChangingEventArgs_g =
+        { 0x13922481, 0x41f3, 0x4e20, { 0xb6, 0x3a, 0x3f, 0x53, 0x63, 0x2e, 0x10, 0x85 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IContainerContentChangingEventArgs_g ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_ccc_args *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI uwp_ccc_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_ccc_args *)iface)->ref );
+}
+
+static ULONG WINAPI uwp_ccc_Release( void *iface )
+{
+    struct uwp_ccc_args *a = (struct uwp_ccc_args *)iface;
+    LONG r = InterlockedDecrement( &a->ref );
+    if (r == 0)
+    {
+        if (a->item) IInspectable_Release( a->item );
+        free( a );
+    }
+    return r;
+}
+
+static HRESULT WINAPI uwp_ccc_GetIids( void *iface, ULONG *cnt, IID **iids )
+{
+    if (cnt) *cnt = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_ccc_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Controls.ContainerContentChangingEventArgs", 58, name );
+}
+
+static HRESULT WINAPI uwp_ccc_GetTrustLevel( void *iface, TrustLevel *tl )
+{
+    if (tl) *tl = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_ccc_get_ItemContainer( void *iface, void **out ) { if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI uwp_ccc_get_InRecycleQueue( void *iface, boolean *out ) { if (out) *out = ((struct uwp_ccc_args *)iface)->in_recycle; return S_OK; }
+static HRESULT WINAPI uwp_ccc_get_ItemIndex( void *iface, INT32 *out ) { if (out) *out = 0; return S_OK; }
+static HRESULT WINAPI uwp_ccc_get_Item( void *iface, IInspectable **out )
+{
+    struct uwp_ccc_args *a = (struct uwp_ccc_args *)iface;
+    if (!out) return E_POINTER;
+    *out = a->item;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ccc_get_Phase( void *iface, UINT32 *out ) { if (out) *out = ((struct uwp_ccc_args *)iface)->phase; return S_OK; }
+static HRESULT WINAPI uwp_ccc_put_Handled( void *iface, boolean v ) { ((struct uwp_ccc_args *)iface)->handled = v; return S_OK; }
+static HRESULT WINAPI uwp_ccc_get_Handled( void *iface, boolean *out ) { if (out) *out = ((struct uwp_ccc_args *)iface)->handled; return S_OK; }
+static HRESULT WINAPI uwp_ccc_RegisterUpdateCallback( void *iface, void *cb ) { return S_OK; }
+static HRESULT WINAPI uwp_ccc_RegisterUpdateCallbackWithPhase( void *iface, UINT32 p, void *cb ) { return S_OK; }
+
+static const void *uwp_ccc_vtbl[] =
+{
+    uwp_ccc_QueryInterface,
+    uwp_ccc_AddRef,
+    uwp_ccc_Release,
+    uwp_ccc_GetIids,
+    uwp_ccc_GetRuntimeClassName,
+    uwp_ccc_GetTrustLevel,
+    uwp_ccc_get_ItemContainer,
+    uwp_ccc_get_InRecycleQueue,
+    uwp_ccc_get_ItemIndex,
+    uwp_ccc_get_Item,
+    uwp_ccc_get_Phase,
+    uwp_ccc_put_Handled,
+    uwp_ccc_get_Handled,
+    uwp_ccc_RegisterUpdateCallback,
+    uwp_ccc_RegisterUpdateCallbackWithPhase,
+};
+
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
 {
     int i;
@@ -6756,6 +6853,38 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
     else if (!xaml_get_app_caps()->teardown_vm && g_calc_vm.vm)
     {
         uwp_calc_vm_teardown( FALSE );
+    }
+
+    if (dc && dc != old_dc && impl->binding_connector && impl->dc_cnt == 0)
+    {
+        static const GUID IID_IDTE_g = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
+        void *dte = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)impl->binding_connector, &IID_IDTE_g, &dte )) && dte)
+        {
+            struct uwp_ccc_args *ccc = calloc( 1, sizeof(*ccc) );
+            if (ccc)
+            {
+                INT32 next_phase = -1;
+                HRESULT (WINAPI *proc_bindings)(void *, void *, INT32 *) = (void *)(*(void ***)dte)[8];
+                ccc->vtbl = uwp_ccc_vtbl;
+                ccc->ref = 1;
+                ccc->item = dc;
+                IInspectable_AddRef( dc );
+                ccc->phase = 0;
+                ccc->in_recycle = FALSE;
+                if (proc_bindings)
+                {
+                    __TRY
+                    {
+                        proc_bindings( dte, ccc, &next_phase );
+                    }
+                    __EXCEPT_ALL {}
+                    __ENDTRY;
+                }
+                uwp_ccc_Release( ccc );
+            }
+            IUnknown_Release( (IUnknown *)dte );
+        }
     }
 
     for (i = 0; i < impl->dc_cnt; i++)
