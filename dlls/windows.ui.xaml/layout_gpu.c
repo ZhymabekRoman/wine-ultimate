@@ -3174,7 +3174,11 @@ IActivationFactory *xaml_get_ceol_factory( void )
 
 static HRESULT WINAPI binding_ops_SetBinding( void *iface, void *target, void *dp, void *binding )
 {
+    struct uwp_element *tel = uwp_elem_from_any( target );
+    struct uwp_element *bel = uwp_elem_from_any( binding );
     TRACE( "binding_ops_SetBinding(target=%p, dp=%p, binding=%p)\n", target, dp, binding );
+    if (tel && dp && bel && bel->data_context)
+        uwp_do_SetValue( &tel->IDependencyObject_iface, dp, bel->data_context );
     return S_OK;
 }
 static const void *binding_ops_statics_vtbl[8] =

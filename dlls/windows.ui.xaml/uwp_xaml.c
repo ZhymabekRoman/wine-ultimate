@@ -1956,6 +1956,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IParagraph_iface;
     else if (iid->Data1 == 0x59553c83 && iid->Data2 == 0x0e14 && iid->Data3 == 0x49bd)     /* IRun */
         *out = &impl->IRun_iface;
+    else if (iid->Data1 == 0x3f7a0c6b && iid->Data2 == 0xd00f && iid->Data3 == 0x4730)     /* IBinding */
+        *out = &impl->IBinding_iface;
     else if (IsEqualGUID( iid, &IID_IRowDefinition_UWP ))
         *out = &impl->IRowDefinition_iface;
     else if (IsEqualGUID( iid, &IID_IColumnDefinition_UWP ))
@@ -6574,6 +6576,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->ITextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb_vtbl;
     impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_paragraph_vtbl;
     impl->IRun_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_run_vtbl;
+    impl->IBinding_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_binding_vtbl;
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;

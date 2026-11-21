@@ -2871,6 +2871,42 @@ const void *uwp_run_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_binding_get_Source( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->data_context : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_put_Source( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->data_context != val)
+    {
+        if (impl->data_context) IInspectable_Release( impl->data_context );
+        impl->data_context = val;
+        if (val) IInspectable_AddRef( val );
+    }
+    return S_OK;
+}
+
+const void *uwp_binding_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 13] = uwp_generic_noop,
+    [14] = uwp_binding_get_Source,
+    [15] = uwp_binding_put_Source,
+    [16 ... 31] = uwp_generic_noop,
+};
+
 const void *uwp_rowcol_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
