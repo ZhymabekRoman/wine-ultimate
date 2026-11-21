@@ -5708,16 +5708,16 @@ void xaml_get_layout_metrics( HWND hwnd, SIZE *client, float *scale )
     {
         if (hwnd && IsWindow( hwnd ) && GetClientRect( hwnd, &rc ) && rc.right > 0 && rc.bottom > 0)
         {
-            HMONITOR mon = MonitorFromWindow( hwnd, MONITOR_DEFAULTTOPRIMARY );
-            MONITORINFO mi = { .cbSize = sizeof(mi) };
-            client->cx = rc.right;
-            client->cy = rc.bottom;
-            if (mon && GetMonitorInfoW( mon, &mi ))
+            UINT wdpi = GetDpiForWindow( hwnd );
+            if (wdpi > 96)
             {
-                LONG mw = mi.rcMonitor.right - mi.rcMonitor.left;
-                LONG mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-                if (mw > 0 && client->cx > mw) client->cx = mw;
-                if (mh > 0 && client->cy > mh) client->cy = mh;
+                client->cx = MulDiv( rc.right, 96, (int)wdpi );
+                client->cy = MulDiv( rc.bottom, 96, (int)wdpi );
+            }
+            else
+            {
+                client->cx = rc.right;
+                client->cy = rc.bottom;
             }
         }
         else

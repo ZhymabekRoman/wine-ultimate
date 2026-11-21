@@ -454,6 +454,9 @@ struct uwp_element
     IInspectable **dc_handlers;
     int dc_cnt;
     int dc_cap;
+    IInspectable **loading_handlers;
+    int loading_cnt;
+    int loading_cap;
     void *binding_connector;
     IInspectable *selected_item;
     IInspectable *items_source;
@@ -1205,6 +1208,7 @@ BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *n
 void uwp_ensure_app_resources_loaded( void );
 BOOL uwp_extract_resource_key( const WCHAR *in, WCHAR *out, size_t out_chars );
 HRESULT WINAPI uwp_fe3_add_DataContextChanged( void *iface, void *handler, EventRegistrationToken *tok );
+HRESULT WINAPI uwp_fe3_add_Loading( void *iface, void *handler, EventRegistrationToken *tok );
 HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out );
 HRESULT WINAPI uwp_fe_add_Loaded( void *iface, void *handler, EventRegistrationToken *tok );
 HRESULT WINAPI uwp_fe_get_ActualHeight( void *iface, double *val );

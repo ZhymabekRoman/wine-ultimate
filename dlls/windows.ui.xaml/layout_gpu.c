@@ -1611,17 +1611,19 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             }
         }
     }
-    else if (!el->children_coll && el->data_context &&
-             (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56)
+    if (!el->children_coll && (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
+        !(el->content && uwp_elem_from_any( el->content )) &&
+        el->kind != UWP_KIND_CONTENT_CONTROL &&
+        (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56)
     {
         if (!el->text[0])
         {
             static const WCHAR *const title_props[] = { L"Title", L"ProductTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
             static const WCHAR *const sub_props[] = { L"DisplayPrice", L"PriceText", L"FormattedPrice", L"Price", L"Category", L"PublisherName", L"Publisher", L"Subtitle", L"Description" };
             static const WCHAR *const img_props[] = { L"Images", L"TileImages", L"ProductImages", L"Icons", L"ImageUrl", L"IconUrl", L"IconUri", L"ImageUri", L"ProductImageUrl", L"HeroImageUrl", L"TileImageUrl", L"LogoUrl", L"ThumbnailUrl", L"BoxArtUrl", L"PosterUrl", L"ImageLinkUri", L"TileImage", L"ProductImage", L"IconImage", L"LogoImage", L"BackgroundImage", L"Icon", L"Image", L"ImageSource", L"Uri" };
-            static const WCHAR *const nested_props[] = { L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
+            static const WCHAR *const nested_props[] = { L"Content", L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
             WCHAR title_buf[128] = {0}, sub_buf[128] = {0}, img_buf[512] = {0};
-            IInspectable *vm = el->data_context;
+            IInspectable *vm = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
             IInspectable *target_vm = vm;
             IInspectable *nested_vm = NULL;
             HSTRING hcls = NULL;

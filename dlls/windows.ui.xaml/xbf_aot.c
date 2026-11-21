@@ -542,7 +542,7 @@ void xbf_aot_cache_insert( struct xbf_aot_header *tpl )
 void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWORD xbf_sz,
                                  IInspectable *component, void *connector, BOOL is_uwp_conn, void *app_outer,
                                  struct uwp_element *root_el, struct uwp_element **out_created,
-                                 struct uwp_rd_bucket *target_rd )
+                                 struct uwp_rd_bucket *target_rd, BOOL is_template )
 {
     const struct xbf_aot_ref *refs = (const struct xbf_aot_ref *)((const BYTE *)hdr + hdr->off_refs);
     const UINT32 *res_uris = (const UINT32 *)((const BYTE *)hdr + hdr->off_res_uris);
@@ -771,7 +771,8 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 TRACE( "AOT Connect(cid=%d, target=%p [%s %s])\n", op->cid, raw,
                        el ? debugstr_w( el->class_name ) : "?", el ? debugstr_w( el->name ) : "" );
                 conn_fn( connector, op->cid, raw );
-                if (root_el && root_el->binding_connector && (!out_created || root_el->loaded_fired))
+                if (root_el && root_el->binding_connector && !is_template &&
+                    (!out_created || (hdr->node_cnt > 0 && (nodes[0].flags & XBF_AOT_NODE_ROOT_REUSE))))
                 {
                     HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)root_el->binding_connector)[6];
                     if (b_conn) b_conn( root_el->binding_connector, op->cid, raw );

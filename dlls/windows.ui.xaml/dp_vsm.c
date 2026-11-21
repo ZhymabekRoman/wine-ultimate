@@ -1546,7 +1546,7 @@ static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *
         struct uwp_element *rep;
         const WCHAR *target_dp = !wcscmp( dpname, L"ItemsSource" ) ? L"ItemsSource" : L"ItemTemplate";
         int j;
-        if (!val) return;
+        if (!val || wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" )) return;
         rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
         if (!rep || rep == impl || !wcsstr( rep->class_name, L"ItemsRepeater" )) return;
         for (j = 0; j < rep->dp_cnt; j++)
@@ -1830,7 +1830,12 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0] &&
             (!wcscmp( dpl->name, L"ItemsSource" ) || !wcscmp( dpl->name, L"Content" ) ||
              !wcscmp( dpl->name, L"Text" ) || !wcscmp( dpl->name, L"Visibility" )))
+        {
+            extern void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src );
+            if (!wcscmp( dpl->name, L"ItemsSource" ) && val)
+                uwp_items_ctrl_materialize_source( impl, val );
             uwp_invalidate_window();
+        }
     }
 
     if (old_val) IInspectable_Release( old_val );
@@ -2893,6 +2898,8 @@ static HRESULT WINAPI vth_GetChildrenCount( void *iface, void *ref, INT32 *count
 static HRESULT WINAPI vth_GetParent( void *iface, void *ref, void **out )
 {
     struct uwp_element *el = uwp_elem_from_any( ref );
+    WARN( "vth_GetParent: ref=%p el=%p (%s) parent=%p (%s)\n", ref, el, el ? debugstr_w(el->class_name) : "?",
+          el ? el->parent : NULL, (el && el->parent) ? debugstr_w(el->parent->class_name) : "?" );
     if (!out) return E_POINTER;
     *out = NULL;
     if (el && el->parent)

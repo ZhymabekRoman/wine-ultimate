@@ -222,7 +222,7 @@ const void *uwp_fe3_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_fe3_add_DataContextChanged,
+    [6] = uwp_fe3_add_Loading,
     [7 ... 15] = uwp_generic_noop,
 };
 
@@ -1004,7 +1004,7 @@ static HRESULT WINAPI uwp_items_ctrl_get_ItemsSource( void *iface, void **out )
     return S_OK;
 }
 
-static void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src )
+void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src )
 {
     static const GUID IID_IVectorView_Obj =
         { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
@@ -1045,7 +1045,11 @@ static void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspec
                                 IInspectable_AddRef( bel->data_context );
                                 bel->width = 44.0;
                                 bel->height = 36.0;
+                                bel->has_bg = TRUE;
+                                bel->bg_argb = 0xE02A2A2A;
+                                bel->bg_alpha = 224;
                                 uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
+                                if (!bel->text[0]) lstrcpynW( bel->text, L"\x25A1", ARRAY_SIZE(bel->text) );
                                 uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
                             }
                             IInspectable_Release( btn_inner );
@@ -1086,7 +1090,11 @@ static void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspec
                                 IInspectable_AddRef( bel->data_context );
                                 bel->width = 44.0;
                                 bel->height = 36.0;
+                                bel->has_bg = TRUE;
+                                bel->bg_argb = 0xE02A2A2A;
+                                bel->bg_alpha = 224;
                                 uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
+                                if (!bel->text[0]) lstrcpynW( bel->text, L"\x25A1", ARRAY_SIZE(bel->text) );
                                 uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
                             }
                             IInspectable_Release( btn_inner );

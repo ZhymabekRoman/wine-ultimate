@@ -2083,6 +2083,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             { 0x31af3271, 0xe3b4, 0x442d, { 0xa3, 0x41, 0x4c, 0x02, 0x26, 0xb2, 0x72, 0x5b } };
         static const GUID IID_IBitmapImage2_UWP =
             { 0x1abaee23, 0x74ee, 0x4cc7, { 0x99, 0xba, 0xb1, 0x71, 0xe3, 0xcd, 0xa6, 0x1e } };
+        static const GUID IID_IBitmapImage2_Real_UWP =
+            { 0x1069c1b6, 0x8c9b, 0x4762, { 0xbe, 0x3d, 0x75, 0x9f, 0x56, 0x98, 0xf2, 0xb3 } };
         static const GUID IID_IBitmapImage3_UWP =
             { 0x7311e0d4, 0xfe94, 0x4e70, { 0x9b, 0x90, 0xcd, 0xd4, 0x7a, 0xc2, 0x3a, 0xfb } };
         static const GUID IID_IBitmapSource_UWP =
@@ -2100,6 +2102,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                  IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IStateTrigger_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
+                 IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage3_UWP ))
             *out = &impl->IStyle_iface;
         else if (IsEqualGUID( iid, &IID_ISelector_UWP ))
@@ -2639,6 +2642,9 @@ HRESULT WINAPI uwp_fe_put_Name( void *iface, HSTRING name )
 HRESULT WINAPI uwp_fe_get_Parent( void *iface, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    WARN( "uwp_fe_get_Parent: iface=%p impl=%p (%s) parent=%p (%s)\n", iface, impl,
+          impl ? debugstr_w(impl->class_name) : "?", impl ? impl->parent : NULL,
+          (impl && impl->parent) ? debugstr_w(impl->parent->class_name) : "?" );
     if (!out) return E_POINTER;
     *out = NULL;
     if (impl && impl->parent)
@@ -2893,6 +2899,19 @@ HRESULT WINAPI uwp_fe3_add_DataContextChanged( void *iface, void *handler, Event
                 else IInspectable_Release( (IInspectable *)cur_dc );
             }
         }
+    }
+    return S_OK;
+}
+
+HRESULT WINAPI uwp_fe3_add_Loading( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (tok) tok->value = 1;
+    if (!impl || !handler) return S_OK;
+    if (xaml_vec_grow( (void **)&impl->loading_handlers, &impl->loading_cap, impl->loading_cnt + 1, sizeof(*impl->loading_handlers), 8 ))
+    {
+        impl->loading_handlers[impl->loading_cnt++] = (IInspectable *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
     }
     return S_OK;
 }
@@ -6889,15 +6908,15 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
 
     uwp_apply_template_if_needed( el );
 
-    if (!el->loaded_fired && el->dc_cnt > 0 && !el->data_context)
+    if (!el->loaded_fired && el->loading_cnt > 0)
     {
         IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
-        for (i = 0; i < el->dc_cnt; i++)
+        for (i = 0; i < el->loading_cnt; i++)
         {
-            if (el->dc_handlers[i])
+            if (el->loading_handlers[i])
             {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->dc_handlers[i];
-                WARN( "Firing Loading handler[%d] on %s (%s)\n",
+                struct xaml_event_handler *h = (struct xaml_event_handler *)el->loading_handlers[i];
+                TRACE( "Firing Loading handler[%d] on %s (%s)\n",
                        i, debugstr_w(el->class_name), debugstr_w(el->name) );
                 __TRY
                 {
@@ -7044,6 +7063,7 @@ void uwp_vsm_invalidate_eval_chain( struct uwp_element *el );
 void uwp_realize_empty_panel_defers( struct uwp_element *root )
 {
     int d;
+    return;
     if (!root) return;
     for (d = 0; d < root->defer_cnt; d++)
     {
@@ -8069,6 +8089,24 @@ void uwp_invoke_button( struct uwp_element *btn )
                           hs_dc ? debugstr_w(WindowsGetStringRawBuffer(hs_dc, NULL)) : "?",
                           hs_cnt ? debugstr_w(WindowsGetStringRawBuffer(hs_cnt, NULL)) : "?",
                           (unsigned long)ehr2, (unsigned long)ehr3, (unsigned long)ehr4 );
+                    if (mod)
+                    {
+                        void *(*get_target)(void *) = (void *)((const char *)mod + 0x85f730);
+                        void **rcmd = (void **)get_target( cmd );
+                        void **act = rcmd ? (void **)rcmd[1] : NULL;
+                        void *mptr = act ? act[4] : NULL;
+                        void **tthis = act ? (void **)act[1] : NULL;
+                        HMODULE appmod = NULL;
+                        if (mptr) GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)mptr, &appmod );
+                        void *fn_fb0 = appmod ? *(void **)((const char *)appmod + 0x1767fb0) : NULL;
+                        void *dict_eb0 = appmod ? *(void **)((const char *)appmod + 0x1463eb0) : NULL;
+                        void *def_ed8 = appmod ? *(void **)((const char *)appmod + 0x1463ed8) : NULL;
+                        WARN( "  RelayCommand=%p act=%p mptr=%p (+0x%lx) this=%p this[6]=%p this[34]=%p this[49]=%p fn_fb0=%p (+0x%lx) eb0=%p ed8=%p\n",
+                              rcmd, act, mptr, appmod ? (unsigned long)((const char *)mptr - (const char *)appmod) : 0ul,
+                              tthis, tthis ? tthis[6] : NULL, tthis ? tthis[34] : NULL, tthis ? tthis[49] : NULL,
+                              fn_fb0, (appmod && fn_fb0) ? (unsigned long)((const char *)fn_fb0 - (const char *)appmod) : 0ul,
+                              dict_eb0, def_ed8 );
+                    }
                     if (hs_cmd) WindowsDeleteString( hs_cmd );
                     if (hs_dc) WindowsDeleteString( hs_dc );
                     if (hs_cnt) WindowsDeleteString( hs_cnt );

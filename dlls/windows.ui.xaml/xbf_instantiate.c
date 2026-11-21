@@ -56,6 +56,7 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
     DWORD last_popped_off = 0;
     UINT32 last_popped_node_idx = (~0u);
     BOOL has_last_popped = FALSE;
+    void *dt_binding = NULL;
 
     memset( val_stack, 0, sizeof(val_stack) );
     memset( &last_popped, 0, sizeof(last_popped) );
@@ -469,29 +470,35 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                            cid, top_raw, top_el ? debugstr_w(top_el->class_name) : "?",
                            top_el ? debugstr_w(top_el->name) : "" );
                     conn_fn( ctx->connector, cid, top_raw );
-                    if (ctx->root_el && ctx->root_el->binding_connector && (!out_created || ctx->root_el->loaded_fired))
+                    if (ctx->root_el && ctx->root_el->binding_connector && (!out_created || initial_root))
                     {
                         HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)ctx->root_el->binding_connector)[6];
                         if (b_conn) b_conn( ctx->root_el->binding_connector, cid, top_raw );
                     }
                     else if (out_created && ctx->root_comp)
                     {
-                        void *conn2 = NULL, *bc = NULL;
-                        if (SUCCEEDED(IInspectable_QueryInterface( ctx->root_comp, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
+                        if (!dt_binding)
                         {
-                            HRESULT (WINAPI *get_bc)(void *, int, void *, void **) = (void *)(*(void ***)conn2)[6];
-                            if (get_bc && SUCCEEDED(get_bc( conn2, cid, top_raw, &bc )) && bc)
+                            void *conn2 = NULL, *bc = NULL;
+                            if (SUCCEEDED(IInspectable_QueryInterface( ctx->root_comp, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
                             {
-                                HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)bc)[6];
-                                if (top_el && !top_el->binding_connector)
+                                HRESULT (WINAPI *get_bc)(void *, int, void *, void **) = (void *)(*(void ***)conn2)[6];
+                                if (get_bc && SUCCEEDED(get_bc( conn2, cid, top_raw, &bc )) && bc)
                                 {
-                                    top_el->binding_connector = bc;
-                                    IUnknown_AddRef( (IUnknown *)bc );
+                                    dt_binding = bc;
+                                    if (top_el && !top_el->binding_connector)
+                                    {
+                                        top_el->binding_connector = bc;
+                                        IUnknown_AddRef( (IUnknown *)bc );
+                                    }
                                 }
-                                if (b_conn) b_conn( bc, cid, top_raw );
-                                IUnknown_Release( (IUnknown *)bc );
+                                IUnknown_Release( (IUnknown *)conn2 );
                             }
-                            IUnknown_Release( (IUnknown *)conn2 );
+                        }
+                        if (dt_binding)
+                        {
+                            HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)dt_binding)[6];
+                            if (b_conn) b_conn( dt_binding, cid, top_raw );
                         }
                     }
                 }
@@ -1348,6 +1355,7 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
         free( val_stack[obj_sp].setters );
     }
     free( last_popped.setters );
+    if (dt_binding) IUnknown_Release( (IUnknown *)dt_binding );
 }
 
 void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
@@ -1386,7 +1394,8 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
             const struct xbf_aot_header *tpl = slot->tpl;
             double us;
             xbf_aot_instantiate( tpl, xbf, xbf_sz, component, connector, is_uwp_conn, app_outer,
-                                 root_el_pre, out_created, target_rd );
+                                 root_el_pre, out_created, target_rd,
+                                 (out_created != NULL && attach_root == NULL) );
             QueryPerformanceCounter( &t1 );
             us = freq.QuadPart ? ((double)(t1.QuadPart - t0.QuadPart) * 1000000.0 / (double)freq.QuadPart) : 0.0;
             TRACE( "XBF AOT %s hit (%s, sub=%d, %lu xbf -> %lu aot bytes, %u nodes, %u ops) in %.1f us\n",
@@ -1735,18 +1744,17 @@ void uwp_realize_deferred_entry( struct uwp_defer_entry *de )
         if (de->parent_panel->data_context && !created->data_context)
             uwp_propagate_data_context( created, de->parent_panel->data_context );
         uwp_vsm_invalidate_eval_chain( created );
-        uwp_fire_loaded_tree( created );
         {
             struct uwp_element *root_el = uwp_elem_from_any( de->root_component );
-            if (root_el && root_el->loaded_fired && root_el->dc_cnt > 0)
+            if (root_el && root_el->loaded_fired && root_el->loading_cnt > 0)
             {
                 IInspectable *sender = root_el->outer ? root_el->outer : &root_el->IInspectable_iface;
                 int i;
-                for (i = 0; i < root_el->dc_cnt; i++)
+                for (i = 0; i < root_el->loading_cnt; i++)
                 {
-                    if (root_el->dc_handlers[i])
+                    if (root_el->loading_handlers[i])
                     {
-                        struct xaml_event_handler *h = (struct xaml_event_handler *)root_el->dc_handlers[i];
+                        struct xaml_event_handler *h = (struct xaml_event_handler *)root_el->loading_handlers[i];
                         TRACE( "Re-firing Loading handler[%d] on %s (%s) after deferred realize\n",
                                i, debugstr_w(root_el->class_name), debugstr_w(root_el->name) );
                         __TRY

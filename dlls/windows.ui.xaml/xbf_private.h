@@ -265,7 +265,7 @@ void xbf_aot_cache_insert( struct xbf_aot_header *tpl );
 void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWORD xbf_sz,
                           IInspectable *component, void *connector, BOOL is_uwp_conn, void *app_outer,
                           struct uwp_element *root_el, struct uwp_element **out_created,
-                          struct uwp_rd_bucket *target_rd );
+                          struct uwp_rd_bucket *target_rd, BOOL is_template );
 
 /* xbf_instantiate.c */
 void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element *initial_root,
