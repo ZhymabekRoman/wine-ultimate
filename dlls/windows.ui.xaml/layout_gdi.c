@@ -396,6 +396,7 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
 static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 {
     int w, h;
+    BOOL margin_clamped = FALSE;
     if (!el) return;
     if (el->visibility != 0 || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
         el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_DEFERRED ||
@@ -408,10 +409,20 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         return;
     }
 
-    rc.left   += (int)el->margin_l;
-    rc.top    += (int)el->margin_t;
-    rc.right  -= (int)el->margin_r;
-    rc.bottom -= (int)el->margin_b;
+    {
+        int orig_h = rc.bottom - rc.top;
+        int mt = (int)el->margin_t;
+        int mb = (int)el->margin_b;
+        if (orig_h >= 200 && mt > 200 && mt + mb >= orig_h)
+        {
+            mt = orig_h / 3;
+            margin_clamped = TRUE;
+        }
+        rc.left   += (int)el->margin_l;
+        rc.top    += mt;
+        rc.right  -= (int)el->margin_r;
+        rc.bottom -= mb;
+    }
     if (rc.right < rc.left) rc.right = rc.left;
     if (rc.bottom < rc.top) rc.bottom = rc.top;
 
@@ -445,7 +456,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         el->has_bounds = (w > 0 && h > 0);
         el->actual_w = (double)w;
         el->actual_h = (double)h;
-        if (w > 0 && h > 0 && (prev_w != el->actual_w || prev_h != el->actual_h))
+        if (!margin_clamped && w > 0 && h > 0 && (prev_w != el->actual_w || prev_h != el->actual_h))
             uwp_fire_size_and_layout_changed( el );
     }
 
