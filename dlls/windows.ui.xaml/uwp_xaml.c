@@ -5770,6 +5770,40 @@ static HRESULT WINAPI uwp_img_put_Stretch( void *iface, int val )
     if (impl) impl->media_stretch = val;
     return S_OK;
 }
+static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl && is_active)
+    {
+        struct uwp_element *p;
+        for (p = impl->parent; p; p = p->parent)
+        {
+            if (!wcscmp( p->class_name, L"Windows.UI.Xaml.VisualState" ) && p->name[0])
+            {
+                struct uwp_element *scope = p->owner_component ? p->owner_component : impl->owner_component;
+                if (scope)
+                {
+                    uwp_vsm_goto_state_on_tree( scope, p->name );
+                    g_layout_dirty = TRUE;
+                    uwp_invalidate_window();
+                }
+                break;
+            }
+        }
+    }
+    return S_OK;
+}
+static const void *uwp_state_trigger_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_st_SetActive,
+    [7 ... 15] = uwp_generic_noop,
+};
 static const void *uwp_img_vtbl[24] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -6817,7 +6851,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_flyout_vtbl;
     impl->ISelector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_selector_vtbl;
     impl->IItemsControl_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_items_ctrl_vtbl;
-    impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xamlroot_vtbl;
+    impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_state_trigger_vtbl;
     impl->IObservableVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_obsvec_vtbl;
     impl->IVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_vec_vtbl;
     impl->IIterable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_iterable_vtbl;

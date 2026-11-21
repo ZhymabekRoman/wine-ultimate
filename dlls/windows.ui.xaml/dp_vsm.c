@@ -2775,7 +2775,7 @@ void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h )
     vsm_depth--;
 }
 
-static BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name )
+BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name )
 {
     int g, s;
     unsigned int k;
