@@ -226,6 +226,8 @@ const void *uwp_fe3_vtbl[16] =
     [7 ... 15] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_cd_get_NullOut( void *iface, void **out );
+
 const void *uwp_ctrl_vtbl[64] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -234,9 +236,11 @@ const void *uwp_ctrl_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_ctrl_get_FontSize,
-    [7] = uwp_ctrl_put_FontSize,
-    [8 ... 21] = uwp_generic_noop,
+    [6] = uwp_cd_get_NullOut,        /* get_FontFamily */
+    [7] = uwp_generic_noop,          /* put_FontFamily */
+    [8] = uwp_ctrl_get_FontSize,     /* get_FontSize */
+    [9] = uwp_ctrl_put_FontSize,     /* put_FontSize */
+    [10 ... 21] = uwp_generic_noop,
     [22] = uwp_ctrl_get_IsEnabled,
     [23] = uwp_ctrl_put_IsEnabled,
     [24 ... 43] = uwp_generic_noop,
@@ -2824,9 +2828,11 @@ const void *uwp_tb_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_ctrl_get_FontSize,
-    [7] = uwp_ctrl_put_FontSize,
-    [8 ... 23] = uwp_generic_noop,
+    [6] = uwp_cd_get_NullOut,        /* get_FontFamily */
+    [7] = uwp_generic_noop,          /* put_FontFamily */
+    [8] = uwp_ctrl_get_FontSize,     /* get_FontSize */
+    [9] = uwp_ctrl_put_FontSize,     /* put_FontSize */
+    [10 ... 23] = uwp_generic_noop,
     [24] = uwp_tb_get_Inlines,
     [25] = uwp_generic_noop,
     [26] = uwp_tb_get_Text,

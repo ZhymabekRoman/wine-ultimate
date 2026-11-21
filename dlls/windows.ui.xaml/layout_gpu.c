@@ -2570,6 +2570,16 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         *out = (void *)&f->IComposableFactory_iface;
         return S_OK;
     }
+    {
+        static const GUID IID_IXamlMarkupHelperStatics_UWP =
+            { 0xc9bc3725, 0xf34f, 0x445c, { 0x81, 0xa2, 0x6b, 0x72, 0xa5, 0xe8, 0xf0, 0x72 } };
+        extern const void *xaml_markup_helper_statics_obj;
+        if (IsEqualGUID( iid, &IID_IXamlMarkupHelperStatics_UWP ))
+        {
+            *out = (void *)&xaml_markup_helper_statics_obj;
+            return S_OK;
+        }
+    }
     /* Unknown IID on factory: log so we can see exact Statics/Factory IID, return Statics */
     WARN( "uwp_cf_QI(%s) unknown iid %s -> Statics fallback\n",
           f ? debugstr_w(f->class_name) : "?", debugstr_guid(iid) );
@@ -3156,6 +3166,25 @@ static const void *thickness_helper_statics_vtbl[8] =
     [7] = thickness_helper_FromUniformLength,
 };
 static const void *thickness_helper_statics_obj = thickness_helper_statics_vtbl;
+
+static HRESULT WINAPI xaml_markup_helper_UnloadObject( void *iface, void *element )
+{
+    struct uwp_element *el = uwp_elem_from_any( element );
+    if (el) el->visibility = 1; /* Collapsed */
+    return S_OK;
+}
+static const void *xaml_markup_helper_statics_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = xaml_markup_helper_UnloadObject,
+    [7 ... 15] = uwp_generic_noop,
+};
+const void *xaml_markup_helper_statics_obj = xaml_markup_helper_statics_vtbl;
 
 const void *uwp_cf_statics_vtbl[64] =
 {

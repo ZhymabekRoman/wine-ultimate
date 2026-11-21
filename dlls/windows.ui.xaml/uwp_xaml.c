@@ -6964,6 +6964,30 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
 
     uwp_apply_template_if_needed( el );
 
+    if (!el->loaded_fired && el->loading_cnt > 0)
+    {
+        IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
+        for (i = 0; i < el->loading_cnt; i++)
+        {
+            if (el->loading_handlers[i])
+            {
+                struct xaml_event_handler *h = (struct xaml_event_handler *)el->loading_handlers[i];
+                TRACE( "Firing Loading handler[%d] on %s (%s)\n",
+                       i, debugstr_w(el->class_name), debugstr_w(el->name) );
+                __TRY
+                {
+                    h->lpVtbl->Invoke( h, sender, NULL );
+                }
+                __EXCEPT_ALL
+                {
+                    WARN( "Loading handler[%d] on %s (%s) threw\n",
+                          i, debugstr_w(el->class_name), debugstr_w(el->name) );
+                }
+                __ENDTRY;
+            }
+        }
+    }
+
     el->loaded_fired = TRUE;
     if (el->loaded_fired_cnt < el->loaded_cnt)
     {
