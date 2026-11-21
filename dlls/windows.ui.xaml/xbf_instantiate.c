@@ -953,6 +953,10 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                         uwp_vec_Append( parent_el->children_coll, last_popped.raw );
                         if (last_popped.el) last_popped.el->parent = parent_el;
                     }
+                    if (last_popped.el && parent_el && !last_popped.el->parent)
+                        last_popped.el->parent = parent_el;
+                    if (last_popped.el && ctx->root_el && !last_popped.el->owner_component)
+                        last_popped.el->owner_component = ctx->root_el;
                 }
                 if (ctx->aot && node_idx_stack[obj_sp - 1] != (~0u) && last_popped_node_idx != (~0u))
                 {

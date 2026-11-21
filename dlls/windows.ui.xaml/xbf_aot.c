@@ -895,6 +895,10 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     uwp_vec_Append( parent_el->children_coll, child_raw );
                     if (child_el) child_el->parent = parent_el;
                 }
+                if (child_el && parent_el && !child_el->parent)
+                    child_el->parent = parent_el;
+                if (child_el && root_el && !child_el->owner_component)
+                    child_el->owner_component = root_el;
             }
             break;
         }
