@@ -456,6 +456,7 @@ struct uwp_element
     int dc_cap;
     void *binding_connector;
     IInspectable *selected_item;
+    IInspectable *items_source;
     IInspectable *sel_changed_handler;
     IInspectable *tab_items_source;
     IInspectable *tab_add_cmd;

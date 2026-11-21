@@ -995,6 +995,128 @@ const void *uwp_selector_vtbl[20] =
     [17 ... 19] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_items_ctrl_get_ItemsSource( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->items_source : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src )
+{
+    static const GUID IID_IVectorView_Obj =
+        { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
+    static const GUID IID_IVector_Obj =
+        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
+    void *vec = NULL;
+    UINT32 count = 0, i;
+    HRESULT hr = E_FAIL;
+
+    if (!impl || !src) return;
+    if (SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVector_Obj, &vec )) && vec)
+    {
+        HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
+        HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
+        if (SUCCEEDED(get_size( vec, &count )) && count > 0)
+        {
+            if (count > 64) count = 64;
+            if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+            for (i = 0; i < count; i++)
+            {
+                void *item = NULL;
+                if (SUCCEEDED(get_at( vec, i, &item )) && item)
+                {
+                    struct uwp_element *item_el = uwp_elem_from_any( item );
+                    if (item_el)
+                    {
+                        uwp_vec_Append( impl->children_coll, item );
+                    }
+                    else
+                    {
+                        IInspectable *btn_inner = NULL;
+                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_inner )) && btn_inner)
+                        {
+                            struct uwp_element *bel = uwp_elem_from_any( btn_inner );
+                            if (bel)
+                            {
+                                bel->data_context = (IInspectable *)item;
+                                IInspectable_AddRef( bel->data_context );
+                                bel->width = 44.0;
+                                bel->height = 36.0;
+                                uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
+                                uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
+                            }
+                            IInspectable_Release( btn_inner );
+                        }
+                    }
+                    IUnknown_Release( (IUnknown *)item );
+                }
+            }
+            hr = S_OK;
+        }
+        IUnknown_Release( (IUnknown *)vec );
+    }
+    if (FAILED(hr) && SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Obj, &vec )) && vec)
+    {
+        HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
+        HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
+        if (SUCCEEDED(get_size( vec, &count )) && count > 0)
+        {
+            if (count > 64) count = 64;
+            if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+            for (i = 0; i < count; i++)
+            {
+                void *item = NULL;
+                if (SUCCEEDED(get_at( vec, i, &item )) && item)
+                {
+                    struct uwp_element *item_el = uwp_elem_from_any( item );
+                    if (item_el)
+                        uwp_vec_Append( impl->children_coll, item );
+                    else
+                    {
+                        IInspectable *btn_inner = NULL;
+                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_inner )) && btn_inner)
+                        {
+                            struct uwp_element *bel = uwp_elem_from_any( btn_inner );
+                            if (bel)
+                            {
+                                bel->data_context = (IInspectable *)item;
+                                IInspectable_AddRef( bel->data_context );
+                                bel->width = 44.0;
+                                bel->height = 36.0;
+                                uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
+                                uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
+                            }
+                            IInspectable_Release( btn_inner );
+                        }
+                    }
+                    IUnknown_Release( (IUnknown *)item );
+                }
+            }
+        }
+        IUnknown_Release( (IUnknown *)vec );
+    }
+}
+
+static HRESULT WINAPI uwp_items_ctrl_put_ItemsSource( void *iface, void *src )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    if (!impl) return S_OK;
+    if (impl->items_source == (IInspectable *)src) return S_OK;
+    if (impl->items_source) IInspectable_Release( impl->items_source );
+    impl->items_source = (IInspectable *)src;
+    if (impl->items_source) IInspectable_AddRef( impl->items_source );
+    TRACE( "IItemsControl::put_ItemsSource on %s (%s) -> %p\n",
+           debugstr_w(impl->class_name), debugstr_w(impl->name), src );
+    if (impl->items_source)
+        uwp_items_ctrl_materialize_source( impl, impl->items_source );
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_items_ctrl_get_Items( void *iface, void **out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
@@ -1012,7 +1134,8 @@ const void *uwp_items_ctrl_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 7] = uwp_generic_noop,
+    [6] = uwp_items_ctrl_get_ItemsSource,
+    [7] = uwp_items_ctrl_put_ItemsSource,
     [8] = uwp_items_ctrl_get_Items,
     [9 ... 31] = uwp_generic_noop,
 };
