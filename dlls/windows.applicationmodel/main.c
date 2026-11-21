@@ -497,6 +497,7 @@ static HRESULT WINAPI vector_view_QueryInterface( void *iface, REFIID iid, void 
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
+    ERR( "vector_view_QueryInterface: rejecting iid=%s\n", debugstr_guid(iid) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -602,6 +603,7 @@ static HRESULT WINAPI vector_iter_QueryInterface( void *iface, REFIID iid, void 
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
+    ERR( "vector_iter_QueryInterface: rejecting iid=%s\n", debugstr_guid(iid) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -3609,6 +3611,14 @@ static HRESULT WINAPI app_install_mgr3_StartProductInstallForUserAsync( void *if
 {
     return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
 }
+static HRESULT WINAPI app_install_mgr3_UpdateAppByPackageFamilyNameForUserAsync( void *iface, void *u, HSTRING p, HSTRING cv, void **op )
+{
+    return store_async_create( NULL, FALSE, FALSE, S_OK, op );
+}
+static HRESULT WINAPI app_install_mgr3_SearchForUpdatesForUserAsync( void *iface, void *u, HSTRING p, HSTRING s, HSTRING c, HSTRING cv, void **op )
+{
+    return store_async_create( NULL, FALSE, FALSE, S_OK, op );
+}
 static HRESULT WINAPI app_install_mgr3_SearchForAllUpdatesForUserAsync( void *iface, void *u, HSTRING cv, void **op )
 {
     return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
@@ -3633,6 +3643,8 @@ static const void *app_install_manager_vtbl3[] =
     app_install_mgr_GetTrustLevel,
     app_install_mgr3_StartProductInstallAsync,
     app_install_mgr3_StartProductInstallForUserAsync,
+    app_install_mgr3_UpdateAppByPackageFamilyNameForUserAsync,
+    app_install_mgr3_SearchForUpdatesForUserAsync,
     app_install_mgr3_SearchForAllUpdatesForUserAsync,
     app_install_mgr3_GetIsAppAllowedToInstallForUserAsync,
     app_install_mgr3_GetIsApplicableForUserAsync,
@@ -4252,9 +4264,19 @@ static HRESULT WINAPI store_cfg1_get_HardwareManufacturerInfo( void *iface, void
     *val = impl;
     return S_OK;
 }
+static const GUID IID_IVectorView_StoreSystemFeature =
+    { 0xc8f90757, 0xebcf, 0x5f2c, { 0xb9, 0x18, 0x64, 0x87, 0x10, 0x5b, 0x0c, 0xa1 } };
+static const GUID IID_IIterable_StoreSystemFeature =
+    { 0x98a8577a, 0xb128, 0x5400, { 0x8d, 0x3d, 0x58, 0x65, 0x4e, 0xaa, 0xf9, 0x57 } };
+static const GUID IID_IIterator_StoreSystemFeature =
+    { 0xd0455b2d, 0xd8aa, 0x557e, { 0x89, 0xa3, 0x63, 0xc3, 0x3e, 0x8c, 0xee, 0x99 } };
+
 static HRESULT WINAPI store_cfg1_FilterUnsupportedSystemFeaturesAsync( void *iface, void *features, void **op )
 {
-    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
+    struct winrt_vector_view *vec = store_create_vector_view( NULL, 0,
+        &IID_IVectorView_StoreSystemFeature, &IID_IIterable_StoreSystemFeature );
+    if (vec) vec->iterator_iid = IID_IIterator_StoreSystemFeature;
+    return store_async_create( vec, FALSE, FALSE, S_OK, op );
 }
 
 static const void *store_cfg_vtbl1[] =
