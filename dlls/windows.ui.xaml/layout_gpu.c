@@ -1047,6 +1047,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
            el ? el->has_bounds : 0, el ? el->visibility : 0xffff,
            (void *)(el ? el->children_coll : NULL), (void *)(el ? el->content : NULL) );
     if (!el || !el->has_bounds || el->visibility != 0) return;
+    if (el->evc_cnt > 0 && !el->evc_fired)
+        uwp_fire_evc_if_needed( el );
 
     if (el->kind == UWP_KIND_IMAGE)
     {
