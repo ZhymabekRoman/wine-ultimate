@@ -641,6 +641,7 @@ struct xbf_ctx
     struct uwp_rd_bucket *target_rd;
     char base_xbf_dir[256];
     BOOL rd_only;
+    BOOL is_template;
     BOOL vsm_collect;
     struct xbf_aot_builder *aot;
 };

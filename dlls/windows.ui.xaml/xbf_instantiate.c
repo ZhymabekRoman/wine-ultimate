@@ -470,7 +470,7 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                            cid, top_raw, top_el ? debugstr_w(top_el->class_name) : "?",
                            top_el ? debugstr_w(top_el->name) : "" );
                     conn_fn( ctx->connector, cid, top_raw );
-                    if (ctx->root_el && ctx->root_el->binding_connector && (!out_created || initial_root))
+                    if (ctx->root_el && ctx->root_el->binding_connector && !ctx->is_template)
                     {
                         HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)ctx->root_el->binding_connector)[6];
                         if (b_conn) b_conn( ctx->root_el->binding_connector, cid, top_raw );
@@ -1448,6 +1448,7 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
     ctx.root_comp = component;
     ctx.target_rd = target_rd;
     ctx.rd_only = rd_only;
+    ctx.is_template = (out_created != NULL && attach_root == NULL);
     if (base_xbf_path && base_xbf_path[0])
     {
         const char *slash = strrchr( base_xbf_path, '/' );

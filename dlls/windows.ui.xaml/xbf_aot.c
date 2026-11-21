@@ -771,8 +771,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 TRACE( "AOT Connect(cid=%d, target=%p [%s %s])\n", op->cid, raw,
                        el ? debugstr_w( el->class_name ) : "?", el ? debugstr_w( el->name ) : "" );
                 conn_fn( connector, op->cid, raw );
-                if (root_el && root_el->binding_connector && !is_template &&
-                    (!out_created || (hdr->node_cnt > 0 && (nodes[0].flags & XBF_AOT_NODE_ROOT_REUSE))))
+                if (root_el && root_el->binding_connector && !is_template)
                 {
                     HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)root_el->binding_connector)[6];
                     if (b_conn) b_conn( root_el->binding_connector, op->cid, raw );
