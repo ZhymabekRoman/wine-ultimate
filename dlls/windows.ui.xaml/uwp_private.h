@@ -2232,6 +2232,7 @@ ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
 
 extern const void *uwp_tb_vtbl[64];
 extern const void *uwp_paragraph_vtbl[32];
+extern const void *uwp_run_vtbl[16];
 
 extern const void *uwp_teachingtip_vtbl[64];
 

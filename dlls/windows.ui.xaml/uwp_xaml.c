@@ -2172,6 +2172,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                 {
                     if (wcsstr( impl->class_name, L"RichTextBlock" ))
                         *out = &impl->ITextBlock_iface;
+                    else if (iid->Data1 == 0x59553c83 && iid->Data2 == 0x0e14 && iid->Data3 == 0x49bd)
+                        *out = &impl->IParagraph_iface; /* IRun */
                     else if ((wcsstr( impl->class_name, L"Paragraph" ) ||
                               wcsstr( impl->class_name, L"Span" ) ||
                               wcsstr( impl->class_name, L"Hyperlink" )) &&
@@ -6547,7 +6549,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IGrid3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grid3_vtbl;
     impl->IBorder_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_border_vtbl;
     impl->ITextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb_vtbl;
-    impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_paragraph_vtbl;
+    impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)(wcsstr( class_name, L"Run" ) ? uwp_run_vtbl : uwp_paragraph_vtbl);
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;

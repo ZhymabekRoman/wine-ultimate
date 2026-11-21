@@ -263,7 +263,7 @@ static BOOL uwp_island_ensure_gpu( HWND hwnd, struct uwp_island_state *st, int w
 static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 {
     int kids = 0;
-    if (!el || depth > 22 || *rem <= 0) return;
+    if (!el || depth > 35 || *rem <= 0) return;
     if (wcsstr( el->class_name, L"HomepageSkeleton" ))
     {
         WARN( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
@@ -296,7 +296,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 
 void uwp_debug_dump_root( IInspectable *root )
 {
-    int rem = 250;
+    int rem = 500;
     if (root) uwp_debug_dump_tree( uwp_elem_from_any( root ), 0, &rem );
 }
 
@@ -453,7 +453,7 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
     }
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_F12 && impl && impl->content)
     {
-        int rem = 250;
+        int rem = 500;
         uwp_debug_dump_tree( uwp_elem_from_any( impl->content ), 0, &rem );
         return 0;
     }
@@ -1481,27 +1481,67 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             uwp_gpu_paint_element( ctx, el->tpl_normal_output );
             return;
         }
-        if (el->text[0])
         {
-            RECT trc = el->bounds;
-            BOOL is_result = uwp_is_display_result_element( el );
-            int fh = is_result
-                ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
-                : max( (int)(12 * g_layout_scale + 0.5f), min( (int)(22 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
-            COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
-                ? blend_argb_over( el->fg_argb, surface_bg )
-                : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
-            if (wcsstr( el->class_name, L"MenuBarItem" ) &&
-                (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
+            WCHAR rich_buf[1024];
+            const WCHAR *draw_txt = el->text;
+            BOOL is_rich = FALSE;
+            if (!draw_txt[0] && el->inlines_coll)
             {
-                RECT hrc = trc;
-                InflateRect( &hrc, -2, -3 );
-                xaml_gpu_push_rect( (float)hrc.left, (float)hrc.top, (float)hrc.right, (float)hrc.bottom, NULL,
-                                    3.0f, cr_to_argb( RGB( 54, 54, 54 ) ), 0, 0.0f, 1.0f );
+                struct uwp_vec_view *v = CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+                unsigned int i, j;
+                size_t pos = 0;
+                rich_buf[0] = 0;
+                for (i = 0; v && i < v->count && pos + 2 < ARRAY_SIZE(rich_buf); i++)
+                {
+                    struct uwp_element *blk = uwp_elem_from_any( v->items[i] );
+                    if (!blk) continue;
+                    if (blk->text[0])
+                    {
+                        if (pos > 0 && rich_buf[pos - 1] != '\n') rich_buf[pos++] = '\n';
+                        lstrcpynW( rich_buf + pos, blk->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
+                        pos += wcslen( rich_buf + pos );
+                    }
+                    else if (blk->inlines_coll)
+                    {
+                        struct uwp_vec_view *iv = CONTAINING_RECORD( blk->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+                        if (pos > 0 && rich_buf[pos - 1] != '\n') rich_buf[pos++] = '\n';
+                        for (j = 0; iv && j < iv->count && pos + 2 < ARRAY_SIZE(rich_buf); j++)
+                        {
+                            struct uwp_element *inl = uwp_elem_from_any( iv->items[j] );
+                            if (inl && inl->text[0])
+                            {
+                                lstrcpynW( rich_buf + pos, inl->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
+                                pos += wcslen( rich_buf + pos );
+                            }
+                        }
+                    }
+                }
+                if (rich_buf[0]) { draw_txt = rich_buf; is_rich = TRUE; }
             }
-            InflateRect( &trc, -8, 0 );
-            xaml_gpu_push_text( ctx, el->text, fh, is_result ? FW_SEMIBOLD : FW_NORMAL,
-                                (is_result ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE, &trc, NULL, tfg, 1.0f );
+            if (draw_txt[0])
+            {
+                RECT trc = el->bounds;
+                BOOL is_result = uwp_is_display_result_element( el );
+                int fh = is_result
+                    ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
+                    : max( (int)(12 * g_layout_scale + 0.5f), min( (int)(22 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
+                COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
+                    ? blend_argb_over( el->fg_argb, surface_bg )
+                    : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
+                if (wcsstr( el->class_name, L"MenuBarItem" ) &&
+                    (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
+                {
+                    RECT hrc = trc;
+                    InflateRect( &hrc, -2, -3 );
+                    xaml_gpu_push_rect( (float)hrc.left, (float)hrc.top, (float)hrc.right, (float)hrc.bottom, NULL,
+                                        3.0f, cr_to_argb( RGB( 54, 54, 54 ) ), 0, 0.0f, 1.0f );
+                }
+                InflateRect( &trc, -8, 0 );
+                xaml_gpu_push_text( ctx, draw_txt, fh, is_result ? FW_SEMIBOLD : FW_NORMAL,
+                                    is_rich ? (DT_LEFT | DT_TOP | DT_WORDBREAK)
+                                            : ((is_result ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE),
+                                    &trc, NULL, tfg, 1.0f );
+            }
         }
     }
 
