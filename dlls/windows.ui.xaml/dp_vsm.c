@@ -940,7 +940,7 @@ IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_e
     else if (e->kind == UWP_RD_DATA_TEMPLATE)
     {
         IInspectable *dt = NULL;
-        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.DataTemplate", (void **)&dt )) && dt)
+        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.DataTemplate", NULL, NULL, (void **)&dt )) && dt)
         {
             struct uwp_element *dt_el = uwp_elem_from_any( dt );
             if (dt_el && e->template_xbf_data && e->template_xbf_size)
@@ -1778,7 +1778,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 old_val = pml->default_value;
                 IInspectable_AddRef( old_val );
             }
-            if (pml->callback)
+            if (pml->callback && old_val != val)
             {
                 struct uwp_dp_changed_args *args = calloc( 1, sizeof(*args) );
                 if (args)
