@@ -262,7 +262,9 @@ struct core_window
     float width;
     float height;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs *visibility_changed_handler;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *size_changed_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *size_changed_handlers[16];
+    INT64 size_changed_tokens[16];
+    INT64 next_size_changed_token;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *activated_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *character_received_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keydown_handler;
@@ -1204,8 +1206,14 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
         if (impl->window_client_adapter) IUnknown_Release( impl->window_client_adapter );
         if (impl->visibility_changed_handler)
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs_Release( impl->visibility_changed_handler );
-        if (impl->size_changed_handler)
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Release( impl->size_changed_handler );
+        {
+            unsigned int i;
+            for (i = 0; i < ARRAY_SIZE( impl->size_changed_handlers ); i++)
+            {
+                if (impl->size_changed_handlers[i])
+                    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Release( impl->size_changed_handlers[i] );
+            }
+        }
         if (impl->activated_handler)
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Release( impl->activated_handler );
         if (impl->character_received_handler)
@@ -1891,22 +1899,37 @@ static HRESULT WINAPI core_window_add_SizeChanged( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *handler, EventRegistrationToken *cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
+    unsigned int i;
     TRACE( "iface %p, handler %p\n", iface, handler );
-    if (cookie) cookie->value = 1;
-    if (handler)
+    if (cookie) cookie->value = 0;
+    if (!handler) return E_INVALIDARG;
+    for (i = 0; i < ARRAY_SIZE( impl->size_changed_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_AddRef( handler );
-        impl->size_changed_handler = handler;
+        if (!impl->size_changed_handlers[i])
+        {
+            INT64 tok = ++impl->next_size_changed_token;
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_AddRef( handler );
+            impl->size_changed_handlers[i] = handler;
+            impl->size_changed_tokens[i] = tok;
+            if (cookie) cookie->value = tok;
+            return S_OK;
+        }
     }
-    return S_OK;
+    return E_OUTOFMEMORY;
 }
 static HRESULT WINAPI core_window_remove_SizeChanged( ICoreWindow *iface, EventRegistrationToken cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
-    if (impl->size_changed_handler)
+    unsigned int i;
+    for (i = 0; i < ARRAY_SIZE( impl->size_changed_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Release( impl->size_changed_handler );
-        impl->size_changed_handler = NULL;
+        if (impl->size_changed_handlers[i] && impl->size_changed_tokens[i] == cookie.value)
+        {
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Release( impl->size_changed_handlers[i] );
+            impl->size_changed_handlers[i] = NULL;
+            impl->size_changed_tokens[i] = 0;
+            break;
+        }
     }
     return S_OK;
 }
@@ -2654,19 +2677,38 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
         float height = (float)HIWORD( lparam );
         if (impl && (width != impl->width || height != impl->height))
         {
+            unsigned int i;
+            __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *args = NULL;
+
             impl->width = width;
             impl->height = height;
-            if (impl->size_changed_handler)
+            if (width > 0 && height > 0)
             {
-                __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *args =
-                    window_size_changed_args_create( width, height );
-                if (args)
+                HWND child = GetWindow( hwnd, GW_CHILD );
+                while (child)
                 {
-                    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Invoke(
-                        impl->size_changed_handler, &impl->ICoreWindow_iface, args );
-                    __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs_Release( args );
+                    WCHAR cls[64];
+                    if (GetClassNameW( child, cls, ARRAY_SIZE(cls) ) && !wcscmp( cls, L"Chrome_WidgetWin_0" ))
+                    {
+                        SetWindowPos( child, NULL, 0, 0, (int)width, (int)height,
+                                SWP_NOZORDER | SWP_NOACTIVATE );
+                        break;
+                    }
+                    child = GetWindow( child, GW_HWNDNEXT );
                 }
             }
+            for (i = 0; i < ARRAY_SIZE( impl->size_changed_handlers ); i++)
+            {
+                __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *h =
+                    impl->size_changed_handlers[i];
+                if (!h) continue;
+                if (!args) args = window_size_changed_args_create( width, height );
+                if (args)
+                    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Invoke(
+                        h, &impl->ICoreWindow_iface, args );
+            }
+            if (args)
+                __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs_Release( args );
         }
         return DefWindowProcW( hwnd, msg, wparam, lparam );
     }
