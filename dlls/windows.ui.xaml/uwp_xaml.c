@@ -3529,9 +3529,19 @@ static const GUID IID_IIterable_Block_UWP =
 static const GUID IID_IIterator_Block_UWP =
     { 0x798d518e, 0xa9f8, 0x5fc7, { 0x8c, 0xcc, 0x2a, 0x49, 0x06, 0x9a, 0xba, 0x05 } };
 static const GUID IID_IIterable_Inline_UWP =
-    { 0x10204650, 0xe804, 0x50be, { 0xbc, 0xeb, 0x27, 0xb0, 0x4f, 0x15, 0xd1, 0x98 } };
+    { 0x3017abfa, 0xa321, 0x5045, { 0x97, 0x44, 0x60, 0xaf, 0x42, 0xed, 0x71, 0x59 } };
 static const GUID IID_IIterator_Inline_UWP =
-    { 0x3e57bafb, 0xc6c8, 0x5c7a, { 0x87, 0x73, 0x34, 0x49, 0x33, 0x42, 0x21, 0x6a } };
+    { 0x18bb3ba7, 0x67d6, 0x5d0d, { 0x90, 0x97, 0x24, 0xfc, 0x66, 0xbf, 0xb9, 0x01 } };
+static const GUID IID_IBindableIterable_UWP =
+    { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
+static const GUID IID_IIterable_RowDef_UWP =
+    { 0x11fdab6b, 0x6769, 0x5c78, { 0x93, 0x21, 0x1c, 0x29, 0x30, 0x25, 0x38, 0x7d } };
+static const GUID IID_IIterator_RowDef_UWP =
+    { 0xd3d9ead4, 0x5e46, 0x54f7, { 0xa5, 0x27, 0x60, 0xde, 0xdd, 0x9f, 0x25, 0xc8 } };
+static const GUID IID_IIterable_ColDef_UWP =
+    { 0xb629d3fc, 0x513c, 0x5857, { 0x9b, 0xd5, 0xf9, 0xf7, 0x8f, 0xdc, 0xb1, 0xb9 } };
+static const GUID IID_IIterator_ColDef_UWP =
+    { 0x4159246b, 0x41be, 0x5bc2, { 0xa0, 0x7e, 0x9f, 0x26, 0xf1, 0xb9, 0x28, 0x71 } };
 
 static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 {
@@ -3551,7 +3561,10 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IIterable_IInspectable_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_UIElement_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_Block_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterable_Inline_UWP ))
+        IsEqualGUID( iid, &IID_IIterable_Inline_UWP ) ||
+        IsEqualGUID( iid, &IID_IBindableIterable_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_RowDef_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_ColDef_UWP ))
     {
         *out = &v->IIterable_iface;
         IInspectable_AddRef( iface );
@@ -3754,7 +3767,9 @@ static HRESULT WINAPI uwp_viter_QI( IInspectable *iface, REFIID iid, void **out 
         IsEqualGUID( iid, &IID_IIterator_IInspectable_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_UIElement_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_Block_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterator_Inline_UWP ))
+        IsEqualGUID( iid, &IID_IIterator_Inline_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_RowDef_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_ColDef_UWP ))
     {
         *out = iface;
         IInspectable_AddRef( iface );
