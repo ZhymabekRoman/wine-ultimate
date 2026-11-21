@@ -2176,12 +2176,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                         *out = &impl->ITextBlock_iface;
                     else if (iid->Data1 == 0x59553c83 && iid->Data2 == 0x0e14 && iid->Data3 == 0x49bd)
                         *out = &impl->IParagraph_iface; /* IRun */
-                    else if ((wcsstr( impl->class_name, L"Paragraph" ) ||
-                              wcsstr( impl->class_name, L"Span" ) ||
-                              wcsstr( impl->class_name, L"Hyperlink" ) ||
-                              wcsstr( impl->class_name, L"Bold" ) ||
-                              wcsstr( impl->class_name, L"Italic" ) ||
-                              wcsstr( impl->class_name, L"Underline" )) &&
+                    else if (wcsstr( impl->class_name, L"Documents." ) && !wcsstr( impl->class_name, L"Run" ) &&
                              iid->Data1 != 0xf83ef59a && iid->Data1 != 0x4bce0016)
                         *out = &impl->IParagraph_iface;
                     else
