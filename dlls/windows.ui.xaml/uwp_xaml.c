@@ -4660,6 +4660,16 @@ HRESULT WINAPI uwp_fe_probe109( void *iface, ... ) { struct uwp_element *impl = 
 HRESULT WINAPI uwp_fe_probe110( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 110 hit on NavView\n" ); return S_OK; }
 HRESULT WINAPI uwp_fe_probe111( void *iface, ... ) { struct uwp_element *impl = uwp_elem_from_any( iface ); if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) TRACE( "fe-vtbl slot 111 hit on NavView\n" ); return S_OK; }
 
+static HRESULT WINAPI uwp_fe_SetBinding( void *iface, void *dp, void *binding )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_element *bel = uwp_elem_from_any( binding );
+    TRACE( "uwp_fe_SetBinding(%p, dp=%p, binding=%p)\n", impl, dp, binding );
+    if (impl && dp && bel && bel->data_context)
+        uwp_do_SetValue( &impl->IDependencyObject_iface, dp, bel->data_context );
+    return S_OK;
+}
+
 static const void *uwp_fe_vtbl[112] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -4679,7 +4689,6 @@ static const void *uwp_fe_vtbl[112] =
     [39] = uwp_fe_put_Style,
     [44] = uwp_fe_probe44,
     [48] = uwp_fe_probe48,
-    [52] = uwp_fe_probe52,
     [53] = uwp_fe_probe53,
     [54] = uwp_fe_probe54,
     [55] = uwp_fe_probe55,
@@ -4724,6 +4733,7 @@ static const void *uwp_fe_vtbl[112] =
     [49] = uwp_fe_add_LayoutUpdated,
     [50] = uwp_fe_remove_LayoutUpdated,
     [51] = uwp_fe_FindName,
+    [52] = uwp_fe_SetBinding,
     /* INavigationView ABI slots when this face is cast to NavigationView.
      * Chain: IInspectable(3) + IFrameworkElement(53) = base 56, own-method
      * order from Microsoft.UI.Xaml.winmd 2.8: own[0]=IsPaneOpen(56),
