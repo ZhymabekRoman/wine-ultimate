@@ -2778,6 +2778,8 @@ void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h )
 BOOL uwp_vsm_leave_state_on_tree( struct uwp_element *el, const WCHAR *state_name )
 {
     int g, s;
+    unsigned int k;
+    BOOL found = FALSE;
     if (!el || !state_name || !state_name[0]) return FALSE;
     for (g = 0; g < el->vsm_group_cnt; g++)
     {
@@ -2788,11 +2790,28 @@ BOOL uwp_vsm_leave_state_on_tree( struct uwp_element *el, const WCHAR *state_nam
             {
                 if (grp->active_state_idx == s)
                     uwp_vsm_transition_group( el, grp, -1 );
-                return TRUE;
+                found = TRUE;
+                break;
             }
         }
     }
-    return FALSE;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_vsm_leave_state_on_tree( ch, state_name ))
+            found = TRUE;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el && uwp_vsm_leave_state_on_tree( ch, state_name ))
+                found = TRUE;
+        }
+    }
+    return found;
 }
 
 BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name )

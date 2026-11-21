@@ -2119,12 +2119,13 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             *out = &impl->IBitmapImage_iface;
         else if (IsEqualGUID( iid, &IID_IBitmapSource_UWP ))
             *out = &impl->IBitmapSource_iface;
+        else if (IsEqualGUID( iid, &IID_IStateTrigger_UWP ))
+            *out = &impl->IStateTriggerPub_iface;
         else if (IsEqualGUID( iid, &IID_IListViewBase2_UWP ) ||
                  IsEqualGUID( iid, &IID_IListViewBase4_UWP ) ||
                  IsEqualGUID( iid, &IID_IListView_UWP ) ||
                  IsEqualGUID( iid, &IID_IShape_UWP ) ||
                  IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
-                 IsEqualGUID( iid, &IID_IStateTrigger_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage3_UWP ))
@@ -2140,11 +2141,11 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         if (IsEqualGUID( iid, &IID_IDispatcherTimer_UWP ))
             *out = &impl->IInspectable_iface;
         else if (IsEqualGUID( iid, &IID_IStateTriggerBase_UWP ) ||
-                 IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ) ||
                  IsEqualGUID( iid, &IID_IMarkupExtension_UWP ) ||
                  IsEqualGUID( iid, &IID_IMarkupExtensionOverrides_UWP ))
             *out = &impl->IStyle_iface;
-        else if (IsEqualGUID( iid, &IID_IUIElement10_UWP ) ||
+        else if (IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ) ||
+                 IsEqualGUID( iid, &IID_IUIElement10_UWP ) ||
                  IsEqualGUID( iid, &IID_IXamlRoot_UWP ))
             *out = &impl->IStateTrigger_iface;
         else
@@ -5787,6 +5788,9 @@ static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
                 struct uwp_element *scope = p->owner_component ? p->owner_component : impl->owner_component;
                 if (scope)
                 {
+                    TRACE( "StateTrigger %s (%s) is_active=%d -> state=%s on scope=%s (%s)\n",
+                           debugstr_w(impl->class_name), debugstr_w(impl->name), is_active,
+                           debugstr_w(p->name), debugstr_w(scope->class_name), debugstr_w(scope->name) );
                     if (is_active)
                         uwp_vsm_goto_state_on_tree( scope, p->name );
                     else
