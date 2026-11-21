@@ -3365,14 +3365,24 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
         ID2D1Effect *effect;
         if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Effect, (void **)&effect)))
         {
-            ID2D1Image *input = NULL;
-            TRACE("Forwarding input image for unhandled ID2D1Effect %p.\n", effect);
-            ID2D1Effect_GetInput(effect, 0, &input);
-            if (input)
+            struct d2d_effect *effect_impl = CONTAINING_RECORD(effect, struct d2d_effect, ID2D1Effect_iface);
+            if (IsEqualGUID(&effect_impl->clsid, &CLSID_D2D1Shadow))
             {
-                ID2D1DeviceContext6_DrawImage(iface, input, target_offset, image_rect,
-                        interpolation_mode, composite_mode);
-                ID2D1Image_Release(input);
+                static const D2D1_COLOR_F transparent = { 0.0f, 0.0f, 0.0f, 0.0f };
+                TRACE("Clearing target for unhandled CLSID_D2D1Shadow %p.\n", effect);
+                d2d_device_context_Clear(iface, &transparent);
+            }
+            else
+            {
+                ID2D1Image *input = NULL;
+                TRACE("Forwarding input image for unhandled ID2D1Effect %p.\n", effect);
+                ID2D1Effect_GetInput(effect, 0, &input);
+                if (input)
+                {
+                    ID2D1DeviceContext6_DrawImage(iface, input, target_offset, image_rect,
+                            interpolation_mode, composite_mode);
+                    ID2D1Image_Release(input);
+                }
             }
             ID2D1Effect_Release(effect);
             return;

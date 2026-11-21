@@ -3446,6 +3446,7 @@ HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effec
     object->ID2D1Effect_iface.lpVtbl = &d2d_effect_vtbl;
     object->ID2D1Image_iface.lpVtbl = &d2d_effect_image_vtbl;
     object->refcount = 1;
+    object->clsid = *effect_id;
     object->effect_context = effect_context;
 
     /* Create properties */
