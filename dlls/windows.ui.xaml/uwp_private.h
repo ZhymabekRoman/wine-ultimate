@@ -300,6 +300,8 @@ struct uwp_element
     IInspectable ISelector_iface;
     IInspectable IItemsControl_iface;
     IInspectable IStateTrigger_iface;
+    IInspectable IStateTriggerPub_iface;
+    boolean state_trigger_active;
     IInspectable IObservableVector_iface;
     IInspectable IVector_iface;
     IInspectable IIterable_iface;

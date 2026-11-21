@@ -2119,12 +2119,13 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             *out = &impl->IBitmapImage_iface;
         else if (IsEqualGUID( iid, &IID_IBitmapSource_UWP ))
             *out = &impl->IBitmapSource_iface;
+        else if (IsEqualGUID( iid, &IID_IStateTrigger_UWP ))
+            *out = &impl->IStateTriggerPub_iface;
         else if (IsEqualGUID( iid, &IID_IListViewBase2_UWP ) ||
                  IsEqualGUID( iid, &IID_IListViewBase4_UWP ) ||
                  IsEqualGUID( iid, &IID_IListView_UWP ) ||
                  IsEqualGUID( iid, &IID_IShape_UWP ) ||
                  IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
-                 IsEqualGUID( iid, &IID_IStateTrigger_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage3_UWP ))
@@ -5773,6 +5774,7 @@ static HRESULT WINAPI uwp_img_put_Stretch( void *iface, int val )
 static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->state_trigger_active = is_active;
     if (impl && is_active)
     {
         struct uwp_element *p;
@@ -5785,13 +5787,22 @@ static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
                 {
                     uwp_vsm_goto_state_on_tree( scope, p->name );
                     g_layout_dirty = TRUE;
-                    uwp_invalidate_window();
                 }
                 break;
             }
         }
     }
     return S_OK;
+}
+static HRESULT WINAPI uwp_st_get_IsActive( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->state_trigger_active : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_st_put_IsActive( void *iface, boolean is_active )
+{
+    return uwp_st_SetActive( iface, is_active );
 }
 static const void *uwp_state_trigger_vtbl[16] =
 {
@@ -5803,6 +5814,18 @@ static const void *uwp_state_trigger_vtbl[16] =
     [5] = uwp_sub_GetTrustLevel,
     [6] = uwp_st_SetActive,
     [7 ... 15] = uwp_generic_noop,
+};
+static const void *uwp_state_trigger_pub_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_st_get_IsActive,
+    [7] = uwp_st_put_IsActive,
+    [8 ... 15] = uwp_generic_noop,
 };
 static const void *uwp_img_vtbl[24] =
 {
@@ -6852,6 +6875,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->ISelector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_selector_vtbl;
     impl->IItemsControl_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_items_ctrl_vtbl;
     impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_state_trigger_vtbl;
+    impl->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_state_trigger_pub_vtbl;
     impl->IObservableVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_obsvec_vtbl;
     impl->IVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_vec_vtbl;
     impl->IIterable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_iterable_vtbl;
