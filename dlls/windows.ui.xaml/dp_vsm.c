@@ -2109,9 +2109,7 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
                     }
                     if (target_is_coll)
                     {
-                        coll = (IInspectable *)target_obj;
-                        IInspectable_AddRef( coll );
-                        hr = S_OK;
+                        hr = E_FAIL;
                     }
                     else
                     {
