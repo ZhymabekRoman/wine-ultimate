@@ -2307,6 +2307,8 @@ HRESULT WINAPI uwp_ui_add_##name( void *iface, void *handler, EventRegistrationT
 { \
     struct uwp_element *impl = uwp_elem_from_any( iface ); \
     if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; } \
+    if (wcsstr( impl->class_name, L"Card" )) \
+        WARN( "add_" #name " on %s (%s) impl=%p handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( uwp_elem_name_w( impl ) ), impl, handler ); \
     TRACE( "add_" #name " on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( uwp_elem_name_w( impl ) ), handler ); \
     return xaml_event_registry_add( &impl->field, handler, tok ); \
 } \
@@ -3306,6 +3308,8 @@ HRESULT WINAPI uwp_btn_put_Command( void *iface, void *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return S_OK;
+    if (wcsstr( impl->class_name, L"Card" ))
+        WARN( "uwp_btn_put_Command on %s impl=%p val=%p\n", debugstr_w(impl->class_name), impl, val );
     if (impl->command) IInspectable_Release( impl->command );
     impl->command = (IInspectable *)val;
     if (impl->command) IInspectable_AddRef( impl->command );
@@ -3323,6 +3327,8 @@ HRESULT WINAPI uwp_btn_put_CommandParameter( void *iface, void *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return S_OK;
+    if (wcsstr( impl->class_name, L"Card" ))
+        WARN( "uwp_btn_put_CommandParameter on %s impl=%p val=%p\n", debugstr_w(impl->class_name), impl, val );
     if (impl->command_param) IInspectable_Release( impl->command_param );
     impl->command_param = (IInspectable *)val;
     if (impl->command_param) IInspectable_AddRef( impl->command_param );
@@ -3333,6 +3339,8 @@ HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationT
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (tok) tok->value = 1;
     if (!impl || !handler) return S_OK;
+    if (wcsstr( impl->class_name, L"Card" ))
+        WARN( "uwp_btn_add_Click on %s impl=%p handler=%p\n", debugstr_w(impl->class_name), impl, handler );
     if (xaml_vec_grow( (void **)&impl->click_handlers, &impl->click_cap, impl->click_cnt + 1, sizeof(*impl->click_handlers), 8 ))
     {
         impl->click_handlers[impl->click_cnt++] = (IInspectable *)handler;
@@ -4237,6 +4245,8 @@ static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *
     struct uwp_element *impl = uwp_elem_from_any( iface );
     (void)handled_too;
     if (!impl || !handler) return S_OK;
+    WARN( "uwp_ui_AddHandler on %s (%s) ev=%p ptr_ev=%p handler=%p handled_too=%d\n",
+          debugstr_w(impl->class_name), debugstr_w(impl->name), routed_event, g_routed_event_ptr_pressed, handler, handled_too );
     if (g_routed_event_ptr_pressed && routed_event == (void *)g_routed_event_ptr_pressed)
     {
         static const GUID IID_IPointerEventHandler_UWP =
@@ -5690,8 +5700,11 @@ static HRESULT WINAPI uwp_dt_LoadContent( IInspectable *iface, IInspectable **ou
                                               impl->template_sub_idx, impl->template_owner_comp );
         if (*out)
         {
-            TRACE( "uwp_dt_LoadContent(%p) -> instantiated substream %u -> %p\n",
-                   impl, (unsigned)impl->template_sub_idx, *out );
+            struct uwp_element *ce = uwp_elem_from_any( *out );
+            WARN( "uwp_dt_LoadContent(%p) sub=%u -> %p (%s bc=%p clicks=%d)\n",
+                  impl, (unsigned)impl->template_sub_idx, *out,
+                  ce ? debugstr_w(ce->class_name) : "?",
+                  ce ? ce->binding_connector : NULL, ce ? ce->click_cnt : -1 );
             return S_OK;
         }
     }
@@ -6621,6 +6634,16 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
         if (impl->data_context) IInspectable_Release( impl->data_context );
         impl->data_context = dc;
         if (dc) IInspectable_AddRef( dc );
+    }
+    if (wcsstr( impl->class_name, L"Card" ))
+    {
+        static const GUID IID_IDTE = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
+        void *dte = NULL;
+        if (impl->binding_connector &&
+            SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)impl->binding_connector, &IID_IDTE, &dte )) && dte)
+            IUnknown_Release( (IUnknown *)dte );
+        WARN( "Card DC(%p) dc=%p dc_cnt=%d bc=%p dte=%p clicks=%d cmd=%p\n",
+              impl, dc, impl->dc_cnt, impl->binding_connector, dte, impl->click_cnt, impl->command );
     }
 
     if (dc)
@@ -7707,6 +7730,7 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
         (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
+         el->click_cnt > 0 || el->command != NULL ||
          wcsstr( el->class_name, L"MenuBarItem" )))
     {
         if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
@@ -7958,14 +7982,24 @@ BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e )
     return FALSE;
 }
 
+static BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y );
+
 void uwp_invoke_button( struct uwp_element *btn )
 {
     int i;
     if (!btn || !btn->is_enabled) return;
 
-    TRACE( "uwp_invoke_button: %s (%s, text=%s, cmd=%p, param=%p, clicks=%d)\n",
-           debugstr_w(btn->class_name), debugstr_w(btn->name), debugstr_w(btn->text),
-           btn->command, btn->command_param, btn->click_cnt );
+    WARN( "uwp_invoke_button: %s (%s, text=%s, cmd=%p, param=%p, dc=%p, clicks=%d, tapped=%d, ptrP=%d, ptrR=%d, dp=%d)\n",
+          debugstr_w(btn->class_name), debugstr_w(btn->name), debugstr_w(btn->text),
+          btn->command, btn->command_param, btn->data_context, btn->click_cnt,
+          (int)btn->tapped_reg.next_token, (int)btn->ptr_pressed_reg.next_token,
+          (int)btn->ptr_released_reg.next_token, btn->dp_cnt );
+    for (i = 0; i < btn->dp_cnt; i++)
+    {
+        struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dp_store[i].dp;
+        WARN( "  dp[%d] name=%s val=%p\n", i,
+              (dpl && (ULONG_PTR)dpl >= 0x10000) ? debugstr_w(dpl->name) : "?", btn->dp_store[i].value );
+    }
 
     /* 1. Invoke ICommand::Execute(CommandParameter) if Command is bound */
     if (btn->command)
@@ -7973,24 +8007,88 @@ void uwp_invoke_button( struct uwp_element *btn )
         __TRY
         {
             void *cmd_iface = NULL;
-            if ((SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface )) ||
-                 SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP2, &cmd_iface ))) && cmd_iface)
+            HRESULT qhr = IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface );
+            if (FAILED(qhr))
+                qhr = IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP2, &cmd_iface );
+            if (SUCCEEDED(qhr) && cmd_iface)
             {
                 /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
                 struct command_iface *cmd = (struct command_iface *)cmd_iface;
-                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, btn->command_param );
+                HRESULT ehr = E_NOTIMPL;
+                HMODULE mod = NULL;
+                boolean can_null = -1, can_dc = -1, can_content = -1;
+                HRESULT (WINAPI *can_exec)(void *, void *, boolean *) = (void *)(*(void ***)cmd)[8];
+                HSTRING hcmd_cls = NULL;
+                IInspectable_GetRuntimeClassName( (IInspectable *)cmd, &hcmd_cls );
+                if (can_exec)
+                {
+                    can_exec( cmd, btn->command_param, &can_null );
+                    if (btn->data_context) can_exec( cmd, btn->data_context, &can_dc );
+                    if (btn->content) can_exec( cmd, btn->content, &can_content );
+                }
+                GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    (LPCSTR)cmd->lpVtbl->Execute, &mod );
+                if (cmd->lpVtbl->Execute) ehr = cmd->lpVtbl->Execute( cmd, btn->command_param );
+                WARN( "uwp_invoke_button: ICommand cls=%s cmd=%p can=(%d,%d,%d) fn=%p (+0x%lx) param=%p -> hr=%#lx\n",
+                      hcmd_cls ? debugstr_w(WindowsGetStringRawBuffer(hcmd_cls, NULL)) : "?",
+                      btn->command, (int)can_null, (int)can_dc, (int)can_content, cmd->lpVtbl->Execute,
+                      mod ? (unsigned long)((const char *)cmd->lpVtbl->Execute - (const char *)mod) : 0ul,
+                      btn->command_param, (unsigned long)ehr );
+                if (cmd->lpVtbl->Execute && !btn->command_param && btn->content)
+                {
+                    static const GUID IID_IStringable_u = { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+                    void *strable = NULL;
+                    HSTRING hs_cmd = NULL, hs_dc = NULL, hs_cnt = NULL;
+                    IInspectable *sender_el = btn->outer ? btn->outer : &btn->IInspectable_iface;
+                    HRESULT ehr2, ehr3, ehr4;
+                    if (SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_IStringable_u, &strable )) && strable)
+                    {
+                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
+                        if (to_str) to_str( strable, &hs_cmd );
+                        IUnknown_Release( (IUnknown *)strable );
+                        strable = NULL;
+                    }
+                    if (btn->data_context && SUCCEEDED(IInspectable_QueryInterface( btn->data_context, &IID_IStringable_u, &strable )) && strable)
+                    {
+                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
+                        if (to_str) to_str( strable, &hs_dc );
+                        IUnknown_Release( (IUnknown *)strable );
+                        strable = NULL;
+                    }
+                    if (SUCCEEDED(IInspectable_QueryInterface( btn->content, &IID_IStringable_u, &strable )) && strable)
+                    {
+                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
+                        if (to_str) to_str( strable, &hs_cnt );
+                        IUnknown_Release( (IUnknown *)strable );
+                    }
+                    ehr2 = cmd->lpVtbl->Execute( cmd, btn->content );
+                    ehr3 = btn->data_context ? cmd->lpVtbl->Execute( cmd, btn->data_context ) : E_FAIL;
+                    ehr4 = cmd->lpVtbl->Execute( cmd, sender_el );
+                    WARN( "uwp_invoke_button: ToString cmd=%s dc=%s cnt=%s | Exec(cnt)=%#lx Exec(dc)=%#lx Exec(card)=%#lx\n",
+                          hs_cmd ? debugstr_w(WindowsGetStringRawBuffer(hs_cmd, NULL)) : "?",
+                          hs_dc ? debugstr_w(WindowsGetStringRawBuffer(hs_dc, NULL)) : "?",
+                          hs_cnt ? debugstr_w(WindowsGetStringRawBuffer(hs_cnt, NULL)) : "?",
+                          (unsigned long)ehr2, (unsigned long)ehr3, (unsigned long)ehr4 );
+                    if (hs_cmd) WindowsDeleteString( hs_cmd );
+                    if (hs_dc) WindowsDeleteString( hs_dc );
+                    if (hs_cnt) WindowsDeleteString( hs_cnt );
+                }
+                if (hcmd_cls) WindowsDeleteString( hcmd_cls );
                 IUnknown_Release( (IUnknown *)cmd_iface );
             }
             else
             {
                 /* Direct vtbl call if already on ICommand face */
                 struct command_iface *cmd = (struct command_iface *)btn->command;
-                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, btn->command_param );
+                HRESULT ehr = E_NOTIMPL;
+                if (cmd->lpVtbl->Execute) ehr = cmd->lpVtbl->Execute( cmd, btn->command_param );
+                WARN( "uwp_invoke_button: direct Execute qhr=%#lx cmd=%p fn=%p -> hr=%#lx\n",
+                      (unsigned long)qhr, cmd, cmd->lpVtbl->Execute, (unsigned long)ehr );
             }
         }
         __EXCEPT_ALL
         {
-            TRACE( "uwp_invoke_button: ICommand::Execute faulted\n" );
+            WARN( "uwp_invoke_button: ICommand::Execute faulted\n" );
         }
         __ENDTRY;
     }
@@ -8004,15 +8102,25 @@ void uwp_invoke_button( struct uwp_element *btn )
             {
                 IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
                 struct xaml_event_handler *h = (struct xaml_event_handler *)btn->click_handlers[i];
-                h->lpVtbl->Invoke( h, sender, g_routed_args() );
+                HMODULE mod = NULL;
+                void *inv = h->lpVtbl->Invoke;
+                HRESULT chr;
+                GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    (LPCSTR)inv, &mod );
+                chr = h->lpVtbl->Invoke( h, sender, g_routed_args() );
+                WARN( "uwp_invoke_button: Click[%d] h=%p inv=%p (mod=%p +0x%lx) sender=%p -> hr=%#lx\n",
+                      i, h, inv, mod, mod ? (unsigned long)((const char *)inv - (const char *)mod) : 0ul,
+                      sender, (unsigned long)chr );
             }
             __EXCEPT_ALL
             {
-                TRACE( "uwp_invoke_button: Click handler %d faulted\n", i );
+                WARN( "uwp_invoke_button: Click handler %d faulted\n", i );
             }
             __ENDTRY;
         }
     }
+    if (btn->tapped_reg.next_token > 0)
+        uwp_fire_tapped_bubble( btn, btn->bounds.left + 8, btn->bounds.top + 8 );
 
     /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
     if (xaml_get_app_caps()->vm_type[0])
@@ -8307,8 +8415,16 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
         }
         if (btn)
         {
+            struct xaml_pointer_info info = {0};
             g_pressed_btn = btn;
             btn->is_pressed = TRUE;
+            info.x = (float)x;
+            info.y = (float)y;
+            info.pointer_id = 1;
+            info.is_left = TRUE;
+            info.is_in_contact = TRUE;
+            info.is_in_window = TRUE;
+            uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
             TRACE( "uwp_handle_mouse_input: DOWN (%d,%d) -> %s (%s)\n",
                    x, y, debugstr_w(btn->name), debugstr_w(btn->text) );
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
@@ -8395,10 +8511,22 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             struct uwp_element *hit = uwp_hit_test_button( root_el, x, y );
             btn->is_pressed = FALSE;
             g_pressed_btn = NULL;
-            TRACE( "uwp_handle_mouse_input: UP (%d,%d) pressed=%s hit=%s\n",
-                   x, y, debugstr_w(btn->name), hit ? debugstr_w(hit->name) : "(null)" );
+            WARN( "uwp_handle_mouse_input: UP (%d,%d) pressed=%p(%s) hit=%p(%s)\n",
+                  x, y, btn, debugstr_w(btn->class_name), hit, hit ? debugstr_w(hit->class_name) : "(null)" );
             if (hit == btn)
+            {
+                struct xaml_pointer_info info = {0};
+                info.x = (float)x;
+                info.y = (float)y;
+                info.pointer_id = 1;
+                info.is_left = TRUE;
+                info.is_in_contact = FALSE;
+                info.is_in_window = TRUE;
+                uwp_fire_element_pointer( btn, XAML_PTR_RELEASED, &info, TRUE );
                 uwp_invoke_button( btn );
+            }
+            else
+                uwp_fire_tapped_bubble( btn, x, y );
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
             return TRUE;
