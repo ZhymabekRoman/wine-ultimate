@@ -1513,6 +1513,20 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                                 lstrcpynW( rich_buf + pos, inl->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
                                 pos += wcslen( rich_buf + pos );
                             }
+                            else if (inl && inl->inlines_coll)
+                            {
+                                struct uwp_vec_view *sv = CONTAINING_RECORD( inl->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+                                unsigned int k;
+                                for (k = 0; sv && k < sv->count && pos + 2 < ARRAY_SIZE(rich_buf); k++)
+                                {
+                                    struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
+                                    if (sub && sub->text[0])
+                                    {
+                                        lstrcpynW( rich_buf + pos, sub->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
+                                        pos += wcslen( rich_buf + pos );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
