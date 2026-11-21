@@ -1807,7 +1807,7 @@ BOOL xbf_read_vsm_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
         {
             DWORD q = p + 3, cnt = 0;
             if (xbf_read_uleb( nodes, &q, end_p, &cnt ) &&
-                cnt >= n_states && cnt <= (end_p - q) / 2 &&
+                cnt <= (end_p - q) / 2 &&
                 q + cnt * 2 < end_p && nodes[q + cnt * 2] == 0x02)
             {
                 DWORD next_p = q + cnt * 2 + 1;
