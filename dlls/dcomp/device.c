@@ -388,8 +388,10 @@ struct composite_blit_data
 {
     FLOAT opacity;
     FLOAT replace_popup_black;
-    FLOAT pad[2];
+    FLOAT backdrop_radius;
+    FLOAT pad;
     FLOAT clip_rect[4];         /* left, top, right, bottom */
+    FLOAT backdrop_rect[4];     /* left, top, right, bottom in device pixels (0 if unused) */
 };
 
 static const char composite_vs_code[] =
@@ -417,8 +419,10 @@ static const char composite_ps_code[] =
     "{\n"
     "    float opacity;\n"
     "    float replace_popup_black;\n"
-    "    float2 pad;\n"
+    "    float backdrop_radius;\n"
+    "    float pad;\n"
     "    float4 clip_rect; /* left, top, right, bottom in device pixels */\n"
+    "    float4 backdrop_rect; /* left, top, right, bottom in device pixels */\n"
     "};\n"
     "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET\n"
     "{\n"
@@ -428,6 +432,21 @@ static const char composite_ps_code[] =
     "    float4 c = src_texture.Sample(sam_linear, uv);\n"
     "    if (replace_popup_black > 0.5 && c.a > 0.99 && c.r < 0.005 && c.g < 0.005 && c.b < 0.005)\n"
     "        c = float4(0.976, 0.976, 0.976, 1.0);\n"
+    "    if (backdrop_rect.z > backdrop_rect.x && backdrop_rect.w > backdrop_rect.y)\n"
+    "    {\n"
+    "        float2 center = 0.5 * (backdrop_rect.xy + backdrop_rect.zw);\n"
+    "        float2 half_size = 0.5 * (backdrop_rect.zw - backdrop_rect.xy);\n"
+    "        float r = min(backdrop_radius, min(half_size.x, half_size.y));\n"
+    "        float2 q = abs(px - center) - (half_size - float2(r, r));\n"
+    "        float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n"
+    "        float cov = clamp(0.5 - dist, 0.0, 1.0);\n"
+    "        if (cov > 0.0)\n"
+    "        {\n"
+    "            float3 bg = float3(0.976, 0.976, 0.976);\n"
+    "            float4 dst = float4(bg * cov, cov);\n"
+    "            c = float4(c.rgb + dst.rgb * (1.0 - c.a), c.a + dst.a * (1.0 - c.a));\n"
+    "        }\n"
+    "    }\n"
     "    return float4(c.rgb * opacity, c.a * opacity);\n"
     "}";
 
@@ -822,11 +841,24 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         vs_data.transform = *proj_matrix;
         blit_data.opacity = opacity;
         blit_data.replace_popup_black = ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP)) ? 1.0f : 0.0f;
-        blit_data.pad[0] = blit_data.pad[1] = 0;
+        blit_data.backdrop_radius = target->has_backdrop_clip ? target->backdrop_radius : 0.0f;
+        blit_data.pad = 0.0f;
         blit_data.clip_rect[0] = clip_rect ? clip_rect->left : 0.0f;
         blit_data.clip_rect[1] = clip_rect ? clip_rect->top : 0.0f;
         blit_data.clip_rect[2] = clip_rect ? clip_rect->right : (FLOAT)dst_width;
         blit_data.clip_rect[3] = clip_rect ? clip_rect->bottom : (FLOAT)dst_height;
+        if ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP) && target->has_backdrop_clip)
+        {
+            blit_data.backdrop_rect[0] = target->backdrop_clip.left;
+            blit_data.backdrop_rect[1] = target->backdrop_clip.top;
+            blit_data.backdrop_rect[2] = target->backdrop_clip.right;
+            blit_data.backdrop_rect[3] = target->backdrop_clip.bottom;
+        }
+        else
+        {
+            blit_data.backdrop_rect[0] = blit_data.backdrop_rect[1] = 0.0f;
+            blit_data.backdrop_rect[2] = blit_data.backdrop_rect[3] = 0.0f;
+        }
 
         ID3D11DeviceContext_UpdateSubresource(d3d11_device_context,
                 (ID3D11Resource *)target->composite_vs_cb, 0, NULL, &vs_data, 0, 0);
@@ -1884,6 +1916,7 @@ struct target_snapshot
 };
 
 static BOOL visual_get_clip_rect(const struct composition_visual *visual, D2D_RECT_F *rect);
+static FLOAT visual_get_clip_radius(const struct composition_visual *visual);
 static void composite_frame_cleanup(struct composite_frame *frame);
 
 static struct composite_frame *device_alloc_frame(struct composition_device *device)
@@ -2118,6 +2151,16 @@ static void collect_visual_frames(struct composition_device *device, struct comp
             cur_clip = v_clip;
         }
         effective_clip_ptr = &cur_clip;
+        if (!visual_tree_has_content(visual))
+        {
+            FLOAT radius = visual_get_clip_radius(visual);
+            if (radius > 0.0f && cur_clip.right > cur_clip.left && cur_clip.bottom > cur_clip.top)
+            {
+                target->has_backdrop_clip = TRUE;
+                target->backdrop_clip = cur_clip;
+                target->backdrop_radius = radius;
+            }
+        }
     }
 
     if (visual->shared_visual_handle)
@@ -2435,6 +2478,7 @@ static void collect_device_frames(struct composition_device *device, LONG *out_t
             unsigned int target_queued = 0;
             BOOL force = target->needs_redraw;
             target->needs_redraw = FALSE;
+            target->has_backdrop_clip = FALSE;
             collect_visual_frames(device, target, root, target->hwnd, 0.0f, 0.0f,
                     &identity, FALSE, 0, NULL, 0, force, &target_queued);
             if (!force && target_queued > 0)
@@ -2517,6 +2561,22 @@ static BOOL visual_get_clip_rect(const struct composition_visual *visual, D2D_RE
         return TRUE;
     }
     return FALSE;
+}
+
+static FLOAT visual_get_clip_radius(const struct composition_visual *visual)
+{
+    IDCompositionRectangleClip *rectangle_clip;
+    struct dcomp_transform *transform;
+    FLOAT radius = 0.0f;
+
+    if (visual->clip && SUCCEEDED(IDCompositionClip_QueryInterface(visual->clip,
+            &IID_IDCompositionRectangleClip, (void **)&rectangle_clip)))
+    {
+        transform = impl_from_rectangle_clip(rectangle_clip);
+        radius = transform->clip_tl_radius_x;
+        IDCompositionRectangleClip_Release(rectangle_clip);
+    }
+    return radius;
 }
 
 static IDXGISurface *frame_get_surface(struct composite_frame *frame)

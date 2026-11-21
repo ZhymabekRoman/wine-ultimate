@@ -217,6 +217,9 @@ struct composition_target
     RECT composite_batch_rect;              /* union of the visual regions drawn this pass */
     BOOL composite_batch_active;            /* a composite pass for this target is open */
     BOOL composite_batch_cleared;           /* the back buffer was cleared this pass */
+    BOOL has_backdrop_clip;                 /* rounded-rect backdrop clip from empty backdrop visual */
+    D2D_RECT_F backdrop_clip;
+    FLOAT backdrop_radius;
     LONG ref;
 };
 
