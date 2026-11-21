@@ -836,6 +836,8 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                             aop.str2_off = xbf_aot_intern_str( ctx->aot,
                                 (last_popped.kind == UWP_RD_STYLE) ? last_popped.based_on : last_popped.str_val );
                             aop.argb = last_popped.argb;
+                            aop.cid = (last_popped.template_xbf_data && last_popped.template_xbf_size)
+                                ? (INT32)last_popped.template_sub_idx : -1;
                             aop.num = (last_popped.kind == UWP_RD_BRUSH || last_popped.kind == UWP_RD_COLOR)
                                 ? last_popped.opacity : last_popped.dval;
                             memcpy( aop.vec4, last_popped.vec4, sizeof(aop.vec4) );

@@ -1118,6 +1118,13 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     sv.template_sub_idx = child_el->template_sub_idx;
                     sv.template_owner_comp = child_el->template_owner_comp;
                 }
+                else if (op->cid >= 0 && xbf && xbf_sz)
+                {
+                    sv.template_xbf_data = xbf;
+                    sv.template_xbf_size = xbf_sz;
+                    sv.template_sub_idx = (DWORD)op->cid;
+                    sv.template_owner_comp = component;
+                }
                 uwp_rd_store_stack_val( dest_rd, key, &sv );
                 if (target_rd && target_rd != dest_rd)
                     uwp_rd_store_stack_val( target_rd, key, &sv );
