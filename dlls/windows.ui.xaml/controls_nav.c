@@ -2842,7 +2842,7 @@ const void *uwp_tb_vtbl[64] =
     [35 ... 63] = uwp_generic_noop,
 };
 
-const void *uwp_paragraph_vtbl[32] =
+const void *uwp_paragraph_vtbl[64] =
 {
     [0] = uwp_sub_QueryInterface,
     [1] = uwp_sub_AddRef,
@@ -2851,7 +2851,11 @@ const void *uwp_paragraph_vtbl[32] =
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
     [6] = uwp_tb_get_Inlines,
-    [7 ... 31] = uwp_generic_noop,
+    [7 ... 23] = uwp_generic_noop,
+    [24] = uwp_tb_get_Inlines,
+    [25 ... 33] = uwp_generic_noop,
+    [34] = uwp_tb_get_Inlines,
+    [35 ... 63] = uwp_generic_noop,
 };
 
 const void *uwp_run_vtbl[16] =

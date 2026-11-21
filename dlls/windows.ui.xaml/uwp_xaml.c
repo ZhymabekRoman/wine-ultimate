@@ -1948,9 +1948,14 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IBorder_UWP ) ||
              IsEqualGUID( iid, &IID_IBorder2_Calc ))
         *out = &impl->IBorder_iface;
-    else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ) ||
-             (iid->Data1 == 0xd45c1e6e && iid->Data2 == 0x3594 && iid->Data3 == 0x460e))
+    else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ))
         *out = &impl->ITextBlock_iface;
+    else if ((iid->Data1 == 0xe5fff9e2 && iid->Data2 == 0xb968 && iid->Data3 == 0x49e7) || /* IRichTextBlock */
+             (iid->Data1 == 0xf83ef59a && iid->Data2 == 0xfa61 && iid->Data3 == 0x4bef) || /* IParagraph */
+             (iid->Data1 == 0x54f03373 && iid->Data2 == 0xc273 && iid->Data3 == 0x4f3b))   /* ISpan */
+        *out = &impl->IParagraph_iface;
+    else if (iid->Data1 == 0x59553c83 && iid->Data2 == 0x0e14 && iid->Data3 == 0x49bd)     /* IRun */
+        *out = &impl->IRun_iface;
     else if (IsEqualGUID( iid, &IID_IRowDefinition_UWP ))
         *out = &impl->IRowDefinition_iface;
     else if (IsEqualGUID( iid, &IID_IColumnDefinition_UWP ))
@@ -2172,15 +2177,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             {
                 if (IsEqualGUID( iid, &IID_IUIE_Extra[k] ))
                 {
-                    if (wcsstr( impl->class_name, L"RichTextBlock" ))
-                        *out = &impl->ITextBlock_iface;
-                    else if (iid->Data1 == 0x59553c83 && iid->Data2 == 0x0e14 && iid->Data3 == 0x49bd)
-                        *out = &impl->IParagraph_iface; /* IRun */
-                    else if (wcsstr( impl->class_name, L"Documents." ) && !wcsstr( impl->class_name, L"Run" ) &&
-                             iid->Data1 != 0xf83ef59a && iid->Data1 != 0x4bce0016)
-                        *out = &impl->IParagraph_iface;
-                    else
-                        *out = &impl->IStyle_iface;
+                    *out = &impl->IStyle_iface;
                     break;
                 }
             }
@@ -6564,7 +6561,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IGrid3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grid3_vtbl;
     impl->IBorder_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_border_vtbl;
     impl->ITextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb_vtbl;
-    impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)(wcsstr( class_name, L"Run" ) ? uwp_run_vtbl : uwp_paragraph_vtbl);
+    impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_paragraph_vtbl;
+    impl->IRun_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_run_vtbl;
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
