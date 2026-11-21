@@ -3688,6 +3688,15 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
             }
             if (v->owner->data_context && !child_el->data_context)
                 uwp_propagate_data_context( child_el, v->owner->data_context );
+            if (!child_el->loaded_fired)
+            {
+                BOOL tree_loaded = FALSE;
+                struct uwp_element *p;
+                for (p = v->owner; p; p = p->parent)
+                    if (p->loaded_fired) { tree_loaded = TRUE; break; }
+                if (tree_loaded)
+                    uwp_fire_loaded_tree( child_el );
+            }
         }
     }
     g_layout_dirty = TRUE;
