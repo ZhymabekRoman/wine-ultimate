@@ -3539,6 +3539,8 @@ static const GUID IID_IIterable_ColDef_UWP =
     { 0xb629d3fc, 0x513c, 0x5857, { 0x9b, 0xd5, 0xf9, 0xf7, 0x8f, 0xdc, 0xb1, 0xb9 } };
 static const GUID IID_IIterator_ColDef_UWP =
     { 0x4159246b, 0x41be, 0x5bc2, { 0xa0, 0x7e, 0x9f, 0x26, 0xf1, 0xb9, 0x28, 0x71 } };
+static const GUID IID_IIterable_DO_UWP =
+    { 0x42e26ae1, 0xd357, 0x57e8, { 0xbb, 0x48, 0xf7, 0x5c, 0x9f, 0xf6, 0x9d, 0x91 } };
 
 static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 {
@@ -3561,7 +3563,8 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IIterable_Inline_UWP ) ||
         IsEqualGUID( iid, &IID_IBindableIterable_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_RowDef_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterable_ColDef_UWP ))
+        IsEqualGUID( iid, &IID_IIterable_ColDef_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_DO_UWP ))
     {
         *out = &v->IIterable_iface;
         IInspectable_AddRef( iface );

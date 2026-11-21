@@ -2084,14 +2084,45 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
                 struct xaml_member *xm = (struct xaml_member *)member;
                 if (xm->lpVtbl->GetValue && xm->lpVtbl->get_Type)
                 {
-                    __TRY
+                    BOOL target_is_coll = FALSE;
+                    boolean is_attachable = FALSE;
+                    struct uwp_element *tel = uwp_elem_from_any( target_obj );
+                    if (xm->lpVtbl->get_IsAttachable)
+                        xm->lpVtbl->get_IsAttachable( xm, &is_attachable );
+                    if (is_attachable && (!tel || wcsstr( tel->class_name, L"Collection" ) || wcsstr( tel->class_name, L"AnimationSet" )))
+                        target_is_coll = TRUE;
+                    if (SUCCEEDED(xm->lpVtbl->get_Type( xm, (struct xaml_type **)&member_type )) && member_type && !target_is_coll)
                     {
-                        hr = xm->lpVtbl->GetValue( xm, target_obj, &coll );
+                        struct xaml_type *mt = (struct xaml_type *)member_type;
+                        HSTRING h_mt = NULL, h_tc = NULL;
+                        if (mt->lpVtbl->get_FullName && SUCCEEDED(mt->lpVtbl->get_FullName( mt, &h_mt )) && h_mt &&
+                            SUCCEEDED(IInspectable_GetRuntimeClassName( (IInspectable *)target_obj, &h_tc )) && h_tc)
+                        {
+                            const WCHAR *mtn = WindowsGetStringRawBuffer( h_mt, NULL );
+                            const WCHAR *tcn = WindowsGetStringRawBuffer( h_tc, NULL );
+                            if (mtn && tcn && (!wcscmp( mtn, tcn ) ||
+                                               wcsstr( tcn, L"Collection" ) || wcsstr( tcn, L"AnimationSet" )))
+                                target_is_coll = TRUE;
+                        }
+                        if (h_mt) WindowsDeleteString( h_mt );
+                        if (h_tc) WindowsDeleteString( h_tc );
                     }
-                    __EXCEPT_ALL { hr = E_FAIL; coll = NULL; }
-                    __ENDTRY;
-                    if (SUCCEEDED(hr) && coll &&
-                        SUCCEEDED(xm->lpVtbl->get_Type( xm, (struct xaml_type **)&member_type )) && member_type)
+                    if (target_is_coll)
+                    {
+                        coll = (IInspectable *)target_obj;
+                        IInspectable_AddRef( coll );
+                        hr = S_OK;
+                    }
+                    else
+                    {
+                        __TRY
+                        {
+                            hr = xm->lpVtbl->GetValue( xm, target_obj, &coll );
+                        }
+                        __EXCEPT_ALL { hr = E_FAIL; coll = NULL; }
+                        __ENDTRY;
+                    }
+                    if (SUCCEEDED(hr) && coll && member_type)
                     {
                         struct xaml_type *mt = (struct xaml_type *)member_type;
                         if (mt->lpVtbl->AddToVector)
@@ -2106,8 +2137,8 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
                             TRACE( "IXamlMember::AddToVector(%s.%s coll=%p item=%p) -> hr %#lx\n",
                                    debugstr_w(owner_type_name), debugstr_w(prop_name), coll, item_obj, hr );
                         }
-                        IInspectable_Release( (IInspectable *)member_type );
                     }
+                    if (member_type) IInspectable_Release( (IInspectable *)member_type );
                     if (coll) IInspectable_Release( coll );
                 }
                 IInspectable_Release( (IInspectable *)member );
