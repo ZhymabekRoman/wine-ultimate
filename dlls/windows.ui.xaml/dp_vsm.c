@@ -1778,7 +1778,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 old_val = pml->default_value;
                 IInspectable_AddRef( old_val );
             }
-            if (pml->callback && old_val != val)
+            if (pml->callback && (old_val || val))
             {
                 struct uwp_dp_changed_args *args = calloc( 1, sizeof(*args) );
                 if (args)
