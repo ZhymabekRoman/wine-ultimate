@@ -1633,14 +1633,20 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     /* Check if val is a string (e.g. CalculationResult.DisplayValue or Content) */
     if (val && uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
     {
-        if (uwp_is_display_result_element( impl ) ||
-            wcsstr( impl->class_name, L"OverflowTextBlock" ) ||
-            wcsstr( impl->class_name, L"TabsBarItem" ) ||
-            wcsstr( impl->class_name, L"TabViewItem" ) ||
-            wcsstr( impl->class_name, L"MenuBarItem" ) ||
-            !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Control" ) ||
-            !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.ListViewItem" ) ||
-            impl->kind == UWP_KIND_TEXT_BLOCK)
+        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+        const WCHAR *dpn = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
+        BOOL is_meta_dp = (!wcscmp( dpn, L"AutomationId" ) || !wcscmp( dpn, L"Name" ) ||
+                           !wcscmp( dpn, L"HelpText" ) || !wcscmp( dpn, L"ItemStatus" ) ||
+                           !wcscmp( dpn, L"LocalizedControlType" ) || !wcscmp( dpn, L"FullDescription" ));
+        if (!is_meta_dp &&
+            (uwp_is_display_result_element( impl ) ||
+             wcsstr( impl->class_name, L"OverflowTextBlock" ) ||
+             wcsstr( impl->class_name, L"TabsBarItem" ) ||
+             wcsstr( impl->class_name, L"TabViewItem" ) ||
+             wcsstr( impl->class_name, L"MenuBarItem" ) ||
+             !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Control" ) ||
+             !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.ListViewItem" ) ||
+             (impl->kind == UWP_KIND_TEXT_BLOCK && !wcscmp( dpn, L"Text" ))))
         {
             lstrcpynW( impl->text, str_val, ARRAY_SIZE(impl->text) );
             if (impl->tpl_normal_output)
