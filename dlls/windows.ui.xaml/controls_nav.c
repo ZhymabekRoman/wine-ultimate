@@ -1004,22 +1004,81 @@ static HRESULT WINAPI uwp_items_ctrl_get_ItemsSource( void *iface, void **out )
     return S_OK;
 }
 
+static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
+{
+    static const GUID IID_IStringable_ic =
+        { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+    struct uwp_element *item_el = uwp_elem_from_any( item );
+    if (item_el)
+    {
+        uwp_vec_Append( impl->children_coll, item );
+    }
+    else
+    {
+        IInspectable *btn_inner = NULL;
+        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_inner )) && btn_inner)
+        {
+            struct uwp_element *bel = uwp_elem_from_any( btn_inner );
+            if (bel)
+            {
+                bel->data_context = (IInspectable *)item;
+                IInspectable_AddRef( bel->data_context );
+                bel->width = 44.0;
+                bel->height = 36.0;
+                bel->has_bg = TRUE;
+                bel->bg_argb = 0xE02A2A2A;
+                bel->bg_alpha = 224;
+                uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
+                if (!bel->text[0])
+                {
+                    void *strable = NULL;
+                    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)item, &IID_IStringable_ic, &strable )) && strable)
+                    {
+                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
+                        HSTRING hs = NULL;
+                        if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
+                        {
+                            const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
+                            if (raw && raw[0]) lstrcpynW( bel->text, raw, ARRAY_SIZE(bel->text) );
+                            WindowsDeleteString( hs );
+                        }
+                        IUnknown_Release( (IUnknown *)strable );
+                    }
+                }
+                if (!bel->text[0]) lstrcpynW( bel->text, L"\x25A1", ARRAY_SIZE(bel->text) );
+                uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
+            }
+            IInspectable_Release( btn_inner );
+        }
+    }
+}
+
 void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src )
 {
     static const GUID IID_IVectorView_Obj =
         { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
+    static const GUID IID_IVectorView_Insp =
+        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
     static const GUID IID_IVector_Obj =
         { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
+    static const GUID IID_IBindableVector_ic =
+        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
+    static const GUID IID_IBindableIterable_ic =
+        { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
+    static const GUID IID_IIterable_Insp_ic =
+        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
     void *vec = NULL;
     UINT32 count = 0, i;
-    HRESULT hr = E_FAIL;
 
     if (!impl || !src) return;
-    if (SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVector_Obj, &vec )) && vec)
+    if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVector_Obj, &vec )) ||
+         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Insp, &vec )) ||
+         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableVector_ic, &vec )) ||
+         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Obj, &vec ))) && vec)
     {
         HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
         HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
-        if (SUCCEEDED(get_size( vec, &count )) && count > 0)
+        if (get_size && get_at && SUCCEEDED(get_size( vec, &count )) && count > 0)
         {
             if (count > 64) count = 64;
             if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
@@ -1028,81 +1087,42 @@ void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *
                 void *item = NULL;
                 if (SUCCEEDED(get_at( vec, i, &item )) && item)
                 {
-                    struct uwp_element *item_el = uwp_elem_from_any( item );
-                    if (item_el)
-                    {
-                        uwp_vec_Append( impl->children_coll, item );
-                    }
-                    else
-                    {
-                        IInspectable *btn_inner = NULL;
-                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_inner )) && btn_inner)
-                        {
-                            struct uwp_element *bel = uwp_elem_from_any( btn_inner );
-                            if (bel)
-                            {
-                                bel->data_context = (IInspectable *)item;
-                                IInspectable_AddRef( bel->data_context );
-                                bel->width = 44.0;
-                                bel->height = 36.0;
-                                bel->has_bg = TRUE;
-                                bel->bg_argb = 0xE02A2A2A;
-                                bel->bg_alpha = 224;
-                                uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
-                                if (!bel->text[0]) lstrcpynW( bel->text, L"\x25A1", ARRAY_SIZE(bel->text) );
-                                uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
-                            }
-                            IInspectable_Release( btn_inner );
-                        }
-                    }
+                    uwp_items_ctrl_append_item( impl, item );
                     IUnknown_Release( (IUnknown *)item );
                 }
             }
-            hr = S_OK;
         }
         IUnknown_Release( (IUnknown *)vec );
     }
-    if (FAILED(hr) && SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Obj, &vec )) && vec)
+    else if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IIterable_Insp_ic, &vec )) ||
+              SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableIterable_ic, &vec ))) && vec)
     {
-        HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
-        HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
-        if (SUCCEEDED(get_size( vec, &count )) && count > 0)
+        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
+        void *iter = NULL;
+        if (first && SUCCEEDED(first( vec, &iter )) && iter)
         {
-            if (count > 64) count = 64;
-            if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
-            for (i = 0; i < count; i++)
+            HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
+            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
+            HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
+            boolean has = FALSE;
+            int n = 0;
+            if (has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
             {
-                void *item = NULL;
-                if (SUCCEEDED(get_at( vec, i, &item )) && item)
+                if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+                while (has && n < 64)
                 {
-                    struct uwp_element *item_el = uwp_elem_from_any( item );
-                    if (item_el)
-                        uwp_vec_Append( impl->children_coll, item );
-                    else
+                    void *item = NULL;
+                    if (get_cur && SUCCEEDED(get_cur( iter, &item )) && item)
                     {
-                        IInspectable *btn_inner = NULL;
-                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_inner )) && btn_inner)
-                        {
-                            struct uwp_element *bel = uwp_elem_from_any( btn_inner );
-                            if (bel)
-                            {
-                                bel->data_context = (IInspectable *)item;
-                                IInspectable_AddRef( bel->data_context );
-                                bel->width = 44.0;
-                                bel->height = 36.0;
-                                bel->has_bg = TRUE;
-                                bel->bg_argb = 0xE02A2A2A;
-                                bel->bg_alpha = 224;
-                                uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
-                                if (!bel->text[0]) lstrcpynW( bel->text, L"\x25A1", ARRAY_SIZE(bel->text) );
-                                uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
-                            }
-                            IInspectable_Release( btn_inner );
-                        }
+                        uwp_items_ctrl_append_item( impl, item );
+                        IUnknown_Release( (IUnknown *)item );
                     }
-                    IUnknown_Release( (IUnknown *)item );
+                    n++;
+                    has = FALSE;
+                    if (!move_next || FAILED(move_next( iter, &has ))) break;
                 }
             }
+            IUnknown_Release( (IUnknown *)iter );
         }
         IUnknown_Release( (IUnknown *)vec );
     }

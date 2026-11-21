@@ -333,7 +333,7 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
 {
     if (!el || el->visibility != 0 || depth > 14) return FALSE;
     if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
-    if (el->text[0] || el->img_pixels || el->img_loaded) return TRUE;
+    if (el->text[0] || el->inlines_coll || el->img_pixels || el->img_loaded) return TRUE;
     if (wcsstr( el->class_name, L"ItemsRepeater" ))
     {
         int di;
