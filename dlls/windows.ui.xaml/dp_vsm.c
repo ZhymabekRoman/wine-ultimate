@@ -2038,7 +2038,30 @@ BOOL uwp_set_custom_xaml_member_obj( void *app_outer, const WCHAR *owner_type_na
             if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, (struct xaml_member **)&member )) && member)
             {
                 struct xaml_member *xm = (struct xaml_member *)member;
-                if (xm->lpVtbl->SetValue)
+                BOOL type_mismatch = FALSE;
+                if (uwp_elem_from_any( val_obj ) && xm->lpVtbl->get_Type)
+                {
+                    struct xaml_type *mt = NULL;
+                    if (SUCCEEDED(xm->lpVtbl->get_Type( xm, &mt )) && mt)
+                    {
+                        HSTRING h_mt = NULL;
+                        if (mt->lpVtbl->get_FullName && SUCCEEDED(mt->lpVtbl->get_FullName( mt, &h_mt )) && h_mt)
+                        {
+                            const WCHAR *mtn = WindowsGetStringRawBuffer( h_mt, NULL );
+                            if (mtn && (!wcscmp( mtn, L"Double" ) || !wcscmp( mtn, L"Single" ) ||
+                                        !wcscmp( mtn, L"Int32" ) || !wcscmp( mtn, L"UInt32" ) ||
+                                        !wcscmp( mtn, L"Int64" ) || !wcscmp( mtn, L"UInt64" ) ||
+                                        !wcscmp( mtn, L"Boolean" ) || !wcscmp( mtn, L"String" ) ||
+                                        !wcscmp( mtn, L"Windows.UI.Xaml.GridLength" ) ||
+                                        !wcscmp( mtn, L"Windows.UI.Xaml.Thickness" ) ||
+                                        !wcscmp( mtn, L"Windows.UI.Xaml.CornerRadius" )))
+                                type_mismatch = TRUE;
+                            WindowsDeleteString( h_mt );
+                        }
+                        IInspectable_Release( (IInspectable *)mt );
+                    }
+                }
+                if (!type_mismatch && xm->lpVtbl->SetValue)
                 {
                     __TRY
                     {

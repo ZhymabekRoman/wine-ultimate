@@ -1510,7 +1510,29 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                         for (j = 0; iv && j < iv->count && pos + 2 < ARRAY_SIZE(rich_buf); j++)
                         {
                             struct uwp_element *inl = uwp_elem_from_any( iv->items[j] );
-                            if (inl && inl->text[0])
+                            if (!inl && iv->items[j])
+                            {
+                                static const GUID IID_IRun_g =
+                                    { 0x59553c83, 0x0e14, 0x49bd, { 0xb8, 0x4b, 0xc5, 0x26, 0xf3, 0x03, 0x43, 0x49 } };
+                                void *run_iface = NULL;
+                                if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_IRun_g, &run_iface )) && run_iface)
+                                {
+                                    HSTRING htxt = NULL;
+                                    HRESULT (WINAPI *get_txt)(void *, HSTRING *) = (void *)(*(void ***)run_iface)[6];
+                                    if (get_txt && SUCCEEDED(get_txt( run_iface, &htxt )) && htxt)
+                                    {
+                                        const WCHAR *s = WindowsGetStringRawBuffer( htxt, NULL );
+                                        if (s && s[0])
+                                        {
+                                            lstrcpynW( rich_buf + pos, s, (int)(ARRAY_SIZE(rich_buf) - pos) );
+                                            pos += wcslen( rich_buf + pos );
+                                        }
+                                        WindowsDeleteString( htxt );
+                                    }
+                                    IUnknown_Release( (IUnknown *)run_iface );
+                                }
+                            }
+                            else if (inl && inl->text[0])
                             {
                                 lstrcpynW( rich_buf + pos, inl->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
                                 pos += wcslen( rich_buf + pos );
