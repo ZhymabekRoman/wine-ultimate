@@ -6719,7 +6719,10 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
 {
     int i;
+    IInspectable *old_dc;
     if (!impl) return;
+    old_dc = impl->data_context;
+    if (old_dc) IInspectable_AddRef( old_dc );
     if (impl->data_context != dc)
     {
         if (impl->data_context) IInspectable_Release( impl->data_context );
@@ -6777,7 +6780,8 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
     if (impl->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( impl->content );
-        if (ch && !ch->data_context) uwp_propagate_data_context( ch, dc );
+        if (ch && (!ch->data_context || (old_dc && ch->data_context == old_dc)) && ch->data_context != dc)
+            uwp_propagate_data_context( ch, dc );
     }
     if (impl->children_coll)
     {
@@ -6786,9 +6790,11 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
         for (k = 0; k < v->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-            if (ch && !ch->data_context) uwp_propagate_data_context( ch, dc );
+            if (ch && (!ch->data_context || (old_dc && ch->data_context == old_dc)) && ch->data_context != dc)
+                uwp_propagate_data_context( ch, dc );
         }
     }
+    if (old_dc) IInspectable_Release( old_dc );
 }
 
 static struct { const void *vtbl; LONG ref; } g_dp_routed_args = { (const void *)dp_changed_args_vtbl, 1 };
