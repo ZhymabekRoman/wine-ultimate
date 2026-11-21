@@ -6029,6 +6029,12 @@ static HRESULT WINAPI uwp_dt_LoadContent( IInspectable *iface, IInspectable **ou
             return S_OK;
         }
     }
+    if (impl->content)
+    {
+        *out = impl->content;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
     TRACE( "uwp_dt_LoadContent(%p) -> fallback Grid\n", impl );
     return uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)out );
 }
