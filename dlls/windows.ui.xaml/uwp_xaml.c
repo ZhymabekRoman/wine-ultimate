@@ -7089,11 +7089,12 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
         uwp_calc_vm_teardown( FALSE );
     }
 
-    if (dc && dc != old_dc && impl->binding_connector && impl->dc_cnt == 0)
+    if (dc && dc != old_dc && (impl->dt_binding_connector || (impl->binding_connector && impl->dc_cnt == 0)))
     {
         static const GUID IID_IDTE_g = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
+        void *bc_src = impl->dt_binding_connector ? impl->dt_binding_connector : impl->binding_connector;
         void *dte = NULL;
-        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)impl->binding_connector, &IID_IDTE_g, &dte )) && dte)
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)bc_src, &IID_IDTE_g, &dte )) && dte)
         {
             struct uwp_ccc_args *ccc = calloc( 1, sizeof(*ccc) );
             if (ccc)

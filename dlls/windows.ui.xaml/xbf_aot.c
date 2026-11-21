@@ -788,6 +788,11 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                             if (get_bc && SUCCEEDED(get_bc( conn2, op->cid, raw, &bc )) && bc)
                             {
                                 dt_binding = bc;
+                                if (el && !el->dt_binding_connector)
+                                {
+                                    el->dt_binding_connector = bc;
+                                    IUnknown_AddRef( (IUnknown *)bc );
+                                }
                                 if (el && !el->binding_connector)
                                 {
                                     el->binding_connector = bc;

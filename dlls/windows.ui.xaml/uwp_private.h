@@ -473,6 +473,7 @@ struct uwp_element
     int loading_cnt;
     int loading_cap;
     void *binding_connector;
+    void *dt_binding_connector;
     IInspectable *selected_item;
     IInspectable *items_source;
     IInspectable *sel_changed_handler;

@@ -486,6 +486,11 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                                 if (get_bc && SUCCEEDED(get_bc( conn2, cid, top_raw, &bc )) && bc)
                                 {
                                     dt_binding = bc;
+                                    if (top_el && !top_el->dt_binding_connector)
+                                    {
+                                        top_el->dt_binding_connector = bc;
+                                        IUnknown_AddRef( (IUnknown *)bc );
+                                    }
                                     if (top_el && !top_el->binding_connector)
                                     {
                                         top_el->binding_connector = bc;
