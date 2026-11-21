@@ -3681,6 +3681,8 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
                 child_el->outer_pinned = TRUE;
                 IInspectable_AddRef( child_el->outer );
             }
+            if (v->owner->data_context && !child_el->data_context)
+                uwp_propagate_data_context( child_el, v->owner->data_context );
         }
     }
     g_layout_dirty = TRUE;
