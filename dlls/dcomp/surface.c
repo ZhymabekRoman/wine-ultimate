@@ -78,6 +78,8 @@ static ULONG STDMETHODCALLTYPE surface_AddRef(IDCompositionSurfaceUnknown *iface
     return ref;
 }
 
+extern struct composition_surface *g_last_rendered_surface;
+
 static ULONG STDMETHODCALLTYPE surface_Release(IDCompositionSurfaceUnknown *iface)
 {
     struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
@@ -87,6 +89,10 @@ static ULONG STDMETHODCALLTYPE surface_Release(IDCompositionSurfaceUnknown *ifac
 
     if (!ref)
     {
+        dcomp_lock();
+        if (g_last_rendered_surface == surface)
+            g_last_rendered_surface = NULL;
+        dcomp_unlock();
         if (surface->cached_srv)
             ID3D11ShaderResourceView_Release(surface->cached_srv);
         if (surface->cached_srv_device)

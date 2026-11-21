@@ -387,7 +387,8 @@ struct composite_vs_data
 struct composite_blit_data
 {
     FLOAT opacity;
-    FLOAT pad[3];
+    FLOAT replace_popup_black;
+    FLOAT pad[2];
     FLOAT clip_rect[4];         /* left, top, right, bottom */
 };
 
@@ -415,6 +416,8 @@ static const char composite_ps_code[] =
     "cbuffer blit_data : register(b0)\n"
     "{\n"
     "    float opacity;\n"
+    "    float replace_popup_black;\n"
+    "    float2 pad;\n"
     "    float4 clip_rect; /* left, top, right, bottom in device pixels */\n"
     "};\n"
     "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET\n"
@@ -423,6 +426,8 @@ static const char composite_ps_code[] =
     "    if (px.x < clip_rect.x || px.y < clip_rect.y || px.x > clip_rect.z || px.y > clip_rect.w)\n"
     "        discard;\n"
     "    float4 c = src_texture.Sample(sam_linear, uv);\n"
+    "    if (replace_popup_black > 0.5 && c.a > 0.99 && c.r < 0.005 && c.g < 0.005 && c.b < 0.005)\n"
+    "        c = float4(0.976, 0.976, 0.976, 1.0);\n"
     "    return float4(c.rgb * opacity, c.a * opacity);\n"
     "}";
 
@@ -479,7 +484,7 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
             target->composite_width = width;
             target->composite_height = height;
             if (target->composite_hwnd && IsWindow(target->composite_hwnd))
-                SetWindowPos(target->composite_hwnd, HWND_TOP, 0, 0, (int)width, (int)height,
+                SetWindowPos(target->composite_hwnd, HWND_BOTTOM, 0, 0, (int)width, (int)height,
                         SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
             return S_OK;
         }
@@ -499,7 +504,7 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
     }
 
     if (target->composite_hwnd && IsWindow(target->composite_hwnd))
-        SetWindowPos(target->composite_hwnd, HWND_TOP, 0, 0, (int)width, (int)height,
+        SetWindowPos(target->composite_hwnd, HWND_BOTTOM, 0, 0, (int)width, (int)height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
 
     memset(&desc, 0, sizeof(desc));
@@ -816,7 +821,8 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
     {
         vs_data.transform = *proj_matrix;
         blit_data.opacity = opacity;
-        blit_data.pad[0] = blit_data.pad[1] = blit_data.pad[2] = 0;
+        blit_data.replace_popup_black = ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP)) ? 1.0f : 0.0f;
+        blit_data.pad[0] = blit_data.pad[1] = 0;
         blit_data.clip_rect[0] = clip_rect ? clip_rect->left : 0.0f;
         blit_data.clip_rect[1] = clip_rect ? clip_rect->top : 0.0f;
         blit_data.clip_rect[2] = clip_rect ? clip_rect->right : (FLOAT)dst_width;
@@ -2122,6 +2128,7 @@ static void collect_visual_frames(struct composition_device *device, struct comp
                     has_transform, xform_ver, effective_clip_ptr, depth + 1, force_redraw, queued);
 
         if (!*queued && !visual_tree_has_content(child_root) && g_last_rendered_surface
+                && InterlockedCompareExchange(&g_last_rendered_surface->ref, 0, 0) > 0
                 && g_last_rendered_surface->physical_surface
                 && g_last_rendered_surface != target->composited_surface)
         {
