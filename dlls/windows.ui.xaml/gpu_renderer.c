@@ -746,7 +746,7 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     tlen = wcslen( text );
     if (tlen > 127) tlen = 127;
 
-    align_flags = dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
+    align_flags = dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_WORDBREAK);
     h = fnv1a_bytes( &font_height, sizeof(font_height), 0 );
     h = fnv1a_bytes( &font_weight, sizeof(font_weight), h );
     h = fnv1a_bytes( &align_flags, sizeof(align_flags), h );

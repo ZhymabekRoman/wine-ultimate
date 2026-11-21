@@ -271,6 +271,8 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
     }
     if (el->children_coll)
         kids = (int)CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count;
+    else if (el->inlines_coll)
+        kids = (int)CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface )->count;
     (*rem)--;
     WARN( "%*s%s (%s) rc=(%ld,%ld,%ld,%ld) hb=%d vis=%d op=%.2f kids=%d txt=%s\n",
           depth * 2, "", debugstr_w(el->class_name), debugstr_w(el->name),
