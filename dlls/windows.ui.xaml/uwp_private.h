@@ -1136,6 +1136,7 @@ struct xaml_event_handler;
 UINT32 apply_opacity_to_argb( UINT32 argb, double opacity );
 COLORREF blend_argb_over( UINT32 fg_argb, COLORREF bg_cr );
 IInspectable *box_bool_value( boolean b );
+IInspectable *box_double_value( double d );
 IInspectable *box_int32_value( INT32 v );
 IInspectable *box_string_value( const WCHAR *str );
 enum uwp_elem_kind classify_uwp_class( const WCHAR *cls );

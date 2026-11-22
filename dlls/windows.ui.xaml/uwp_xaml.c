@@ -10049,6 +10049,76 @@ static HRESULT WINAPI xbh_ConvertValue( void *iface, TypeName *type, IInspectabl
                 return S_OK;
             }
         }
+        if ((!wcscmp( tname, L"Windows.UI.Xaml.Visibility" ) ||
+             !wcscmp( tname, L"Microsoft.UI.Xaml.Visibility" )) && has_str)
+        {
+            INT32 vis = !wcsicmp( str_buf, L"Collapsed" ) ? 1 :
+                        (!wcsicmp( str_buf, L"Visible" ) ? 0 : _wtoi( str_buf ));
+            *out = box_int32_value( vis );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Windows.UI.Xaml.HorizontalAlignment" ) ||
+             !wcscmp( tname, L"Microsoft.UI.Xaml.HorizontalAlignment" )) && has_str)
+        {
+            INT32 v = !wcsicmp( str_buf, L"Left" ) ? 0 :
+                      !wcsicmp( str_buf, L"Center" ) ? 1 :
+                      !wcsicmp( str_buf, L"Right" ) ? 2 :
+                      !wcsicmp( str_buf, L"Stretch" ) ? 3 : _wtoi( str_buf );
+            *out = box_int32_value( v );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Windows.UI.Xaml.VerticalAlignment" ) ||
+             !wcscmp( tname, L"Microsoft.UI.Xaml.VerticalAlignment" )) && has_str)
+        {
+            INT32 v = !wcsicmp( str_buf, L"Top" ) ? 0 :
+                      !wcsicmp( str_buf, L"Center" ) ? 1 :
+                      !wcsicmp( str_buf, L"Bottom" ) ? 2 :
+                      !wcsicmp( str_buf, L"Stretch" ) ? 3 : _wtoi( str_buf );
+            *out = box_int32_value( v );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Windows.UI.Xaml.Controls.Orientation" ) ||
+             !wcscmp( tname, L"Microsoft.UI.Xaml.Controls.Orientation" )) && has_str)
+        {
+            INT32 v = !wcsicmp( str_buf, L"Horizontal" ) ? 1 :
+                      !wcsicmp( str_buf, L"Vertical" ) ? 0 : _wtoi( str_buf );
+            *out = box_int32_value( v );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Windows.UI.Xaml.TextWrapping" ) ||
+             !wcscmp( tname, L"Microsoft.UI.Xaml.TextWrapping" )) && has_str)
+        {
+            INT32 v = !wcsicmp( str_buf, L"NoWrap" ) ? 1 :
+                      !wcsicmp( str_buf, L"Wrap" ) ? 2 :
+                      !wcsicmp( str_buf, L"WrapWholeWords" ) ? 3 : _wtoi( str_buf );
+            *out = box_int32_value( v );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Windows.UI.Xaml.Media.Stretch" ) ||
+             !wcscmp( tname, L"Microsoft.UI.Xaml.Media.Stretch" )) && has_str)
+        {
+            INT32 v = !wcsicmp( str_buf, L"None" ) ? 0 :
+                      !wcsicmp( str_buf, L"Fill" ) ? 1 :
+                      !wcsicmp( str_buf, L"Uniform" ) ? 2 :
+                      !wcsicmp( str_buf, L"UniformToFill" ) ? 3 : _wtoi( str_buf );
+            *out = box_int32_value( v );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Boolean" ) || !wcscmp( tname, L"System.Boolean" )) && has_str)
+        {
+            *out = box_bool_value( !wcsicmp( str_buf, L"True" ) ? TRUE : FALSE );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Int32" ) || !wcscmp( tname, L"System.Int32" )) && has_str)
+        {
+            *out = box_int32_value( _wtoi( str_buf ) );
+            if (*out) return S_OK;
+        }
+        if ((!wcscmp( tname, L"Double" ) || !wcscmp( tname, L"System.Double" )) && has_str)
+        {
+            *out = box_double_value( wcstod( str_buf, NULL ) );
+            if (*out) return S_OK;
+        }
         /* For non-primitive reference types (not String/Object/IInspectable), never return
          * an unconverted IPropertyValue — CoreRT casts it immediately and failfasts. */
         if (type->Kind != 0 &&
