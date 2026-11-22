@@ -845,6 +845,41 @@ static inline UINT32 cr_to_argb( COLORREF cr )
 
 static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth );
 
+static void *uwp_qi_first( IInspectable *obj, const GUID *const *iids, unsigned int count )
+{
+    unsigned int i;
+    for (i = 0; i < count; i++)
+    {
+        void *iface = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( obj, iids[i], &iface )) && iface)
+            return iface;
+    }
+    return NULL;
+}
+
+static void uwp_vm_extract_val_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth )
+{
+    if (!uwp_unbox_string( pval, out, out_len ))
+        uwp_vm_extract_nested_url( pval, out, out_len, depth );
+}
+
+static void uwp_vm_probe_xaml_members( IInspectable *vm, const WCHAR *cls,
+                                       const WCHAR *const *props, unsigned int count,
+                                       WCHAR *out, size_t out_len, int depth )
+{
+    unsigned int pi;
+    if (!cls || !cls[0]) return;
+    for (pi = 0; pi < count && !out[0]; pi++)
+    {
+        IInspectable *pval = NULL;
+        if (uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, props[pi], vm, &pval ) && pval)
+        {
+            uwp_vm_extract_val_url( pval, out, out_len, depth );
+            IInspectable_Release( pval );
+        }
+    }
+}
+
 static BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props, unsigned int count,
                                             WCHAR *out, size_t out_len, int depth )
 {
@@ -859,20 +894,7 @@ static BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const
 
     if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
     {
-        const WCHAR *cls = WindowsGetStringRawBuffer( hcls, NULL );
-        if (cls && cls[0])
-        {
-            for (pi = 0; pi < count && !out[0]; pi++)
-            {
-                IInspectable *pval = NULL;
-                if (uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, props[pi], vm, &pval ) && pval)
-                {
-                    if (!uwp_unbox_string( pval, out, out_len ))
-                        uwp_vm_extract_nested_url( pval, out, out_len, depth );
-                    IInspectable_Release( pval );
-                }
-            }
-        }
+        uwp_vm_probe_xaml_members( vm, WindowsGetStringRawBuffer( hcls, NULL ), props, count, out, out_len, depth );
         WindowsDeleteString( hcls );
     }
     if (!out[0] && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICustomPropertyProvider_gpu, &cpp )) && cpp)
@@ -890,19 +912,7 @@ static BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const
                 if (raw) lstrcpynW( tcls, raw, ARRAY_SIZE(tcls) );
                 comma = wcschr( tcls, ',' );
                 if (comma) *comma = 0;
-                if (tcls[0])
-                {
-                    for (pi = 0; pi < count && !out[0]; pi++)
-                    {
-                        IInspectable *pval = NULL;
-                        if (uwp_get_custom_xaml_member( uwp_get_app_outer(), tcls, props[pi], vm, &pval ) && pval)
-                        {
-                            if (!uwp_unbox_string( pval, out, out_len ))
-                                uwp_vm_extract_nested_url( pval, out, out_len, depth );
-                            IInspectable_Release( pval );
-                        }
-                    }
-                }
+                uwp_vm_probe_xaml_members( vm, tcls, props, count, out, out_len, depth );
                 WindowsDeleteString( tn.Name );
             }
         }
@@ -918,8 +928,7 @@ static BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const
                     IInspectable *pval = NULL;
                     if (get_val && SUCCEEDED(get_val( cp, vm, &pval )) && pval)
                     {
-                        if (!uwp_unbox_string( pval, out, out_len ))
-                            uwp_vm_extract_nested_url( pval, out, out_len, depth );
+                        uwp_vm_extract_val_url( pval, out, out_len, depth );
                         IInspectable_Release( pval );
                     }
                     IUnknown_Release( (IUnknown *)cp );
@@ -949,8 +958,10 @@ static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t ou
         { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
     static const GUID IID_IIterable_Insp_g =
         { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
+    static const GUID *const vec_iids[] = { &IID_IVector_Insp_g, &IID_IVectorView_Insp_g, &IID_IBindableVector_g };
+    static const GUID *const iter_iids[] = { &IID_IIterable_Insp_g, &IID_IBindableIterable_g };
     struct uwp_element *pel = uwp_elem_from_any( pval );
-    void *vec = NULL;
+    void *vec;
 
     if (pel && pel->image_src[0])
     {
@@ -960,9 +971,7 @@ static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t ou
     uwp_extract_uri_string( pval, out, out_len );
     if (out[0] || depth <= 0) return;
 
-    if (SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVector_Insp_g, &vec )) ||
-        SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVectorView_Insp_g, &vec )) ||
-        SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IBindableVector_g, &vec )))
+    if ((vec = uwp_qi_first( pval, vec_iids, ARRAY_SIZE(vec_iids) )))
     {
         HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
         HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
@@ -983,8 +992,7 @@ static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t ou
         }
         IUnknown_Release( (IUnknown *)vec );
     }
-    else if ((SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IIterable_Insp_g, &vec )) ||
-              SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IBindableIterable_g, &vec ))) && vec)
+    else if ((vec = uwp_qi_first( pval, iter_iids, ARRAY_SIZE(iter_iids) )))
     {
         HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
         void *iter = NULL;

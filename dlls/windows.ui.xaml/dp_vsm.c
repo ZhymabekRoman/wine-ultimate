@@ -1551,31 +1551,64 @@ static struct uwp_element *uwp_find_named_descendant( struct uwp_element *el, co
     return NULL;
 }
 
+static BOOL uwp_replace_iface( IInspectable **slot, IInspectable *val )
+{
+    if (*slot == val) return FALSE;
+    if (*slot) IInspectable_Release( *slot );
+    *slot = val;
+    if (*slot) IInspectable_AddRef( *slot );
+    return TRUE;
+}
+
+static BOOL uwp_wcs_in_table( const WCHAR *s, const WCHAR *const *table, size_t count )
+{
+    size_t i;
+    for (i = 0; i < count; i++)
+        if (!wcscmp( s, table[i] )) return TRUE;
+    return FALSE;
+}
+
+static BOOL uwp_substr_in_table( const WCHAR *s, const WCHAR *const *table, size_t count )
+{
+    size_t i;
+    for (i = 0; i < count; i++)
+        if (wcsstr( s, table[i] )) return TRUE;
+    return FALSE;
+}
+
 static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
 {
-    const WCHAR *part_name = NULL;
+    static const struct { const WCHAR *dp; const WCHAR *target; } repeater_forwards[] = {
+        { L"ItemsSource",          L"ItemsSource"  },
+        { L"ItemTemplate",         L"ItemTemplate" },
+        { L"ItemTemplateSelector", L"ItemTemplate" },
+    };
+    static const struct { const WCHAR *dp; const WCHAR *part; } presenter_forwards[] = {
+        { L"Header",              L"HeaderPresenter"       },
+        { L"IslandHeaderContent", L"IslandHeaderPresenter" },
+        { L"IslandContent",       L"IslandPresenter"       },
+    };
     struct uwp_element *pres;
+    size_t k;
 
     if (!impl || !dpname || !dpname[0]) return;
-    if (!wcscmp( dpname, L"ItemsSource" ) ||
-        !wcscmp( dpname, L"ItemTemplate" ) ||
-        !wcscmp( dpname, L"ItemTemplateSelector" ))
+    for (k = 0; k < ARRAY_SIZE(repeater_forwards); k++)
     {
         struct uwp_element *rep;
-        const WCHAR *target_dp = !wcscmp( dpname, L"ItemsSource" ) ? L"ItemsSource" : L"ItemTemplate";
         int j;
+        if (wcscmp( dpname, repeater_forwards[k].dp )) continue;
         if (!val || wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" )) return;
         rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
         if (!rep || rep == impl || !wcsstr( rep->class_name, L"ItemsRepeater" )) return;
         for (j = 0; j < rep->dp_cnt; j++)
         {
             struct dp_internal_layout *rdpl = (struct dp_internal_layout *)rep->dp_store[j].dp;
-            if (rdpl && (ULONG_PTR)rdpl >= 0x10000 && !wcscmp( rdpl->name, target_dp ))
+            if (rdpl && (ULONG_PTR)rdpl >= 0x10000 && !wcscmp( rdpl->name, repeater_forwards[k].target ))
             {
                 if (rep->dp_store[j].value != val)
                 {
                     WARN( "uwp_sync_template_presenter: forwarding %s -> Repeater.%s val=%p\n",
-                          debugstr_w(dpname), debugstr_w(target_dp), val );
+                          debugstr_w(dpname), debugstr_w(repeater_forwards[k].target), val );
                     uwp_do_SetValue( &rep->IDependencyObject_iface, rep->dp_store[j].dp, val );
                 }
                 break;
@@ -1583,19 +1616,67 @@ static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *
         }
         return;
     }
-    if (!wcscmp( dpname, L"Header" )) part_name = L"HeaderPresenter";
-    else if (!wcscmp( dpname, L"IslandHeaderContent" )) part_name = L"IslandHeaderPresenter";
-    else if (!wcscmp( dpname, L"IslandContent" )) part_name = L"IslandPresenter";
-    else return;
-
-    pres = uwp_find_named_descendant( impl, part_name, 0 );
-    if (!pres) return;
-    if (pres->content != val)
+    for (k = 0; k < ARRAY_SIZE(presenter_forwards); k++)
     {
-        if (pres->content) IInspectable_Release( pres->content );
-        pres->content = val;
-        if (pres->content) IInspectable_AddRef( pres->content );
-        uwp_invalidate_window();
+        if (wcscmp( dpname, presenter_forwards[k].dp )) continue;
+        pres = uwp_find_named_descendant( impl, presenter_forwards[k].part, 0 );
+        if (pres && uwp_replace_iface( &pres->content, val ))
+            uwp_invalidate_window();
+        return;
+    }
+}
+
+static BOOL uwp_should_sync_display_text( const struct uwp_element *impl, const WCHAR *dpn )
+{
+    static const WCHAR *const meta_dps[] = {
+        L"AutomationId", L"Name", L"HelpText", L"ItemStatus", L"LocalizedControlType", L"FullDescription",
+    };
+    static const WCHAR *const text_class_substrs[] = {
+        L"OverflowTextBlock", L"TabsBarItem", L"TabViewItem", L"MenuBarItem",
+    };
+    static const WCHAR *const text_class_exact[] = {
+        L"Windows.UI.Xaml.Controls.Control", L"Windows.UI.Xaml.Controls.ListViewItem",
+    };
+
+    if (uwp_wcs_in_table( dpn, meta_dps, ARRAY_SIZE(meta_dps) ))
+        return FALSE;
+    return uwp_is_display_result_element( impl ) ||
+           uwp_substr_in_table( impl->class_name, text_class_substrs, ARRAY_SIZE(text_class_substrs) ) ||
+           uwp_wcs_in_table( impl->class_name, text_class_exact, ARRAY_SIZE(text_class_exact) ) ||
+           (impl->kind == UWP_KIND_TEXT_BLOCK && !wcscmp( dpn, L"Text" ));
+}
+
+static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
+{
+    static const struct { const WCHAR *dp; size_t off; BOOL invalidate; } tab_dps[] = {
+        { L"TabItemsSource",              offsetof(struct uwp_element, tab_items_source),  TRUE  },
+        { L"AddTabButtonCommand",         offsetof(struct uwp_element, tab_add_cmd),       FALSE },
+        { L"AddTabButtonCommandParameter",offsetof(struct uwp_element, tab_add_cmd_param), FALSE },
+    };
+    size_t k;
+
+    TRACE( "TabView SetValue dp=%s val=%p\n", debugstr_w(dpname), val );
+    for (k = 0; k < ARRAY_SIZE(tab_dps); k++)
+    {
+        if (!wcscmp( dpname, tab_dps[k].dp ))
+        {
+            IInspectable **slot = (IInspectable **)((char *)impl + tab_dps[k].off);
+            if (uwp_replace_iface( slot, val ) && tab_dps[k].invalidate)
+                uwp_invalidate_window();
+            return;
+        }
+    }
+    if (val && (ULONG_PTR)val >= 0x10000)
+    {
+        static const GUID IID_ITabItemViewModel_dp =
+            { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
+        void *vm = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel_dp, &vm )) && vm)
+        {
+            IUnknown_Release( (IUnknown *)vm );
+            if (uwp_replace_iface( &impl->selected_item, val ))
+                uwp_invalidate_window();
+        }
     }
 }
 
@@ -1636,18 +1717,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     {
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
         const WCHAR *dpn = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
-        BOOL is_meta_dp = (!wcscmp( dpn, L"AutomationId" ) || !wcscmp( dpn, L"Name" ) ||
-                           !wcscmp( dpn, L"HelpText" ) || !wcscmp( dpn, L"ItemStatus" ) ||
-                           !wcscmp( dpn, L"LocalizedControlType" ) || !wcscmp( dpn, L"FullDescription" ));
-        if (!is_meta_dp &&
-            (uwp_is_display_result_element( impl ) ||
-             wcsstr( impl->class_name, L"OverflowTextBlock" ) ||
-             wcsstr( impl->class_name, L"TabsBarItem" ) ||
-             wcsstr( impl->class_name, L"TabViewItem" ) ||
-             wcsstr( impl->class_name, L"MenuBarItem" ) ||
-             !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Control" ) ||
-             !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.ListViewItem" ) ||
-             (impl->kind == UWP_KIND_TEXT_BLOCK && !wcscmp( dpn, L"Text" ))))
+        if (uwp_should_sync_display_text( impl, dpn ))
         {
             lstrcpynW( impl->text, str_val, ARRAY_SIZE(impl->text) );
             if (impl->tpl_normal_output)
@@ -1666,52 +1736,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     {
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
         const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
-        TRACE( "TabView SetValue dp=%s val=%p\n", debugstr_w(dpname), val );
-        if (!wcscmp( dpname, L"TabItemsSource" ))
-        {
-            if (impl->tab_items_source != val)
-            {
-                if (impl->tab_items_source) IInspectable_Release( impl->tab_items_source );
-                impl->tab_items_source = val;
-                if (impl->tab_items_source) IInspectable_AddRef( impl->tab_items_source );
-                uwp_invalidate_window();
-            }
-        }
-        else if (!wcscmp( dpname, L"AddTabButtonCommand" ))
-        {
-            if (impl->tab_add_cmd != val)
-            {
-                if (impl->tab_add_cmd) IInspectable_Release( impl->tab_add_cmd );
-                impl->tab_add_cmd = val;
-                if (impl->tab_add_cmd) IInspectable_AddRef( impl->tab_add_cmd );
-            }
-        }
-        else if (!wcscmp( dpname, L"AddTabButtonCommandParameter" ))
-        {
-            if (impl->tab_add_cmd_param != val)
-            {
-                if (impl->tab_add_cmd_param) IInspectable_Release( impl->tab_add_cmd_param );
-                impl->tab_add_cmd_param = val;
-                if (impl->tab_add_cmd_param) IInspectable_AddRef( impl->tab_add_cmd_param );
-            }
-        }
-        else if (val && (ULONG_PTR)val >= 0x10000)
-        {
-            static const GUID IID_ITabItemViewModel_dp =
-                { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
-            void *vm = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel_dp, &vm )) && vm)
-            {
-                IUnknown_Release( (IUnknown *)vm );
-                if (impl->selected_item != val)
-                {
-                    if (impl->selected_item) IInspectable_Release( impl->selected_item );
-                    impl->selected_item = val;
-                    IInspectable_AddRef( impl->selected_item );
-                    uwp_invalidate_window();
-                }
-            }
-        }
+        uwp_tabview_handle_dp( impl, dpname, val );
     }
 
     for (i = 0; i < impl->dp_cnt; i++)

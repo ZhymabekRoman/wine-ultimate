@@ -486,10 +486,48 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
     return best;
 }
 
+static BOOL uwp_apply_margins_clamped( const struct uwp_element *el, RECT *rc )
+{
+    int orig_h = rc->bottom - rc->top;
+    int mt = (int)el->margin_t;
+    int mb = (int)el->margin_b;
+    BOOL clamped = FALSE;
+
+    if (orig_h >= 200 && mt > 200 && mt + mb >= orig_h)
+    {
+        mt = orig_h / 3;
+        clamped = TRUE;
+    }
+    rc->left   += (int)el->margin_l;
+    rc->top    += mt;
+    rc->right  -= (int)el->margin_r;
+    rc->bottom -= mb;
+    if (rc->right < rc->left) rc->right = rc->left;
+    if (rc->bottom < rc->top) rc->bottom = rc->top;
+    return clamped;
+}
+
+static int uwp_align_axis( LONG *start, LONG *end, double explicit_size, int align )
+{
+    int span = *end - *start;
+    if (explicit_size > 0.0 && !isnan( explicit_size ))
+    {
+        int es = (int)(explicit_size + 0.5);
+        if (es < span)
+        {
+            if (align == 1) *start += (span - es) / 2;
+            else if (align == 2) *start = *end - es;
+            *end = *start + es;
+            return es;
+        }
+    }
+    return span;
+}
+
 static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 {
     int w, h;
-    BOOL margin_clamped = FALSE;
+    BOOL margin_clamped;
     if (!el) return;
     if (el->visibility != 0 || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
         el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_DEFERRED ||
@@ -502,47 +540,9 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         return;
     }
 
-    {
-        int orig_h = rc.bottom - rc.top;
-        int mt = (int)el->margin_t;
-        int mb = (int)el->margin_b;
-        if (orig_h >= 200 && mt > 200 && mt + mb >= orig_h)
-        {
-            mt = orig_h / 3;
-            margin_clamped = TRUE;
-        }
-        rc.left   += (int)el->margin_l;
-        rc.top    += mt;
-        rc.right  -= (int)el->margin_r;
-        rc.bottom -= mb;
-    }
-    if (rc.right < rc.left) rc.right = rc.left;
-    if (rc.bottom < rc.top) rc.bottom = rc.top;
-
-    w = rc.right - rc.left;
-    h = rc.bottom - rc.top;
-    if (el->width > 0.0 && !isnan( el->width ))
-    {
-        int ew = (int)(el->width + 0.5);
-        if (ew < w)
-        {
-            if (el->h_align == 1) rc.left += (w - ew) / 2;
-            else if (el->h_align == 2) rc.left = rc.right - ew;
-            rc.right = rc.left + ew;
-            w = ew;
-        }
-    }
-    if (el->height > 0.0 && !isnan( el->height ))
-    {
-        int eh = (int)(el->height + 0.5);
-        if (eh < h)
-        {
-            if (el->v_align == 1) rc.top += (h - eh) / 2;
-            else if (el->v_align == 2) rc.top = rc.bottom - eh;
-            rc.bottom = rc.top + eh;
-            h = eh;
-        }
-    }
+    margin_clamped = uwp_apply_margins_clamped( el, &rc );
+    w = uwp_align_axis( &rc.left, &rc.right, el->width, el->h_align );
+    h = uwp_align_axis( &rc.top, &rc.bottom, el->height, el->v_align );
     {
         double prev_w = el->actual_w, prev_h = el->actual_h;
         el->bounds = rc;
