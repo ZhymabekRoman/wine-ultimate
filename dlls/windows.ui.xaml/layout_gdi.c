@@ -390,6 +390,102 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
     depth--;
 }
 
+static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
+{
+    double best = 0.0;
+    if (!el || depth > 12 || el->visibility != 0) return 0.0;
+    if (el->kind == UWP_KIND_DEFERRED || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
+        el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_RESOURCE_DICT ||
+        el->kind == UWP_KIND_COLOR || el->kind == UWP_KIND_ACCELERATOR || el->kind == UWP_KIND_XAML_COMMAND)
+        return 0.0;
+    if (el->height > 0.0 && !isnan( el->height ))
+        return el->height + max( 0.0, el->margin_t ) + max( 0.0, el->margin_b );
+    if (el->min_height > 0.0 && !isnan( el->min_height ))
+        best = el->min_height;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el)
+        {
+            double ch_h = uwp_estimate_auto_height( ch, depth + 1 );
+            if (ch_h > best) best = ch_h;
+        }
+    }
+    if (el->kind == UWP_KIND_GRID && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        struct uwp_vec_view *rows = el->row_defs_coll ? CONTAINING_RECORD( el->row_defs_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+        int nrows = (rows && rows->count > 0) ? min( (int)rows->count, 32 ) : 1;
+        double sum_h = 0.0;
+        int r;
+        unsigned int k;
+        for (r = 0; r < nrows; r++)
+        {
+            struct uwp_element *rd = (rows && (unsigned)r < rows->count) ? uwp_elem_from_any( rows->items[r] ) : NULL;
+            double rh = 0.0;
+            BOOL r_vis = FALSE;
+            if (rd && rd->grid_len_type == 1)
+            {
+                rh = rd->grid_len_val;
+            }
+            else
+            {
+                for (k = 0; k < children->count; k++)
+                {
+                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                    if (ch && ch != el && ch->visibility == 0 && ch->grid_row == r && ch->grid_row_span == 1)
+                    {
+                        double ch_h = uwp_estimate_auto_height( ch, depth + 1 );
+                        r_vis = TRUE;
+                        if (ch_h > rh) rh = ch_h;
+                    }
+                }
+                if (r_vis && rh < 36.0 * g_layout_scale) rh = 36.0 * g_layout_scale;
+            }
+            sum_h += rh;
+        }
+        if (sum_h > best) best = sum_h;
+    }
+    else if (el->kind == UWP_KIND_STACK_PANEL && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        double acc = 0.0;
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el && ch->visibility == 0)
+            {
+                double ch_h = uwp_estimate_auto_height( ch, depth + 1 );
+                if (ch_h <= 0.0 && (ch->kind == UWP_KIND_BUTTON || ch->kind == UWP_KIND_TEXT_BLOCK))
+                    ch_h = 36.0 * g_layout_scale;
+                if (el->orientation == 1) { if (ch_h > acc) acc = ch_h; }
+                else acc += ch_h;
+            }
+        }
+        if (acc > best) best = acc;
+    }
+    else if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el && ch->visibility == 0)
+            {
+                double ch_h = uwp_estimate_auto_height( ch, depth + 1 );
+                if (ch_h > best) best = ch_h;
+            }
+        }
+    }
+    if (el->max_height > 0.0 && !isnan( el->max_height ) && best > el->max_height)
+        best = el->max_height;
+    if (best > 0.0)
+        best += max( 0.0, el->margin_t ) + max( 0.0, el->margin_b );
+    return best;
+}
+
 static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 {
     int w, h;
@@ -461,6 +557,12 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 
     uwp_invoke_winui_measure_arrange( el, w, h );
     uwp_fire_evc_if_needed( el );
+
+    if (el->items_source && (!el->children_coll ||
+        CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
+    {
+        uwp_items_ctrl_materialize_source( el, el->items_source );
+    }
 
     if (el->kind == UWP_KIND_GRID && el->children_coll)
     {
@@ -586,8 +688,32 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             { r_type[i] = 1; r_val[i] = 0; }
             if (r_type[i] == 0) /* Auto */
             {
+                double auto_h = 0.0;
+                if (has_vis)
+                {
+                    for (k = 0; k < children->count; k++)
+                    {
+                        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                        if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                            ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                            ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
+                            ch->grid_row == i && ch->grid_row_span == 1)
+                        {
+                            double ch_h = uwp_estimate_auto_height( ch, 0 );
+                            if (ch_h > auto_h) auto_h = ch_h;
+                        }
+                    }
+                    if (auto_h < 36.0 * g_layout_scale)
+                        auto_h = 36.0 * g_layout_scale;
+                    if (rd && rd->max_height > 0.0 && auto_h > rd->max_height)
+                        auto_h = rd->max_height;
+                    if (rd && rd->min_height > 0.0 && auto_h < rd->min_height)
+                        auto_h = rd->min_height;
+                    if (h > 0 && auto_h > min( (double)h * 0.35, 320.0 ))
+                        auto_h = min( (double)h * 0.35, 320.0 );
+                }
                 r_type[i] = 1;
-                r_val[i] = has_vis ? 36.0 * g_layout_scale : 0.0;
+                r_val[i] = auto_h;
             }
             if (r_type[i] == 1) r_fixed += r_val[i];
             else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
