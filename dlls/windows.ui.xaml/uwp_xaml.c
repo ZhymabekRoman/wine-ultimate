@@ -2020,7 +2020,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         static const GUID IID_ILoadedImageSurface_UWP =
             { 0x091e237c, 0x5217, 0x424b, { 0xb6, 0xea, 0x19, 0x34, 0x18, 0xc2, 0x6d, 0x0b } };
         static const GUID IID_ICompositionSurface_UWP =
-            { 0xc44d4e07, 0x9992, 0x4540, { 0x90, 0xb5, 0x57, 0x91, 0x34, 0x07, 0x74, 0x06 } };
+            { 0x1527540d, 0x42c7, 0x47a6, { 0xa4, 0x08, 0x66, 0x8f, 0x79, 0xa9, 0x0d, 0xfb } };
         if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBaseProtected_UWP ))
             *out = &impl->IXamlCompositionBrushBaseProtected_iface;
         else if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBase_UWP ))
@@ -4977,6 +4977,27 @@ static const void *uwp_fe_vtbl[112] =
  * SelectionChanged per alphabetical winmd metadata over Control's 24 slots)
  * must live in the face the element hands out at creation.  All other slots
  * mirror the FrameworkElement face. */
+static HRESULT WINAPI uwp_vs_get_Name( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl || !impl->name[0]) return S_OK;
+    return WindowsCreateString( impl->name, lstrlenW( impl->name ), out );
+}
+
+static const void *uwp_visual_state_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_vs_get_Name,
+    [7 ... 31] = uwp_generic_noop,
+};
+
 static const void *uwp_noop_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -7236,7 +7257,10 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IPropertyPath_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_pp_vtbl;
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
-    impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
+    impl->IStyle_iface.lpVtbl = (!wcscmp( class_name, L"Windows.UI.Xaml.VisualState" ) ||
+                                 !wcscmp( class_name, L"Windows.UI.Xaml.VisualStateGroup" ))
+        ? (const struct IInspectableVtbl *)uwp_visual_state_vtbl
+        : (const struct IInspectableVtbl *)uwp_noop_vtbl;
     impl->IDataTemplate_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_data_template_vtbl;
     impl->IDataTemplateSelector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dts_vtbl;
     impl->IDataTemplateSelector2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dts2_vtbl;
