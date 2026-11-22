@@ -261,6 +261,120 @@ static const void *kbd_caps_factory_vtbl[] =
 };
 static struct { const void **vtbl; } kbd_caps_factory_obj = { kbd_caps_factory_vtbl };
 
+static const GUID IID_ITouchCapabilities =
+    {0x20dd55f9, 0x13f1, 0x46c8, {0x92, 0x85, 0x2c, 0x05, 0xfa, 0x3e, 0xda, 0x6f}};
+
+static HRESULT WINAPI touch_caps_QI( void *iface, REFIID riid, void **out )
+{
+    if (IsEqualGUID( riid, &IID_IUnknown ) || IsEqualGUID( riid, &IID_IInspectable ) ||
+        IsEqualGUID( riid, &IID_IAgileObject ) || IsEqualGUID( riid, &IID_ITouchCapabilities ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI touch_caps_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Devices.Input.TouchCapabilities", 39, name );
+}
+static HRESULT WINAPI touch_caps_get_TouchPresent( void *iface, INT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+static HRESULT WINAPI touch_caps_get_Contacts( void *iface, UINT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+static const void *touch_caps_vtbl[] =
+{
+    touch_caps_QI, kbd_caps_AddRef, kbd_caps_Release,
+    kbd_caps_GetIids, touch_caps_GetRuntimeClassName, kbd_caps_GetTrustLevel,
+    touch_caps_get_TouchPresent, touch_caps_get_Contacts,
+};
+static struct { const void **vtbl; } touch_caps_obj = { touch_caps_vtbl };
+
+static HRESULT WINAPI touch_caps_factory_ActivateInstance( void *iface, IInspectable **out )
+{
+    if (!out) return E_POINTER;
+    *out = (IInspectable *)&touch_caps_obj;
+    return S_OK;
+}
+static const void *touch_caps_factory_vtbl[] =
+{
+    kbd_caps_factory_QI, kbd_caps_AddRef, kbd_caps_Release,
+    kbd_caps_GetIids, touch_caps_GetRuntimeClassName, kbd_caps_GetTrustLevel,
+    touch_caps_factory_ActivateInstance,
+};
+static struct { const void **vtbl; } touch_caps_factory_obj = { touch_caps_factory_vtbl };
+
+static const GUID IID_IMouseCapabilities =
+    {0xbca5e023, 0x7dd9, 0x4b6b, {0x9a, 0x92, 0x55, 0xd4, 0x3c, 0xb3, 0x8f, 0x73}};
+
+static HRESULT WINAPI mouse_caps_QI( void *iface, REFIID riid, void **out )
+{
+    if (IsEqualGUID( riid, &IID_IUnknown ) || IsEqualGUID( riid, &IID_IInspectable ) ||
+        IsEqualGUID( riid, &IID_IAgileObject ) || IsEqualGUID( riid, &IID_IMouseCapabilities ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI mouse_caps_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Devices.Input.MouseCapabilities", 39, name );
+}
+static HRESULT WINAPI mouse_caps_get_one( void *iface, INT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 1;
+    return S_OK;
+}
+static HRESULT WINAPI mouse_caps_get_zero( void *iface, INT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+static HRESULT WINAPI mouse_caps_get_NumberOfButtons( void *iface, UINT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 3;
+    return S_OK;
+}
+static const void *mouse_caps_vtbl[] =
+{
+    mouse_caps_QI, kbd_caps_AddRef, kbd_caps_Release,
+    kbd_caps_GetIids, mouse_caps_GetRuntimeClassName, kbd_caps_GetTrustLevel,
+    mouse_caps_get_one,  /* MousePresent */
+    mouse_caps_get_one,  /* VerticalWheelPresent */
+    mouse_caps_get_zero, /* HorizontalWheelPresent */
+    mouse_caps_get_zero, /* SwapButtons */
+    mouse_caps_get_NumberOfButtons,
+};
+static struct { const void **vtbl; } mouse_caps_obj = { mouse_caps_vtbl };
+
+static HRESULT WINAPI mouse_caps_factory_ActivateInstance( void *iface, IInspectable **out )
+{
+    if (!out) return E_POINTER;
+    *out = (IInspectable *)&mouse_caps_obj;
+    return S_OK;
+}
+static const void *mouse_caps_factory_vtbl[] =
+{
+    kbd_caps_factory_QI, kbd_caps_AddRef, kbd_caps_Release,
+    kbd_caps_GetIids, mouse_caps_GetRuntimeClassName, kbd_caps_GetTrustLevel,
+    mouse_caps_factory_ActivateInstance,
+};
+static struct { const void **vtbl; } mouse_caps_factory_obj = { mouse_caps_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *name = WindowsGetStringRawBuffer( classid, NULL );
@@ -275,6 +389,10 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
                                            &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( name, L"Windows.Devices.Input.KeyboardCapabilities" ))
         *factory = (IActivationFactory *)&kbd_caps_factory_obj;
+    else if (!wcscmp( name, L"Windows.Devices.Input.TouchCapabilities" ))
+        *factory = (IActivationFactory *)&touch_caps_factory_obj;
+    else if (!wcscmp( name, L"Windows.Devices.Input.MouseCapabilities" ))
+        *factory = (IActivationFactory *)&mouse_caps_factory_obj;
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;
