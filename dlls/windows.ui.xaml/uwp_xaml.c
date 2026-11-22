@@ -2017,9 +2017,18 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             { 0x1513f3d8, 0x0457, 0x4e1c, { 0xad, 0x77, 0x11, 0xc1, 0xd9, 0x87, 0x97, 0x43 } };
         static const GUID IID_IXamlCompositionBrushBase_UWP =
             { 0x410b99e7, 0x9d63, 0x4449, { 0xa3, 0x58, 0x49, 0x62, 0xfd, 0x93, 0x5f, 0x39 } };
-        if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBaseProtected_UWP ) ||
-            IsEqualGUID( iid, &IID_IXamlCompositionBrushBase_UWP ))
+        static const GUID IID_ILoadedImageSurface_UWP =
+            { 0x091e237c, 0x5217, 0x424b, { 0xb6, 0xea, 0x19, 0x34, 0x18, 0xc2, 0x6d, 0x0b } };
+        static const GUID IID_ICompositionSurface_UWP =
+            { 0xc44d4e07, 0x9992, 0x4540, { 0x90, 0xb5, 0x57, 0x91, 0x34, 0x07, 0x74, 0x06 } };
+        if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBaseProtected_UWP ))
+            *out = &impl->IXamlCompositionBrushBaseProtected_iface;
+        else if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBase_UWP ))
             *out = &impl->IStyle_iface;
+        else if (IsEqualGUID( iid, &IID_ILoadedImageSurface_UWP ))
+            *out = &impl->ILoadedImageSurface_iface;
+        else if (IsEqualGUID( iid, &IID_ICompositionSurface_UWP ))
+            *out = &impl->IInspectable_iface;
     }
     if (!*out && (IsEqualGUID( iid, &IID_IRoutedEventArgs_QI_UWP ) ||
               IsEqualGUID( iid, &IID_IRoutedEventArgs_Clone_UWP ) ||
@@ -2118,10 +2127,11 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             *out = &impl->IBitmapSource_iface;
         else if (IsEqualGUID( iid, &IID_IStateTrigger_UWP ))
             *out = &impl->IStateTriggerPub_iface;
+        else if (IsEqualGUID( iid, &IID_IShape_UWP ))
+            *out = &impl->IShape_iface;
         else if (IsEqualGUID( iid, &IID_IListViewBase2_UWP ) ||
                  IsEqualGUID( iid, &IID_IListViewBase4_UWP ) ||
                  IsEqualGUID( iid, &IID_IListView_UWP ) ||
-                 IsEqualGUID( iid, &IID_IShape_UWP ) ||
                  IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
@@ -5846,6 +5856,277 @@ static const void *uwp_img_vtbl[24] =
     [14 ... 23] = uwp_generic_noop,
 };
 
+BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size_t cap )
+{
+    static const GUID IID_ICompositionSurfaceBrush_UWP =
+        { 0xad016d79, 0x1e4c, 0x4c0d, { 0x9c, 0x29, 0x83, 0x33, 0x8c, 0x87, 0xc1, 0x62 } };
+    static const GUID IID_ICompositionMaskBrush_UWP =
+        { 0x522e34a4, 0xc4b8, 0x41f7, { 0x93, 0x59, 0x4e, 0x65, 0x26, 0x51, 0x20, 0x2b } };
+    void *sb = NULL, *mb = NULL;
+
+    if (!brush || !out_uri || cap == 0) return FALSE;
+    if (SUCCEEDED(IInspectable_QueryInterface( brush, &IID_ICompositionSurfaceBrush_UWP, &sb )) && sb)
+    {
+        typedef HRESULT (WINAPI *get_surf_fn)( void *, IInspectable ** );
+        void **vtbl = *(void ***)sb;
+        IInspectable *surf = NULL;
+        if (vtbl && vtbl[12] && SUCCEEDED(((get_surf_fn)vtbl[12])( sb, &surf )) && surf)
+        {
+            struct uwp_element *surf_el = uwp_elem_from_any( surf );
+            BOOL ok = FALSE;
+            if (surf_el && surf_el->image_src[0])
+            {
+                lstrcpynW( out_uri, surf_el->image_src, cap );
+                ok = TRUE;
+            }
+            IInspectable_Release( surf );
+            IUnknown_Release( (IUnknown *)sb );
+            return ok;
+        }
+        IUnknown_Release( (IUnknown *)sb );
+    }
+    if (SUCCEEDED(IInspectable_QueryInterface( brush, &IID_ICompositionMaskBrush_UWP, &mb )) && mb)
+    {
+        typedef HRESULT (WINAPI *get_brush_fn)( void *, IInspectable ** );
+        void **vtbl = *(void ***)mb;
+        IInspectable *src_brush = NULL;
+        if (vtbl && vtbl[8] && SUCCEEDED(((get_brush_fn)vtbl[8])( mb, &src_brush )) && src_brush)
+        {
+            BOOL ok = uwp_extract_comp_brush_image_src( src_brush, out_uri, cap );
+            IInspectable_Release( src_brush );
+            IUnknown_Release( (IUnknown *)mb );
+            return ok;
+        }
+        IUnknown_Release( (IUnknown *)mb );
+    }
+    return FALSE;
+}
+
+BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t cap )
+{
+    static const GUID IID_ISpriteVisual_UWP =
+        { 0x08e05581, 0x1ad1, 0x4f97, { 0x97, 0x57, 0x40, 0x2d, 0x76, 0xe4, 0x23, 0x3b } };
+    void *sv = NULL;
+
+    if (!visual || !out_uri || cap == 0) return FALSE;
+    if (SUCCEEDED(IInspectable_QueryInterface( visual, &IID_ISpriteVisual_UWP, &sv )) && sv)
+    {
+        typedef HRESULT (WINAPI *get_brush_fn)( void *, IInspectable ** );
+        void **vtbl = *(void ***)sv;
+        IInspectable *brush = NULL;
+        if (vtbl && vtbl[6] && SUCCEEDED(((get_brush_fn)vtbl[6])( sv, &brush )) && brush)
+        {
+            BOOL ok = uwp_extract_comp_brush_image_src( brush, out_uri, cap );
+            IInspectable_Release( brush );
+            IUnknown_Release( (IUnknown *)sv );
+            return ok;
+        }
+        IUnknown_Release( (IUnknown *)sv );
+    }
+    return FALSE;
+}
+
+static HRESULT WINAPI uwp_shape_get_Fill( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->fill_brush : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_shape_put_Fill( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->fill_brush != val)
+    {
+        if (impl->fill_brush) IInspectable_Release( impl->fill_brush );
+        impl->fill_brush = val;
+        if (impl->fill_brush) IInspectable_AddRef( impl->fill_brush );
+    }
+    if (val)
+    {
+        struct uwp_element *b_el = uwp_elem_from_any( val );
+        if (wcsstr( impl->name, L"HeroImage" ))
+            TRACE( "uwp_shape_put_Fill(HeroImage %s): val=%p b_el=%p b_cls=%s\n",
+                   debugstr_w(impl->name), val, b_el, b_el ? debugstr_w(b_el->class_name) : "?" );
+        if (b_el)
+        {
+            if (b_el->image_src[0])
+            {
+                lstrcpynW( impl->image_src, b_el->image_src, ARRAY_SIZE(impl->image_src) );
+                impl->img_loaded = FALSE;
+                InterlockedExchange( &impl->img_loading, 0 );
+                TRACE( "uwp_shape_put_Fill(%s %s): uri=%s\n", debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(impl->image_src) );
+            }
+            else if (b_el->comp_brush && uwp_extract_comp_brush_image_src( b_el->comp_brush, impl->image_src, ARRAY_SIZE(impl->image_src) ))
+            {
+                impl->img_loaded = FALSE;
+                InterlockedExchange( &impl->img_loading, 0 );
+                TRACE( "uwp_shape_put_Fill(%s %s): comp_brush uri=%s\n", debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(impl->image_src) );
+            }
+            if (b_el->has_bg)
+            {
+                impl->bg_argb = b_el->bg_argb;
+                impl->bg_alpha = b_el->bg_alpha;
+                impl->has_bg = TRUE;
+            }
+        }
+    }
+    uwp_invalidate_window();
+    return S_OK;
+}
+static HRESULT WINAPI uwp_shape_get_Stroke( void *iface, IInspectable **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_shape_put_Stroke( void *iface, IInspectable *val )
+{
+    return S_OK;
+}
+static const void *uwp_shape_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_shape_get_Fill,
+    [7] = uwp_shape_put_Fill,
+    [8] = uwp_shape_get_Stroke,
+    [9] = uwp_shape_put_Stroke,
+    [10 ... 31] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_xcbb_get_CompositionBrush( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->comp_brush : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_xcbb_put_CompositionBrush( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->comp_brush != val)
+    {
+        if (impl->comp_brush) IInspectable_Release( impl->comp_brush );
+        impl->comp_brush = val;
+        if (impl->comp_brush) IInspectable_AddRef( impl->comp_brush );
+    }
+    if (val)
+    {
+        if (uwp_extract_comp_brush_image_src( val, impl->image_src, ARRAY_SIZE(impl->image_src) ))
+        {
+            TRACE( "uwp_xcbb_put_CompositionBrush(%s): extracted uri=%s\n",
+                   debugstr_w(impl->class_name), debugstr_w(impl->image_src) );
+            impl->img_loaded = FALSE;
+            InterlockedExchange( &impl->img_loading, 0 );
+            uwp_load_image_asset( impl );
+        }
+    }
+    uwp_invalidate_window();
+    return S_OK;
+}
+static const void *uwp_xcbb_prot_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_xcbb_get_CompositionBrush,
+    [7] = uwp_xcbb_put_CompositionBrush,
+    [8 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_lis_args_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_ILoadedImageSourceLoadCompletedEventArgs_UWP =
+        { 0xe9b0047a, 0x0528, 0x4230, { 0x8d, 0x3b, 0x9b, 0x73, 0x5d, 0x48, 0x6f, 0x70 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ILoadedImageSourceLoadCompletedEventArgs_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_lis_args_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI uwp_lis_args_Release( void *iface ) { return 1; }
+static HRESULT WINAPI uwp_lis_args_GetIids( void *iface, ULONG *cnt, IID **iids )
+{
+    if (cnt) *cnt = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_lis_args_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Media.LoadedImageSourceLoadCompletedEventArgs", 61, n );
+}
+static HRESULT WINAPI uwp_lis_args_GetTrustLevel( void *iface, TrustLevel *lvl )
+{
+    if (lvl) *lvl = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_lis_args_get_Status( void *iface, int *status )
+{
+    if (status) *status = 0; /* LoadedImageSourceLoadStatus_Success */
+    return S_OK;
+}
+static const void *uwp_lis_args_vtbl[] =
+{
+    uwp_lis_args_QI, uwp_lis_args_AddRef, uwp_lis_args_Release,
+    uwp_lis_args_GetIids, uwp_lis_args_GetRuntimeClassName, uwp_lis_args_GetTrustLevel,
+    uwp_lis_args_get_Status,
+};
+static const void *uwp_lis_args_obj = uwp_lis_args_vtbl;
+
+static HRESULT WINAPI uwp_lis_add_LoadCompleted( void *iface, IInspectable *handler, EventRegistrationToken *tok )
+{
+    static LONG next_tok = 1;
+    if (tok) tok->value = InterlockedIncrement( &next_tok );
+    if (handler)
+    {
+        typedef HRESULT (WINAPI *invoke_fn)( void *, void *, void * );
+        void **vtbl = *(void ***)handler;
+        if (vtbl && vtbl[3])
+            ((invoke_fn)vtbl[3])( handler, iface, (void *)&uwp_lis_args_obj );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_lis_get_Size( void *iface, struct __x_ABI_CWindows_CFoundation_CSize *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    out->Width = (impl && impl->img_w) ? (float)impl->img_w : 0.0f;
+    out->Height = (impl && impl->img_h) ? (float)impl->img_h : 0.0f;
+    return S_OK;
+}
+static const void *uwp_lis_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_lis_get_Size,          /* get_DecodedPhysicalSize */
+    [7] = uwp_lis_get_Size,          /* get_DecodedSize */
+    [8] = uwp_lis_get_Size,          /* get_NaturalSize */
+    [9] = uwp_lis_add_LoadCompleted, /* add_LoadCompleted */
+    [10] = uwp_generic_noop,         /* remove_LoadCompleted */
+    [11 ... 15] = uwp_generic_noop,
+};
+
 static const void *uwp_frame2_vtbl[16] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -6908,6 +7189,9 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IBitmapImage_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bi_vtbl;
     impl->IBitmapSource_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bs_vtbl;
     impl->IImage_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_img_vtbl;
+    impl->IShape_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_shape_vtbl;
+    impl->IXamlCompositionBrushBaseProtected_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xcbb_prot_vtbl;
+    impl->ILoadedImageSurface_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_lis_vtbl;
     impl->media_stretch = 2; /* Uniform */
     impl->IWeakReferenceSource_iface.lpVtbl = &uwp_wrs_vtbl;
     impl->IDispatch_iface.lpVtbl = &uwp_disp_vtbl;

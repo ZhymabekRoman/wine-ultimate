@@ -1069,6 +1069,55 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
+    if (el->fill_brush || el->ecp_visual || wcsstr( el->class_name, L"Rectangle" ))
+    {
+        WCHAR resolved_uri[512] = {0};
+        if (el->fill_brush)
+        {
+            struct uwp_element *b_el = uwp_elem_from_any( el->fill_brush );
+            if (b_el)
+            {
+                if (b_el->image_src[0])
+                    lstrcpynW( resolved_uri, b_el->image_src, ARRAY_SIZE(resolved_uri) );
+                else if (b_el->comp_brush)
+                    uwp_extract_comp_brush_image_src( b_el->comp_brush, resolved_uri, ARRAY_SIZE(resolved_uri) );
+            }
+        }
+        if (!resolved_uri[0] && el->dp_cnt > 0 && el->dp_store)
+        {
+            int di;
+            for (di = 0; di < el->dp_cnt; di++)
+            {
+                struct uwp_element *b_el = el->dp_store[di].value ? uwp_elem_from_any( el->dp_store[di].value ) : NULL;
+                if (!b_el) continue;
+                if (b_el->image_src[0])
+                {
+                    lstrcpynW( resolved_uri, b_el->image_src, ARRAY_SIZE(resolved_uri) );
+                    break;
+                }
+                if (b_el->comp_brush && uwp_extract_comp_brush_image_src( b_el->comp_brush, resolved_uri, ARRAY_SIZE(resolved_uri) ))
+                    break;
+            }
+        }
+        if (!resolved_uri[0] && el->ecp_visual)
+            uwp_extract_visual_image_src( el->ecp_visual, resolved_uri, ARRAY_SIZE(resolved_uri) );
+        if (resolved_uri[0] && wcscmp( el->image_src, resolved_uri ))
+        {
+            lstrcpynW( el->image_src, resolved_uri, ARRAY_SIZE(el->image_src) );
+            el->img_loaded = FALSE;
+            InterlockedExchange( &el->img_loading, 0 );
+        }
+        if (el->image_src[0])
+        {
+            uwp_load_image_asset( el );
+            if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+            {
+                RECT rc = el->bounds;
+                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &rc, NULL );
+            }
+        }
+    }
+
     if (el->kind == UWP_KIND_PROGRESS_RING)
     {
         RECT rc = el->bounds;
@@ -2146,6 +2195,25 @@ static HRESULT WINAPI ecp_SetElementChildVisual( void *iface, void *elem, void *
 {
     IDCompositionVisual *root = xaml_get_dcomp_root_visual();
     IDCompositionVisual *dcomp_vis = NULL;
+    struct uwp_element *el = uwp_elem_from_any( elem );
+    if (el)
+    {
+        if (el->ecp_visual != (IInspectable *)visual)
+        {
+            if (el->ecp_visual) IInspectable_Release( el->ecp_visual );
+            el->ecp_visual = (IInspectable *)visual;
+            if (el->ecp_visual) IInspectable_AddRef( el->ecp_visual );
+        }
+        if (visual && uwp_extract_visual_image_src( (IInspectable *)visual, el->image_src, ARRAY_SIZE(el->image_src) ))
+        {
+            TRACE( "ecp_SetElementChildVisual(%s): extracted uri=%s\n",
+                   debugstr_w(el->name), debugstr_w(el->image_src) );
+            el->img_loaded = FALSE;
+            InterlockedExchange( &el->img_loading, 0 );
+            uwp_load_image_asset( el );
+            uwp_invalidate_window();
+        }
+    }
     if (visual)
         IUnknown_QueryInterface( (IUnknown *)visual, &IID_IDCompositionVisual, (void **)&dcomp_vis );
     if (root)
@@ -2356,6 +2424,80 @@ static const void *cas_statics_vtbl[] =
     cas_statics_GetForCurrentView,
 };
 static const void *cas_statics_obj = cas_statics_vtbl;
+
+static HRESULT WINAPI uwp_lis_statics_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_ILoadedImageSurfaceStatics_UWP =
+        { 0x22b8edf6, 0x84ad, 0x40ab, { 0x93, 0x7d, 0x48, 0x71, 0x61, 0x3e, 0x76, 0x5d } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ILoadedImageSurfaceStatics_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI uwp_lis_statics_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Media.LoadedImageSurface", 40, n );
+}
+static HRESULT WINAPI uwp_lis_StartLoadFromUriWithSize( void *iface, IInspectable *uri,
+                                                        struct __x_ABI_CWindows_CFoundation_CSize desired_max_size, IInspectable **out )
+{
+    void *inst = NULL;
+    struct uwp_element *el;
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    hr = uwp_element_create( L"Windows.UI.Xaml.Media.LoadedImageSurface", NULL, NULL, &inst );
+    if (FAILED(hr) || !inst) return FAILED(hr) ? hr : E_OUTOFMEMORY;
+    el = uwp_elem_from_any( inst );
+    if (el)
+    {
+        if (uri) uwp_extract_uri_string( uri, el->image_src, ARRAY_SIZE(el->image_src) );
+        TRACE( "LoadedImageSurface.StartLoadFromUriWithSize uri=%s\n", debugstr_w(el->image_src) );
+        if (el->image_src[0]) uwp_load_image_asset( el );
+        *out = &el->ILoadedImageSurface_iface;
+    }
+    else
+        *out = (IInspectable *)inst;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_lis_StartLoadFromUri( void *iface, IInspectable *uri, IInspectable **out )
+{
+    struct __x_ABI_CWindows_CFoundation_CSize sz = { 0.0f, 0.0f };
+    return uwp_lis_StartLoadFromUriWithSize( iface, uri, sz, out );
+}
+static HRESULT WINAPI uwp_lis_StartLoadFromStreamWithSize( void *iface, IInspectable *stream,
+                                                           struct __x_ABI_CWindows_CFoundation_CSize desired_max_size, IInspectable **out )
+{
+    void *inst = NULL;
+    struct uwp_element *el;
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    hr = uwp_element_create( L"Windows.UI.Xaml.Media.LoadedImageSurface", NULL, NULL, &inst );
+    if (FAILED(hr) || !inst) return FAILED(hr) ? hr : E_OUTOFMEMORY;
+    el = uwp_elem_from_any( inst );
+    *out = el ? &el->ILoadedImageSurface_iface : (IInspectable *)inst;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_lis_StartLoadFromStream( void *iface, IInspectable *stream, IInspectable **out )
+{
+    struct __x_ABI_CWindows_CFoundation_CSize sz = { 0.0f, 0.0f };
+    return uwp_lis_StartLoadFromStreamWithSize( iface, stream, sz, out );
+}
+static const void *uwp_lis_statics_vtbl[] =
+{
+    uwp_lis_statics_QI, ecp_AddRef, ecp_Release, ecp_GetIids, uwp_lis_statics_GetRuntimeClassName, ecp_GetTrustLevel,
+    uwp_lis_StartLoadFromUriWithSize,
+    uwp_lis_StartLoadFromUri,
+    uwp_lis_StartLoadFromStreamWithSize,
+    uwp_lis_StartLoadFromStream,
+};
+static const void *uwp_lis_statics_obj = uwp_lis_statics_vtbl;
 
 static const void *comp_target_statics_obj;
 static const void *binding_ops_statics_obj;
@@ -2626,10 +2768,17 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
     {
         static const GUID IID_IXamlMarkupHelperStatics_UWP =
             { 0xc9bc3725, 0xf34f, 0x445c, { 0x81, 0xa2, 0x6b, 0x72, 0xa5, 0xe8, 0xf0, 0x72 } };
+        static const GUID IID_ILoadedImageSurfaceStatics_UWP =
+            { 0x22b8edf6, 0x84ad, 0x40ab, { 0x93, 0x7d, 0x48, 0x71, 0x61, 0x3e, 0x76, 0x5d } };
         extern const void *xaml_markup_helper_statics_obj;
         if (IsEqualGUID( iid, &IID_IXamlMarkupHelperStatics_UWP ))
         {
             *out = (void *)&xaml_markup_helper_statics_obj;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_ILoadedImageSurfaceStatics_UWP ))
+        {
+            *out = (void *)&uwp_lis_statics_obj;
             return S_OK;
         }
     }
