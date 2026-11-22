@@ -1114,7 +1114,7 @@ static struct
 } g_http_img_cache[128];
 static int g_http_img_cache_cnt = 0;
 
-static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, BYTE **out_pixels, UINT *out_w, UINT *out_h )
+static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, UINT max_dim, BYTE **out_pixels, UINT *out_w, UINT *out_h )
 {
     IWICImagingFactory *wic = NULL;
     IWICStream *stream = NULL;
@@ -1139,10 +1139,10 @@ static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, BYTE **out_pixel
                     IWICBitmapSource *src_bmp = (IWICBitmapSource *)frame;
                     IWICBitmapScaler *scaler = NULL;
                     if (SUCCEEDED(IWICBitmapFrameDecode_GetSize( frame, &w, &h )) &&
-                        (w > 192 || h > 192) && w > 0 && h > 0)
+                        max_dim > 0 && (w > max_dim || h > max_dim) && w > 0 && h > 0)
                     {
-                        UINT nw = w >= h ? 192 : max( 1, (UINT)(192.0 * w / h) );
-                        UINT nh = h >= w ? 192 : max( 1, (UINT)(192.0 * h / w) );
+                        UINT nw = w >= h ? max_dim : max( 1, (UINT)((double)max_dim * w / h) );
+                        UINT nh = h >= w ? max_dim : max( 1, (UINT)((double)max_dim * h / w) );
                         if (SUCCEEDED(IWICImagingFactory_CreateBitmapScaler( wic, &scaler )) && scaler)
                         {
                             if (SUCCEEDED(IWICBitmapScaler_Initialize( scaler, src_bmp, nw, nh, WICBitmapInterpolationModeFant )))
@@ -1307,7 +1307,11 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
     {
         BYTE *px = NULL;
         UINT pw = 0, ph = 0;
-        if (uwp_wic_decode_memory( buf, len, &px, &pw, &ph ) && px)
+        UINT max_dim = 192;
+        if (wcsstr( el->class_name, L"LoadedImageSurface" ) || wcsstr( el->name, L"Hero" ) ||
+            (el->has_bounds && ((el->bounds.right - el->bounds.left) > 320 || (el->bounds.bottom - el->bounds.top) > 320)))
+            max_dim = 1024;
+        if (uwp_wic_decode_memory( buf, len, max_dim, &px, &pw, &ph ) && px)
         {
             AcquireSRWLockExclusive( &g_http_img_cache_lock );
             if (g_http_img_cache_cnt < (int)ARRAY_SIZE(g_http_img_cache))

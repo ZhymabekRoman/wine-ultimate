@@ -1463,7 +1463,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     bg = RGB( max( 0, (int)GetRValue(bg) - 20 ), max( 0, (int)GetGValue(bg) - 20 ), max( 0, (int)GetBValue(bg) - 20 ) );
             }
         }
-        else if (wcsstr( el->name, L"GetButton" ) || !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ) ||
+        else if (wcsstr( el->name, L"GetButton" ) || wcsstr( el->name, L"BuyButton" ) ||
+                 !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ) ||
                  !wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
         {
             bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
@@ -1518,6 +1519,11 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         }
         if (label[0])
             xaml_gpu_push_text( ctx, label, fh, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &brc, NULL, fg, 1.0f );
+        else if (el->content)
+        {
+            struct uwp_element *ce = uwp_elem_from_any( el->content );
+            if (ce && ce != el) uwp_gpu_paint_element( ctx, ce );
+        }
         return;
     }
 
