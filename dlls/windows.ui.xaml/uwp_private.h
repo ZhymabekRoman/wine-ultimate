@@ -381,16 +381,20 @@ struct uwp_element
     IInspectable *col_defs_coll; /* Grid.ColumnDefinitions */
     IInspectable *resources_rd;  /* FrameworkElement.Resources */
     IInspectable *data_context;
-    void *dc_bound_dps[8];
-    struct uwp_element *dc_bound_bindings[8];
+    struct {
+        void *dp;
+        struct uwp_element *binding;
+    } *dc_bound_dps;
     int dc_bound_dp_cnt;
+    int dc_bound_dp_cap;
     struct {
         WCHAR owner_cls[128];
         WCHAR prop_name[64];
         WCHAR path[128];
         IInspectable *source;
-    } xaml_bindings[4];
+    } *xaml_bindings;
     int xaml_binding_cnt;
+    int xaml_binding_cap;
     IInspectable *command;
     IInspectable *command_param;
     IInspectable *tag;
@@ -832,8 +836,9 @@ struct xaml_element
     IInspectable IDependencyObject_iface;
     IUnknown IWeakReferenceSource_iface;
     struct xaml_weak_ref *weak_ref;
-    struct { void *dp; IInspectable *val; } dp_store[16];
+    struct { void *dp; IInspectable *val; } *dp_store;
     int dp_count;
+    int dp_cap;
     LONG ref;
     int visibility;
     IInspectable *outer;
@@ -2254,8 +2259,36 @@ ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
 extern const void *uwp_tb_vtbl[64];
 extern const void *uwp_paragraph_vtbl[64];
 extern const void *uwp_run_vtbl[16];
-extern const void *uwp_binding_vtbl[32];
-extern const void *uwp_pp_vtbl[16];
+struct uwp_binding_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IInspectable *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IInspectable *iface );
+    ULONG (WINAPI *Release)( IInspectable *iface );
+    HRESULT (WINAPI *GetIids)( IInspectable *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IInspectable *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
+    HRESULT (WINAPI *get_Path)( void *iface, IInspectable **out );
+    HRESULT (WINAPI *put_Path)( void *iface, IInspectable *val );
+    HRESULT (WINAPI *pad8_13[6])( void *iface, ... );
+    HRESULT (WINAPI *get_Source)( void *iface, IInspectable **out );
+    HRESULT (WINAPI *put_Source)( void *iface, IInspectable *val );
+    HRESULT (WINAPI *pad16_31[16])( void *iface, ... );
+};
+
+struct uwp_pp_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IInspectable *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IInspectable *iface );
+    ULONG (WINAPI *Release)( IInspectable *iface );
+    HRESULT (WINAPI *GetIids)( IInspectable *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IInspectable *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
+    HRESULT (WINAPI *get_Path)( void *iface, HSTRING *out );
+    HRESULT (WINAPI *pad7_15[9])( void *iface, ... );
+};
+
+extern const struct uwp_binding_vtbl uwp_binding_vtbl;
+extern const struct uwp_pp_vtbl uwp_pp_vtbl;
 
 extern const void *uwp_teachingtip_vtbl[64];
 

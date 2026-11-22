@@ -4768,7 +4768,7 @@ static HRESULT WINAPI wv2_do_SetValue( void *iface, void *dp, IInspectable *valu
             return S_OK;
         }
     }
-    if (impl->dp_count < (int)ARRAY_SIZE( impl->dp_store ))
+    if (xaml_vec_grow( (void **)&impl->dp_store, &impl->dp_cap, impl->dp_count + 1, sizeof(*impl->dp_store), 16 ))
     {
         impl->dp_store[impl->dp_count].dp = dp;
         impl->dp_store[impl->dp_count].val = value;

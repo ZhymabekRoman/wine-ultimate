@@ -2915,20 +2915,20 @@ static HRESULT WINAPI uwp_binding_put_Source( void *iface, IInspectable *val )
     return S_OK;
 }
 
-const void *uwp_binding_vtbl[32] =
+const struct uwp_binding_vtbl uwp_binding_vtbl =
 {
-    [0] = uwp_sub_QueryInterface,
-    [1] = uwp_sub_AddRef,
-    [2] = uwp_sub_Release,
-    [3] = uwp_sub_GetIids,
-    [4] = uwp_sub_GetRuntimeClassName,
-    [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_binding_get_Path,
-    [7] = uwp_binding_put_Path,
-    [8 ... 13] = uwp_generic_noop,
-    [14] = uwp_binding_get_Source,
-    [15] = uwp_binding_put_Source,
-    [16 ... 31] = uwp_generic_noop,
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_binding_get_Path,
+    uwp_binding_put_Path,
+    { [0 ... 5] = uwp_generic_noop },
+    uwp_binding_get_Source,
+    uwp_binding_put_Source,
+    { [0 ... 15] = uwp_generic_noop },
 };
 
 static HRESULT WINAPI uwp_pp_get_Path( void *iface, HSTRING *out )
@@ -2941,16 +2941,16 @@ static HRESULT WINAPI uwp_pp_get_Path( void *iface, HSTRING *out )
     return S_OK;
 }
 
-const void *uwp_pp_vtbl[16] =
+const struct uwp_pp_vtbl uwp_pp_vtbl =
 {
-    [0] = uwp_sub_QueryInterface,
-    [1] = uwp_sub_AddRef,
-    [2] = uwp_sub_Release,
-    [3] = uwp_sub_GetIids,
-    [4] = uwp_sub_GetRuntimeClassName,
-    [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_pp_get_Path,
-    [7 ... 15] = uwp_generic_noop,
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_pp_get_Path,
+    { [0 ... 8] = uwp_generic_noop },
 };
 
 const void *uwp_rowcol_vtbl[32] =

@@ -21,14 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <wctype.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
 #include "xbf_known_types.h"
-#include "appmodel.h"
 #include "weakreference.h"
-#include "winreg.h"
 #include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
@@ -4795,7 +4792,8 @@ void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
     else
     {
         struct uwp_element *anc;
-        if (tel->xaml_binding_cnt < 4)
+        if (xaml_vec_grow( (void **)&tel->xaml_bindings, &tel->xaml_binding_cap,
+                           tel->xaml_binding_cnt + 1, sizeof(*tel->xaml_bindings), 8 ))
         {
             int idx = tel->xaml_binding_cnt++;
             lstrcpynW( tel->xaml_bindings[idx].owner_cls, owner_cls, ARRAY_SIZE(tel->xaml_bindings[idx].owner_cls) );
@@ -4842,11 +4840,13 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
     {
         struct uwp_element *anc;
         for (i = 0; i < tel->dc_bound_dp_cnt; i++)
-            if (tel->dc_bound_dps[i] == dp) break;
-        if (i == tel->dc_bound_dp_cnt && tel->dc_bound_dp_cnt < 8)
+            if (tel->dc_bound_dps[i].dp == dp) break;
+        if (i == tel->dc_bound_dp_cnt &&
+            xaml_vec_grow( (void **)&tel->dc_bound_dps, &tel->dc_bound_dp_cap,
+                           tel->dc_bound_dp_cnt + 1, sizeof(*tel->dc_bound_dps), 8 ))
         {
-            tel->dc_bound_dps[tel->dc_bound_dp_cnt] = dp;
-            tel->dc_bound_bindings[tel->dc_bound_dp_cnt] = bel;
+            tel->dc_bound_dps[tel->dc_bound_dp_cnt].dp = dp;
+            tel->dc_bound_dps[tel->dc_bound_dp_cnt].binding = bel;
             if (bel) IInspectable_AddRef( &bel->IInspectable_iface );
             tel->dc_bound_dp_cnt++;
         }
@@ -4967,38 +4967,6 @@ static const void *uwp_fe_vtbl[112] =
  * SelectionChanged per alphabetical winmd metadata over Control's 24 slots)
  * must live in the face the element hands out at creation.  All other slots
  * mirror the FrameworkElement face. */
-static HRESULT WINAPI uwp_xamlroot_get_Content( void *iface, void **out )
-{
-    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IStateTrigger_iface );
-    if (!out) return E_POINTER;
-    *out = &impl->IUIElement_iface;
-    uwp_sub_AddRef( &impl->IUIElement_iface );
-    return S_OK;
-}
-
-static HRESULT WINAPI uwp_xamlroot_get_XamlRoot( void *iface, void **out )
-{
-    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IStateTrigger_iface );
-    if (!out) return E_POINTER;
-    *out = &impl->IStateTrigger_iface;
-    uwp_sub_AddRef( &impl->IStateTrigger_iface );
-    return S_OK;
-}
-
-static const void *uwp_xamlroot_vtbl[128] =
-{
-    [0] = uwp_sub_QueryInterface,
-    [1] = uwp_sub_AddRef,
-    [2] = uwp_sub_Release,
-    [3] = uwp_sub_GetIids,
-    [4] = uwp_sub_GetRuntimeClassName,
-    [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_xamlroot_get_Content,
-    [7] = uwp_generic_noop,
-    [8] = uwp_xamlroot_get_XamlRoot,
-    [9 ... 127] = uwp_generic_noop,
-};
-
 static const void *uwp_noop_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -5813,28 +5781,51 @@ static HRESULT WINAPI uwp_st_put_IsActive( void *iface, boolean is_active )
 {
     return uwp_st_SetActive( iface, is_active );
 }
-static const void *uwp_state_trigger_vtbl[16] =
+struct uwp_state_trigger_vtbl
 {
-    [0] = uwp_sub_QueryInterface,
-    [1] = uwp_sub_AddRef,
-    [2] = uwp_sub_Release,
-    [3] = uwp_sub_GetIids,
-    [4] = uwp_sub_GetRuntimeClassName,
-    [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_st_SetActive,
-    [7 ... 15] = uwp_generic_noop,
+    HRESULT (WINAPI *QueryInterface)( IInspectable *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IInspectable *iface );
+    ULONG (WINAPI *Release)( IInspectable *iface );
+    HRESULT (WINAPI *GetIids)( IInspectable *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IInspectable *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
+    HRESULT (WINAPI *SetActive)( void *iface, boolean is_active );
+    HRESULT (WINAPI *pad7_15[9])( void *iface, ... );
 };
-static const void *uwp_state_trigger_pub_vtbl[16] =
+static const struct uwp_state_trigger_vtbl uwp_state_trigger_vtbl =
 {
-    [0] = uwp_sub_QueryInterface,
-    [1] = uwp_sub_AddRef,
-    [2] = uwp_sub_Release,
-    [3] = uwp_sub_GetIids,
-    [4] = uwp_sub_GetRuntimeClassName,
-    [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_st_get_IsActive,
-    [7] = uwp_st_put_IsActive,
-    [8 ... 15] = uwp_generic_noop,
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_st_SetActive,
+    { [0 ... 8] = uwp_generic_noop },
+};
+struct uwp_state_trigger_pub_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IInspectable *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IInspectable *iface );
+    ULONG (WINAPI *Release)( IInspectable *iface );
+    HRESULT (WINAPI *GetIids)( IInspectable *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IInspectable *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
+    HRESULT (WINAPI *get_IsActive)( void *iface, boolean *out );
+    HRESULT (WINAPI *put_IsActive)( void *iface, boolean is_active );
+    HRESULT (WINAPI *pad8_15[8])( void *iface, ... );
+};
+static const struct uwp_state_trigger_pub_vtbl uwp_state_trigger_pub_vtbl =
+{
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_st_get_IsActive,
+    uwp_st_put_IsActive,
+    { [0 ... 7] = uwp_generic_noop },
 };
 static const void *uwp_img_vtbl[24] =
 {
@@ -6870,8 +6861,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->ITextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb_vtbl;
     impl->IParagraph_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_paragraph_vtbl;
     impl->IRun_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_run_vtbl;
-    impl->IBinding_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_binding_vtbl;
-    impl->IPropertyPath_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pp_vtbl;
+    impl->IBinding_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_binding_vtbl;
+    impl->IPropertyPath_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_pp_vtbl;
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
@@ -6883,8 +6874,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_flyout_vtbl;
     impl->ISelector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_selector_vtbl;
     impl->IItemsControl_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_items_ctrl_vtbl;
-    impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_state_trigger_vtbl;
-    impl->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_state_trigger_pub_vtbl;
+    impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_vtbl;
+    impl->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_pub_vtbl;
     impl->IObservableVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_obsvec_vtbl;
     impl->IVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_vec_vtbl;
     impl->IIterable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_iterable_vtbl;
@@ -7197,8 +7188,8 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
 
     for (i = 0; i < impl->dc_bound_dp_cnt; i++)
     {
-        if (impl->dc_bound_dps[i] && dc && dc != old_dc)
-            uwp_apply_binding( impl, impl->dc_bound_dps[i], impl->dc_bound_bindings[i] );
+        if (impl->dc_bound_dps[i].dp && dc && dc != old_dc)
+            uwp_apply_binding( impl, impl->dc_bound_dps[i].dp, impl->dc_bound_dps[i].binding );
     }
     for (i = 0; i < impl->xaml_binding_cnt; i++)
     {
@@ -7255,22 +7246,14 @@ static struct uwp_element *g_routed_args_el = NULL;
 /* McgMarshal caches the RCW (__ComObject) per IUnknown pointer and pins its
  * interop type at the first crossing.  Handlers registered on one element
  * often use distinct delegate args types (RoutedEventArgs vs RoutedEventArgs2),
- * so each fire gets its own args object to keep cached RCW types matching. */
-static struct uwp_element *g_args_ring[8];
-static unsigned int g_args_idx;
+ * so each fire allocates its own args object to keep cached RCW types matching. */
 static void *g_routed_args(void)
 {
+    void *inst = NULL;
     struct uwp_element *el;
-    unsigned int idx = g_args_idx;
-    g_args_idx = (g_args_idx + 1) % ARRAY_SIZE( g_args_ring );
-    el = g_args_ring[idx];
-    if (!el)
-    {
-        void *inst = NULL;
-        uwp_element_create( L"Windows.UI.Xaml.RoutedEventArgs", NULL, NULL, &inst );
-        el = g_args_ring[idx] = uwp_elem_from_any( inst );
-        if (!g_routed_args_el) g_routed_args_el = el;
-    }
+    uwp_element_create( L"Windows.UI.Xaml.RoutedEventArgs", NULL, NULL, &inst );
+    el = uwp_elem_from_any( inst );
+    if (el && !g_routed_args_el) g_routed_args_el = el;
     if (el && el->outer) return el->outer;
     if (el) return &el->IInspectable_iface;
     return &g_dp_routed_args;
