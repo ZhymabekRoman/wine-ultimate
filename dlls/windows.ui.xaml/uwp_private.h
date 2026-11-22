@@ -552,6 +552,7 @@ struct uwp_element
     IInspectable *fill_brush;
     IInspectable *comp_brush;
     IInspectable *ecp_visual;
+    BOOL xcbb_connected;
     BYTE *img_pixels;
     UINT img_w, img_h;
     BOOL img_loaded;
@@ -1283,6 +1284,7 @@ ULONG WINAPI uwp_key_args_Release( void *iface );
 void uwp_load_image_asset( struct uwp_element *el );
 BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size_t cap );
 BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t cap );
+void uwp_xcbb_ensure_connected( IInspectable *brush );
 void uwp_load_res_xbf_into_bucket( const char *base_dir, const WCHAR *uri_or_path, struct uwp_rd_bucket *target );
 void uwp_mark_xbf_ref_instantiated( struct uwp_element *root, const WCHAR *cls_name );
 HRESULT WINAPI uwp_nav_args_QI( void *iface, REFIID iid, void **out );

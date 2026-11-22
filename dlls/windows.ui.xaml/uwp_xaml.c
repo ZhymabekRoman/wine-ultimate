@@ -5902,13 +5902,47 @@ BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size
     return FALSE;
 }
 
-BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t cap )
+void uwp_xcbb_ensure_connected( IInspectable *brush )
+{
+    static const GUID IID_IXamlCompositionBrushBaseOverrides_UWP =
+        { 0xd19127f1, 0x38b4, 0x4ea1, { 0x8f, 0x33, 0x84, 0x96, 0x29, 0xa4, 0xc9, 0xc1 } };
+    struct uwp_element *b_el;
+    IUnknown *target;
+    void *ov = NULL;
+
+    if (!brush) return;
+    b_el = uwp_elem_from_any( brush );
+    if (b_el && (b_el->xcbb_connected || b_el->comp_brush)) return;
+    if (b_el && (!wcsncmp( b_el->class_name, L"Windows.UI.Xaml.", 16 ) ||
+                 !wcsncmp( b_el->class_name, L"Microsoft.UI.Xaml.", 18 )))
+        return;
+    target = (b_el && b_el->outer_unk) ? (IUnknown *)b_el->outer_unk : (IUnknown *)brush;
+    if (SUCCEEDED(IUnknown_QueryInterface( target, &IID_IXamlCompositionBrushBaseOverrides_UWP, &ov )) && ov)
+    {
+        typedef HRESULT (WINAPI *on_connected_fn)( void * );
+        void **vtbl = *(void ***)ov;
+        if (b_el) b_el->xcbb_connected = TRUE;
+        if (vtbl && vtbl[6])
+        {
+            HRESULT hr = ((on_connected_fn)vtbl[6])( ov );
+            TRACE( "uwp_xcbb_ensure_connected(%s): OnConnected hr=%#lx\n",
+                   b_el ? debugstr_w(b_el->class_name) : "?", hr );
+        }
+        IUnknown_Release( (IUnknown *)ov );
+    }
+}
+
+static BOOL uwp_extract_visual_image_src_depth( IInspectable *visual, WCHAR *out_uri, size_t cap, int depth )
 {
     static const GUID IID_ISpriteVisual_UWP =
         { 0x08e05581, 0x1ad1, 0x4f97, { 0x97, 0x57, 0x40, 0x2d, 0x76, 0xe4, 0x23, 0x3b } };
-    void *sv = NULL;
+    static const GUID IID_IContainerVisual_UWP =
+        { 0x02f6bc74, 0xed20, 0x4773, { 0xaf, 0xe6, 0xd4, 0x9b, 0x4a, 0x93, 0xdb, 0x32 } };
+    static const GUID IID_IIterable_Visual_UWP =
+        { 0x4eed7dce, 0xe4ac, 0x5891, { 0x9b, 0x52, 0x79, 0x9d, 0x70, 0xdf, 0x47, 0xfe } };
+    void *sv = NULL, *cv = NULL;
 
-    if (!visual || !out_uri || cap == 0) return FALSE;
+    if (!visual || !out_uri || cap == 0 || depth > 8) return FALSE;
     if (SUCCEEDED(IInspectable_QueryInterface( visual, &IID_ISpriteVisual_UWP, &sv )) && sv)
     {
         typedef HRESULT (WINAPI *get_brush_fn)( void *, IInspectable ** );
@@ -5919,11 +5953,65 @@ BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t 
             BOOL ok = uwp_extract_comp_brush_image_src( brush, out_uri, cap );
             IInspectable_Release( brush );
             IUnknown_Release( (IUnknown *)sv );
-            return ok;
+            if (ok) return TRUE;
         }
-        IUnknown_Release( (IUnknown *)sv );
+        else
+        {
+            IUnknown_Release( (IUnknown *)sv );
+        }
+    }
+    if (SUCCEEDED(IInspectable_QueryInterface( visual, &IID_IContainerVisual_UWP, &cv )) && cv)
+    {
+        typedef HRESULT (WINAPI *get_children_fn)( void *, IInspectable ** );
+        void **vtbl = *(void ***)cv;
+        IInspectable *children = NULL;
+        BOOL found = FALSE;
+        if (vtbl && vtbl[6] && SUCCEEDED(((get_children_fn)vtbl[6])( cv, &children )) && children)
+        {
+            void *iterable = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( children, &IID_IIterable_Visual_UWP, &iterable )) && iterable)
+            {
+                typedef HRESULT (WINAPI *first_fn)( void *, void ** );
+                void **it_vtbl = *(void ***)iterable;
+                void *iter = NULL;
+                if (it_vtbl && it_vtbl[6] && SUCCEEDED(((first_fn)it_vtbl[6])( iterable, &iter )) && iter)
+                {
+                    typedef HRESULT (WINAPI *get_cur_fn)( void *, IInspectable ** );
+                    typedef HRESULT (WINAPI *get_has_fn)( void *, boolean * );
+                    typedef HRESULT (WINAPI *move_next_fn)( void *, boolean * );
+                    void **iv = *(void ***)iter;
+                    boolean has = FALSE;
+                    int guard = 0;
+                    if (iv && iv[7] && SUCCEEDED(((get_has_fn)iv[7])( iter, &has )))
+                    {
+                        while (has && guard++ < 64)
+                        {
+                            IInspectable *child = NULL;
+                            if (iv[6] && SUCCEEDED(((get_cur_fn)iv[6])( iter, &child )) && child)
+                            {
+                                found = uwp_extract_visual_image_src_depth( child, out_uri, cap, depth + 1 );
+                                IInspectable_Release( child );
+                                if (found) break;
+                            }
+                            has = FALSE;
+                            if (!iv[8] || FAILED(((move_next_fn)iv[8])( iter, &has ))) break;
+                        }
+                    }
+                    IUnknown_Release( (IUnknown *)iter );
+                }
+                IUnknown_Release( (IUnknown *)iterable );
+            }
+            IInspectable_Release( children );
+        }
+        IUnknown_Release( (IUnknown *)cv );
+        if (found) return TRUE;
     }
     return FALSE;
+}
+
+BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t cap )
+{
+    return uwp_extract_visual_image_src_depth( visual, out_uri, cap, 0 );
 }
 
 static HRESULT WINAPI uwp_shape_get_Fill( void *iface, IInspectable **out )
@@ -5946,7 +6034,9 @@ static HRESULT WINAPI uwp_shape_put_Fill( void *iface, IInspectable *val )
     }
     if (val)
     {
-        struct uwp_element *b_el = uwp_elem_from_any( val );
+        struct uwp_element *b_el;
+        uwp_xcbb_ensure_connected( val );
+        b_el = uwp_elem_from_any( val );
         if (wcsstr( impl->name, L"HeroImage" ))
             TRACE( "uwp_shape_put_Fill(HeroImage %s): val=%p b_el=%p b_cls=%s\n",
                    debugstr_w(impl->name), val, b_el, b_el ? debugstr_w(b_el->class_name) : "?" );

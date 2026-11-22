@@ -1074,7 +1074,9 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         WCHAR resolved_uri[512] = {0};
         if (el->fill_brush)
         {
-            struct uwp_element *b_el = uwp_elem_from_any( el->fill_brush );
+            struct uwp_element *b_el;
+            uwp_xcbb_ensure_connected( el->fill_brush );
+            b_el = uwp_elem_from_any( el->fill_brush );
             if (b_el)
             {
                 if (b_el->image_src[0])
@@ -1090,6 +1092,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             {
                 struct uwp_element *b_el = el->dp_store[di].value ? uwp_elem_from_any( el->dp_store[di].value ) : NULL;
                 if (!b_el) continue;
+                if (wcsstr( b_el->class_name, L"Brush" ))
+                    uwp_xcbb_ensure_connected( el->dp_store[di].value );
                 if (b_el->image_src[0])
                 {
                     lstrcpynW( resolved_uri, b_el->image_src, ARRAY_SIZE(resolved_uri) );
