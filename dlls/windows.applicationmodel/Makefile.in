@@ -8,5 +8,6 @@ SOURCES = \
 	designmode.c \
 	main.c \
 	package.c \
+	store_fe3.c \
 	store_install.c \
 	winappsdk_dd.c

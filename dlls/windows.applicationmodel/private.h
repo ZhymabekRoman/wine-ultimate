@@ -124,6 +124,55 @@ extern struct winappsdk_factory web_auth_core_helper_factory;
 extern struct winappsdk_factory license_manager_factory;
 extern struct winappsdk_factory store_context_custom_factory;
 
+/* ---- store_install.c / store_fe3.c: AppInstallManager + FE3 download ----- */
+#define APP_INSTALL_MAX_HANDLERS 16
+
+struct app_install_handler_slot
+{
+    INT64 token;
+    IUnknown *handler;
+};
+
+enum app_install_state_val
+{
+    APP_INSTALL_STATE_PENDING = 0,
+    APP_INSTALL_STATE_STARTING = 1,
+    APP_INSTALL_STATE_ACQUIRING_LICENSE = 2,
+    APP_INSTALL_STATE_DOWNLOADING = 3,
+    APP_INSTALL_STATE_RESTORING_DATA = 4,
+    APP_INSTALL_STATE_INSTALLING = 5,
+    APP_INSTALL_STATE_COMPLETED = 6,
+    APP_INSTALL_STATE_CANCELED = 7,
+    APP_INSTALL_STATE_PAUSED = 8,
+    APP_INSTALL_STATE_ERROR = 9,
+};
+
+struct app_install_item_impl
+{
+    const void *vtbl1;
+    const void *vtbl2;
+    const void *vtbl3;
+    LONG ref;
+    HSTRING product_id;
+    HSTRING package_family_name;
+    INT32 install_type;
+    boolean is_user_initiated;
+    INT32 state;
+    UINT64 download_size;
+    UINT64 bytes_downloaded;
+    double percent_complete;
+    HRESULT error_code;
+    boolean ready_for_launch;
+    BOOL canceled;
+    BOOL paused;
+    struct app_install_handler_slot completed_handlers[APP_INSTALL_MAX_HANDLERS];
+    struct app_install_handler_slot status_handlers[APP_INSTALL_MAX_HANDLERS];
+};
+
+extern CRITICAL_SECTION app_install_cs;
+void app_install_notify_item_change( struct app_install_item_impl *item, BOOL completed );
+DWORD WINAPI app_install_worker_proc( void *param );
+
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
     {                                                                                              \
