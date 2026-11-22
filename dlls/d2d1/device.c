@@ -132,6 +132,104 @@ static const char msaa_blit_ps_code[] =
     "    return src.Load(int3(pos.xy, 0));\n"
     "}\n";
 
+struct d2d_shadow_cb
+{
+    D2D1_VECTOR_4F color;
+    float sigma;
+    int radius;
+    int src_offset_x;
+    int src_offset_y;
+    int src_min_x;
+    int src_min_y;
+    int src_max_x;
+    int src_max_y;
+};
+
+static const char shadow_h_ps_code[] =
+    "Texture2D<float4> src : register(t0);\n"
+    "cbuffer params : register(b0)\n"
+    "{\n"
+    "    float4 color;\n"
+    "    float sigma;\n"
+    "    int radius;\n"
+    "    int src_offset_x;\n"
+    "    int src_offset_y;\n"
+    "    int src_min_x;\n"
+    "    int src_min_y;\n"
+    "    int src_max_x;\n"
+    "    int src_max_y;\n"
+    "};\n"
+    "float4 main(float4 pos : SV_POSITION) : SV_TARGET\n"
+    "{\n"
+    "    int x = (int)pos.x + src_offset_x;\n"
+    "    int y = (int)pos.y + src_offset_y;\n"
+    "    if (y < src_min_y || y >= src_max_y)\n"
+    "        return float4(0.0f, 0.0f, 0.0f, 0.0f);\n"
+    "    if (radius <= 0 || sigma <= 0.001f)\n"
+    "    {\n"
+    "        float a = (x >= src_min_x && x < src_max_x) ? src.Load(int3(x, y, 0)).a : 0.0f;\n"
+    "        return float4(a, 0.0f, 0.0f, 1.0f);\n"
+    "    }\n"
+    "    float inv_2sigma2 = 0.5f / (sigma * sigma);\n"
+    "    float sum = 0.0f;\n"
+    "    float wsum = 0.0f;\n"
+    "    [loop]\n"
+    "    for (int i = -radius; i <= radius; ++i)\n"
+    "    {\n"
+    "        float fi = (float)i;\n"
+    "        float w = exp(-fi * fi * inv_2sigma2);\n"
+    "        int sx = x + i;\n"
+    "        float a = (sx >= src_min_x && sx < src_max_x) ? src.Load(int3(sx, y, 0)).a : 0.0f;\n"
+    "        sum += a * w;\n"
+    "        wsum += w;\n"
+    "    }\n"
+    "    return float4(sum / wsum, 0.0f, 0.0f, 1.0f);\n"
+    "}\n";
+
+static const char shadow_v_ps_code[] =
+    "Texture2D<float4> src : register(t0);\n"
+    "cbuffer params : register(b0)\n"
+    "{\n"
+    "    float4 color;\n"
+    "    float sigma;\n"
+    "    int radius;\n"
+    "    int src_offset_x;\n"
+    "    int src_offset_y;\n"
+    "    int src_min_x;\n"
+    "    int src_min_y;\n"
+    "    int src_max_x;\n"
+    "    int src_max_y;\n"
+    "};\n"
+    "float4 main(float4 pos : SV_POSITION) : SV_TARGET\n"
+    "{\n"
+    "    int x = (int)pos.x;\n"
+    "    int y = (int)pos.y;\n"
+    "    float blurred_a;\n"
+    "    if (radius <= 0 || sigma <= 0.001f)\n"
+    "    {\n"
+    "        blurred_a = src.Load(int3(x, y, 0)).r;\n"
+    "    }\n"
+    "    else\n"
+    "    {\n"
+    "        float inv_2sigma2 = 0.5f / (sigma * sigma);\n"
+    "        float sum = 0.0f;\n"
+    "        float wsum = 0.0f;\n"
+    "        [loop]\n"
+    "        for (int i = -radius; i <= radius; ++i)\n"
+    "        {\n"
+    "            float fi = (float)i;\n"
+    "            float w = exp(-fi * fi * inv_2sigma2);\n"
+    "            int sy = y + i;\n"
+    "            float a = (sy >= 0 && sy < src_max_y) ? src.Load(int3(x, sy, 0)).r : 0.0f;\n"
+    "            sum += a * w;\n"
+    "            wsum += w;\n"
+    "        }\n"
+    "        blurred_a = sum / wsum;\n"
+    "    }\n"
+    "    float out_a = saturate(blurred_a * color.a);\n"
+    "    return float4(color.rgb * out_a, out_a);\n"
+    "}\n";
+
 static void d2d_device_context_release_msaa_resources(struct d2d_device_context *context)
 {
     if (context->msaa_sync_srv)
@@ -807,6 +905,12 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         if (context->bs)
             ID3D11BlendState_Release(context->bs);
         d2d_device_context_release_msaa_resources(context);
+        if (context->shadow_cb)
+            ID3D11Buffer_Release(context->shadow_cb);
+        if (context->shadow_v_ps)
+            ID3D11PixelShader_Release(context->shadow_v_ps);
+        if (context->shadow_h_ps)
+            ID3D11PixelShader_Release(context->shadow_h_ps);
         if (context->blit_ps)
             ID3D11PixelShader_Release(context->blit_ps);
         if (context->blit_vs)
@@ -3323,6 +3427,303 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
     d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
 }
 
+static BOOL d2d_device_context_ensure_shadow_resources(struct d2d_device_context *context)
+{
+    ID3D11Device1 *device = context->d3d_device;
+
+    if (!context->blit_vs)
+    {
+        ID3D10Blob *vs_blob = NULL;
+        if (SUCCEEDED(D3DCompile(msaa_blit_vs_code, sizeof(msaa_blit_vs_code) - 1, "msaa_blit_vs",
+                NULL, NULL, "main", "vs_4_0", 0, 0, &vs_blob, NULL)))
+        {
+            ID3D11Device1_CreateVertexShader(device, ID3D10Blob_GetBufferPointer(vs_blob),
+                    ID3D10Blob_GetBufferSize(vs_blob), NULL, &context->blit_vs);
+            ID3D10Blob_Release(vs_blob);
+        }
+    }
+    if (!context->shadow_h_ps)
+    {
+        ID3D10Blob *ps_blob = NULL;
+        if (SUCCEEDED(D3DCompile(shadow_h_ps_code, sizeof(shadow_h_ps_code) - 1, "shadow_h_ps",
+                NULL, NULL, "main", "ps_4_0", 0, 0, &ps_blob, NULL)))
+        {
+            ID3D11Device1_CreatePixelShader(device, ID3D10Blob_GetBufferPointer(ps_blob),
+                    ID3D10Blob_GetBufferSize(ps_blob), NULL, &context->shadow_h_ps);
+            ID3D10Blob_Release(ps_blob);
+        }
+    }
+    if (!context->shadow_v_ps)
+    {
+        ID3D10Blob *ps_blob = NULL;
+        if (SUCCEEDED(D3DCompile(shadow_v_ps_code, sizeof(shadow_v_ps_code) - 1, "shadow_v_ps",
+                NULL, NULL, "main", "ps_4_0", 0, 0, &ps_blob, NULL)))
+        {
+            ID3D11Device1_CreatePixelShader(device, ID3D10Blob_GetBufferPointer(ps_blob),
+                    ID3D10Blob_GetBufferSize(ps_blob), NULL, &context->shadow_v_ps);
+            ID3D10Blob_Release(ps_blob);
+        }
+    }
+    if (!context->shadow_cb)
+    {
+        D3D11_BUFFER_DESC cb_desc = {0};
+        cb_desc.ByteWidth = sizeof(struct d2d_shadow_cb);
+        cb_desc.Usage = D3D11_USAGE_DEFAULT;
+        cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        ID3D11Device1_CreateBuffer(device, &cb_desc, NULL, &context->shadow_cb);
+    }
+
+    return context->blit_vs && context->shadow_h_ps && context->shadow_v_ps && context->shadow_cb;
+}
+
+static void d2d_device_context_draw_shadow(struct d2d_device_context *context, ID2D1Effect *effect,
+        const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect,
+        D2D1_INTERPOLATION_MODE interpolation_mode)
+{
+    ID2D1Image *input = NULL;
+    ID2D1Bitmap *src_bitmap = NULL;
+    struct d2d_bitmap *src_bm, *shadow_bm = NULL;
+    ID3D11Device1 *device = context->d3d_device;
+    ID3D11Texture2D *src_copy_tex = NULL, *temp_tex = NULL, *out_tex = NULL;
+    ID3D11ShaderResourceView *src_srv = NULL, *src_copy_srv = NULL, *temp_srv = NULL;
+    ID3D11RenderTargetView *temp_rtv = NULL, *out_rtv = NULL;
+    IDXGISurface *out_surface = NULL;
+    D3D11_TEXTURE2D_DESC tex_desc = {0};
+    D2D1_BITMAP_PROPERTIES1 bm_desc = {{0}};
+    struct d2d_shadow_cb cb = {{0}};
+    float blur_std_dev = 3.0f, sigma, dpi_x, dpi_y, pad_dip_x, pad_dip_y;
+    D2D1_VECTOR_4F color = { 0.0f, 0.0f, 0.0f, 1.0f };
+    UINT src_w, src_h, out_w, out_h;
+    int radius, hop;
+
+    ID2D1Effect_GetInput(effect, 0, &input);
+    for (hop = 0; hop < 4 && input; ++hop)
+    {
+        ID2D1Effect *nested = NULL;
+        if (SUCCEEDED(ID2D1Image_QueryInterface(input, &IID_ID2D1Bitmap, (void **)&src_bitmap)))
+            break;
+        if (SUCCEEDED(ID2D1Image_QueryInterface(input, &IID_ID2D1Effect, (void **)&nested)))
+        {
+            ID2D1Image *next = NULL;
+            ID2D1Effect_GetInput(nested, 0, &next);
+            ID2D1Effect_Release(nested);
+            ID2D1Image_Release(input);
+            input = next;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if (input)
+        ID2D1Image_Release(input);
+
+    if (!src_bitmap)
+        return;
+
+    src_bm = unsafe_impl_from_ID2D1Bitmap(src_bitmap);
+    src_w = src_bm->pixel_size.width;
+    src_h = src_bm->pixel_size.height;
+    if (!src_w || !src_h || !src_bm->resource || !d2d_device_context_ensure_shadow_resources(context))
+    {
+        ID2D1Bitmap_Release(src_bitmap);
+        return;
+    }
+
+    ID2D1Effect_GetValue(effect, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_PROPERTY_TYPE_FLOAT,
+            (BYTE *)&blur_std_dev, sizeof(blur_std_dev));
+    ID2D1Effect_GetValue(effect, D2D1_SHADOW_PROP_COLOR, D2D1_PROPERTY_TYPE_VECTOR4,
+            (BYTE *)&color, sizeof(color));
+
+    if (blur_std_dev < 0.0f)
+        blur_std_dev = 0.0f;
+
+    dpi_x = src_bm->dpi_x > 0.0f ? src_bm->dpi_x : 96.0f;
+    dpi_y = src_bm->dpi_y > 0.0f ? src_bm->dpi_y : 96.0f;
+    sigma = blur_std_dev * (dpi_x / 96.0f);
+    radius = (sigma > 0.001f) ? (int)ceilf(3.0f * sigma) : 0;
+    if (radius > 64)
+        radius = 64;
+
+    out_w = src_w + (UINT)(2 * radius);
+    out_h = src_h + (UINT)(2 * radius);
+
+    if (src_bm->srv)
+    {
+        src_srv = src_bm->srv;
+    }
+    else
+    {
+        ID3D11Texture2D *src_tex = NULL;
+        D3D11_TEXTURE2D_DESC sdesc;
+        if (FAILED(ID3D11Resource_QueryInterface(src_bm->resource, &IID_ID3D11Texture2D, (void **)&src_tex)))
+            goto done;
+        ID3D11Texture2D_GetDesc(src_tex, &sdesc);
+        ID3D11Texture2D_Release(src_tex);
+
+        sdesc.MipLevels = 1;
+        sdesc.ArraySize = 1;
+        sdesc.SampleDesc.Count = 1;
+        sdesc.SampleDesc.Quality = 0;
+        sdesc.Usage = D3D11_USAGE_DEFAULT;
+        sdesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        sdesc.CPUAccessFlags = 0;
+        sdesc.MiscFlags = 0;
+
+        if (FAILED(ID3D11Device1_CreateTexture2D(device, &sdesc, NULL, &src_copy_tex)))
+            goto done;
+        if (FAILED(ID3D11Device1_CreateShaderResourceView(device, (ID3D11Resource *)src_copy_tex,
+                NULL, &src_copy_srv)))
+            goto done;
+        src_srv = src_copy_srv;
+    }
+
+    tex_desc.Width = out_w;
+    tex_desc.Height = out_h;
+    tex_desc.MipLevels = 1;
+    tex_desc.ArraySize = 1;
+    tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    tex_desc.SampleDesc.Count = 1;
+    tex_desc.Usage = D3D11_USAGE_DEFAULT;
+    tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    if (FAILED(ID3D11Device1_CreateTexture2D(device, &tex_desc, NULL, &temp_tex)))
+        goto done;
+    if (FAILED(ID3D11Device1_CreateRenderTargetView(device, (ID3D11Resource *)temp_tex, NULL, &temp_rtv)))
+        goto done;
+    if (FAILED(ID3D11Device1_CreateShaderResourceView(device, (ID3D11Resource *)temp_tex, NULL, &temp_srv)))
+        goto done;
+
+    tex_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (FAILED(ID3D11Device1_CreateTexture2D(device, &tex_desc, NULL, &out_tex)))
+        goto done;
+    if (FAILED(ID3D11Device1_CreateRenderTargetView(device, (ID3D11Resource *)out_tex, NULL, &out_rtv)))
+        goto done;
+
+    cb.color = color;
+    cb.sigma = sigma;
+    cb.radius = radius;
+    cb.src_offset_x = -radius;
+    cb.src_offset_y = -radius;
+    cb.src_min_x = 0;
+    cb.src_min_y = 0;
+    cb.src_max_x = (int)src_w;
+    cb.src_max_y = (int)src_h;
+
+    {
+        ID3D11DeviceContext1 *d3d_ctx;
+        ID3DDeviceContextState *prev_state;
+        D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)out_w, (float)out_h, 0.0f, 1.0f };
+        D3D11_RECT sc = { 0, 0, (LONG)out_w, (LONG)out_h };
+        ID3D11ShaderResourceView *null_srv = NULL;
+        ID3D11RenderTargetView *null_rtv = NULL;
+        unsigned int offset = 0;
+
+        if (context->cs)
+            EnterCriticalSection(context->cs);
+
+        ID3D11Device1_GetImmediateContext1(device, &d3d_ctx);
+        ID3D11DeviceContext1_SwapDeviceContextState(d3d_ctx, context->d3d_state, &prev_state);
+
+        if (src_copy_tex)
+            ID3D11DeviceContext1_CopyResource(d3d_ctx, (ID3D11Resource *)src_copy_tex, src_bm->resource);
+
+        ID3D11DeviceContext1_UpdateSubresource(d3d_ctx, (ID3D11Resource *)context->shadow_cb, 0, NULL, &cb, 0, 0);
+
+        ID3D11DeviceContext1_OMSetRenderTargets(d3d_ctx, 1, &temp_rtv, NULL);
+        ID3D11DeviceContext1_OMSetBlendState(d3d_ctx, NULL, NULL, D3D11_DEFAULT_SAMPLE_MASK);
+        ID3D11DeviceContext1_IASetInputLayout(d3d_ctx, context->shape_resources[D2D_SHAPE_TYPE_TRIANGLE].il);
+        ID3D11DeviceContext1_IASetPrimitiveTopology(d3d_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11DeviceContext1_IASetIndexBuffer(d3d_ctx, context->ib, DXGI_FORMAT_R16_UINT, 0);
+        ID3D11DeviceContext1_IASetVertexBuffers(d3d_ctx, 0, 1, &context->vb, &context->vb_stride, &offset);
+        ID3D11DeviceContext1_VSSetShader(d3d_ctx, context->blit_vs, NULL, 0);
+        ID3D11DeviceContext1_PSSetShader(d3d_ctx, context->shadow_h_ps, NULL, 0);
+        ID3D11DeviceContext1_PSSetConstantBuffers(d3d_ctx, 0, 1, &context->shadow_cb);
+        ID3D11DeviceContext1_PSSetShaderResources(d3d_ctx, 0, 1, &src_srv);
+        ID3D11DeviceContext1_RSSetViewports(d3d_ctx, 1, &vp);
+        ID3D11DeviceContext1_RSSetScissorRects(d3d_ctx, 1, &sc);
+        ID3D11DeviceContext1_RSSetState(d3d_ctx, context->rs);
+        ID3D11DeviceContext1_DrawIndexed(d3d_ctx, 6, 0, 0);
+        ID3D11DeviceContext1_PSSetShaderResources(d3d_ctx, 0, 1, &null_srv);
+
+        cb.src_max_y = (int)out_h;
+        ID3D11DeviceContext1_UpdateSubresource(d3d_ctx, (ID3D11Resource *)context->shadow_cb, 0, NULL, &cb, 0, 0);
+
+        ID3D11DeviceContext1_OMSetRenderTargets(d3d_ctx, 1, &out_rtv, NULL);
+        ID3D11DeviceContext1_PSSetShader(d3d_ctx, context->shadow_v_ps, NULL, 0);
+        ID3D11DeviceContext1_PSSetShaderResources(d3d_ctx, 0, 1, &temp_srv);
+        ID3D11DeviceContext1_DrawIndexed(d3d_ctx, 6, 0, 0);
+        ID3D11DeviceContext1_PSSetShaderResources(d3d_ctx, 0, 1, &null_srv);
+        ID3D11DeviceContext1_OMSetRenderTargets(d3d_ctx, 1, &null_rtv, NULL);
+
+        ID3D11DeviceContext1_SwapDeviceContextState(d3d_ctx, prev_state, NULL);
+        ID3DDeviceContextState_Release(prev_state);
+        ID3D11DeviceContext1_Release(d3d_ctx);
+
+        if (context->cs)
+            LeaveCriticalSection(context->cs);
+    }
+
+    if (FAILED(ID3D11Texture2D_QueryInterface(out_tex, &IID_IDXGISurface, (void **)&out_surface)))
+        goto done;
+
+    bm_desc.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    bm_desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    bm_desc.dpiX = dpi_x;
+    bm_desc.dpiY = dpi_y;
+    bm_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
+
+    if (FAILED(d2d_bitmap_create_shared(context, &IID_IDXGISurface, out_surface, &bm_desc, &shadow_bm)))
+        goto done;
+
+    pad_dip_x = (float)radius * 96.0f / dpi_x;
+    pad_dip_y = (float)radius * 96.0f / dpi_y;
+
+    if (image_rect)
+    {
+        D2D1_RECT_F adj_rect =
+        {
+            image_rect->left + pad_dip_x,
+            image_rect->top + pad_dip_y,
+            image_rect->right + pad_dip_x,
+            image_rect->bottom + pad_dip_y,
+        };
+        d2d_device_context_draw_bitmap(context, (ID2D1Bitmap *)&shadow_bm->ID2D1Bitmap1_iface, NULL, 1.0f,
+                interpolation_mode, &adj_rect, target_offset, NULL);
+    }
+    else
+    {
+        D2D1_POINT_2F adj_offset =
+        {
+            (target_offset ? target_offset->x : 0.0f) - pad_dip_x,
+            (target_offset ? target_offset->y : 0.0f) - pad_dip_y,
+        };
+        d2d_device_context_draw_bitmap(context, (ID2D1Bitmap *)&shadow_bm->ID2D1Bitmap1_iface, NULL, 1.0f,
+                interpolation_mode, NULL, &adj_offset, NULL);
+    }
+
+done:
+    if (shadow_bm)
+        ID2D1Bitmap1_Release(&shadow_bm->ID2D1Bitmap1_iface);
+    if (out_surface)
+        IDXGISurface_Release(out_surface);
+    if (out_rtv)
+        ID3D11RenderTargetView_Release(out_rtv);
+    if (out_tex)
+        ID3D11Texture2D_Release(out_tex);
+    if (temp_srv)
+        ID3D11ShaderResourceView_Release(temp_srv);
+    if (temp_rtv)
+        ID3D11RenderTargetView_Release(temp_rtv);
+    if (temp_tex)
+        ID3D11Texture2D_Release(temp_tex);
+    if (src_copy_srv)
+        ID3D11ShaderResourceView_Release(src_copy_srv);
+    if (src_copy_tex)
+        ID3D11Texture2D_Release(src_copy_tex);
+    ID2D1Bitmap_Release(src_bitmap);
+}
+
 static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *iface, ID2D1Image *image,
         const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
         D2D1_COMPOSITE_MODE composite_mode)
@@ -3368,9 +3769,7 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
             struct d2d_effect *effect_impl = CONTAINING_RECORD(effect, struct d2d_effect, ID2D1Effect_iface);
             if (IsEqualGUID(&effect_impl->clsid, &CLSID_D2D1Shadow))
             {
-                static const D2D1_COLOR_F transparent = { 0.0f, 0.0f, 0.0f, 0.0f };
-                TRACE("Clearing target for unhandled CLSID_D2D1Shadow %p.\n", effect);
-                d2d_device_context_Clear(iface, &transparent);
+                d2d_device_context_draw_shadow(context, effect, target_offset, image_rect, interpolation_mode);
             }
             else
             {

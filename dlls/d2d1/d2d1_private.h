@@ -253,6 +253,9 @@ struct d2d_device_context
     ID3D11RasterizerState *rs_msaa;
     ID3D11VertexShader *blit_vs;
     ID3D11PixelShader *blit_ps;
+    ID3D11PixelShader *shadow_h_ps;
+    ID3D11PixelShader *shadow_v_ps;
+    ID3D11Buffer *shadow_cb;
     ID3D11Texture2D *msaa_tex;
     ID3D11RenderTargetView *msaa_rtv;
     ID3D11Texture2D *msaa_sync_tex;
