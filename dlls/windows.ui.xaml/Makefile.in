@@ -23,6 +23,8 @@ SOURCES = \
 	uwp_guids.c \
 	uwp_xaml.c \
 	webview2_bridge.c \
+	winui_collections.c \
+	winui_events.c \
 	wv2_async_profile.c \
 	wv2_events.c \
 	wv2_host_sta.c \
