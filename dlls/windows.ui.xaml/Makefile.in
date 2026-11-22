@@ -14,6 +14,10 @@ SOURCES = \
 	main.c \
 	pri.c \
 	swapchain_panel.c \
+	uwp_binding.c \
+	uwp_collections.c \
+	uwp_factories.c \
+	uwp_guids.c \
 	uwp_xaml.c \
 	webview2_bridge.c \
 	xbf_aot.c \
