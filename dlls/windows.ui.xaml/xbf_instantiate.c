@@ -187,7 +187,8 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
             else if ((ctx->rd_only || rd_tbl) && !is_rd_type &&
                      ((!ctx->connector &&
                        !(tid < ctx->type_cnt && (wcsstr( ctx->types[tid].full_name, L"Breakpoint" ) ||
-                                                 wcsstr( ctx->types[tid].full_name, L"TemplateSelector" )))) ||
+                                                 wcsstr( ctx->types[tid].full_name, L"TemplateSelector" ) ||
+                                                 wcsstr( ctx->types[tid].full_name, L"Converter" )))) ||
                       tid == XBF_TYPE_STYLE || tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
                       tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_STRING ||
                       tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))

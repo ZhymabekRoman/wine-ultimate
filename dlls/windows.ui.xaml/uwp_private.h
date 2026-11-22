@@ -1285,6 +1285,7 @@ BOOL uwp_is_fg_pid( WORD pid );
 ULONG WINAPI uwp_ka_args_Release( void *iface );
 ULONG WINAPI uwp_key_args_Release( void *iface );
 void uwp_load_image_asset( struct uwp_element *el );
+void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src );
 BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size_t cap );
 BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t cap );
 void uwp_xcbb_ensure_connected( IInspectable *brush );

@@ -1049,6 +1049,15 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
     if (!el || !el->has_bounds || el->visibility != 0) return;
     if (el->evc_cnt > 0 && !el->evc_fired)
         uwp_fire_evc_if_needed( el );
+    if (el->items_source && !el->children_coll)
+    {
+        uwp_items_ctrl_materialize_source( el, el->items_source );
+        if (el->children_coll)
+        {
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+    }
 
     if (el->kind == UWP_KIND_IMAGE)
     {

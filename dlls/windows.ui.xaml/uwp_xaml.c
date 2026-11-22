@@ -1914,8 +1914,14 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     }
     else if (IsEqualGUID( iid, &IID_IMenuFlyout2_Real_UWP ))
         *out = &impl->IMenuFlyout2_iface;
-    else if (IsEqualGUID( iid, &IID_IAutoSuggestBox_Real_UWP ) ||
-             IsEqualGUID( iid, &IID_IAutoSuggestBox2_Real_UWP ))
+    else if (IsEqualGUID( iid, &IID_IAutoSuggestBox_Real_UWP ))
+    {
+        if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
+            *out = &impl->IAutoSuggestBox2_iface;
+        else
+            *out = &impl->IItemsControl_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IAutoSuggestBox2_Real_UWP ))
     {
         if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
             *out = &impl->IAutoSuggestBox2_iface;
@@ -5882,7 +5888,7 @@ static BOOL uwp_extract_comp_brush_image_src_depth( IInspectable *brush, WCHAR *
     static const GUID IID_ICompositionSurfaceBrush_UWP =
         { 0xad016d79, 0x1e4c, 0x4c0d, { 0x9c, 0x29, 0x83, 0x33, 0x8c, 0x87, 0xc1, 0x62 } };
     static const GUID IID_ICompositionMaskBrush_UWP =
-        { 0x522e34a4, 0xc4b8, 0x41f7, { 0x93, 0x59, 0x4e, 0x65, 0x26, 0x51, 0x20, 0x2b } };
+        { 0x522cf09e, 0xbe6b, 0x4f41, { 0xbe, 0x49, 0xf9, 0x22, 0x6d, 0x47, 0x1b, 0x4a } };
     void *sb = NULL, *mb = NULL;
 
     if (!brush || !out_uri || cap == 0 || depth > 8) return FALSE;

@@ -1062,8 +1062,8 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                     struct uwp_element *cel = uwp_elem_from_any( content );
                     if (cel)
                     {
-                        uwp_fe_put_DataContext( &cel->IInspectable_iface, item );
                         uwp_vec_Append( impl->children_coll, &cel->IInspectable_iface );
+                        uwp_fe_put_DataContext( &cel->IInspectable_iface, item );
                         IUnknown_Release( (IUnknown *)content );
                         IUnknown_Release( (IUnknown *)dt );
                         IInspectable_Release( tmpl );
