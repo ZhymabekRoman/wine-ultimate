@@ -5877,7 +5877,7 @@ static const void *uwp_img_vtbl[24] =
     [14 ... 23] = uwp_generic_noop,
 };
 
-BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size_t cap )
+static BOOL uwp_extract_comp_brush_image_src_depth( IInspectable *brush, WCHAR *out_uri, size_t cap, int depth )
 {
     static const GUID IID_ICompositionSurfaceBrush_UWP =
         { 0xad016d79, 0x1e4c, 0x4c0d, { 0x9c, 0x29, 0x83, 0x33, 0x8c, 0x87, 0xc1, 0x62 } };
@@ -5885,7 +5885,7 @@ BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size
         { 0x522e34a4, 0xc4b8, 0x41f7, { 0x93, 0x59, 0x4e, 0x65, 0x26, 0x51, 0x20, 0x2b } };
     void *sb = NULL, *mb = NULL;
 
-    if (!brush || !out_uri || cap == 0) return FALSE;
+    if (!brush || !out_uri || cap == 0 || depth > 8) return FALSE;
     if (SUCCEEDED(IInspectable_QueryInterface( brush, &IID_ICompositionSurfaceBrush_UWP, &sb )) && sb)
     {
         typedef HRESULT (WINAPI *get_surf_fn)( void *, IInspectable ** );
@@ -5913,7 +5913,7 @@ BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size
         IInspectable *src_brush = NULL;
         if (vtbl && vtbl[8] && SUCCEEDED(((get_brush_fn)vtbl[8])( mb, &src_brush )) && src_brush)
         {
-            BOOL ok = uwp_extract_comp_brush_image_src( src_brush, out_uri, cap );
+            BOOL ok = uwp_extract_comp_brush_image_src_depth( src_brush, out_uri, cap, depth + 1 );
             IInspectable_Release( src_brush );
             IUnknown_Release( (IUnknown *)mb );
             return ok;
@@ -5921,6 +5921,11 @@ BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size
         IUnknown_Release( (IUnknown *)mb );
     }
     return FALSE;
+}
+
+BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size_t cap )
+{
+    return uwp_extract_comp_brush_image_src_depth( brush, out_uri, cap, 0 );
 }
 
 void uwp_xcbb_ensure_connected( IInspectable *brush )

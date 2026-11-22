@@ -1719,6 +1719,33 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
         }
     }
+    if (el && (pid == 0x837c || pid == 0x837b) && is_res_ref && sval && sval[0])
+    {
+        struct uwp_rd_entry *re = NULL;
+        struct uwp_rd_bucket *found_b = NULL;
+        if (uwp_rd_find_entry( ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL,
+                               el, sval, 0, &re, &found_b ) && re)
+        {
+            IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
+            if (res_val)
+            {
+                if (pid == 0x837c)
+                {
+                    if (el->item_template_selector) IInspectable_Release( el->item_template_selector );
+                    el->item_template_selector = res_val;
+                    IInspectable_AddRef( res_val );
+                }
+                else
+                {
+                    if (el->item_template) IInspectable_Release( el->item_template );
+                    el->item_template = res_val;
+                    IInspectable_AddRef( res_val );
+                }
+                TRACE( "xbf_apply_property: %s (%s) pid=%#x -> res %s (%p)\n",
+                       debugstr_w(el->class_name), debugstr_w(el->name), pid, debugstr_w(sval), res_val );
+            }
+        }
+    }
 }
 
 void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WORD target_pid,
