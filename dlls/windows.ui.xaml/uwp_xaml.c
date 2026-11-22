@@ -2481,8 +2481,17 @@ static void uwp_apply_runtime_style_setters( struct uwp_element *target_el, cons
         const struct uwp_style_setter *st = &setters[i];
         WARN( "  setter[%d] pid=%#x prop=%s owner=%s res=%d vt=%d str=%s\n",
               i, st->pid, debugstr_w(st->prop_name), debugstr_w(st->owner_cls), st->is_res_ref, st->vt, debugstr_w(st->str) );
+        if (st->pid & 0x8000)
+        {
+            xbf_apply_property( NULL, target_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+            continue;
+        }
         if (!st->prop_name[0] || !st->owner_cls[0]) continue;
-        if (!wcsncmp( st->owner_cls, L"Windows.UI.Xaml.", 16 )) continue;
+        if (!wcsncmp( st->owner_cls, L"Windows.UI.Xaml.", 16 ))
+        {
+            xbf_apply_property( NULL, target_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+            continue;
+        }
         if (!app_outer) continue;
         if (st->is_res_ref && st->str[0])
         {
@@ -2514,6 +2523,8 @@ static void uwp_apply_runtime_style_by_name( struct uwp_element *target_el, cons
     struct uwp_rd_entry *se = NULL;
     struct uwp_rd_bucket *sb = NULL;
     if (!target_el || !key || !key[0] || depth > 8) return;
+    if (uwp_style_is_accent_name( key ))
+        target_el->is_accent_style = TRUE;
     if (uwp_rd_find_entry( NULL, target_el, key, 0, &se, &sb ) && se && se->kind == UWP_RD_STYLE)
     {
         if (se->str_val[0])
@@ -2531,19 +2542,24 @@ HRESULT WINAPI uwp_fe_put_Style( void *iface, IInspectable *val )
     if (val) IInspectable_AddRef( val );
     if (impl->style_obj) IInspectable_Release( impl->style_obj );
     impl->style_obj = val;
+    if (val) impl->is_accent_style = FALSE;
     st_el = uwp_elem_from_any( val );
     if (wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
-        WARN( "uwp_fe_put_Style on %s (%s) val=%p st_el=%p based_on=%s cnt=%d\n",
+        WARN( "uwp_fe_put_Style on %s (%s) val=%p st_el=%p name=%s based_on=%s cnt=%d\n",
               debugstr_w(impl->class_name), debugstr_w(impl->name), val, st_el,
+              st_el ? debugstr_w(st_el->name) : "\"-\"",
               st_el ? debugstr_w(st_el->style_based_on) : "\"-\"",
               st_el ? st_el->style_setter_cnt : -1 );
     if (st_el)
     {
+        if (st_el->name[0] && uwp_style_is_accent_name( st_el->name ))
+            impl->is_accent_style = TRUE;
         if (st_el->style_based_on[0])
             uwp_apply_runtime_style_by_name( impl, st_el->style_based_on, 0 );
         if (st_el->style_setter_cnt > 0 && st_el->style_setters)
             uwp_apply_runtime_style_setters( impl, st_el->style_setters, st_el->style_setter_cnt );
     }
+    uwp_invalidate_window();
     return S_OK;
 }
 
@@ -3315,8 +3331,13 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
 
-    if (val && uwp_unbox_string( val, str_buf, ARRAY_SIZE(str_buf) ))
+    if (!val)
     {
+        impl->content_kind = UWP_CONTENT_NONE;
+    }
+    else if (uwp_unbox_string( val, str_buf, ARRAY_SIZE(str_buf) ))
+    {
+        impl->content_kind = UWP_CONTENT_TEXT;
         if (str_buf[0])
         {
             lstrcpynW( impl->text, str_buf, ARRAY_SIZE(impl->text) );
@@ -3326,6 +3347,7 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     }
     else if ((child_el = uwp_elem_from_any( val )) != NULL)
     {
+        impl->content_kind = UWP_CONTENT_ELEMENT;
         child_el->parent = impl;
         if (child_el->outer && !child_el->delegating && !child_el->outer_pinned)
         {

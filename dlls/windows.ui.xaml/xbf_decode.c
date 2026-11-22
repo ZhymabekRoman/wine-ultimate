@@ -1259,10 +1259,14 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
 {
     int i;
     if (!el || !se || se->kind != UWP_RD_STYLE || depth > 8) return;
+    if (uwp_style_is_accent_name( se->key ))
+        el->is_accent_style = TRUE;
     if (se->str_val[0])
     {
         struct uwp_rd_entry *base_se = NULL;
         struct uwp_rd_bucket *base_b = NULL;
+        if (uwp_style_is_accent_name( se->str_val ))
+            el->is_accent_style = TRUE;
         if (uwp_rd_find_entry( b, el, se->str_val, 0, &base_se, &base_b ) && base_se)
             uwp_apply_style_entry( ctx, el, base_b, base_se, depth + 1 );
     }

@@ -452,6 +452,12 @@ struct uwp_element
     int style_setter_cnt;
     int style_setter_cap;
     IInspectable *style_obj;
+    BOOL is_accent_style;
+    enum {
+        UWP_CONTENT_NONE = 0,
+        UWP_CONTENT_TEXT,
+        UWP_CONTENT_ELEMENT,
+    } content_kind;
     struct uwp_rd_bucket *rd_bucket;
     /* Computed screen rectangle */
     RECT bounds;
@@ -1191,6 +1197,19 @@ void uwp_accel_register( struct uwp_element *accel_el, struct uwp_element *targe
 void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *style_key );
 void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
                                    struct uwp_rd_bucket *b, struct uwp_rd_entry *se, int depth );
+HRESULT WINAPI uwp_fe_put_Style( void *iface, IInspectable *val );
+struct xbf_stack_val;
+void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
+                         WORD pid, int vt, double num, const WCHAR *sval,
+                         const double vec4[4], BOOL is_res_ref );
+static inline BOOL uwp_style_is_accent_name( const WCHAR *name )
+{
+    if (!name || !name[0]) return FALSE;
+    return wcsstr( name, L"AccentButton" ) != NULL ||
+           wcsstr( name, L"PrimaryButtonStyle" ) != NULL ||
+           wcsstr( name, L"PrimaryPapButton" ) != NULL ||
+           wcsstr( name, L"AccentStyle" ) != NULL;
+}
 void uwp_arrange_element( struct uwp_element *el, RECT rc );
 HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationToken *tok );
 HRESULT WINAPI uwp_btn_get_Command( void *iface, void **out );

@@ -920,6 +920,7 @@ IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_e
             struct uwp_element *st_el = uwp_elem_from_any( st );
             if (st_el)
             {
+                lstrcpynW( st_el->name, e->key, ARRAY_SIZE(st_el->name) );
                 lstrcpynW( st_el->style_based_on, e->str_val, ARRAY_SIZE(st_el->style_based_on) );
                 if (e->setter_cnt > 0 && e->setters)
                 {
@@ -1053,6 +1054,8 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
         IInspectable *st = NULL;
         if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Style", (void **)&st )) && st)
         {
+            struct uwp_element *st_el = uwp_elem_from_any( st );
+            if (st_el) lstrcpynW( st_el->name, key_str, ARRAY_SIZE(st_el->name) );
             uwp_rd_insert( rd_key, key_str, st );
             *out_val = st;
             return S_OK;
@@ -1743,6 +1746,8 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
         if (dpl && dpl->name[0])
             uwp_sync_template_presenter( impl, dpl->name, val );
+        if (dpl && !wcscmp( dpl->name, L"Style" ))
+            uwp_fe_put_Style( &impl->IInspectable_iface, val );
         if (impl->kind == UWP_KIND_IMAGE && dpl && !wcscmp( dpl->name, L"Source" ))
         {
             if (impl->img_source != val)
@@ -2323,6 +2328,8 @@ void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const
     if (!el || !style_key || !style_key[0]) return;
     uwp_extract_resource_key( style_key, key, ARRAY_SIZE(key) );
     if (!key[0]) return;
+    if (uwp_style_is_accent_name( key ))
+        el->is_accent_style = TRUE;
     uwp_ensure_app_resources_loaded();
     if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, key, 0, &se, &sb ) && se && se->kind == UWP_RD_STYLE)
         uwp_apply_style_entry( ctx, el, sb, se, 0 );

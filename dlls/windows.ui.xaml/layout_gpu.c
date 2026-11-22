@@ -1459,29 +1459,61 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     bg = RGB( max( 0, (int)GetRValue(bg) - 20 ), max( 0, (int)GetGValue(bg) - 20 ), max( 0, (int)GetBValue(bg) - 20 ) );
             }
         }
-        else if (wcsstr( el->name, L"GetButton" ) || wcsstr( el->name, L"BuyButton" ) ||
-                 !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ) ||
-                 !wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
-        {
-            bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
-                     uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
-            if (el->is_pressed)
-                bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
-        }
-        else if (wcsstr( el->name, L"Num" ) || !wcscmp( el->name, L"DecimalSeparatorButton" ) ||
-                 !wcscmp( el->name, L"NegateButton" ))
-        {
-            bg = uwp_paint_resolve_color( el, L"CalcButtonFillColorDefaultBrush",
-                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 59, 59, 59 ), surface_bg ), surface_bg );
-            if (el->is_pressed)
-                bg = RGB( max( 0, (int)GetRValue(bg) - 14 ), max( 0, (int)GetGValue(bg) - 14 ), max( 0, (int)GetBValue(bg) - 14 ) );
-        }
         else
         {
-            bg = uwp_paint_resolve_color( el, L"CalcButtonAltFillColorDefaultBrush",
-                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg ), surface_bg );
-            if (el->is_pressed)
-                bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
+            const WCHAR *btn_label = label;
+            if (!btn_label[0] && el->content)
+            {
+                struct uwp_element *ce = uwp_elem_from_any( el->content );
+                struct uwp_element *stack[16];
+                int sp = 0;
+                if (ce && ce != el) stack[sp++] = ce;
+                while (sp > 0 && !btn_label[0])
+                {
+                    struct uwp_element *cur = stack[--sp];
+                    if (cur->visibility != 0) continue;
+                    if (cur->text[0]) { btn_label = cur->text; break; }
+                    if (cur->content)
+                    {
+                        struct uwp_element *c2 = uwp_elem_from_any( cur->content );
+                        if (c2 && c2 != cur && sp < (int)ARRAY_SIZE(stack)) stack[sp++] = c2;
+                    }
+                    if (cur->children_coll)
+                    {
+                        struct uwp_vec_view *v = CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface );
+                        int ci;
+                        for (ci = (int)v->count - 1; ci >= 0 && sp < (int)ARRAY_SIZE(stack); ci--)
+                        {
+                            struct uwp_element *ch = uwp_elem_from_any( v->items[ci] );
+                            if (ch && ch != cur) stack[sp++] = ch;
+                        }
+                    }
+                }
+            }
+            if (el->is_accent_style ||
+                !wcscmp( btn_label, L"Get" ) || !wcscmp( btn_label, L"Free" ) ||
+                !wcscmp( el->name, L"EqualButton" ) || (!wcscmp( btn_label, L"=" ) && btn_label[1] == 0))
+            {
+                bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
+                         uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+                if (el->is_pressed)
+                    bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
+            }
+            else if (wcsstr( el->name, L"Num" ) || !wcscmp( el->name, L"DecimalSeparatorButton" ) ||
+                     !wcscmp( el->name, L"NegateButton" ))
+            {
+                bg = uwp_paint_resolve_color( el, L"CalcButtonFillColorDefaultBrush",
+                         uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 59, 59, 59 ), surface_bg ), surface_bg );
+                if (el->is_pressed)
+                    bg = RGB( max( 0, (int)GetRValue(bg) - 14 ), max( 0, (int)GetGValue(bg) - 14 ), max( 0, (int)GetBValue(bg) - 14 ) );
+            }
+            else
+            {
+                bg = uwp_paint_resolve_color( el, L"CalcButtonAltFillColorDefaultBrush",
+                         uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg ), surface_bg );
+                if (el->is_pressed)
+                    bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
+            }
         }
 
         if (el->has_border)
@@ -1513,12 +1545,14 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                                 4.0f, draw_bg ? cr_to_argb( bg ) : 0, draw_bd ? cr_to_argb( bd ) : 0,
                                 draw_bd ? 1.0f : 0.0f, 1.0f );
         }
-        if (label[0])
-            xaml_gpu_push_text( ctx, label, fh, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &brc, NULL, fg, 1.0f );
-        else if (el->content)
+        if (el->content_kind == UWP_CONTENT_ELEMENT || (el->content && uwp_elem_from_any( el->content )))
         {
             struct uwp_element *ce = uwp_elem_from_any( el->content );
             if (ce && ce != el) uwp_gpu_paint_element( ctx, ce );
+        }
+        else if (label[0])
+        {
+            xaml_gpu_push_text( ctx, label, fh, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &brc, NULL, fg, 1.0f );
         }
         return;
     }
