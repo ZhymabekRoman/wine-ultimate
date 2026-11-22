@@ -485,6 +485,8 @@ struct uwp_element
     void *dt_binding_connector;
     IInspectable *selected_item;
     IInspectable *items_source;
+    IInspectable *item_template;
+    IInspectable *item_template_selector;
     IInspectable *sel_changed_handler;
     IInspectable *tab_items_source;
     IInspectable *tab_add_cmd;

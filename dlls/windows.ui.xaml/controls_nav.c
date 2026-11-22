@@ -1012,6 +1012,12 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
 {
     static const GUID IID_IStringable_ic =
         { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+    static const GUID IID_IDataTemplateSelector_ic =
+        { 0xa907d496, 0x46a0, 0x4cd7, { 0x8d, 0xbe, 0xf9, 0xa5, 0x81, 0xdf, 0x60, 0xb1 } };
+    static const GUID IID_IDataTemplateSelector2_ic =
+        { 0x3792bc47, 0x8c4b, 0x4257, { 0xa5, 0xae, 0xcc, 0x3f, 0x8e, 0xd7, 0x86, 0xeb } };
+    static const GUID IID_IDataTemplate_ic =
+        { 0x9910aec7, 0x8ab5, 0x4118, { 0x9b, 0xc6, 0x09, 0xf4, 0x5a, 0x35, 0x07, 0x3d } };
     struct uwp_element *item_el = uwp_elem_from_any( item );
     if (item_el)
     {
@@ -1020,6 +1026,55 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
     else
     {
         IInspectable *btn_inner = NULL;
+        IInspectable *tmpl = NULL;
+        IInspectable *sel = (!wcsstr( impl->class_name, L"TileList" ) && !wcsstr( impl->class_name, L"ItemsRepeater" ))
+                                ? impl->item_template_selector : NULL;
+        if (sel)
+        {
+            void *dts = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector_ic, &dts )) && dts)
+            {
+                HRESULT (WINAPI *sel_fn)(void *, void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
+                if (sel_fn) sel_fn( dts, item, &impl->IDependencyObject_iface, &tmpl );
+                IUnknown_Release( (IUnknown *)dts );
+            }
+            if (!tmpl && SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector2_ic, &dts )) && dts)
+            {
+                HRESULT (WINAPI *sel2_fn)(void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
+                if (sel2_fn) sel2_fn( dts, item, &tmpl );
+                IUnknown_Release( (IUnknown *)dts );
+            }
+        }
+        if (!tmpl && impl->item_template)
+        {
+            tmpl = impl->item_template;
+            IInspectable_AddRef( tmpl );
+        }
+        if (tmpl)
+        {
+            void *dt = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( tmpl, &IID_IDataTemplate_ic, &dt )) && dt)
+            {
+                HRESULT (WINAPI *load_fn)(void *, void **) = (void *)(*(void ***)dt)[6];
+                void *content = NULL;
+                if (load_fn && SUCCEEDED(load_fn( dt, &content )) && content)
+                {
+                    struct uwp_element *cel = uwp_elem_from_any( content );
+                    if (cel)
+                    {
+                        uwp_fe_put_DataContext( &cel->IInspectable_iface, item );
+                        uwp_vec_Append( impl->children_coll, &cel->IInspectable_iface );
+                        IUnknown_Release( (IUnknown *)content );
+                        IUnknown_Release( (IUnknown *)dt );
+                        IInspectable_Release( tmpl );
+                        return;
+                    }
+                    IUnknown_Release( (IUnknown *)content );
+                }
+                IUnknown_Release( (IUnknown *)dt );
+            }
+            IInspectable_Release( tmpl );
+        }
         if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_inner )) && btn_inner)
         {
             struct uwp_element *bel = uwp_elem_from_any( btn_inner );
@@ -1158,6 +1213,57 @@ static HRESULT WINAPI uwp_items_ctrl_get_Items( void *iface, void **out )
     uwp_sub_AddRef( &impl->IVector_iface );
     return S_OK;
 }
+
+static HRESULT WINAPI uwp_items_ctrl_get_ItemTemplate( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->item_template : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_items_ctrl_put_ItemTemplate( void *iface, void *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    if (!impl) return S_OK;
+    if (impl->item_template == (IInspectable *)val) return S_OK;
+    if (impl->item_template) IInspectable_Release( impl->item_template );
+    impl->item_template = (IInspectable *)val;
+    if (impl->item_template) IInspectable_AddRef( impl->item_template );
+    if (impl->items_source && !impl->children_coll)
+        uwp_items_ctrl_materialize_source( impl, impl->items_source );
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_items_ctrl_get_ItemTemplateSelector( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->item_template_selector : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_items_ctrl_put_ItemTemplateSelector( void *iface, void *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    if (!impl) return S_OK;
+    if (impl->item_template_selector == (IInspectable *)val) return S_OK;
+    if (impl->item_template_selector) IInspectable_Release( impl->item_template_selector );
+    impl->item_template_selector = (IInspectable *)val;
+    if (impl->item_template_selector) IInspectable_AddRef( impl->item_template_selector );
+    TRACE( "IItemsControl::put_ItemTemplateSelector on %s (%s) -> %p\n",
+           debugstr_w(impl->class_name), debugstr_w(impl->name), val );
+    if (impl->items_source && !impl->children_coll)
+        uwp_items_ctrl_materialize_source( impl, impl->items_source );
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+    return S_OK;
+}
+
 const void *uwp_items_ctrl_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -1169,7 +1275,11 @@ const void *uwp_items_ctrl_vtbl[32] =
     [6] = uwp_items_ctrl_get_ItemsSource,
     [7] = uwp_items_ctrl_put_ItemsSource,
     [8] = uwp_items_ctrl_get_Items,
-    [9 ... 31] = uwp_generic_noop,
+    [9] = uwp_items_ctrl_get_ItemTemplate,
+    [10] = uwp_items_ctrl_put_ItemTemplate,
+    [11] = uwp_items_ctrl_get_ItemTemplateSelector,
+    [12] = uwp_items_ctrl_put_ItemTemplateSelector,
+    [13 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_key_args_QI( void *iface, REFIID iid, void **out )
