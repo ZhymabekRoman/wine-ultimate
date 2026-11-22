@@ -873,6 +873,396 @@ static const void *sc_stat_vtbl[] =
 };
 static IActivationFactory *settings_cmd_factory = (IActivationFactory *)&settings_cmd_factory_obj.vtbl_act;
 
+/* Windows.UI.ApplicationSettings.AccountsSettingsPane */
+static const GUID IID_IAccountsSettingsPane_local =
+    { 0x81ea942c, 0x4f09, 0x4406, { 0xa5, 0x38, 0x83, 0x8d, 0x9b, 0x14, 0xb7, 0xe6 } };
+static const GUID IID_IAccountsSettingsPaneStatics_local =
+    { 0x561f8b60, 0xb0ec, 0x4150, { 0xa8, 0xdc, 0x20, 0x8e, 0xe4, 0x4b, 0x06, 0x8a } };
+static const GUID IID_IAccountsSettingsPaneStatics2_local =
+    { 0xd21df7c2, 0xce0d, 0x484f, { 0xb8, 0xe8, 0xe8, 0x23, 0xc2, 0x15, 0x76, 0x5e } };
+static const GUID IID_IAccountsSettingsPaneStatics3_local =
+    { 0x08410458, 0xa2ba, 0x4c6f, { 0xb4, 0xac, 0x48, 0xf5, 0x14, 0x33, 0x12, 0x16 } };
+
+struct asp_async_action
+{
+    IAsyncAction IAsyncAction_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+    AsyncStatus status;
+    IAsyncActionCompletedHandler *handler;
+};
+
+static inline struct asp_async_action *asp_action_from_IAsyncAction( IAsyncAction *iface )
+{
+    return CONTAINING_RECORD( iface, struct asp_async_action, IAsyncAction_iface );
+}
+
+static inline struct asp_async_action *asp_action_from_IAsyncInfo( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct asp_async_action, IAsyncInfo_iface );
+}
+
+static HRESULT WINAPI asp_action_QueryInterface( IAsyncAction *iface, REFIID iid, void **out )
+{
+    struct asp_async_action *This = asp_action_from_IAsyncAction( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncAction ))
+    {
+        *out = &This->IAsyncAction_iface;
+        IAsyncAction_AddRef( &This->IAsyncAction_iface );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &This->IAsyncInfo_iface;
+        IAsyncAction_AddRef( &This->IAsyncAction_iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI asp_action_AddRef( IAsyncAction *iface )
+{
+    struct asp_async_action *This = asp_action_from_IAsyncAction( iface );
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI asp_action_Release( IAsyncAction *iface )
+{
+    struct asp_async_action *This = asp_action_from_IAsyncAction( iface );
+    ULONG ref = InterlockedDecrement( &This->ref );
+    if (!ref)
+    {
+        if (This->handler) IAsyncActionCompletedHandler_Release( This->handler );
+        free( This );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI asp_action_GetIids( IAsyncAction *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_action_GetRuntimeClassName( IAsyncAction *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.IAsyncAction", 31, name );
+}
+
+static HRESULT WINAPI asp_action_GetTrustLevel( IAsyncAction *iface, TrustLevel *trust )
+{
+    *trust = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_action_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *handler )
+{
+    struct asp_async_action *This = asp_action_from_IAsyncAction( iface );
+    if (This->handler) IAsyncActionCompletedHandler_Release( This->handler );
+    This->handler = handler;
+    if (handler)
+    {
+        IAsyncActionCompletedHandler_AddRef( handler );
+        IAsyncActionCompletedHandler_Invoke( handler, iface, This->status );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_action_get_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler **handler )
+{
+    struct asp_async_action *This = asp_action_from_IAsyncAction( iface );
+    if (!handler) return E_POINTER;
+    *handler = This->handler;
+    if (*handler) IAsyncActionCompletedHandler_AddRef( *handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_action_GetResults( IAsyncAction *iface )
+{
+    return S_OK;
+}
+
+static const IAsyncActionVtbl asp_action_vtbl =
+{
+    asp_action_QueryInterface,
+    asp_action_AddRef,
+    asp_action_Release,
+    asp_action_GetIids,
+    asp_action_GetRuntimeClassName,
+    asp_action_GetTrustLevel,
+    asp_action_put_Completed,
+    asp_action_get_Completed,
+    asp_action_GetResults,
+};
+
+static HRESULT WINAPI asp_action_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
+{
+    return asp_action_QueryInterface( &asp_action_from_IAsyncInfo( iface )->IAsyncAction_iface, iid, out );
+}
+static ULONG WINAPI asp_action_info_AddRef( IAsyncInfo *iface )
+{
+    return asp_action_AddRef( &asp_action_from_IAsyncInfo( iface )->IAsyncAction_iface );
+}
+static ULONG WINAPI asp_action_info_Release( IAsyncInfo *iface )
+{
+    return asp_action_Release( &asp_action_from_IAsyncInfo( iface )->IAsyncAction_iface );
+}
+static HRESULT WINAPI asp_action_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
+{
+    *count = 0; *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI asp_action_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.IAsyncAction", 31, name );
+}
+static HRESULT WINAPI asp_action_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *trust )
+{
+    *trust = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI asp_action_info_get_Id( IAsyncInfo *iface, UINT32 *id )
+{
+    if (id) *id = 1;
+    return S_OK;
+}
+static HRESULT WINAPI asp_action_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
+{
+    struct asp_async_action *This = asp_action_from_IAsyncInfo( iface );
+    if (status) *status = This->status;
+    return S_OK;
+}
+static HRESULT WINAPI asp_action_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
+{
+    if (error) *error = S_OK;
+    return S_OK;
+}
+static HRESULT WINAPI asp_action_info_Cancel( IAsyncInfo *iface )
+{
+    return S_OK;
+}
+static HRESULT WINAPI asp_action_info_Close( IAsyncInfo *iface )
+{
+    struct asp_async_action *This = asp_action_from_IAsyncInfo( iface );
+    This->status = AsyncStatus_Closed;
+    return S_OK;
+}
+
+static const IAsyncInfoVtbl asp_action_info_vtbl =
+{
+    asp_action_info_QueryInterface,
+    asp_action_info_AddRef,
+    asp_action_info_Release,
+    asp_action_info_GetIids,
+    asp_action_info_GetRuntimeClassName,
+    asp_action_info_GetTrustLevel,
+    asp_action_info_get_Id,
+    asp_action_info_get_Status,
+    asp_action_info_get_ErrorCode,
+    asp_action_info_Cancel,
+    asp_action_info_Close,
+};
+
+static HRESULT asp_create_completed_action( IAsyncAction **out )
+{
+    struct asp_async_action *act;
+    if (!out) return E_POINTER;
+    act = calloc( 1, sizeof(*act) );
+    if (!act) return E_OUTOFMEMORY;
+    act->IAsyncAction_iface.lpVtbl = &asp_action_vtbl;
+    act->IAsyncInfo_iface.lpVtbl = &asp_action_info_vtbl;
+    act->ref = 1;
+    act->status = Completed;
+    *out = &act->IAsyncAction_iface;
+    return S_OK;
+}
+
+static const void *asp_pane_vtbl[];
+static struct { const void **vtbl; } asp_pane_singleton = { asp_pane_vtbl };
+static LONG asp_next_cookie = 1;
+
+static HRESULT WINAPI asp_pane_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAccountsSettingsPane_local ))
+    {
+        *out = &asp_pane_singleton;
+        return S_OK;
+    }
+    WARN( "AccountsSettingsPane unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI asp_pane_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI asp_pane_Release( void *iface ) { return 1; }
+static HRESULT WINAPI asp_pane_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    *count = 0; *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI asp_pane_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.ApplicationSettings.AccountsSettingsPane", 51, name );
+}
+static HRESULT WINAPI asp_pane_GetTrustLevel( void *iface, TrustLevel *trust )
+{
+    *trust = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI asp_pane_add_AccountCommandsRequested( void *iface, void *handler, EventRegistrationToken *cookie )
+{
+    TRACE( "iface %p, handler %p, cookie %p.\n", iface, handler, cookie );
+    if (cookie) cookie->value = InterlockedIncrement( &asp_next_cookie );
+    return S_OK;
+}
+static HRESULT WINAPI asp_pane_remove_AccountCommandsRequested( void *iface, EventRegistrationToken cookie )
+{
+    TRACE( "iface %p, cookie %I64d.\n", iface, cookie.value );
+    return S_OK;
+}
+
+static const void *asp_pane_vtbl[] =
+{
+    asp_pane_QI,
+    asp_pane_AddRef,
+    asp_pane_Release,
+    asp_pane_GetIids,
+    asp_pane_GetRuntimeClassName,
+    asp_pane_GetTrustLevel,
+    asp_pane_add_AccountCommandsRequested,
+    asp_pane_remove_AccountCommandsRequested,
+};
+
+static const void *asp_act_vtbl[];
+static const void *asp_stat1_vtbl[];
+static const void *asp_stat2_vtbl[];
+static const void *asp_stat3_vtbl[];
+static struct {
+    const void **vtbl_act;
+    const void **vtbl_stat1;
+    const void **vtbl_stat2;
+    const void **vtbl_stat3;
+} asp_factory_obj = { asp_act_vtbl, asp_stat1_vtbl, asp_stat2_vtbl, asp_stat3_vtbl };
+
+static HRESULT WINAPI asp_factory_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &asp_factory_obj.vtbl_act;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAccountsSettingsPaneStatics_local ))
+    {
+        *out = &asp_factory_obj.vtbl_stat1;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAccountsSettingsPaneStatics2_local ))
+    {
+        *out = &asp_factory_obj.vtbl_stat2;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAccountsSettingsPaneStatics3_local ))
+    {
+        *out = &asp_factory_obj.vtbl_stat3;
+        return S_OK;
+    }
+    WARN( "AccountsSettingsPane factory unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI asp_factory_ActivateInstance( void *iface, IInspectable **out )
+{
+    if (!out) return E_POINTER;
+    *out = (IInspectable *)&asp_pane_singleton;
+    return S_OK;
+}
+static HRESULT WINAPI asp_stat1_GetForCurrentView( void *iface, void **out )
+{
+    TRACE( "iface %p, out %p.\n", iface, out );
+    if (!out) return E_POINTER;
+    *out = &asp_pane_singleton;
+    return S_OK;
+}
+static HRESULT WINAPI asp_stat1_Show( void *iface )
+{
+    TRACE( "iface %p.\n", iface );
+    return S_OK;
+}
+static HRESULT WINAPI asp_stat2_ShowManageAccountsAsync( void *iface, IAsyncAction **out )
+{
+    TRACE( "iface %p, out %p.\n", iface, out );
+    return asp_create_completed_action( out );
+}
+static HRESULT WINAPI asp_stat2_ShowAddAccountAsync( void *iface, IAsyncAction **out )
+{
+    TRACE( "iface %p, out %p.\n", iface, out );
+    return asp_create_completed_action( out );
+}
+static HRESULT WINAPI asp_stat3_ShowManageAccountsForUserAsync( void *iface, void *user, IAsyncAction **out )
+{
+    TRACE( "iface %p, user %p, out %p.\n", iface, user, out );
+    return asp_create_completed_action( out );
+}
+static HRESULT WINAPI asp_stat3_ShowAddAccountForUserAsync( void *iface, void *user, IAsyncAction **out )
+{
+    TRACE( "iface %p, user %p, out %p.\n", iface, user, out );
+    return asp_create_completed_action( out );
+}
+
+static const void *asp_act_vtbl[] =
+{
+    asp_factory_QI,
+    asp_pane_AddRef,
+    asp_pane_Release,
+    asp_pane_GetIids,
+    asp_pane_GetRuntimeClassName,
+    asp_pane_GetTrustLevel,
+    asp_factory_ActivateInstance,
+};
+static const void *asp_stat1_vtbl[] =
+{
+    asp_factory_QI,
+    asp_pane_AddRef,
+    asp_pane_Release,
+    asp_pane_GetIids,
+    asp_pane_GetRuntimeClassName,
+    asp_pane_GetTrustLevel,
+    asp_stat1_GetForCurrentView,
+    asp_stat1_Show,
+};
+static const void *asp_stat2_vtbl[] =
+{
+    asp_factory_QI,
+    asp_pane_AddRef,
+    asp_pane_Release,
+    asp_pane_GetIids,
+    asp_pane_GetRuntimeClassName,
+    asp_pane_GetTrustLevel,
+    asp_stat2_ShowManageAccountsAsync,
+    asp_stat2_ShowAddAccountAsync,
+};
+static const void *asp_stat3_vtbl[] =
+{
+    asp_factory_QI,
+    asp_pane_AddRef,
+    asp_pane_Release,
+    asp_pane_GetIids,
+    asp_pane_GetRuntimeClassName,
+    asp_pane_GetTrustLevel,
+    asp_stat3_ShowManageAccountsForUserAsync,
+    asp_stat3_ShowAddAccountForUserAsync,
+};
+static IActivationFactory *accounts_settings_pane_factory = (IActivationFactory *)&asp_factory_obj.vtbl_act;
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -925,6 +1315,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     if (!wcscmp( buffer, L"Windows.UI.ApplicationSettings.SettingsCommand" ))
         IActivationFactory_QueryInterface( settings_cmd_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.UI.ApplicationSettings.AccountsSettingsPane" ))
+        IActivationFactory_QueryInterface( accounts_settings_pane_factory, &IID_IActivationFactory, (void **)factory );
 
     if (!wcscmp( buffer, L"Windows.UI.Shell.TaskbarManager" ))
         IActivationFactory_QueryInterface( taskbar_mgr_factory, &IID_IActivationFactory, (void **)factory );
