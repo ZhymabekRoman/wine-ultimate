@@ -910,143 +910,6 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             uwp_arrange_element( ch, rc );
     }
 
-    if (wcsstr( el->name, L"TileCard" ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (!ch) continue;
-            if (wcsstr( ch->name, L"AppIcon" ))
-                SetRect( &ch->bounds, rc.left + 12, rc.top + 12, rc.left + 54, rc.top + 54 );
-            else if (wcsstr( ch->name, L"TitleText" ))
-                SetRect( &ch->bounds, rc.left + 64, rc.top + 10, rc.right - 10, rc.top + 30 );
-            else if (wcsstr( ch->name, L"CategoryText" ))
-                SetRect( &ch->bounds, rc.left + 64, rc.top + 31, rc.right - 10, rc.top + 47 );
-            else if (wcsstr( ch->name, L"RatingText" ))
-                SetRect( &ch->bounds, rc.left + 64, rc.top + 48, rc.right - 10, rc.top + 66 );
-            else if (wcsstr( ch->name, L"GetButton" ))
-                SetRect( &ch->bounds, rc.left + 64, rc.top + 70, rc.left + 138, rc.top + 96 );
-            else
-                ch->bounds = rc;
-            ch->has_bounds = TRUE;
-        }
-        return;
-    }
-    if (!wcscmp( el->name, L"RootStoreGrid" ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (!ch) continue;
-            if (!wcscmp( ch->name, L"NavRail" ))
-            {
-                RECT nrc;
-                SetRect( &nrc, rc.left, rc.top, rc.left + 68, rc.bottom );
-                uwp_arrange_element( ch, nrc );
-            }
-            else if (!wcscmp( ch->name, L"MainContentGrid" ))
-            {
-                RECT mrc;
-                SetRect( &mrc, rc.left + 68, rc.top, rc.right, rc.bottom );
-                uwp_arrange_element( ch, mrc );
-            }
-            else
-                uwp_arrange_element( ch, rc );
-        }
-        return;
-    }
-    if (!wcscmp( el->name, L"NavRail" ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        int nav_y = rc.top + 60;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (!ch) continue;
-            if (!wcscmp( ch->name, L"StoreBrandLogo" ))
-            {
-                SetRect( &ch->bounds, rc.left + 4, rc.top + 16, rc.right - 4, rc.top + 44 );
-                ch->has_bounds = TRUE;
-            }
-            else if (wcsstr( ch->name, L"NavItem" ))
-            {
-                if (wcsstr( ch->name, L"Library" ))
-                    SetRect( &ch->bounds, rc.left + 4, rc.bottom - 56, rc.right - 4, rc.bottom - 12 );
-                else
-                {
-                    SetRect( &ch->bounds, rc.left + 4, nav_y, rc.right - 4, nav_y + 48 );
-                    nav_y += 54;
-                }
-                ch->has_bounds = TRUE;
-            }
-            else
-                uwp_arrange_element( ch, rc );
-        }
-        return;
-    }
-    if (!wcscmp( el->name, L"MainContentGrid" ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (!ch) continue;
-            if (wcsstr( ch->name, L"SearchBox" ))
-            {
-                RECT src;
-                SetRect( &src, rc.left + 24, rc.top + 14, min( rc.left + 520, rc.right - 40 ), rc.top + 50 );
-                uwp_arrange_element( ch, src );
-            }
-            else if (wcsstr( ch->name, L"HeroBanner" ))
-            {
-                RECT hrc;
-                SetRect( &hrc, rc.left + 24, rc.top + 64, rc.right - 24, rc.top + 188 );
-                uwp_arrange_element( ch, hrc );
-            }
-            else if (wcsstr( ch->name, L"TopAppsHeader" ))
-            {
-                RECT thrc;
-                SetRect( &thrc, rc.left + 24, rc.top + 204, rc.right - 24, rc.top + 234 );
-                uwp_arrange_element( ch, thrc );
-            }
-            else if (wcsstr( ch->name, L"HomeIslandTilesGrid" ))
-            {
-                RECT tgrc;
-                SetRect( &tgrc, rc.left + 24, rc.top + 244, rc.right - 24, rc.bottom - 16 );
-                uwp_arrange_element( ch, tgrc );
-            }
-            else
-                uwp_arrange_element( ch, rc );
-        }
-        return;
-    }
-    if (!wcscmp( el->name, L"HomeIslandTilesGrid" ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        int tw = rc.right - rc.left;
-        int cw = max( 180, (tw - 3 * 16) / 4 );
-        int ch = 106;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch_elem = uwp_elem_from_any( children->items[k] );
-            int r, c;
-            RECT card_rc;
-            if (!ch_elem) continue;
-            r = (int)(k / 4);
-            c = (int)(k % 4);
-            SetRect( &card_rc, rc.left + c * (cw + 16), rc.top + r * (ch + 16),
-                     rc.left + c * (cw + 16) + cw, rc.top + r * (ch + 16) + ch );
-            uwp_arrange_element( ch_elem, card_rc );
-        }
-        return;
-    }
     if (el->kind != UWP_KIND_GRID && el->kind != UWP_KIND_STACK_PANEL && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -1063,17 +926,6 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp, size_t tmp_len )
 {
     const WCHAR *s = el->text;
-    if (el->name[0])
-    {
-        if (!wcscmp( el->name, L"DecimalSeparatorButton" )) return L".";
-        if (!wcscmp( el->name, L"NegateButton" )) return L"+/-";
-        if (!wcscmp( el->name, L"ClearMemoryButton" )) return L"MC";
-        if (!wcscmp( el->name, L"MemRecall" )) return L"MR";
-        if (!wcscmp( el->name, L"MemPlus" )) return L"M+";
-        if (!wcscmp( el->name, L"MemMinus" )) return L"M-";
-        if (!wcscmp( el->name, L"MemButton" )) return L"MS";
-        if (!wcscmp( el->name, L"MemoryButton" )) return L"M\x25be";
-    }
     if (!s || !s[0]) return L"";
     if (s[1] == 0)
     {
@@ -1569,26 +1421,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         return;
     }
 
-    if (wcsstr( el->name, L"NavRail" ))
-    {
-        RECT rc = el->bounds;
-        COLORREF rail_bg = (el->has_bg && el->bg_alpha > 0)
-            ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"BodyBackgroundBrush", RGB( 22, 22, 22 ), surface_bg );
-        COLORREF rail_bd = (el->has_border && el->border_alpha > 0)
-            ? blend_argb_over( el->border_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"BodyBackgroundStroke", RGB( 38, 38, 38 ), surface_bg );
-        HBRUSH br = CreateSolidBrush( rail_bg );
-        HPEN pen = CreatePen( PS_SOLID, 1, rail_bd );
-        HGDIOBJ old_br = SelectObject( hdc, br );
-        HGDIOBJ old_pen = SelectObject( hdc, pen );
-        Rectangle( hdc, rc.left, rc.top, rc.right, rc.bottom );
-        SelectObject( hdc, old_pen );
-        SelectObject( hdc, old_br );
-        DeleteObject( pen );
-        DeleteObject( br );
-    }
-    else if (wcsstr( el->class_name, L"AppTitleBar" ))
+    if (wcsstr( el->class_name, L"AppTitleBar" ))
     {
         if (el->text[0])
         {
@@ -1670,92 +1503,6 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         SelectObject( hdc, old_br );
         DeleteObject( pen );
         DeleteObject( br );
-    }
-    else if (wcsstr( el->name, L"HeroBanner" ))
-    {
-        RECT rc = el->bounds, trc;
-        COLORREF hbg = uwp_paint_resolve_color( el, L"SystemAccentColorDark2", RGB( 20, 36, 56 ), surface_bg );
-        COLORREF hbd = uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg );
-        COLORREF hfg = uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), hbg );
-        COLORREF hsfg = uwp_paint_resolve_color( el, L"AccentTextFillColorPrimaryBrush", RGB( 200, 220, 240 ), hbg );
-        HBRUSH br = CreateSolidBrush( hbg );
-        HPEN pen = CreatePen( PS_SOLID, 1, hbd );
-        HFONT title_font = CreateFontW( -22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                       CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-        HFONT sub_font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                     CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-        HGDIOBJ old_br = SelectObject( hdc, br );
-        HGDIOBJ old_pen = SelectObject( hdc, pen );
-        HGDIOBJ old_font;
-        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 12, 12 );
-        SetBkMode( hdc, TRANSPARENT );
-        trc = rc;
-        trc.left += 28; trc.top += 24; trc.right -= 28;
-        old_font = SelectObject( hdc, title_font );
-        SetTextColor( hdc, hfg );
-        DrawTextW( hdc, L"Featured: Essential Windows Apps", -1, &trc, DT_LEFT | DT_TOP | DT_SINGLELINE );
-        SelectObject( hdc, sub_font );
-        trc.top += 34;
-        SetTextColor( hdc, hsfg );
-        DrawTextW( hdc, L"Discover top-rated tools for communication, productivity, and entertainment.", -1, &trc, DT_LEFT | DT_TOP | DT_SINGLELINE );
-        SelectObject( hdc, old_font );
-        SelectObject( hdc, old_pen );
-        SelectObject( hdc, old_br );
-        DeleteObject( title_font );
-        DeleteObject( sub_font );
-        DeleteObject( pen );
-        DeleteObject( br );
-        return;
-    }
-    else if (wcsstr( el->name, L"TileCard" ))
-    {
-        RECT rc = el->bounds;
-        COLORREF cbg = (el->has_bg && el->bg_alpha > 0)
-            ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"ProductCardBackground", uwp_paint_resolve_color( el, L"CardBackgroundFillColorDefaultBrush", RGB( 38, 38, 38 ), surface_bg ), surface_bg );
-        COLORREF cbd = (el->has_border && el->border_alpha > 0)
-            ? blend_argb_over( el->border_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"DefaultCardBorderBrush", RGB( 58, 58, 58 ), surface_bg );
-        HBRUSH br = CreateSolidBrush( cbg );
-        HPEN pen = CreatePen( PS_SOLID, 1, cbd );
-        HGDIOBJ old_br = SelectObject( hdc, br );
-        HGDIOBJ old_pen = SelectObject( hdc, pen );
-        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 10, 10 );
-        SelectObject( hdc, old_pen );
-        SelectObject( hdc, old_br );
-        DeleteObject( pen );
-        DeleteObject( br );
-    }
-    else if (wcsstr( el->name, L"AppIcon" ))
-    {
-        static const COLORREF colors[] = {
-            RGB(37, 211, 102), RGB(30, 215, 96), RGB(229, 9, 20), RGB(0, 122, 204),
-            RGB(16, 124, 65), RGB(88, 101, 242), RGB(85, 170, 85), RGB(255, 136, 0)
-        };
-        RECT rc = el->bounds;
-        int idx = (int)(el->bounds.left / 100 + el->bounds.top / 80) % ARRAY_SIZE(colors);
-        HBRUSH br = CreateSolidBrush( colors[idx] );
-        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 70, 70, 70 ) );
-        HFONT font = CreateFontW( -16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-        HGDIOBJ old_br = SelectObject( hdc, br );
-        HGDIOBJ old_pen = SelectObject( hdc, pen );
-        HGDIOBJ old_font = SelectObject( hdc, font );
-        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8 );
-        SetTextColor( hdc, RGB( 255, 255, 255 ) );
-        SetBkMode( hdc, TRANSPARENT );
-        if (el->text[0])
-            DrawTextW( hdc, el->text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
-        SelectObject( hdc, old_font );
-        SelectObject( hdc, old_pen );
-        SelectObject( hdc, old_br );
-        DeleteObject( font );
-        DeleteObject( pen );
-        DeleteObject( br );
-        return;
     }
     else if (el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON && el->kind != UWP_KIND_TEXT_BLOCK)
     {
@@ -1943,26 +1690,16 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                     bg = RGB( max( 0, (int)GetRValue(bg) - 20 ), max( 0, (int)GetGValue(bg) - 20 ), max( 0, (int)GetBValue(bg) - 20 ) );
             }
         }
-        else if (wcsstr( el->name, L"GetButton" ) || !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ) ||
-                 !wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
+        else if (el->is_accent_style)
         {
             bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
                      uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
             if (el->is_pressed)
                 bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
         }
-        else if (wcsstr( el->name, L"Num" ) || !wcscmp( el->name, L"DecimalSeparatorButton" ) ||
-                 !wcscmp( el->name, L"NegateButton" ))
-        {
-            bg = uwp_paint_resolve_color( el, L"CalcButtonFillColorDefaultBrush",
-                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 59, 59, 59 ), surface_bg ), surface_bg );
-            if (el->is_pressed)
-                bg = RGB( max( 0, (int)GetRValue(bg) - 14 ), max( 0, (int)GetGValue(bg) - 14 ), max( 0, (int)GetBValue(bg) - 14 ) );
-        }
         else
         {
-            bg = uwp_paint_resolve_color( el, L"CalcButtonAltFillColorDefaultBrush",
-                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg ), surface_bg );
+            bg = uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg );
             if (el->is_pressed)
                 bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
         }
@@ -2018,38 +1755,6 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 
     if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
-        if (wcsstr( el->name, L"RatingText" ))
-        {
-            RECT rc = el->bounds;
-            HFONT font = CreateFontW( -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                      CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-            HGDIOBJ old_font = SelectObject( hdc, font );
-            COLORREF rfg = (el->has_fg && el->fg_alpha > 0) ? blend_argb_over( el->fg_argb, surface_bg ) : RGB( 255, 215, 0 );
-            SetTextColor( hdc, rfg );
-            SetBkMode( hdc, TRANSPARENT );
-            DrawTextW( hdc, el->text[0] ? el->text : L"\x2605 4.8", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
-            SelectObject( hdc, old_font );
-            DeleteObject( font );
-            return;
-        }
-        if (wcsstr( el->name, L"CategoryText" ))
-        {
-            RECT rc = el->bounds;
-            HFONT font = CreateFontW( -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                      CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-            HGDIOBJ old_font = SelectObject( hdc, font );
-            COLORREF cfg = (el->has_fg && el->fg_alpha > 0)
-                ? blend_argb_over( el->fg_argb, surface_bg )
-                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 150, 150, 150 ), surface_bg );
-            SetTextColor( hdc, cfg );
-            SetBkMode( hdc, TRANSPARENT );
-            DrawTextW( hdc, el->text, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
-            SelectObject( hdc, old_font );
-            DeleteObject( font );
-            return;
-        }
         /* Avoid double-painting CalculationResult if its inner NormalOutput TextBlock is painted */
         if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
             el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)

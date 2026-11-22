@@ -1336,24 +1336,54 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         if (sv && sv->raw && ctx && !(pid & 0x8000) && pid < ctx->prop_cnt &&
             ctx->props[pid].name[0] && ctx->props[pid].owner_tid < ctx->type_cnt &&
             ctx->types[ctx->props[pid].owner_tid].full_name[0] &&
-            wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Breakpoint" ))
+            (wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Breakpoint" ) ||
+             wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Converter" )))
         {
             void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
             const struct xbf_prop_info *pi = &ctx->props[pid];
             const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
             if (ao)
             {
-                if (vt == 0x01 || vt == 0x02)
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, (vt == 0x02) ? L"True" : L"False" );
-                else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+                if (is_res_ref && sval && sval[0])
                 {
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, sval );
+                    struct uwp_rd_entry *re = NULL;
+                    struct uwp_rd_bucket *found_b = NULL;
+                    IInspectable *res_val = NULL;
+                    BOOL release_res = FALSE;
+                    if (uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd,
+                                           ctx->root_el, sval, 0, &re, &found_b ) && re)
+                    {
+                        res_val = uwp_rd_materialize_entry( found_b, re );
+                    }
+                    else if (wcsstr( sval, L"Style" ))
+                    {
+                        void *st = NULL;
+                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Style", NULL, NULL, &st )) && st)
+                        {
+                            struct uwp_element *st_el = uwp_elem_from_any( st );
+                            if (st_el) lstrcpynW( st_el->name, sval, ARRAY_SIZE(st_el->name) );
+                            res_val = (IInspectable *)st;
+                            release_res = TRUE;
+                        }
+                    }
+                    if (res_val)
+                    {
+                        uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, sv->raw, res_val );
+                        if (release_res) IInspectable_Release( res_val );
+                    }
                 }
-                else if (vt == 0x03 || vt == 0x04 || vt == 0x0b)
+                else if (wcsstr( owner_cls, L"Breakpoint" ) || wcsstr( owner_cls, L"Converter" ))
                 {
-                    WCHAR nbuf[64];
-                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, nbuf );
+                    if (vt == 0x01 || vt == 0x02)
+                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, (vt == 0x02) ? L"True" : L"False" );
+                    else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, sval );
+                    else if (vt == 0x03 || vt == 0x04 || vt == 0x0b)
+                    {
+                        WCHAR nbuf[64];
+                        swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
+                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, nbuf );
+                    }
                 }
             }
         }

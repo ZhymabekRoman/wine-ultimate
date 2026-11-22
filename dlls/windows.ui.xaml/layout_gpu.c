@@ -1142,19 +1142,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
-    if (wcsstr( el->name, L"NavRail" ))
-    {
-        RECT rc = el->bounds;
-        COLORREF rail_bg = (el->has_bg && el->bg_alpha > 0)
-            ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"BodyBackgroundBrush", RGB( 22, 22, 22 ), surface_bg );
-        COLORREF rail_bd = (el->has_border && el->border_alpha > 0)
-            ? blend_argb_over( el->border_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"BodyBackgroundStroke", RGB( 38, 38, 38 ), surface_bg );
-        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
-                            0.0f, cr_to_argb( rail_bg ), cr_to_argb( rail_bd ), 1.0f, 1.0f );
-    }
-    else if (wcsstr( el->class_name, L"AppTitleBar" ))
+    if (wcsstr( el->class_name, L"AppTitleBar" ))
     {
         if (el->text[0])
         {
@@ -1213,48 +1201,6 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         COLORREF tbd = uwp_paint_resolve_color( el, L"SurfaceStrokeColorFlyoutBrush", RGB( 82, 82, 82 ), surface_bg );
         xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
                             4.0f, cr_to_argb( tbg ), cr_to_argb( tbd ), 1.0f, 1.0f );
-    }
-    else if (wcsstr( el->name, L"HeroBanner" ))
-    {
-        RECT rc = el->bounds, trc;
-        COLORREF hbg = uwp_paint_resolve_color( el, L"SystemAccentColorDark2", RGB( 20, 36, 56 ), surface_bg );
-        COLORREF hbd = uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg );
-        COLORREF hfg = uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), hbg );
-        COLORREF hsfg = uwp_paint_resolve_color( el, L"AccentTextFillColorPrimaryBrush", RGB( 200, 220, 240 ), hbg );
-        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
-                            6.0f, cr_to_argb( hbg ), cr_to_argb( hbd ), 1.0f, 1.0f );
-        trc = rc;
-        trc.left += 28; trc.top += 24; trc.right -= 28;
-        xaml_gpu_push_text( ctx, L"Featured: Essential Windows Apps", 22, FW_BOLD, DT_LEFT | DT_TOP | DT_SINGLELINE, &trc, NULL, hfg, 1.0f );
-        trc.top += 34;
-        xaml_gpu_push_text( ctx, L"Discover top-rated tools for communication, productivity, and entertainment.", 13, FW_NORMAL, DT_LEFT | DT_TOP | DT_SINGLELINE, &trc, NULL, hsfg, 1.0f );
-        return;
-    }
-    else if (wcsstr( el->name, L"TileCard" ))
-    {
-        RECT rc = el->bounds;
-        COLORREF cbg = (el->has_bg && el->bg_alpha > 0)
-            ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"ProductCardBackground", uwp_paint_resolve_color( el, L"CardBackgroundFillColorDefaultBrush", RGB( 38, 38, 38 ), surface_bg ), surface_bg );
-        COLORREF cbd = (el->has_border && el->border_alpha > 0)
-            ? blend_argb_over( el->border_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"DefaultCardBorderBrush", RGB( 58, 58, 58 ), surface_bg );
-        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
-                            5.0f, cr_to_argb( cbg ), cr_to_argb( cbd ), 1.0f, 1.0f );
-    }
-    else if (wcsstr( el->name, L"AppIcon" ))
-    {
-        static const COLORREF colors[] = {
-            RGB(37, 211, 102), RGB(30, 215, 96), RGB(229, 9, 20), RGB(0, 122, 204),
-            RGB(16, 124, 65), RGB(88, 101, 242), RGB(85, 170, 85), RGB(255, 136, 0)
-        };
-        RECT rc = el->bounds;
-        int idx = (int)(el->bounds.left / 100 + el->bounds.top / 80) % ARRAY_SIZE(colors);
-        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
-                            4.0f, cr_to_argb( colors[idx] ), cr_to_argb( RGB( 70, 70, 70 ) ), 1.0f, 1.0f );
-        if (el->text[0])
-            xaml_gpu_push_text( ctx, el->text, 16, FW_BOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &rc, NULL, RGB( 255, 255, 255 ), 1.0f );
-        return;
     }
     else if (el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON && el->kind != UWP_KIND_TEXT_BLOCK)
     {
@@ -1459,61 +1405,18 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     bg = RGB( max( 0, (int)GetRValue(bg) - 20 ), max( 0, (int)GetGValue(bg) - 20 ), max( 0, (int)GetBValue(bg) - 20 ) );
             }
         }
+        else if (el->is_accent_style)
+        {
+            bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
+                     uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
+        }
         else
         {
-            const WCHAR *btn_label = label;
-            if (!btn_label[0] && el->content)
-            {
-                struct uwp_element *ce = uwp_elem_from_any( el->content );
-                struct uwp_element *stack[16];
-                int sp = 0;
-                if (ce && ce != el) stack[sp++] = ce;
-                while (sp > 0 && !btn_label[0])
-                {
-                    struct uwp_element *cur = stack[--sp];
-                    if (cur->visibility != 0) continue;
-                    if (cur->text[0]) { btn_label = cur->text; break; }
-                    if (cur->content)
-                    {
-                        struct uwp_element *c2 = uwp_elem_from_any( cur->content );
-                        if (c2 && c2 != cur && sp < (int)ARRAY_SIZE(stack)) stack[sp++] = c2;
-                    }
-                    if (cur->children_coll)
-                    {
-                        struct uwp_vec_view *v = CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface );
-                        int ci;
-                        for (ci = (int)v->count - 1; ci >= 0 && sp < (int)ARRAY_SIZE(stack); ci--)
-                        {
-                            struct uwp_element *ch = uwp_elem_from_any( v->items[ci] );
-                            if (ch && ch != cur) stack[sp++] = ch;
-                        }
-                    }
-                }
-            }
-            if (el->is_accent_style ||
-                !wcscmp( btn_label, L"Get" ) || !wcscmp( btn_label, L"Free" ) ||
-                !wcscmp( el->name, L"EqualButton" ) || (!wcscmp( btn_label, L"=" ) && btn_label[1] == 0))
-            {
-                bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
-                         uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
-                if (el->is_pressed)
-                    bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
-            }
-            else if (wcsstr( el->name, L"Num" ) || !wcscmp( el->name, L"DecimalSeparatorButton" ) ||
-                     !wcscmp( el->name, L"NegateButton" ))
-            {
-                bg = uwp_paint_resolve_color( el, L"CalcButtonFillColorDefaultBrush",
-                         uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 59, 59, 59 ), surface_bg ), surface_bg );
-                if (el->is_pressed)
-                    bg = RGB( max( 0, (int)GetRValue(bg) - 14 ), max( 0, (int)GetGValue(bg) - 14 ), max( 0, (int)GetBValue(bg) - 14 ) );
-            }
-            else
-            {
-                bg = uwp_paint_resolve_color( el, L"CalcButtonAltFillColorDefaultBrush",
-                         uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg ), surface_bg );
-                if (el->is_pressed)
-                    bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
-            }
+            bg = uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
         }
 
         if (el->has_border)
@@ -1559,22 +1462,6 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
 
     if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
-        if (wcsstr( el->name, L"RatingText" ))
-        {
-            RECT rc = el->bounds;
-            COLORREF rfg = (el->has_fg && el->fg_alpha > 0) ? blend_argb_over( el->fg_argb, surface_bg ) : RGB( 255, 215, 0 );
-            xaml_gpu_push_text( ctx, el->text[0] ? el->text : L"\x2605 4.8", 11, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &rc, NULL, rfg, 1.0f );
-            return;
-        }
-        if (wcsstr( el->name, L"CategoryText" ))
-        {
-            RECT rc = el->bounds;
-            COLORREF cfg = (el->has_fg && el->fg_alpha > 0)
-                ? blend_argb_over( el->fg_argb, surface_bg )
-                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 150, 150, 150 ), surface_bg );
-            xaml_gpu_push_text( ctx, el->text, 11, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &rc, NULL, cfg, 1.0f );
-            return;
-        }
         if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
             el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
         {

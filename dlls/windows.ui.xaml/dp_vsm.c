@@ -1051,12 +1051,12 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
     }
     if (wcsstr( key_str, L"Style" ))
     {
-        IInspectable *st = NULL;
-        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Style", (void **)&st )) && st)
+        void *st = NULL;
+        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Style", NULL, NULL, &st )) && st)
         {
             struct uwp_element *st_el = uwp_elem_from_any( st );
             if (st_el) lstrcpynW( st_el->name, key_str, ARRAY_SIZE(st_el->name) );
-            uwp_rd_insert( rd_key, key_str, st );
+            uwp_rd_insert( rd_key, key_str, (IInspectable *)st );
             *out_val = st;
             return S_OK;
         }
