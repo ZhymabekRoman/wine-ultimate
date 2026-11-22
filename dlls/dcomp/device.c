@@ -172,7 +172,28 @@ static void * WINAPI dcomp_6b556968_GetTarget( void *iface )
     return iface;
 }
 
-static const void *dcomp_6b556968_vtbl[] =
+struct dcomp_6b556968_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( void *iface );
+    ULONG (WINAPI *Release)( void *iface );
+    HRESULT (WINAPI *slot3)( void *iface );
+    const D2D_RECT_F * (WINAPI *GetRect)( void *iface );
+    HRESULT (WINAPI *SetCommitCompletionEvent)( void *iface, HANDLE event );
+    HRESULT (WINAPI *slot6)( void *iface );
+    HRESULT (WINAPI *slot7)( void *iface );
+    void * (WINAPI *GetTarget)( void *iface );
+    HRESULT (WINAPI *slot9)( void *iface );
+    HRESULT (WINAPI *slot10)( void *iface );
+    HRESULT (WINAPI *slot11)( void *iface );
+    HRESULT (WINAPI *slot12)( void *iface );
+    HRESULT (WINAPI *slot13)( void *iface );
+    HRESULT (WINAPI *slot14)( void *iface );
+    HRESULT (WINAPI *slot15)( void *iface );
+    HRESULT (WINAPI *slot16)( void *iface );
+};
+
+static const struct dcomp_6b556968_vtbl dcomp_6b556968_vtbl =
 {
     dcomp_6b556968_QueryInterface, /* 0 (0x00) */
     dcomp_6b556968_AddRef,         /* 1 (0x08) */
@@ -193,7 +214,7 @@ static const void *dcomp_6b556968_vtbl[] =
     dcomp_6b556968_slot3,          /* 16 (0x80) */
 };
 
-static struct { const void *vtbl; } dcomp_6b556968_obj = { dcomp_6b556968_vtbl };
+static struct { const struct dcomp_6b556968_vtbl *vtbl; } dcomp_6b556968_obj = { &dcomp_6b556968_vtbl };
 
 /*
  * IDCompositionDevice4 (composition textures, Windows 11 22H2) and
@@ -5898,7 +5919,19 @@ static HRESULT WINAPI batch_query_GetBatchId(IUnknown *iface, DWORD *batch_id)
     return S_OK;
 }
 
-static void *batch_query_vtbl[] =
+struct batch_query_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IUnknown *iface, REFIID riid, void **out );
+    ULONG (WINAPI *AddRef)( IUnknown *iface );
+    ULONG (WINAPI *Release)( IUnknown *iface );
+    HRESULT (WINAPI *slot3)( IUnknown *iface, DWORD *batch_id );
+    HRESULT (WINAPI *GetBatchId)( IUnknown *iface, DWORD *batch_id );
+    HRESULT (WINAPI *slot5)( IUnknown *iface, DWORD *batch_id );
+    HRESULT (WINAPI *slot6)( IUnknown *iface, DWORD *batch_id );
+    HRESULT (WINAPI *slot7)( IUnknown *iface, DWORD *batch_id );
+};
+
+static const struct batch_query_vtbl batch_query_vtbl =
 {
     batch_query_QueryInterface,
     batch_query_AddRef,
@@ -5918,7 +5951,7 @@ HRESULT WINAPI DCompPrivates_CreateCompositionBatchQuery(IDCompositionDevice *de
 
     if (!out_query) return E_POINTER;
     if (!(impl = calloc(1, sizeof(*impl)))) return E_OUTOFMEMORY;
-    impl->IUnknown_iface.lpVtbl = (void *)batch_query_vtbl;
+    impl->IUnknown_iface.lpVtbl = (const IUnknownVtbl *)&batch_query_vtbl;
     impl->ref = 1;
     *out_query = &impl->IUnknown_iface;
     return S_OK;

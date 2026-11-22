@@ -20,12 +20,8 @@
 #ifndef __WINE_WINDOWS_UI_COMPOSITION_PRIVATE_H
 #define __WINE_WINDOWS_UI_COMPOSITION_PRIVATE_H
 
-#include <stdarg.h>
-#include <stddef.h>
-
 #define COBJMACROS
 #include "windef.h"
-#include "winbase.h"
 #include "winstring.h"
 
 #include "activation.h"

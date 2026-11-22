@@ -323,6 +323,40 @@ unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void
     return count;
 }
 
+unsigned int xaml_event_registry_snapshot_alloc( struct xaml_event_registry *reg, void ***out_handlers )
+{
+    unsigned int i, count = 0, idx = 0;
+    void **buf;
+
+    if (out_handlers) *out_handlers = NULL;
+    if (!reg || !out_handlers) return 0;
+    EnterCriticalSection( &xaml_event_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+        if (reg->entries[i].handler) count++;
+    if (!count)
+    {
+        LeaveCriticalSection( &xaml_event_cs );
+        return 0;
+    }
+    buf = malloc( count * sizeof(*buf) );
+    if (!buf)
+    {
+        LeaveCriticalSection( &xaml_event_cs );
+        return 0;
+    }
+    for (i = 0; i < ARRAY_SIZE( reg->entries ) && idx < count; i++)
+    {
+        if (reg->entries[i].handler)
+        {
+            IUnknown_AddRef( (IUnknown *)reg->entries[i].handler );
+            buf[idx++] = reg->entries[i].handler;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+    *out_handlers = buf;
+    return idx;
+}
+
 void xaml_event_registry_clear( struct xaml_event_registry *reg )
 {
     void *to_release[64];

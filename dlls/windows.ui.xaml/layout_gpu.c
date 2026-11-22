@@ -20,15 +20,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <wctype.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
-#include "xbf_known_types.h"
-#include "appmodel.h"
 #include "weakreference.h"
-#include "winreg.h"
 #include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
@@ -576,9 +571,8 @@ static struct uwp_element *g_active_timers[MAX_ACTIVE_DISPATCHER_TIMERS];
 static void CALLBACK uwp_dispatcher_timer_proc( HWND hwnd, UINT msg, UINT_PTR id, DWORD time )
 {
     struct uwp_element *impl = NULL;
-    int i;
-    void *handlers[16];
-    int count;
+    unsigned int i, count;
+    void **handlers = NULL;
 
     for (i = 0; i < MAX_ACTIVE_DISPATCHER_TIMERS; i++)
     {
@@ -591,8 +585,8 @@ static void CALLBACK uwp_dispatcher_timer_proc( HWND hwnd, UINT msg, UINT_PTR id
     if (!impl || !impl->timer_enabled) return;
 
     uwp_sub_AddRef( &impl->IInspectable_iface );
-    count = xaml_event_registry_snapshot( &impl->timer_tick_reg, handlers, ARRAY_SIZE(handlers) );
-    TRACE( "uwp_dispatcher_timer_proc id=%Iu impl=%p handlers=%d\n", id, impl, count );
+    count = xaml_event_registry_snapshot_alloc( &impl->timer_tick_reg, &handlers );
+    TRACE( "uwp_dispatcher_timer_proc id=%Iu impl=%p handlers=%u\n", id, impl, count );
     for (i = 0; i < count; i++)
     {
         struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
@@ -605,6 +599,7 @@ static void CALLBACK uwp_dispatcher_timer_proc( HWND hwnd, UINT msg, UINT_PTR id
         __ENDTRY;
         IUnknown_Release( (IUnknown *)handlers[i] );
     }
+    free( handlers );
     uwp_sub_Release( &impl->IInspectable_iface );
 }
 
@@ -751,18 +746,19 @@ static HRESULT WINAPI uwp_disp_ti_GetRefTypeInfo( ITypeInfo *iface, HREFTYPE hre
 static HRESULT WINAPI uwp_disp_ti_GetDocumentation( ITypeInfo *iface, MEMBERID mid,
         BSTR *name, BSTR *docstr, DWORD *hcontext, BSTR *helpfile )
 {
+    static SRWLOCK doc_lock = SRWLOCK_INIT;
     static WCHAR cached_cls[128];
     static OLECHAR cached_bstr[128];
-    static BSTR cached_name = NULL;
     struct uwp_element *impl = uwp_elem_from_any( (IInspectable *)iface );
     const WCHAR *cls = (impl && impl->class_name[0]) ? impl->class_name : L"Windows.UI.Xaml.DependencyObject";
+    AcquireSRWLockExclusive( &doc_lock );
     if (wcscmp( cached_cls, cls ))
     {
-        lstrcpyW( cached_cls, cls );
-        memcpy( cached_bstr, cls, (wcslen( cls ) + 1) * sizeof(WCHAR) );
+        lstrcpynW( cached_cls, cls, ARRAY_SIZE(cached_cls) );
+        lstrcpynW( cached_bstr, cls, ARRAY_SIZE(cached_bstr) );
     }
-    if (!cached_name) cached_name = cached_bstr;
-    if (name) *name = cached_name;
+    if (name) *name = cached_bstr;
+    ReleaseSRWLockExclusive( &doc_lock );
     if (docstr) *docstr = NULL;
     if (hcontext) *hcontext = 0;
     if (helpfile) *helpfile = NULL;
@@ -2079,17 +2075,19 @@ static inline struct uwp_class_factory *uwp_cf_from_any( void *iface )
         return &feap_factory_obj;
     if ((char *)iface >= (char *)&scb_factory_obj && (char *)iface < (char *)(&scb_factory_obj + 1))
         return &scb_factory_obj;
-    AcquireSRWLockExclusive( &g_dyn_factories_lock );
+    AcquireSRWLockShared( &g_dyn_factories_lock );
     for (i = 0; i < g_dyn_factory_cnt; i++)
     {
-        if ((char *)iface >= (char *)&g_dyn_factories[i] &&
-            (char *)iface < (char *)&g_dyn_factories[i + 1])
+        if (g_dyn_factories[i] &&
+            (char *)iface >= (char *)g_dyn_factories[i] &&
+            (char *)iface < (char *)(g_dyn_factories[i] + 1))
         {
-            ReleaseSRWLockExclusive( &g_dyn_factories_lock );
-            return &g_dyn_factories[i];
+            struct uwp_class_factory *cf = g_dyn_factories[i];
+            ReleaseSRWLockShared( &g_dyn_factories_lock );
+            return cf;
         }
     }
-    ReleaseSRWLockExclusive( &g_dyn_factories_lock );
+    ReleaseSRWLockShared( &g_dyn_factories_lock );
     return NULL;
 }
 
@@ -3071,24 +3069,35 @@ static const void *rendering_args_vtbl[] =
 };
 static const void *rendering_args_obj = rendering_args_vtbl;
 
-static struct { IInspectable *handler; INT64 token; } g_ct_rendering[32];
+struct ct_rendering_entry { IInspectable *handler; INT64 token; };
+static struct ct_rendering_entry *g_ct_rendering = NULL;
 static int g_ct_rendering_cnt = 0;
+static int g_ct_rendering_cap = 0;
 static LONG g_ct_rendering_next_tok = 1;
 static BOOL g_ct_in_rendering = FALSE;
+static SRWLOCK g_ct_rendering_lock = SRWLOCK_INIT;
 
 static HRESULT WINAPI comp_target_add_Rendering( void *iface, void *handler, EventRegistrationToken *tok )
 {
     INT64 t = InterlockedIncrement( &g_ct_rendering_next_tok );
     if (tok && (ULONG_PTR)tok > 0x10000 && !IsBadWritePtr( tok, sizeof(*tok) ))
         tok->value = t;
-    if (handler && g_ct_rendering_cnt < (int)ARRAY_SIZE(g_ct_rendering))
+    if (handler)
     {
-        TRACE( "CompositionTarget::add_Rendering handler=%p cnt=%d\n", handler, g_ct_rendering_cnt + 1 );
-        g_ct_rendering[g_ct_rendering_cnt].handler = (IInspectable *)handler;
-        g_ct_rendering[g_ct_rendering_cnt].token = t;
-        g_ct_rendering_cnt++;
-        IInspectable_AddRef( (IInspectable *)handler );
-        uwp_invalidate_window();
+        AcquireSRWLockExclusive( &g_ct_rendering_lock );
+        if (xaml_vec_grow( (void **)&g_ct_rendering, &g_ct_rendering_cap,
+                           g_ct_rendering_cnt + 1, sizeof(*g_ct_rendering), 16 ))
+        {
+            TRACE( "CompositionTarget::add_Rendering handler=%p cnt=%d\n", handler, g_ct_rendering_cnt + 1 );
+            g_ct_rendering[g_ct_rendering_cnt].handler = (IInspectable *)handler;
+            g_ct_rendering[g_ct_rendering_cnt].token = t;
+            g_ct_rendering_cnt++;
+            IInspectable_AddRef( (IInspectable *)handler );
+            ReleaseSRWLockExclusive( &g_ct_rendering_lock );
+            uwp_invalidate_window();
+            return S_OK;
+        }
+        ReleaseSRWLockExclusive( &g_ct_rendering_lock );
     }
     return S_OK;
 }
@@ -3096,26 +3105,40 @@ static HRESULT WINAPI comp_target_add_Rendering( void *iface, void *handler, Eve
 static HRESULT WINAPI comp_target_remove_Rendering( void *iface, EventRegistrationToken tok )
 {
     int i;
+    IInspectable *h = NULL;
+    AcquireSRWLockExclusive( &g_ct_rendering_lock );
     for (i = 0; i < g_ct_rendering_cnt; i++)
     {
         if (g_ct_rendering[i].token == tok.value)
         {
-            IInspectable *h = g_ct_rendering[i].handler;
+            h = g_ct_rendering[i].handler;
             g_ct_rendering[i] = g_ct_rendering[--g_ct_rendering_cnt];
-            if (h) IInspectable_Release( h );
             break;
         }
     }
+    ReleaseSRWLockExclusive( &g_ct_rendering_lock );
+    if (h) IInspectable_Release( h );
     return S_OK;
 }
 
 void uwp_fire_composition_target_rendering( void )
 {
-    IInspectable *snap[32];
+    IInspectable **snap = NULL;
     int n = 0, i;
-    if (g_ct_in_rendering || g_ct_rendering_cnt <= 0) return;
-    g_ct_in_rendering = TRUE;
-    for (i = 0; i < g_ct_rendering_cnt && n < (int)ARRAY_SIZE(snap); i++)
+    if (g_ct_in_rendering) return;
+    AcquireSRWLockShared( &g_ct_rendering_lock );
+    if (g_ct_rendering_cnt <= 0)
+    {
+        ReleaseSRWLockShared( &g_ct_rendering_lock );
+        return;
+    }
+    snap = malloc( (size_t)g_ct_rendering_cnt * sizeof(*snap) );
+    if (!snap)
+    {
+        ReleaseSRWLockShared( &g_ct_rendering_lock );
+        return;
+    }
+    for (i = 0; i < g_ct_rendering_cnt; i++)
     {
         if (g_ct_rendering[i].handler)
         {
@@ -3123,6 +3146,8 @@ void uwp_fire_composition_target_rendering( void )
             IInspectable_AddRef( g_ct_rendering[i].handler );
         }
     }
+    ReleaseSRWLockShared( &g_ct_rendering_lock );
+    g_ct_in_rendering = TRUE;
     for (i = 0; i < n; i++)
     {
         struct xaml_event_handler *h = (struct xaml_event_handler *)snap[i];
@@ -3136,6 +3161,7 @@ void uwp_fire_composition_target_rendering( void )
         __ENDTRY;
         IInspectable_Release( snap[i] );
     }
+    free( snap );
     g_ct_in_rendering = FALSE;
 }
 

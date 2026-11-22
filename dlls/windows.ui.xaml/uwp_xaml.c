@@ -4007,17 +4007,18 @@ static const void *uwp_vca_vtbl[] =
 
 static void uwp_el_fire_vector_changed( struct uwp_element *impl, int change, unsigned int idx )
 {
-    void *handlers[32];
+    void **handlers = NULL;
     unsigned int cnt, i;
     struct uwp_vec_changed_args *args;
     IInspectable *sender;
     if (!impl) return;
-    cnt = xaml_event_registry_snapshot( &impl->obsvec_changed_reg, handlers, ARRAY_SIZE(handlers) );
+    cnt = xaml_event_registry_snapshot_alloc( &impl->obsvec_changed_reg, &handlers );
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
     if (!args)
     {
         for (i = 0; i < cnt; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        free( handlers );
         return;
     }
     args->IVectorChangedEventArgs_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_vca_vtbl;
@@ -4041,6 +4042,7 @@ static void uwp_el_fire_vector_changed( struct uwp_element *impl, int change, un
         __ENDTRY;
         IUnknown_Release( (IUnknown *)h );
     }
+    free( handlers );
     IInspectable_Release( &args->IVectorChangedEventArgs_iface );
 }
 
@@ -8578,8 +8580,8 @@ static HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *
                     /* Fire Frame::Navigated handlers */
                     if (impl->frame_navigated_reg.next_token > 0)
                     {
-                        void *handlers[32];
-                        unsigned int cnt = xaml_event_registry_snapshot( &impl->frame_navigated_reg, handlers, ARRAY_SIZE(handlers) );
+                        void **handlers = NULL;
+                        unsigned int cnt = xaml_event_registry_snapshot_alloc( &impl->frame_navigated_reg, &handlers );
                         IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
                         unsigned int hi;
                         for (hi = 0; hi < cnt; hi++)
@@ -8595,6 +8597,7 @@ static HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *
                             __ENDTRY;
                             IUnknown_Release( (IUnknown *)handlers[hi] );
                         }
+                        free( handlers );
                     }
                     if (nea) uwp_nea_Release( &nea->INavigationEventArgs_iface );
                 }
@@ -8830,8 +8833,8 @@ BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_route
     if (wcsstr( el->class_name, L"TeachingTip" ) && !el->is_open) return FALSE;
 
     {
-        void *handlers[64];
-        unsigned int hcnt = xaml_event_registry_snapshot( &el->preview_keydown_reg, handlers, ARRAY_SIZE(handlers) );
+        void **handlers = NULL;
+        unsigned int hcnt = xaml_event_registry_snapshot_alloc( &el->preview_keydown_reg, &handlers );
         if (hcnt > 0)
         {
             IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
@@ -8845,6 +8848,7 @@ BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_route
                     IUnknown_Release( (IUnknown *)handlers[hi] );
                 }
             }
+            free( handlers );
             if (args->handled) return TRUE;
         }
     }
@@ -9174,20 +9178,21 @@ static struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x,
 
 static BOOL uwp_fire_tapped( struct uwp_element *el, int x, int y )
 {
-    void *handlers[16];
-    int count, i;
+    void **handlers = NULL;
+    unsigned int count, i;
     struct uwp_tapped_args *args;
     IInspectable *sender;
 
     if (!el || el->tapped_reg.next_token == 0) return FALSE;
-    count = xaml_event_registry_snapshot( &el->tapped_reg, handlers, ARRAY_SIZE(handlers) );
-    if (count <= 0) return FALSE;
+    count = xaml_event_registry_snapshot_alloc( &el->tapped_reg, &handlers );
+    if (!count) return FALSE;
 
     sender = el->outer ? el->outer : &el->IInspectable_iface;
     args = calloc( 1, sizeof(*args) );
     if (!args)
     {
         for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        free( handlers );
         return FALSE;
     }
     args->ITappedRoutedEventArgs_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tap_vtbl;
@@ -9198,7 +9203,7 @@ static BOOL uwp_fire_tapped( struct uwp_element *el, int x, int y )
     args->x = (float)x;
     args->y = (float)y;
 
-    TRACE( "uwp_fire_tapped on %s (%s / %s) handlers=%d\n",
+    TRACE( "uwp_fire_tapped on %s (%s / %s) handlers=%u\n",
            debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(el->text), count );
     for (i = 0; i < count; i++)
     {
@@ -9211,6 +9216,7 @@ static BOOL uwp_fire_tapped( struct uwp_element *el, int x, int y )
         __ENDTRY;
         IUnknown_Release( (IUnknown *)handlers[i] );
     }
+    free( handlers );
     uwp_tap_Release( &args->ITappedRoutedEventArgs_iface );
     return TRUE;
 }
@@ -9764,8 +9770,8 @@ static BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
 
     for (cur = target; cur && !args->handled; cur = cur->parent)
     {
-        void *handlers[16];
-        int count, i;
+        void **handlers = NULL;
+        unsigned int count, i;
         IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
 
         if (cur->outer)
@@ -9787,21 +9793,22 @@ static BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
         }
         if (cur->tapped_reg.next_token > 0)
         {
-            count = xaml_event_registry_snapshot( &cur->tapped_reg, handlers, ARRAY_SIZE(handlers) );
+            count = xaml_event_registry_snapshot_alloc( &cur->tapped_reg, &handlers );
             for (i = 0; i < count; i++)
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
                 HRESULT thr = S_OK;
-                WARN( "uwp_fire_tapped_bubble: invoking tapped_reg[%d/%d] on %s (%s) txt=%s handled=%d\n",
+                WARN( "uwp_fire_tapped_bubble: invoking tapped_reg[%u/%u] on %s (%s) txt=%s handled=%d\n",
                       i, count, debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(cur->text), args->handled );
                 g_in_tap_diag = TRUE;
                 __TRY { thr = h->lpVtbl->Invoke( h, sender, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
-                __EXCEPT_ALL { WARN( "uwp_fire_tapped_bubble: tapped_reg[%d] threw!\n", i ); }
+                __EXCEPT_ALL { WARN( "uwp_fire_tapped_bubble: tapped_reg[%u] threw!\n", i ); }
                 __ENDTRY;
                 g_in_tap_diag = FALSE;
-                WARN( "uwp_fire_tapped_bubble: after tapped_reg[%d] hr=%#lx handled=%d\n", i, thr, args->handled );
+                WARN( "uwp_fire_tapped_bubble: after tapped_reg[%u] hr=%#lx handled=%d\n", i, thr, args->handled );
                 IUnknown_Release( (IUnknown *)handlers[i] );
             }
+            free( handlers );
         }
     }
     uwp_tap_Release( &args->ITappedRoutedEventArgs_iface );
@@ -9835,8 +9842,8 @@ static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_poin
     for (cur = target; cur && !args->handled; cur = bubble ? cur->parent : NULL)
     {
         struct xaml_event_registry *reg = uwp_elem_ptr_registry( cur, kind );
-        void *handlers[64];
-        unsigned int i, count = reg ? xaml_event_registry_snapshot( reg, handlers, ARRAY_SIZE( handlers ) ) : 0;
+        void **handlers = NULL;
+        unsigned int i, count = reg ? xaml_event_registry_snapshot_alloc( reg, &handlers ) : 0;
         IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
 
         if (ovr_slot >= 0 && cur->outer)
@@ -9881,6 +9888,7 @@ static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_poin
             }
             IUnknown_Release( (IUnknown *)handlers[i] );
         }
+        free( handlers );
     }
 
     pra_Release( args );
@@ -10268,9 +10276,10 @@ const GUID IID_IVisualTreeHelperStatics_UWP =
     { 0xe75758c4, 0xd25d, 0x4b1d, { 0x97, 0x1f, 0x59, 0x6f, 0x17, 0xf1, 0x2b, 0xaa } };
 
 
-struct uwp_class_factory g_dyn_factories[256];
-static WCHAR g_dyn_factory_names[256][128];
+struct uwp_class_factory **g_dyn_factories = NULL;
+static WCHAR **g_dyn_factory_names = NULL;
 int g_dyn_factory_cnt = 0;
+static int g_dyn_factory_cap = 0;
 SRWLOCK g_dyn_factories_lock = SRWLOCK_INIT;
 
 static UINT32 xaml_factory_hash_fnv( const WCHAR *name )
@@ -10361,7 +10370,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         wcscmp( buf, L"Microsoft.UI.Xaml.PropertyPath" ) != 0 &&
         wcscmp( buf, L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider" ) != 0)
     {
-        static int g_dyn_hash_next[256];
+        static int *g_dyn_hash_next = NULL;
         static int g_dyn_hash_head[512];
         static BOOL g_dyn_hash_init = FALSE;
         UINT32 bucket = xaml_factory_hash_fnv( buf ) & 511;
@@ -10373,7 +10382,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
             {
                 if (!wcscmp( g_dyn_factory_names[i], buf ))
                 {
-                    *factory = &g_dyn_factories[i].IActivationFactory_iface;
+                    *factory = &g_dyn_factories[i]->IActivationFactory_iface;
                     ReleaseSRWLockShared( &g_dyn_factories_lock );
                     return S_OK;
                 }
@@ -10397,26 +10406,48 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         {
             if (!wcscmp( g_dyn_factory_names[i], buf ))
             {
-                *factory = &g_dyn_factories[i].IActivationFactory_iface;
+                *factory = &g_dyn_factories[i]->IActivationFactory_iface;
                 ReleaseSRWLockExclusive( &g_dyn_factories_lock );
                 return S_OK;
             }
         }
-        if (g_dyn_factory_cnt < 256)
+        if (g_dyn_factory_cnt >= g_dyn_factory_cap)
         {
-            int idx = g_dyn_factory_cnt++;
-            lstrcpynW( g_dyn_factory_names[idx], buf, 128 );
-            g_dyn_factories[idx].IActivationFactory_iface.lpVtbl = (const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl;
-            g_dyn_factories[idx].IComposableFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_comp_vtbl;
-            g_dyn_factories[idx].IStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_statics_vtbl;
-            g_dyn_factories[idx].IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
-            g_dyn_factories[idx].IBitmapImageFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bitmap_image_factory_vtbl;
-            g_dyn_factories[idx].class_name = g_dyn_factory_names[idx];
-            g_dyn_hash_next[idx] = g_dyn_hash_head[bucket];
-            g_dyn_hash_head[bucket] = idx;
-            *factory = &g_dyn_factories[idx].IActivationFactory_iface;
-            ReleaseSRWLockExclusive( &g_dyn_factories_lock );
-            return S_OK;
+            int new_cap = g_dyn_factory_cap ? g_dyn_factory_cap * 2 : 64;
+            struct uwp_class_factory **new_factories = realloc( g_dyn_factories, (size_t)new_cap * sizeof(*new_factories) );
+            WCHAR **new_names = new_factories ? realloc( g_dyn_factory_names, (size_t)new_cap * sizeof(*new_names) ) : NULL;
+            int *new_next = new_names ? realloc( g_dyn_hash_next, (size_t)new_cap * sizeof(*new_next) ) : NULL;
+            if (new_factories) g_dyn_factories = new_factories;
+            if (new_names) g_dyn_factory_names = new_names;
+            if (new_next) g_dyn_hash_next = new_next;
+            if (new_factories && new_names && new_next)
+                g_dyn_factory_cap = new_cap;
+        }
+        if (g_dyn_factory_cnt < g_dyn_factory_cap)
+        {
+            struct uwp_class_factory *cf = calloc( 1, sizeof(*cf) );
+            size_t len = wcslen( buf ) + 1;
+            WCHAR *name_copy = cf ? malloc( len * sizeof(WCHAR) ) : NULL;
+            if (cf && name_copy)
+            {
+                int idx = g_dyn_factory_cnt++;
+                memcpy( name_copy, buf, len * sizeof(WCHAR) );
+                cf->IActivationFactory_iface.lpVtbl = (const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl;
+                cf->IComposableFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_comp_vtbl;
+                cf->IStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_statics_vtbl;
+                cf->IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
+                cf->IBitmapImageFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bitmap_image_factory_vtbl;
+                cf->class_name = name_copy;
+                g_dyn_factories[idx] = cf;
+                g_dyn_factory_names[idx] = name_copy;
+                g_dyn_hash_next[idx] = g_dyn_hash_head[bucket];
+                g_dyn_hash_head[bucket] = idx;
+                *factory = &cf->IActivationFactory_iface;
+                ReleaseSRWLockExclusive( &g_dyn_factories_lock );
+                return S_OK;
+            }
+            free( name_copy );
+            free( cf );
         }
         ReleaseSRWLockExclusive( &g_dyn_factories_lock );
     }

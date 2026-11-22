@@ -176,6 +176,7 @@ struct xaml_event_registry
 HRESULT xaml_event_registry_add( struct xaml_event_registry *reg, void *handler, EventRegistrationToken *token );
 HRESULT xaml_event_registry_remove( struct xaml_event_registry *reg, EventRegistrationToken token );
 unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void **out, unsigned int max_out );
+unsigned int xaml_event_registry_snapshot_alloc( struct xaml_event_registry *reg, void ***out_handlers );
 void xaml_event_registry_clear( struct xaml_event_registry *reg );
 
 /* Realloc-backed growable vector helper (grows capacity x2) */

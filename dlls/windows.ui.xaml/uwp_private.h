@@ -2548,7 +2548,7 @@ extern int g_app_rd_sentinel;
 extern BOOL g_app_res_loaded;
 extern BOOL g_app_res_loading;
 extern struct uwp_element *g_captured_elem;
-extern struct uwp_class_factory g_dyn_factories[256];
+extern struct uwp_class_factory **g_dyn_factories;
 extern SRWLOCK g_dyn_factories_lock;
 extern int g_dyn_factory_cnt;
 extern struct uwp_element *g_focused_textbox;

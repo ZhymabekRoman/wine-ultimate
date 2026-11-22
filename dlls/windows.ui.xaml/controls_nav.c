@@ -17,18 +17,13 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <wctype.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
-#include "xbf_known_types.h"
-#include "appmodel.h"
 #include "weakreference.h"
-#include "winreg.h"
 #include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
@@ -80,11 +75,11 @@ struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth );
 void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
                           IInspectable *item )
 {
-    void *handlers[16];
+    void **handlers = NULL;
     unsigned int n, i;
     IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
 
-    n = xaml_event_registry_snapshot( reg, handlers, ARRAY_SIZE( handlers ) );
+    n = xaml_event_registry_snapshot_alloc( reg, &handlers );
     if (!n) return;
     g_nav_args_item = item;
     for (i = 0; i < n; i++)
@@ -103,6 +98,7 @@ void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
         }
         __ENDTRY;
     }
+    free( handlers );
     g_nav_args_item = NULL;
 }
 
@@ -2515,16 +2511,21 @@ static HRESULT WINAPI uwp_asb_remove_QuerySubmitted( void *iface, EventRegistrat
 
 void uwp_asb_fire_text_changed( struct uwp_element *el )
 {
-    void *handlers[32];
+    void **handlers = NULL;
     unsigned int cnt, i;
     struct asb_tc_args *args;
     IInspectable *sender;
 
     if (!el) return;
-    cnt = xaml_event_registry_snapshot( &el->asb_text_changed_reg, handlers, ARRAY_SIZE(handlers) );
+    cnt = xaml_event_registry_snapshot_alloc( &el->asb_text_changed_reg, &handlers );
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
-    if (!args) return;
+    if (!args)
+    {
+        for (i = 0; i < cnt; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        free( handlers );
+        return;
+    }
     args->lpVtbl = asb_tc_vtbl;
     args->ref = 1;
     args->reason = 0; /* UserInput */
@@ -2537,21 +2538,27 @@ void uwp_asb_fire_text_changed( struct uwp_element *el )
         __ENDTRY;
         IUnknown_Release( (IUnknown *)h );
     }
+    free( handlers );
     asb_tc_Release( args );
 }
 
 void uwp_asb_fire_query_submitted( struct uwp_element *el )
 {
-    void *handlers[32];
+    void **handlers = NULL;
     unsigned int cnt, i;
     struct asb_qs_args *args;
     IInspectable *sender;
 
     if (!el) return;
-    cnt = xaml_event_registry_snapshot( &el->asb_query_submitted_reg, handlers, ARRAY_SIZE(handlers) );
+    cnt = xaml_event_registry_snapshot_alloc( &el->asb_query_submitted_reg, &handlers );
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
-    if (!args) return;
+    if (!args)
+    {
+        for (i = 0; i < cnt; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        free( handlers );
+        return;
+    }
     args->lpVtbl = asb_qs_vtbl;
     args->ref = 1;
     WindowsCreateString( el->text, (UINT32)wcslen( el->text ), &args->query_text );
@@ -2566,6 +2573,7 @@ void uwp_asb_fire_query_submitted( struct uwp_element *el )
         __ENDTRY;
         IUnknown_Release( (IUnknown *)h );
     }
+    free( handlers );
     asb_qs_Release( args );
 }
 

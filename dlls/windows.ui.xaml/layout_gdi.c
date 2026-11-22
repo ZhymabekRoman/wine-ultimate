@@ -21,14 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <wctype.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
 #include "xbf_known_types.h"
-#include "appmodel.h"
 #include "weakreference.h"
-#include "winreg.h"
 #include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment

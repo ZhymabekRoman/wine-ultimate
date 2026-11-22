@@ -1244,7 +1244,6 @@ static HRESULT WINAPI compositor5_get_Comment( void *iface, HSTRING *val ) { ret
 static HRESULT WINAPI compositor5_put_Comment( void *iface, HSTRING val ) { return S_OK; }
 static HRESULT WINAPI compositor5_get_GlobalPlaybackRate( void *iface, FLOAT *val ) { if (val) *val = 1.0f; return S_OK; }
 static HRESULT WINAPI compositor5_put_GlobalPlaybackRate( void *iface, FLOAT val ) { return S_OK; }
-static HRESULT WINAPI compositor5_CreateAnimationController( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.AnimationController", res ); }
 static HRESULT WINAPI compositor5_CreateBounceScalarAnimation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.BounceScalarNaturalMotionAnimation", res ); }
 static HRESULT WINAPI compositor5_CreateBounceVector2Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.BounceVector2NaturalMotionAnimation", res ); }
 static HRESULT WINAPI compositor5_CreateBounceVector3Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.BounceVector3NaturalMotionAnimation", res ); }
@@ -1279,9 +1278,6 @@ static HRESULT WINAPI compositor5_CreateShapeVisual( void *iface, void **res )
     *res = &visual->IShapeVisual_iface;
     return S_OK;
 }
-static HRESULT WINAPI compositor5_CreateSpringScalarAnimation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.SpringScalarNaturalMotionAnimation", res ); }
-static HRESULT WINAPI compositor5_CreateSpringVector2Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.SpringVector2NaturalMotionAnimation", res ); }
-static HRESULT WINAPI compositor5_CreateSpringVector3Animation( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.SpringVector3NaturalMotionAnimation", res ); }
 static HRESULT WINAPI compositor5_CreateSpriteShape( void *iface, void **res ) { return comp5_stub_create( L"Windows.UI.Composition.CompositionSpriteShape", res ); }
 static HRESULT WINAPI compositor5_CreateSpriteShapeWithGeometry( void *iface, void *geom, void **res )
 {
