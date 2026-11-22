@@ -164,7 +164,7 @@ static HRESULT WINAPI client_PutAsync( IHttpClient *This, IUriRuntimeClass *uri,
 /* Perform the HTTP exchange for a request message via winhttp. */
 static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri,
                                        const void *body_data, DWORD body_len,
-                                       void *req_headers, void **out )
+                                       void *req_headers, void *content_headers, void **out )
 {
     static const WCHAR ua[] = L"WinGet/1.29";
     URL_COMPONENTS uc = { sizeof(uc) };
@@ -222,6 +222,27 @@ static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri,
     {
         UINT32 npairs = 0;
         const struct hdr_pair *pairs = http_headers_pairs( req_headers, &npairs );
+
+        for (UINT32 i = 0; i < npairs; i++)
+        {
+            const WCHAR *k = WindowsGetStringRawBuffer( pairs[i].k, NULL );
+            const WCHAR *v = WindowsGetStringRawBuffer( pairs[i].v, NULL );
+            SIZE_T n = lstrlenW( k ) + lstrlenW( v ) + 4;
+            if ((hdr = malloc( n * sizeof(WCHAR) )))
+            {
+                lstrcpyW( hdr, k );
+                lstrcatW( hdr, L": " );
+                lstrcatW( hdr, v );
+                WinHttpAddRequestHeaders( req, hdr, -1, WINHTTP_ADDREQ_FLAG_ADD );
+                free( hdr );
+                hdr = NULL;
+            }
+        }
+    }
+    if (content_headers)
+    {
+        UINT32 npairs = 0;
+        const struct hdr_pair *pairs = http_headers_pairs( content_headers, &npairs );
 
         for (UINT32 i = 0; i < npairs; i++)
         {
@@ -394,7 +415,7 @@ static HRESULT send_request( void *req, void **op )
 {
     struct http_request_message *r = impl_from_request( req );
     const WCHAR *method, *uri;
-    void *resp = NULL;
+    void *resp = NULL, *content_headers = NULL;
     BYTE *body_data = NULL;
     ULONG body_len = 0;
     HRESULT hr;
@@ -435,14 +456,22 @@ static HRESULT send_request( void *req, void **op )
         WDBG( "send_request content pump len %u\n", (unsigned)body_len );
     }
 
-    if (FAILED( (hr = http_fetch_to_response( method, uri, body_data, body_len, r->headers, &resp ) ) ))
+    if (r->content)
+    {
+        HRESULT (WINAPI *get_hdrs)( void *, void ** ) =
+            (void *)((void *const *)(*(void *const **)r->content))[6];
+        get_hdrs( r->content, &content_headers );
+    }
+    if (FAILED( (hr = http_fetch_to_response( method, uri, body_data, body_len, r->headers, content_headers, &resp ) ) ))
     {
         if (FAILED( (hr = create_http_response( 200, &resp ) ) ))
         {
+            if (content_headers) IUnknown_Release( (IUnknown *)content_headers );
             if (body_data) HeapFree( GetProcessHeap(), 0, body_data );
             return hr;
         }
     }
+    if (content_headers) IUnknown_Release( (IUnknown *)content_headers );
     if (body_data) HeapFree( GetProcessHeap(), 0, body_data );
     return create_async_http_op( resp, NULL, FALSE, (void **)op );
 }
@@ -823,7 +852,22 @@ static HRESULT WINAPI http_string_content_factory_CreateFromStringWithEncoding( 
 }
 static HRESULT WINAPI http_string_content_factory_CreateFromStringWithEncodingAndMediaType( IActivationFactory *This, HSTRING content, INT32 encoding, HSTRING media_type, void **instance )
 {
-    return create_http_string_content( content, instance );
+    HRESULT hr = create_http_string_content( content, instance );
+    if (SUCCEEDED( hr ) && instance && *instance && media_type && WindowsGetStringLen( media_type ))
+    {
+        void *chdrs = NULL;
+        if (SUCCEEDED( content_get_Headers( *instance, &chdrs ) ) && chdrs)
+        {
+            HSTRING k = NULL;
+            if (SUCCEEDED( WindowsCreateString( L"Content-Type", 12, &k ) ))
+            {
+                headers_Append( chdrs, k, media_type );
+                WindowsDeleteString( k );
+            }
+            IUnknown_Release( (IUnknown *)chdrs );
+        }
+    }
+    return hr;
 }
 
 static const struct string_content_factory_vtbl http_string_content_factory_vtbl = {
