@@ -502,6 +502,113 @@ static const void *wip_statics_vtbl[] =
 static struct wip_factory wip_factory_obj = { wip_factory_vtbl };
 static struct wip_factory wip_statics_obj = { wip_statics_vtbl };
 
+/* Windows.System.Profile.RetailInfo */
+static const GUID IID_IRetailInfoStatics_local =
+    { 0x0712c6b8, 0x8b92, 0x4f2a, { 0x84, 0x99, 0x03, 0x1f, 0x17, 0x98, 0xd6, 0xef } };
+
+struct retail_factory
+{
+    const void *vtbl;
+};
+static struct retail_factory retail_factory_obj;
+static struct retail_factory retail_statics_obj;
+
+static HRESULT WINAPI retail_factory_QI( IActivationFactory *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &retail_factory_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IRetailInfoStatics_local ))
+    {
+        *out = &retail_statics_obj;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI retail_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI retail_factory_Release( IActivationFactory *iface ) { return 1; }
+
+static HRESULT WINAPI retail_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI retail_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.System.Profile.RetailInfo";
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI retail_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
+{
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI retail_factory_ActivateInstance( IActivationFactory *iface, IInspectable **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return CLASS_E_CLASSNOTAVAILABLE;
+}
+
+static HRESULT WINAPI retail_statics_get_IsDemoModeEnabled( void *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI retail_statics_get_Properties( void *iface, void **value )
+{
+    FIXME( "iface %p, value %p stub!\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return E_NOTIMPL;
+}
+
+static const void *retail_factory_vtbl[] =
+{
+    retail_factory_QI,
+    retail_factory_AddRef,
+    retail_factory_Release,
+    retail_factory_GetIids,
+    retail_factory_GetRuntimeClassName,
+    retail_factory_GetTrustLevel,
+    retail_factory_ActivateInstance,
+};
+
+static const void *retail_statics_vtbl[] =
+{
+    retail_factory_QI,
+    retail_factory_AddRef,
+    retail_factory_Release,
+    retail_factory_GetIids,
+    retail_factory_GetRuntimeClassName,
+    retail_factory_GetTrustLevel,
+    retail_statics_get_IsDemoModeEnabled,   /* slot 6: get_IsDemoModeEnabled */
+    retail_statics_get_Properties,          /* slot 7: get_Properties */
+};
+
+static struct retail_factory retail_factory_obj = { retail_factory_vtbl };
+static struct retail_factory retail_statics_obj = { retail_statics_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *name = WindowsGetStringRawBuffer( classid, NULL );
@@ -519,6 +626,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
                                            &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( name, L"Windows.System.Profile.WindowsIntegrityPolicy" ))
         *factory = (IActivationFactory *)&wip_factory_obj;
+    else if (!wcscmp( name, L"Windows.System.Profile.RetailInfo" ))
+        *factory = (IActivationFactory *)&retail_factory_obj;
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;
