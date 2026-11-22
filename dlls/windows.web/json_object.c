@@ -35,6 +35,7 @@ struct json_object
     IJsonObjectWithDefaultValues_local IJsonObjectWithDefaultValues_iface;
     __FIMap_2_HSTRING_Windows__CData__CJson__CIJsonValue IMap_iface;
     __FIIterable_1___FIKeyValuePair_2_HSTRING_Windows__CData__CJson__CIJsonValue IIterable_iface;
+    IStringable IStringable_iface;
     LONG ref;
 
     cJSON *node;
@@ -124,6 +125,13 @@ static HRESULT WINAPI json_object_QueryInterface( IJsonObject *iface, REFIID iid
     if (IsEqualGUID( iid, &IID___FIIterable_1___FIKeyValuePair_2_HSTRING_Windows__CData__CJson__CIJsonValue ))
     {
         *out = &impl->IIterable_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IStringable ))
+    {
+        *out = &impl->IStringable_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -873,6 +881,67 @@ static const __FIIterable_1___FIKeyValuePair_2_HSTRING_Windows__CData__CJson__CI
     json_obj_iterable_First,
 };
 
+static inline struct json_object *impl_from_IStringable( IStringable *iface )
+{
+    return CONTAINING_RECORD( iface, struct json_object, IStringable_iface );
+}
+
+static HRESULT WINAPI json_obj_str_QueryInterface( IStringable *iface, REFIID iid, void **out )
+{
+    return IJsonObject_QueryInterface( &impl_from_IStringable( iface )->IJsonObject_iface, iid, out );
+}
+
+static ULONG WINAPI json_obj_str_AddRef( IStringable *iface )
+{
+    return IJsonObject_AddRef( &impl_from_IStringable( iface )->IJsonObject_iface );
+}
+
+static ULONG WINAPI json_obj_str_Release( IStringable *iface )
+{
+    return IJsonObject_Release( &impl_from_IStringable( iface )->IJsonObject_iface );
+}
+
+static HRESULT WINAPI json_obj_str_GetIids( IStringable *iface, ULONG *count, IID **iids )
+{
+    return IJsonObject_GetIids( &impl_from_IStringable( iface )->IJsonObject_iface, count, iids );
+}
+
+static HRESULT WINAPI json_obj_str_GetRuntimeClassName( IStringable *iface, HSTRING *name )
+{
+    return IJsonObject_GetRuntimeClassName( &impl_from_IStringable( iface )->IJsonObject_iface, name );
+}
+
+static HRESULT WINAPI json_obj_str_GetTrustLevel( IStringable *iface, TrustLevel *level )
+{
+    return IJsonObject_GetTrustLevel( &impl_from_IStringable( iface )->IJsonObject_iface, level );
+}
+
+static HRESULT WINAPI json_obj_str_ToString( IStringable *iface, HSTRING *value )
+{
+    struct json_object *impl = impl_from_IStringable( iface );
+    char *printed;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!impl->node) return WindowsCreateString( L"{}", 2, value );
+    if (!(printed = cJSON_PrintUnformatted( impl->node ))) return E_OUTOFMEMORY;
+    hr = hstring_from_utf8( printed, value );
+    cJSON_free( printed );
+    return hr;
+}
+
+static const struct IStringableVtbl json_object_stringable_vtbl =
+{
+    json_obj_str_QueryInterface,
+    json_obj_str_AddRef,
+    json_obj_str_Release,
+    json_obj_str_GetIids,
+    json_obj_str_GetRuntimeClassName,
+    json_obj_str_GetTrustLevel,
+    json_obj_str_ToString,
+};
+
 HRESULT create_json_object( cJSON *node, struct json_root *root, IJsonObject **out )
 {
     struct json_object *impl;
@@ -887,6 +956,7 @@ HRESULT create_json_object( cJSON *node, struct json_root *root, IJsonObject **o
     impl->IJsonObjectWithDefaultValues_iface.lpVtbl = &json_object_def_vtbl;
     impl->IMap_iface.lpVtbl = &json_object_map_vtbl;
     impl->IIterable_iface.lpVtbl = &json_object_iterable_vtbl;
+    impl->IStringable_iface.lpVtbl = &json_object_stringable_vtbl;
     impl->ref = 1;
     impl->node = node;
     impl->root = root;

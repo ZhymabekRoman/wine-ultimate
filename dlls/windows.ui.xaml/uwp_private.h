@@ -2895,6 +2895,7 @@ extern const GUID IID_ISplitView2_UWP;
 extern const GUID IID_ISplitView_UWP;
 extern const GUID IID_IStackPanel_UWP;
 extern const GUID IID_IStackPanel_UWP2;
+extern const GUID IID_IStackPanel2_Real_UWP;
 extern const GUID IID_IStateTriggerBaseProtected_UWP;
 extern const GUID IID_IStateTriggerBase_UWP;
 extern const GUID IID_IStyle_UWP;

@@ -1343,6 +1343,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IPanel_UWP ) ||
              IsEqualGUID( iid, &IID_IStackPanel_UWP ) ||
              IsEqualGUID( iid, &IID_IStackPanel_UWP2 ) ||
+             IsEqualGUID( iid, &IID_IStackPanel2_Real_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuBar_WinUI ))
         *out = &impl->IPanel_iface;
     else if (IsEqualGUID( iid, &IID_IMenuFlyoutSubItem_UWP ))
