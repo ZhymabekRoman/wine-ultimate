@@ -1078,8 +1078,11 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
             {
                 bel->data_context = (IInspectable *)item;
                 IInspectable_AddRef( bel->data_context );
-                bel->width = 44.0;
-                bel->height = 36.0;
+                if (!wcsstr( impl->class_name, L"ListView" ) && !wcsstr( impl->class_name, L"GridView" ))
+                {
+                    bel->width = 44.0;
+                    bel->height = 36.0;
+                }
                 bel->has_bg = TRUE;
                 bel->bg_argb = 0xE02A2A2A;
                 bel->bg_alpha = 224;

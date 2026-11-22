@@ -903,6 +903,42 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         }
     }
 
+    if ((wcsstr( el->class_name, L"ListView" ) || wcsstr( el->class_name, L"GridView" )) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        int avail_w = rc.right - rc.left;
+        int avail_h = rc.bottom - rc.top;
+        if (avail_w >= 480 && avail_h > 0 && avail_h <= 400)
+        {
+            int pad = 8, gap = 12;
+            int item_h = max( 64, avail_h - pad );
+            int item_w = max( 180, min( 320, (item_h * 16) / 9 ) );
+            int idx = 0;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                int x0;
+                RECT crc;
+                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Template" )) continue;
+                x0 = rc.left + pad + idx * (item_w + gap);
+                if (x0 >= rc.right)
+                {
+                    ch->has_bounds = FALSE;
+                    idx++;
+                    continue;
+                }
+                SetRect( &crc, x0, rc.top + pad / 2,
+                         min( (int)rc.right, x0 + item_w ),
+                         min( (int)rc.bottom, rc.top + pad / 2 + item_h ) );
+                if (!ch->parent) ch->parent = el;
+                uwp_arrange_element( ch, crc );
+                idx++;
+            }
+            return;
+        }
+    }
+
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );

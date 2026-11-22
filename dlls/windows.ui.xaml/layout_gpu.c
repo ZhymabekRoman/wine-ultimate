@@ -269,11 +269,13 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
     else if (el->inlines_coll)
         kids = (int)CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface )->count;
     (*rem)--;
-    WARN( "%*s%s (%s) rc=(%ld,%ld,%ld,%ld) hb=%d vis=%d op=%.2f kids=%d txt=%s\n",
+    WARN( "%*s%s (%s) rc=(%ld,%ld,%ld,%ld) hb=%d vis=%d op=%.2f kids=%d w=%.0f h=%.0f txt=%s img=%s\n",
           depth * 2, "", debugstr_w(el->class_name), debugstr_w(el->name),
           el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom,
           el->has_bounds, el->visibility, el->opacity, kids,
-          el->text[0] ? debugstr_w(el->text) : "\"\"" );
+          el->width, el->height,
+          el->text[0] ? debugstr_w(el->text) : "\"\"",
+          el->image_src[0] ? debugstr_w(el->image_src) : "\"\"" );
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
@@ -1024,15 +1026,17 @@ static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *prop
     return uwp_vm_query_string_prop_depth( vm, props, count, out, out_len, 0 );
 }
 
+static struct uwp_element *g_paint_ancestors[48];
+static int g_paint_depth = 0;
+
 static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el );
 
 static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
-    static int depth = 0;
-    if (!el || depth >= 48) return;
-    depth++;
+    if (!el || g_paint_depth >= 48) return;
+    g_paint_ancestors[g_paint_depth++] = el;
     uwp_gpu_paint_element_inner( ctx, el );
-    depth--;
+    g_paint_depth--;
 }
 
 static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el )
@@ -1057,6 +1061,52 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
 
     if (el->kind == UWP_KIND_IMAGE)
     {
+        if (!el->image_src[0] && el->img_source)
+        {
+            struct uwp_element *src_el = uwp_elem_from_any( el->img_source );
+            if (src_el && src_el->image_src[0])
+            {
+                lstrcpynW( el->image_src, src_el->image_src, ARRAY_SIZE(el->image_src) );
+                el->img_loaded = FALSE;
+                InterlockedExchange( &el->img_loading, 0 );
+            }
+        }
+        if (!el->image_src[0])
+        {
+            static const WCHAR *const img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"Source", L"IconUrl", L"IconUri", L"TileImageUrl", L"BoxArtUrl", L"PosterUrl", L"ThumbnailUrl", L"Images", L"Image", L"Icon" };
+            int ai;
+            int min_ai = max( 0, g_paint_depth - 7 );
+            for (ai = g_paint_depth - 2; ai >= min_ai && !el->image_src[0]; ai--)
+            {
+                struct uwp_element *p = g_paint_ancestors[ai];
+                int di;
+                if (!p) continue;
+                for (di = 0; di < p->dp_cnt && p->dp_store && !el->image_src[0]; di++)
+                {
+                    IInspectable *dv = p->dp_store[di].value;
+                    struct uwp_element *bel;
+                    WCHAR tmp[512] = {0};
+                    if (!dv) continue;
+                    bel = uwp_elem_from_any( dv );
+                    if (bel && bel->image_src[0])
+                        lstrcpynW( el->image_src, bel->image_src, ARRAY_SIZE(el->image_src) );
+                    else
+                    {
+                        if (!uwp_unbox_string( dv, tmp, ARRAY_SIZE(tmp) ))
+                            uwp_extract_uri_string( dv, tmp, ARRAY_SIZE(tmp) );
+                        if (tmp[0] && (wcsstr( tmp, L"http://" ) || wcsstr( tmp, L"https://" ) || wcsstr( tmp, L"ms-appx://" )))
+                            lstrcpynW( el->image_src, tmp, ARRAY_SIZE(el->image_src) );
+                    }
+                }
+                if (!el->image_src[0] && p->data_context)
+                {
+                    WCHAR img_buf[512] = {0};
+                    if (uwp_vm_query_string_prop_depth( p->data_context, img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
+                        img_buf[0])
+                        lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                }
+            }
+        }
         uwp_load_image_asset( el );
         if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
         {
@@ -1064,8 +1114,11 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
             int dw = (int)el->img_w, dh = (int)el->img_h;
             int dx, dy;
-            if (dw > bw && bw > 0) { dh = MulDiv( dh, bw, dw ); dw = bw; }
-            if (dh > bh && bh > 0) { dw = MulDiv( dw, bh, dh ); dh = bh; }
+            if (bw > 0 && bh > 0 && dw > 0 && dh > 0)
+            {
+                if (dw * bh > dh * bw) { dh = MulDiv( dh, bw, dw ); dw = bw; }
+                else { dw = MulDiv( dw, bh, dh ); dh = bh; }
+            }
             dx = rc.left + (bw - dw) / 2;
             dy = rc.top + (bh - dh) / 2;
             SetRect( &dst, dx, dy, dx + dw, dy + dh );
@@ -1333,6 +1386,31 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             }
         }
 
+        if (el->data_context && el->parent &&
+            (wcsstr( el->parent->class_name, L"ListView" ) || wcsstr( el->parent->class_name, L"GridView" )) &&
+            (brc.right - brc.left) >= 120 && (brc.bottom - brc.top) >= 48)
+        {
+            if (!el->image_src[0])
+            {
+                static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"Image", L"Images", L"Source", L"IconUrl", L"BoxArtUrl", L"PosterUrl" };
+                WCHAR img_buf[512] = {0};
+                if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
+                    img_buf[0])
+                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+            }
+            if (el->image_src[0])
+                uwp_load_image_asset( el );
+            if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+            {
+                RECT irc = brc;
+                InflateRect( &irc, -2, -2 );
+                xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                    6.0f, cr_to_argb( RGB( 32, 32, 32 ) ), cr_to_argb( RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
+                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                return;
+            }
+        }
+
         if (label[0] && (wcschr( label, '\n' ) || wcsstr( el->class_name, L"Card" )) &&
             (brc.right - brc.left) >= 160 && (brc.bottom - brc.top) >= 60)
         {
@@ -1391,7 +1469,13 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         InflateRect( &brc, -2, -2 );
         if (brc.right <= brc.left || brc.bottom <= brc.top) return;
 
-        if (el->has_bg)
+        if (!label[0] && !el->has_bg && !el->is_accent_style && !el->is_hovered && !el->is_pressed)
+        {
+            draw_bg = FALSE;
+            draw_bd = FALSE;
+            bg = surface_bg;
+        }
+        else if (el->has_bg)
         {
             if (el->bg_alpha == 0)
             {
@@ -1767,6 +1851,14 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             if (tlen >= ARRAY_SIZE(tline)) tlen = ARRAY_SIZE(tline) - 1;
             memcpy( tline, el->text, tlen * sizeof(WCHAR) );
             tline[tlen] = 0;
+            if (!el->image_src[0] && el->data_context)
+            {
+                static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"Image", L"Images", L"Source" };
+                WCHAR img_buf[512] = {0};
+                if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
+                    img_buf[0])
+                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+            }
             InflateRect( &brc, -2, -2 );
             xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
                                 6.0f, cr_to_argb( el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ) ),
@@ -1776,16 +1868,29 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 uwp_load_image_asset( el );
             if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
             {
-                int bh = brc.bottom - brc.top;
-                int isz = min( 56, max( 32, bh - 20 ) );
-                int iy = brc.top + (bh - isz) / 2;
-                RECT irc = { brc.left + 12, iy, brc.left + 12 + isz, iy + isz };
-                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
-                text_left = irc.right + 12;
+                if (!nl && el->parent && (wcsstr( el->parent->class_name, L"ListView" ) || wcsstr( el->parent->class_name, L"GridView" )))
+                {
+                    RECT irc = brc;
+                    InflateRect( &irc, -2, -2 );
+                    xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                    tline[0] = 0;
+                }
+                else
+                {
+                    int bh = brc.bottom - brc.top;
+                    int isz = min( 56, max( 32, bh - 20 ) );
+                    int iy = brc.top + (bh - isz) / 2;
+                    RECT irc = { brc.left + 12, iy, brc.left + 12 + isz, iy + isz };
+                    xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                    text_left = irc.right + 12;
+                }
             }
-            SetRect( &trc, text_left, brc.top + 14, brc.right - 14, brc.top + 48 );
-            xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                &trc, NULL, RGB( 255, 255, 255 ), 1.0f );
+            if (tline[0])
+            {
+                SetRect( &trc, text_left, brc.top + 14, brc.right - 14, brc.top + 48 );
+                xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &trc, NULL, RGB( 255, 255, 255 ), 1.0f );
+            }
             if (nl)
             {
                 SetRect( &src, text_left, brc.top + 52, brc.right - 14, brc.bottom - 12 );
