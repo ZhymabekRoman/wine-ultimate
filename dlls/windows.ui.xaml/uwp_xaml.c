@@ -158,7 +158,7 @@ BOOL WINAPI init_xaml_meta_cache( INIT_ONCE *once, void *param, void **ctx )
     return TRUE;
 }
 
-static int uwp_resolve_button_calc_code( struct uwp_element *btn )
+int uwp_resolve_button_calc_code( struct uwp_element *btn )
 {
     IInspectable *val = NULL;
     INT32 code = -1;
@@ -452,7 +452,7 @@ static const void *g_calc_vm_npc_vtbl[] =
 };
 static struct { const void *vtbl; } g_calc_vm_npc_handler = { g_calc_vm_npc_vtbl };
 
-static void uwp_calc_vm_teardown( BOOL final_cleanup )
+void uwp_calc_vm_teardown( BOOL final_cleanup )
 {
     if (g_calc_vm.npc)
     {
@@ -627,7 +627,7 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
 
 static IInspectable *uwp_make_button_pressed_args( int code );
 
-static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name )
+void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name )
 {
     void *npc = NULL;
     IInspectable *cmd_prop = NULL;
@@ -722,7 +722,7 @@ static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name 
     uwp_sync_calc_display_from_vm();
 }
 
-static void uwp_calc_vm_ensure( void )
+void uwp_calc_vm_ensure( void )
 {
     WCHAR vm_type_name[128] = {0};
     IInspectable *vm_inst = NULL;
@@ -801,7 +801,7 @@ static IInspectable *uwp_make_button_pressed_args( int code )
     return args;
 }
 
-static void uwp_calc_vm_send( int code, IInspectable *cmd_param )
+void uwp_calc_vm_send( int code, IInspectable *cmd_param )
 {
     WCHAR pre_disp[256] = {0}, post_disp[256] = {0};
 
@@ -2177,13 +2177,6 @@ HRESULT WINAPI uwp_fe_get_Parent( void *iface, void **out )
 }
 
 /* DataContextChangedEventArgs (slot 6 = get_NewValue, slot 7 = get_Handled, slot 8 = put_Handled) */
-struct uwp_dc_args
-{
-    const void *vtbl;
-    LONG ref;
-    IInspectable *new_val;
-    boolean handled;
-};
 static HRESULT WINAPI dc_args_get_NewValue( void *iface, IInspectable **out )
 {
     struct uwp_dc_args *a = iface;
@@ -2224,7 +2217,7 @@ static HRESULT WINAPI dc_args_GetRuntimeClassName( void *iface, HSTRING *name )
     const WCHAR *cls = L"Windows.UI.Xaml.DataContextChangedEventArgs";
     return WindowsCreateString( cls, wcslen(cls), name );
 }
-static const void *dc_args_vtbl[] =
+const void *dc_args_vtbl[] =
 {
     dc_args_QI,
     dp_args_AddRef,
@@ -3451,7 +3444,7 @@ static IInspectable *uwp_resolve_binding_path( IInspectable *src, const WCHAR *p
     return cur_owned ? cur : NULL;
 }
 
-static void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
+void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
                                    const WCHAR *prop_name, const WCHAR *path, IInspectable *src )
 {
     IInspectable *target;
@@ -6123,15 +6116,6 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
  * 5. DataContext Propagation, Loaded & OnApplyTemplate Dispatch, Frame Navigate
  * ============================================================================ */
 
-struct uwp_ccc_args
-{
-    const void *vtbl;
-    LONG ref;
-    IInspectable *item;
-    UINT32 phase;
-    boolean in_recycle;
-    boolean handled;
-};
 
 static HRESULT WINAPI uwp_ccc_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -6154,7 +6138,7 @@ static ULONG WINAPI uwp_ccc_AddRef( void *iface )
     return InterlockedIncrement( &((struct uwp_ccc_args *)iface)->ref );
 }
 
-static ULONG WINAPI uwp_ccc_Release( void *iface )
+ULONG WINAPI uwp_ccc_Release( void *iface )
 {
     struct uwp_ccc_args *a = (struct uwp_ccc_args *)iface;
     LONG r = InterlockedDecrement( &a->ref );
@@ -6201,7 +6185,7 @@ static HRESULT WINAPI uwp_ccc_get_Handled( void *iface, boolean *out ) { if (out
 static HRESULT WINAPI uwp_ccc_RegisterUpdateCallback( void *iface, void *cb ) { return S_OK; }
 static HRESULT WINAPI uwp_ccc_RegisterUpdateCallbackWithPhase( void *iface, UINT32 p, void *cb ) { return S_OK; }
 
-static const void *uwp_ccc_vtbl[] =
+const void *uwp_ccc_vtbl[] =
 {
     uwp_ccc_QueryInterface,
     uwp_ccc_AddRef,
@@ -6220,143 +6204,17 @@ static const void *uwp_ccc_vtbl[] =
     uwp_ccc_RegisterUpdateCallbackWithPhase,
 };
 
-void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
-{
-    int i;
-    IInspectable *old_dc;
-    if (!impl) return;
-    old_dc = impl->data_context;
-    if (old_dc) IInspectable_AddRef( old_dc );
-    if (impl->data_context != dc)
-    {
-        if (impl->data_context) IInspectable_Release( impl->data_context );
-        impl->data_context = dc;
-        if (dc) IInspectable_AddRef( dc );
-    }
-    if (wcsstr( impl->class_name, L"Card" ))
-    {
-        static const GUID IID_IDTE = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
-        void *dte = NULL;
-        if (impl->binding_connector &&
-            SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)impl->binding_connector, &IID_IDTE, &dte )) && dte)
-            IUnknown_Release( (IUnknown *)dte );
-        WARN( "Card DC(%p) dc=%p dc_cnt=%d bc=%p dte=%p clicks=%d cmd=%p\n",
-              impl, dc, impl->dc_cnt, impl->binding_connector, dte, impl->click_cnt, impl->command );
-    }
-
-    if (dc)
-    {
-        void *npc = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( dc, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
-        {
-            IUnknown_Release( (IUnknown *)npc );
-            uwp_calc_vm_set_instance( dc, NULL );
-        }
-        else if (uwp_is_display_result_element( impl ))
-        {
-            uwp_calc_vm_set_instance( dc, NULL );
-        }
-    }
-    else if (!xaml_get_app_caps()->teardown_vm && g_calc_vm.vm)
-    {
-        uwp_calc_vm_teardown( FALSE );
-    }
-
-    if (dc && dc != old_dc && (impl->dt_binding_connector || (impl->binding_connector && impl->dc_cnt == 0)))
-    {
-        static const GUID IID_IDTE_g = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
-        void *bc_src = impl->dt_binding_connector ? impl->dt_binding_connector : impl->binding_connector;
-        void *dte = NULL;
-        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)bc_src, &IID_IDTE_g, &dte )) && dte)
-        {
-            struct uwp_ccc_args *ccc = calloc( 1, sizeof(*ccc) );
-            if (ccc)
-            {
-                INT32 next_phase = -1;
-                HRESULT (WINAPI *proc_bindings)(void *, void *, INT32 *) = (void *)(*(void ***)dte)[8];
-                ccc->vtbl = uwp_ccc_vtbl;
-                ccc->ref = 1;
-                ccc->item = dc;
-                IInspectable_AddRef( dc );
-                ccc->phase = 0;
-                ccc->in_recycle = FALSE;
-                if (proc_bindings)
-                {
-                    __TRY
-                    {
-                        proc_bindings( dte, ccc, &next_phase );
-                    }
-                    __EXCEPT_ALL {}
-                    __ENDTRY;
-                }
-                uwp_ccc_Release( ccc );
-            }
-            IUnknown_Release( (IUnknown *)dte );
-        }
-    }
-
-    for (i = 0; i < impl->dc_bound_dp_cnt; i++)
-    {
-        if (impl->dc_bound_dps[i].dp && dc && dc != old_dc)
-            uwp_apply_binding( impl, impl->dc_bound_dps[i].dp, impl->dc_bound_dps[i].binding );
-    }
-    for (i = 0; i < impl->xaml_binding_cnt; i++)
-    {
-        if (!impl->xaml_bindings[i].source && dc && dc != old_dc)
-            uwp_eval_xaml_binding( impl, impl->xaml_bindings[i].owner_cls,
-                                   impl->xaml_bindings[i].prop_name,
-                                   impl->xaml_bindings[i].path, dc );
-    }
-
-    for (i = 0; i < impl->dc_cnt; i++)
-    {
-        if (impl->dc_handlers[i])
-        {
-            struct uwp_dc_args *args = calloc( 1, sizeof(*args) );
-            if (args)
-            {
-                IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-                struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dc_handlers[i];
-                args->vtbl = dc_args_vtbl;
-                args->ref = 1;
-                args->new_val = dc;
-                if (dc) IInspectable_AddRef( dc );
-                h->lpVtbl->Invoke( h, sender, args );
-                dp_args_Release( args );
-            }
-        }
-    }
-
-    if (impl->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( impl->content );
-        if (ch && (!ch->data_context || (old_dc && ch->data_context == old_dc)) && ch->data_context != dc)
-            uwp_propagate_data_context( ch, dc );
-    }
-    if (impl->children_coll)
-    {
-        struct uwp_vec_view *v = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < v->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-            if (ch && (!ch->data_context || (old_dc && ch->data_context == old_dc)) && ch->data_context != dc)
-                uwp_propagate_data_context( ch, dc );
-        }
-    }
-    if (old_dc) IInspectable_Release( old_dc );
-}
 
 static struct { const void *vtbl; LONG ref; } g_dp_routed_args = { (const void *)dp_changed_args_vtbl, 1 };
 /* Loaded/Click/Navigation callbacks receive this: McgMarshal ComInterfaceToObject
  * calls GetRuntimeClassName on it, so it must be an element face naming
  * RoutedEventArgs. */
-static struct uwp_element *g_routed_args_el = NULL;
+struct uwp_element *g_routed_args_el = NULL;
 /* McgMarshal caches the RCW (__ComObject) per IUnknown pointer and pins its
  * interop type at the first crossing.  Handlers registered on one element
  * often use distinct delegate args types (RoutedEventArgs vs RoutedEventArgs2),
  * so each fire allocates its own args object to keep cached RCW types matching. */
-static void *g_routed_args(void)
+void *g_routed_args(void)
 {
     void *inst = NULL;
     struct uwp_element *el;
@@ -6369,50 +6227,6 @@ static void *g_routed_args(void)
 }
 #define g_dummy_routed_args g_routed_args()
 
-static void uwp_apply_template_if_needed( struct uwp_element *el )
-{
-    void *fe_ovr = NULL;
-    BOOL has_children = FALSE;
-    if (!el || el->template_applied || !el->outer) return;
-    if (el->parent && !wcsncmp( el->parent->class_name, L"Microsoft.UI.Xaml.", 18 ))
-        return;
-    if (el->named_cnt > 0 || el->size_changed_cnt > 0)
-        has_children = TRUE;
-    /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
-     * has actually been inflated into the control's visual tree (except WinUI
-     * builtin controls like NavigationView/ItemsRepeater that synthesize parts). */
-    if (!has_children && wcsncmp( el->class_name, L"Microsoft.UI.Xaml.", 18 ) != 0 &&
-        !uwp_is_display_result_element( el ))
-        return;
-    el->template_applied = TRUE;
-    if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_UWP, &fe_ovr )) && fe_ovr)
-    {
-        /* Slot 8 on IFrameworkElementOverrides is OnApplyTemplate() */
-        HRESULT (WINAPI *on_apply)(void *) = (void *)(*(void ***)fe_ovr)[8];
-        if (on_apply)
-        {
-            WARN( "Calling IFrameworkElementOverrides::OnApplyTemplate on %s (%s) named_cnt=%d\n",
-                   debugstr_w(el->class_name), debugstr_w(el->name), el->named_cnt );
-            __TRY
-            {
-                on_apply( fe_ovr );
-            }
-            __EXCEPT_ALL
-            {
-                WARN( "OnApplyTemplate on %s (%s) threw exception\n",
-                      debugstr_w(el->class_name), debugstr_w(el->name) );
-            }
-            __ENDTRY;
-        }
-        IUnknown_Release( (IUnknown *)fe_ovr );
-    }
-    uwp_sync_all_template_presenters( el );
-    if (xaml_get_app_caps()->display_sync && uwp_is_display_result_element( el ))
-    {
-        uwp_calc_vm_ensure();
-        uwp_sync_calc_display_from_vm();
-    }
-}
 
 static const GUID IID_ISizeChangedEventArgs_UWP =
     { 0xd5312e60, 0x5cc1, 0x42a1, { 0x92, 0x0c, 0x1a, 0xf4, 0x6b, 0xe2, 0xf9, 0x86 } };
@@ -6448,7 +6262,7 @@ static HRESULT WINAPI uwp_sc_args_get_PreviousSize( void *iface, Size *sz )
     if (sz) { sz->Width = 0.0f; sz->Height = 0.0f; }
     return S_OK;
 }
-static float g_sc_new_w = 1272.0f, g_sc_new_h = 990.0f;
+float g_sc_new_w = 1272.0f, g_sc_new_h = 990.0f;
 static HRESULT WINAPI uwp_sc_args_get_NewSize( void *iface, Size *sz )
 {
     if (sz) { sz->Width = g_sc_new_w > 0.0f ? g_sc_new_w : 1272.0f; sz->Height = g_sc_new_h > 0.0f ? g_sc_new_h : 990.0f; }
@@ -6461,214 +6275,9 @@ static const void *const uwp_sc_args_vtbl[] =
     uwp_sc_args_get_PreviousSize,
     uwp_sc_args_get_NewSize,
 };
-static struct { const void *const *vtbl; } uwp_sc_args_obj = { uwp_sc_args_vtbl };
+struct uwp_sc_args_obj uwp_sc_args_obj = { uwp_sc_args_vtbl };
 
-void uwp_fire_size_and_layout_changed( struct uwp_element *el )
-{
-    int i;
-    float prev_w = 0.0f, prev_h = 0.0f;
-    if (!el) return;
-    if (el->size_changed_cnt <= 0 && el->layout_updated_cnt <= 0) return;
-    if (el->actual_w <= 0.0 || el->actual_h <= 0.0) return;
-    uwp_apply_template_if_needed( el );
-    if (el->size_changed_cnt > 0 && (el->actual_w != el->last_sc_w || el->actual_h != el->last_sc_h))
-    {
-        IInspectable * volatile sender = el->outer ? el->outer : &el->IInspectable_iface;
-        volatile int cnt = el->size_changed_cnt;
-        prev_w = g_sc_new_w;
-        prev_h = g_sc_new_h;
-        g_sc_new_w = (float)el->actual_w;
-        g_sc_new_h = (float)el->actual_h;
-        el->last_sc_w = el->actual_w;
-        el->last_sc_h = el->actual_h;
-        for (i = 0; i < cnt && i < el->size_changed_cnt; i++)
-        {
-            struct xaml_event_handler * volatile h = (struct xaml_event_handler *)el->size_changed_handlers[i];
-            if (h)
-            {
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, sender, (IInspectable *)&uwp_sc_args_obj );
-                }
-                __EXCEPT_ALL
-                {
-                }
-                __ENDTRY;
-            }
-        }
-        g_sc_new_w = prev_w;
-        g_sc_new_h = prev_h;
-    }
-    if (el->layout_updated_cnt > 0)
-    {
-        int cnt = el->layout_updated_cnt;
-        for (i = 0; i < cnt && i < el->layout_updated_cnt; i++)
-        {
-            if (el->layout_updated_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->layout_updated_handlers[i];
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, NULL, NULL );
-                }
-                __EXCEPT_ALL
-                {
-                }
-                __ENDTRY;
-            }
-        }
-    }
-    g_sc_new_w = prev_w;
-    g_sc_new_h = prev_h;
-}
 
-void uwp_fire_loaded_tree( struct uwp_element *el )
-{
-    int i;
-    if (!el) return;
-
-    uwp_apply_template_if_needed( el );
-
-    if (!el->loaded_fired && el->loading_cnt > 0)
-    {
-        IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
-        for (i = 0; i < el->loading_cnt; i++)
-        {
-            if (el->loading_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->loading_handlers[i];
-                TRACE( "Firing Loading handler[%d] on %s (%s)\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, sender, NULL );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "Loading handler[%d] on %s (%s) threw\n",
-                          i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                }
-                __ENDTRY;
-            }
-        }
-    }
-
-    el->loaded_fired = TRUE;
-    if (el->loaded_fired_cnt < el->loaded_cnt)
-    {
-        IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
-        int start = el->loaded_fired_cnt;
-        el->loaded_fired_cnt = el->loaded_cnt;
-        for (i = start; i < el->loaded_cnt; i++)
-        {
-            if (el->loaded_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->loaded_handlers[i];
-                TRACE( "Firing Loaded handler[%d] on %s (%s)\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                __TRY
-                {
-                    HRESULT lhr = h->lpVtbl->Invoke( h, sender, g_routed_args() );
-                    if (FAILED(lhr))
-                        WARN( "Loaded handler[%d] on %s (%s) returned hr %#lx\n",
-                              i, debugstr_w(el->class_name), debugstr_w(el->name), lhr );
-                }
-                __EXCEPT_ALL
-                {
-                    struct uwp_element *se = uwp_elem_from_any( sender );
-                    WARN( "Loaded handler[%d] on %s (%s) threw exception (sender=%s args=%s)\n",
-                          i, debugstr_w(el->class_name), debugstr_w(el->name),
-                          se ? debugstr_w( se->class_name ) : "\"?\"",
-                          debugstr_w( g_routed_args_el ? g_routed_args_el->class_name : L"?" ) );
-                }
-                __ENDTRY;
-            }
-        }
-        /* EVC is fired during Arrange (uwp_fire_evc_if_needed) once Measure has run. */
-    }
-    if (el->size_changed_cnt > 0 && el->actual_w > 0.0 && el->actual_h > 0.0 &&
-        (el->actual_w != el->last_sc_w || el->actual_h != el->last_sc_h))
-    {
-        IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
-        float prev_w = g_sc_new_w, prev_h = g_sc_new_h;
-        g_sc_new_w = (float)el->actual_w;
-        g_sc_new_h = (float)el->actual_h;
-        el->last_sc_w = el->actual_w;
-        el->last_sc_h = el->actual_h;
-        for (i = 0; i < el->size_changed_cnt; i++)
-        {
-            if (el->size_changed_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->size_changed_handlers[i];
-                TRACE( "Firing SizeChanged handler[%d] on %s (%s) w=%.0f h=%.0f\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name), el->actual_w, el->actual_h );
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, sender, (IInspectable *)&uwp_sc_args_obj );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "SizeChanged handler[%d] on %s threw exception\n", i, debugstr_w(el->class_name) );
-                }
-                __ENDTRY;
-            }
-        }
-        g_sc_new_w = prev_w;
-        g_sc_new_h = prev_h;
-    }
-    if (el->layout_updated_cnt > 0)
-    {
-        int cnt = el->layout_updated_cnt;
-        for (i = 0; i < cnt && i < el->layout_updated_cnt; i++)
-        {
-            if (el->layout_updated_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->layout_updated_handlers[i];
-                TRACE( "Firing LayoutUpdated handler[%d] on %s (%s) w=%.0f h=%.0f\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name), el->actual_w, el->actual_h );
-                IUnknown_AddRef( (IUnknown *)h );
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, NULL, NULL );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "LayoutUpdated handler[%d] on %s threw exception\n", i, debugstr_w(el->class_name) );
-                }
-                __ENDTRY;
-                IUnknown_Release( (IUnknown *)h );
-            }
-        }
-    }
-
-    /* NavigationView raises SelectionChanged/ItemInvoked once after its own
-     * Loaded handlers so the app's navigation handler populates the content
-     * Frame (ContentFrame1.Navigate in Clock's MainPage) before we recurse. */
-    if (!el->nav_fired && el->class_name[0] && wcsstr( el->class_name, L".Controls.NavigationView" ))
-    {
-        struct uwp_element *item = uwp_nav_find_item( el, 0 );
-        IInspectable *item_obj = item ? (item->outer ? item->outer : &item->IInspectable_iface) : NULL;
-        el->nav_fired = TRUE;
-        uwp_nav_fire( el, &el->nav_sel_changed_reg, item_obj );
-        uwp_nav_fire( el, &el->nav_item_invoked_reg, item_obj );
-    }
-
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el) uwp_fire_loaded_tree( ch );
-    }
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < v->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-            if (ch && ch != el) uwp_fire_loaded_tree( ch );
-        }
-    }
-}
 
 void uwp_fire_loaded_content( IInspectable *content )
 {
@@ -6680,23 +6289,6 @@ void uwp_fire_loaded_content( IInspectable *content )
 
 void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
 void uwp_vsm_invalidate_eval_chain( struct uwp_element *el );
-void uwp_realize_empty_panel_defers( struct uwp_element *root )
-{
-    int d;
-    if (!root) return;
-    for (d = 0; d < root->defer_cnt; d++)
-    {
-        struct uwp_defer_entry *de = &root->defer_entries[d];
-        if (!de->realized && de->parent_panel &&
-            (de->parent_panel->kind == UWP_KIND_GRID ||
-             de->parent_panel->kind == UWP_KIND_STACK_PANEL ||
-             de->parent_panel->kind == UWP_KIND_BORDER) &&
-            !uwp_panel_has_concrete_child( de->parent_panel ))
-        {
-            uwp_realize_deferred_entry( de );
-        }
-    }
-}
 
 void uwp_record_xbf_ref( struct uwp_element *root, const WCHAR *full_name,
                                 const WCHAR *short_name, BOOL is_resource_path )
@@ -6790,36 +6382,6 @@ static struct uwp_element *uwp_find_empty_holder_border( struct uwp_element *el,
     return NULL;
 }
 
-BOOL uwp_populate_element_from_pri_xbf( struct uwp_element *el, const WCHAR *short_name )
-{
-    const BYTE *xbf = NULL;
-    DWORD xbf_sz = 0;
-    const WCHAR *lookup = short_name;
-
-    if (!el) return FALSE;
-    if (!lookup || !lookup[0])
-    {
-        const WCHAR *dot = wcsrchr( el->class_name, '.' );
-        lookup = dot ? dot + 1 : el->class_name;
-    }
-    if (!lookup || !lookup[0]) return FALSE;
-    if (!uwp_pri_find_xbf( lookup, &xbf, &xbf_sz ) || !xbf || xbf_sz <= 0x50)
-        return FALSE;
-
-    if (!el->children_coll && !el->content)
-    {
-        void *conn = NULL;
-        IInspectable *comp = el->outer ? el->outer : &el->IInspectable_iface;
-        if (el->outer)
-            IInspectable_QueryInterface( el->outer, &IID_IComponentConnector_UWP_g, &conn );
-        TRACE( "uwp_populate_element_from_pri_xbf: parsing %s.xbf (%lu bytes) into %p\n",
-               debugstr_w(lookup), (unsigned long)xbf_sz, el );
-        uwp_parse_and_build_xbf( xbf, xbf_sz, comp, conn, TRUE, uwp_get_app_outer(), -1, el, NULL );
-        if (conn) IUnknown_Release( (IUnknown *)conn );
-    }
-    uwp_realize_empty_panel_defers( el );
-    return el->children_coll != NULL || el->content != NULL;
-}
 
 static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const WCHAR *full_name,
                                               const WCHAR *short_name )
@@ -7251,45 +6813,10 @@ const WCHAR *uwp_btype_to_class_name( WORD tid )
 }
 
 /* Set a custom XAML property (e.g. CalculatorButton.ButtonId = "Zero") via IXamlMetadataProvider */
-static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
-{
-    if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit = uwp_hit_test_button( ch, x, y );
-            if (hit) return hit;
-        }
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit = uwp_hit_test_button( ch, x, y );
-        if (hit) return hit;
-    }
-
-    if (el->has_bounds && el->is_enabled &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom &&
-        (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
-         el->click_cnt > 0 || el->command != NULL ||
-         wcsstr( el->class_name, L"MenuBarItem" )))
-    {
-        if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
-            return NULL;
-        return el;
-    }
-    return NULL;
-}
 
 void uwp_invoke_button( struct uwp_element *btn );
 
-static struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR *text )
+struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR *text )
 {
     if (!el || el->visibility != 0 || !el->is_enabled) return NULL;
 
@@ -7326,7 +6853,7 @@ static BOOL uwp_is_textbox( const struct uwp_element *el )
            wcsstr( el->name, L"SearchBox" ) != NULL;
 }
 
-static struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
+struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0) return NULL;
 
@@ -7356,7 +6883,7 @@ static struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, 
     return NULL;
 }
 
-static void uwp_fire_asb_recursive( struct uwp_element *el, const WCHAR *text, BOOL is_submit )
+void uwp_fire_asb_recursive( struct uwp_element *el, const WCHAR *text, BOOL is_submit )
 {
     if (!el) return;
     if (text && el->text != text && (wcsstr( el->class_name, L"AutoSuggestBox" ) || wcsstr( el->class_name, L"TextBox" )))
@@ -7376,47 +6903,6 @@ static void uwp_fire_asb_recursive( struct uwp_element *el, const WCHAR *text, B
     }
 }
 
-void uwp_keyboard_press_char( WCHAR ch )
-{
-    WCHAR buf[2] = { ch, 0 };
-    struct uwp_element *root = g_navigated_page_el, *hit;
-
-    if (g_focused_textbox && g_focused_textbox->visibility == 0 && g_focused_textbox->is_enabled)
-    {
-        size_t len = wcslen( g_focused_textbox->text );
-        BOOL changed = FALSE;
-        TRACE( "uwp_keyboard_press_char: ch=%#x focused=%s cur=%s\n",
-               (unsigned)ch, debugstr_w(g_focused_textbox->name), debugstr_w(g_focused_textbox->text) );
-        if (ch == L'\b')
-        {
-            if (len > 0) { g_focused_textbox->text[len - 1] = 0; changed = TRUE; }
-        }
-        else if (ch == 27)
-        {
-            if (len > 0) { g_focused_textbox->text[0] = 0; changed = TRUE; }
-            else g_focused_textbox = NULL;
-        }
-        else if (ch == L'\r')
-        {
-            uwp_fire_asb_recursive( g_focused_textbox, g_focused_textbox->text, TRUE );
-        }
-        else if (ch >= 0x20 && len + 1 < ARRAY_SIZE(g_focused_textbox->text))
-        {
-            g_focused_textbox->text[len] = ch;
-            g_focused_textbox->text[len + 1] = 0;
-            changed = TRUE;
-        }
-        if (changed && g_focused_textbox)
-            uwp_fire_asb_recursive( g_focused_textbox, g_focused_textbox->text, FALSE );
-        uwp_invalidate_window();
-        xaml_window_present_current();
-        return;
-    }
-
-    if (!root) return;
-    if (ch == L'\r') buf[0] = L'=';
-    if ((hit = uwp_find_button_by_text( root, buf ))) uwp_invoke_button( hit );
-}
 
 BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *node )
 {
@@ -7432,197 +6918,12 @@ BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *n
     return FALSE;
 }
 
-BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_routed_args *args )
-{
-    if (!el || !args || el->visibility != 0) return FALSE;
-    if (wcsstr( el->class_name, L"TeachingTip" ) && !el->is_open) return FALSE;
 
-    {
-        void **handlers = NULL;
-        unsigned int hcnt = xaml_event_registry_snapshot_alloc( &el->preview_keydown_reg, &handlers );
-        if (hcnt > 0)
-        {
-            IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
-            unsigned int hi;
-            for (hi = 0; hi < hcnt; hi++)
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
-                if (h)
-                {
-                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
-                    IUnknown_Release( (IUnknown *)handlers[hi] );
-                }
-            }
-            free( handlers );
-            if (args->handled) return TRUE;
-        }
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el && uwp_fire_preview_keydown_tree( ch, args ))
-            return TRUE;
-    }
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (ch && ch != el && uwp_fire_preview_keydown_tree( ch, args ))
-                return TRUE;
-        }
-    }
-    return FALSE;
-}
 
-BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e )
-{
-    struct uwp_element *accel = e->accel_el;
-    struct uwp_element *target = e->target_el;
-    UINT vk = e->vk, mods = e->mods;
-    int i;
+BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y );
 
-    TRACE( "accelerator inv: %c%s%s%s (vk=%#x mods=%#x target=%s %s)\n",
-           ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) ? (char)vk : '?',
-           (mods & 1) ? " ctrl" : "",
-           (mods & 2) ? " alt" : "",
-           (mods & 4) ? " shift" : "",
-           vk, mods,
-           target ? debugstr_w(target->class_name) : "?",
-           target ? debugstr_w(target->name) : "" );
 
-    if (accel && accel->accel_invoked_cnt > 0)
-    {
-        struct uwp_ka_invoked_args *args = calloc( 1, sizeof(*args) );
-        if (args)
-        {
-            IInspectable *sender = accel->outer ? accel->outer : &accel->IKeyboardAccelerator_iface;
-            boolean handled = FALSE;
-            args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ka_args_vtbl;
-            args->ref = 1;
-            args->handled = FALSE;
-            if (target)
-            {
-                args->element = target->outer ? target->outer : &target->IDependencyObject_iface;
-                IInspectable_AddRef( args->element );
-            }
-            for (i = 0; i < accel->accel_invoked_cnt; i++)
-            {
-                if (accel->accel_invoked_handlers[i])
-                {
-                    struct xaml_event_handler *h = (struct xaml_event_handler *)accel->accel_invoked_handlers[i];
-                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
-                }
-            }
-            handled = args->handled;
-            uwp_ka_args_Release( &args->IInspectable_iface );
-            if (handled) return TRUE;
-        }
-    }
-
-    if (target)
-    {
-        uwp_invoke_button( target );
-        return TRUE;
-    }
-    return FALSE;
-}
-
-static BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y );
-
-void uwp_invoke_button( struct uwp_element *btn )
-{
-    int i;
-    if (!btn || !btn->is_enabled) return;
-
-    WARN( "uwp_invoke_button: %s (%s, text=%s, cmd=%p, param=%p, dc=%p, clicks=%d, tapped=%d, ptrP=%d, ptrR=%d, dp=%d)\n",
-          debugstr_w(btn->class_name), debugstr_w(btn->name), debugstr_w(btn->text),
-          btn->command, btn->command_param, btn->data_context, btn->click_cnt,
-          (int)btn->tapped_reg.next_token, (int)btn->ptr_pressed_reg.next_token,
-          (int)btn->ptr_released_reg.next_token, btn->dp_cnt );
-    for (i = 0; i < btn->dp_cnt; i++)
-    {
-        struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dp_store[i].dp;
-        WARN( "  dp[%d] name=%s val=%p\n", i,
-              (dpl && (ULONG_PTR)dpl >= 0x10000) ? debugstr_w(dpl->name) : "?", btn->dp_store[i].value );
-    }
-
-    /* 1. Invoke ICommand::Execute(CommandParameter) if Command is bound */
-    if (btn->command)
-    {
-        __TRY
-        {
-            void *cmd_iface = NULL;
-            HRESULT qhr = IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface );
-            if (FAILED(qhr))
-                qhr = IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP2, &cmd_iface );
-            if (SUCCEEDED(qhr) && cmd_iface)
-            {
-                /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
-                struct command_iface *cmd = (struct command_iface *)cmd_iface;
-                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, btn->command_param );
-                IUnknown_Release( (IUnknown *)cmd_iface );
-            }
-            else
-            {
-                /* Direct vtbl call if already on ICommand face */
-                struct command_iface *cmd = (struct command_iface *)btn->command;
-                HRESULT ehr = E_NOTIMPL;
-                if (cmd->lpVtbl->Execute) ehr = cmd->lpVtbl->Execute( cmd, btn->command_param );
-                WARN( "uwp_invoke_button: direct Execute qhr=%#lx cmd=%p fn=%p -> hr=%#lx\n",
-                      (unsigned long)qhr, cmd, cmd->lpVtbl->Execute, (unsigned long)ehr );
-            }
-        }
-        __EXCEPT_ALL
-        {
-            WARN( "uwp_invoke_button: ICommand::Execute faulted\n" );
-        }
-        __ENDTRY;
-    }
-
-    /* 2. Invoke registered Click handlers */
-    for (i = 0; i < btn->click_cnt; i++)
-    {
-        if (btn->click_handlers[i])
-        {
-            __TRY
-            {
-                IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
-                struct xaml_event_handler *h = (struct xaml_event_handler *)btn->click_handlers[i];
-                HMODULE mod = NULL;
-                void *inv = h->lpVtbl->Invoke;
-                HRESULT chr;
-                GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                    (LPCSTR)inv, &mod );
-                chr = h->lpVtbl->Invoke( h, sender, g_routed_args() );
-                WARN( "uwp_invoke_button: Click[%d] h=%p inv=%p (mod=%p +0x%lx) sender=%p -> hr=%#lx\n",
-                      i, h, inv, mod, mod ? (unsigned long)((const char *)inv - (const char *)mod) : 0ul,
-                      sender, (unsigned long)chr );
-            }
-            __EXCEPT_ALL
-            {
-                WARN( "uwp_invoke_button: Click handler %d faulted\n", i );
-            }
-            __ENDTRY;
-        }
-    }
-    if (btn->tapped_reg.next_token > 0)
-        uwp_fire_tapped_bubble( btn, btn->bounds.left + 8, btn->bounds.top + 8 );
-
-    /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
-    if (xaml_get_app_caps()->vm_type[0])
-    {
-        int code = uwp_resolve_button_calc_code( btn );
-        if (code >= 0)
-            uwp_calc_vm_send( code, btn->command_param );
-    }
-
-    uwp_invalidate_window();
-}
-
-static struct uwp_element *uwp_hit_test_tabview( struct uwp_element *el, int x, int y )
+struct uwp_element *uwp_hit_test_tabview( struct uwp_element *el, int x, int y )
 {
     if (!el || !el->has_bounds || el->visibility != 0) return NULL;
     if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
@@ -7662,15 +6963,6 @@ static const GUID IID_ITappedRoutedEventArgs_UWP =
 static const GUID IID_IRoutedEventArgs_tap_UWP =
     { 0x5c985ac6, 0xd802, 0x4b38, { 0xa2, 0x23, 0xbf, 0x07, 0x0c, 0x43, 0xfe, 0xdf } };
 
-struct uwp_tapped_args
-{
-    IInspectable ITappedRoutedEventArgs_iface;
-    IInspectable IRoutedEventArgs_iface;
-    LONG ref;
-    IInspectable *orig_source;
-    boolean handled;
-    float x, y;
-};
 
 static inline struct uwp_tapped_args *impl_from_tap( void *iface )
 {
@@ -7701,7 +6993,7 @@ static HRESULT WINAPI uwp_tap_QI( void *iface, REFIID iid, void **out )
     return E_NOINTERFACE;
 }
 static ULONG WINAPI uwp_tap_AddRef( void *iface ) { return InterlockedIncrement( &impl_from_tap( iface )->ref ); }
-static ULONG WINAPI uwp_tap_Release( void *iface )
+ULONG WINAPI uwp_tap_Release( void *iface )
 {
     struct uwp_tapped_args *a = impl_from_tap( iface );
     ULONG r = InterlockedDecrement( &a->ref );
@@ -7742,20 +7034,20 @@ static HRESULT WINAPI uwp_tap_routed_get_OriginalSource( void *iface, IInspectab
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
-static const void *uwp_tap_vtbl[] =
+const void *uwp_tap_vtbl[] =
 {
     uwp_tap_QI, uwp_tap_AddRef, uwp_tap_Release,
     uwp_tap_GetIids, uwp_tap_GetRuntimeClassName, uwp_tap_GetTrustLevel,
     uwp_tap_get_PointerDeviceType, uwp_tap_get_Handled, uwp_tap_put_Handled, uwp_tap_GetPosition,
 };
-static const void *uwp_tap_routed_vtbl[] =
+const void *uwp_tap_routed_vtbl[] =
 {
     uwp_tap_routed_QI, uwp_tap_routed_AddRef, uwp_tap_routed_Release,
     uwp_tap_routed_GetIids, uwp_tap_routed_GetRuntimeClassName, uwp_tap_routed_GetTrustLevel,
     uwp_tap_routed_get_OriginalSource,
 };
 
-static struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x, int y )
+struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x, int y )
 {
     if (!el || !el->has_bounds || el->visibility != 0) return NULL;
     if (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom)
@@ -7781,259 +7073,12 @@ static struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x,
     return NULL;
 }
 
-static BOOL uwp_fire_tapped( struct uwp_element *el, int x, int y )
-{
-    void **handlers = NULL;
-    unsigned int count, i;
-    struct uwp_tapped_args *args;
-    IInspectable *sender;
 
-    if (!el || el->tapped_reg.next_token == 0) return FALSE;
-    count = xaml_event_registry_snapshot_alloc( &el->tapped_reg, &handlers );
-    if (!count) return FALSE;
-
-    sender = el->outer ? el->outer : &el->IInspectable_iface;
-    args = calloc( 1, sizeof(*args) );
-    if (!args)
-    {
-        for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
-        free( handlers );
-        return FALSE;
-    }
-    args->ITappedRoutedEventArgs_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tap_vtbl;
-    args->IRoutedEventArgs_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tap_routed_vtbl;
-    args->ref = 1;
-    args->orig_source = sender;
-    if (sender) IInspectable_AddRef( sender );
-    args->x = (float)x;
-    args->y = (float)y;
-
-    TRACE( "uwp_fire_tapped on %s (%s / %s) handlers=%u\n",
-           debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(el->text), count );
-    for (i = 0; i < count; i++)
-    {
-        struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
-        __TRY
-        {
-            h->lpVtbl->Invoke( h, sender, &args->ITappedRoutedEventArgs_iface );
-        }
-        __EXCEPT_ALL {}
-        __ENDTRY;
-        IUnknown_Release( (IUnknown *)handlers[i] );
-    }
-    free( handlers );
-    uwp_tap_Release( &args->ITappedRoutedEventArgs_iface );
-    return TRUE;
-}
-
-static struct uwp_element *g_pressed_btn = NULL;
-static struct uwp_element *g_pressed_tabview = NULL;
-static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
+struct uwp_element *g_pressed_btn = NULL;
+struct uwp_element *g_pressed_tabview = NULL;
+BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
                                       const struct xaml_pointer_info *info, BOOL bubble );
 
-BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content )
-{
-    struct uwp_element *root_el = uwp_elem_from_any( root_content );
-    if (!root_el && g_navigated_page_el) root_el = g_navigated_page_el;
-    if (!root_el) return FALSE;
-    if (root_el->kind == UWP_KIND_FRAME && g_navigated_page_el)
-        root_el = g_navigated_page_el;   /* Frame.content RCW unresolvable; hit the adopted page */
-
-    if (width > 0 && height > 0 &&
-        (!root_el->has_bounds ||
-         (root_el->bounds.right - root_el->bounds.left) != width ||
-         (root_el->bounds.bottom - root_el->bounds.top) != height))
-    {
-        RECT rc = { 0, 0, width, height };
-        uwp_arrange_element( root_el, rc );
-    }
-
-    if (msg == WM_LBUTTONDOWN)
-    {
-        struct uwp_element *tv = uwp_hit_test_tabview( root_el, x, y );
-        struct uwp_element *tb = tv ? NULL : uwp_hit_test_textbox( root_el, x, y );
-        struct uwp_element *btn = (tv || tb) ? NULL : uwp_hit_test_button( root_el, x, y );
-        if (tv)
-        {
-            g_pressed_tabview = tv;
-            return TRUE;
-        }
-        if (tb)
-        {
-            g_focused_textbox = tb;
-            TRACE( "uwp_handle_mouse_input: FOCUS TextBox (%d,%d) -> %s\n", x, y, debugstr_w(tb->name) );
-            if (hwnd)
-            {
-                SetFocus( hwnd );
-                InvalidateRect( hwnd, NULL, FALSE );
-            }
-            uwp_invalidate_window();
-            return TRUE;
-        }
-        if (g_focused_textbox)
-        {
-            g_focused_textbox = NULL;
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
-        }
-        if (btn && wcsstr( btn->class_name, L"MenuBarItem" ))
-        {
-            if (uwp_popup_is_open_for( btn ))
-            {
-                uwp_close_flyout_popup( TRUE );
-                g_last_closed_flyout = NULL;
-                return TRUE;
-            }
-            if (g_last_closed_flyout == btn && (GetTickCount() - g_last_closed_tick) < 250)
-            {
-                g_last_closed_flyout = NULL;
-                return TRUE;
-            }
-            {
-                struct xaml_pointer_info info = {0};
-                POINT spt = { btn->bounds.left, btn->bounds.bottom };
-                info.x = (float)x;
-                info.y = (float)y;
-                info.pointer_id = 1;
-                info.is_left = TRUE;
-                info.is_in_contact = TRUE;
-                info.is_in_window = TRUE;
-                uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
-                if (hwnd) ClientToScreen( hwnd, &spt );
-                uwp_show_flyout_popup( btn, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
-            }
-            return TRUE;
-        }
-        if (btn)
-        {
-            struct xaml_pointer_info info = {0};
-            g_pressed_btn = btn;
-            btn->is_pressed = TRUE;
-            info.x = (float)x;
-            info.y = (float)y;
-            info.pointer_id = 1;
-            info.is_left = TRUE;
-            info.is_in_contact = TRUE;
-            info.is_in_window = TRUE;
-            uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
-            TRACE( "uwp_handle_mouse_input: DOWN (%d,%d) -> %s (%s)\n",
-                   x, y, debugstr_w(btn->name), debugstr_w(btn->text) );
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
-            return TRUE;
-        }
-    }
-    else if (msg == WM_MOUSEMOVE)
-    {
-        struct uwp_element *hit = uwp_hit_test_button( root_el, x, y );
-        if (hit != g_hovered_elem)
-        {
-            if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
-            g_hovered_elem = hit;
-            if (hit) hit->is_hovered = TRUE;
-            if (hit && wcsstr( hit->class_name, L"MenuBarItem" ) &&
-                g_popup_owner_el && wcsstr( g_popup_owner_el->class_name, L"MenuBarItem" ) &&
-                hit != g_popup_owner_el)
-            {
-                struct xaml_pointer_info info = {0};
-                POINT spt = { hit->bounds.left, hit->bounds.bottom };
-                info.x = (float)x;
-                info.y = (float)y;
-                info.pointer_id = 1;
-                info.is_left = TRUE;
-                info.is_in_contact = TRUE;
-                info.is_in_window = TRUE;
-                uwp_fire_element_pointer( hit, XAML_PTR_PRESSED, &info, TRUE );
-                if (hwnd) ClientToScreen( hwnd, &spt );
-                uwp_show_flyout_popup( hit, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
-            }
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
-            return TRUE;
-        }
-        return FALSE;
-    }
-    else if (msg == WM_LBUTTONUP)
-    {
-        if (g_pressed_tabview)
-        {
-            struct uwp_element *tv = g_pressed_tabview;
-            struct uwp_element *hit = uwp_hit_test_tabview( root_el, x, y );
-            g_pressed_tabview = NULL;
-            if (hit == tv)
-            {
-                IInspectable *items[64];
-                int count = uwp_tabview_get_items( tv, items, ARRAY_SIZE(items) );
-                int n = max( 1, count ), i;
-                POINT pt = { x, y };
-                RECT pill, close_rc, add_rc;
-                uwp_tabview_compute_rects( &tv->bounds, n, 0, &pill, &close_rc, &add_rc );
-                if (PtInRect( &add_rc, pt ))
-                {
-                    uwp_tabview_fire_add_tab( tv );
-                }
-                else
-                {
-                    for (i = 0; i < count; i++)
-                    {
-                        uwp_tabview_compute_rects( &tv->bounds, n, i, &pill, &close_rc, &add_rc );
-                        if (PtInRect( &close_rc, pt ))
-                        {
-                            uwp_tabview_fire_close_tab( tv, items[i] );
-                            break;
-                        }
-                        if (PtInRect( &pill, pt ))
-                        {
-                            uwp_tabview_select_item( tv, items[i] );
-                            break;
-                        }
-                    }
-                }
-                for (i = 0; i < count; i++)
-                    IInspectable_Release( items[i] );
-            }
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
-            return TRUE;
-        }
-        if (g_pressed_btn)
-        {
-            struct uwp_element *btn = g_pressed_btn;
-            struct uwp_element *hit = uwp_hit_test_button( root_el, x, y );
-            btn->is_pressed = FALSE;
-            g_pressed_btn = NULL;
-            WARN( "uwp_handle_mouse_input: UP (%d,%d) pressed=%p(%s) hit=%p(%s)\n",
-                  x, y, btn, debugstr_w(btn->class_name), hit, hit ? debugstr_w(hit->class_name) : "(null)" );
-            if (hit == btn)
-            {
-                struct xaml_pointer_info info = {0};
-                info.x = (float)x;
-                info.y = (float)y;
-                info.pointer_id = 1;
-                info.is_left = TRUE;
-                info.is_in_contact = FALSE;
-                info.is_in_window = TRUE;
-                uwp_fire_element_pointer( btn, XAML_PTR_RELEASED, &info, TRUE );
-                uwp_invoke_button( btn );
-            }
-            else
-                uwp_fire_tapped_bubble( btn, x, y );
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
-            return TRUE;
-        }
-        {
-            struct uwp_element *tap = uwp_hit_test_tappable( root_el, x, y );
-            if (tap && uwp_fire_tapped( tap, x, y ))
-            {
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-                return TRUE;
-            }
-        }
-    }
-    return FALSE;
-}
 
 /* ============================================================================
  * 7b. Generic Pointer Hit-Testing, Capture, Bubbling & PointerRoutedEventArgs
@@ -8124,16 +7169,6 @@ static const void *uwp_ptr_vtbl[] =
     uwp_ptr_get_IsInRange,
 };
 
-struct uwp_pointer_routed_args
-{
-    const void **IPointerRoutedEventArgs_vtbl;
-    const void **IRoutedEventArgs_vtbl;
-    LONG ref;
-    struct xaml_pointer_info info;
-    IInspectable *orig_source;
-    struct uwp_pointer *pointer;
-    boolean handled;
-};
 
 static inline struct uwp_pointer_routed_args *pra_from_routed( void *iface )
 {
@@ -8166,7 +7201,7 @@ static ULONG WINAPI pra_AddRef( void *iface )
 {
     return InterlockedIncrement( &((struct uwp_pointer_routed_args *)iface)->ref );
 }
-static ULONG WINAPI pra_Release( void *iface )
+ULONG WINAPI pra_Release( void *iface )
 {
     struct uwp_pointer_routed_args *a = iface;
     ULONG ref = InterlockedDecrement( &a->ref );
@@ -8291,7 +7326,7 @@ static const void *pra_routed_vtbl[] =
     pra_routed_get_OriginalSource,
 };
 
-static struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const struct xaml_pointer_info *info,
+struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const struct xaml_pointer_info *info,
                                                                       IInspectable *orig_source )
 {
     struct uwp_pointer_routed_args *a = calloc( 1, sizeof(*a) );
@@ -8305,47 +7340,8 @@ static struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const str
     return a;
 }
 
-static struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, int y )
-{
-    if (!el || !el->has_bounds || el->visibility != 0 || !el->is_enabled || !el->is_hit_test_visible)
-        return NULL;
-    if (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom)
-        return NULL;
 
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit;
-            if (ch && !ch->parent) ch->parent = el;
-            hit = uwp_hit_test_element( ch, x, y );
-            if (hit) return hit;
-        }
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit;
-        if (ch && !ch->parent && ch != el) ch->parent = el;
-        hit = uwp_hit_test_element( ch, x, y );
-        if (hit) return hit;
-    }
-    /* In UWP/WinUI XAML, a Border or Panel with Background == null is hit-test
-     * transparent so clicks pass through to underlying siblings. */
-    if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_GRID ||
-         el->kind == UWP_KIND_STACK_PANEL) &&
-        !el->has_bg && !el->comp_brush && !el->fill_brush &&
-        el->tapped_reg.next_token == 0 &&
-        el->ptr_pressed_reg.next_token == 0 &&
-        el->ptr_released_reg.next_token == 0)
-        return NULL;
-    return el;
-}
-
-static struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el, enum xaml_pointer_event_kind kind )
+struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el, enum xaml_pointer_event_kind kind )
 {
     if (!el) return NULL;
     switch (kind)
@@ -8361,153 +7357,7 @@ static struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el
     return NULL;
 }
 
-static BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
-{
-    struct uwp_tapped_args *args;
-    struct uwp_element *cur;
-    IInspectable *orig_sender;
-    BOOL fired = FALSE;
 
-    if (!target) return FALSE;
-    WARN( "uwp_fire_tapped_bubble: target=%s (%s) txt=%s (%d,%d)\n",
-          debugstr_w(target->class_name), debugstr_w(target->name), debugstr_w(target->text), x, y );
-    orig_sender = target->outer ? target->outer : &target->IInspectable_iface;
-    args = calloc( 1, sizeof(*args) );
-    if (!args) return FALSE;
-    args->ITappedRoutedEventArgs_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tap_vtbl;
-    args->IRoutedEventArgs_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tap_routed_vtbl;
-    args->ref = 1;
-    args->orig_source = orig_sender;
-    if (orig_sender) IInspectable_AddRef( orig_sender );
-    args->x = (float)x;
-    args->y = (float)y;
-
-    for (cur = target; cur && !args->handled; cur = cur->parent)
-    {
-        void **handlers = NULL;
-        unsigned int count, i;
-        IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
-
-        if (cur->outer)
-        {
-            void *ctrl_ovr = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( cur->outer, &IID_IControlOverrides_UWP, &ctrl_ovr )) && ctrl_ovr)
-            {
-                HRESULT (WINAPI *on_tapped)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[14];
-                if (on_tapped)
-                {
-                    WARN( "uwp_fire_tapped_bubble: IControlOverrides::OnTapped on %s (%s) txt=%s\n",
-                          debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(cur->text) );
-                    __TRY { on_tapped( ctrl_ovr, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
-                    __EXCEPT_ALL {}
-                    __ENDTRY;
-                }
-                IUnknown_Release( (IUnknown *)ctrl_ovr );
-            }
-        }
-        if (cur->tapped_reg.next_token > 0)
-        {
-            count = xaml_event_registry_snapshot_alloc( &cur->tapped_reg, &handlers );
-            for (i = 0; i < count; i++)
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
-                HRESULT thr = S_OK;
-                WARN( "uwp_fire_tapped_bubble: invoking tapped_reg[%u/%u] on %s (%s) txt=%s handled=%d\n",
-                      i, count, debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(cur->text), args->handled );
-                g_in_tap_diag = TRUE;
-                __TRY { thr = h->lpVtbl->Invoke( h, sender, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
-                __EXCEPT_ALL { WARN( "uwp_fire_tapped_bubble: tapped_reg[%u] threw!\n", i ); }
-                __ENDTRY;
-                g_in_tap_diag = FALSE;
-                WARN( "uwp_fire_tapped_bubble: after tapped_reg[%u] hr=%#lx handled=%d\n", i, thr, args->handled );
-                IUnknown_Release( (IUnknown *)handlers[i] );
-            }
-            free( handlers );
-        }
-    }
-    uwp_tap_Release( &args->ITappedRoutedEventArgs_iface );
-    return fired;
-}
-
-static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
-                                      const struct xaml_pointer_info *info, BOOL bubble )
-{
-    struct uwp_pointer_routed_args *args;
-    struct uwp_element *cur;
-    BOOL fired = FALSE;
-    int ovr_slot = -1;
-
-    if (!target) return FALSE;
-    switch (kind)
-    {
-    case XAML_PTR_ENTERED:      ovr_slot = 6;  break;
-    case XAML_PTR_PRESSED:      ovr_slot = 7;  break;
-    case XAML_PTR_MOVED:        ovr_slot = 8;  break;
-    case XAML_PTR_RELEASED:     ovr_slot = 9;  break;
-    case XAML_PTR_EXITED:       ovr_slot = 10; break;
-    case XAML_PTR_CAPTURE_LOST: ovr_slot = 11; break;
-    case XAML_PTR_WHEEL:        ovr_slot = 13; break;
-    default:                    ovr_slot = -1; break;
-    }
-
-    args = uwp_pointer_routed_args_create( info, target->outer ? target->outer : &target->IInspectable_iface );
-    if (!args) return FALSE;
-
-    for (cur = target; cur && !args->handled; cur = bubble ? cur->parent : NULL)
-    {
-        struct xaml_event_registry *reg = uwp_elem_ptr_registry( cur, kind );
-        void **handlers = NULL;
-        unsigned int i, count = reg ? xaml_event_registry_snapshot_alloc( reg, &handlers ) : 0;
-        IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
-
-        if (ovr_slot >= 0 && cur->outer)
-        {
-            void *ctrl_ovr = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( cur->outer, &IID_IControlOverrides_UWP, &ctrl_ovr )) && ctrl_ovr)
-            {
-                HRESULT (WINAPI *on_ptr)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[ovr_slot];
-                if (on_ptr)
-                {
-                    __TRY
-                    {
-                        on_ptr( ctrl_ovr, &args->IPointerRoutedEventArgs_vtbl );
-                        fired = TRUE;
-                    }
-                    __EXCEPT_ALL
-                    {
-                        TRACE( "uwp_fire_element_pointer: IControlOverrides[%d] faulted on %s\n",
-                               ovr_slot, debugstr_w(cur->class_name) );
-                    }
-                    __ENDTRY;
-                }
-                IUnknown_Release( (IUnknown *)ctrl_ovr );
-            }
-        }
-
-        for (i = 0; i < count; i++)
-        {
-            struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
-            if (h->lpVtbl->Invoke)
-            {
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, sender, &args->IPointerRoutedEventArgs_vtbl );
-                    fired = TRUE;
-                }
-                __EXCEPT_ALL
-                {
-                    TRACE( "uwp_fire_element_pointer: handler %p faulted on %s\n", handlers[i], debugstr_w(cur->name) );
-                }
-                __ENDTRY;
-            }
-            IUnknown_Release( (IUnknown *)handlers[i] );
-        }
-        free( handlers );
-    }
-
-    pra_Release( args );
-    return fired;
-}
 
 BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info,
                               int width, int height, IInspectable *root_content )

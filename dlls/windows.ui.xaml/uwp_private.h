@@ -2942,4 +2942,101 @@ extern WCHAR **g_dyn_factory_names;
 extern int g_dyn_factory_cap;
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
 
+/* ==========================================================================
+ * Shared types & cross-TU symbols for the uwp_xaml.c / uwp_input.c /
+ * uwp_tree_lifecycle.c split.  Definitions live in uwp_xaml.c unless noted.
+ * ========================================================================== */
+
+struct uwp_pointer;
+
+struct uwp_dc_args
+{
+    const void *vtbl;
+    LONG ref;
+    IInspectable *new_val;
+    boolean handled;
+};
+
+struct uwp_ccc_args
+{
+    const void *vtbl;
+    LONG ref;
+    IInspectable *item;
+    UINT32 phase;
+    boolean in_recycle;
+    boolean handled;
+};
+
+struct uwp_tapped_args
+{
+    IInspectable ITappedRoutedEventArgs_iface;
+    IInspectable IRoutedEventArgs_iface;
+    LONG ref;
+    IInspectable *orig_source;
+    boolean handled;
+    float x, y;
+};
+
+struct uwp_pointer_routed_args
+{
+    const void **IPointerRoutedEventArgs_vtbl;
+    const void **IRoutedEventArgs_vtbl;
+    LONG ref;
+    struct xaml_pointer_info info;
+    IInspectable *orig_source;
+    struct uwp_pointer *pointer;
+    boolean handled;
+};
+
+/* Calc view-model bridge (uwp_xaml.c). */
+int  uwp_resolve_button_calc_code( struct uwp_element *btn );
+void uwp_calc_vm_ensure( void );
+void uwp_calc_vm_send( int code, IInspectable *cmd_param );
+void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name );
+void uwp_calc_vm_teardown( BOOL final_cleanup );
+void uwp_sync_calc_display_from_vm( void );
+
+/* Binding engine (uwp_xaml.c). */
+void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
+                            const WCHAR *prop_name, const WCHAR *path, IInspectable *src );
+ULONG WINAPI uwp_ccc_Release( void *iface );
+
+/* Routed/pointer args helpers (uwp_xaml.c). */
+void *g_routed_args( void );
+struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const struct xaml_pointer_info *info,
+                                                                IInspectable *orig_source );
+ULONG WINAPI pra_Release( void *iface );
+ULONG WINAPI uwp_tap_Release( void *iface );
+struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el, enum xaml_pointer_event_kind kind );
+
+/* Hit-testing helpers shared between uwp_xaml.c and uwp_input.c. */
+struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x, int y );
+struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, int y );
+struct uwp_element *uwp_hit_test_tabview( struct uwp_element *el, int x, int y );
+struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y );
+struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR *text );
+void uwp_fire_asb_recursive( struct uwp_element *el, const WCHAR *text, BOOL is_submit );
+
+/* Pointer/tapped dispatch (uwp_input.c, called back from uwp_xaml.c). */
+BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y );
+BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
+                               const struct xaml_pointer_info *info, BOOL bubble );
+
+/* Realize/defer helpers (uwp_xaml.c). */
+void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
+
+/* Shared vtables & globals (uwp_xaml.c). */
+extern const void *dc_args_vtbl[];
+extern const void *uwp_ccc_vtbl[];
+extern const void *uwp_tap_vtbl[];
+extern const void *uwp_tap_routed_vtbl[];
+struct uwp_sc_args_obj { const void *const *vtbl; };
+extern struct uwp_sc_args_obj uwp_sc_args_obj;
+extern struct uwp_element *g_routed_args_el;
+extern struct uwp_element *g_pressed_btn;
+extern struct uwp_element *g_pressed_tabview;
+extern float g_sc_new_w;
+extern float g_sc_new_h;
+extern BOOL g_in_tap_diag;
+
 #endif /* UWP_PRIVATE_H */

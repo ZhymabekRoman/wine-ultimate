@@ -21,6 +21,8 @@ SOURCES = \
 	uwp_collections.c \
 	uwp_factories.c \
 	uwp_guids.c \
+	uwp_input.c \
+	uwp_tree_lifecycle.c \
 	uwp_xaml.c \
 	webview2_bridge.c \
 	winui_collections.c \
