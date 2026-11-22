@@ -392,6 +392,7 @@ struct composite_blit_data
     FLOAT pad;
     FLOAT clip_rect[4];         /* left, top, right, bottom */
     FLOAT backdrop_rect[4];     /* left, top, right, bottom in device pixels (0 if unused) */
+    FLOAT popup_bg_color[4];    /* theme-aware popup backdrop color (RGB + 1.0) */
 };
 
 static const char composite_vs_code[] =
@@ -423,6 +424,7 @@ static const char composite_ps_code[] =
     "    float pad;\n"
     "    float4 clip_rect; /* left, top, right, bottom in device pixels */\n"
     "    float4 backdrop_rect; /* left, top, right, bottom in device pixels */\n"
+    "    float4 popup_bg_color; /* theme-aware popup backdrop color */\n"
     "};\n"
     "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET\n"
     "{\n"
@@ -431,7 +433,7 @@ static const char composite_ps_code[] =
     "        discard;\n"
     "    float4 c = src_texture.Sample(sam_linear, uv);\n"
     "    if (replace_popup_black > 0.5 && c.a > 0.99 && c.r < 0.005 && c.g < 0.005 && c.b < 0.005)\n"
-    "        c = float4(0.976, 0.976, 0.976, 1.0);\n"
+    "        c = float4(popup_bg_color.rgb, 1.0);\n"
     "    if (backdrop_rect.z > backdrop_rect.x && backdrop_rect.w > backdrop_rect.y)\n"
     "    {\n"
     "        float2 center = 0.5 * (backdrop_rect.xy + backdrop_rect.zw);\n"
@@ -442,7 +444,7 @@ static const char composite_ps_code[] =
     "        float cov = clamp(0.5 - dist, 0.0, 1.0);\n"
     "        if (cov <= 0.0)\n"
     "            discard;\n"
-    "        float3 bg = float3(0.976, 0.976, 0.976);\n"
+    "        float3 bg = popup_bg_color.rgb;\n"
     "        float3 rgb = c.rgb + bg * (1.0 - c.a);\n"
     "        c = float4(rgb * cov, cov);\n"
     "    }\n"
@@ -783,6 +785,43 @@ static ID3D11ShaderResourceView *get_or_create_visual_srv(struct composition_vis
  * visual's rectangle clip. Falls back to a plain GPU CopySubresourceRegion
  * only when even a cached SRV copy texture cannot be created.
  */
+static BOOL apps_use_light_theme(void)
+{
+    static LONG cached = -1;
+    LONG val = InterlockedCompareExchange(&cached, -1, -1);
+    HANDLE hkcu, hkey;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING subkey, name;
+    char buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(DWORD)];
+    KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buf;
+    ULONG len = 0;
+    BOOL light = TRUE;
+
+    if (val != -1)
+        return val != 0;
+
+    if (!RtlOpenCurrentUser(KEY_READ, &hkcu))
+    {
+        RtlInitUnicodeString(&subkey, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        InitializeObjectAttributes(&attr, &subkey, OBJ_CASE_INSENSITIVE, hkcu, NULL);
+        if (!NtOpenKey(&hkey, KEY_READ, &attr))
+        {
+            RtlInitUnicodeString(&name, L"AppsUseLightTheme");
+            if (!NtQueryValueKey(hkey, &name, KeyValuePartialInformation, buf, sizeof(buf), &len)
+                    && info->Type == REG_DWORD && info->DataLength == sizeof(DWORD))
+            {
+                DWORD dword_val = *(const DWORD *)info->Data;
+                light = (dword_val != 0);
+            }
+            NtClose(hkey);
+        }
+        NtClose(hkcu);
+    }
+
+    InterlockedExchange(&cached, light ? 1 : 0);
+    return light;
+}
+
 static HRESULT composite_surface_to_backbuffer(struct composition_target *target,
         struct composition_visual *visual,
         ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
@@ -857,6 +896,20 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         {
             blit_data.backdrop_rect[0] = blit_data.backdrop_rect[1] = 0.0f;
             blit_data.backdrop_rect[2] = blit_data.backdrop_rect[3] = 0.0f;
+        }
+        if (apps_use_light_theme())
+        {
+            blit_data.popup_bg_color[0] = 0.976f;
+            blit_data.popup_bg_color[1] = 0.976f;
+            blit_data.popup_bg_color[2] = 0.976f;
+            blit_data.popup_bg_color[3] = 1.0f;
+        }
+        else
+        {
+            blit_data.popup_bg_color[0] = 0.173f;
+            blit_data.popup_bg_color[1] = 0.173f;
+            blit_data.popup_bg_color[2] = 0.173f;
+            blit_data.popup_bg_color[3] = 1.0f;
         }
 
         ID3D11DeviceContext_UpdateSubresource(d3d11_device_context,
