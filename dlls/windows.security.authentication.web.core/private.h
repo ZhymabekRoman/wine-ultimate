@@ -84,11 +84,22 @@ void *async_action_iface( struct async_op *impl );
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
 
 IInspectable *create_web_token_request_result( void );
+IInspectable *create_web_token_request_result_ex( WebTokenRequestStatus status,
+                                                  IVectorView_WebTokenResponse *response_data,
+                                                  const WCHAR *authority, const WCHAR *client_id );
 IInspectable *create_web_account_provider( void );
 IInspectable *create_web_account_provider_ex( HSTRING id, HSTRING authority );
 IInspectable *create_web_account( void );
+IInspectable *create_web_account_ex( IInspectable *provider, const WCHAR *user_name,
+                                     const WCHAR *id, WebAccountState state );
 IInspectable *create_web_token_request( void );
 IInspectable *create_web_token_response( void );
+IInspectable *create_web_token_response_ex( const WCHAR *token, IInspectable *account );
+IVectorView_WebTokenResponse *create_web_token_response_vector_view( IInspectable *response );
 IInspectable *create_web_provider_error( void );
+
+IInspectable *wam_broker_acquire_token( __x_ABI_CWindows_CSecurity_CAuthentication_CWeb_CCore_CIWebTokenRequest *request,
+                                        BOOL allow_interactive );
+void wam_cache_invalidate( const WCHAR *authority, const WCHAR *client_id );
 
 #endif /* __WINE_WEBAUTHENTICATIONCORE_PRIVATE_H */

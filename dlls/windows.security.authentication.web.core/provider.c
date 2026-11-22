@@ -239,17 +239,32 @@ IInspectable *create_web_account_provider( void )
     return create_web_account_provider_ex( NULL, NULL );
 }
 
-/* WebAccount stand-in: no provider, no user name, state None. */
+/* WebAccount implementation with optional provider, user name, id, and state. */
+
+static const GUID IID_IWebAccount2_local =
+    { 0x7b56d6f8, 0x990b, 0x4eb5, { 0x94, 0xa7, 0x56, 0x21, 0xf3, 0xa8, 0xb8, 0x24 } };
 
 struct web_account
 {
     const void *account_vtbl;
+    const void *account2_vtbl;
     LONG ref;
+    IInspectable *provider;
+    HSTRING user_name;
+    HSTRING id;
+    WebAccountState state;
 };
+
+static const void *web_account2_vtbl[];
 
 static inline struct web_account *impl_from_account( const void *iface )
 {
     return (struct web_account *)iface;
+}
+
+static inline struct web_account *impl_from_account2( const void *iface )
+{
+    return CONTAINING_RECORD( iface, struct web_account, account2_vtbl );
 }
 
 static HRESULT WINAPI account_QueryInterface( const void *iface, REFIID iid, void **out )
@@ -266,7 +281,14 @@ static HRESULT WINAPI account_QueryInterface( const void *iface, REFIID iid, voi
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IWebAccount ))
     {
-        *out = (void *)impl;
+        *out = &impl->account_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWebAccount2_local ))
+    {
+        *out = &impl->account2_vtbl;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -286,7 +308,13 @@ static ULONG WINAPI account_Release( const void *iface )
     struct web_account *impl = impl_from_account( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
 
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        if (impl->provider) IInspectable_Release( impl->provider );
+        if (impl->user_name) WindowsDeleteString( impl->user_name );
+        if (impl->id) WindowsDeleteString( impl->id );
+        free( impl );
+    }
     return ref;
 }
 
@@ -310,23 +338,36 @@ static HRESULT WINAPI account_GetTrustLevel( const void *iface, TrustLevel *trus
 static HRESULT WINAPI account_get_WebAccountProvider( const void *iface,
                                                       __x_ABI_CWindows_CSecurity_CCredentials_CWebAccountProvider **value )
 {
+    struct web_account *impl = impl_from_account( iface );
+
     TRACE( "iface %p, value %p.\n", iface, value );
     if (!value) return E_POINTER;
     *value = NULL;
+    if (impl->provider)
+    {
+        IInspectable_AddRef( impl->provider );
+        *value = (__x_ABI_CWindows_CSecurity_CCredentials_CWebAccountProvider *)impl->provider;
+    }
     return S_OK;
 }
 
 static HRESULT WINAPI account_get_UserName( const void *iface, HSTRING *value )
 {
+    struct web_account *impl = impl_from_account( iface );
+
     TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    if (impl->user_name) return WindowsDuplicateString( impl->user_name, value );
     return dup_empty_string( value );
 }
 
 static HRESULT WINAPI account_get_State( const void *iface, WebAccountState *value )
 {
+    struct web_account *impl = impl_from_account( iface );
+
     TRACE( "iface %p, value %p.\n", iface, value );
     if (!value) return E_POINTER;
-    *value = WebAccountState_None;
+    *value = impl->state;
     return S_OK;
 }
 
@@ -343,16 +384,95 @@ static const void *web_account_vtbl[] =
     account_get_State,
 };
 
-IInspectable *create_web_account( void )
+static HRESULT WINAPI account2_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    return account_QueryInterface( &impl_from_account2( iface )->account_vtbl, iid, out );
+}
+
+static ULONG WINAPI account2_AddRef( const void *iface )
+{
+    return account_AddRef( &impl_from_account2( iface )->account_vtbl );
+}
+
+static ULONG WINAPI account2_Release( const void *iface )
+{
+    return account_Release( &impl_from_account2( iface )->account_vtbl );
+}
+
+static HRESULT WINAPI account2_GetIids( const void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI account2_GetRuntimeClassName( const void *iface, HSTRING *name )
+{
+    return create_class_name( L"Windows.Security.Credentials.WebAccount", name );
+}
+
+static HRESULT WINAPI account2_GetTrustLevel( const void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI account2_get_Id( const void *iface, HSTRING *value )
+{
+    struct web_account *impl = impl_from_account2( iface );
+
+    if (!value) return E_POINTER;
+    if (impl->id) return WindowsDuplicateString( impl->id, value );
+    return dup_empty_string( value );
+}
+
+static HRESULT WINAPI account2_get_Properties( const void *iface, IMapView_HSTRING_HSTRING **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static const void *web_account2_vtbl[] =
+{
+    account2_QueryInterface,
+    account2_AddRef,
+    account2_Release,
+    account2_GetIids,
+    account2_GetRuntimeClassName,
+    account2_GetTrustLevel,
+    account2_get_Id,
+    account2_get_Properties,
+};
+
+IInspectable *create_web_account_ex( IInspectable *provider, const WCHAR *user_name,
+                                     const WCHAR *id, WebAccountState state )
 {
     struct web_account *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->account_vtbl = web_account_vtbl;
+    impl->account2_vtbl = web_account2_vtbl;
     impl->ref = 1;
+    impl->state = state;
+    if (provider)
+    {
+        impl->provider = provider;
+        IInspectable_AddRef( provider );
+    }
+    if (user_name && *user_name)
+        WindowsCreateString( user_name, lstrlenW( user_name ), &impl->user_name );
+    if (id && *id)
+        WindowsCreateString( id, lstrlenW( id ), &impl->id );
 
-    TRACE( "created WebAccount %p.\n", impl );
+    TRACE( "created WebAccount %p user=%s id=%s state=%u.\n", impl,
+           debugstr_w( user_name ), debugstr_w( id ), state );
     return (IInspectable *)impl;
+}
+
+IInspectable *create_web_account( void )
+{
+    return create_web_account_ex( NULL, NULL, NULL, WebAccountState_None );
 }
 
 /*

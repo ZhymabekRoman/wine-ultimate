@@ -1,12 +1,13 @@
 MODULE  = windows.security.authentication.web.core.dll
 ENABLE_ARCHS = x86_64
-IMPORTS = combase uuid kernelbase ole32
+IMPORTS = combase uuid kernelbase ole32 advapi32 winhttp ws2_32 bcrypt shell32
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 
 SOURCES = \
 	classes.idl \
 	async.c \
+	broker.c \
 	main.c \
 	manager.c \
 	provider.c \

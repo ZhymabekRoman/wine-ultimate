@@ -136,12 +136,16 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
-static HRESULT create_token_request_result_op( IAsyncOperation_WebTokenRequestResult **operation )
+static HRESULT create_token_request_result_op_for_request(
+        __x_ABI_CWindows_CSecurity_CAuthentication_CWeb_CCore_CIWebTokenRequest *request,
+        BOOL allow_interactive,
+        IAsyncOperation_WebTokenRequestResult **operation )
 {
     struct async_op *op;
     IInspectable *result;
 
-    if (!(result = create_web_token_request_result())) return E_OUTOFMEMORY;
+    if (!(result = wam_broker_acquire_token( request, allow_interactive )))
+        return E_OUTOFMEMORY;
     if (!(op = create_async_op( &IID_IAsyncOperation_WebTokenRequestResult, OP_CLASS_RESULT, result )))
     {
         IInspectable_Release( result );
@@ -181,7 +185,7 @@ static HRESULT WINAPI statics_GetTokenSilentlyAsync( IWebAuthenticationCoreManag
 
     if (!request) return E_INVALIDARG;
     if (!operation) return E_POINTER;
-    return create_token_request_result_op( operation );
+    return create_token_request_result_op_for_request( request, FALSE, operation );
 }
 
 static HRESULT WINAPI statics_GetTokenSilentlyWithWebAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -193,7 +197,7 @@ static HRESULT WINAPI statics_GetTokenSilentlyWithWebAccountAsync( IWebAuthentic
 
     if (!request) return E_INVALIDARG;
     if (!operation) return E_POINTER;
-    return create_token_request_result_op( operation );
+    return create_token_request_result_op_for_request( request, FALSE, operation );
 }
 
 static HRESULT WINAPI statics_RequestTokenAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -204,7 +208,7 @@ static HRESULT WINAPI statics_RequestTokenAsync( IWebAuthenticationCoreManagerSt
 
     if (!request) return E_INVALIDARG;
     if (!operation) return E_POINTER;
-    return create_token_request_result_op( operation );
+    return create_token_request_result_op_for_request( request, TRUE, operation );
 }
 
 static HRESULT WINAPI statics_RequestTokenWithWebAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -216,7 +220,7 @@ static HRESULT WINAPI statics_RequestTokenWithWebAccountAsync( IWebAuthenticatio
 
     if (!request) return E_INVALIDARG;
     if (!operation) return E_POINTER;
-    return create_token_request_result_op( operation );
+    return create_token_request_result_op_for_request( request, TRUE, operation );
 }
 
 static HRESULT WINAPI statics_FindAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
