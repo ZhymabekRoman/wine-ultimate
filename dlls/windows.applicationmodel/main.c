@@ -1026,9 +1026,24 @@ static struct winrt_map_view *store_create_map_view( HSTRING *keys, IInspectable
     return impl;
 }
 
+static const GUID IID_IVectorView_AppInstallItem =
+    { 0x48d7f874, 0xa83c, 0x55db, { 0xb2, 0xe6, 0x94, 0x0b, 0xe9, 0x56, 0x98, 0x69 } };
+static const GUID IID_IIterable_AppInstallItem =
+    { 0x93e1cdc8, 0x503f, 0x55b1, { 0x91, 0x5b, 0xc0, 0xdc, 0x78, 0x88, 0xce, 0x31 } };
+static const GUID IID_IIterator_AppInstallItem =
+    { 0xccaca81b, 0x6cf7, 0x56f0, { 0xb7, 0xff, 0x8a, 0xc5, 0x19, 0x1e, 0x79, 0xbf } };
+
 static void *store_create_empty_vector_view( void )
 {
     return store_create_vector_view( NULL, 0, &IID_IVectorView_Object, &IID_IIterable_Object );
+}
+
+static void *store_create_empty_app_install_item_vector_view( void )
+{
+    struct winrt_vector_view *vv = store_create_vector_view( NULL, 0,
+        &IID_IVectorView_AppInstallItem, &IID_IIterable_AppInstallItem );
+    if (vv) vv->iterator_iid = IID_IIterator_AppInstallItem;
+    return vv;
 }
 
 static void *store_create_empty_map_view( void )
@@ -3471,7 +3486,7 @@ static HRESULT WINAPI app_install_mgr_GetTrustLevel( void *iface, TrustLevel *l 
 /* Face 1 methods */
 static HRESULT WINAPI app_install_mgr_get_AppInstallItems( void *iface, void **value )
 {
-    if (value) *value = store_create_empty_vector_view();
+    if (value) *value = store_create_empty_app_install_item_vector_view();
     return S_OK;
 }
 static HRESULT WINAPI app_install_mgr_Cancel( void *iface, HSTRING prod ) { return S_OK; }
@@ -3519,7 +3534,7 @@ static HRESULT WINAPI app_install_mgr_SearchForUpdatesAsync( void *iface, HSTRIN
 }
 static HRESULT WINAPI app_install_mgr_SearchForAllUpdatesAsync( void *iface, void **op )
 {
-    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr_IsStoreBlockedByPolicyAsync( void *iface, HSTRING n, HSTRING p, void **op )
 {
@@ -3574,7 +3589,7 @@ static HRESULT WINAPI app_install_mgr2_SearchForUpdatesWithTelemetryAsync( void 
 }
 static HRESULT WINAPI app_install_mgr2_SearchForAllUpdatesWithTelemetryAsync( void *iface, HSTRING cv, void **op )
 {
-    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr2_GetIsAppAllowedToInstallWithTelemetryAsync( void *iface, HSTRING p, HSTRING s, HSTRING c, HSTRING cv, void **op )
 {
@@ -3605,11 +3620,11 @@ static const void *app_install_manager_vtbl2[] =
 /* Face 3 methods */
 static HRESULT WINAPI app_install_mgr3_StartProductInstallAsync( void *iface, HSTRING p, HSTRING cat, HSTRING fl, HSTRING cl, BOOL r, BOOL f, HSTRING cv, void *vol, void **op )
 {
-    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr3_StartProductInstallForUserAsync( void *iface, void *u, HSTRING p, HSTRING cat, HSTRING fl, HSTRING cl, BOOL r, BOOL f, HSTRING cv, void *vol, void **op )
 {
-    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr3_UpdateAppByPackageFamilyNameForUserAsync( void *iface, void *u, HSTRING p, HSTRING cv, void **op )
 {
@@ -3621,7 +3636,7 @@ static HRESULT WINAPI app_install_mgr3_SearchForUpdatesForUserAsync( void *iface
 }
 static HRESULT WINAPI app_install_mgr3_SearchForAllUpdatesForUserAsync( void *iface, void *u, HSTRING cv, void **op )
 {
-    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr3_GetIsAppAllowedToInstallForUserAsync( void *iface, void *u, HSTRING p, HSTRING s, HSTRING c, HSTRING cv, void **op )
 {
@@ -3681,7 +3696,7 @@ static const void *app_install_manager_vtbl4[] =
 /* Face 5 methods */
 static HRESULT WINAPI app_install_mgr5_get_AppInstallItemsWithGroupSupport( void *iface, void **value )
 {
-    if (value) *value = store_create_empty_vector_view();
+    if (value) *value = store_create_empty_app_install_item_vector_view();
     return S_OK;
 }
 
