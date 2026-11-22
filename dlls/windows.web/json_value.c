@@ -98,6 +98,7 @@ struct json_value
 {
     IJsonValue IJsonValue_iface;
     IJsonValueInternal IJsonValueInternal_iface;
+    IStringable IStringable_iface;
     LONG ref;
 
     cJSON *node;
@@ -170,6 +171,13 @@ static HRESULT WINAPI json_value_QueryInterface( IJsonValue *iface, REFIID iid, 
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IStringable ))
+    {
+        *out = &impl->IStringable_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -208,14 +216,15 @@ static HRESULT WINAPI json_value_GetIids( IJsonValue *iface, ULONG *iid_count, I
 
 static HRESULT WINAPI json_value_GetRuntimeClassName( IJsonValue *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( L"Windows.Data.Json.JsonValue", 27, class_name );
 }
 
 static HRESULT WINAPI json_value_GetTrustLevel( IJsonValue *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI json_value_get_ValueType( IJsonValue *iface, JsonValueType *value )
@@ -354,6 +363,57 @@ static const struct IJsonValueVtbl json_value_vtbl =
     json_value_GetObject,
 };
 
+static inline struct json_value *impl_from_IStringable( IStringable *iface )
+{
+    return CONTAINING_RECORD( iface, struct json_value, IStringable_iface );
+}
+
+static HRESULT WINAPI json_value_str_QueryInterface( IStringable *iface, REFIID iid, void **out )
+{
+    return IJsonValue_QueryInterface( &impl_from_IStringable( iface )->IJsonValue_iface, iid, out );
+}
+
+static ULONG WINAPI json_value_str_AddRef( IStringable *iface )
+{
+    return IJsonValue_AddRef( &impl_from_IStringable( iface )->IJsonValue_iface );
+}
+
+static ULONG WINAPI json_value_str_Release( IStringable *iface )
+{
+    return IJsonValue_Release( &impl_from_IStringable( iface )->IJsonValue_iface );
+}
+
+static HRESULT WINAPI json_value_str_GetIids( IStringable *iface, ULONG *count, IID **iids )
+{
+    return IJsonValue_GetIids( &impl_from_IStringable( iface )->IJsonValue_iface, count, iids );
+}
+
+static HRESULT WINAPI json_value_str_GetRuntimeClassName( IStringable *iface, HSTRING *name )
+{
+    return IJsonValue_GetRuntimeClassName( &impl_from_IStringable( iface )->IJsonValue_iface, name );
+}
+
+static HRESULT WINAPI json_value_str_GetTrustLevel( IStringable *iface, TrustLevel *level )
+{
+    return IJsonValue_GetTrustLevel( &impl_from_IStringable( iface )->IJsonValue_iface, level );
+}
+
+static HRESULT WINAPI json_value_str_ToString( IStringable *iface, HSTRING *value )
+{
+    return json_value_Stringify( &impl_from_IStringable( iface )->IJsonValue_iface, value );
+}
+
+static const struct IStringableVtbl json_value_stringable_vtbl =
+{
+    json_value_str_QueryInterface,
+    json_value_str_AddRef,
+    json_value_str_Release,
+    json_value_str_GetIids,
+    json_value_str_GetRuntimeClassName,
+    json_value_str_GetTrustLevel,
+    json_value_str_ToString,
+};
+
 HRESULT create_json_value( cJSON *node, struct json_root *root, IJsonValue **out )
 {
     struct json_value *impl;
@@ -365,6 +425,7 @@ HRESULT create_json_value( cJSON *node, struct json_root *root, IJsonValue **out
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IJsonValue_iface.lpVtbl = &json_value_vtbl;
     impl->IJsonValueInternal_iface.lpVtbl = &json_value_internal_vtbl;
+    impl->IStringable_iface.lpVtbl = &json_value_stringable_vtbl;
     impl->ref = 1;
     impl->node = node;
     impl->root = root;

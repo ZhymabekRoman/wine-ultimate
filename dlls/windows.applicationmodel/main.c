@@ -3595,10 +3595,14 @@ static const void *app_install_manager_vtbl2[] =
 /* Face 3 methods */
 static HRESULT WINAPI app_install_mgr3_StartProductInstallAsync( void *iface, HSTRING p, HSTRING cat, HSTRING fl, HSTRING cl, BOOL r, BOOL f, HSTRING cv, void *vol, void **op )
 {
+    WARN( "StartProductInstallAsync product=%s catalog=%s flight=%s client=%s\n",
+          debugstr_hstring(p), debugstr_hstring(cat), debugstr_hstring(fl), debugstr_hstring(cl) );
     return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr3_StartProductInstallForUserAsync( void *iface, void *u, HSTRING p, HSTRING cat, HSTRING fl, HSTRING cl, BOOL r, BOOL f, HSTRING cv, void *vol, void **op )
 {
+    WARN( "StartProductInstallForUserAsync user=%p product=%s catalog=%s flight=%s client=%s\n",
+          u, debugstr_hstring(p), debugstr_hstring(cat), debugstr_hstring(fl), debugstr_hstring(cl) );
     return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr3_UpdateAppByPackageFamilyNameForUserAsync( void *iface, void *u, HSTRING p, HSTRING cv, void **op )
@@ -3644,14 +3648,17 @@ static const void *app_install_manager_vtbl3[] =
 /* Face 4 methods */
 static HRESULT WINAPI app_install_mgr4_GetFreeUserEntitlementAsync( void *iface, HSTRING s, HSTRING c, HSTRING cv, void **op )
 {
+    WARN( "GetFreeUserEntitlementAsync storeId=%s campaign=%s cv=%s\n", debugstr_hstring(s), debugstr_hstring(c), debugstr_hstring(cv) );
     return store_async_create( &get_entitlement_result_obj, FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr4_GetFreeUserEntitlementForUserAsync( void *iface, void *u, HSTRING s, HSTRING c, HSTRING cv, void **op )
 {
+    WARN( "GetFreeUserEntitlementForUserAsync user=%p storeId=%s campaign=%s cv=%s\n", u, debugstr_hstring(s), debugstr_hstring(c), debugstr_hstring(cv) );
     return store_async_create( &get_entitlement_result_obj, FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr4_GetFreeDeviceEntitlementAsync( void *iface, HSTRING s, HSTRING c, HSTRING cv, void **op )
 {
+    WARN( "GetFreeDeviceEntitlementAsync storeId=%s campaign=%s cv=%s\n", debugstr_hstring(s), debugstr_hstring(c), debugstr_hstring(cv) );
     return store_async_create( &get_entitlement_result_obj, FALSE, FALSE, S_OK, op );
 }
 
