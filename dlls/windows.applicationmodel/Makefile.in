@@ -7,4 +7,6 @@ SOURCES = \
 	classes.idl \
 	designmode.c \
 	main.c \
-	package.c
+	package.c \
+	store_install.c \
+	winappsdk_dd.c
