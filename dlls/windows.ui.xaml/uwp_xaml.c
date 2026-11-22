@@ -7252,7 +7252,7 @@ const WCHAR *uwp_btype_to_class_name( WORD tid )
 /* Set a custom XAML property (e.g. CalculatorButton.ButtonId = "Zero") via IXamlMetadataProvider */
 static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
 {
-    if (!el || el->visibility != 0) return NULL;
+    if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
 
     if (el->children_coll)
     {
@@ -8332,6 +8332,15 @@ static struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, 
         hit = uwp_hit_test_element( ch, x, y );
         if (hit) return hit;
     }
+    /* In UWP/WinUI XAML, a Border or Panel with Background == null is hit-test
+     * transparent so clicks pass through to underlying siblings. */
+    if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_GRID ||
+         el->kind == UWP_KIND_STACK_PANEL) &&
+        !el->has_bg && !el->comp_brush && !el->fill_brush &&
+        el->tapped_reg.next_token == 0 &&
+        el->ptr_pressed_reg.next_token == 0 &&
+        el->ptr_released_reg.next_token == 0)
+        return NULL;
     return el;
 }
 
