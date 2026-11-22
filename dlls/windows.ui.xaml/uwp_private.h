@@ -3039,4 +3039,85 @@ extern float g_sc_new_w;
 extern float g_sc_new_h;
 extern BOOL g_in_tap_diag;
 
+/* ---- Shared types & interfaces split out of uwp_xaml.c into
+ *      uwp_controls.c (controls) and uwp_brush_media.c (brush/media). ---- */
+
+struct uwp_state_trigger_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IInspectable *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IInspectable *iface );
+    ULONG (WINAPI *Release)( IInspectable *iface );
+    HRESULT (WINAPI *GetIids)( IInspectable *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IInspectable *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
+    HRESULT (WINAPI *SetActive)( void *iface, boolean is_active );
+    HRESULT (WINAPI *pad7_15[9])( void *iface, ... );
+};
+struct uwp_state_trigger_pub_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IInspectable *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IInspectable *iface );
+    ULONG (WINAPI *Release)( IInspectable *iface );
+    HRESULT (WINAPI *GetIids)( IInspectable *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IInspectable *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
+    HRESULT (WINAPI *get_IsActive)( void *iface, boolean *out );
+    HRESULT (WINAPI *put_IsActive)( void *iface, boolean is_active );
+    HRESULT (WINAPI *pad8_15[8])( void *iface, ... );
+};
+
+struct uwp_nav_event_args
+{
+    IInspectable INavigationEventArgs_iface;
+    IInspectable INavigationEventArgs2_iface;
+    LONG ref;
+    IInspectable *content;
+    IInspectable *parameter;
+    IInspectable *transition_info;
+    IInspectable *uri;
+    TypeName source_page_type;
+    INT32 nav_mode;
+};
+
+/* Control vtables (uwp_controls.c). */
+extern const void *uwp_cc_vtbl[128];
+extern const void *uwp_border_vtbl[32];
+extern const void *uwp_btn_vtbl[32];
+extern const void *uwp_tbtn_vtbl[32];
+extern const void *uwp_panel_vtbl[32];
+extern const void *uwp_ui7_vtbl[32];
+extern const void *uwp_ui4_vtbl[32];
+extern const void *uwp_ui5_vtbl[36];
+extern const void *uwp_button_flyout_vtbl[8];
+extern const void *uwp_frame3_vtbl[16];
+extern const void *uwp_frame5_vtbl[16];
+extern const void *uwp_frame2_vtbl[16];
+extern const void *uwp_page_vtbl[16];
+extern const void *uwp_sv_vtbl[64];
+extern const void *uwp_data_template_vtbl[];
+extern const void *uwp_dts_vtbl[];
+extern const void *uwp_dts2_vtbl[];
+extern const void *uwp_fe7_vtbl[32];
+extern const struct IDispatchVtbl uwp_disp_vtbl;
+
+/* Brush/media vtables (uwp_brush_media.c). */
+extern const void *uwp_mpe_vtbl[24];
+extern const void *uwp_bi_vtbl[24];
+extern const void *uwp_bs_vtbl[16];
+extern const void *uwp_img_vtbl[24];
+extern const void *uwp_shape_vtbl[32];
+extern const void *uwp_xcbb_prot_vtbl[16];
+extern const void *uwp_lis_vtbl[16];
+extern const void *uwp_scb_vtbl[16];
+extern const struct uwp_state_trigger_vtbl uwp_state_trigger_vtbl;
+extern const struct uwp_state_trigger_pub_vtbl uwp_state_trigger_pub_vtbl;
+
+/* Cross-TU functions. */
+HRESULT WINAPI uwp_frame2_Navigate( void *iface, void *type_name_ptr, void *param, void *transition_info, boolean *result );
+HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, void *transition_info, boolean *result );
+struct uwp_nav_event_args *uwp_nav_event_args_create( IInspectable *content, IInspectable *param,
+                                                      const TypeName *type, IInspectable *transition_info );
+ULONG WINAPI uwp_nea_Release( void *iface );
+BOOL uwp_populate_page_from_xbf_refs( struct uwp_element *page_el );
+
 #endif /* UWP_PRIVATE_H */

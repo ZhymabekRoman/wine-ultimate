@@ -18,7 +18,9 @@ SOURCES = \
 	pri.c \
 	swapchain_panel.c \
 	uwp_binding.c \
+	uwp_brush_media.c \
 	uwp_collections.c \
+	uwp_controls.c \
 	uwp_factories.c \
 	uwp_guids.c \
 	uwp_input.c \
