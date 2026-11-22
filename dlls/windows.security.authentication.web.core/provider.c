@@ -49,6 +49,8 @@ struct web_account_provider
     const void *provider_vtbl;
     const void *provider2_vtbl;
     LONG ref;
+    HSTRING id;
+    HSTRING authority;
 };
 
 static const void *web_account_provider2_vtbl[];
@@ -103,7 +105,12 @@ static ULONG WINAPI provider_Release( const void *iface )
     struct web_account_provider *impl = impl_from_provider( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
 
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        if (impl->id) WindowsDeleteString( impl->id );
+        if (impl->authority) WindowsDeleteString( impl->authority );
+        free( impl );
+    }
     return ref;
 }
 
@@ -126,7 +133,10 @@ static HRESULT WINAPI provider_GetTrustLevel( const void *iface, TrustLevel *tru
 
 static HRESULT WINAPI provider_get_Id( const void *iface, HSTRING *value )
 {
+    struct web_account_provider *impl = impl_from_provider( iface );
     TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    if (impl->id) return WindowsDuplicateString( impl->id, value );
     return dup_empty_string( value );
 }
 
@@ -190,6 +200,9 @@ static HRESULT WINAPI provider2_get_DisplayPurpose( const void *iface, HSTRING *
 }
 static HRESULT WINAPI provider2_get_Authority( const void *iface, HSTRING *value )
 {
+    struct web_account_provider *impl = impl_from_provider2( iface );
+    if (!value) return E_POINTER;
+    if (impl->authority) return WindowsDuplicateString( impl->authority, value );
     return dup_empty_string( value );
 }
 
@@ -205,7 +218,7 @@ static const void *web_account_provider2_vtbl[] =
     provider2_get_Authority,
 };
 
-IInspectable *create_web_account_provider( void )
+IInspectable *create_web_account_provider_ex( HSTRING id, HSTRING authority )
 {
     struct web_account_provider *impl;
 
@@ -213,9 +226,17 @@ IInspectable *create_web_account_provider( void )
     impl->provider_vtbl = web_account_provider_vtbl;
     impl->provider2_vtbl = web_account_provider2_vtbl;
     impl->ref = 1;
+    if (id) WindowsDuplicateString( id, &impl->id );
+    if (authority) WindowsDuplicateString( authority, &impl->authority );
 
-    TRACE( "created WebAccountProvider %p.\n", impl );
+    TRACE( "created WebAccountProvider %p id=%s authority=%s.\n", impl,
+           debugstr_hstring( impl->id ), debugstr_hstring( impl->authority ) );
     return (IInspectable *)impl;
+}
+
+IInspectable *create_web_account_provider( void )
+{
+    return create_web_account_provider_ex( NULL, NULL );
 }
 
 /* WebAccount stand-in: no provider, no user name, state None. */

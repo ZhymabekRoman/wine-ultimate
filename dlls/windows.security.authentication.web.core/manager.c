@@ -154,12 +154,13 @@ static HRESULT create_token_request_result_op( IAsyncOperation_WebTokenRequestRe
     return S_OK;
 }
 
-static HRESULT create_account_provider_op( IAsyncOperation_WebAccountProvider **operation )
+static HRESULT create_account_provider_op( HSTRING id, HSTRING authority,
+                                           IAsyncOperation_WebAccountProvider **operation )
 {
     struct async_op *op;
     IInspectable *provider;
 
-    if (!(provider = create_web_account_provider())) return E_OUTOFMEMORY;
+    if (!(provider = create_web_account_provider_ex( id, authority ))) return E_OUTOFMEMORY;
     if (!(op = create_async_op( &IID_IAsyncOperation_WebAccountProvider, OP_CLASS_PROVIDER, provider )))
     {
         IInspectable_Release( provider );
@@ -250,7 +251,7 @@ static HRESULT WINAPI statics_FindAccountProviderAsync( IWebAuthenticationCoreMa
            debugstr_hstring( web_account_provider_id ), operation );
 
     if (!operation) return E_POINTER;
-    return create_account_provider_op( operation );
+    return create_account_provider_op( web_account_provider_id, NULL, operation );
 }
 
 static HRESULT WINAPI statics_FindAccountProviderWithAuthorityAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -262,7 +263,7 @@ static HRESULT WINAPI statics_FindAccountProviderWithAuthorityAsync( IWebAuthent
            debugstr_hstring( web_account_provider_id ), debugstr_hstring( authority ), operation );
 
     if (!operation) return E_POINTER;
-    return create_account_provider_op( operation );
+    return create_account_provider_op( web_account_provider_id, authority, operation );
 }
 
 DEFINE_IINSPECTABLE( statics, IWebAuthenticationCoreManagerStatics, struct webauthcore_statics,
@@ -293,7 +294,7 @@ static HRESULT WINAPI statics2_FindAccountProviderWithAuthorityForUserAsync(
            debugstr_hstring( web_account_provider_id ), debugstr_hstring( authority ), user, operation );
 
     if (!operation) return E_POINTER;
-    return create_account_provider_op( operation );
+    return create_account_provider_op( web_account_provider_id, authority, operation );
 }
 
 DEFINE_IINSPECTABLE( statics2, IWebAuthenticationCoreManagerStatics2, struct webauthcore_statics,

@@ -882,6 +882,18 @@ static const GUID IID_IAccountsSettingsPaneStatics2_local =
     { 0xd21df7c2, 0xce0d, 0x484f, { 0xb8, 0xe8, 0xe8, 0x23, 0xc2, 0x15, 0x76, 0x5e } };
 static const GUID IID_IAccountsSettingsPaneStatics3_local =
     { 0x08410458, 0xa2ba, 0x4c6f, { 0xb4, 0xac, 0x48, 0xf5, 0x14, 0x33, 0x12, 0x16 } };
+static const GUID IID_IAccountsSettingsPaneCommandsRequestedEventArgs_local =
+    { 0x3b68c099, 0xdb19, 0x45d0, { 0x9a, 0xbf, 0x95, 0xd3, 0x77, 0x3c, 0x93, 0x30 } };
+static const GUID IID_IAccountsSettingsPaneEventDeferral_local =
+    { 0xcbf25d3f, 0xe5ba, 0x40ef, { 0x93, 0xda, 0x65, 0xe0, 0x96, 0xe5, 0xfb, 0x04 } };
+static const GUID IID_IVector_WebAccountProviderCommand_local =
+    { 0xd376abf3, 0xf0c1, 0x5233, { 0x9f, 0x42, 0xde, 0x53, 0x18, 0x84, 0x96, 0x3e } };
+static const GUID IID_IVector_WebAccountCommand_local =
+    { 0x64e864c8, 0x7fef, 0x5df5, { 0xa6, 0x24, 0x50, 0xb5, 0x77, 0xf4, 0x85, 0x54 } };
+static const GUID IID_IVector_CredentialCommand_local =
+    { 0xb6af1cb5, 0xf60e, 0x5b08, { 0xb3, 0x12, 0x2e, 0xb5, 0x11, 0x35, 0xcf, 0xc6 } };
+static const GUID IID_IVector_SettingsCommand_local =
+    { 0x10bd9cdd, 0x3767, 0x5e96, { 0x90, 0x22, 0xf0, 0x0f, 0x9c, 0xbd, 0x62, 0x41 } };
 
 struct asp_async_action
 {
@@ -1081,9 +1093,542 @@ static HRESULT asp_create_completed_action( IAsyncAction **out )
     return S_OK;
 }
 
+struct asp_vector
+{
+    const void **vtbl;
+    LONG ref;
+    GUID iid;
+    IUnknown **items;
+    UINT32 count;
+    UINT32 cap;
+};
+
+static HRESULT WINAPI asp_vector_QI( void *iface, REFIID iid, void **out )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &This->iid ))
+    {
+        *out = This;
+        InterlockedIncrement( &This->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI asp_vector_AddRef( void *iface )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI asp_vector_Release( void *iface )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    ULONG ref = InterlockedDecrement( &This->ref );
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < This->count; i++)
+            if (This->items[i]) IUnknown_Release( This->items[i] );
+        free( This->items );
+        free( This );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI asp_vector_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IVector`1", 40, name );
+}
+
+static HRESULT WINAPI asp_vector_GetTrustLevel( void *iface, TrustLevel *trust )
+{
+    if (trust) *trust = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_GetAt( void *iface, UINT32 index, IUnknown **item )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    if (!item) return E_POINTER;
+    if (index >= This->count) return E_BOUNDS;
+    *item = This->items[index];
+    if (*item) IUnknown_AddRef( *item );
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_get_Size( void *iface, UINT32 *size )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    if (!size) return E_POINTER;
+    *size = This->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_GetView( void *iface, void **view )
+{
+    if (!view) return E_POINTER;
+    *view = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI asp_vector_IndexOf( void *iface, IUnknown *value, UINT32 *index, boolean *found )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    UINT32 i;
+    if (index) *index = 0;
+    if (found) *found = FALSE;
+    for (i = 0; i < This->count; i++)
+    {
+        if (This->items[i] == value)
+        {
+            if (index) *index = i;
+            if (found) *found = TRUE;
+            return S_OK;
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_SetAt( void *iface, UINT32 index, IUnknown *item )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    if (index >= This->count) return E_BOUNDS;
+    if (item) IUnknown_AddRef( item );
+    if (This->items[index]) IUnknown_Release( This->items[index] );
+    This->items[index] = item;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_InsertAt( void *iface, UINT32 index, IUnknown *item )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    if (index > This->count) return E_BOUNDS;
+    if (This->count == This->cap)
+    {
+        UINT32 new_cap = This->cap ? This->cap * 2 : 8;
+        IUnknown **tmp = realloc( This->items, new_cap * sizeof(*tmp) );
+        if (!tmp) return E_OUTOFMEMORY;
+        This->items = tmp;
+        This->cap = new_cap;
+    }
+    if (index < This->count)
+        memmove( &This->items[index + 1], &This->items[index], (This->count - index) * sizeof(*This->items) );
+    if (item) IUnknown_AddRef( item );
+    This->items[index] = item;
+    This->count++;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_RemoveAt( void *iface, UINT32 index )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    if (index >= This->count) return E_BOUNDS;
+    if (This->items[index]) IUnknown_Release( This->items[index] );
+    if (index + 1 < This->count)
+        memmove( &This->items[index], &This->items[index + 1], (This->count - index - 1) * sizeof(*This->items) );
+    This->count--;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_Append( void *iface, IUnknown *item )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    return asp_vector_InsertAt( iface, This->count, item );
+}
+
+static HRESULT WINAPI asp_vector_RemoveAtEnd( void *iface )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    if (!This->count) return E_BOUNDS;
+    return asp_vector_RemoveAt( iface, This->count - 1 );
+}
+
+static HRESULT WINAPI asp_vector_Clear( void *iface )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    UINT32 i;
+    for (i = 0; i < This->count; i++)
+        if (This->items[i]) IUnknown_Release( This->items[i] );
+    This->count = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_GetMany( void *iface, UINT32 start, UINT32 cap, IUnknown **items, UINT32 *actual )
+{
+    struct asp_vector *This = (struct asp_vector *)iface;
+    UINT32 i, n = 0;
+    if (start < This->count && items)
+    {
+        n = This->count - start;
+        if (n > cap) n = cap;
+        for (i = 0; i < n; i++)
+        {
+            items[i] = This->items[start + i];
+            if (items[i]) IUnknown_AddRef( items[i] );
+        }
+    }
+    if (actual) *actual = n;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_vector_ReplaceAll( void *iface, UINT32 count, IUnknown **items )
+{
+    UINT32 i;
+    HRESULT hr;
+    asp_vector_Clear( iface );
+    for (i = 0; i < count; i++)
+    {
+        if (FAILED(hr = asp_vector_Append( iface, items ? items[i] : NULL )))
+            return hr;
+    }
+    return S_OK;
+}
+
+static const void *asp_vector_vtbl[] =
+{
+    asp_vector_QI,
+    asp_vector_AddRef,
+    asp_vector_Release,
+    asp_vector_GetIids,
+    asp_vector_GetRuntimeClassName,
+    asp_vector_GetTrustLevel,
+    asp_vector_GetAt,
+    asp_vector_get_Size,
+    asp_vector_GetView,
+    asp_vector_IndexOf,
+    asp_vector_SetAt,
+    asp_vector_InsertAt,
+    asp_vector_RemoveAt,
+    asp_vector_Append,
+    asp_vector_RemoveAtEnd,
+    asp_vector_Clear,
+    asp_vector_GetMany,
+    asp_vector_ReplaceAll,
+};
+
+static struct asp_vector *asp_create_vector( REFIID iid )
+{
+    struct asp_vector *vec = calloc( 1, sizeof(*vec) );
+    if (!vec) return NULL;
+    vec->vtbl = asp_vector_vtbl;
+    vec->ref = 1;
+    vec->iid = *iid;
+    return vec;
+}
+
+struct asp_deferral
+{
+    const void **vtbl;
+    LONG ref;
+};
+
+static HRESULT WINAPI asp_deferral_QI( void *iface, REFIID iid, void **out )
+{
+    struct asp_deferral *This = (struct asp_deferral *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAccountsSettingsPaneEventDeferral_local ))
+    {
+        *out = This;
+        InterlockedIncrement( &This->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI asp_deferral_AddRef( void *iface )
+{
+    struct asp_deferral *This = (struct asp_deferral *)iface;
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI asp_deferral_Release( void *iface )
+{
+    struct asp_deferral *This = (struct asp_deferral *)iface;
+    ULONG ref = InterlockedDecrement( &This->ref );
+    if (!ref) free( This );
+    return ref;
+}
+
+static HRESULT WINAPI asp_deferral_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_deferral_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.ApplicationSettings.AccountsSettingsPaneEventDeferral", 64, name );
+}
+
+static HRESULT WINAPI asp_deferral_GetTrustLevel( void *iface, TrustLevel *trust )
+{
+    if (trust) *trust = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_deferral_Complete( void *iface )
+{
+    TRACE( "iface %p.\n", iface );
+    return S_OK;
+}
+
+static const void *asp_deferral_vtbl[] =
+{
+    asp_deferral_QI,
+    asp_deferral_AddRef,
+    asp_deferral_Release,
+    asp_deferral_GetIids,
+    asp_deferral_GetRuntimeClassName,
+    asp_deferral_GetTrustLevel,
+    asp_deferral_Complete,
+};
+
+struct asp_commands_args
+{
+    const void **vtbl;
+    LONG ref;
+    struct asp_vector *provider_commands;
+    struct asp_vector *account_commands;
+    struct asp_vector *credential_commands;
+    struct asp_vector *commands;
+    HSTRING header_text;
+};
+
+static HRESULT WINAPI asp_args_QI( void *iface, REFIID iid, void **out )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAccountsSettingsPaneCommandsRequestedEventArgs_local ))
+    {
+        *out = This;
+        InterlockedIncrement( &This->ref );
+        return S_OK;
+    }
+    WARN( "AccountsSettingsPaneCommandsRequestedEventArgs unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI asp_args_AddRef( void *iface )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI asp_args_Release( void *iface )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    ULONG ref = InterlockedDecrement( &This->ref );
+    if (!ref)
+    {
+        if (This->provider_commands) asp_vector_Release( This->provider_commands );
+        if (This->account_commands) asp_vector_Release( This->account_commands );
+        if (This->credential_commands) asp_vector_Release( This->credential_commands );
+        if (This->commands) asp_vector_Release( This->commands );
+        if (This->header_text) WindowsDeleteString( This->header_text );
+        free( This );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI asp_args_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_args_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.ApplicationSettings.AccountsSettingsPaneCommandsRequestedEventArgs", 77, name );
+}
+
+static HRESULT WINAPI asp_args_GetTrustLevel( void *iface, TrustLevel *trust )
+{
+    if (trust) *trust = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_args_get_WebAccountProviderCommands( void *iface, void **value )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    if (!value) return E_POINTER;
+    *value = This->provider_commands;
+    if (*value) asp_vector_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_args_get_WebAccountCommands( void *iface, void **value )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    if (!value) return E_POINTER;
+    *value = This->account_commands;
+    if (*value) asp_vector_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_args_get_CredentialCommands( void *iface, void **value )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    if (!value) return E_POINTER;
+    *value = This->credential_commands;
+    if (*value) asp_vector_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_args_get_Commands( void *iface, void **value )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    if (!value) return E_POINTER;
+    *value = This->commands;
+    if (*value) asp_vector_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_args_get_HeaderText( void *iface, HSTRING *value )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( This->header_text, value );
+}
+
+static HRESULT WINAPI asp_args_put_HeaderText( void *iface, HSTRING value )
+{
+    struct asp_commands_args *This = (struct asp_commands_args *)iface;
+    HSTRING dup = NULL;
+    HRESULT hr = WindowsDuplicateString( value, &dup );
+    if (FAILED(hr)) return hr;
+    if (This->header_text) WindowsDeleteString( This->header_text );
+    This->header_text = dup;
+    return S_OK;
+}
+
+static HRESULT WINAPI asp_args_GetDeferral( void *iface, void **value )
+{
+    struct asp_deferral *def;
+    if (!value) return E_POINTER;
+    def = calloc( 1, sizeof(*def) );
+    if (!def) return E_OUTOFMEMORY;
+    def->vtbl = asp_deferral_vtbl;
+    def->ref = 1;
+    *value = def;
+    return S_OK;
+}
+
+static const void *asp_args_vtbl[] =
+{
+    asp_args_QI,
+    asp_args_AddRef,
+    asp_args_Release,
+    asp_args_GetIids,
+    asp_args_GetRuntimeClassName,
+    asp_args_GetTrustLevel,
+    asp_args_get_WebAccountProviderCommands,
+    asp_args_get_WebAccountCommands,
+    asp_args_get_CredentialCommands,
+    asp_args_get_Commands,
+    asp_args_get_HeaderText,
+    asp_args_put_HeaderText,
+    asp_args_GetDeferral,
+};
+
+static struct asp_commands_args *asp_create_commands_args( void )
+{
+    struct asp_commands_args *args = calloc( 1, sizeof(*args) );
+    if (!args) return NULL;
+    args->vtbl = asp_args_vtbl;
+    args->ref = 1;
+    args->provider_commands = asp_create_vector( &IID_IVector_WebAccountProviderCommand_local );
+    args->account_commands = asp_create_vector( &IID_IVector_WebAccountCommand_local );
+    args->credential_commands = asp_create_vector( &IID_IVector_CredentialCommand_local );
+    args->commands = asp_create_vector( &IID_IVector_SettingsCommand_local );
+    if (!args->provider_commands || !args->account_commands ||
+        !args->credential_commands || !args->commands)
+    {
+        asp_args_Release( args );
+        return NULL;
+    }
+    return args;
+}
+
+struct asp_typed_handler_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( void *iface );
+    ULONG (WINAPI *Release)( void *iface );
+    HRESULT (WINAPI *Invoke)( void *iface, void *sender, void *args );
+};
+
+struct asp_handler_entry
+{
+    IUnknown *handler;
+    INT64 cookie;
+};
+
+static SRWLOCK asp_handlers_lock = SRWLOCK_INIT;
+static struct asp_handler_entry asp_handlers[32];
+static UINT32 asp_handler_count = 0;
+
 static const void *asp_pane_vtbl[];
 static struct { const void **vtbl; } asp_pane_singleton = { asp_pane_vtbl };
 static LONG asp_next_cookie = 1;
+
+static void asp_fire_commands_requested( void )
+{
+    IUnknown *snapshot[32];
+    UINT32 count = 0, i;
+    struct asp_commands_args *args;
+
+    AcquireSRWLockShared( &asp_handlers_lock );
+    for (i = 0; i < asp_handler_count && i < ARRAY_SIZE(snapshot); i++)
+    {
+        snapshot[count] = asp_handlers[i].handler;
+        if (snapshot[count])
+        {
+            IUnknown_AddRef( snapshot[count] );
+            count++;
+        }
+    }
+    ReleaseSRWLockShared( &asp_handlers_lock );
+
+    if (!count) return;
+    args = asp_create_commands_args();
+    if (!args)
+    {
+        for (i = 0; i < count; i++) IUnknown_Release( snapshot[i] );
+        return;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        const struct asp_typed_handler_vtbl *vtbl = *(const struct asp_typed_handler_vtbl **)snapshot[i];
+        TRACE( "invoking AccountCommandsRequested handler %p with args %p.\n", snapshot[i], args );
+        vtbl->Invoke( snapshot[i], &asp_pane_singleton, args );
+        IUnknown_Release( snapshot[i] );
+    }
+    asp_args_Release( args );
+}
 
 static HRESULT WINAPI asp_pane_QI( void *iface, REFIID iid, void **out )
 {
@@ -1116,13 +1661,41 @@ static HRESULT WINAPI asp_pane_GetTrustLevel( void *iface, TrustLevel *trust )
 }
 static HRESULT WINAPI asp_pane_add_AccountCommandsRequested( void *iface, void *handler, EventRegistrationToken *cookie )
 {
+    INT64 token;
     TRACE( "iface %p, handler %p, cookie %p.\n", iface, handler, cookie );
-    if (cookie) cookie->value = InterlockedIncrement( &asp_next_cookie );
+    if (!handler || !cookie) return E_POINTER;
+    token = InterlockedIncrement( &asp_next_cookie );
+    AcquireSRWLockExclusive( &asp_handlers_lock );
+    if (asp_handler_count < ARRAY_SIZE(asp_handlers))
+    {
+        IUnknown_AddRef( (IUnknown *)handler );
+        asp_handlers[asp_handler_count].handler = (IUnknown *)handler;
+        asp_handlers[asp_handler_count].cookie = token;
+        asp_handler_count++;
+    }
+    ReleaseSRWLockExclusive( &asp_handlers_lock );
+    cookie->value = token;
     return S_OK;
 }
 static HRESULT WINAPI asp_pane_remove_AccountCommandsRequested( void *iface, EventRegistrationToken cookie )
 {
+    IUnknown *removed = NULL;
+    UINT32 i;
     TRACE( "iface %p, cookie %I64d.\n", iface, cookie.value );
+    AcquireSRWLockExclusive( &asp_handlers_lock );
+    for (i = 0; i < asp_handler_count; i++)
+    {
+        if (asp_handlers[i].cookie == cookie.value)
+        {
+            removed = asp_handlers[i].handler;
+            asp_handler_count--;
+            if (i < asp_handler_count)
+                asp_handlers[i] = asp_handlers[asp_handler_count];
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive( &asp_handlers_lock );
+    if (removed) IUnknown_Release( removed );
     return S_OK;
 }
 
@@ -1195,26 +1768,31 @@ static HRESULT WINAPI asp_stat1_GetForCurrentView( void *iface, void **out )
 static HRESULT WINAPI asp_stat1_Show( void *iface )
 {
     TRACE( "iface %p.\n", iface );
+    asp_fire_commands_requested();
     return S_OK;
 }
 static HRESULT WINAPI asp_stat2_ShowManageAccountsAsync( void *iface, IAsyncAction **out )
 {
     TRACE( "iface %p, out %p.\n", iface, out );
+    asp_fire_commands_requested();
     return asp_create_completed_action( out );
 }
 static HRESULT WINAPI asp_stat2_ShowAddAccountAsync( void *iface, IAsyncAction **out )
 {
     TRACE( "iface %p, out %p.\n", iface, out );
+    asp_fire_commands_requested();
     return asp_create_completed_action( out );
 }
 static HRESULT WINAPI asp_stat3_ShowManageAccountsForUserAsync( void *iface, void *user, IAsyncAction **out )
 {
     TRACE( "iface %p, user %p, out %p.\n", iface, user, out );
+    asp_fire_commands_requested();
     return asp_create_completed_action( out );
 }
 static HRESULT WINAPI asp_stat3_ShowAddAccountForUserAsync( void *iface, void *user, IAsyncAction **out )
 {
     TRACE( "iface %p, user %p, out %p.\n", iface, user, out );
+    asp_fire_commands_requested();
     return asp_create_completed_action( out );
 }
 

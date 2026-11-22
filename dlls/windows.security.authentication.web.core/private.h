@@ -85,6 +85,7 @@ void *async_action_iface( struct async_op *impl );
 
 IInspectable *create_web_token_request_result( void );
 IInspectable *create_web_account_provider( void );
+IInspectable *create_web_account_provider_ex( HSTRING id, HSTRING authority );
 IInspectable *create_web_account( void );
 IInspectable *create_web_token_request( void );
 IInspectable *create_web_token_response( void );
