@@ -244,6 +244,25 @@ struct color_brush
     Color color;
 };
 
+/*
+ * CompositionMaskBrush (UniversalApiContract 3.0). Its default interface
+ * ICompositionMaskBrush {0x522cf09e-be6b-4f41-be49-f9226d471b4a} is not in
+ * include/windows.ui.composition.idl, so it is answered through a
+ * struct IInspectable + function-pointer vtable.
+ */
+struct mask_brush
+{
+    struct ICompositionBrush ICompositionBrush_iface;
+    struct IInspectable ICompositionMaskBrush_iface;
+    struct ICompositionObject ICompositionObject_iface;
+    struct IClosable IClosable_iface;
+    LONG ref;
+    struct compositor *compositor;
+    struct prop_set *properties;
+    struct ICompositionBrush *mask;
+    struct ICompositionBrush *source;
+};
+
 struct surface_brush
 {
     struct ICompositionBrush ICompositionBrush_iface;
@@ -423,6 +442,7 @@ struct inset_clip *inset_clip_create( struct compositor *compositor, FLOAT left,
 void visual_sync_dcomp_clip( struct visual *impl );
 struct geometric_clip *geometric_clip_create( struct compositor *compositor, void *geometry );
 struct color_brush *color_brush_create( struct compositor *compositor, Color color );
+struct mask_brush *mask_brush_create( struct compositor *compositor );
 struct surface_brush *surface_brush_create( struct compositor *compositor, struct ICompositionSurface *surface );
 struct composition_target *composition_target_create( struct compositor *compositor, struct IDCompositionTarget *dcomp_target, HWND hwnd );
 struct graphics_device *graphics_device_create( struct compositor *compositor, struct IDCompositionDevice2 *dcomp_device );

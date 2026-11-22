@@ -1511,7 +1511,13 @@ static HRESULT WINAPI compositor2_CreateLayerVisual( void *iface, void **res )
 }
 static HRESULT WINAPI compositor2_CreateMaskBrush( void *iface, void **res )
 {
-    return comp5_stub_create( L"Windows.UI.Composition.CompositionMaskBrush", res );
+    struct compositor *impl = impl_from_ICompositor2( iface );
+    struct mask_brush *brush;
+
+    if (!res) return E_POINTER;
+    if (!(brush = mask_brush_create( impl ))) return E_OUTOFMEMORY;
+    *res = &brush->ICompositionMaskBrush_iface;
+    return S_OK;
 }
 static HRESULT WINAPI compositor2_CreateNineGridBrush( void *iface, void **res )
 {

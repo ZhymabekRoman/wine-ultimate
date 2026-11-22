@@ -2047,6 +2047,253 @@ struct color_brush *color_brush_create( struct compositor *compositor, Color col
 }
 
 /*
+ * CompositionMaskBrush.
+ */
+
+static const GUID IID_ICompositionMaskBrush_local =
+    { 0x522cf09e, 0xbe6b, 0x4f41, { 0xbe, 0x49, 0xf9, 0x22, 0x6d, 0x47, 0x1b, 0x4a } };
+
+static inline struct mask_brush *impl_from_ICompositionBrush_mask( struct ICompositionBrush *iface )
+{
+    return CONTAINING_RECORD( iface, struct mask_brush, ICompositionBrush_iface );
+}
+
+static HRESULT WINAPI mask_brush_QueryInterface( struct ICompositionBrush *iface, REFIID iid, void **out )
+{
+    struct mask_brush *impl = impl_from_ICompositionBrush_mask( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown )
+        || IsEqualGUID( iid, &IID_IInspectable )
+        || IsEqualGUID( iid, &IID_IAgileObject )
+        || IsEqualGUID( iid, &IID_ICompositionBrush ))
+    {
+        *out = &impl->ICompositionBrush_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositionMaskBrush_local ))
+    {
+        *out = &impl->ICompositionMaskBrush_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositionObject ))
+    {
+        *out = &impl->ICompositionObject_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IClosable ))
+    {
+        *out = &impl->IClosable_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI mask_brush_AddRef( struct ICompositionBrush *iface )
+{
+    struct mask_brush *impl = impl_from_ICompositionBrush_mask( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI mask_brush_Release( struct ICompositionBrush *iface )
+{
+    struct mask_brush *impl = impl_from_ICompositionBrush_mask( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->mask) IInspectable_Release( (IInspectable *)impl->mask );
+        if (impl->source) IInspectable_Release( (IInspectable *)impl->source );
+        comp_release_refs( impl->compositor, impl->properties );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI mask_brush_GetIids( struct ICompositionBrush *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI mask_brush_GetRuntimeClassName( struct ICompositionBrush *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.UI.Composition.CompositionMaskBrush";
+    return WindowsCreateString( name, ARRAYSIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI mask_brush_GetTrustLevel( struct ICompositionBrush *iface, TrustLevel *trust_level )
+{
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static const struct ICompositionBrushVtbl mask_brush_vtbl =
+{
+    mask_brush_QueryInterface,
+    mask_brush_AddRef,
+    mask_brush_Release,
+    mask_brush_GetIids,
+    mask_brush_GetRuntimeClassName,
+    mask_brush_GetTrustLevel,
+};
+
+static inline struct mask_brush *impl_from_mb_iface( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct mask_brush, ICompositionMaskBrush_iface );
+}
+
+static HRESULT WINAPI mb_iface_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return mask_brush_QueryInterface( &impl_from_mb_iface( iface )->ICompositionBrush_iface, iid, out );
+}
+
+static ULONG WINAPI mb_iface_AddRef( void *iface )
+{
+    return mask_brush_AddRef( &impl_from_mb_iface( iface )->ICompositionBrush_iface );
+}
+
+static ULONG WINAPI mb_iface_Release( void *iface )
+{
+    return mask_brush_Release( &impl_from_mb_iface( iface )->ICompositionBrush_iface );
+}
+
+static HRESULT WINAPI mb_iface_GetIids( void *iface, ULONG *iid_count, IID **iids )
+{
+    return mask_brush_GetIids( &impl_from_mb_iface( iface )->ICompositionBrush_iface, iid_count, iids );
+}
+
+static HRESULT WINAPI mb_iface_GetRuntimeClassName( void *iface, HSTRING *class_name )
+{
+    return mask_brush_GetRuntimeClassName( &impl_from_mb_iface( iface )->ICompositionBrush_iface, class_name );
+}
+
+static HRESULT WINAPI mb_iface_GetTrustLevel( void *iface, TrustLevel *trust_level )
+{
+    return mask_brush_GetTrustLevel( &impl_from_mb_iface( iface )->ICompositionBrush_iface, trust_level );
+}
+
+static HRESULT WINAPI mb_iface_get_Mask( void *iface, struct ICompositionBrush **value )
+{
+    struct mask_brush *impl = impl_from_mb_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = impl->mask;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
+    return S_OK;
+}
+
+static HRESULT WINAPI mb_iface_put_Mask( void *iface, struct ICompositionBrush *value )
+{
+    struct mask_brush *impl = impl_from_mb_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (value) IInspectable_AddRef( (IInspectable *)value );
+    if (impl->mask) IInspectable_Release( (IInspectable *)impl->mask );
+    impl->mask = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI mb_iface_get_Source( void *iface, struct ICompositionBrush **value )
+{
+    struct mask_brush *impl = impl_from_mb_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = impl->source;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
+    return S_OK;
+}
+
+static HRESULT WINAPI mb_iface_put_Source( void *iface, struct ICompositionBrush *value )
+{
+    struct mask_brush *impl = impl_from_mb_iface( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (value) IInspectable_AddRef( (IInspectable *)value );
+    if (impl->source) IInspectable_Release( (IInspectable *)impl->source );
+    impl->source = value;
+    return S_OK;
+}
+
+static const void *mb_iface_vtbl[] =
+{
+    mb_iface_QueryInterface,
+    mb_iface_AddRef,
+    mb_iface_Release,
+    mb_iface_GetIids,
+    mb_iface_GetRuntimeClassName,
+    mb_iface_GetTrustLevel,
+    mb_iface_get_Mask,
+    mb_iface_put_Mask,
+    mb_iface_get_Source,
+    mb_iface_put_Source,
+};
+
+DEFINE_INHERITED_PROLOGUE( mb_object, ICompositionObject, struct mask_brush, ICompositionBrush_iface )
+COMP_OBJECT_IMPL( mb_object, struct mask_brush )
+
+static const struct ICompositionObjectVtbl mb_object_vtbl =
+{
+    mb_object_QueryInterface,
+    mb_object_AddRef,
+    mb_object_Release,
+    mb_object_GetIids,
+    mb_object_GetRuntimeClassName,
+    mb_object_GetTrustLevel,
+    mb_object_get_Compositor,
+    mb_object_get_Dispatcher,
+    mb_object_get_Properties,
+    mb_object_StartAnimation,
+    mb_object_StopAnimation,
+};
+
+DEFINE_INHERITED_PROLOGUE( mb_closable, IClosable, struct mask_brush, ICompositionBrush_iface )
+COMP_CLOSABLE_IMPL( mb_closable, struct mask_brush )
+
+static const struct IClosableVtbl mb_closable_vtbl =
+{
+    mb_closable_QueryInterface,
+    mb_closable_AddRef,
+    mb_closable_Release,
+    mb_closable_GetIids,
+    mb_closable_GetRuntimeClassName,
+    mb_closable_GetTrustLevel,
+    mb_closable_Close,
+};
+
+struct mask_brush *mask_brush_create( struct compositor *compositor )
+{
+    struct mask_brush *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->ICompositionBrush_iface.lpVtbl = &mask_brush_vtbl;
+    impl->ICompositionMaskBrush_iface.lpVtbl = (const IInspectableVtbl *)mb_iface_vtbl;
+    impl->ICompositionObject_iface.lpVtbl = &mb_object_vtbl;
+    impl->IClosable_iface.lpVtbl = &mb_closable_vtbl;
+    impl->ref = 1;
+    impl->compositor = compositor;
+    if (compositor) IInspectable_AddRef( (IInspectable *)&compositor->ICompositor_iface );
+    return impl;
+}
+
+/*
  * EffectFactory + EffectBrush.
  *
  * The WinAppSDK titlebar code compiles its caption-button glyph effect and
