@@ -2,8 +2,11 @@ MODULE  = windows.ui.xaml.dll
 IMPORTS = advapi32 dcomp dxgi d3d11 d2d1 gdi32 user32 combase
 
 SOURCES = \
+	app_identity.c \
 	application.c \
 	classes.idl \
+	core_input.c \
+	core_window_wrap.c \
 	color_helper.c \
 	controls_nav.c \
 	dp_vsm.c \
