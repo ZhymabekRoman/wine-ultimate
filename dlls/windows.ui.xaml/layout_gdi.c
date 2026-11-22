@@ -453,12 +453,11 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         el->has_bounds = (w > 0 && h > 0);
         el->actual_w = (double)w;
         el->actual_h = (double)h;
+        if (!el->loaded_fired || el->loaded_fired_cnt < el->loaded_cnt)
+            uwp_fire_loaded_tree( el );
         if (!margin_clamped && w > 0 && h > 0 && (prev_w != el->actual_w || prev_h != el->actual_h))
             uwp_fire_size_and_layout_changed( el );
     }
-
-    if (!el->loaded_fired || el->loaded_fired_cnt < el->loaded_cnt)
-        uwp_fire_loaded_tree( el );
 
     uwp_invoke_winui_measure_arrange( el, w, h );
     uwp_fire_evc_if_needed( el );

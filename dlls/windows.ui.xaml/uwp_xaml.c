@@ -2514,6 +2514,8 @@ static const WCHAR *uwp_tpl_part_class( const WCHAR *nm )
         { L"MenuItemsScrollViewer", L"Windows.UI.Xaml.Controls.ScrollViewer" },
         { L"FooterItemsScrollViewer", L"Windows.UI.Xaml.Controls.ScrollViewer" },
         { L"Shape", L"Windows.UI.Xaml.Controls.Border" },
+        { L"OldElement", L"Windows.UI.Xaml.Controls.ContentPresenter" },
+        { L"NewElement", L"Windows.UI.Xaml.Controls.ContentPresenter" },
     };
     size_t i;
     for (i = 0; i < ARRAY_SIZE(map); i++)
@@ -6371,10 +6373,9 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
     void *fe_ovr = NULL;
     BOOL has_children = FALSE;
     if (!el || el->template_applied || !el->outer) return;
-    el->template_applied = TRUE;
     if (el->parent && !wcsncmp( el->parent->class_name, L"Microsoft.UI.Xaml.", 18 ))
         return;
-    if (el->named_cnt > 0)
+    if (el->named_cnt > 0 || el->size_changed_cnt > 0)
         has_children = TRUE;
     /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
      * has actually been inflated into the control's visual tree (except WinUI
@@ -6382,6 +6383,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
     if (!has_children && wcsncmp( el->class_name, L"Microsoft.UI.Xaml.", 18 ) != 0 &&
         !uwp_is_display_result_element( el ))
         return;
+    el->template_applied = TRUE;
     if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_UWP, &fe_ovr )) && fe_ovr)
     {
         /* Slot 8 on IFrameworkElementOverrides is OnApplyTemplate() */
@@ -6467,6 +6469,7 @@ void uwp_fire_size_and_layout_changed( struct uwp_element *el )
     if (!el) return;
     if (el->size_changed_cnt <= 0 && el->layout_updated_cnt <= 0) return;
     if (el->actual_w <= 0.0 || el->actual_h <= 0.0) return;
+    uwp_apply_template_if_needed( el );
     if (el->size_changed_cnt > 0 && (el->actual_w != el->last_sc_w || el->actual_h != el->last_sc_h))
     {
         IInspectable * volatile sender = el->outer ? el->outer : &el->IInspectable_iface;
