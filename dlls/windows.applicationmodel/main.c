@@ -297,8 +297,6 @@ static const GUID IID_IVectorView_StoreImage =
     { 0x7e1ceace, 0x82bd, 0x5db3, { 0x8f, 0x35, 0x9b, 0xf0, 0xc8, 0x8e, 0xf8, 0x39 } };
 static const GUID IID_IIterable_StoreImage =
     { 0xb2da6de8, 0xad55, 0x56ce, { 0x87, 0x54, 0x2c, 0x96, 0xf4, 0xfe, 0x1c, 0x2e } };
-static const GUID IID_IIterator_StoreImage =
-    { 0xfbe076f6, 0xc3d2, 0x5df7, { 0x83, 0x9f, 0x01, 0x2a, 0xc0, 0xf9, 0x51, 0xc5 } };
 
 static const GUID IID_IMapView_StoreProduct =
     { 0x3074efe6, 0x0cd8, 0x5fb7, { 0xae, 0xe3, 0x60, 0xbd, 0xa3, 0xc2, 0xf6, 0x7e } };
@@ -306,8 +304,6 @@ static const GUID IID_IIterable_StoreProductKeyValuePair =
     { 0xb9663fb7, 0x1c5f, 0x59a4, { 0x90, 0xc7, 0x36, 0x34, 0xfd, 0xd3, 0xf2, 0xf4 } };
 static const GUID IID_IKeyValuePair_StoreProduct =
     { 0x0e89a311, 0x437a, 0x5957, { 0x95, 0x93, 0x8e, 0xd6, 0x45, 0x11, 0x54, 0x5b } };
-static const GUID IID_IIterator_StoreProductKeyValuePair =
-    { 0xaf049501, 0x6d88, 0x5887, { 0x81, 0xa1, 0xed, 0xd4, 0xad, 0xc4, 0xc0, 0x63 } };
 
 struct winrt_vector_view
 {
@@ -1445,29 +1441,6 @@ static void family_from_full_name( const WCHAR *full, WCHAR *family, DWORD cch )
     lstrcatW( family, publisher + 1 );
 }
 
-/* Windows.ApplicationModel.PackageVersion is a four-WORD value struct; the
- * projection's property getter takes it by pointer. */
-static HRESULT WINAPI package_version_get_Major( void *iface, UINT16 *major ) { if (major) *major = 1; return S_OK; }
-static HRESULT WINAPI package_version_get_Minor( void *iface, UINT16 *minor ) { if (minor) *minor = 0; return S_OK; }
-static HRESULT WINAPI package_version_get_Build( void *iface, UINT16 *build ) { if (build) *build = 0; return S_OK; }
-static HRESULT WINAPI package_version_get_Revision( void *iface, UINT16 *revision ) { if (revision) *revision = 0; return S_OK; }
-
-static const void *package_version_vtbl[] =
-{
-    winappsdk_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
-    winappsdk_GetIids,
-    winappsdk_GetRuntimeClassName,
-    winappsdk_GetTrustLevel,
-    package_version_get_Major,
-    package_version_get_Minor,
-    package_version_get_Build,
-    package_version_get_Revision,
-};
-
-WINAPPSDK_CLASS( package_version, "Windows.ApplicationModel.PackageVersion" );
-
 /* The registered framework the app pins: the WindowsAppRuntime framework of the
  * AppModel registration, the first framework registered if there is no
  * WindowsAppRuntime package, and nothing when the plane is empty. The
@@ -1550,7 +1523,8 @@ static const void *deployment_package_vtbl[] =
     deployment_package_get_Version,
 };
 
-WINAPPSDK_CLASS_V( deployment_package, deployment_package_vtbl, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentPackage" );
+static struct winappsdk_class deployment_package_obj =
+    { deployment_package_vtbl, L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentPackage", 1 };
 
 /* DeploymentResult: Status (stub answers IdenticalPackageAvailable) + package. */
 static HRESULT WINAPI deployment_result_get_DeploymentPackage( void *iface, void **package )
@@ -2282,7 +2256,8 @@ static const void *package_graph_vtbl[] =
     package_graph_First,
 };
 
-WINAPPSDK_CLASS_V( package_graph, package_graph_vtbl, "Windows.Foundation.Collections.IIterable`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>" );
+static struct winappsdk_class package_graph_obj =
+    { package_graph_vtbl, L"Windows.Foundation.Collections.IIterable`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>", 1 };
 
 /* PackageDependencyContext: ContextToken (one installed dependency = token 1),
  * the PackageDependency it points at, and the PackageGraph iterable. */
