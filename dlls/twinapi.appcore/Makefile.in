@@ -8,6 +8,7 @@ UNIX_CFLAGS = $(DBUS_CFLAGS)
 SOURCES = \
 	advertising_manager.c \
 	analytics_info.c \
+	app_instance.c \
 	appnotifications.c \
 	appnotifications.idl \
 	badge_update_manager.c \

@@ -151,6 +151,10 @@ HRESULT core_app_add_resuming( __FIEventHandler_1_IInspectable *handler,
 HRESULT core_app_remove_resuming( EventRegistrationToken token );
 void ensure_focus_watcher_started( void );
 void core_app_flush_properties( void );
+BOOL core_app_try_single_instance_redirect( void );
+const WCHAR *app_activation_current_uri( void );
+void *activated_event_args_create_for_uri( const WCHAR *uri );
+void core_app_fire_view_activated( const WCHAR *uri );
 
 /* Wine extension interfaces on the ToastNotification face, answered by
  * toast_notification_manager.c (NotificationSuppressed event sink registry,
