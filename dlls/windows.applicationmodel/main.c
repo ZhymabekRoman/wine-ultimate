@@ -3458,27 +3458,851 @@ static HRESULT WINAPI app_install_mgr_GetTrustLevel( void *iface, TrustLevel *l 
     if (l) *l = BaseTrust; return S_OK;
 }
 
-/* Face 1 methods */
-static HRESULT WINAPI app_install_mgr_get_AppInstallItems( void *iface, void **value )
+static const GUID IID_IAppInstallItem =
+    { 0x49d3dfab, 0x168a, 0x4cbf, { 0xa9, 0x3a, 0x9e, 0x44, 0x8c, 0x82, 0x73, 0x7d } };
+static const GUID IID_IAppInstallItem2 =
+    { 0xd3972af8, 0x40c0, 0x4fd7, { 0xaa, 0x6c, 0x0a, 0xa1, 0x3c, 0xa6, 0x18, 0x8c } };
+static const GUID IID_IAppInstallItem3 =
+    { 0x6f3dc998, 0xdd47, 0x433c, { 0x92, 0x34, 0x56, 0x01, 0x72, 0xd6, 0x7a, 0x45 } };
+static const GUID IID_IAppInstallStatus =
+    { 0x936dccfa, 0x2450, 0x4126, { 0x88, 0xb1, 0x61, 0x27, 0xa6, 0x44, 0xdd, 0x5c } };
+static const GUID IID_IAppInstallStatus2 =
+    { 0x96e7818a, 0x5e92, 0x4aa9, { 0x8e, 0xdc, 0x58, 0xfe, 0xd4, 0xb8, 0x7e, 0x00 } };
+static const GUID IID_IAppInstallManagerItemEventArgs =
+    { 0xbc505743, 0x4674, 0x4dd1, { 0x95, 0x7e, 0xc2, 0x56, 0x82, 0x08, 0x6a, 0x14 } };
+
+typedef HRESULT (WINAPI *typed_event_invoke_fn)( void *handler, void *sender, void *args );
+
+struct app_install_handler_slot
+{
+    INT64 token;
+    IUnknown *handler;
+};
+
+#define APP_INSTALL_MAX_HANDLERS 16
+#define APP_INSTALL_MAX_ITEMS    32
+
+enum app_install_state_val
+{
+    APP_INSTALL_STATE_PENDING = 0,
+    APP_INSTALL_STATE_STARTING = 1,
+    APP_INSTALL_STATE_ACQUIRING_LICENSE = 2,
+    APP_INSTALL_STATE_DOWNLOADING = 3,
+    APP_INSTALL_STATE_RESTORING_DATA = 4,
+    APP_INSTALL_STATE_INSTALLING = 5,
+    APP_INSTALL_STATE_COMPLETED = 6,
+    APP_INSTALL_STATE_CANCELED = 7,
+    APP_INSTALL_STATE_PAUSED = 8,
+    APP_INSTALL_STATE_ERROR = 9,
+};
+
+struct app_install_status_impl
+{
+    const void *vtbl1;
+    const void *vtbl2;
+    LONG ref;
+    INT32 state;
+    UINT64 download_size;
+    UINT64 bytes_downloaded;
+    double percent_complete;
+    HRESULT error_code;
+    boolean ready_for_launch;
+};
+
+struct app_install_item_impl
+{
+    const void *vtbl1;
+    const void *vtbl2;
+    const void *vtbl3;
+    LONG ref;
+    HSTRING product_id;
+    HSTRING package_family_name;
+    INT32 install_type;
+    boolean is_user_initiated;
+    INT32 state;
+    UINT64 download_size;
+    UINT64 bytes_downloaded;
+    double percent_complete;
+    HRESULT error_code;
+    boolean ready_for_launch;
+    BOOL canceled;
+    BOOL paused;
+    struct app_install_handler_slot completed_handlers[APP_INSTALL_MAX_HANDLERS];
+    struct app_install_handler_slot status_handlers[APP_INSTALL_MAX_HANDLERS];
+};
+
+struct app_install_mgr_item_event_args
+{
+    const void *vtbl;
+    LONG ref;
+    struct app_install_item_impl *item;
+};
+
+static CRITICAL_SECTION app_install_cs;
+static CRITICAL_SECTION_DEBUG app_install_cs_debug =
+{
+    0, 0, &app_install_cs,
+    { &app_install_cs_debug.ProcessLocksList, &app_install_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": app_install_cs") }
+};
+static CRITICAL_SECTION app_install_cs = { &app_install_cs_debug, -1, 0, 0, 0, 0 };
+
+static LONG64 app_install_next_token = 1;
+static struct app_install_item_impl *app_install_active_items[APP_INSTALL_MAX_ITEMS];
+static UINT32 app_install_active_count = 0;
+static struct app_install_handler_slot app_install_mgr_completed_handlers[APP_INSTALL_MAX_HANDLERS];
+static struct app_install_handler_slot app_install_mgr_status_handlers[APP_INSTALL_MAX_HANDLERS];
+
+static HRESULT WINAPI app_install_status_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct app_install_status_impl *impl = iface;
+    if (!out) return E_INVALIDARG;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAppInstallStatus ))
+    {
+        *out = &impl->vtbl1;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAppInstallStatus2 ))
+    {
+        *out = &impl->vtbl2;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI app_install_status2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct app_install_status_impl *impl = (struct app_install_status_impl *)((char *)iface - offsetof(struct app_install_status_impl, vtbl2));
+    return app_install_status_QueryInterface( &impl->vtbl1, iid, out );
+}
+static ULONG WINAPI app_install_status_AddRef( void *iface )
+{
+    struct app_install_status_impl *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_install_status2_AddRef( void *iface )
+{
+    struct app_install_status_impl *impl = (struct app_install_status_impl *)((char *)iface - offsetof(struct app_install_status_impl, vtbl2));
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_install_status_Release( void *iface )
+{
+    struct app_install_status_impl *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static ULONG WINAPI app_install_status2_Release( void *iface )
+{
+    struct app_install_status_impl *impl = (struct app_install_status_impl *)((char *)iface - offsetof(struct app_install_status_impl, vtbl2));
+    return app_install_status_Release( &impl->vtbl1 );
+}
+static HRESULT WINAPI app_install_status_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR name[] = L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallStatus";
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, n );
+}
+static HRESULT WINAPI app_install_status_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status_get_InstallState( void *iface, INT32 *value )
+{
+    struct app_install_status_impl *impl = iface;
+    if (value) *value = impl->state;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status_get_DownloadSizeInBytes( void *iface, UINT64 *value )
+{
+    struct app_install_status_impl *impl = iface;
+    if (value) *value = impl->download_size;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status_get_BytesDownloaded( void *iface, UINT64 *value )
+{
+    struct app_install_status_impl *impl = iface;
+    if (value) *value = impl->bytes_downloaded;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status_get_PercentComplete( void *iface, double *value )
+{
+    struct app_install_status_impl *impl = iface;
+    if (value) *value = impl->percent_complete;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status_get_ErrorCode( void *iface, HRESULT *value )
+{
+    struct app_install_status_impl *impl = iface;
+    if (value) *value = impl->error_code;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status2_get_User( void *iface, void **value )
+{
+    if (value) *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_status2_get_ReadyForLaunch( void *iface, boolean *value )
+{
+    struct app_install_status_impl *impl = (struct app_install_status_impl *)((char *)iface - offsetof(struct app_install_status_impl, vtbl2));
+    if (value) *value = impl->ready_for_launch;
+    return S_OK;
+}
+
+static const void *app_install_status_vtbl1[] =
+{
+    app_install_status_QueryInterface,
+    app_install_status_AddRef,
+    app_install_status_Release,
+    app_install_status_GetIids,
+    app_install_status_GetRuntimeClassName,
+    app_install_status_GetTrustLevel,
+    app_install_status_get_InstallState,
+    app_install_status_get_DownloadSizeInBytes,
+    app_install_status_get_BytesDownloaded,
+    app_install_status_get_PercentComplete,
+    app_install_status_get_ErrorCode,
+};
+
+static const void *app_install_status_vtbl2[] =
+{
+    app_install_status2_QueryInterface,
+    app_install_status2_AddRef,
+    app_install_status2_Release,
+    app_install_status_GetIids,
+    app_install_status_GetRuntimeClassName,
+    app_install_status_GetTrustLevel,
+    app_install_status2_get_User,
+    app_install_status2_get_ReadyForLaunch,
+};
+
+static HRESULT WINAPI app_install_event_args_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct app_install_mgr_item_event_args *impl = iface;
+    if (!out) return E_INVALIDARG;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAppInstallManagerItemEventArgs ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_install_event_args_AddRef( void *iface )
+{
+    struct app_install_mgr_item_event_args *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_install_event_args_Release( void *iface )
+{
+    struct app_install_mgr_item_event_args *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->item) IUnknown_Release( (IUnknown *)&impl->item->vtbl1 );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI app_install_event_args_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_event_args_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR name[] = L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallManagerItemEventArgs";
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, n );
+}
+static HRESULT WINAPI app_install_event_args_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_event_args_get_Item( void *iface, void **value )
+{
+    struct app_install_mgr_item_event_args *impl = iface;
+    if (!value) return E_INVALIDARG;
+    *value = &impl->item->vtbl1;
+    if (impl->item) IUnknown_AddRef( (IUnknown *)&impl->item->vtbl1 );
+    return S_OK;
+}
+
+static const void *app_install_event_args_vtbl[] =
+{
+    app_install_event_args_QueryInterface,
+    app_install_event_args_AddRef,
+    app_install_event_args_Release,
+    app_install_event_args_GetIids,
+    app_install_event_args_GetRuntimeClassName,
+    app_install_event_args_GetTrustLevel,
+    app_install_event_args_get_Item,
+};
+
+static struct app_install_mgr_item_event_args *app_install_event_args_create( struct app_install_item_impl *item )
+{
+    struct app_install_mgr_item_event_args *args = calloc( 1, sizeof(*args) );
+    if (!args) return NULL;
+    args->vtbl = app_install_event_args_vtbl;
+    args->ref = 1;
+    args->item = item;
+    if (item) IUnknown_AddRef( (IUnknown *)&item->vtbl1 );
+    return args;
+}
+
+static void app_install_add_handler( struct app_install_handler_slot *slots, void *handler, INT64 *token )
+{
+    int i;
+    INT64 tok = InterlockedIncrement64( &app_install_next_token );
+    if (token) *token = tok;
+    if (!handler) return;
+    EnterCriticalSection( &app_install_cs );
+    for (i = 0; i < APP_INSTALL_MAX_HANDLERS; i++)
+    {
+        if (!slots[i].handler)
+        {
+            slots[i].token = tok;
+            slots[i].handler = (IUnknown *)handler;
+            IUnknown_AddRef( slots[i].handler );
+            break;
+        }
+    }
+    LeaveCriticalSection( &app_install_cs );
+}
+
+static void app_install_remove_handler( struct app_install_handler_slot *slots, INT64 token )
+{
+    int i;
+    IUnknown *to_release = NULL;
+    EnterCriticalSection( &app_install_cs );
+    for (i = 0; i < APP_INSTALL_MAX_HANDLERS; i++)
+    {
+        if (slots[i].handler && slots[i].token == token)
+        {
+            to_release = slots[i].handler;
+            slots[i].handler = NULL;
+            slots[i].token = 0;
+            break;
+        }
+    }
+    LeaveCriticalSection( &app_install_cs );
+    if (to_release) IUnknown_Release( to_release );
+}
+
+static void app_install_fire_handlers( struct app_install_handler_slot *slots, void *sender, void *args )
+{
+    IUnknown *snapshot[APP_INSTALL_MAX_HANDLERS];
+    int count = 0, i;
+
+    EnterCriticalSection( &app_install_cs );
+    for (i = 0; i < APP_INSTALL_MAX_HANDLERS; i++)
+    {
+        if (slots[i].handler)
+        {
+            snapshot[count] = slots[i].handler;
+            IUnknown_AddRef( snapshot[count] );
+            count++;
+        }
+    }
+    LeaveCriticalSection( &app_install_cs );
+
+    for (i = 0; i < count; i++)
+    {
+        void **vtbl = *(void ***)snapshot[i];
+        typed_event_invoke_fn invoke = (typed_event_invoke_fn)vtbl[3];
+        if (invoke) invoke( snapshot[i], sender, args );
+        IUnknown_Release( snapshot[i] );
+    }
+}
+
+static void app_install_notify_item_change( struct app_install_item_impl *item, BOOL completed )
+{
+    struct app_install_mgr_item_event_args *mgr_args;
+
+    app_install_fire_handlers( item->status_handlers, &item->vtbl1, NULL );
+    mgr_args = app_install_event_args_create( item );
+    if (mgr_args)
+    {
+        app_install_fire_handlers( app_install_mgr_status_handlers, &app_install_mgr_instance.vtbl1, &mgr_args->vtbl );
+        if (completed)
+        {
+            app_install_fire_handlers( item->completed_handlers, &item->vtbl1, NULL );
+            app_install_fire_handlers( app_install_mgr_completed_handlers, &app_install_mgr_instance.vtbl1, &mgr_args->vtbl );
+        }
+        IUnknown_Release( (IUnknown *)&mgr_args->vtbl );
+    }
+    else if (completed)
+    {
+        app_install_fire_handlers( item->completed_handlers, &item->vtbl1, NULL );
+    }
+}
+
+static HRESULT WINAPI app_install_item_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct app_install_item_impl *impl = iface;
+    if (!out) return E_INVALIDARG;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAppInstallItem ))
+    {
+        *out = &impl->vtbl1;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAppInstallItem2 ))
+    {
+        *out = &impl->vtbl2;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAppInstallItem3 ))
+    {
+        *out = &impl->vtbl3;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI app_install_item2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl2));
+    return app_install_item_QueryInterface( &impl->vtbl1, iid, out );
+}
+static HRESULT WINAPI app_install_item3_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl3));
+    return app_install_item_QueryInterface( &impl->vtbl1, iid, out );
+}
+static ULONG WINAPI app_install_item_AddRef( void *iface )
+{
+    struct app_install_item_impl *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_install_item2_AddRef( void *iface )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl2));
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_install_item3_AddRef( void *iface )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl3));
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_install_item_Release( void *iface )
+{
+    struct app_install_item_impl *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        int i;
+        for (i = 0; i < APP_INSTALL_MAX_HANDLERS; i++)
+        {
+            if (impl->completed_handlers[i].handler) IUnknown_Release( impl->completed_handlers[i].handler );
+            if (impl->status_handlers[i].handler) IUnknown_Release( impl->status_handlers[i].handler );
+        }
+        if (impl->product_id) WindowsDeleteString( impl->product_id );
+        if (impl->package_family_name) WindowsDeleteString( impl->package_family_name );
+        free( impl );
+    }
+    return ref;
+}
+static ULONG WINAPI app_install_item2_Release( void *iface )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl2));
+    return app_install_item_Release( &impl->vtbl1 );
+}
+static ULONG WINAPI app_install_item3_Release( void *iface )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl3));
+    return app_install_item_Release( &impl->vtbl1 );
+}
+static HRESULT WINAPI app_install_item_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR name[] = L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallItem";
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, n );
+}
+static HRESULT WINAPI app_install_item_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_get_ProductId( void *iface, HSTRING *value )
+{
+    struct app_install_item_impl *impl = iface;
+    if (!value) return E_INVALIDARG;
+    return WindowsDuplicateString( impl->product_id, value );
+}
+static HRESULT WINAPI app_install_item_get_PackageFamilyName( void *iface, HSTRING *value )
+{
+    struct app_install_item_impl *impl = iface;
+    if (!value) return E_INVALIDARG;
+    return WindowsDuplicateString( impl->package_family_name, value );
+}
+static HRESULT WINAPI app_install_item_get_InstallType( void *iface, INT32 *value )
+{
+    struct app_install_item_impl *impl = iface;
+    if (value) *value = impl->install_type;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_get_IsUserInitiated( void *iface, boolean *value )
+{
+    struct app_install_item_impl *impl = iface;
+    if (value) *value = impl->is_user_initiated;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_GetCurrentStatus( void *iface, void **result )
+{
+    struct app_install_item_impl *impl = iface;
+    struct app_install_status_impl *st;
+    if (!result) return E_INVALIDARG;
+    st = calloc( 1, sizeof(*st) );
+    if (!st) return E_OUTOFMEMORY;
+    st->vtbl1 = app_install_status_vtbl1;
+    st->vtbl2 = app_install_status_vtbl2;
+    st->ref = 1;
+    EnterCriticalSection( &app_install_cs );
+    st->state = impl->state;
+    st->download_size = impl->download_size;
+    st->bytes_downloaded = impl->bytes_downloaded;
+    st->percent_complete = impl->percent_complete;
+    st->error_code = impl->error_code;
+    st->ready_for_launch = impl->ready_for_launch;
+    LeaveCriticalSection( &app_install_cs );
+    *result = &st->vtbl1;
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_Cancel( void *iface )
+{
+    struct app_install_item_impl *impl = iface;
+    EnterCriticalSection( &app_install_cs );
+    impl->canceled = TRUE;
+    impl->state = APP_INSTALL_STATE_CANCELED;
+    LeaveCriticalSection( &app_install_cs );
+    app_install_notify_item_change( impl, TRUE );
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_Pause( void *iface )
+{
+    struct app_install_item_impl *impl = iface;
+    EnterCriticalSection( &app_install_cs );
+    impl->paused = TRUE;
+    impl->state = APP_INSTALL_STATE_PAUSED;
+    LeaveCriticalSection( &app_install_cs );
+    app_install_notify_item_change( impl, FALSE );
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_Restart( void *iface )
+{
+    struct app_install_item_impl *impl = iface;
+    EnterCriticalSection( &app_install_cs );
+    impl->paused = FALSE;
+    if (impl->state == APP_INSTALL_STATE_PAUSED)
+        impl->state = APP_INSTALL_STATE_DOWNLOADING;
+    LeaveCriticalSection( &app_install_cs );
+    app_install_notify_item_change( impl, FALSE );
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_add_Completed( void *iface, void *handler, INT64 *token )
+{
+    struct app_install_item_impl *impl = iface;
+    app_install_add_handler( impl->completed_handlers, handler, token );
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_remove_Completed( void *iface, INT64 token )
+{
+    struct app_install_item_impl *impl = iface;
+    app_install_remove_handler( impl->completed_handlers, token );
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_add_StatusChanged( void *iface, void *handler, INT64 *token )
+{
+    struct app_install_item_impl *impl = iface;
+    app_install_add_handler( impl->status_handlers, handler, token );
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item_remove_StatusChanged( void *iface, INT64 token )
+{
+    struct app_install_item_impl *impl = iface;
+    app_install_remove_handler( impl->status_handlers, token );
+    return S_OK;
+}
+static HRESULT WINAPI app_install_item2_CancelWithTelemetry( void *iface, HSTRING cv )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl2));
+    return app_install_item_Cancel( &impl->vtbl1 );
+}
+static HRESULT WINAPI app_install_item2_PauseWithTelemetry( void *iface, HSTRING cv )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl2));
+    return app_install_item_Pause( &impl->vtbl1 );
+}
+static HRESULT WINAPI app_install_item2_RestartWithTelemetry( void *iface, HSTRING cv )
+{
+    struct app_install_item_impl *impl = (struct app_install_item_impl *)((char *)iface - offsetof(struct app_install_item_impl, vtbl2));
+    return app_install_item_Restart( &impl->vtbl1 );
+}
+static HRESULT WINAPI app_install_item3_get_Children( void *iface, void **value )
 {
     if (value) *value = store_create_empty_app_install_item_vector_view();
     return S_OK;
 }
-static HRESULT WINAPI app_install_mgr_Cancel( void *iface, HSTRING prod ) { return S_OK; }
-static HRESULT WINAPI app_install_mgr_Pause( void *iface, HSTRING prod ) { return S_OK; }
-static HRESULT WINAPI app_install_mgr_Restart( void *iface, HSTRING prod ) { return S_OK; }
+static HRESULT WINAPI app_install_item3_get_ItemOperationsMightAffectOtherItems( void *iface, boolean *value )
+{
+    if (value) *value = FALSE;
+    return S_OK;
+}
+
+static const void *app_install_item_vtbl1[] =
+{
+    app_install_item_QueryInterface,
+    app_install_item_AddRef,
+    app_install_item_Release,
+    app_install_item_GetIids,
+    app_install_item_GetRuntimeClassName,
+    app_install_item_GetTrustLevel,
+    app_install_item_get_ProductId,
+    app_install_item_get_PackageFamilyName,
+    app_install_item_get_InstallType,
+    app_install_item_get_IsUserInitiated,
+    app_install_item_GetCurrentStatus,
+    app_install_item_Cancel,
+    app_install_item_Pause,
+    app_install_item_Restart,
+    app_install_item_add_Completed,
+    app_install_item_remove_Completed,
+    app_install_item_add_StatusChanged,
+    app_install_item_remove_StatusChanged,
+};
+
+static const void *app_install_item_vtbl2[] =
+{
+    app_install_item2_QueryInterface,
+    app_install_item2_AddRef,
+    app_install_item2_Release,
+    app_install_item_GetIids,
+    app_install_item_GetRuntimeClassName,
+    app_install_item_GetTrustLevel,
+    app_install_item2_CancelWithTelemetry,
+    app_install_item2_PauseWithTelemetry,
+    app_install_item2_RestartWithTelemetry,
+};
+
+static const void *app_install_item_vtbl3[] =
+{
+    app_install_item3_QueryInterface,
+    app_install_item3_AddRef,
+    app_install_item3_Release,
+    app_install_item_GetIids,
+    app_install_item_GetRuntimeClassName,
+    app_install_item_GetTrustLevel,
+    app_install_item3_get_Children,
+    app_install_item3_get_ItemOperationsMightAffectOtherItems,
+};
+
+static DWORD WINAPI app_install_worker_proc( void *param )
+{
+    struct app_install_item_impl *item = param;
+    static const struct
+    {
+        INT32 state;
+        double percent;
+        UINT64 bytes;
+        BOOL completed;
+    } steps[] =
+    {
+        { APP_INSTALL_STATE_STARTING,          5.0,   52428,  FALSE },
+        { APP_INSTALL_STATE_ACQUIRING_LICENSE, 10.0,  104857, FALSE },
+        { APP_INSTALL_STATE_DOWNLOADING,       35.0,  367001, FALSE },
+        { APP_INSTALL_STATE_DOWNLOADING,       70.0,  734003, FALSE },
+        { APP_INSTALL_STATE_INSTALLING,        90.0,  1048576, FALSE },
+        { APP_INSTALL_STATE_COMPLETED,         100.0, 1048576, TRUE },
+    };
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(steps); i++)
+    {
+        Sleep( 120 );
+        for (;;)
+        {
+            BOOL canceled, paused;
+            EnterCriticalSection( &app_install_cs );
+            canceled = item->canceled;
+            paused = item->paused;
+            LeaveCriticalSection( &app_install_cs );
+            if (canceled)
+            {
+                IUnknown_Release( (IUnknown *)&item->vtbl1 );
+                return 0;
+            }
+            if (!paused) break;
+            Sleep( 100 );
+        }
+        EnterCriticalSection( &app_install_cs );
+        item->state = steps[i].state;
+        item->percent_complete = steps[i].percent;
+        item->bytes_downloaded = steps[i].bytes;
+        item->ready_for_launch = steps[i].completed ? TRUE : FALSE;
+        LeaveCriticalSection( &app_install_cs );
+
+        WARN( "AppInstallItem progress product=%s state=%d pct=%.1f\n",
+              debugstr_hstring(item->product_id), steps[i].state, steps[i].percent );
+        app_install_notify_item_change( item, steps[i].completed );
+    }
+
+    IUnknown_Release( (IUnknown *)&item->vtbl1 );
+    return 0;
+}
+
+static struct app_install_item_impl *app_install_start_item( HSTRING product_id, BOOL repair )
+{
+    struct app_install_item_impl *item = calloc( 1, sizeof(*item) );
+    HANDLE thread;
+    if (!item) return NULL;
+
+    item->vtbl1 = app_install_item_vtbl1;
+    item->vtbl2 = app_install_item_vtbl2;
+    item->vtbl3 = app_install_item_vtbl3;
+    item->ref = 1;
+    if (product_id) WindowsDuplicateString( product_id, &item->product_id );
+    else WindowsCreateString( L"", 0, &item->product_id );
+    WindowsCreateString( L"", 0, &item->package_family_name );
+    item->install_type = repair ? 2 : 0;
+    item->is_user_initiated = TRUE;
+    item->state = APP_INSTALL_STATE_PENDING;
+    item->download_size = 1048576;
+    item->bytes_downloaded = 0;
+    item->percent_complete = 0.0;
+    item->error_code = S_OK;
+    item->ready_for_launch = FALSE;
+
+    EnterCriticalSection( &app_install_cs );
+    if (app_install_active_count < APP_INSTALL_MAX_ITEMS)
+    {
+        app_install_active_items[app_install_active_count++] = item;
+        InterlockedIncrement( &item->ref );
+    }
+    LeaveCriticalSection( &app_install_cs );
+
+    InterlockedIncrement( &item->ref );
+    thread = CreateThread( NULL, 0, app_install_worker_proc, item, 0, NULL );
+    if (thread) CloseHandle( thread );
+    else InterlockedDecrement( &item->ref );
+
+    return item;
+}
+
+static void *app_install_create_active_vector_view( void )
+{
+    IInspectable *items[APP_INSTALL_MAX_ITEMS];
+    UINT32 count, i;
+    struct winrt_vector_view *vv;
+
+    EnterCriticalSection( &app_install_cs );
+    count = app_install_active_count;
+    for (i = 0; i < count; i++)
+        items[i] = (IInspectable *)&app_install_active_items[i]->vtbl1;
+    vv = store_create_vector_view( count ? items : NULL, count,
+        &IID_IVectorView_AppInstallItem, &IID_IIterable_AppInstallItem );
+    LeaveCriticalSection( &app_install_cs );
+    if (vv) vv->iterator_iid = IID_IIterator_AppInstallItem;
+    return vv;
+}
+
+static struct app_install_item_impl *app_install_find_by_product( HSTRING prod )
+{
+    const WCHAR *target = WindowsGetStringRawBuffer( prod, NULL );
+    struct app_install_item_impl *found = NULL;
+    UINT32 i;
+    if (!target) return NULL;
+    EnterCriticalSection( &app_install_cs );
+    for (i = 0; i < app_install_active_count; i++)
+    {
+        const WCHAR *cur = WindowsGetStringRawBuffer( app_install_active_items[i]->product_id, NULL );
+        if (cur && !wcscmp( cur, target ))
+        {
+            found = app_install_active_items[i];
+            InterlockedIncrement( &found->ref );
+            break;
+        }
+    }
+    LeaveCriticalSection( &app_install_cs );
+    return found;
+}
+
+/* Face 1 methods */
+static HRESULT WINAPI app_install_mgr_get_AppInstallItems( void *iface, void **value )
+{
+    if (value) *value = app_install_create_active_vector_view();
+    return S_OK;
+}
+static HRESULT WINAPI app_install_mgr_Cancel( void *iface, HSTRING prod )
+{
+    struct app_install_item_impl *item = app_install_find_by_product( prod );
+    if (item)
+    {
+        app_install_item_Cancel( &item->vtbl1 );
+        IUnknown_Release( (IUnknown *)&item->vtbl1 );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI app_install_mgr_Pause( void *iface, HSTRING prod )
+{
+    struct app_install_item_impl *item = app_install_find_by_product( prod );
+    if (item)
+    {
+        app_install_item_Pause( &item->vtbl1 );
+        IUnknown_Release( (IUnknown *)&item->vtbl1 );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI app_install_mgr_Restart( void *iface, HSTRING prod )
+{
+    struct app_install_item_impl *item = app_install_find_by_product( prod );
+    if (item)
+    {
+        app_install_item_Restart( &item->vtbl1 );
+        IUnknown_Release( (IUnknown *)&item->vtbl1 );
+    }
+    return S_OK;
+}
 static HRESULT WINAPI app_install_mgr_ItemCompleted( void *iface, void *handler, INT64 *token )
 {
-    if (token) *token = 1;
+    app_install_add_handler( app_install_mgr_completed_handlers, handler, token );
     return S_OK;
 }
-static HRESULT WINAPI app_install_mgr_remove_ItemCompleted( void *iface, INT64 token ) { return S_OK; }
+static HRESULT WINAPI app_install_mgr_remove_ItemCompleted( void *iface, INT64 token )
+{
+    app_install_remove_handler( app_install_mgr_completed_handlers, token );
+    return S_OK;
+}
 static HRESULT WINAPI app_install_mgr_ItemStatusChanged( void *iface, void *handler, INT64 *token )
 {
-    if (token) *token = 1;
+    app_install_add_handler( app_install_mgr_status_handlers, handler, token );
     return S_OK;
 }
-static HRESULT WINAPI app_install_mgr_remove_ItemStatusChanged( void *iface, INT64 token ) { return S_OK; }
+static HRESULT WINAPI app_install_mgr_remove_ItemStatusChanged( void *iface, INT64 token )
+{
+    app_install_remove_handler( app_install_mgr_status_handlers, token );
+    return S_OK;
+}
 static HRESULT WINAPI app_install_mgr_get_AutoUpdateSetting( void *iface, INT32 *setting )
 {
     if (setting) *setting = 1; /* Enabled */
@@ -3497,7 +4321,9 @@ static HRESULT WINAPI app_install_mgr_GetIsApplicableAsync( void *iface, HSTRING
 }
 static HRESULT WINAPI app_install_mgr_StartAppInstallAsync( void *iface, HSTRING p, HSTRING s, BOOL r, BOOL f, void **op )
 {
-    return store_async_create( NULL, FALSE, FALSE, S_OK, op );
+    struct app_install_item_impl *item = app_install_start_item( p, r );
+    WARN( "StartAppInstallAsync product=%s sku=%s repair=%d\n", debugstr_hstring(p), debugstr_hstring(s), r );
+    return store_async_create( item ? &item->vtbl1 : NULL, FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr_UpdateAppByPackageFamilyNameAsync( void *iface, HSTRING p, void **op )
 {
@@ -3552,7 +4378,9 @@ static const void *app_install_manager_vtbl1[] =
 /* Face 2 methods */
 static HRESULT WINAPI app_install_mgr2_StartAppInstallWithTelemetryAsync( void *iface, HSTRING p, HSTRING s, BOOL r, BOOL f, HSTRING c, HSTRING b, HSTRING cv, void **op )
 {
-    return store_async_create( NULL, FALSE, FALSE, S_OK, op );
+    struct app_install_item_impl *item = app_install_start_item( p, r );
+    WARN( "StartAppInstallWithTelemetryAsync product=%s sku=%s repair=%d\n", debugstr_hstring(p), debugstr_hstring(s), r );
+    return store_async_create( item ? &item->vtbl1 : NULL, FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr2_UpdateAppByPackageFamilyNameWithTelemetryAsync( void *iface, HSTRING p, HSTRING cv, void **op )
 {
@@ -3595,14 +4423,38 @@ static const void *app_install_manager_vtbl2[] =
 /* Face 3 methods */
 static HRESULT WINAPI app_install_mgr3_StartProductInstallAsync( void *iface, HSTRING p, HSTRING cat, HSTRING fl, HSTRING cl, BOOL r, BOOL f, HSTRING cv, void *vol, void **op )
 {
+    struct app_install_item_impl *item = app_install_start_item( p, r );
+    IInspectable *arr[1];
+    struct winrt_vector_view *vv;
+
     WARN( "StartProductInstallAsync product=%s catalog=%s flight=%s client=%s\n",
           debugstr_hstring(p), debugstr_hstring(cat), debugstr_hstring(fl), debugstr_hstring(cl) );
+    if (item)
+    {
+        arr[0] = (IInspectable *)&item->vtbl1;
+        vv = store_create_vector_view( arr, 1, &IID_IVectorView_AppInstallItem, &IID_IIterable_AppInstallItem );
+        if (vv) vv->iterator_iid = IID_IIterator_AppInstallItem;
+        IUnknown_Release( (IUnknown *)&item->vtbl1 );
+        return store_async_create( vv, FALSE, FALSE, S_OK, op );
+    }
     return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr3_StartProductInstallForUserAsync( void *iface, void *u, HSTRING p, HSTRING cat, HSTRING fl, HSTRING cl, BOOL r, BOOL f, HSTRING cv, void *vol, void **op )
 {
+    struct app_install_item_impl *item = app_install_start_item( p, r );
+    IInspectable *arr[1];
+    struct winrt_vector_view *vv;
+
     WARN( "StartProductInstallForUserAsync user=%p product=%s catalog=%s flight=%s client=%s\n",
           u, debugstr_hstring(p), debugstr_hstring(cat), debugstr_hstring(fl), debugstr_hstring(cl) );
+    if (item)
+    {
+        arr[0] = (IInspectable *)&item->vtbl1;
+        vv = store_create_vector_view( arr, 1, &IID_IVectorView_AppInstallItem, &IID_IIterable_AppInstallItem );
+        if (vv) vv->iterator_iid = IID_IIterator_AppInstallItem;
+        IUnknown_Release( (IUnknown *)&item->vtbl1 );
+        return store_async_create( vv, FALSE, FALSE, S_OK, op );
+    }
     return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI app_install_mgr3_UpdateAppByPackageFamilyNameForUserAsync( void *iface, void *u, HSTRING p, HSTRING cv, void **op )
@@ -3678,7 +4530,7 @@ static const void *app_install_manager_vtbl4[] =
 /* Face 5 methods */
 static HRESULT WINAPI app_install_mgr5_get_AppInstallItemsWithGroupSupport( void *iface, void **value )
 {
-    if (value) *value = store_create_empty_app_install_item_vector_view();
+    if (value) *value = app_install_create_active_vector_view();
     return S_OK;
 }
 
