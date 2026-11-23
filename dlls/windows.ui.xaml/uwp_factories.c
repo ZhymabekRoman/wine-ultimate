@@ -94,6 +94,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Canvas" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Button" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.TextBlock" ) ||
+           !wcscmp( buf, L"Microsoft.UI.Xaml.Controls.Primitives.Popup" ) ||
            !wcscmp( buf, L"CalculatorApp.Controls.CalculationResult" ))) &&
         (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 ) ||
          !wcscmp( buf, L"CalculatorApp.Controls.CalculationResult" )) &&
