@@ -439,9 +439,9 @@ static BOOL d2d_device_context_ensure_msaa(struct d2d_device_context *render_tar
     return TRUE;
 }
 
-static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
+static void d2d_device_context_draw_ex(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
-        struct d2d_brush *brush, struct d2d_brush *opacity_brush)
+        struct d2d_brush *brush, struct d2d_brush *opacity_brush, BOOL resolve_msaa)
 {
     struct d2d_shape_resources *shape_resources = &render_target->shape_resources[shape_type];
     ID3DDeviceContextState *prev_state;
@@ -550,7 +550,7 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     else
         ID3D11DeviceContext1_Draw(context, index_count, 0);
 
-    if (use_msaa)
+    if (use_msaa && resolve_msaa)
     {
         ID3D11DeviceContext1_ResolveSubresource(context, render_target->target.bitmap->resource, 0,
                 (ID3D11Resource *)render_target->msaa_tex, 0, render_target->msaa_format);
@@ -563,6 +563,14 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
 
     if (render_target->cs)
         LeaveCriticalSection(render_target->cs);
+}
+
+static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
+        ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
+        struct d2d_brush *brush, struct d2d_brush *opacity_brush)
+{
+    d2d_device_context_draw_ex(render_target, shape_type, ib, index_count, vb, vb_stride,
+            brush, opacity_brush, TRUE);
 }
 
 static void d2d_device_context_set_error(struct d2d_device_context *context, HRESULT code)
@@ -2319,8 +2327,8 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
             return;
         }
 
-        d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_OUTLINE, ib, 3 * geometry->outline.face_count, vb,
-                sizeof(*geometry->outline.vertices), brush, NULL);
+        d2d_device_context_draw_ex(render_target, D2D_SHAPE_TYPE_OUTLINE, ib, 3 * geometry->outline.face_count, vb,
+                sizeof(*geometry->outline.vertices), brush, NULL, FALSE);
 
         ID3D11Buffer_Release(vb);
         ID3D11Buffer_Release(ib);
@@ -2349,9 +2357,9 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
             return;
         }
 
-        d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_BEZIER_OUTLINE, ib,
+        d2d_device_context_draw_ex(render_target, D2D_SHAPE_TYPE_BEZIER_OUTLINE, ib,
                 3 * geometry->outline.bezier_face_count, vb,
-                sizeof(*geometry->outline.beziers), brush, NULL);
+                sizeof(*geometry->outline.beziers), brush, NULL, FALSE);
 
         ID3D11Buffer_Release(vb);
         ID3D11Buffer_Release(ib);
@@ -2381,13 +2389,15 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         }
 
         if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE)))
-            d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_ARC_OUTLINE, ib,
+            d2d_device_context_draw_ex(render_target, D2D_SHAPE_TYPE_ARC_OUTLINE, ib,
                     3 * geometry->outline.arc_face_count, vb,
-                    sizeof(*geometry->outline.arcs), brush, NULL);
+                    sizeof(*geometry->outline.arcs), brush, NULL, FALSE);
 
         ID3D11Buffer_Release(vb);
         ID3D11Buffer_Release(ib);
     }
+
+    d2d_device_context_resolve_msaa(render_target);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext6 *iface,
@@ -2483,8 +2493,8 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
             return;
         }
 
-        d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_TRIANGLE, ib, 3 * geometry->fill.face_count, vb,
-                sizeof(*geometry->fill.vertices), brush, opacity_brush);
+        d2d_device_context_draw_ex(render_target, D2D_SHAPE_TYPE_TRIANGLE, ib, 3 * geometry->fill.face_count, vb,
+                sizeof(*geometry->fill.vertices), brush, opacity_brush, FALSE);
 
         ID3D11Buffer_Release(vb);
         ID3D11Buffer_Release(ib);
@@ -2502,8 +2512,8 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
             return;
         }
 
-        d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.bezier_vertex_count, vb,
-                sizeof(*geometry->fill.bezier_vertices), brush, opacity_brush);
+        d2d_device_context_draw_ex(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.bezier_vertex_count, vb,
+                sizeof(*geometry->fill.bezier_vertices), brush, opacity_brush, FALSE);
 
         ID3D11Buffer_Release(vb);
     }
@@ -2521,11 +2531,13 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         }
 
         if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, TRUE)))
-            d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.arc_vertex_count, vb,
-                    sizeof(*geometry->fill.arc_vertices), brush, opacity_brush);
+            d2d_device_context_draw_ex(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.arc_vertex_count, vb,
+                    sizeof(*geometry->fill.arc_vertices), brush, opacity_brush, FALSE);
 
         ID3D11Buffer_Release(vb);
     }
+
+    d2d_device_context_resolve_msaa(render_target);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_FillGeometry(ID2D1DeviceContext6 *iface,
