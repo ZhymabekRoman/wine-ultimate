@@ -1332,7 +1332,8 @@ static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *contex
     cb_data = map_desc.pData;
     cb_data->outline = outline;
     cb_data->is_arc = is_arc;
-    cb_data->antialias = (context->drawing_state.antialiasMode != D2D1_ANTIALIAS_MODE_ALIASED);
+    cb_data->antialias = (context->drawing_state.antialiasMode != D2D1_ANTIALIAS_MODE_ALIASED)
+            && (outline || !brush || opacity_brush || brush->type == D2D_BRUSH_TYPE_BITMAP);
     cb_data->pad = 0;
     if (!d2d_brush_fill_cb(brush, &cb_data->colour_brush))
         WARN("Failed to initialize colour brush buffer.\n");
