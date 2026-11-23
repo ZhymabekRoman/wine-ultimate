@@ -23,6 +23,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "dcomp_private.h"
+#include "d3d11_4.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
@@ -119,6 +120,10 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             ID3D11Texture2D_Release(visual->cached_copy_tex);
         if (visual->cached_copy_device)
             ID3D11Device_Release(visual->cached_copy_device);
+        if (visual->sc_snap_tex)
+            ID3D11Texture2D_Release(visual->sc_snap_tex);
+        if (visual->sc_snap_device)
+            ID3D11Device_Release(visual->sc_snap_device);
         if (visual->transform)
             IDCompositionTransform_Release(visual->transform);
         if (visual->shared_visual_handle)
@@ -1556,7 +1561,135 @@ static const struct IDCompositionVisualUnknownVtbl visual_unknown_vtbl =
  * buffer), and a bare texture or DXGI surface. A visual with no GPU-backed
  * content publishes no handle, and the consumer composites the tree structure
  * alone, as before. */
-static HRESULT content_get_shared_handle(IUnknown *content, HANDLE *handle)
+/* Snapshot a content swapchain's presented buffer into a dcomp-owned texture.
+ *
+ * d2d1 renders one SwapChainPanel frame as BeginDraw() + Clear(transparent) +
+ * strokes + Present(). dxgi Present() raises the composite-thread event, and the
+ * composite thread then samples buffer 0 asynchronously; d2d1 has already started
+ * the next frame on that same buffer, so a sample taken mid-frame sees the frame
+ * partly cleared to transparent and the window background (the checkerboard)
+ * shows through. Copying buffer 0 into a texture dcomp owns gives the composite
+ * thread a buffer d2d1 never writes to.
+ *
+ * The copy is queued on the same immediate context that rendered the frame, so it
+ * is ordered after that frame's Clear() and strokes: the snapshot is a coherent
+ * whole frame, not a torn one.
+ *
+ * Keyed on IDXGISwapChain::GetLastPresentCount(): exactly one copy per presented
+ * frame, and the copy is skipped when the composite thread runs twice for one
+ * present. Runs on the composite thread only (frame_get_surface and the
+ * shared-content publish path), the visual holds the only reference to the
+ * texture, so no lock is needed. Recreated on resize (buffer format/size change)
+ * and released with the visual. Returns an AddRef'd IDXGISurface, or NULL. */
+IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visual)
+{
+    ID3D11Multithread *multithread = NULL;
+    ID3D11DeviceContext *context = NULL;
+    D3D11_TEXTURE2D_DESC src_desc, desc;
+    ID3D11Texture2D *src = NULL;
+    IDXGISwapChain *swapchain = NULL;
+    ID3D11Device *device = NULL;
+    IDXGISurface *surface = NULL;
+    UINT present_count = 0;
+    HRESULT hr;
+
+    if (!visual || !visual->content)
+        return NULL;
+    if (FAILED(IUnknown_QueryInterface(visual->content, &IID_IDXGISwapChain, (void **)&swapchain)))
+        return NULL;
+
+    IDXGISwapChain_GetLastPresentCount(swapchain, &present_count);
+    if (visual->sc_snap_tex && visual->sc_snap_valid && visual->sc_snap_present_count == present_count)
+    {
+        IDXGISwapChain_Release(swapchain);
+        ID3D11Texture2D_AddRef(visual->sc_snap_tex);
+        return (IDXGISurface *)visual->sc_snap_tex;
+    }
+
+    hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&src);
+    IDXGISwapChain_Release(swapchain);
+    if (FAILED(hr))
+        return NULL;
+
+    ID3D11Texture2D_GetDesc(src, &src_desc);
+    ID3D11Texture2D_GetDevice(src, &device);
+    if (!src_desc.Width || !src_desc.Height || !device)
+    {
+        if (device)
+            ID3D11Device_Release(device);
+        ID3D11Texture2D_Release(src);
+        return NULL;
+    }
+
+    if (!visual->sc_snap_tex || visual->sc_snap_device != device
+            || visual->sc_snap_width != src_desc.Width || visual->sc_snap_height != src_desc.Height
+            || visual->sc_snap_format != src_desc.Format)
+    {
+        ID3D11Texture2D *tex = NULL;
+
+        /* CopyResource needs the same size, format, mip level, array size and
+         * sample count, so only usage/binding are changed. The shader-resource
+         * bind is what both consumers need: the composite blit samples it, and
+         * the cross-process publish path takes its shared handle (as the
+         * cached-copy texture in device.c does). */
+        desc = src_desc;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = 0;
+        if (FAILED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &tex)) || !tex)
+        {
+            ID3D11Device_Release(device);
+            ID3D11Texture2D_Release(src);
+            return NULL;
+        }
+        if (visual->sc_snap_tex)
+            ID3D11Texture2D_Release(visual->sc_snap_tex);
+        if (visual->sc_snap_device)
+            ID3D11Device_Release(visual->sc_snap_device);
+        visual->sc_snap_tex = tex;
+        visual->sc_snap_device = device;
+        visual->sc_snap_width = src_desc.Width;
+        visual->sc_snap_height = src_desc.Height;
+        visual->sc_snap_format = src_desc.Format;
+        visual->sc_snap_valid = FALSE;
+    }
+
+    ID3D11Device_GetImmediateContext(device, &context);
+    if (!context)
+    {
+        ID3D11Device_Release(device);
+        ID3D11Texture2D_Release(src);
+        return NULL;
+    }
+    /* The application renders on this same immediate context from its own thread;
+     * ID3D11Multithread serialises the two users (as do_composite_dxgi_surface does). */
+    if (SUCCEEDED(ID3D11DeviceContext_QueryInterface(context, &IID_ID3D11Multithread, (void **)&multithread)))
+    {
+        ID3D11Multithread_SetMultithreadProtected(multithread, TRUE);
+        ID3D11Multithread_Enter(multithread);
+    }
+    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)visual->sc_snap_tex, (ID3D11Resource *)src);
+    ID3D11DeviceContext_Flush(context);
+    if (multithread)
+    {
+        ID3D11Multithread_Leave(multithread);
+        ID3D11Multithread_Release(multithread);
+    }
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+    ID3D11Texture2D_Release(src);
+
+    visual->sc_snap_present_count = present_count;
+    visual->sc_snap_valid = TRUE;
+
+    hr = ID3D11Texture2D_QueryInterface(visual->sc_snap_tex, &IID_IDXGISurface, (void **)&surface);
+    if (FAILED(hr))
+        return NULL;
+    return surface;
+}
+
+static HRESULT content_get_shared_handle(struct composition_visual *visual, IUnknown *content, HANDLE *handle)
 {
     IDCompositionSurface *surface = NULL;
     IDXGISwapChain *swapchain = NULL;
@@ -1594,13 +1727,21 @@ static HRESULT content_get_shared_handle(IUnknown *content, HANDLE *handle)
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain, (void **)&swapchain)))
     {
-        hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
         IDXGISwapChain_Release(swapchain);
+        /* Publish the retained snapshot, not the live buffer 0: d2d1 clears buffer 0
+         * as soon as it starts the next frame, so a consumer sampling the live buffer
+         * sees it partly transparent (see visual_snapshot_swapchain_content). */
+        texture = (ID3D11Texture2D *)visual_snapshot_swapchain_content(visual);
+        if (texture)
+            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
+        else
+            hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
         if (SUCCEEDED(hr))
         {
-            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
-            ID3D11Texture2D_Release(texture);
+            if (!dxgi_resource)
+                hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
         }
+        ID3D11Texture2D_Release(texture);
     }
     else
     {
@@ -1702,7 +1843,7 @@ static void visual_find_best_shared_content(struct composition_visual *visual,
         return;
     if (visual->content)
     {
-        if (FAILED(content_get_shared_handle(visual->content, &h)) || !h)
+        if (FAILED(content_get_shared_handle(visual, visual->content, &h)) || !h)
             h = visual->shared_content_handle;
         if (h)
         {

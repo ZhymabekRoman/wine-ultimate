@@ -261,6 +261,13 @@ struct composition_visual
     unsigned int composited_transform_version; /* transform/effect version as of last blit */
     HWND composited_hwnd;           /* window last composited into */
     ID3D11Device *cached_copy_device;
+    ID3D11Texture2D *sc_snap_tex;       /* retained copy of the content swapchain's presented buffer 0 */
+    ID3D11Device *sc_snap_device;       /* device sc_snap_tex was created on (AddRef'd) */
+    UINT sc_snap_present_count;         /* GetLastPresentCount() of the frame stored in sc_snap_tex */
+    BOOL sc_snap_valid;                 /* sc_snap_tex holds a presented frame */
+    UINT sc_snap_width;
+    UINT sc_snap_height;
+    DXGI_FORMAT sc_snap_format;
     ID3D11Texture2D *cached_copy_tex;
     ID3D11ShaderResourceView *cached_copy_srv;
     UINT cached_copy_width;
@@ -346,6 +353,7 @@ HRESULT create_target_from_shared_visual_handle(struct composition_device *devic
 HRESULT create_visual(int version, REFIID iid, void **visual);
 HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual);
 void visual_publish_shared_content(struct composition_visual *visual, HANDLE *handle, UINT *width, UINT *height);
+IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visual);
 void shared_visual_target_set_root(HANDLE shared_visual_handle, IDCompositionVisual *visual);
 IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, struct composition_visual *visual);
 HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXGISurface *dxgi_surface, IUnknown **out_surface);
