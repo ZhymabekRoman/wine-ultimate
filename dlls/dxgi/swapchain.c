@@ -225,8 +225,27 @@ struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swap
 /* Exported by dcomp (dcomp.spec). Signal DirectComposition that a composition
  * swapchain pushed a new frame, so its composite thread re-composites the
  * composition target and presents it without waiting for an app
- * IDCompositionDevice::Commit(). dcomp.dll is loaded with this module. */
-void WINAPI wine_dcomp_swapchain_presented( void *swapchain );
+ * IDCompositionDevice::Commit(). Dynamically resolved via GetModuleHandleW so
+ * dxgi.dll has no circular hard import on dcomp.dll and degrades to a no-op if
+ * a native/overridden dcomp.dll lacks the export. */
+static void dxgi_notify_dcomp_presented( void *swapchain )
+{
+    typedef void (WINAPI *pfn_wine_dcomp_swapchain_presented)( void * );
+    static pfn_wine_dcomp_swapchain_presented pfn;
+    static BOOL resolved;
+
+    if (!resolved)
+    {
+        HMODULE dcomp = GetModuleHandleW( L"dcomp.dll" );
+        if (dcomp)
+        {
+            pfn = (pfn_wine_dcomp_swapchain_presented)GetProcAddress( dcomp, "wine_dcomp_swapchain_presented" );
+            resolved = TRUE;
+        }
+    }
+    if (pfn)
+        pfn( swapchain );
+}
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *iface,
         UINT buffer_idx, REFIID riid, void **surface);
@@ -965,7 +984,7 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
          * IDCompositionDevice::Commit(); an app that only calls Present() between
          * commits (e.g. MS Paint strokes) leaves the window on the initial frame.
          * Notify dcomp so its composite thread re-composites now. */
-        wine_dcomp_swapchain_presented( &swapchain->IDXGISwapChain4_iface );
+        dxgi_notify_dcomp_presented( &swapchain->IDXGISwapChain4_iface );
         if (swapchain->frame_latency_semaphore
                 && !ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL))
             ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
