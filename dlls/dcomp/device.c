@@ -866,12 +866,12 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         float opacity, const D2D_RECT_F *clip_rect, BOOL clear, POINT copy_off)
 {
     static const float transparent_clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    static const float black_clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static const float dark_clear[4] = {0.125f, 0.125f, 0.125f, 1.0f};
     static const float light_clear[4] = {0.953f, 0.953f, 0.953f, 1.0f};
     DWORD ex_style = target->hwnd ? GetWindowLongW(target->hwnd, GWL_EXSTYLE) : 0;
     DWORD style = target->hwnd ? GetWindowLongW(target->hwnd, GWL_STYLE) : 0;
-    const float *clear_color = (ex_style & WS_EX_NOREDIRECTIONBITMAP)
-            ? ((style & WS_POPUP) ? transparent_clear : light_clear) : black_clear;
+    const float *clear_color = ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP))
+            ? transparent_clear : (apps_use_light_theme() ? light_clear : dark_clear);
     struct composite_vs_data vs_data;
     struct composite_blit_data blit_data;
     ID3D11ShaderResourceView *srv = NULL;
