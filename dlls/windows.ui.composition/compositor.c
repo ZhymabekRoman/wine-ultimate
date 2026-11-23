@@ -165,7 +165,10 @@ static HRESULT WINAPI compositor_QueryInterface( struct ICompositor *iface, REFI
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1834,7 +1837,10 @@ static HRESULT WINAPI factory_QueryInterface( struct IActivationFactory *iface, 
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }

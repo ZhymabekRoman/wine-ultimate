@@ -309,7 +309,10 @@ static HRESULT WINAPI keyframe_QueryInterface( struct ICompositionAnimation *ifa
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -935,7 +938,10 @@ static HRESULT WINAPI expression_QueryInterface( struct ICompositionAnimation *i
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1218,7 +1224,10 @@ static HRESULT WINAPI easing_QueryInterface( struct ICompositionEasingFunction *
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1426,7 +1435,10 @@ static HRESULT WINAPI inset_clip_QueryInterface( struct ICompositionClip *iface,
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1669,7 +1681,10 @@ static HRESULT WINAPI geometric_clip_QueryInterface( struct ICompositionClip *if
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1917,7 +1932,10 @@ static HRESULT WINAPI color_brush_QueryInterface( struct ICompositionBrush *ifac
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -2094,7 +2112,10 @@ static HRESULT WINAPI mask_brush_QueryInterface( struct ICompositionBrush *iface
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -2344,7 +2365,10 @@ static HRESULT WINAPI effect_brush_QueryInterface( struct ICompositionBrush *ifa
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -2571,7 +2595,10 @@ static HRESULT WINAPI effect_factory_QueryInterface( struct ICompositionEffectFa
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -2754,7 +2781,10 @@ static HRESULT WINAPI surface_brush_QueryInterface( struct ICompositionBrush *if
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -3031,7 +3061,10 @@ static HRESULT WINAPI target_QueryInterface( struct ICompositionTarget *iface, R
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -3303,7 +3336,10 @@ static HRESULT WINAPI graphics_device_QueryInterface( struct ICompositionGraphic
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -3488,7 +3524,10 @@ static HRESULT WINAPI surface_QueryInterface( struct ICompositionSurface *iface,
         if (SUCCEEDED( hr )) return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -3634,7 +3673,10 @@ static HRESULT WINAPI scoped_batch_QueryInterface( struct ICompositionScopedBatc
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -3893,7 +3935,10 @@ static HRESULT WINAPI commit_batch_QueryInterface( struct ICompositionCommitBatc
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }

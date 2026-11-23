@@ -165,7 +165,10 @@ static HRESULT WINAPI propset_QueryInterface( struct ICompositionPropertySet *if
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }

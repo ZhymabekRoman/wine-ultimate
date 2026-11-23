@@ -95,6 +95,13 @@
         return IInspectable_GetTrustLevel( (IInspectable *)&impl->base_iface, trust_level );       \
     }
 
+static inline BOOL is_reference_tracker_target( REFIID iid )
+{
+    static const GUID iid_reference_tracker_target =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    return IsEqualGUID( iid, &iid_reference_tracker_target );
+}
+
 struct compositor;
 struct prop_set;
 struct visual;

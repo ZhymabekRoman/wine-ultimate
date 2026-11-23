@@ -178,7 +178,10 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1211,7 +1214,10 @@ static HRESULT WINAPI collection_QueryInterface( struct IVisualCollection *iface
         return S_OK;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ))
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    else
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
