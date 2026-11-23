@@ -6518,7 +6518,7 @@ static const char shape_ps_code[] =
     "\n"
     "            clip(dot(df, uv.zw));\n"
     "            float dist = length(mul(i.stroke_transform, df)) - abs(uv.x * uv.x - uv.y);\n"
-    "            if (antialias)\n"
+    "            if (antialias && dot(df, df) > 1e-12f)\n"
     "            {\n"
     "                float cov = saturate(0.5f + dist / max(length(df), 1e-6f));\n"
     "                clip(cov - 1e-4f);\n"
