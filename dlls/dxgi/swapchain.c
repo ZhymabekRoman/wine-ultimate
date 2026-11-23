@@ -222,6 +222,12 @@ struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swap
     return impl->wined3d_swapchain;
 }
 
+/* Exported by dcomp (dcomp.spec). Signal DirectComposition that a composition
+ * swapchain pushed a new frame, so its composite thread re-composites the
+ * composition target and presents it without waiting for an app
+ * IDCompositionDevice::Commit(). dcomp.dll is loaded with this module. */
+void WINAPI wine_dcomp_swapchain_presented( void *swapchain );
+
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *iface,
         UINT buffer_idx, REFIID riid, void **surface);
 
@@ -953,6 +959,13 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
          * cloaked/offscreen HWND so XWayland never stalls waiting for wl_surface.frame. */
         if (!(flags & DXGI_PRESENT_DO_NOT_SEQUENCE))
             InterlockedIncrement(&swapchain->present_count);
+        /* A composition swapchain (SwapChainPanel) has no window of its own: the
+         * frame is on screen only once DirectComposition re-composites the target
+         * that has this swapchain as content. dcomp normally re-composites on
+         * IDCompositionDevice::Commit(); an app that only calls Present() between
+         * commits (e.g. MS Paint strokes) leaves the window on the initial frame.
+         * Notify dcomp so its composite thread re-composites now. */
+        wine_dcomp_swapchain_presented( &swapchain->IDXGISwapChain4_iface );
         if (swapchain->frame_latency_semaphore
                 && !ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL))
             ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());

@@ -42,3 +42,4 @@
 @ stdcall DCompPrivates_SetVisualRelativeSize(ptr int64)
 @ stub DCompPrivates_SetVisualSize
 @ stdcall -private wine_dcomp_get_composite_count(ptr)
+@ stdcall wine_dcomp_swapchain_presented(ptr)

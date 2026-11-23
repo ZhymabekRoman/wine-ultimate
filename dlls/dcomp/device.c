@@ -134,6 +134,23 @@ static HANDLE g_commit_completion_event = NULL;
 static HANDLE g_compositor_clock_event = NULL;
 
 /*
+ * Composition-swapchain present signal. dxgi calls wine_dcomp_swapchain_presented()
+ * from IDXGISwapChain1::Present() whenever a composition swapchain (one created by
+ * CreateSwapChainForComposition, e.g. a XAML SwapChainPanel) pushes a new frame. It
+ * raises this auto-reset event; the composite thread (composite_thread_proc) waits on
+ * it in its idle path, so a Present-driven update is picked up on the next tick instead
+ * of waiting for the idle poll throttle. The thread re-runs device_check_swapchains(),
+ * which reads IDXGISwapChain::GetLastPresentCount() per content visual and re-composites
+ * the target when a present count advanced. Raising the event is idempotent (auto-reset,
+ * coalesces), so the event is not re-created per device: it is process-lifetime once the
+ * first composite thread starts. The composite thread's own present of
+ * target->composite_swapchain also routes through this hook; that swapchain is not a
+ * visual's content, so the follow-up check finds no content-version change and the pass
+ * is a cheap no-op: no present<->composite recursion.
+ */
+static HANDLE g_swapchain_present_event = NULL;
+
+/*
  * Compositor-clock waiter registry. A caller of DCompositionWaitForCompositorClock
  * passes the handles it parks on (the CoreMessaging lifted-input workers register the
  * handle the present clock is expected to signal per frame). Each caller handle is
@@ -466,8 +483,8 @@ static const char composite_ps_code[] =
     "        if (cov <= 0.0)\n"
     "            discard;\n"
     "        float3 bg = popup_bg_color.rgb;\n"
-    "        float3 rgb = c.rgb + bg * (1.0 - c.a);\n"
-    "        c = float4(rgb * cov, cov);\n"
+    "        float3 fg = c.rgb + bg * (1.0 - c.a);\n"
+    "        c = float4(lerp(bg, fg, cov), 1.0);\n"
     "    }\n"
     "    return float4(c.rgb * opacity, c.a * opacity);\n"
     "}";
@@ -3261,7 +3278,19 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                         ? refresh_period - elapsed : refresh_period;
 
             if (device->wake_event)
-                WaitForSingleObject(device->wake_event, wait_ms);
+            {
+                HANDLE handles[2];
+                DWORD n = 0, ret;
+
+                handles[n++] = device->wake_event;
+                if (g_swapchain_present_event)
+                    handles[n++] = g_swapchain_present_event;
+                ret = WaitForMultipleObjects(n, handles, FALSE, wait_ms);
+                /* Consume a Present wake that coalesced with this idle window, so the
+                 * re-check below runs against the freshest present count. */
+                if (ret == WAIT_OBJECT_0 + 1 && g_swapchain_present_event)
+                    ResetEvent(g_swapchain_present_event);
+            }
             else
                 Sleep(wait_ms);
             if (device->exit_thread)
@@ -3504,6 +3533,12 @@ void ensure_composite_thread(struct composition_device *device)
          * compositor-clock waiter, not just one. */
         if (!g_compositor_clock_event)
             g_compositor_clock_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+
+        /* Auto-reset: one Present since the composite thread last waited releases one
+         * idle-wake; successive Presents coalesce. Created before the thread starts so
+         * a wine_dcomp_swapchain_presented() from a Present always finds it. */
+        if (!g_swapchain_present_event)
+            g_swapchain_present_event = CreateEventW( NULL, FALSE, FALSE, NULL );
 
         /* Starting a thread reaches the PE loader: ntdll logs the thread creation
          * event under the loader lock. A thread that is inside DllMain owns that
@@ -6227,6 +6262,14 @@ HRESULT WINAPI DCompositionBoostCompositorClock( BOOL boost )
     TRACE( "(%d)\n", boost );
 
     return S_OK;
+}
+
+void WINAPI wine_dcomp_swapchain_presented( void *swapchain )
+{
+    HANDLE event = g_swapchain_present_event;
+
+    if (event)
+        SetEvent( event );
 }
 
 LONG WINAPI wine_dcomp_get_composite_count( IDCompositionDevice *iface )
