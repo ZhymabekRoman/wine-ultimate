@@ -726,9 +726,6 @@ struct d2d_device
     IDXGIDevice *dxgi_device;
     bool allow_get_dxgi_device;
 
-    ID3D10Blob *precompiled_shape_vs[D2D_SHAPE_TYPE_COUNT];
-    ID3D10Blob *precompiled_shape_ps;
-
     struct d2d_indexed_objects shaders;
 };
 

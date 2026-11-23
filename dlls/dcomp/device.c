@@ -35,7 +35,7 @@
 #include "dxgi.h"
 #include "dwmapi.h"
 #include "d3d11_4.h"
-#include "d3dcompiler.h"
+#include "dcomp_shaders.h"
 #include <ddk/d3dkmthk.h>
 #include "ntgdi.h"
 #include "wine/server.h"
@@ -433,60 +433,6 @@ struct composite_blit_data
     FLOAT popup_bg_color[4];    /* theme-aware popup backdrop color (RGB + 1.0) */
 };
 
-static const char composite_vs_code[] =
-    "cbuffer vs_data : register(b0)\n"
-    "{\n"
-    "    float4 m0;\n"
-    "    float4 m1;\n"
-    "    float4 m2;\n"
-    "    float4 m3;\n"
-    "};\n"
-    "void main(in float4 in_position : POSITION,\n"
-    "          in float2 in_texcoord : TEXCOORD,\n"
-    "          out float4 position : SV_Position,\n"
-    "          out float2 texcoord : TEXCOORD)\n"
-    "{\n"
-    "     float4 p = float4(in_position.xy, 0.0, 1.0);\n"
-    "     position = p.x * m0 + p.y * m1 + p.z * m2 + p.w * m3;\n"
-    "     texcoord = in_texcoord;\n"
-    "}";
-
-static const char composite_ps_code[] =
-    "Texture2D src_texture : register(t0);\n"
-    "SamplerState sam_linear : register(s0);\n"
-    "cbuffer blit_data : register(b0)\n"
-    "{\n"
-    "    float opacity;\n"
-    "    float replace_popup_black;\n"
-    "    float backdrop_radius;\n"
-    "    float pad;\n"
-    "    float4 clip_rect; /* left, top, right, bottom in device pixels */\n"
-    "    float4 backdrop_rect; /* left, top, right, bottom in device pixels */\n"
-    "    float4 popup_bg_color; /* theme-aware popup backdrop color */\n"
-    "};\n"
-    "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET\n"
-    "{\n"
-    "    float2 px = pos.xy - float2(0.5, 0.5);\n"
-    "    if (px.x < clip_rect.x || px.y < clip_rect.y || px.x > clip_rect.z || px.y > clip_rect.w)\n"
-    "        discard;\n"
-    "    float4 c = src_texture.Sample(sam_linear, uv);\n"
-    "    if (replace_popup_black > 0.5 && c.a > 0.99 && c.r < 0.005 && c.g < 0.005 && c.b < 0.005)\n"
-    "        c = float4(popup_bg_color.rgb, 1.0);\n"
-    "    if (backdrop_rect.z > backdrop_rect.x && backdrop_rect.w > backdrop_rect.y)\n"
-    "    {\n"
-    "        float2 center = 0.5 * (backdrop_rect.xy + backdrop_rect.zw);\n"
-    "        float2 half_size = 0.5 * (backdrop_rect.zw - backdrop_rect.xy);\n"
-    "        float r = min(backdrop_radius, min(half_size.x, half_size.y));\n"
-    "        float2 q = abs(px - center) - (half_size - float2(r, r));\n"
-    "        float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n"
-    "        if (dist > 0.0)\n"
-    "            discard;\n"
-    "        float3 bg = popup_bg_color.rgb;\n"
-    "        c = float4(c.rgb + bg * (1.0 - c.a), 1.0);\n"
-    "    }\n"
-    "    return float4(c.rgb * opacity, c.a * opacity);\n"
-    "}";
-
 /*
  * Per-target zero-copy presentation swapchain. Its back buffer is the wined3d
  * texture that owns the target window's drawable; content is sampled into it
@@ -591,7 +537,6 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
 static HRESULT ensure_composite_pipeline(struct composition_target *target,
         ID3D11Device1 *d3d11_device)
 {
-    static ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
     static const struct
     {
         struct { float x, y; } position;
@@ -618,32 +563,14 @@ static HRESULT ensure_composite_pipeline(struct composition_target *target,
     if (target->composite_vs)
         return S_OK;
 
-    if (!vs_blob)
-    {
-        hr = D3DCompile(composite_vs_code, sizeof(composite_vs_code) - 1, "vs", NULL, NULL, "main",
-                        "vs_4_0", 0, 0, &vs_blob, NULL);
-        if (FAILED(hr))
-        {
-            ERR("Failed to compile vertex shader, hr %#lx.\n", hr);
-            return hr;
-        }
-        hr = D3DCompile(composite_ps_code, sizeof(composite_ps_code) - 1, "ps", NULL, NULL, "main",
-                        "ps_4_0", 0, 0, &ps_blob, NULL);
-        if (FAILED(hr))
-        {
-            ERR("Failed to compile pixel shader, hr %#lx.\n", hr);
-            return hr;
-        }
-    }
-
-    if (FAILED(hr = ID3D11Device1_CreateVertexShader(d3d11_device, ID3D10Blob_GetBufferPointer(vs_blob),
-            ID3D10Blob_GetBufferSize(vs_blob), NULL, &target->composite_vs)))
+    if (FAILED(hr = ID3D11Device1_CreateVertexShader(d3d11_device, dcomp_composite_vs_dxbc,
+            sizeof(dcomp_composite_vs_dxbc), NULL, &target->composite_vs)))
         return hr;
-    if (FAILED(hr = ID3D11Device1_CreatePixelShader(d3d11_device, ID3D10Blob_GetBufferPointer(ps_blob),
-            ID3D10Blob_GetBufferSize(ps_blob), NULL, &target->composite_ps)))
+    if (FAILED(hr = ID3D11Device1_CreatePixelShader(d3d11_device, dcomp_composite_ps_dxbc,
+            sizeof(dcomp_composite_ps_dxbc), NULL, &target->composite_ps)))
         return hr;
     if (FAILED(hr = ID3D11Device1_CreateInputLayout(d3d11_device, layout_desc, ARRAY_SIZE(layout_desc),
-            ID3D10Blob_GetBufferPointer(vs_blob), ID3D10Blob_GetBufferSize(vs_blob),
+            dcomp_composite_vs_dxbc, sizeof(dcomp_composite_vs_dxbc),
             &target->composite_input_layout)))
         return hr;
 
