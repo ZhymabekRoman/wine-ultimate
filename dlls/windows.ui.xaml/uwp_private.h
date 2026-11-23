@@ -848,6 +848,7 @@ struct xaml_element
     IInspectable IWebView22_iface;
     IInspectable IUIElement_iface;
     IInspectable IFrameworkElement_iface;
+    IInspectable ITextBlock_iface;
     IInspectable IDependencyObject_iface;
     IUnknown IWeakReferenceSource_iface;
     struct xaml_weak_ref *weak_ref;

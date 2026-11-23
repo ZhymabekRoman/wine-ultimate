@@ -1489,7 +1489,6 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IUIElementOverrides ) ||
         IsEqualGUID( iid, &IID_IFrameworkElementOverrides ) ||
         IsEqualGUID( iid, &IID_IImage ) ||
-        IsEqualGUID( iid, &IID_ITextBlock ) ||
         IsEqualGUID( iid, &IID_IRectangle ) ||
         IsEqualGUID( iid, &IID_IShape ) ||
         IsEqualGUID( iid, &IID_IViewbox ) ||
@@ -1512,6 +1511,13 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ))
     {
         *out = &impl->IFrameworkElement_iface;
+        element_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ITextBlock ))
+    {
+        *out = &impl->ITextBlock_iface;
         element_AddRef( &impl->IInspectable_iface );
         return S_OK;
     }
@@ -2824,6 +2830,52 @@ static const void *framework_element_vtbl[96] =
     [77 ... 95] = element_generic_slot,
 };
 
+static inline struct xaml_element *impl_from_ITextBlock( void *iface )
+{
+    return CONTAINING_RECORD( (IInspectable *)iface, struct xaml_element, ITextBlock_iface );
+}
+static HRESULT WINAPI tb_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct xaml_element *impl = impl_from_ITextBlock( iface );
+    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI tb_AddRef( void *iface )
+{
+    struct xaml_element *impl = impl_from_ITextBlock( iface );
+    return element_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI tb_Release( void *iface )
+{
+    struct xaml_element *impl = impl_from_ITextBlock( iface );
+    return element_Release( &impl->IInspectable_iface );
+}
+static HRESULT WINAPI tb_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    struct xaml_element *impl = impl_from_ITextBlock( iface );
+    return element_GetIids( &impl->IInspectable_iface, count, iids );
+}
+static HRESULT WINAPI tb_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    struct xaml_element *impl = impl_from_ITextBlock( iface );
+    return element_GetRuntimeClassName( &impl->IInspectable_iface, name );
+}
+static HRESULT WINAPI tb_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    struct xaml_element *impl = impl_from_ITextBlock( iface );
+    return element_GetTrustLevel( &impl->IInspectable_iface, level );
+}
+
+static const void *textblock_vtbl[64] =
+{
+    [0] = tb_QueryInterface,
+    [1] = tb_AddRef,
+    [2] = tb_Release,
+    [3] = tb_GetIids,
+    [4] = tb_GetRuntimeClassName,
+    [5] = tb_GetTrustLevel,
+    [6 ... 63] = element_generic_slot,
+};
+
 HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
 {
     struct xaml_element *impl;
@@ -2839,6 +2891,7 @@ HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instan
     impl->IWebView22_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv22_vtbl );
     impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( uielement_vtbl, 256 );
     impl->IFrameworkElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( framework_element_vtbl, 96 );
+    impl->ITextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)textblock_vtbl;
     impl->IDependencyObject_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup_n( wv2_do_vtbl, 64 );
     impl->IWeakReferenceSource_iface.lpVtbl = (const IUnknownVtbl *)weak_src_vtbl;
     impl->class_name = L"Windows.UI.Xaml.Controls.Grid";
