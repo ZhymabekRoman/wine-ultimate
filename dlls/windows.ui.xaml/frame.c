@@ -65,12 +65,8 @@ static const GUID IID_IGrid =
     { 0xc4496219, 0x9014, 0x58a1, { 0xb4, 0xad, 0xc5, 0x04, 0x49, 0x13, 0xa5, 0xbb } };
 /* WinUI3 (Microsoft.UI.Xaml.Controls.Grid) interface versions asked by the
  * .NET 8 projection when casting RootVisual children to Grid / app views. */
-static const GUID IID_IGrid_WinUI =
-    { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
 static const GUID IID_IGrid_WinUI2 =
     { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
-static const GUID IID_IGrid_v1 =
-    { 0xf6790987, 0xe6e5, 0x47f2, { 0x92, 0xc6, 0xec, 0xcc, 0xe4, 0xba, 0x15, 0x9a } };
 static const GUID IID_IView_IV1 =
     { 0x9e5f3ed0, 0xcf1c, 0x5d38, { 0x83, 0x2c, 0xac, 0xea, 0x61, 0x64, 0xbf, 0x5c } };
 static const GUID IID_IView_IV2 =
@@ -1429,9 +1425,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
     if (impl->is_webview)
     {
         if (IsEqualGUID( iid, &IID_IWebView2_g ) ||
-            IsEqualGUID( iid, &IID_IGrid_WinUI ) ||
-            IsEqualGUID( iid, &IID_IGrid_WinUI2 ) ||
-            IsEqualGUID( iid, &IID_IGrid_v1 ))
+            IsEqualGUID( iid, &IID_IGrid_WinUI2 ))
         {
             /* WinUI3 WebView2 IV1/IV2: serve the real IWebView2 vtbl, not the
              * generic element slots (r100: get_double outs AV webview calls). */
@@ -1472,9 +1466,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
     }
 
     if (IsEqualGUID( iid, &IID_IGrid ) ||
-        IsEqualGUID( iid, &IID_IGrid_WinUI ) ||
         IsEqualGUID( iid, &IID_IGrid_WinUI2 ) ||
-        IsEqualGUID( iid, &IID_IGrid_v1 ) ||
         IsEqualGUID( iid, &IID_IView_IV1 ) ||
         IsEqualGUID( iid, &IID_IView_IV2 ) ||
         IsEqualGUID( iid, &IID_ICanvas ) ||
@@ -1535,23 +1527,11 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         }
     }
 
-    if (impl->outer && (IsEqualGUID( iid, &IID_IComponentConnector_x ) ||
-                        IsEqualGUID( iid, &IID_IComponentConnector_UWP )))
+    if (IsEqualGUID( iid, &IID_IComponentConnector_x ) ||
+        IsEqualGUID( iid, &IID_IComponentConnector_UWP ))
     {
-        /* The app's compiled BindComponent walks the visual tree via the
-         * connector it QIs off each element. When our synthetic tree feeds a
-         * connector back onto its own element the walk cycles: one Grid gets
-         * QI'd 18k times nested on the stack (~3.4 KB/level, stack overflow
-         * even at 16 MB). Answer the first 128 connector requests per element;
-         * past that report E_NOINTERFACE so the binder treats the element as
-         * a leaf and unwinds. */
-        if (impl->qi_count > 16)
-        {
-            *out = NULL;
-            return E_NOINTERFACE;
-        }
-        impl->qi_count++;
-        return IInspectable_QueryInterface( impl->outer, iid, out );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     ERR( "element_QueryInterface %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
