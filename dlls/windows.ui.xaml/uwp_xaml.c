@@ -1474,6 +1474,9 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IPopup_UWP ) ||
              IsEqualGUID( iid, &IID_IPopup2_UWP ) ||
              IsEqualGUID( iid, &IID_IPopup3_UWP ) ||
+             IsEqualGUID( iid, &IID_IPopup_WinUI ) ||
+             IsEqualGUID( iid, &IID_IPopup2_WinUI ) ||
+             IsEqualGUID( iid, &IID_IPopup3_WinUI ) ||
              IsEqualGUID( iid, &IID_IStyle_UWP ) ||
              IsEqualGUID( iid, &IID_ISetter_UWP ) ||
              IsEqualGUID( iid, &IID_ISetterBase_UWP ) ||
