@@ -5843,6 +5843,22 @@ static ULONG WINAPI glyphrunanalysis_Release(IDWriteGlyphRunAnalysis *iface)
     return refcount;
 }
 
+static int glyphrunanalysis_adjust_origin_y(const struct dwrite_glyphrunanalysis *analysis,
+        const struct dwrite_fontface *fontface, const RECT *bbox, float emsize, int orig_y)
+{
+    if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0)
+    {
+        float scaled_emsize = emsize * (analysis->m.m22 != 0.0f ? fabsf(analysis->m.m22) : 1.0f);
+        int emsize_px = (int)floorf(scaled_emsize + 0.5f);
+
+        if (fontface && fontface->metrics.descent == 0 && -bbox->top >= emsize_px)
+            return orig_y + (-bbox->top - emsize_px) + 1;
+        if (bbox->top + orig_y == -1)
+            return orig_y + 1;
+    }
+    return orig_y;
+}
+
 static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *analysis, RECT *bounds)
 {
     struct dwrite_fontface *fontface = unsafe_impl_from_IDWriteFontFace(analysis->run.fontFace);
@@ -5877,11 +5893,7 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
             analysis->max_glyph_bitmap_size = bitmap_size;
 
         orig_x = analysis->origins[i].x;
-        orig_y = analysis->origins[i].y;
-        if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 &&
-                (bbox->top + orig_y == -1 ||
-                (fontface && fontface->metrics.descent == 0 && -bbox->top == (int)floorf(glyph_bitmap.emsize + 0.5f))))
-            orig_y++;
+        orig_y = glyphrunanalysis_adjust_origin_y(analysis, fontface, bbox, glyph_bitmap.emsize, analysis->origins[i].y);
         OffsetRect(bbox, orig_x, orig_y);
         UnionRect(&analysis->bounds, &analysis->bounds, bbox);
     }
@@ -5980,11 +5992,7 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
 
         {
             int orig_x = analysis->origins[i].x;
-            int orig_y = analysis->origins[i].y;
-            if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 &&
-                    (bbox->top + orig_y == -1 ||
-                    (fontface && fontface->metrics.descent == 0 && -bbox->top == (int)floorf(glyph_bitmap.emsize + 0.5f))))
-                orig_y++;
+            int orig_y = glyphrunanalysis_adjust_origin_y(analysis, fontface, bbox, glyph_bitmap.emsize, analysis->origins[i].y);
             OffsetRect(bbox, orig_x, orig_y);
         }
 
