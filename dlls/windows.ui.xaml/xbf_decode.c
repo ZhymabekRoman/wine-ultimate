@@ -1651,11 +1651,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
     else if (ctx && pid < ctx->prop_cnt)
     {
         const struct xbf_prop_info *pi = &ctx->props[pid];
-        if (!wcscmp( pi->name, L"Name" ) && sval && sval[0])
-        {
-            lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
-        }
-        else if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
+        if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
                  (el->kind == UWP_KIND_TEXT_BLOCK || wcsstr( el->class_name, L"Run" ) || wcsstr( el->class_name, L"Inline" )))
         {
             lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );

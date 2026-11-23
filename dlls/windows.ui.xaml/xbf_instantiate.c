@@ -1169,6 +1169,10 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                                      !wcscmp( pname, L"VirtualKeyShiftChord" ) ||
                                      !wcscmp( pname, L"VirtualKeyControlShiftChord" ));
                     BOOL is_vk = (!wcscmp( pname, L"VirtualKey" ) || is_chord);
+                    BOOL is_text_prop = (!wcscmp( pname, L"Text" ) || !wcscmp( pname, L"Content" ) ||
+                                         !wcscmp( pname, L"Glyph" ) || !wcscmp( pname, L"Label" ) ||
+                                         !wcscmp( pname, L"Header" ) || !wcscmp( pname, L"Title" ) ||
+                                         !wcscmp( pname, L"PlaceholderText" ) || !wcscmp( pname, L"Character" ));
                     if (is_chord)
                     {
                         UINT vk = uwp_parse_vk_string( resolved );
@@ -1178,7 +1182,9 @@ void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element
                         if (vk)
                             uwp_accel_register( NULL, target_el, vk, mods, TRUE );
                     }
-                    if (pid == XBF_PROP_CONTENT || pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV || pid == XBF_PROP_TEXTBLOCK_TEXT || (!is_vk && !target_el->text[0]))
+                    if (pid == XBF_PROP_CONTENT || pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
+                        pid == XBF_PROP_TEXTBLOCK_TEXT || pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
+                        pid == 0x80fa || (!is_vk && is_text_prop && !target_el->text[0]))
                         lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
                 }
                 if (ctx->aot && node_idx_stack[obj_sp - 1] != (~0u) && last_popped_node_idx != (~0u))

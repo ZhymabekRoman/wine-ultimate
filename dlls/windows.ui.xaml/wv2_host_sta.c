@@ -115,6 +115,8 @@ static BOOL g_wv2_alt_down;
 #define WM_APP_WV2_INIT  (WM_APP + 0x5d)
 #define WM_APP_WV2_RESIZE (WM_APP + 0x5e)
 #define WV2_CHILD_SYNC_TIMER_ID 0x57563201
+#define WV2_CHILD_SYNC_MAX_TICKS 40
+static UINT g_wv2_child_sync_ticks;
 
 static BOOL CALLBACK wv2_post_wheel_cb( HWND child, LPARAM lparam )
 {
@@ -581,7 +583,8 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
     }
     if (msg == WM_TIMER && wparam == WV2_CHILD_SYNC_TIMER_ID)
     {
-        if (!g_active_wv2_impl)
+        if (!g_active_wv2_impl && xaml_get_app_caps()->winui3 &&
+            ++g_wv2_child_sync_ticks < WV2_CHILD_SYNC_MAX_TICKS)
             wv2_sync_child_hwnds( hwnd, 0, 0 );
         else
             KillTimer( hwnd, WV2_CHILD_SYNC_TIMER_ID );
@@ -679,8 +682,11 @@ void wv2_ensure_host_subclass( HWND parent )
     {
         g_wv2_prev_wndproc = prev;
         g_wv2_subclassed_hwnd = parent;
-        if (!g_active_wv2_impl)
+        if (!g_active_wv2_impl && xaml_get_app_caps()->winui3)
+        {
+            g_wv2_child_sync_ticks = 0;
             SetTimer( parent, WV2_CHILD_SYNC_TIMER_ID, 250, NULL );
+        }
         ERR( "wv2_ensure_host_subclass: subclassed parent=%p prev=%p\n", parent, prev );
     }
 }
