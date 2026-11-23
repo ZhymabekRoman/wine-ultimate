@@ -407,6 +407,11 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el) uwp_fire_loaded_tree( ch );
     }
+    if (el->pane)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->pane );
+        if (ch && ch != el) uwp_fire_loaded_tree( ch );
+    }
     if (el->children_coll)
     {
         struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );

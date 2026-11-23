@@ -955,8 +955,10 @@ void uwp_fire_evc_if_needed( struct uwp_element *impl )
 static HRESULT WINAPI uwp_fe7_get_IsLoaded( IInspectable *iface, boolean *val )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IFrameworkElement7_iface );
+    struct uwp_element *p;
     BOOL loaded = impl->loaded_fired;
-    if (!loaded && impl->parent && impl->parent->loaded_fired) loaded = TRUE;
+    for (p = impl->parent; !loaded && p; p = p->parent)
+        if (p->loaded_fired) loaded = TRUE;
     TRACE( "uwp_fe7_get_IsLoaded(%s, %s) -> %d (w=%.0f h=%.0f)\n",
            debugstr_w(impl->class_name), debugstr_w(impl->name), loaded, impl->actual_w, impl->actual_h );
     if (val) *val = loaded ? TRUE : FALSE;
