@@ -2208,6 +2208,11 @@ static HRESULT WINAPI time_trigger_factory_QueryInterface( void *iface, REFIID i
         *out = NULL;
         return E_NOINTERFACE;
     }
+    if (IsEqualGUID( iid, &IID_ITimeTriggerFactory_local ))
+    {
+        *out = &time_trigger_factory_obj;
+        return S_OK;
+    }
     *out = &time_trigger_factory_obj;
     return S_OK;
 }
@@ -2247,6 +2252,11 @@ static HRESULT WINAPI sys_trigger_factory_QueryInterface( void *iface, REFIID ii
     {
         *out = NULL;
         return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_ISystemTriggerFactory_local ))
+    {
+        *out = &sys_trigger_factory_obj;
+        return S_OK;
     }
     *out = &sys_trigger_factory_obj;
     return S_OK;
@@ -2375,7 +2385,9 @@ static void package_installed_location( WCHAR *buf, DWORD cch )
     buf[0] = 0;
 }
 
-static WCHAR resource_loader_scope[256];
+static WCHAR resource_loader_scope[256];    /* normalized loader scope, '\' separators */
+static WCHAR resource_loader_primary[256];  /* part before '/': secondary .pri name */
+static pri_index *scope_pri_index;          /* resources of the secondary .pri, if any */
 
 static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **context )
 {
@@ -2411,11 +2423,74 @@ static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **conte
     return TRUE;
 }
 
+/* Load the secondary .pri file named by the primary part of a
+ * "Primary/ResourceName" loader name (e.g. "Microsoft.UI.Xaml/Assets",
+ * "WhatsApp.WebView2.LocalizationResources/AppResources"): <Primary>.pri
+ * sits next to the package's resources.pri, in the exe dir / installed
+ * location. */
+static pri_index *load_named_pri( const WCHAR *primary )
+{
+    static const WCHAR pri_ext[] = L".pri";
+    WCHAR dir[2048], path[4096];
+    pri_index *idx;
+    DWORD len;
+
+    len = GetModuleFileNameW( NULL, dir, ARRAY_SIZE( dir ) );
+    if (len && len < ARRAY_SIZE( dir ) && wcsrchr( dir, '\\' ))
+    {
+        *wcsrchr( dir, '\\' ) = 0;
+        lstrcpyW( path, dir );
+        lstrcatW( path, L"\\" );
+        lstrcatW( path, primary );
+        lstrcatW( path, pri_ext );
+        if ((idx = pri_load( path ))) return idx;
+    }
+
+    package_installed_location( dir, ARRAY_SIZE( dir ) );
+    if (dir[0])
+    {
+        lstrcpyW( path, dir );
+        lstrcatW( path, L"\\" );
+        lstrcatW( path, primary );
+        lstrcatW( path, pri_ext );
+        return pri_load( path );
+    }
+    return NULL;
+}
+
+/* Store the loader scope from a factory entry point name.  WinRT spells the
+ * scope with '/' separators ("Primary/ResourceName"); PRI full names join
+ * their tree with '\', so normalize the separators.  When the name carries a
+ * primary part, load the matching secondary .pri: its resources (top scope
+ * "ResourceName") are not in the package resources.pri. */
+static void set_resource_loader_scope( const WCHAR *raw )
+{
+    WCHAR norm[256], *p;
+    const WCHAR *slash;
+
+    if (!raw || !raw[0]) return;
+    lstrcpynW( norm, raw, ARRAY_SIZE( norm ) );
+    for (p = norm; *p; p++) if (*p == L'/') *p = L'\\';
+    if (!lstrcmpW( norm, resource_loader_scope )) return;
+    lstrcpynW( resource_loader_scope, norm, ARRAY_SIZE( resource_loader_scope ) );
+    pri_release( scope_pri_index );
+    scope_pri_index = NULL;
+    resource_loader_primary[0] = 0;
+    if ((slash = wcschr( norm, L'\\' )) && slash != norm)
+    {
+        lstrcpynW( resource_loader_primary, norm, (INT)(slash - norm) + 1 );
+        scope_pri_index = load_named_pri( resource_loader_primary );
+        ERR( "TWINAPI: loader scope %s, primary %s, secondary pri %s\n", debugstr_w( resource_loader_scope ),
+             debugstr_w( resource_loader_primary ), scope_pri_index ? "loaded" : "missing" );
+    }
+}
+
 /* Resolve a resource key against the cached index.  A bare key is tried in
  * the main map, then under the default "Resources" scope, any named loader
  * scope, top-level PRI scopes, and the "Files" scope (ms-resource file URIs);
- * the scope prefix is skipped when the key already carries one.  On success
- * *value holds the string. */
+ * the scope prefix is skipped when the key already carries one.  A named
+ * loader scope with a secondary .pri ("Primary/ResourceName") searches that
+ * file first.  On success *value holds the string. */
 static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
 {
     static const WCHAR *const scopes[] = { L"", L"Resources\\", L"Files\\" };
@@ -2427,9 +2502,38 @@ static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
     if (!cached_pri_index || !key[0]) return E_FAIL;
     if (resource_loader_scope[0])
     {
+        /* Split-package pri files key candidates under the resource-map name
+         * alone ("AppResources\\Key"), the primary package name is only the
+         * .pri file selector.  Try <map>\<key> first, then the raw scope. */
+        const WCHAR *map = resource_loader_scope;
+        WCHAR *slash = wcschr( map, L'\\' );
+        if (slash) map = slash + 1;
+        lstrcpyW( full, map );
+        lstrcatW( full, L"\\" );
+        lstrcatW( full, key );
+        if (scope_pri_index
+            && pri_lookup( scope_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        {
+            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+            pri_free_result( val, NULL );
+            return hr;
+        }
+        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        {
+            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+            pri_free_result( val, NULL );
+            return hr;
+        }
         lstrcpyW( full, resource_loader_scope );
         lstrcatW( full, L"\\" );
         lstrcatW( full, key );
+        if (scope_pri_index
+            && pri_lookup( scope_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        {
+            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+            pri_free_result( val, NULL );
+            return hr;
+        }
         if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
         {
             HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
@@ -2511,6 +2615,16 @@ static HRESULT WINAPI language_GetRuntimeClassName( void *iface, HSTRING *name )
     return WindowsCreateString( L"Windows.Globalization.Language", 31, name );
 }
 
+static HRESULT WINAPI language_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    if (!(*iids = CoTaskMemAlloc( 2 * sizeof(**iids) ))) return E_OUTOFMEMORY;
+    (*iids)[0] = IID_IInspectable;
+    (*iids)[1] = IID_ILanguage;
+    *count = 2;
+    return S_OK;
+}
+
 static HRESULT WINAPI language_get_LanguageTag( void *iface, HSTRING *value )
 {
     if (!value) return E_POINTER;
@@ -2540,7 +2654,7 @@ static const void *language_vtbl[] =
     language_QueryInterface,
     dummy_async_AddRef,
     dummy_async_Release,
-    resource_loader_GetIids,
+    language_GetIids,
     language_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
     language_get_LanguageTag,
@@ -2590,8 +2704,16 @@ static HRESULT WINAPI resource_loader2_QueryInterface( void *iface, REFIID iid, 
 
 static HRESULT WINAPI resource_loader_GetIids( void *iface, ULONG *count, IID **iids )
 {
-    if (count) *count = 0;
-    if (iids) *iids = NULL;
+    static const IID *iids_arr[] = { &IID_IInspectable, &IID_IResourceLoader, &IID_IResourceLoader2 };
+    IID *iid;
+    SIZE_T i;
+
+    if (!count || !iids) return E_POINTER;
+    if (!(iid = CoTaskMemAlloc( ARRAY_SIZE( iids_arr ) * sizeof(*iid) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < ARRAY_SIZE( iids_arr ); i++)
+        iid[i] = *iids_arr[i];
+    *count = ARRAY_SIZE( iids_arr );
+    *iids = iid;
     return S_OK;
 }
 
@@ -2604,7 +2726,6 @@ static HRESULT WINAPI resource_loader_GetRuntimeClassName( void *iface, HSTRING 
 static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
 {
     const WCHAR *str = WindowsGetStringRawBuffer( resource, NULL );
-    HRESULT hr;
 
     TRACE( "resource_loader_GetString resource %s\n", debugstr_hstring( resource ) );
     if (!value) return E_POINTER;
@@ -2693,8 +2814,9 @@ static HRESULT WINAPI resource_loader_put_Culture( void *iface, void *value )
  * constructor, ...), empty when the loader is the package's default one. */
 static HRESULT WINAPI resource_loader_get_PriName( void *iface, HSTRING *value )
 {
+    const WCHAR *name = resource_loader_primary[0] ? resource_loader_primary : resource_loader_scope;
     if (!value) return E_POINTER;
-    return WindowsCreateString( resource_loader_scope, (UINT32)lstrlenW( resource_loader_scope ), value );
+    return WindowsCreateString( name, (UINT32)lstrlenW( name ), value );
 }
 
 /* IResourceLoader: GetString, GetStringForUri, get_Culture. */
@@ -2798,7 +2920,7 @@ static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     ERR( "TWINAPI: CreateResourceLoaderByName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
-    if (raw && raw[0]) lstrcpynW( resource_loader_scope, raw, ARRAY_SIZE( resource_loader_scope ) );
+    set_resource_loader_scope( raw );
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
 }
@@ -2822,7 +2944,7 @@ static HRESULT WINAPI resource_loader_statics2_GetForCurrentViewWithName( void *
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     ERR( "TWINAPI: GetForCurrentViewWithName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
-    if (raw && raw[0]) lstrcpynW( resource_loader_scope, raw, ARRAY_SIZE( resource_loader_scope ) );
+    set_resource_loader_scope( raw );
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
 }
@@ -2838,7 +2960,7 @@ static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUseWithName(
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     ERR( "TWINAPI: GetForViewIndependentUseWithName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
-    if (raw && raw[0]) lstrcpynW( resource_loader_scope, raw, ARRAY_SIZE( resource_loader_scope ) );
+    set_resource_loader_scope( raw );
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
 }

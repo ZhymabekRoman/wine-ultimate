@@ -128,8 +128,8 @@ struct pri_index
     BYTE *value_types;            /* decoded resource value type table */
     UINT32 value_type_count;
 
-    WORD *item_decision;          /* [item index] -> decision, 0xffff = none */
-    WORD *item_firstcand;         /* [item index] -> first candidate index */
+    DWORD *item_decision;         /* [item index] -> decision, 0xffffffff = none */
+    DWORD *item_firstcand;        /* [item index] -> first candidate index */
 
     struct pri_qualinfo *quals;
     UINT32 qual_count;
@@ -231,12 +231,12 @@ static BOOL parse_sections( pri_index *idx )
 
         if (off > idx->size || size < PRI_SEC_HEADER_SIZE || first_sec + off + size > idx->size)
         {
-            WARN( "section %u out of bounds (off %#x size %#x)\n", i, (unsigned int)off, (unsigned int)size );
+            WARN( "section %lu out of bounds (off %#x size %#x)\n", i, (unsigned int)off, (unsigned int)size );
             return FALSE;
         }
         if (get32( idx->map + first_sec + off + 24 ) != size)
         {
-            WARN( "section %u header length %u != directory %u\n", i,
+            WARN( "section %lu header length %u != directory %u\n", i,
                   (unsigned int)get32( idx->map + first_sec + off + 24 ), (unsigned int)size );
             return FALSE;
         }
@@ -541,6 +541,9 @@ static BOOL parse_resmap( pri_index *idx )
     if (pos + nvtype * 8 + n2g * 4 + ngrp * 4 + ninfo * 4 + get32( d + 28 ) + ncand * 8 + get32( d + 24 ) > size)
         return FALSE;
 
+    TRACE( "resmap: nvtype %u n2g %u ngrp %u ninfo %lu ncand %lu ext %lu emb %lu size %lu\n",
+           nvtype, n2g, ngrp, ninfo, ncand, (unsigned long)get32( d + 28 ),
+           (unsigned long)get32( d + 24 ), size );
     if (nvtype && !(idx->value_types = HeapAlloc( GetProcessHeap(), 0, nvtype ))) return FALSE;
     for (i = 0; i < nvtype; i++) idx->value_types[i] = (BYTE)get32( d + pos + i * 8 + 4 );
     idx->value_type_count = nvtype;
@@ -550,12 +553,13 @@ static BOOL parse_resmap( pri_index *idx )
         return FALSE;
     if (!(idx->item_decision = HeapAlloc( GetProcessHeap(), 0, idx->item_count * sizeof(*idx->item_decision) )))
         return FALSE;
-    for (i = 0; i < idx->item_count; i++) idx->item_decision[i] = idx->item_firstcand[i] = 0xffff;
+    for (i = 0; i < idx->item_count; i++) idx->item_decision[i] = idx->item_firstcand[i] = 0xffffffff;
 
     {
         const BYTE *i2g  = d + pos;
         const BYTE *grp  = i2g + n2g * 4;
         const BYTE *info = grp + ngrp * 4;
+        DWORD large_sz = get32( d + 28 );
         for (i = 0; i < n2g; i++)
         {
             WORD first_item = get16( i2g + i * 4 );
@@ -573,7 +577,64 @@ static BOOL parse_resmap( pri_index *idx )
                 idx->item_firstcand[item] = get16( info + ii * 4 + 2 );
             }
         }
-        pos += n2g * 4 + ngrp * 4 + ninfo * 4 + get32( d + 28 );
+        pos += n2g * 4 + ngrp * 4 + ninfo * 4;
+        /* table extension: u32 (u16-count overflow) continuations of the
+         * i2g / group / iteminfo tables; group and iteminfo indices past the
+         * u16 counts index into the u32 tables */
+        if (large_sz >= 12)
+        {
+            const BYTE *ld = d + pos;
+            DWORD ln2g = get32( ld );
+            DWORD lngrp = get32( ld + 4 );
+            DWORD lninfo = get32( ld + 8 );
+            TRACE( "resmap: ext ln2g %lu lngrp %lu lninfo %lu\n", ln2g, lngrp, lninfo );
+            if (12 + (UINT64)ln2g * 8 + (UINT64)lngrp * 8 + (UINT64)lninfo * 8 <= large_sz)
+            {
+                const BYTE *li2g = ld + 12;
+                const BYTE *lgrp = li2g + ln2g * 8;
+                const BYTE *linfo = lgrp + lngrp * 8;
+                for (i = 0; i < ln2g; i++)
+                {
+                    DWORD first_item = get32( li2g + i * 8 );
+                    DWORD gidx = get32( li2g + i * 8 + 4 );
+                    DWORD gsize, gfirst, j;
+                    if (gidx >= ngrp && gidx - ngrp < lngrp)
+                    {
+                        gsize = get32( lgrp + (gidx - ngrp) * 8 );
+                        gfirst = get32( lgrp + (gidx - ngrp) * 8 + 4 );
+                    }
+                    else if (gidx < ngrp)
+                    {
+                        gsize = get16( grp + gidx * 4 );
+                        gfirst = get16( grp + gidx * 4 + 2 );
+                    }
+                    else
+                    {
+                        gsize = 1;
+                        gfirst = gidx - ngrp - lngrp;
+                    }
+                    for (j = 0; j < gsize; j++)
+                    {
+                        DWORD item = first_item + j;
+                        DWORD ii = gfirst + j;
+                        if (item >= idx->item_count) continue;
+                        if (ii >= ninfo && ii - ninfo < lninfo)
+                        {
+                            idx->item_decision[item]  = get32( linfo + (ii - ninfo) * 8 );
+                            idx->item_firstcand[item] = get32( linfo + (ii - ninfo) * 8 + 4 );
+                        }
+                        else if (ii < ninfo)
+                        {
+                            WORD d16 = get16( info + ii * 4 );
+                            WORD c16 = get16( info + ii * 4 + 2 );
+                            idx->item_decision[item]  = (d16 == 0xffff) ? 0xffffffff : d16;
+                            idx->item_firstcand[item] = (c16 == 0xffff) ? 0xffffffff : c16;
+                        }
+                    }
+                }
+            }
+        }
+        pos += large_sz;
     }
 
     if (ncand && !(idx->cands = HeapAlloc( GetProcessHeap(), 0, ncand * sizeof(*idx->cands) ))) return FALSE;
@@ -910,7 +971,8 @@ static BOOL resolve_item( pri_index *idx, WORD item, const pri_qual *ctx, UINT32
                           WCHAR *name_buf, DWORD name_len, WCHAR **value_out,
                           pri_qual **quals_out, UINT32 *qcount_out )
 {
-    WORD dec, fc, best = 0xffff, best_qs = 0xffff, j, k;
+    DWORD dec, fc, best = 0xffffffff, best_qs = 0xffffffff, j;
+    WORD k;
     const struct pri_cand *c;
     pri_qual *qs = NULL;
     WCHAR *value = NULL;
@@ -924,15 +986,21 @@ static BOOL resolve_item( pri_index *idx, WORD item, const pri_qual *ctx, UINT32
 
     dec = idx->item_decision[item];
     fc  = idx->item_firstcand[item];
-    if (dec == 0xffff || dec >= idx->dec_count || fc == 0xffff) return FALSE;
+    TRACE( "resolve_item item %u %s dec %lu fc %lu (dec_count %u cand_count %u)\n", item,
+           debugstr_w( idx->items[item]->fullname ), (unsigned long)dec, (unsigned long)fc, idx->dec_count, idx->cand_count );
+    if (dec == 0xffffffff || dec >= idx->dec_count || fc == 0xffffffff)
+    {
+        WARN( "resolve_item bail: no decision/cands for %s\n", debugstr_w( idx->items[item]->fullname ) );
+        return FALSE;
+    }
 
     for (j = 0; j < idx->dec_n[dec]; j++)
     {
         WORD qs_idx = idx->idx_tbl[idx->dec_first[dec] + j];
         if (qs_idx >= idx->qset_count || fc + j >= idx->cand_count) break;
-        if (best == 0xffff || better_cand( idx, best_qs, qs_idx, ctx, ctxcount )) { best = j; best_qs = qs_idx; }
+        if (best == 0xffffffff || better_cand( idx, best_qs, qs_idx, ctx, ctxcount )) { best = j; best_qs = qs_idx; }
     }
-    if (best == 0xffff) return FALSE;
+    if (best == 0xffffffff) return FALSE;
     c = &idx->cands[fc + best];
 
     /* candidate type 1 (path) stores its value in the data item; in this
