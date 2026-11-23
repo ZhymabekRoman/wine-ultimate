@@ -1507,6 +1507,17 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         return S_OK;
     }
 
+    {
+        static const GUID IID_IStoryboard_WinUI3 =
+            { 0x04d41bb3, 0x8721, 0x519e, { 0x8e, 0x53, 0xfb, 0x8b, 0x34, 0x92, 0x03, 0x05 } };
+        if (IsEqualGUID( iid, &IID_IStoryboard_WinUI3 ))
+        {
+            *out = &impl->IInspectable_iface;
+            element_AddRef( &impl->IInspectable_iface );
+            return S_OK;
+        }
+    }
+
     if (IsEqualGUID( iid, &IID_IFrameworkElement ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ))
     {
