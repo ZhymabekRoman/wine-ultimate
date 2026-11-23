@@ -3307,15 +3307,30 @@ static HRESULT WINAPI dummy_wa_noop( void *iface, void *a1, void *a2 )
 static ULONG WINAPI dummy_wa_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI dummy_wa_Release( void *iface ) { return 1; }
 
+static const void *dummy_wa_app_vtbl[64];
+static const void *dummy_wa_winui3_vtbl[64];
+static struct { const void **vtbl; } dummy_wa_app_obj = { dummy_wa_app_vtbl };
+static struct { const void **vtbl; } dummy_wa_winui3_obj = { dummy_wa_winui3_vtbl };
+
 static HRESULT WINAPI dummy_wa_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
     TRACE( "dummy_wa_QueryInterface iid %s\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_app ))
+    {
+        *out = &dummy_wa_app_obj;
+        dummy_wa_AddRef( *out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_winui3 ))
+    {
+        *out = &dummy_wa_winui3_obj;
+        dummy_wa_AddRef( *out );
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_app ) ||
-        IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_winui3 ))
+        IsEqualGUID( iid, &IID_IAgileObject ))
     {
         *out = iface;
         dummy_wa_AddRef( iface );
@@ -3337,7 +3352,12 @@ static HRESULT WINAPI dummy_wa_GetIids( void *iface, ULONG *count, IID **iids )
     *iids = array;
     return S_OK;
 }
-static HRESULT WINAPI dummy_wa_GetRuntimeClassName( void *iface, HSTRING *name )
+static HRESULT WINAPI dummy_wa_app_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.UI.Core.WindowActivatedEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+static HRESULT WINAPI dummy_wa_winui3_GetRuntimeClassName( void *iface, HSTRING *name )
 {
     static const WCHAR cls[] = L"Microsoft.UI.Xaml.WindowActivatedEventArgs";
     return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
@@ -3357,22 +3377,37 @@ static HRESULT WINAPI dummy_wa_get_WindowActivationState( void *iface, int *valu
     if (value) *value = 0; /* CodeActivated */
     return S_OK;
 }
-/* WinUI 3 Microsoft.UI.Xaml.IWindowActivatedEventArgs layout:
- * slot 6 get_Handled, slot 7 put_Handled, slot 8 get_WindowActivationState. */
-static const void *dummy_wa_vtbl[64] =
+/* UWP Windows.UI.Core.IWindowActivatedEventArgs layout:
+ * slot 6 get_WindowActivationState, slot 7 get_Handled, slot 8 put_Handled. */
+static const void *dummy_wa_app_vtbl[64] =
 {
     [0] = dummy_wa_QueryInterface,
     [1] = dummy_wa_AddRef,
     [2] = dummy_wa_Release,
     [3] = dummy_wa_GetIids,
-    [4] = dummy_wa_GetRuntimeClassName,
+    [4] = dummy_wa_app_GetRuntimeClassName,
+    [5] = dummy_wa_GetTrustLevel,
+    [6] = dummy_wa_get_WindowActivationState,
+    [7] = dummy_wa_get_Handled,
+    [8] = dummy_wa_put_Handled,
+    [9 ... 63] = dummy_wa_noop,
+};
+/* WinUI 3 Microsoft.UI.Xaml.IWindowActivatedEventArgs layout:
+ * slot 6 get_Handled, slot 7 put_Handled, slot 8 get_WindowActivationState. */
+static const void *dummy_wa_winui3_vtbl[64] =
+{
+    [0] = dummy_wa_QueryInterface,
+    [1] = dummy_wa_AddRef,
+    [2] = dummy_wa_Release,
+    [3] = dummy_wa_GetIids,
+    [4] = dummy_wa_winui3_GetRuntimeClassName,
     [5] = dummy_wa_GetTrustLevel,
     [6] = dummy_wa_get_Handled,
     [7] = dummy_wa_put_Handled,
     [8] = dummy_wa_get_WindowActivationState,
     [9 ... 63] = dummy_wa_noop,
 };
-static struct { const void **vtbl; } dummy_wa_obj = { dummy_wa_vtbl };
+#define dummy_wa_obj dummy_wa_app_obj
 
 static HRESULT WINAPI xaml_window_add_Activated( IInspectable *iface, void *handler, EventRegistrationToken *token )
 {
