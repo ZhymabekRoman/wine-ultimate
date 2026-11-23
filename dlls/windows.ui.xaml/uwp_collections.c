@@ -172,6 +172,8 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
 {
     struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
     struct uwp_element *child_el;
+    if (v->owner && wcsstr( v->owner->class_name, L"ItemsRepeater" ) && idx == 0)
+        idx = v->count;
     if (idx > v->count) return S_OK;
     if (!xaml_vec_grow( (void **)&v->items, &v->cap, (int)v->count + 1, sizeof(*v->items), 16 ))
         return E_OUTOFMEMORY;
@@ -242,7 +244,7 @@ static HRESULT WINAPI uwp_vec_RemoveAtEnd( void *iface )
     if (v->count > 0) return uwp_vec_RemoveAt( iface, v->count - 1 );
     return S_OK;
 }
-static HRESULT WINAPI uwp_vec_Clear( void *iface )
+HRESULT WINAPI uwp_vec_Clear( void *iface )
 {
     struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
     unsigned int i;

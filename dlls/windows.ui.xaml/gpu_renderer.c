@@ -730,10 +730,11 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
 {
     UINT bw, bh, idx, probe;
     UINT64 h;
-    size_t tlen;
+    size_t tlen, ci;
     struct atlas_entry *entry = NULL;
     struct xaml_gpu_instance *inst;
     UINT align_flags;
+    WCHAR clean_buf[512];
 
     if (!g_gpu.initialized || !text || !text[0] || !rc) return;
     if (g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
@@ -745,6 +746,32 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     if (bh > SCRATCH_MAX_H) bh = SCRATCH_MAX_H;
     tlen = wcslen( text );
     if (tlen > 511) tlen = 511;
+    if (dt_flags & DT_SINGLELINE)
+    {
+        size_t out_i = 0;
+        BOOL prev_sp = FALSE;
+        for (ci = 0; ci < tlen && out_i < 511; ci++)
+        {
+            WCHAR c = text[ci];
+            if (c == '\r' || c == '\n' || c == '\t' || c < 0x20)
+            {
+                if (!prev_sp && out_i > 0)
+                {
+                    clean_buf[out_i++] = ' ';
+                    prev_sp = TRUE;
+                }
+            }
+            else
+            {
+                clean_buf[out_i++] = c;
+                prev_sp = (c == ' ');
+            }
+        }
+        clean_buf[out_i] = 0;
+        text = clean_buf;
+        tlen = out_i;
+        if (!tlen) return;
+    }
 
     align_flags = dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_WORDBREAK);
     h = fnv1a_bytes( &font_height, sizeof(font_height), 0 );

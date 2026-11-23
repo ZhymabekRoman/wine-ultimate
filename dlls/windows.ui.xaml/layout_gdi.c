@@ -326,9 +326,55 @@ static BOOL uwp_has_shimmer_descendant( struct uwp_element *el, int depth )
     return FALSE;
 }
 
+static BOOL uwp_has_spotlight_descendant( struct uwp_element *el, int depth )
+{
+    if (!el || el->visibility != 0 || depth > 10) return FALSE;
+    if (wcsstr( el->class_name, L"DynamicSpotlightControl" ) ||
+        wcsstr( el->class_name, L"ScrollingSpotlightControl" ) ||
+        wcsstr( el->class_name, L"CarrouselSpotlightControl" ) ||
+        wcsstr( el->class_name, L"ScrollingPreviewListView" ) ||
+        wcsstr( el->class_name, L"SpotlightHeroImage" ))
+        return TRUE;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_has_spotlight_descendant( ch, depth + 1 )) return TRUE;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el && uwp_has_spotlight_descendant( ch, depth + 1 )) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_is_home_title_panel( struct uwp_element *el, int depth )
+{
+    if (!el || depth > 4) return FALSE;
+    if (!wcscmp( el->name, L"HeaderTitle" ) && !wcscmp( el->text, L"Home" )) return TRUE;
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el && uwp_is_home_title_panel( ch, depth + 1 )) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
 {
     if (!el || el->visibility != 0 || depth > 14) return FALSE;
+    if (depth == 0 && uwp_is_home_title_panel( el, 0 )) return FALSE;
+    if (uwp_has_spotlight_descendant( el, 0 )) return TRUE;
     if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
     if (el->text[0] || el->inlines_coll || el->img_pixels || el->img_loaded) return TRUE;
     if (wcsstr( el->class_name, L"ItemsRepeater" ))
@@ -811,12 +857,20 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 else if (in_scroll)
                 {
                     int nat_h;
+                    if (uwp_is_home_title_panel( ch, 0 ))
+                    {
+                        ch->has_bounds = FALSE;
+                        idx++;
+                        continue;
+                    }
                     if (ch->kind == UWP_KIND_TEXT_BLOCK)
                         nat_h = 44;
+                    else if (uwp_has_spotlight_descendant( ch, 0 ))
+                        nat_h = 330;
                     else if (!uwp_scroll_child_has_content( ch, 0 ))
-                        nat_h = 20;
+                        nat_h = 4;
                     else
-                        nat_h = 240;
+                        nat_h = 168;
                     if (cur_y >= rc.bottom)
                     {
                         /* Still arrange off-screen children in virtual coordinates so
@@ -955,9 +1009,9 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 if (!wcscmp( ch->name, L"TogglePaneButton" ))
                     SetRect( &crc, rc.left + 8, rc.top + 8, rc.left + 56, rc.top + 48 );
                 else if (!wcscmp( ch->name, L"MenuItemsHost" ))
-                    SetRect( &crc, rc.left, rc.top + 56, rc.left + rail_w, max( rc.top + 120, rc.bottom - 180 ) );
+                    SetRect( &crc, rc.left, rc.top + 12, rc.left + rail_w, max( rc.top + 120, rc.bottom - 140 ) );
                 else if (!wcscmp( ch->name, L"FooterMenuItemsHost" ))
-                    SetRect( &crc, rc.left, max( rc.top + 120, rc.bottom - 172 ), rc.left + rail_w, rc.bottom - 8 );
+                    SetRect( &crc, rc.left, max( rc.top + 120, rc.bottom - 132 ), rc.left + rail_w, rc.bottom - 8 );
                 else
                     crc = rc;
                 uwp_arrange_element( ch, crc );
@@ -1014,12 +1068,25 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         }
         {
             int cur_y = rc.top;
-            int item_h = is_nav_rail ? 48 : 80;
+            int item_h = is_nav_rail ? 54 : 80;
+            BOOL rev = FALSE;
+            if (is_nav_rail && children->count > 1)
+            {
+                struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
+                if (last_ch && !wcscmp( last_ch->text, L"Home" ))
+                    rev = TRUE;
+            }
             for (k = 0; k < children->count; k++)
             {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                unsigned int idx = rev ? (children->count - 1 - k) : k;
+                struct uwp_element *ch = uwp_elem_from_any( children->items[idx] );
                 RECT crc;
                 if (!ch || ch->visibility != 0) continue;
+                if (is_nav_rail && (!wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( ch->text, L"SettingsButtonName" )))
+                {
+                    ch->has_bounds = FALSE;
+                    continue;
+                }
                 SetRect( &crc, rc.left + 4, cur_y, rc.right - 4, min( (int)rc.bottom, cur_y + item_h ) );
                 uwp_arrange_element( ch, crc );
                 cur_y += item_h + 4;
@@ -1088,6 +1155,7 @@ const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp,
 {
     const WCHAR *s = el->text;
     if (!s || !s[0]) return L"";
+    if (!wcscmp( s, L"SettingsButtonName" ) || !wcscmp( el->name, L"SettingsItem" )) return L"";
     if (s[1] == 0)
     {
         switch (s[0])

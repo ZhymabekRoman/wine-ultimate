@@ -95,6 +95,15 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     }
     else if (uwp_unbox_string( val, str_buf, ARRAY_SIZE(str_buf) ))
     {
+        if (wcsstr( impl->class_name, L"ToolTip" ))
+            return S_OK;
+        if (!wcscmp( str_buf, L"SettingsButtonName" ) || !wcscmp( impl->name, L"SettingsItem" ))
+        {
+            impl->text[0] = 0;
+            if (!wcscmp( impl->name, L"SettingsItem" ))
+                impl->visibility = 1;
+            return S_OK;
+        }
         impl->content_kind = UWP_CONTENT_TEXT;
         if (str_buf[0])
         {

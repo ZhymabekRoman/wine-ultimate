@@ -1640,6 +1640,8 @@ static BOOL uwp_should_sync_display_text( const struct uwp_element *impl, const 
 
     if (uwp_wcs_in_table( dpn, meta_dps, ARRAY_SIZE(meta_dps) ))
         return FALSE;
+    if (wcsstr( impl->class_name, L"ToolTip" ) || !wcscmp( impl->name, L"SettingsItem" ))
+        return FALSE;
     return uwp_is_display_result_element( impl ) ||
            uwp_substr_in_table( impl->class_name, text_class_substrs, ARRAY_SIZE(text_class_substrs) ) ||
            uwp_wcs_in_table( impl->class_name, text_class_exact, ARRAY_SIZE(text_class_exact) ) ||

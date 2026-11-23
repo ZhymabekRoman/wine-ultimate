@@ -2294,6 +2294,14 @@ HRESULT xaml_attach_swapchain_panel_content( IUnknown *content, IDCompositionVis
              impl->dcomp_device, impl->dcomp_root_visual );
         return S_OK;
     }
+    if (!impl->dcomp_target && impl->target_hwnd)
+    {
+        if (SUCCEEDED(IDCompositionDesktopDevice_CreateTargetForHwnd( impl->dcomp_device, impl->target_hwnd, TRUE, &impl->dcomp_target )) &&
+            impl->dcomp_target)
+        {
+            IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
+        }
+    }
     if (!*slot)
     {
         hr = IDCompositionDesktopDevice_CreateVisual( impl->dcomp_device, slot );
@@ -2463,7 +2471,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                         if (xaml_layout_render_gpu( top, (int)rc.right, (int)rc.bottom, global_xaml_window.content,
                                                     global_xaml_window.d3d11_dev, global_xaml_window.d3d11_ctx,
                                                     global_xaml_window.swapchain ) &&
-                            global_xaml_window.dcomp_device)
+                            global_xaml_window.dcomp_device && global_xaml_window.dcomp_target)
                         {
                             IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
                         }
@@ -2787,7 +2795,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (!impl->target_hwnd)
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
-        RECT wrc;
+        RECT wrc, drc;
         SIZE target_sz, def_sz = XAML_DEFAULT_CLIENT_SIZE;
 
         if (!top) top = hwnd;
@@ -2798,6 +2806,13 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
             xaml_get_layout_metrics( NULL, &target_sz, NULL );
             SetWindowPos( top, 0, 0, 0, target_sz.cx, target_sz.cy,
                           SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE );
+        }
+        if (GetClientRect( GetDesktopWindow(), &drc ) && drc.right > 0 && drc.bottom > 0 &&
+            GetWindowRect( top, &wrc ) &&
+            ((wrc.right - wrc.left) > drc.right || (wrc.bottom - wrc.top) > drc.bottom))
+        {
+            SetWindowPos( top, 0, 0, 0, drc.right, drc.bottom,
+                          SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED );
         }
         ShowWindow( hwnd, SW_SHOW );
         SetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE );
@@ -2854,8 +2869,9 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
     }
 
-    /* 2. Ensure DComp target for CoreWindow HWND */
-    if (!impl->dcomp_target)
+    /* 2. Ensure DComp target for CoreWindow HWND (only when WinUI 3 or SwapChainPanel needs DComp target;
+     * creating the 1x1 DComp child HWND on direct-swapchain UWP windows triggers winex11 offscreen SYSRGN clipping) */
+    if (!impl->dcomp_target && (xaml_get_app_caps()->winui3 || g_active_scp_swapchain))
     {
         hr = IDCompositionDesktopDevice_CreateTargetForHwnd( impl->dcomp_device, hwnd, TRUE, &impl->dcomp_target );
         if (FAILED(hr))
@@ -2864,6 +2880,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
             g_in_xaml_present = FALSE;
             return hr;
         }
+        if (impl->dcomp_root_visual)
+            IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
     }
 
     /* Proactively cache the UI thread's DispatcherQueue so worker threads
@@ -2890,7 +2908,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
             g_in_xaml_present = FALSE;
             return hr;
         }
-        IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
+        if (impl->dcomp_target)
+            IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
     }
     if (impl->dcomp_root_visual)
     {

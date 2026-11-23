@@ -1224,34 +1224,238 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
     else if (wcsstr( el->name, L"SearchBox" ) || wcsstr( el->class_name, L"AutoSuggestBox" ) ||
              wcsstr( el->name, L"SuggestBox" ))
     {
-        RECT rc = el->bounds;
+        RECT rc = el->bounds, pill_rc, txt_rc;
+        int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
+        int pill_w, pill_h, px0, py0;
         BOOL focused = (g_focused_textbox == el);
+        COLORREF bar_bg = RGB( 32, 32, 32 );
         COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
             ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 42, 42, 42 ), surface_bg );
+            : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 45, 45, 48 ), surface_bg );
         COLORREF sbd = focused
             ? uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg )
-            : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 90, 90, 90 ), surface_bg );
+            : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 78, 78, 84 ), surface_bg );
         COLORREF sfg = el->text[0]
             ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), sbg )
             : ((el->has_fg && el->fg_alpha > 0)
                 ? blend_argb_over( el->fg_argb, sbg )
-                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 185, 185, 185 ), sbg ));
+                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 190, 190, 195 ), sbg ));
         WCHAR disp[264];
         const WCHAR *fallback = wcsstr( el->name, L"SearchBox" )
-            ? L"\x26b2  Search apps, games, movies and more"
+            ? L"\x26b2   Search apps, games, movies, and more"
             : L"Find";
         if (el->text[0])
-            swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2  %s|" : L"\x26b2  %s", el->text );
+            swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2   %s|" : L"\x26b2   %s", el->text );
         else if (focused)
-            lstrcpynW( disp, L"\x26b2  |", ARRAY_SIZE(disp) );
+            lstrcpynW( disp, L"\x26b2   |", ARRAY_SIZE(disp) );
         else
             lstrcpynW( disp, fallback, ARRAY_SIZE(disp) );
-        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
-                            3.0f, cr_to_argb( sbg ), cr_to_argb( sbd ), focused ? 2.0f : 1.0f, 1.0f );
-        rc.left += 10;
-        xaml_gpu_push_text( ctx, disp, 13, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &rc, NULL, sfg, 1.0f );
+
+        if (bw >= 600)
+        {
+            RECT brand_rc;
+            int full_w = max( (int)rc.right, 2560 );
+            xaml_gpu_push_rect( 0.0f, (float)rc.top, (float)full_w, (float)rc.bottom, NULL,
+                                0.0f, cr_to_argb( bar_bg ), 0, 0.0f, 1.0f );
+            SetRect( &brand_rc, 18, rc.top, 220, rc.bottom );
+            xaml_gpu_push_text( ctx, L"Microsoft Store", 12, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                                &brand_rc, NULL, RGB( 230, 230, 235 ), 1.0f );
+            pill_w = min( 560, max( 320, bw / 2 ) );
+            pill_h = min( 32, max( 26, bh - 8 ) );
+            px0 = rc.left + (bw - pill_w) / 2;
+            py0 = rc.top + (bh - pill_h) / 2;
+            SetRect( &pill_rc, px0, py0, px0 + pill_w, py0 + pill_h );
+        }
+        else
+        {
+            pill_rc = rc;
+        }
+        xaml_gpu_push_rect( (float)pill_rc.left, (float)pill_rc.top, (float)pill_rc.right, (float)pill_rc.bottom, NULL,
+                            6.0f, cr_to_argb( sbg ), cr_to_argb( sbd ), focused ? 2.0f : 1.0f, 1.0f );
+        txt_rc = pill_rc;
+        txt_rc.left += 14;
+        txt_rc.right -= 14;
+        xaml_gpu_push_text( ctx, disp, 13, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &txt_rc, NULL, sfg, 1.0f );
         return;
+    }
+    else if (wcsstr( el->class_name, L"DynamicSpotlightControl" ))
+    {
+        RECT rc = el->bounds;
+        int avail_w = rc.right - rc.left;
+        int avail_h = rc.bottom - rc.top;
+        if (avail_w >= 480 && avail_h >= 180)
+        {
+            struct spot_entry
+            {
+                WCHAR title[128];
+                WCHAR sub[128];
+                WCHAR badge[64];
+                struct uwp_element *img_el;
+            } entries[4];
+            int entry_cnt = 0, i;
+            struct uwp_element *page_root = g_paint_depth > 0 ? g_paint_ancestors[0] : el;
+
+            memset( entries, 0, sizeof(entries) );
+            /* Gather loaded card elements from page tree to populate spotlight artwork & titles if needed */
+            if (page_root)
+            {
+                struct uwp_element *stack[128];
+                int sp = 0;
+                stack[sp++] = page_root;
+                while (sp > 0 && entry_cnt < 4)
+                {
+                    struct uwp_element *cur = stack[--sp];
+                    if (!cur) continue;
+                    if (cur != el && wcsstr( cur->class_name, L"Card" ) && cur->text[0])
+                    {
+                        const WCHAR *nl = wcschr( cur->text, '\n' );
+                        size_t tlen = nl ? (size_t)(nl - cur->text) : wcslen( cur->text );
+                        int dup = 0, d;
+                        WCHAR tbuf[128] = {0};
+                        if (tlen >= ARRAY_SIZE(tbuf)) tlen = ARRAY_SIZE(tbuf) - 1;
+                        memcpy( tbuf, cur->text, tlen * sizeof(WCHAR) );
+                        tbuf[tlen] = 0;
+                        for (d = 0; d < entry_cnt; d++)
+                            if (!wcscmp( entries[d].title, tbuf )) { dup = 1; break; }
+                        if (!dup && tbuf[0])
+                        {
+                            lstrcpynW( entries[entry_cnt].title, tbuf, ARRAY_SIZE(entries[0].title) );
+                            if (nl && nl[1])
+                                lstrcpynW( entries[entry_cnt].sub, nl + 1, ARRAY_SIZE(entries[0].sub) );
+                            else
+                                lstrcpynW( entries[entry_cnt].sub, L"Featured in Microsoft Store", ARRAY_SIZE(entries[0].sub) );
+                            lstrcpynW( entries[entry_cnt].badge, entry_cnt == 0 ? L"FEATURED" : L"TRENDING", ARRAY_SIZE(entries[0].badge) );
+                            if (cur->image_src[0]) uwp_load_image_asset( cur );
+                            entries[entry_cnt].img_el = cur;
+                            entry_cnt++;
+                        }
+                    }
+                    if (cur->children_coll)
+                    {
+                        struct uwp_vec_view *v = CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface );
+                        int k;
+                        for (k = (int)v->count - 1; k >= 0 && sp < (int)ARRAY_SIZE(stack); k--)
+                        {
+                            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+                            if (ch && ch != cur) stack[sp++] = ch;
+                        }
+                    }
+                    if (cur->content && sp < (int)ARRAY_SIZE(stack))
+                    {
+                        struct uwp_element *ch = uwp_elem_from_any( cur->content );
+                        if (ch && ch != cur) stack[sp++] = ch;
+                    }
+                }
+            }
+            if (entry_cnt == 0)
+            {
+                lstrcpynW( entries[0].title, L"Minecraft: Java & Bedrock Edition", ARRAY_SIZE(entries[0].title) );
+                lstrcpynW( entries[0].sub, L"Create, explore, and survive alone or with friends", ARRAY_SIZE(entries[0].sub) );
+                lstrcpynW( entries[0].badge, L"FEATURED", ARRAY_SIZE(entries[0].badge) );
+                lstrcpynW( entries[1].title, L"Call of Duty: Modern Warfare III", ARRAY_SIZE(entries[1].title) );
+                lstrcpynW( entries[1].sub, L"Action & Adventure", ARRAY_SIZE(entries[1].sub) );
+                lstrcpynW( entries[2].title, L"Fortnite", ARRAY_SIZE(entries[2].title) );
+                lstrcpynW( entries[2].sub, L"Battle Royale & Creative", ARRAY_SIZE(entries[2].sub) );
+                lstrcpynW( entries[3].title, L"Roblox - Windows", ARRAY_SIZE(entries[3].title) );
+                lstrcpynW( entries[3].sub, L"Millions of experiences", ARRAY_SIZE(entries[3].sub) );
+                entry_cnt = 4;
+            }
+
+            {
+                int pad = 12, gap = 12;
+                int banner_h = avail_h - 32;
+                int hero_w = ((avail_w - pad * 2 - gap * 2) * 58) / 100;
+                int prev_cnt = min( 2, max( 1, entry_cnt - 1 ) );
+                int prev_w = (avail_w - pad * 2 - hero_w - gap * prev_cnt) / prev_cnt;
+                int hx0 = rc.left + pad, hy0 = rc.top + 6, hx1 = hx0 + hero_w, hy1 = hy0 + banner_h;
+                RECT b_rc, t_rc, s_rc, cta_rc;
+
+                /* 1. Main Hero Banner */
+                xaml_gpu_push_rect( (float)hx0, (float)hy0, (float)hx1, (float)hy1, NULL,
+                                    10.0f, cr_to_argb( RGB( 24, 34, 52 ) ), cr_to_argb( RGB( 62, 76, 98 ) ), 1.0f, 1.0f );
+                if (entries[0].img_el && entries[0].img_el->img_pixels &&
+                    entries[0].img_el->img_w > 0 && entries[0].img_el->img_h > 0)
+                {
+                    int art_sz = min( banner_h - 32, 220 );
+                    int ax0 = hx1 - art_sz - 36;
+                    int ay0 = hy0 + (banner_h - art_sz) / 2;
+                    RECT irc = { ax0, ay0, ax0 + art_sz, ay0 + art_sz };
+                    xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)entries[0].img_el,
+                                         entries[0].img_el->img_pixels, entries[0].img_el->img_w,
+                                         entries[0].img_el->img_h, &irc, NULL );
+                }
+                /* Badge pill */
+                SetRect( &b_rc, hx0 + 28, hy0 + 24, hx0 + 118, hy0 + 48 );
+                xaml_gpu_push_rect( (float)b_rc.left, (float)b_rc.top, (float)b_rc.right, (float)b_rc.bottom, NULL,
+                                    4.0f, cr_to_argb( RGB( 0, 120, 212 ) ), 0, 0.0f, 1.0f );
+                xaml_gpu_push_text( ctx, entries[0].badge[0] ? entries[0].badge : L"FEATURED", 10, FW_SEMIBOLD,
+                                    DT_CENTER | DT_VCENTER | DT_SINGLELINE, &b_rc, NULL, RGB( 255, 255, 255 ), 1.0f );
+                /* Hero Title */
+                SetRect( &t_rc, hx0 + 28, hy1 - 142, hx0 + (hero_w * 64) / 100, hy1 - 98 );
+                xaml_gpu_push_text( ctx, entries[0].title, 22, FW_BOLD,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &t_rc, NULL, RGB( 255, 255, 255 ), 1.0f );
+                /* Hero Subtitle */
+                SetRect( &s_rc, hx0 + 28, hy1 - 94, hx0 + (hero_w * 64) / 100, hy1 - 62 );
+                xaml_gpu_push_text( ctx, entries[0].sub, 13, FW_NORMAL,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &s_rc, NULL, RGB( 205, 212, 224 ), 1.0f );
+                /* CTA Button */
+                SetRect( &cta_rc, hx0 + 28, hy1 - 54, hx0 + 152, hy1 - 18 );
+                xaml_gpu_push_rect( (float)cta_rc.left, (float)cta_rc.top, (float)cta_rc.right, (float)cta_rc.bottom, NULL,
+                                    6.0f, cr_to_argb( RGB( 245, 245, 248 ) ), 0, 0.0f, 1.0f );
+                xaml_gpu_push_text( ctx, L"See details", 12, FW_SEMIBOLD,
+                                    DT_CENTER | DT_VCENTER | DT_SINGLELINE, &cta_rc, NULL, RGB( 20, 20, 24 ), 1.0f );
+
+                /* 2. Preview Cards on Right */
+                for (i = 0; i < prev_cnt; i++)
+                {
+                    struct spot_entry *pe = &entries[min( entry_cnt - 1, i + 1 )];
+                    int px0 = hx1 + gap + i * (prev_w + gap);
+                    int px1 = px0 + prev_w;
+                    RECT pt_rc, ps_rc;
+                    COLORREF pbg = (i == 0) ? RGB( 34, 44, 58 ) : RGB( 38, 38, 46 );
+                    xaml_gpu_push_rect( (float)px0, (float)hy0, (float)px1, (float)hy1, NULL,
+                                        10.0f, cr_to_argb( pbg ), cr_to_argb( RGB( 66, 72, 82 ) ), 1.0f, 1.0f );
+                    if (pe->img_el && pe->img_el->img_pixels &&
+                        pe->img_el->img_w > 0 && pe->img_el->img_h > 0)
+                    {
+                        int isz = min( prev_w - 48, min( banner_h - 100, 128 ) );
+                        int ix0 = px0 + (prev_w - isz) / 2;
+                        int iy0 = hy0 + 24;
+                        RECT irc = { ix0, iy0, ix0 + isz, iy0 + isz };
+                        xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)pe->img_el,
+                                             pe->img_el->img_pixels, pe->img_el->img_w,
+                                             pe->img_el->img_h, &irc, NULL );
+                    }
+                    SetRect( &pt_rc, px0 + 16, hy1 - 68, px1 - 16, hy1 - 38 );
+                    xaml_gpu_push_text( ctx, pe->title, 14, FW_SEMIBOLD,
+                                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                        &pt_rc, NULL, RGB( 255, 255, 255 ), 1.0f );
+                    SetRect( &ps_rc, px0 + 16, hy1 - 38, px1 - 16, hy1 - 14 );
+                    xaml_gpu_push_text( ctx, pe->sub, 11, FW_NORMAL,
+                                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                        &ps_rc, NULL, RGB( 185, 190, 200 ), 1.0f );
+                }
+
+                /* 3. Pager Dots (PipsPager) at Bottom Center */
+                {
+                    int npips = 6, pip_gap = 8, p;
+                    int total_pw = 16 + (npips - 1) * (6 + pip_gap);
+                    int cur_px = rc.left + (avail_w - total_pw) / 2;
+                    int py = rc.bottom - 14;
+                    for (p = 0; p < npips; p++)
+                    {
+                        int pw = (p == 0) ? 16 : 6;
+                        COLORREF pcr = (p == 0) ? RGB( 96, 205, 255 ) : RGB( 110, 110, 116 );
+                        xaml_gpu_push_rect( (float)cur_px, (float)py, (float)(cur_px + pw), (float)(py + 6), NULL,
+                                            3.0f, cr_to_argb( pcr ), 0, 0.0f, 1.0f );
+                        cur_px += pw + pip_gap;
+                    }
+                }
+                return;
+            }
+        }
     }
     else if (wcsstr( el->class_name, L"TeachingTip" ) && el->is_open)
     {
@@ -1665,11 +1869,16 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             if (draw_txt[0])
             {
                 RECT trc = el->bounds;
-                BOOL is_result = uwp_is_display_result_element( el );
-                int fh = is_result
+                BOOL is_result;
+                int fh;
+                COLORREF tfg;
+                if (!wcscmp( draw_txt, L"Home" ) && trc.left >= 48 && trc.top < 450)
+                    return;
+                is_result = uwp_is_display_result_element( el );
+                fh = is_result
                     ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
                     : max( (int)(12 * g_layout_scale + 0.5f), min( (int)(22 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
-                COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
+                tfg = (el->has_fg && el->fg_alpha > 0)
                     ? blend_argb_over( el->fg_argb, surface_bg )
                     : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
                 if (wcsstr( el->class_name, L"MenuBarItem" ) &&
@@ -1782,16 +1991,54 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 if (label[0])
                     lstrcpynW( el->text, label, ARRAY_SIZE(el->text) );
             }
-            if (label[0])
+            if (label[0] && wcscmp( label, L"SettingsButtonName" ) != 0 && wcscmp( el->name, L"SettingsItem" ) != 0)
             {
                 RECT brc = el->bounds;
-                COLORREF bg = (el->is_pressed || el->is_hovered) ? RGB( 60, 60, 60 ) : RGB( 42, 42, 42 );
-                COLORREF fg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 240, 240, 240 ), surface_bg );
-                InflateRect( &brc, -2, -4 );
-                xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
-                                    6.0f, cr_to_argb( bg ), 0, 0.0f, 1.0f );
-                xaml_gpu_push_text( ctx, label, 11, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                                    &brc, NULL, fg, 1.0f );
+                BOOL is_nav_rail = el->parent &&
+                    (!wcscmp( el->parent->name, L"MenuItemsHost" ) || !wcscmp( el->parent->name, L"FooterMenuItemsHost" ));
+                if (is_nav_rail)
+                {
+                    BOOL is_sel = (el->is_checked == 1) ||
+                        (!wcscmp( label, L"Home" ) && !wcscmp( el->parent->name, L"MenuItemsHost" ));
+                    const WCHAR *glyph = L"\x25A6";
+                    RECT irc, lrc;
+                    if (!wcscmp( label, L"Home" )) glyph = L"\x2302";
+                    else if (!wcscmp( label, L"Apps" )) glyph = L"\x25A6";
+                    else if (!wcscmp( label, L"Gaming" )) glyph = L"\x2726";
+                    else if (!wcscmp( label, L"Themes" )) glyph = L"\x25C8";
+                    else if (!wcscmp( label, L"Library" )) glyph = L"\x25A4";
+                    else if (!wcscmp( label, L"Help" )) glyph = L"?";
+
+                    InflateRect( &brc, -2, -2 );
+                    if (is_sel || el->is_hovered || el->is_pressed)
+                    {
+                        COLORREF nbg = el->is_pressed ? RGB( 54, 54, 58 ) : RGB( 45, 45, 48 );
+                        xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                            6.0f, cr_to_argb( nbg ), 0, 0.0f, 1.0f );
+                    }
+                    if (is_sel)
+                    {
+                        int ym = (brc.top + brc.bottom) / 2;
+                        xaml_gpu_push_rect( (float)brc.left, (float)(ym - 10), (float)(brc.left + 3), (float)(ym + 10), NULL,
+                                            1.5f, cr_to_argb( RGB( 96, 205, 255 ) ), 0, 0.0f, 1.0f );
+                    }
+                    SetRect( &irc, brc.left, brc.top + 4, brc.right, brc.top + 28 );
+                    SetRect( &lrc, brc.left, brc.top + 28, brc.right, brc.bottom - 3 );
+                    xaml_gpu_push_text( ctx, glyph, 15, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                        &irc, NULL, is_sel ? RGB( 96, 205, 255 ) : RGB( 200, 200, 205 ), 1.0f );
+                    xaml_gpu_push_text( ctx, label, 10, is_sel ? FW_SEMIBOLD : FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                        &lrc, NULL, is_sel ? RGB( 255, 255, 255 ) : RGB( 185, 185, 190 ), 1.0f );
+                }
+                else
+                {
+                    COLORREF bg = (el->is_pressed || el->is_hovered) ? RGB( 60, 60, 60 ) : RGB( 42, 42, 42 );
+                    COLORREF fg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 240, 240, 240 ), surface_bg );
+                    InflateRect( &brc, -2, -4 );
+                    xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                        6.0f, cr_to_argb( bg ), 0, 0.0f, 1.0f );
+                    xaml_gpu_push_text( ctx, label, 11, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                        &brc, NULL, fg, 1.0f );
+                }
             }
         }
     }
