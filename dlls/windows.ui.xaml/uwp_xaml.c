@@ -2312,7 +2312,8 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     for (el = g_all_uwp_elems_head; el; el = el->next_reg)
     {
-        if (!wcscmp( el->name, want ))
+        if (!wcscmp( el->name, want ) &&
+            (!el->owner_component || el->owner_component == root || el->owner_component == impl))
         {
             *out = el->outer ? el->outer : &el->IInspectable_iface;
             break;
