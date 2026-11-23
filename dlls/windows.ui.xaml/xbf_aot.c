@@ -542,7 +542,7 @@ void xbf_aot_cache_insert( struct xbf_aot_header *tpl )
 void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWORD xbf_sz,
                                  IInspectable *component, void *connector, BOOL is_uwp_conn, void *app_outer,
                                  struct uwp_element *root_el, struct uwp_element **out_created,
-                                 struct uwp_rd_bucket *target_rd, BOOL is_template )
+                                 const char *base_xbf_dir, struct uwp_rd_bucket *target_rd, BOOL is_template )
 {
     const struct xbf_aot_ref *refs = (const struct xbf_aot_ref *)((const BYTE *)hdr + hdr->off_refs);
     const UINT32 *res_uris = (const UINT32 *)((const BYTE *)hdr + hdr->off_res_uris);
@@ -722,6 +722,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 }
                 if (nd->flags & XBF_AOT_NODE_IS_RD)
                 {
+                    el->kind = UWP_KIND_RESOURCE_DICT;
                     if ((nd->flags & XBF_AOT_NODE_ROOT_REUSE) && target_rd)
                     {
                         el->rd_bucket = target_rd;
@@ -729,7 +730,45 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     }
                     else
                     {
-                        uwp_rd_bucket_for_el( el, TRUE );
+                        struct uwp_rd_bucket *sub_rd = uwp_rd_bucket_for_el( el, TRUE );
+                        if (sub_rd && !(nd->tid & 0x8000) && nd->tid < hdr->type_cnt &&
+                            !wcsncmp( fake_ctx.types[nd->tid].xmlns, L"using:", 6 ) &&
+                            fake_ctx.types[nd->tid].short_name[0] &&
+                            wcscmp( fake_ctx.types[nd->tid].short_name, L"XamlControlsResources" ))
+                        {
+                            const WCHAR *ns = fake_ctx.types[nd->tid].xmlns + 6;
+                            const WCHAR *dot = wcschr( ns, L'.' );
+                            WCHAR xaml_name[256];
+                            BOOL loaded = FALSE;
+
+                            if (dot && dot[1])
+                            {
+                                WCHAR rel_ns[128];
+                                int ni;
+                                lstrcpynW( rel_ns, dot + 1, ARRAY_SIZE(rel_ns) );
+                                for (ni = 0; rel_ns[ni]; ni++)
+                                    if (rel_ns[ni] == L'.') rel_ns[ni] = L'/';
+                                swprintf( xaml_name, ARRAY_SIZE(xaml_name), L"%s/%s.xaml", rel_ns, fake_ctx.types[nd->tid].short_name );
+                                uwp_load_res_xbf_into_bucket( base_xbf_dir, xaml_name, sub_rd );
+                                loaded = (sub_rd->count > 0 || sub_rd->merged_cnt > 0 || sub_rd->theme_dark || sub_rd->theme_default);
+                            }
+                            if (!loaded && ns[0])
+                            {
+                                WCHAR full_ns[128];
+                                int ni;
+                                lstrcpynW( full_ns, ns, ARRAY_SIZE(full_ns) );
+                                for (ni = 0; full_ns[ni]; ni++)
+                                    if (full_ns[ni] == L'.') full_ns[ni] = L'/';
+                                swprintf( xaml_name, ARRAY_SIZE(xaml_name), L"%s/%s.xaml", full_ns, fake_ctx.types[nd->tid].short_name );
+                                uwp_load_res_xbf_into_bucket( base_xbf_dir, xaml_name, sub_rd );
+                                loaded = (sub_rd->count > 0 || sub_rd->merged_cnt > 0 || sub_rd->theme_dark || sub_rd->theme_default);
+                            }
+                            if (!loaded)
+                            {
+                                swprintf( xaml_name, ARRAY_SIZE(xaml_name), L"%s.xaml", fake_ctx.types[nd->tid].short_name );
+                                uwp_load_res_xbf_into_bucket( base_xbf_dir, xaml_name, sub_rd );
+                            }
+                        }
                     }
                 }
             }
@@ -813,10 +852,13 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
         case XBF_AOT_OP_SET_PROP:
         {
             struct uwp_element *el = (op->node_idx < hdr->node_cnt) ? nodes_el[op->node_idx] : NULL;
-            if (el)
+            IInspectable *raw = (op->node_idx < hdr->node_cnt) ? nodes_raw[op->node_idx] : NULL;
+            if (el || raw)
             {
                 const WCHAR *sval = xbf_aot_str( hdr, op->str_off );
-                xbf_apply_property( &fake_ctx, el, NULL, op->pid, op->vt, op->num, sval,
+                struct xbf_stack_val tmp_sv = {0};
+                tmp_sv.raw = raw;
+                xbf_apply_property( &fake_ctx, el, el ? NULL : &tmp_sv, op->pid, op->vt, op->num, sval,
                                     op->vec4, op->is_res_ref != 0 );
             }
             break;
@@ -839,6 +881,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
             else if (child_raw)
             {
                 BOOL handled_custom = FALSE;
+                void *ao = app_outer ? app_outer : uwp_get_app_outer();
                 if (parent_el && (op->pid == XBF_PROP_KEYBOARD_ACCELERATORS || (child_el && (child_el->kind == UWP_KIND_ACCELERATOR ||
                                                                               wcsstr( child_el->class_name, L"Accelerator" )))))
                 {
@@ -863,6 +906,28 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     uwp_vec_Append( parent_el->col_defs_coll, child_raw );
                     handled_custom = TRUE;
                 }
+                else if (parent_raw && ao &&
+                         op->node_idx < hdr->node_cnt &&
+                         nodes[op->node_idx].tid < hdr->type_cnt &&
+                         fake_ctx.types[nodes[op->node_idx].tid].full_name[0] &&
+                         wcsstr( fake_ctx.types[nodes[op->node_idx].tid].full_name, L"BreakpointCollection" ))
+                {
+                    void *provider = NULL;
+                    const WCHAR *coll_cls = fake_ctx.types[nodes[op->node_idx].tid].full_name;
+                    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)ao, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider)
+                    {
+                        struct xaml_type *ct = (struct xaml_type *)uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, coll_cls );
+                        if (ct && ct->lpVtbl->AddToVector)
+                        {
+                            HRESULT ahr = ct->lpVtbl->AddToVector( ct, parent_raw, child_raw );
+                            handled_custom = SUCCEEDED(ahr);
+                            TRACE( "AOT AddToVector(%s coll=%p item=%p) -> hr %#lx\n",
+                                   debugstr_w(coll_cls), parent_raw, child_raw, ahr );
+                        }
+                        if (ct) IInspectable_Release( (IInspectable *)ct );
+                        IInspectable_Release( (IInspectable *)provider );
+                    }
+                }
                 else if (!(op->pid & 0x8000) && op->pid < hdr->prop_cnt &&
                          fake_ctx.props[op->pid].owner_tid < hdr->type_cnt &&
                          fake_ctx.props[op->pid].name[0] &&
@@ -877,7 +942,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     const WCHAR *owner_cls = fake_ctx.types[pi->owner_tid].full_name;
                     IInspectable *target = parent_raw ? parent_raw : (parent_el ? (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface) : NULL);
                     if (owner_cls[0] && target)
-                        handled_custom = uwp_add_custom_xaml_collection_item( app_outer, owner_cls, pi->name, target, child_raw );
+                        handled_custom = uwp_add_custom_xaml_collection_item( ao, owner_cls, pi->name, target, child_raw );
                 }
                 if (!handled_custom && parent_el && parent_el->kind == UWP_KIND_TEXT_BLOCK &&
                     child_el && child_el->text[0])
@@ -943,7 +1008,13 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         wcscmp( pi->name, L"ContextFlyout" ) && wcscmp( pi->name, L"Background" ) &&
                         wcscmp( pi->name, L"Foreground" ) && wcscmp( pi->name, L"BorderBrush" ))
                     {
-                        if (uwp_set_custom_xaml_member_obj( app_outer, owner_cls, pi->name, target, child_raw ))
+                        if (parent_el && child_el &&
+                            !wcscmp( child_el->class_name, L"Windows.UI.Xaml.Data.Binding" ))
+                        {
+                            uwp_add_xaml_binding( parent_el, owner_cls, pi->name, child_el );
+                            handled_custom_obj = TRUE;
+                        }
+                        else if (uwp_set_custom_xaml_member_obj( app_outer, owner_cls, pi->name, target, child_raw ))
                         {
                             if (wcscmp( pi->name, L"Content" ) && wcscmp( pi->name, L"Child" ))
                                 handled_custom_obj = TRUE;
