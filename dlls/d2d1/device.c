@@ -2030,23 +2030,39 @@ static void d2d_dash_walk_point(const struct d2d_dash_walk *w, float s, D2D1_POI
 static void d2d_dash_mesh_add_range(struct d2d_dash_mesh *mesh,
         const struct d2d_dash_walk *w, float a, float b)
 {
-    size_t count = 0, i, capacity;
+    size_t count = 0, i, capacity, n;
     D2D1_POINT_2F *pts, *last, q;
 
     if (b <= a)
         return;
 
-    capacity = w->seg_count + 2;
+    /* For a closed figure the closing corner (points[0], at arclength total)
+     * is a real join, so scan one extra vertex to include it. */
+    n = w->closed ? w->seg_count + 1 : w->seg_count;
+    capacity = n + 2;
     if (!(pts = malloc(capacity * sizeof(*pts))))
         return;
 
     d2d_dash_walk_point(w, a, &pts[count++]);
 
-    for (i = 1; i < w->seg_count && count < capacity; ++i)
+    for (i = 1; i < n && count < capacity; ++i)
     {
-        if (w->cum[i] <= a || w->cum[i] > b)
+        float s = w->cum[i];
+        if (w->closed)
+        {
+            /* Map the corner arclength cyclically into [a, a + total) so a
+             * range straddling the seam (a < total < b) picks up the closing
+             * corner and the corners just past it. */
+            while (s < a) s += w->total;
+            while (s >= a + w->total) s -= w->total;
+            if (s > b)
+                continue;
+        }
+        else if (s <= a || s > b)
+        {
             continue;
-        pts[count++] = w->points[i];
+        }
+        pts[count++] = w->points[i % w->count];
     }
 
     if (count < capacity)
@@ -2159,7 +2175,6 @@ static void d2d_device_context_draw_dashed_geometry(struct d2d_device_context *c
         struct d2d_dash_path *path = &capture.paths[path_idx];
         struct d2d_dash_walk walk;
         float *cum = NULL;
-        float ext_a, ext_b, dash_len;
         size_t i;
 
         if (path->count < 2)
@@ -2197,61 +2212,43 @@ static void d2d_device_context_draw_dashed_geometry(struct d2d_device_context *c
 
             if (is_dash && b > 0.0f && a < walk.total + (walk.closed ? period : 0.0f))
             {
-                float a0, b0;
-                struct
-                {
-                    float a, b;
-                    BOOL fig_start, fig_end;
-                } ranges[2];
-                size_t range_count = 0;
+                float ext_a, ext_b, a0, b0;
 
-                if (b > 0.0f && a < walk.total)
+                /* Closed figures: emit the dash as one continuous range. The
+                 * walk wraps past the closing corner, so a dash straddling it
+                 * joins seamlessly instead of ending in two capped stubs that
+                 * leave a miter gap at the corner. */
+                if (walk.closed)
                 {
-                    ranges[range_count].a = max(a, 0.0f);
-                    ranges[range_count].b = min(b, walk.total);
-                    ranges[range_count].fig_start = (a <= 0.0f);
-                    ranges[range_count].fig_end = (b >= walk.total);
-                    ++range_count;
+                    a0 = a;
+                    b0 = b;
                 }
-                if (walk.closed && b > walk.total)
+                else
                 {
-                    ranges[range_count].a = max(a, walk.total) - walk.total;
-                    ranges[range_count].b = min(b, walk.total + period) - walk.total;
-                    ranges[range_count].fig_start = (a <= walk.total);
-                    ranges[range_count].fig_end = (b >= walk.total + period);
-                    ++range_count;
+                    a0 = max(a, 0.0f);
+                    b0 = min(b, walk.total);
                 }
 
-                dash_len = seg;
+                if (b0 > a0)
                 {
-                    size_t r;
+                    if (seg < 1e-6f)
+                        ext_a = ext_b = w_l * 0.5f;
+                    else if (style->desc.dashCap == D2D1_CAP_STYLE_SQUARE || style->desc.dashCap == D2D1_CAP_STYLE_ROUND)
+                        ext_a = ext_b = w_l * 0.5f;
+                    else
+                        ext_a = ext_b = 0.0f;
 
-                    for (r = 0; r < range_count; ++r)
+                    if (!walk.closed)
                     {
-                        a0 = ranges[r].a;
-                        b0 = ranges[r].b;
-                        if (!(b0 > a0))
-                            continue;
-
-                        if (dash_len < 1e-6f)
-                            ext_a = ext_b = w_l * 0.5f;
-                        else if (style->desc.dashCap == D2D1_CAP_STYLE_SQUARE || style->desc.dashCap == D2D1_CAP_STYLE_ROUND)
-                            ext_a = ext_b = w_l * 0.5f;
-                        else
-                            ext_a = ext_b = 0.0f;
-
-                        if (!walk.closed)
-                        {
-                            if (ranges[r].fig_start)
-                                ext_a = (style->desc.startCap == D2D1_CAP_STYLE_SQUARE
-                                        || style->desc.startCap == D2D1_CAP_STYLE_ROUND) ? w_l * 0.5f : 0.0f;
-                            if (ranges[r].fig_end)
-                                ext_b = (style->desc.endCap == D2D1_CAP_STYLE_SQUARE
-                                        || style->desc.endCap == D2D1_CAP_STYLE_ROUND) ? w_l * 0.5f : 0.0f;
-                        }
-
-                        d2d_dash_mesh_add_range(&mesh, &walk, a0 - ext_a, b0 + ext_b);
+                        if (a <= 0.0f)
+                            ext_a = (style->desc.startCap == D2D1_CAP_STYLE_SQUARE
+                                    || style->desc.startCap == D2D1_CAP_STYLE_ROUND) ? w_l * 0.5f : 0.0f;
+                        if (b >= walk.total)
+                            ext_b = (style->desc.endCap == D2D1_CAP_STYLE_SQUARE
+                                    || style->desc.endCap == D2D1_CAP_STYLE_ROUND) ? w_l * 0.5f : 0.0f;
                     }
+
+                    d2d_dash_mesh_add_range(&mesh, &walk, a0 - ext_a, b0 + ext_b);
                 }
             }
 
