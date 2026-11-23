@@ -515,6 +515,7 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         { L"Microsoft.UI.Xaml.Controls.SwapChainPanel",                 L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.UserControl",                    L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.Button",                         L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Primitives.Popup",               L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.TextBlock",                      L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Controls.Viewbox",                        L"windows.ui.xaml.dll" },
         { L"Microsoft.UI.Xaml.Shapes.Rectangle",                        L"windows.ui.xaml.dll" },
