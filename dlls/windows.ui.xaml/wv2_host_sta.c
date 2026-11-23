@@ -114,6 +114,7 @@ static BOOL g_wv2_alt_down;
 #define WM_APP_WV2_PASTE (WM_APP + 0x5c)
 #define WM_APP_WV2_INIT  (WM_APP + 0x5d)
 #define WM_APP_WV2_RESIZE (WM_APP + 0x5e)
+#define WV2_CHILD_SYNC_TIMER_ID 0x57563201
 
 static BOOL CALLBACK wv2_post_wheel_cb( HWND child, LPARAM lparam )
 {
@@ -571,9 +572,20 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
 {
     if (msg == WM_ERASEBKGND && g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
         return 1;
-    if (msg == WM_SIZE && g_active_wv2_impl && g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
+    if (msg == WM_SIZE)
     {
-        PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_RESIZE, wparam, lparam );
+        if (g_active_wv2_impl && g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
+            PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_RESIZE, wparam, lparam );
+        else if (!g_active_wv2_impl)
+            wv2_sync_child_hwnds( hwnd, LOWORD( lparam ), HIWORD( lparam ) );
+    }
+    if (msg == WM_TIMER && wparam == WV2_CHILD_SYNC_TIMER_ID)
+    {
+        if (!g_active_wv2_impl)
+            wv2_sync_child_hwnds( hwnd, 0, 0 );
+        else
+            KillTimer( hwnd, WV2_CHILD_SYNC_TIMER_ID );
+        return 0;
     }
     if (msg == WM_APP_WV2_INIT && lparam)
     {
@@ -667,6 +679,8 @@ void wv2_ensure_host_subclass( HWND parent )
     {
         g_wv2_prev_wndproc = prev;
         g_wv2_subclassed_hwnd = parent;
+        if (!g_active_wv2_impl)
+            SetTimer( parent, WV2_CHILD_SYNC_TIMER_ID, 250, NULL );
         ERR( "wv2_ensure_host_subclass: subclassed parent=%p prev=%p\n", parent, prev );
     }
 }
@@ -689,13 +703,19 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
     if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
         wcsstr( cls, L"Edge" ) || wcsstr( cls, L"WebView" ) || wcsstr( cls, L"RenderWidget" ))
     {
-        if (g_active_wv2_impl && !g_active_wv2_impl->has_comp_ctrl)
+        if (!g_active_wv2_impl || !g_active_wv2_impl->has_comp_ctrl)
         {
-            ShowWindow( child, SW_SHOW );
-            SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
-                          SWP_SHOWWINDOW | SWP_NOACTIVATE );
-            ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
-                   child, debugstr_w( cls ), ctx->width, ctx->height );
+            RECT cur_rc;
+            if (!GetWindowRect( child, &cur_rc ) ||
+                (cur_rc.right - cur_rc.left) != ctx->width ||
+                (cur_rc.bottom - cur_rc.top) != ctx->height)
+            {
+                ShowWindow( child, SW_SHOW );
+                SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
+                              SWP_SHOWWINDOW | SWP_NOACTIVATE );
+                ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
+                       child, debugstr_w( cls ), ctx->width, ctx->height );
+            }
         }
         ctx->count++;
     }
@@ -781,15 +801,25 @@ void wv2_sync_child_hwnds( HWND parent, UINT width, UINT height )
 {
     struct wv2_enum_ctx ctx;
 
-    if (!g_active_wv2_impl || g_active_wv2_impl->has_comp_ctrl) return;
+    if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl) return;
 
     if (!parent || !IsWindow( parent )) parent = wv2_get_controller_parent();
     if ((int)width <= 0 || (int)height <= 0)
     {
-        SIZE sz;
-        xaml_get_layout_metrics( parent, &sz, NULL );
-        if ((int)width <= 0) width = (UINT)sz.cx;
-        if ((int)height <= 0) height = (UINT)sz.cy;
+        RECT rc;
+        if (parent && IsWindow( parent ) && GetClientRect( parent, &rc ) &&
+            rc.right > rc.left && rc.bottom > rc.top)
+        {
+            if ((int)width <= 0) width = (UINT)(rc.right - rc.left);
+            if ((int)height <= 0) height = (UINT)(rc.bottom - rc.top);
+        }
+        else
+        {
+            SIZE sz;
+            xaml_get_layout_metrics( parent, &sz, NULL );
+            if ((int)width <= 0) width = (UINT)sz.cx;
+            if ((int)height <= 0) height = (UINT)sz.cy;
+        }
     }
 
     ctx.width = (int)width;
@@ -798,7 +828,10 @@ void wv2_sync_child_hwnds( HWND parent, UINT width, UINT height )
 
     if (parent && IsWindow( parent ))
         EnumChildWindows( parent, wv2_sync_child_cb, (LPARAM)&ctx );
-    EnumWindows( wv2_sync_top_cb, (LPARAM)&ctx );
+    if (g_active_wv2_impl)
+        EnumWindows( wv2_sync_top_cb, (LPARAM)&ctx );
+    if (!g_active_wv2_impl && ctx.count > 0 && parent && IsWindow( parent ))
+        KillTimer( parent, WV2_CHILD_SYNC_TIMER_ID );
 }
 
 DWORD WINAPI wv2_sta_thread( void *arg )
