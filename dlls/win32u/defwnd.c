@@ -2937,6 +2937,14 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
         result = is_window_unicode(hwnd) ? NFR_UNICODE : NFR_ANSI;
         break;
 
+    case WM_QUERYUISTATE:
+        {
+            BOOL cues = FALSE;
+            NtUserSystemParametersInfo( SPI_GETKEYBOARDCUES, 0, &cues, 0 );
+            result = cues ? 0 : (UISF_HIDEFOCUS | UISF_HIDEACCEL);
+            break;
+        }
+
     case WM_QUERYOPEN:
     case WM_QUERYENDSESSION:
         result = 1;

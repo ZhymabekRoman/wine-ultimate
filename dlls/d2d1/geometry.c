@@ -5006,7 +5006,7 @@ static HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geo
     if (tolerance <= 0.0f)
         tolerance = D2D1_DEFAULT_FLATTENING_TOLERANCE;
 
-    eps = max(tolerance, 1e-3f);
+    eps = 1e-3f;
     scale = 4.0f / eps;
 
     if (FAILED(hr = d2d_combine_collect_rings(geometry1, NULL, tolerance, &collector1)))

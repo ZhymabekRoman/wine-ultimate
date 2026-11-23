@@ -284,6 +284,7 @@ struct d2d_device_context
     BOOL has_subrect;
     RECT target_subrect;
     ID2D1SvgDocument *last_svg_doc;
+    ID2D1Geometry *layer_mask;
 
     struct d2d_indexed_objects vertex_buffers;
 };

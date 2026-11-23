@@ -5845,6 +5845,7 @@ static ULONG WINAPI glyphrunanalysis_Release(IDWriteGlyphRunAnalysis *iface)
 
 static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *analysis, RECT *bounds)
 {
+    struct dwrite_fontface *fontface = unsafe_impl_from_IDWriteFontFace(analysis->run.fontFace);
     struct dwrite_glyphbitmap glyph_bitmap;
     UINT32 i;
 
@@ -5877,7 +5878,9 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
 
         orig_x = analysis->origins[i].x;
         orig_y = analysis->origins[i].y;
-        if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 && bbox->top + orig_y == -1)
+        if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 &&
+                (bbox->top + orig_y == -1 ||
+                (fontface && fontface->metrics.descent == 0 && -bbox->top == (int)floorf(glyph_bitmap.emsize + 0.5f))))
             orig_y++;
         OffsetRect(bbox, orig_x, orig_y);
         UnionRect(&analysis->bounds, &analysis->bounds, bbox);
@@ -5978,7 +5981,9 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
         {
             int orig_x = analysis->origins[i].x;
             int orig_y = analysis->origins[i].y;
-            if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 && bbox->top + orig_y == -1)
+            if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0 &&
+                    (bbox->top + orig_y == -1 ||
+                    (fontface && fontface->metrics.descent == 0 && -bbox->top == (int)floorf(glyph_bitmap.emsize + 0.5f))))
                 orig_y++;
             OffsetRect(bbox, orig_x, orig_y);
         }
