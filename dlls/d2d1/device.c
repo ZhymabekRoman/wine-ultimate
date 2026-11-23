@@ -1492,6 +1492,786 @@ static HRESULT d2d_device_context_update_vs_cb(struct d2d_device_context *contex
     return S_OK;
 }
 
+struct d2d_dash_path
+{
+    D2D1_POINT_2F *points;
+    size_t points_size;
+    size_t count;
+    BOOL closed;
+};
+
+struct d2d_dash_capture
+{
+    ID2D1GeometrySink ID2D1GeometrySink_iface;
+    struct d2d_dash_path *paths;
+    size_t paths_size;
+    size_t path_count;
+    D2D1_POINT_2F current;
+};
+
+static inline struct d2d_dash_capture *d2d_dash_capture_from_ID2D1GeometrySink(ID2D1GeometrySink *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_dash_capture, ID2D1GeometrySink_iface);
+}
+
+static struct d2d_dash_path *d2d_dash_capture_add_path(struct d2d_dash_capture *capture)
+{
+    struct d2d_dash_path *path;
+
+    if (!d2d_array_reserve((void **)&capture->paths, &capture->paths_size,
+            capture->path_count + 1, sizeof(*capture->paths)))
+    {
+        WARN("Failed to grow dash path array.\n");
+        return NULL;
+    }
+    path = &capture->paths[capture->path_count++];
+    memset(path, 0, sizeof(*path));
+    return path;
+}
+
+static void d2d_dash_capture_cleanup(struct d2d_dash_capture *capture)
+{
+    size_t i;
+
+    for (i = 0; i < capture->path_count; ++i)
+        free(capture->paths[i].points);
+    free(capture->paths);
+    capture->paths = NULL;
+    capture->paths_size = 0;
+    capture->path_count = 0;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_dash_capture_QueryInterface(ID2D1GeometrySink *iface,
+        REFIID iid, void **out)
+{
+    if (IsEqualGUID(iid, &IID_ID2D1GeometrySink) || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        *out = iface;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_dash_capture_AddRef(ID2D1GeometrySink *iface)
+{
+    return 1;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_dash_capture_Release(ID2D1GeometrySink *iface)
+{
+    return 1;
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_SetFillMode(ID2D1GeometrySink *iface, D2D1_FILL_MODE fill_mode)
+{
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_SetSegmentSettings(ID2D1GeometrySink *iface,
+        D2D1_PATH_SEGMENT settings)
+{
+}
+
+static struct d2d_dash_path *d2d_dash_capture_current_path(struct d2d_dash_capture *capture)
+{
+    return capture->path_count ? &capture->paths[capture->path_count - 1] : NULL;
+}
+
+static void d2d_dash_path_add_point(struct d2d_dash_path *path, const D2D1_POINT_2F *p)
+{
+    const D2D1_POINT_2F *last;
+
+    if (!path)
+        return;
+
+    last = path->count ? &path->points[path->count - 1] : NULL;
+    if (last && fabsf(last->x - p->x) < 1e-6f && fabsf(last->y - p->y) < 1e-6f)
+        return;
+
+    if (!d2d_array_reserve((void **)&path->points, &path->points_size,
+            path->count + 1, sizeof(*path->points)))
+    {
+        WARN("Failed to grow dash path.\n");
+        return;
+    }
+    path->points[path->count++] = *p;
+}
+
+static void d2d_dash_capture_add_point(struct d2d_dash_capture *capture, const D2D1_POINT_2F *p)
+{
+    d2d_dash_path_add_point(d2d_dash_capture_current_path(capture), p);
+    capture->current = *p;
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_BeginFigure(ID2D1GeometrySink *iface,
+        D2D1_POINT_2F start_point, D2D1_FIGURE_BEGIN figure_begin)
+{
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+    struct d2d_dash_path *path;
+
+    if (!(path = d2d_dash_capture_add_path(capture)))
+        return;
+    capture->current = start_point;
+    d2d_dash_path_add_point(path, &start_point);
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_EndFigure(ID2D1GeometrySink *iface, D2D1_FIGURE_END figure_end)
+{
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+    struct d2d_dash_path *path = d2d_dash_capture_current_path(capture);
+
+    if (path)
+        path->closed = (figure_end == D2D1_FIGURE_END_CLOSED);
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_AddLine(ID2D1GeometrySink *iface, D2D1_POINT_2F point)
+{
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+
+    d2d_dash_capture_add_point(capture, &point);
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_AddLines(ID2D1GeometrySink *iface,
+        const D2D1_POINT_2F *points, UINT32 count)
+{
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+    UINT32 i;
+
+    for (i = 0; i < count; ++i)
+        d2d_dash_capture_add_point(capture, &points[i]);
+}
+
+static void d2d_dash_capture_cubic(struct d2d_dash_capture *capture,
+        const D2D1_POINT_2F *p0, const D2D1_POINT_2F *p1, const D2D1_POINT_2F *p2, const D2D1_POINT_2F *p3)
+{
+    D2D1_POINT_2F q;
+    unsigned int i;
+    float t, u;
+
+    for (i = 1; i <= 8; ++i)
+    {
+        t = i / 8.0f;
+        u = 1.0f - t;
+        q.x = u * u * u * p0->x + 3.0f * u * u * t * p1->x + 3.0f * u * t * t * p2->x + t * t * t * p3->x;
+        q.y = u * u * u * p0->y + 3.0f * u * u * t * p1->y + 3.0f * u * t * t * p2->y + t * t * t * p3->y;
+        d2d_dash_capture_add_point(capture, &q);
+    }
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_AddBezier(ID2D1GeometrySink *iface,
+        const D2D1_BEZIER_SEGMENT *bezier)
+{
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+
+    d2d_dash_capture_cubic(capture, &capture->current, &bezier->point1, &bezier->point2, &bezier->point3);
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_AddBeziers(ID2D1GeometrySink *iface,
+        const D2D1_BEZIER_SEGMENT *beziers, UINT32 count)
+{
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+    UINT32 i;
+
+    for (i = 0; i < count; ++i)
+        d2d_dash_capture_cubic(capture, &capture->current,
+                &beziers[i].point1, &beziers[i].point2, &beziers[i].point3);
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_AddQuadraticBezier(ID2D1GeometrySink *iface,
+        const D2D1_QUADRATIC_BEZIER_SEGMENT *bezier)
+{
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+    D2D1_POINT_2F p0 = capture->current, c1, c2;
+
+    c1.x = p0.x + 2.0f / 3.0f * (bezier->point1.x - p0.x);
+    c1.y = p0.y + 2.0f / 3.0f * (bezier->point1.y - p0.y);
+    c2.x = bezier->point2.x + 2.0f / 3.0f * (bezier->point1.x - bezier->point2.x);
+    c2.y = bezier->point2.y + 2.0f / 3.0f * (bezier->point1.y - bezier->point2.y);
+
+    d2d_dash_capture_cubic(capture, &p0, &c1, &c2, &bezier->point2);
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_AddQuadraticBeziers(ID2D1GeometrySink *iface,
+        const D2D1_QUADRATIC_BEZIER_SEGMENT *beziers, UINT32 count)
+{
+    UINT32 i;
+
+    for (i = 0; i < count; ++i)
+        d2d_dash_capture_AddQuadraticBezier(iface, &beziers[i]);
+}
+
+static void STDMETHODCALLTYPE d2d_dash_capture_AddArc(ID2D1GeometrySink *iface, const D2D1_ARC_SEGMENT *arc)
+{
+    static const float pi = 3.14159265358979323846f;
+    struct d2d_dash_capture *capture = d2d_dash_capture_from_ID2D1GeometrySink(iface);
+    D2D1_POINT_2F p0 = capture->current, p1 = arc->point;
+    D2D1_POINT_2F c1, c2, p;
+    float phi, cos_phi, sin_phi, rx, ry, rx2, ry2;
+    float x1p, y1p, lam, co, cxp, cyp, cx, cy, theta1, dtheta, dt;
+    float num, den, k;
+    unsigned int quadrants, i;
+    BOOL large, cw;
+
+    rx = arc->size.width;
+    ry = arc->size.height;
+    if (rx <= 0.0f || ry <= 0.0f)
+    {
+        d2d_dash_capture_add_point(capture, &p1);
+        return;
+    }
+
+    phi = arc->rotationAngle * pi / 180.0f;
+    cos_phi = cosf(phi);
+    sin_phi = sinf(phi);
+
+    x1p = cos_phi * (p0.x - p1.x) * 0.5f + sin_phi * (p0.y - p1.y) * 0.5f;
+    y1p = -sin_phi * (p0.x - p1.x) * 0.5f + cos_phi * (p0.y - p1.y) * 0.5f;
+    rx2 = rx * rx;
+    ry2 = ry * ry;
+
+    lam = (x1p * x1p) / rx2 + (y1p * y1p) / ry2;
+    if (lam > 1.0f)
+    {
+        lam = sqrtf(lam);
+        rx *= lam;
+        ry *= lam;
+        rx2 = rx * rx;
+        ry2 = ry * ry;
+    }
+
+    large = (arc->arcSize == D2D1_ARC_SIZE_LARGE);
+    cw = (arc->sweepDirection == D2D1_SWEEP_DIRECTION_CLOCKWISE);
+
+    num = rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p;
+    den = rx2 * y1p * y1p + ry2 * x1p * x1p;
+    co = (den > 0.0f) ? ((large != cw) ? sqrtf(fmaxf(0.0f, num / den)) : -sqrtf(fmaxf(0.0f, num / den))) : 0.0f;
+    cxp = co * rx * y1p / ry;
+    cyp = -co * ry * x1p / rx;
+    cx = cos_phi * cxp - sin_phi * cyp + (p0.x + p1.x) * 0.5f;
+    cy = sin_phi * cxp + cos_phi * cyp + (p0.y + p1.y) * 0.5f;
+
+    theta1 = atan2f((y1p - cyp) / ry, (x1p - cxp) / rx);
+    dtheta = atan2f((-y1p - cyp) / ry, (-x1p - cxp) / rx) - theta1;
+    if (cw)
+    {
+        while (dtheta < 0.0f)
+            dtheta += 2.0f * pi;
+    }
+    else
+    {
+        while (dtheta > 0.0f)
+            dtheta -= 2.0f * pi;
+    }
+
+    quadrants = (unsigned int)ceilf(fabsf(dtheta) / (pi * 0.5f));
+    if (!quadrants)
+    {
+        d2d_dash_capture_add_point(capture, &p1);
+        return;
+    }
+    dt = dtheta / quadrants;
+    k = 4.0f / 3.0f * tanf(dt * 0.25f);
+
+    for (i = 0; i < quadrants; ++i)
+    {
+        float t0 = theta1 + dt * i;
+        float t1 = t0 + dt;
+
+        p.x = cx + rx * cosf(t0);
+        p.y = cy + ry * sinf(t0);
+        c1.x = p.x - k * rx * sinf(t0);
+        c1.y = p.y + k * ry * cosf(t0);
+        p.x = cx + rx * cosf(t1);
+        p.y = cy + ry * sinf(t1);
+        c2.x = p.x + k * rx * sinf(t1);
+        c2.y = p.y - k * ry * cosf(t1);
+
+        d2d_dash_capture_cubic(capture, &capture->current, &c1, &c2, &p);
+    }
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_dash_capture_Close(ID2D1GeometrySink *iface)
+{
+    return S_OK;
+}
+
+static const struct ID2D1GeometrySinkVtbl d2d_dash_capture_vtbl =
+{
+    d2d_dash_capture_QueryInterface,
+    d2d_dash_capture_AddRef,
+    d2d_dash_capture_Release,
+    d2d_dash_capture_SetFillMode,
+    d2d_dash_capture_SetSegmentSettings,
+    d2d_dash_capture_BeginFigure,
+    d2d_dash_capture_AddLines,
+    d2d_dash_capture_AddBeziers,
+    d2d_dash_capture_EndFigure,
+    d2d_dash_capture_Close,
+    d2d_dash_capture_AddLine,
+    d2d_dash_capture_AddBezier,
+    d2d_dash_capture_AddQuadraticBezier,
+    d2d_dash_capture_AddQuadraticBeziers,
+    d2d_dash_capture_AddArc,
+};
+
+struct d2d_dash_mesh
+{
+    struct d2d_outline_vertex *vertices;
+    size_t vertices_size;
+    size_t vertex_count;
+
+    struct d2d_face *faces;
+    size_t faces_size;
+    size_t face_count;
+};
+
+static void d2d_dash_mesh_cleanup(struct d2d_dash_mesh *mesh)
+{
+    free(mesh->vertices);
+    free(mesh->faces);
+    memset(mesh, 0, sizeof(*mesh));
+}
+
+static void d2d_dash_outline_vertex_set(struct d2d_outline_vertex *v,
+        float x, float y, float prev_x, float prev_y, float next_x, float next_y)
+{
+    d2d_point_set(&v->position, x, y);
+    d2d_point_set(&v->prev, prev_x, prev_y);
+    d2d_point_set(&v->next, next_x, next_y);
+}
+
+static void d2d_dash_point_subtract(D2D1_POINT_2F *dst, const D2D1_POINT_2F *p0, const D2D1_POINT_2F *p1)
+{
+    dst->x = p0->x - p1->x;
+    dst->y = p0->y - p1->y;
+}
+
+static BOOL d2d_dash_point_normalise(D2D1_POINT_2F *p)
+{
+    float l = sqrtf(p->x * p->x + p->y * p->y);
+
+    if (!(l > 0.0f))
+        return FALSE;
+    p->x /= l;
+    p->y /= l;
+    return TRUE;
+}
+
+static BOOL d2d_dash_mesh_reserve(struct d2d_dash_mesh *mesh, size_t vertex_count, size_t face_count)
+{
+    if (!d2d_array_reserve((void **)&mesh->vertices, &mesh->vertices_size,
+            mesh->vertex_count + vertex_count, sizeof(*mesh->vertices)))
+        return FALSE;
+    if (!d2d_array_reserve((void **)&mesh->faces, &mesh->faces_size,
+            mesh->face_count + face_count, sizeof(*mesh->faces)))
+        return FALSE;
+    return TRUE;
+}
+
+static BOOL d2d_dash_mesh_add_line(struct d2d_dash_mesh *mesh,
+        const D2D1_POINT_2F *p0, const D2D1_POINT_2F *p1)
+{
+    struct d2d_outline_vertex *v;
+    D2D1_POINT_2F q;
+    struct d2d_face *f;
+    size_t base_idx;
+
+    d2d_dash_point_subtract(&q, p1, p0);
+    if (!d2d_dash_point_normalise(&q))
+        return TRUE;
+
+    if (!d2d_dash_mesh_reserve(mesh, 4, 2))
+        return FALSE;
+    base_idx = mesh->vertex_count;
+    v = &mesh->vertices[base_idx];
+    f = &mesh->faces[mesh->face_count];
+
+    d2d_dash_outline_vertex_set(&v[0], p0->x, p0->y, q.x, q.y, q.x, q.y);
+    d2d_dash_outline_vertex_set(&v[1], p0->x, p0->y, -q.x, -q.y, -q.x, -q.y);
+    d2d_dash_outline_vertex_set(&v[2], p1->x, p1->y, q.x, q.y, q.x, q.y);
+    d2d_dash_outline_vertex_set(&v[3], p1->x, p1->y, -q.x, -q.y, -q.x, -q.y);
+    mesh->vertex_count += 4;
+
+    f[0].v[0] = base_idx + 0;
+    f[0].v[1] = base_idx + 1;
+    f[0].v[2] = base_idx + 2;
+    f[1].v[0] = base_idx + 2;
+    f[1].v[1] = base_idx + 1;
+    f[1].v[2] = base_idx + 3;
+    mesh->face_count += 2;
+
+    return TRUE;
+}
+
+static BOOL d2d_dash_mesh_add_join(struct d2d_dash_mesh *mesh,
+        const D2D1_POINT_2F *prev, const D2D1_POINT_2F *p0, const D2D1_POINT_2F *next)
+{
+    struct d2d_outline_vertex *v;
+    struct d2d_face *f;
+    size_t base_idx;
+    float ccw;
+
+    ccw = prev->x * next->y - prev->y * next->x;
+    if (ccw == 0.0f && prev->x == next->x && prev->y == next->y)
+        return TRUE;
+
+    if (!d2d_dash_mesh_reserve(mesh, 4, 2))
+        return FALSE;
+    base_idx = mesh->vertex_count;
+    v = &mesh->vertices[base_idx];
+    f = &mesh->faces[mesh->face_count];
+
+    if (ccw == 0.0f)
+    {
+        d2d_dash_outline_vertex_set(&v[0], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
+        d2d_dash_outline_vertex_set(&v[1], p0->x, p0->y, prev->x, prev->y, prev->x, prev->y);
+        d2d_dash_outline_vertex_set(&v[2], p0->x + 25.0f * -prev->x, p0->y + 25.0f * -prev->y,
+                prev->x, prev->y, prev->x, prev->y);
+        d2d_dash_outline_vertex_set(&v[3], p0->x + 25.0f * -prev->x, p0->y + 25.0f * -prev->y,
+                -prev->x, -prev->y, -prev->x, -prev->y);
+    }
+    else if (ccw < 0.0f)
+    {
+        d2d_dash_outline_vertex_set(&v[0], p0->x, p0->y, next->x, next->y, -prev->x, -prev->y);
+        d2d_dash_outline_vertex_set(&v[1], p0->x, p0->y, -next->x, -next->y, -prev->x, -prev->y);
+        d2d_dash_outline_vertex_set(&v[2], p0->x, p0->y, -next->x, -next->y, prev->x, prev->y);
+        d2d_dash_outline_vertex_set(&v[3], p0->x, p0->y, prev->x, prev->y, prev->x, prev->y);
+    }
+    else
+    {
+        d2d_dash_outline_vertex_set(&v[0], p0->x, p0->y, prev->x, prev->y, -next->x, -next->y);
+        d2d_dash_outline_vertex_set(&v[1], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
+        d2d_dash_outline_vertex_set(&v[2], p0->x, p0->y, -prev->x, -prev->y, next->x, next->y);
+        d2d_dash_outline_vertex_set(&v[3], p0->x, p0->y, next->x, next->y, next->x, next->y);
+    }
+    mesh->vertex_count += 4;
+
+    f[0].v[0] = base_idx + 1;
+    f[0].v[1] = base_idx + 0;
+    f[0].v[2] = base_idx + 2;
+    f[1].v[0] = base_idx + 2;
+    f[1].v[1] = base_idx + 0;
+    f[1].v[2] = base_idx + 3;
+    mesh->face_count += 2;
+
+    return TRUE;
+}
+
+static BOOL d2d_dash_mesh_add_path(struct d2d_dash_mesh *mesh, const D2D1_POINT_2F *points, size_t count)
+{
+    D2D1_POINT_2F q_prev, q_next;
+    size_t i;
+
+    if (count < 2)
+        return TRUE;
+
+    if (!d2d_dash_mesh_add_line(mesh, &points[0], &points[1]))
+        return FALSE;
+
+    for (i = 2; i < count; ++i)
+    {
+        d2d_dash_point_subtract(&q_prev, &points[i - 2], &points[i - 1]);
+        d2d_dash_point_subtract(&q_next, &points[i], &points[i - 1]);
+        if (!d2d_dash_point_normalise(&q_prev) || !d2d_dash_point_normalise(&q_next))
+            continue;
+        if (q_prev.x == q_next.x && q_prev.y == q_next.y)
+            continue;
+        if (!d2d_dash_mesh_add_join(mesh, &q_prev, &points[i - 1], &q_next))
+            return FALSE;
+        if (!d2d_dash_mesh_add_line(mesh, &points[i - 1], &points[i]))
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+struct d2d_dash_walk
+{
+    D2D1_POINT_2F *points;
+    size_t count;
+    size_t seg_count;
+    BOOL closed;
+    float *cum;
+    float total;
+};
+
+static void d2d_dash_walk_point(const struct d2d_dash_walk *w, float s, D2D1_POINT_2F *dst)
+{
+    const D2D1_POINT_2F *p0, *p1;
+    size_t seg;
+    float t;
+
+    if (w->closed)
+    {
+        while (s < 0.0f)
+            s += w->total;
+        while (s >= w->total)
+            s -= w->total;
+    }
+    else
+    {
+        s = min(s, w->total);
+        s = max(s, 0.0f);
+    }
+
+    seg = 0;
+    while (seg + 1 < w->seg_count && w->cum[seg + 1] <= s)
+        ++seg;
+
+    p0 = &w->points[seg];
+    p1 = &w->points[(seg + 1) % w->count];
+    t = (w->cum[seg + 1] - w->cum[seg] > 0.0f)
+            ? (s - w->cum[seg]) / (w->cum[seg + 1] - w->cum[seg]) : 0.0f;
+    dst->x = p0->x + t * (p1->x - p0->x);
+    dst->y = p0->y + t * (p1->y - p0->y);
+}
+
+static void d2d_dash_mesh_add_range(struct d2d_dash_mesh *mesh,
+        const struct d2d_dash_walk *w, float a, float b)
+{
+    size_t count = 0, i, capacity;
+    D2D1_POINT_2F *pts, *last, q;
+
+    if (b <= a)
+        return;
+
+    capacity = w->seg_count + 2;
+    if (!(pts = malloc(capacity * sizeof(*pts))))
+        return;
+
+    d2d_dash_walk_point(w, a, &pts[count++]);
+
+    for (i = 1; i < w->seg_count && count < capacity; ++i)
+    {
+        if (w->cum[i] <= a || w->cum[i] > b)
+            continue;
+        pts[count++] = w->points[i];
+    }
+
+    if (count < capacity)
+    {
+        last = &pts[count - 1];
+        d2d_dash_walk_point(w, b, &q);
+        if (fabsf(last->x - q.x) > 1e-6f || fabsf(last->y - q.y) > 1e-6f)
+            pts[count++] = q;
+    }
+
+    d2d_dash_mesh_add_path(mesh, pts, count);
+    free(pts);
+}
+
+static void d2d_device_context_draw_dash_mesh(struct d2d_device_context *render_target,
+        const D2D_MATRIX_3X2_F *transform, const struct d2d_dash_mesh *mesh,
+        struct d2d_brush *brush, float stroke_width)
+{
+    D3D11_SUBRESOURCE_DATA buffer_data;
+    D3D11_BUFFER_DESC buffer_desc;
+    ID3D11Buffer *ib, *vb;
+    HRESULT hr;
+
+    if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, transform, stroke_width)))
+    {
+        WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
+        return;
+    }
+
+    if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, FALSE)))
+    {
+        WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
+        return;
+    }
+
+    buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+    buffer_desc.CPUAccessFlags = 0;
+    buffer_desc.MiscFlags = 0;
+
+    buffer_data.SysMemPitch = 0;
+    buffer_data.SysMemSlicePitch = 0;
+
+    buffer_desc.ByteWidth = mesh->face_count * sizeof(*mesh->faces);
+    buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    buffer_data.pSysMem = mesh->faces;
+
+    if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
+    {
+        WARN("Failed to create index buffer, hr %#lx.\n", hr);
+        return;
+    }
+
+    buffer_desc.ByteWidth = mesh->vertex_count * sizeof(*mesh->vertices);
+    buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    buffer_data.pSysMem = mesh->vertices;
+
+    if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
+    {
+        ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
+        ID3D11Buffer_Release(ib);
+        return;
+    }
+
+    d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_OUTLINE, ib, 3 * mesh->face_count, vb,
+            sizeof(*mesh->vertices), brush, NULL);
+
+    ID3D11Buffer_Release(vb);
+    ID3D11Buffer_Release(ib);
+}
+
+static void d2d_device_context_draw_dashed_geometry(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width,
+        const struct d2d_stroke_style *style)
+{
+    const D2D_MATRIX_3X2_F *xform = d2d_geometry_outline_transform(geometry);
+    float w_l, unit, period, offset, acc;
+    struct d2d_dash_capture capture = {0};
+    struct d2d_dash_mesh mesh = {0};
+    D2D_MATRIX_3X2_F m;
+    size_t path_idx;
+    unsigned int it, pk;
+    int k;
+
+    capture.ID2D1GeometrySink_iface.lpVtbl = &d2d_dash_capture_vtbl;
+    geometry->ops->stream((struct d2d_geometry *)geometry, NULL, &capture.ID2D1GeometrySink_iface);
+
+    m = context->drawing_state.transform;
+    d2d_matrix_multiply(&m, xform);
+    w_l = sqrtf(fabsf(m._11 * m._22 - m._12 * m._21));
+    if (!(w_l > 0.0f))
+        w_l = 1.0f;
+
+    /* Dash pattern lengths are multiples of the stroke width, in post-transform
+     * units. The tessellation above is in geometry space, so scale by the
+     * geometry and render target transforms. */
+    unit = w_l = stroke_width / w_l;
+
+    period = 0.0f;
+    for (k = 0; k < (int)style->dash_count; ++k)
+        period += style->dashes[k] * unit;
+    if (!(period > 1e-6f))
+        goto done;
+
+    offset = fmodf(style->desc.dashOffset * unit, period);
+    if (offset < 0.0f)
+        offset += period;
+
+    for (path_idx = 0; path_idx < capture.path_count; ++path_idx)
+    {
+        struct d2d_dash_path *path = &capture.paths[path_idx];
+        struct d2d_dash_walk walk;
+        float *cum = NULL;
+        float ext_a, ext_b, dash_len;
+        size_t i;
+
+        if (path->count < 2)
+            continue;
+
+        walk.points = path->points;
+        walk.count = path->count;
+        walk.closed = path->closed;
+        walk.seg_count = path->closed ? path->count : path->count - 1;
+        if (!(cum = malloc((walk.seg_count + 1) * sizeof(*cum))))
+            break;
+        walk.cum = cum;
+        cum[0] = 0.0f;
+        for (i = 0; i < walk.seg_count; ++i)
+        {
+            const D2D1_POINT_2F *p0 = &path->points[i];
+            const D2D1_POINT_2F *p1 = &path->points[(i + 1) % path->count];
+            float dx = p1->x - p0->x, dy = p1->y - p0->y;
+            cum[i + 1] = cum[i] + sqrtf(dx * dx + dy * dy);
+        }
+        walk.total = cum[walk.seg_count];
+        if (!(walk.total > 1e-6f))
+        {
+            free(cum);
+            continue;
+        }
+
+        acc = 0.0f;
+        pk = 0;
+        for (it = 0; it < 4096; ++it)
+        {
+            float seg = style->dashes[pk % style->dash_count] * unit;
+            float a = acc - offset, b = acc + seg - offset;
+            BOOL is_dash = !(pk & 1);
+
+            if (is_dash && b > 0.0f && a < walk.total + (walk.closed ? period : 0.0f))
+            {
+                float a0, b0;
+                struct
+                {
+                    float a, b;
+                    BOOL fig_start, fig_end;
+                } ranges[2];
+                size_t range_count = 0;
+
+                if (b > 0.0f && a < walk.total)
+                {
+                    ranges[range_count].a = max(a, 0.0f);
+                    ranges[range_count].b = min(b, walk.total);
+                    ranges[range_count].fig_start = (a <= 0.0f);
+                    ranges[range_count].fig_end = (b >= walk.total);
+                    ++range_count;
+                }
+                if (walk.closed && b > walk.total)
+                {
+                    ranges[range_count].a = max(a, walk.total) - walk.total;
+                    ranges[range_count].b = min(b, walk.total + period) - walk.total;
+                    ranges[range_count].fig_start = (a <= walk.total);
+                    ranges[range_count].fig_end = (b >= walk.total + period);
+                    ++range_count;
+                }
+
+                dash_len = seg;
+                {
+                    size_t r;
+
+                    for (r = 0; r < range_count; ++r)
+                    {
+                        a0 = ranges[r].a;
+                        b0 = ranges[r].b;
+                        if (!(b0 > a0))
+                            continue;
+
+                        if (dash_len < 1e-6f)
+                            ext_a = ext_b = w_l * 0.5f;
+                        else if (style->desc.dashCap == D2D1_CAP_STYLE_SQUARE || style->desc.dashCap == D2D1_CAP_STYLE_ROUND)
+                            ext_a = ext_b = w_l * 0.5f;
+                        else
+                            ext_a = ext_b = 0.0f;
+
+                        if (!walk.closed)
+                        {
+                            if (ranges[r].fig_start)
+                                ext_a = (style->desc.startCap == D2D1_CAP_STYLE_SQUARE
+                                        || style->desc.startCap == D2D1_CAP_STYLE_ROUND) ? w_l * 0.5f : 0.0f;
+                            if (ranges[r].fig_end)
+                                ext_b = (style->desc.endCap == D2D1_CAP_STYLE_SQUARE
+                                        || style->desc.endCap == D2D1_CAP_STYLE_ROUND) ? w_l * 0.5f : 0.0f;
+                        }
+
+                        d2d_dash_mesh_add_range(&mesh, &walk, a0 - ext_a, b0 + ext_b);
+                    }
+                }
+            }
+
+            acc += seg;
+            ++pk;
+            if (acc - offset > walk.total + (walk.closed ? period : 0.0f))
+                break;
+        }
+
+        free(cum);
+    }
+
+done:
+    if (mesh.face_count)
+        d2d_device_context_draw_dash_mesh(context, xform, &mesh, brush, stroke_width);
+
+    d2d_dash_mesh_cleanup(&mesh);
+    d2d_dash_capture_cleanup(&capture);
+}
+
 static void d2d_device_context_draw_geometry(struct d2d_device_context *render_target,
         const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width)
 {
@@ -1640,13 +2420,17 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
         return;
     }
 
-    if (stroke_style)
-        FIXME("Ignoring stroke style %p.\n", stroke_style);
-
     if (stroke_style_impl)
     {
         if (stroke_style_impl->desc.transformType == D2D1_STROKE_TRANSFORM_TYPE_FIXED)
             stroke_width /= context->drawing_state.transform.m11;
+
+        if (stroke_style_impl->dash_count && stroke_style_impl->desc.dashStyle != D2D1_DASH_STYLE_SOLID)
+        {
+            d2d_device_context_draw_dashed_geometry(context, geometry_impl, brush_impl,
+                    stroke_width, stroke_style_impl);
+            return;
+        }
     }
 
     d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width);

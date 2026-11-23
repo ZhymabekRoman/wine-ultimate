@@ -7264,6 +7264,18 @@ static const struct d2d_geometry_ops d2d_transformed_geometry_ops =
     .stream = d2d_transformed_geometry_stream,
 };
 
+const D2D_MATRIX_3X2_F *d2d_geometry_outline_transform(const struct d2d_geometry *geometry)
+{
+    static const D2D_MATRIX_3X2_F identity = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+
+    /* For transformed geometry the source transform is baked into the streamed
+     * points, so the outline is drawn with an identity vertex transform. */
+    if (geometry->ops == &d2d_transformed_geometry_ops)
+        return &identity;
+
+    return &geometry->transform;
+}
+
 void d2d_transformed_geometry_init(struct d2d_geometry *geometry, ID2D1Factory *factory,
         ID2D1Geometry *src_geometry, const D2D_MATRIX_3X2_F *transform)
 {

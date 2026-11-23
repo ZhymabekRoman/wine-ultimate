@@ -698,6 +698,7 @@ void d2d_transformed_geometry_init(struct d2d_geometry *geometry, ID2D1Factory *
 HRESULT d2d_geometry_group_init(struct d2d_geometry *geometry, ID2D1Factory *factory,
         D2D1_FILL_MODE fill_mode, ID2D1Geometry **src_geometries, unsigned int geometry_count);
 struct d2d_geometry *unsafe_impl_from_ID2D1Geometry(ID2D1Geometry *iface);
+const D2D_MATRIX_3X2_F *d2d_geometry_outline_transform(const struct d2d_geometry *geometry);
 
 struct d2d_geometry_realization
 {
