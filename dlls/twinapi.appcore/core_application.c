@@ -514,9 +514,14 @@ static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApp
     }
     if (IsEqualGUID( iid, &IID_IProtocolActivatedEventArgs ))
     {
-        InterlockedIncrement( &impl->ref );
-        *out = &impl->IProtocolActivatedEventArgs_vtbl;
-        return S_OK;
+        if (impl->kind == ActivationKind_Protocol)
+        {
+            InterlockedIncrement( &impl->ref );
+            *out = &impl->IProtocolActivatedEventArgs_vtbl;
+            return S_OK;
+        }
+        *out = NULL;
+        return E_NOINTERFACE;
     }
     if (IsEqualGUID( iid, &IID_ISplashScreen ))
     {

@@ -1,5 +1,5 @@
 MODULE  = windows.applicationmodel.dll
-IMPORTS = combase kernelbase
+IMPORTS = combase kernelbase winhttp
 
 SOURCES = \
 	appextensions.c \
@@ -7,4 +7,7 @@ SOURCES = \
 	classes.idl \
 	designmode.c \
 	main.c \
-	package.c
+	package.c \
+	store_fe3.c \
+	store_install.c \
+	winappsdk_dd.c

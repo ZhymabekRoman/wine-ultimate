@@ -50,6 +50,129 @@ HRESULT create_package_instance( IPackage **out );
 BOOL package_get_reg_str( const WCHAR *prop_name, WCHAR *buf, DWORD cch );
 extern const WCHAR appmodel_reg_key[];
 
+/* ---- main.c: shared WindowsAppSDK static-class surface ------------------- *
+ * Every WinAppSDK/Store class below is a singleton: its activation factory
+ * hands out the one object, which reports its own class name and answers every
+ * method slot past IInspectable with a zeroed out-param. main.c owns the two
+ * shared vtbls and the IInspectable method bodies; winappsdk_dd.c and
+ * store_install.c instantiate classes from them with the macros here.        */
+struct winappsdk_class
+{
+    const void *vtbl;
+    const WCHAR *name;
+    LONG ref;
+};
+
+struct winappsdk_factory
+{
+    const void *vtbl;
+    struct winappsdk_class *obj;
+    LONG ref;
+};
+
+extern const void *winappsdk_class_vtbl[];
+extern const void *winappsdk_factory_vtbl[];
+
+HRESULT WINAPI winappsdk_class_QueryInterface( void *iface, REFIID iid, void **out );
+HRESULT WINAPI winappsdk_QueryInterface( void *iface, REFIID iid, void **out );
+ULONG WINAPI winappsdk_AddRef( void *iface );
+ULONG WINAPI winappsdk_Release( void *iface );
+HRESULT WINAPI winappsdk_GetIids( void *iface, ULONG *count, IID **iids );
+HRESULT WINAPI winappsdk_GetRuntimeClassName( void *iface, HSTRING *name );
+HRESULT WINAPI winappsdk_GetTrustLevel( void *iface, TrustLevel *level );
+HRESULT WINAPI winappsdk_zero_out( void *iface, void *out );
+HRESULT WINAPI winappsdk_factory_QueryInterface( void *iface, REFIID iid, void **out );
+HRESULT WINAPI winappsdk_factory_ActivateInstance( void *iface, IInspectable **instance );
+HRESULT WINAPI winappsdk_factory_GetRuntimeClassName( void *iface, HSTRING *name );
+
+#define WINAPPSDK_CLASS( ident, classname ) \
+    struct winappsdk_class ident##_obj = { winappsdk_class_vtbl, L##classname, 1 }; \
+    struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
+
+#define WINAPPSDK_CLASS_V( ident, vtbl, classname ) \
+    struct winappsdk_class ident##_obj = { vtbl, L##classname, 1 }; \
+    struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
+
+/* ---- winappsdk_dd.c: WinAppSDK Dynamic Dependencies ---------------------- */
+extern struct winappsdk_factory deployment_manager_factory;
+extern struct winappsdk_factory deployment_init_options_factory;
+extern struct winappsdk_factory deployment_result_factory;
+extern struct winappsdk_factory package_dependency_factory;
+extern struct winappsdk_factory package_dependency_context_factory;
+extern struct winappsdk_factory add_package_dependency_options_factory;
+extern struct winappsdk_factory create_package_dependency_options_factory;
+extern struct winappsdk_factory package_dependency_rank_factory;
+extern struct winappsdk_factory environment_manager_factory;
+
+/* ---- store_install.c: Store, AppInstallManager, StoreContext -------------- */
+struct store_configuration_factory_impl
+{
+    const void *vtbl1;
+    const void *vtbl2;
+    const void *vtbl3;
+    const void *vtbl4;
+    const WCHAR *name;
+    LONG ref;
+};
+
+extern struct store_configuration_factory_impl store_cfg_factory_instance;
+extern struct winappsdk_factory app_install_manager_custom_factory;
+extern struct winappsdk_factory app_install_options_factory;
+extern struct winappsdk_factory app_update_options_factory;
+extern struct winappsdk_factory store_system_feature_factory;
+extern struct winappsdk_factory web_auth_core_helper_factory;
+extern struct winappsdk_factory license_manager_factory;
+extern struct winappsdk_factory store_context_custom_factory;
+
+/* ---- store_install.c / store_fe3.c: AppInstallManager + FE3 download ----- */
+#define APP_INSTALL_MAX_HANDLERS 16
+
+struct app_install_handler_slot
+{
+    INT64 token;
+    IUnknown *handler;
+};
+
+enum app_install_state_val
+{
+    APP_INSTALL_STATE_PENDING = 0,
+    APP_INSTALL_STATE_STARTING = 1,
+    APP_INSTALL_STATE_ACQUIRING_LICENSE = 2,
+    APP_INSTALL_STATE_DOWNLOADING = 3,
+    APP_INSTALL_STATE_RESTORING_DATA = 4,
+    APP_INSTALL_STATE_INSTALLING = 5,
+    APP_INSTALL_STATE_COMPLETED = 6,
+    APP_INSTALL_STATE_CANCELED = 7,
+    APP_INSTALL_STATE_PAUSED = 8,
+    APP_INSTALL_STATE_ERROR = 9,
+};
+
+struct app_install_item_impl
+{
+    const void *vtbl1;
+    const void *vtbl2;
+    const void *vtbl3;
+    LONG ref;
+    HSTRING product_id;
+    HSTRING package_family_name;
+    INT32 install_type;
+    boolean is_user_initiated;
+    INT32 state;
+    UINT64 download_size;
+    UINT64 bytes_downloaded;
+    double percent_complete;
+    HRESULT error_code;
+    boolean ready_for_launch;
+    BOOL canceled;
+    BOOL paused;
+    struct app_install_handler_slot completed_handlers[APP_INSTALL_MAX_HANDLERS];
+    struct app_install_handler_slot status_handlers[APP_INSTALL_MAX_HANDLERS];
+};
+
+extern CRITICAL_SECTION app_install_cs;
+void app_install_notify_item_change( struct app_install_item_impl *item, BOOL completed );
+DWORD WINAPI app_install_worker_proc( void *param );
+
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
     {                                                                                              \
