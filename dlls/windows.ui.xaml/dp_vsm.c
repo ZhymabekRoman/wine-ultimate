@@ -2978,6 +2978,8 @@ static const void *sb_statics_vtbl[16] =
 };
 struct uwp_class_factory sb_factory_obj =
     { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)sb_statics_vtbl}, L"Windows.UI.Xaml.Media.Animation.Storyboard", { NULL } };
+static struct uwp_class_factory sb_factory_winui3_obj =
+    { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)sb_statics_vtbl}, L"Microsoft.UI.Xaml.Media.Animation.Storyboard", { NULL } };
 
     /* VisualTreeHelperStatics */
 static HRESULT WINAPI vth_FindPoint( void *iface, double x, double y, void *subtree, void **out )
@@ -3227,7 +3229,7 @@ const struct xaml_static_factory xaml_static_factories[] =
     { L"Windows.UI.Xaml.Automation.AutomationProperties",                (IActivationFactory *)&auto_props_factory_obj.IActivationFactory_iface },
     { L"Windows.UI.Xaml.Controls.ToolTipService",                        (IActivationFactory *)&auto_props_factory_obj.IActivationFactory_iface },
     { L"Windows.UI.Xaml.Media.Animation.Storyboard",                     (IActivationFactory *)&sb_factory_obj.IActivationFactory_iface },
-    { L"Microsoft.UI.Xaml.Media.Animation.Storyboard",                   (IActivationFactory *)&sb_factory_obj.IActivationFactory_iface },
+    { L"Microsoft.UI.Xaml.Media.Animation.Storyboard",                   (IActivationFactory *)&sb_factory_winui3_obj.IActivationFactory_iface },
 };
 const size_t xaml_static_factories_count = ARRAY_SIZE( xaml_static_factories );
 
