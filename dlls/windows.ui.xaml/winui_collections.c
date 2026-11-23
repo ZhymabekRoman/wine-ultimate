@@ -97,7 +97,7 @@ static ULONG WINAPI collection_AddRef( IInspectable *iface )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
     ULONG ref = InterlockedIncrement( &impl->ref );
-    ERR( "collection_AddRef iface %p ref %lu\n", iface, ref );
+    TRACE( "collection_AddRef iface %p ref %lu\n", iface, ref );
     return ref;
 }
 

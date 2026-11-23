@@ -41,6 +41,8 @@ static inline struct property_metadata *impl_from_IPropertyMetadata( IPropertyMe
 
 static HRESULT WINAPI property_metadata_QueryInterface( IPropertyMetadata *iface, REFIID iid, void **out )
 {
+    static const GUID IID_IReferenceTrackerTarget_uwp =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
     struct property_metadata *impl = impl_from_IPropertyMetadata( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
@@ -54,6 +56,13 @@ static HRESULT WINAPI property_metadata_QueryInterface( IPropertyMetadata *iface
         *out = &impl->IPropertyMetadata_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IReferenceTrackerTarget_uwp ))
+    {
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -378,6 +387,8 @@ static HRESULT WINAPI dep_prop_QueryInterface( IDependencyProperty *iface, REFII
 {
     static const GUID IID_IRoutedEvent_UWP =
         { 0xa6b25818, 0x43c1, 0x4c70, { 0x86, 0x5c, 0x7b, 0xdd, 0x5a, 0x32, 0xe3, 0x27 } };
+    static const GUID IID_IReferenceTrackerTarget_uwp =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
     struct dependency_property *impl = impl_from_IDependencyProperty( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
@@ -392,6 +403,13 @@ static HRESULT WINAPI dep_prop_QueryInterface( IDependencyProperty *iface, REFII
         *out = &impl->IDependencyProperty_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IReferenceTrackerTarget_uwp ))
+    {
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );

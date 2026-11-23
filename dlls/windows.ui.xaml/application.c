@@ -826,7 +826,7 @@ static ULONG WINAPI rd_map_Release( void *iface )
 static HRESULT WINAPI rd_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd( iface );
-    ERR( "rd_QueryInterface %p, iid %s\n", iface, debugstr_guid( iid ) );
+    TRACE( "rd_QueryInterface %p, iid %s\n", iface, debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -849,7 +849,7 @@ static HRESULT WINAPI rd_QueryInterface( IInspectable *iface, REFIID iid, void *
         rd_AddRef( iface );
         return S_OK;
     }
-    ERR( "rd_QueryInterface iid %s not implemented, returning E_NOINTERFACE\n", debugstr_guid( iid ) );
+    TRACE( "rd_QueryInterface iid %s not implemented, returning E_NOINTERFACE\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -2752,8 +2752,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) { g_in_xaml_present = FALSE; return S_FALSE; }
 
-    ERR( "xaml_window_present: hwnd=%p swapchain=%p dev=%p is_uwp=%d\n",
-         hwnd, impl->swapchain, impl->d3d11_dev, !xaml_get_app_caps()->winui3 );
+    TRACE( "xaml_window_present: hwnd=%p swapchain=%p dev=%p is_uwp=%d\n",
+           hwnd, impl->swapchain, impl->d3d11_dev, !xaml_get_app_caps()->winui3 );
 
     /* Re-install the window-slot subclass on every attach: twinapi sets the CoreWindow
      * wndproc on activation, which pushes a previous window-slot subclass aside. The
@@ -3106,7 +3106,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
 
     TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u scale %.2f)\n", hwnd, width, height, scale );
-    ERR( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
+    TRACE( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
     InterlockedExchange( &g_xaml_window_dirty, 0 );
     xaml_wv2_on_window_ready( hwnd, width, height );
     g_in_xaml_present = FALSE;
@@ -4572,9 +4572,12 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
             HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
             if (get_by_name && SUCCEEDED(WindowsCreateString( full_name, wcslen(full_name), &hname )) && hname)
             {
-                ERR( "GetXamlTypeByFullName(%s) calling...\n", debugstr_w(full_name) );
+                TRACE( "GetXamlTypeByFullName(%s) calling...\n", debugstr_w(full_name) );
                 hr = get_by_name( provider, hname, &xaml_type );
-                ERR( "GetXamlTypeByFullName(%s) -> hr %#lx, type %p\n", debugstr_w(full_name), hr, xaml_type );
+                if (FAILED(hr))
+                    WARN( "GetXamlTypeByFullName(%s) -> hr %#lx, type %p\n", debugstr_w(full_name), hr, xaml_type );
+                else
+                    TRACE( "GetXamlTypeByFullName(%s) -> hr %#lx, type %p\n", debugstr_w(full_name), hr, xaml_type );
                 WindowsDeleteString( hname );
                 if (SUCCEEDED(hr) && xaml_type)
                 {
@@ -4593,7 +4596,10 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
                     else if (activate)
                     {
                         hr = activate( xaml_type, out );
-                        ERR( "ActivateInstance(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
+                        if (FAILED(hr))
+                            WARN( "ActivateInstance(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
+                        else
+                            TRACE( "ActivateInstance(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
                     }
                     IInspectable_Release( (IInspectable *)xaml_type );
                 }
@@ -4601,7 +4607,10 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
             IInspectable_Release( (IInspectable *)provider );
         }
     }
-    ERR( "xaml_create_instance_from_provider(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
+    if (FAILED(hr))
+        WARN( "xaml_create_instance_from_provider(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
+    else
+        TRACE( "xaml_create_instance_from_provider(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
     return hr;
 }
 

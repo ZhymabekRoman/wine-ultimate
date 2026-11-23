@@ -1396,7 +1396,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
 
     if (!out) return E_POINTER;
 
-    ERR( "element_QueryInterface(%p vt=%p, %s, class=%s)\n", iface, iface->lpVtbl, debugstr_guid( iid ), debugstr_w( impl->class_name ) );
+    TRACE( "element_QueryInterface(%p vt=%p, %s, class=%s)\n", iface, iface->lpVtbl, debugstr_guid( iid ), debugstr_w( impl->class_name ) );
 
     if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
     {
@@ -1551,7 +1551,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         return E_NOINTERFACE;
     }
 
-    ERR( "element_QueryInterface %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    TRACE( "element_QueryInterface %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1560,7 +1560,7 @@ ULONG WINAPI element_AddRef( IInspectable *iface )
 {
     struct xaml_element *impl = impl_from_element( iface );
     ULONG ref = InterlockedIncrement( &impl->ref );
-    ERR( "element_AddRef iface %p ref %lu\n", iface, ref );
+    TRACE( "element_AddRef iface %p ref %lu\n", iface, ref );
     return ref;
 }
 
@@ -1610,7 +1610,7 @@ HRESULT WINAPI element_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
     struct xaml_element *impl = impl_from_element( iface );
     const WCHAR *str = impl->class_name ? impl->class_name : L"Windows.UI.Xaml.FrameworkElement";
-    ERR( "element_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(str) );
+    TRACE( "element_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(str) );
     return WindowsCreateString( str, wcslen(str), name );
 }
 
