@@ -1780,25 +1780,16 @@ static HRESULT content_get_shared_handle(struct composition_visual *visual, IUnk
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain, (void **)&swapchain)))
     {
-        IDXGISurface *snap_surface;
-
-        /* Publish the retained snapshot, not the live buffer 0: d2d1 clears buffer 0
-         * as soon as it starts the next frame, so a consumer sampling the live buffer
-         * sees it partly transparent (see visual_snapshot_swapchain_content). */
-        snap_surface = visual_snapshot_swapchain_content(visual);
-        if (snap_surface)
+        /* Cross-process consumers open Local\wine_dcomp_shm_%08x keyed on buffer 0's
+         * KMT handle, which dxgi/swapchain.c publishes atomically inside Present().
+         * Calling GetSharedHandle on buffer 0 both activates that SHM publishing and
+         * returns the matching handle. In-process compositing still uses
+         * visual_snapshot_swapchain_content() directly in device.c. */
+        hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
+        if (SUCCEEDED(hr))
         {
-            hr = IDXGISurface_QueryInterface(snap_surface, &IID_IDXGIResource, (void **)&dxgi_resource);
-            IDXGISurface_Release(snap_surface);
-        }
-        else
-        {
-            hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
-            if (SUCCEEDED(hr))
-            {
-                hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
-                ID3D11Texture2D_Release(texture);
-            }
+            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
+            ID3D11Texture2D_Release(texture);
         }
         IDXGISwapChain_Release(swapchain);
     }

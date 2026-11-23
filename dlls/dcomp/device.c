@@ -540,7 +540,7 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
             target->composite_width = width;
             target->composite_height = height;
             if (target->composite_hwnd && IsWindow(target->composite_hwnd))
-                SetWindowPos(target->composite_hwnd, HWND_BOTTOM, 0, 0, (int)width, (int)height,
+                SetWindowPos(target->composite_hwnd, target->topmost ? HWND_TOP : HWND_BOTTOM, 0, 0, (int)width, (int)height,
                         SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
             return S_OK;
         }
@@ -560,7 +560,7 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
     }
 
     if (target->composite_hwnd && IsWindow(target->composite_hwnd))
-        SetWindowPos(target->composite_hwnd, HWND_BOTTOM, 0, 0, (int)width, (int)height,
+        SetWindowPos(target->composite_hwnd, target->topmost ? HWND_TOP : HWND_BOTTOM, 0, 0, (int)width, (int)height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
 
     memset(&desc, 0, sizeof(desc));
