@@ -110,11 +110,14 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
             { 0xef874ea1, 0x5cff, 0x4b68, { 0x9e, 0x30, 0xa1, 0x51, 0x9d, 0x08, 0xba, 0x03 } };
         static const GUID IID_ICompositionObject4_local =
             { 0xf2bd13c3, 0xba7e, 0x4b0f, { 0x91, 0x26, 0xff, 0xb7, 0x53, 0x6b, 0x81, 0x76 } };
+        static const GUID IID_ICompositionObject4_winrt =
+            { 0x0bb3784c, 0x346b, 0x4a7c, { 0x96, 0x6b, 0x73, 0x10, 0x96, 0x65, 0x53, 0xd5 } };
         static const GUID IID_IVisual3_local =
             { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } };
         static const GUID IID_IVisual_Calc4_local =
             { 0x9476bf11, 0xe24b, 0x5bf9, { 0x9e, 0xbe, 0x62, 0x74, 0x10, 0x9b, 0x27, 0x11 } };
-        if (IsEqualGUID( iid, &IID_ICompositionObject4_local ))
+        if (IsEqualGUID( iid, &IID_ICompositionObject4_local ) ||
+            IsEqualGUID( iid, &IID_ICompositionObject4_winrt ))
         {
             *out = &impl->ICompositionObject4_iface;
             IInspectable_AddRef( (IInspectable *)*out );

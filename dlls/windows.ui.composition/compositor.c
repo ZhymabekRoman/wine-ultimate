@@ -750,6 +750,8 @@ static const GUID IID_IReferenceTracker_local =
     { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
 static const GUID IID_ICompositionObject4_local =
     { 0xf2bd13c3, 0xba7e, 0x4b0f, { 0x91, 0x26, 0xff, 0xb7, 0x53, 0x6b, 0x81, 0x76 } };
+static const GUID IID_ICompositionObject4_winrt =
+    { 0x0bb3784c, 0x346b, 0x4a7c, { 0x96, 0x6b, 0x73, 0x10, 0x96, 0x65, 0x53, 0xd5 } };
 
 static HRESULT WINAPI comp5_stub_QI( void *iface, REFIID iid, void **out )
 {
@@ -760,7 +762,8 @@ static HRESULT WINAPI comp5_stub_QI( void *iface, REFIID iid, void **out )
         *out = NULL;
         return E_NOINTERFACE;
     }
-    if (IsEqualGUID( iid, &IID_ICompositionObject4_local ))
+    if (IsEqualGUID( iid, &IID_ICompositionObject4_local ) ||
+        IsEqualGUID( iid, &IID_ICompositionObject4_winrt ))
     {
         *out = &obj->co4_vtbl;
         InterlockedIncrement( &obj->ref );
