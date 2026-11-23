@@ -3293,6 +3293,9 @@ static HRESULT WINAPI xaml_window_get_Dispatcher( IInspectable *iface, void *a2,
 
 static const GUID IID_IWindowActivatedEventArgs_app =
     { 0x179d65e7, 0x4658, 0x4cb6, { 0xaa, 0x13, 0x41, 0xd0, 0x94, 0xea, 0x25, 0x5e } };
+/* Microsoft.UI.Xaml.IWindowActivatedEventArgs (WinUI 3 / Windows App SDK). */
+static const GUID IID_IWindowActivatedEventArgs_winui3 =
+    { 0xc723a5ea, 0x82c4, 0x5dd6, { 0x86, 0x1b, 0x70, 0xef, 0x57, 0x3b, 0x88, 0xd6 } };
 
 static HRESULT WINAPI dummy_wa_noop( void *iface, void *a1, void *a2 )
 {
@@ -3311,7 +3314,8 @@ static HRESULT WINAPI dummy_wa_QueryInterface( void *iface, REFIID iid, void **o
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_app ))
+        IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_app ) ||
+        IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_winui3 ))
     {
         *out = iface;
         dummy_wa_AddRef( iface );
@@ -3320,17 +3324,41 @@ static HRESULT WINAPI dummy_wa_QueryInterface( void *iface, REFIID iid, void **o
     *out = NULL;
     return E_NOINTERFACE;
 }
-static HRESULT WINAPI dummy_wa_GetIids( void *iface, ULONG *count, IID **iids ) { if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI dummy_wa_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    IID *array;
+
+    if (!count || !iids) return E_POINTER;
+    array = CoTaskMemAlloc( sizeof(IID) * 2 );
+    if (!array) return E_OUTOFMEMORY;
+    array[0] = IID_IWindowActivatedEventArgs_winui3;
+    array[1] = IID_IWindowActivatedEventArgs_app;
+    *count = 2;
+    *iids = array;
+    return S_OK;
+}
 static HRESULT WINAPI dummy_wa_GetRuntimeClassName( void *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.UI.Core.WindowActivatedEventArgs", 39, name );
+    static const WCHAR cls[] = L"Microsoft.UI.Xaml.WindowActivatedEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
 }
 static HRESULT WINAPI dummy_wa_GetTrustLevel( void *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI dummy_wa_get_Handled( void *iface, boolean *value )
+{
+    if (value) *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI dummy_wa_put_Handled( void *iface, boolean value )
+{
+    return S_OK;
+}
 static HRESULT WINAPI dummy_wa_get_WindowActivationState( void *iface, int *value )
 {
     if (value) *value = 0; /* CodeActivated */
     return S_OK;
 }
+/* WinUI 3 Microsoft.UI.Xaml.IWindowActivatedEventArgs layout:
+ * slot 6 get_Handled, slot 7 put_Handled, slot 8 get_WindowActivationState. */
 static const void *dummy_wa_vtbl[64] =
 {
     [0] = dummy_wa_QueryInterface,
@@ -3339,8 +3367,10 @@ static const void *dummy_wa_vtbl[64] =
     [3] = dummy_wa_GetIids,
     [4] = dummy_wa_GetRuntimeClassName,
     [5] = dummy_wa_GetTrustLevel,
-    [6] = dummy_wa_get_WindowActivationState,
-    [7 ... 63] = dummy_wa_noop,
+    [6] = dummy_wa_get_Handled,
+    [7] = dummy_wa_put_Handled,
+    [8] = dummy_wa_get_WindowActivationState,
+    [9 ... 63] = dummy_wa_noop,
 };
 static struct { const void **vtbl; } dummy_wa_obj = { dummy_wa_vtbl };
 
@@ -3394,27 +3424,46 @@ static HRESULT WINAPI xaml_window_remove_SizeChanged( IInspectable *iface, Event
 
 static const GUID IID_IVisibilityChangedEventArgs_app =
     { 0xbf9918ea, 0xd801, 0x4564, { 0xa4, 0x95, 0xb1, 0xe8, 0x4f, 0x8a, 0xd0, 0x85 } };
+/* Microsoft.UI.Xaml.IWindowVisibilityChangedEventArgs (WinUI 3 / Windows App SDK). */
+static const GUID IID_IWindowVisibilityChangedEventArgs_winui3 =
+    { 0x7bb24a6d, 0x070c, 0x5cb6, { 0x8e, 0x9c, 0x54, 0x79, 0x05, 0xbe, 0x82, 0x65 } };
+
+static ULONG WINAPI dummy_vis_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI dummy_vis_Release( void *iface ) { return 1; }
 
 static HRESULT WINAPI dummy_vis_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
+    TRACE( "dummy_vis_QueryInterface iid %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IVisibilityChangedEventArgs_app ))
+        IsEqualGUID( iid, &IID_IVisibilityChangedEventArgs_app ) ||
+        IsEqualGUID( iid, &IID_IWindowVisibilityChangedEventArgs_winui3 ))
     {
         *out = iface;
+        dummy_vis_AddRef( iface );
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI dummy_vis_AddRef( void *iface ) { return 2; }
-static ULONG WINAPI dummy_vis_Release( void *iface ) { return 1; }
-static HRESULT WINAPI dummy_vis_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI dummy_vis_GetIids( void *iface, ULONG *c, IID **i )
+{
+    IID *array;
+
+    if (!c || !i) return E_POINTER;
+    array = CoTaskMemAlloc( sizeof(IID) * 2 );
+    if (!array) return E_OUTOFMEMORY;
+    array[0] = IID_IWindowVisibilityChangedEventArgs_winui3;
+    array[1] = IID_IVisibilityChangedEventArgs_app;
+    *c = 2;
+    *i = array;
+    return S_OK;
+}
 static HRESULT WINAPI dummy_vis_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    static const WCHAR cls[] = L"Windows.UI.Core.VisibilityChangedEventArgs";
+    static const WCHAR cls[] = L"Microsoft.UI.Xaml.WindowVisibilityChangedEventArgs";
     return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
 }
 static HRESULT WINAPI dummy_vis_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
