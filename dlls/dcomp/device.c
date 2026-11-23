@@ -2695,7 +2695,6 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain1, (void **)&swapchain)))
     {
-        IDXGISwapChain1_Release(swapchain);
         /* Composition swapchains skip X11 SwapBuffers in dxgi Present1, so the
          * rendered frame stays in buffer 0 rather than rotating to BufferCount - 1.
          * Sample the retained snapshot of buffer 0: d2d1 clears buffer 0 when it
@@ -2704,16 +2703,17 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
             hr = S_OK;
         else
             hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+        IDXGISwapChain1_Release(swapchain);
         if (FAILED(hr))
             ERR("Failed to get the swapchain buffer 0, hr %#lx.\n", hr);
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain_v1)))
     {
-        IDXGISwapChain_Release(swapchain_v1);
         if ((dxgi_surface = visual_snapshot_swapchain_content(frame->visual)))
             hr = S_OK;
         else
             hr = IDXGISwapChain_GetBuffer(swapchain_v1, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+        IDXGISwapChain_Release(swapchain_v1);
         if (FAILED(hr))
             ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
     }

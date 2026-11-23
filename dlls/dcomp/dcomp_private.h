@@ -261,6 +261,7 @@ struct composition_visual
     unsigned int composited_transform_version; /* transform/effect version as of last blit */
     HWND composited_hwnd;           /* window last composited into */
     ID3D11Device *cached_copy_device;
+    SRWLOCK sc_snap_lock;               /* protects sc_snap_* fields */
     ID3D11Texture2D *sc_snap_tex;       /* retained copy of the content swapchain's presented buffer 0 */
     ID3D11Device *sc_snap_device;       /* device sc_snap_tex was created on (AddRef'd) */
     UINT sc_snap_present_count;         /* GetLastPresentCount() of the frame stored in sc_snap_tex */

@@ -120,10 +120,19 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             ID3D11Texture2D_Release(visual->cached_copy_tex);
         if (visual->cached_copy_device)
             ID3D11Device_Release(visual->cached_copy_device);
-        if (visual->sc_snap_tex)
-            ID3D11Texture2D_Release(visual->sc_snap_tex);
-        if (visual->sc_snap_device)
-            ID3D11Device_Release(visual->sc_snap_device);
+        AcquireSRWLockExclusive(&visual->sc_snap_lock);
+        {
+            ID3D11Texture2D *snap_tex = visual->sc_snap_tex;
+            ID3D11Device *snap_dev = visual->sc_snap_device;
+            visual->sc_snap_tex = NULL;
+            visual->sc_snap_device = NULL;
+            visual->sc_snap_valid = FALSE;
+            ReleaseSRWLockExclusive(&visual->sc_snap_lock);
+            if (snap_tex)
+                ID3D11Texture2D_Release(snap_tex);
+            if (snap_dev)
+                ID3D11Device_Release(snap_dev);
+        }
         if (visual->transform)
             IDCompositionTransform_Release(visual->transform);
         if (visual->shared_visual_handle)
@@ -1586,11 +1595,13 @@ IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visua
     ID3D11Multithread *multithread = NULL;
     ID3D11DeviceContext *context = NULL;
     D3D11_TEXTURE2D_DESC src_desc, desc;
+    ID3D11Texture2D *snap_tex = NULL;
     ID3D11Texture2D *src = NULL;
     IDXGISwapChain *swapchain = NULL;
     ID3D11Device *device = NULL;
     IDXGISurface *surface = NULL;
     UINT present_count = 0;
+    BOOL need_recreate = FALSE;
     HRESULT hr;
 
     if (!visual || !visual->content)
@@ -1599,11 +1610,19 @@ IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visua
         return NULL;
 
     IDXGISwapChain_GetLastPresentCount(swapchain, &present_count);
+    AcquireSRWLockExclusive(&visual->sc_snap_lock);
     if (visual->sc_snap_tex && visual->sc_snap_valid && visual->sc_snap_present_count == present_count)
     {
+        snap_tex = visual->sc_snap_tex;
+        ID3D11Texture2D_AddRef(snap_tex);
+    }
+    ReleaseSRWLockExclusive(&visual->sc_snap_lock);
+    if (snap_tex)
+    {
         IDXGISwapChain_Release(swapchain);
-        ID3D11Texture2D_AddRef(visual->sc_snap_tex);
-        return (IDXGISurface *)visual->sc_snap_tex;
+        hr = ID3D11Texture2D_QueryInterface(snap_tex, &IID_IDXGISurface, (void **)&surface);
+        ID3D11Texture2D_Release(snap_tex);
+        return SUCCEEDED(hr) ? surface : NULL;
     }
 
     hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&src);
@@ -1621,11 +1640,25 @@ IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visua
         return NULL;
     }
 
+    AcquireSRWLockExclusive(&visual->sc_snap_lock);
     if (!visual->sc_snap_tex || visual->sc_snap_device != device
             || visual->sc_snap_width != src_desc.Width || visual->sc_snap_height != src_desc.Height
             || visual->sc_snap_format != src_desc.Format)
     {
-        ID3D11Texture2D *tex = NULL;
+        need_recreate = TRUE;
+    }
+    else
+    {
+        snap_tex = visual->sc_snap_tex;
+        ID3D11Texture2D_AddRef(snap_tex);
+    }
+    ReleaseSRWLockExclusive(&visual->sc_snap_lock);
+
+    if (need_recreate)
+    {
+        ID3D11Texture2D *new_tex = NULL;
+        ID3D11Texture2D *old_tex = NULL;
+        ID3D11Device *old_dev = NULL;
 
         /* CopyResource needs the same size, format, mip level, array size and
          * sample count, so only usage/binding are changed. The shader-resource
@@ -1636,28 +1669,42 @@ IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visua
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         desc.CPUAccessFlags = 0;
-        desc.MiscFlags = 0;
-        if (FAILED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &tex)) || !tex)
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+        if (FAILED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &new_tex)) || !new_tex)
         {
-            ID3D11Device_Release(device);
-            ID3D11Texture2D_Release(src);
-            return NULL;
+            desc.MiscFlags = 0;
+            if (FAILED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &new_tex)) || !new_tex)
+            {
+                ID3D11Device_Release(device);
+                ID3D11Texture2D_Release(src);
+                return NULL;
+            }
         }
-        if (visual->sc_snap_tex)
-            ID3D11Texture2D_Release(visual->sc_snap_tex);
-        if (visual->sc_snap_device)
-            ID3D11Device_Release(visual->sc_snap_device);
-        visual->sc_snap_tex = tex;
+
+        AcquireSRWLockExclusive(&visual->sc_snap_lock);
+        old_tex = visual->sc_snap_tex;
+        old_dev = visual->sc_snap_device;
+        ID3D11Device_AddRef(device);
+        visual->sc_snap_tex = new_tex;
         visual->sc_snap_device = device;
         visual->sc_snap_width = src_desc.Width;
         visual->sc_snap_height = src_desc.Height;
         visual->sc_snap_format = src_desc.Format;
         visual->sc_snap_valid = FALSE;
+        snap_tex = new_tex;
+        ID3D11Texture2D_AddRef(snap_tex);
+        ReleaseSRWLockExclusive(&visual->sc_snap_lock);
+
+        if (old_tex)
+            ID3D11Texture2D_Release(old_tex);
+        if (old_dev)
+            ID3D11Device_Release(old_dev);
     }
 
     ID3D11Device_GetImmediateContext(device, &context);
     if (!context)
     {
+        ID3D11Texture2D_Release(snap_tex);
         ID3D11Device_Release(device);
         ID3D11Texture2D_Release(src);
         return NULL;
@@ -1669,7 +1716,7 @@ IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visua
         ID3D11Multithread_SetMultithreadProtected(multithread, TRUE);
         ID3D11Multithread_Enter(multithread);
     }
-    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)visual->sc_snap_tex, (ID3D11Resource *)src);
+    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)snap_tex, (ID3D11Resource *)src);
     ID3D11DeviceContext_Flush(context);
     if (multithread)
     {
@@ -1680,10 +1727,16 @@ IDXGISurface *visual_snapshot_swapchain_content(struct composition_visual *visua
     ID3D11Device_Release(device);
     ID3D11Texture2D_Release(src);
 
-    visual->sc_snap_present_count = present_count;
-    visual->sc_snap_valid = TRUE;
+    AcquireSRWLockExclusive(&visual->sc_snap_lock);
+    if (visual->sc_snap_tex == snap_tex)
+    {
+        visual->sc_snap_present_count = present_count;
+        visual->sc_snap_valid = TRUE;
+    }
+    ReleaseSRWLockExclusive(&visual->sc_snap_lock);
 
-    hr = ID3D11Texture2D_QueryInterface(visual->sc_snap_tex, &IID_IDXGISurface, (void **)&surface);
+    hr = ID3D11Texture2D_QueryInterface(snap_tex, &IID_IDXGISurface, (void **)&surface);
+    ID3D11Texture2D_Release(snap_tex);
     if (FAILED(hr))
         return NULL;
     return surface;
@@ -1727,21 +1780,27 @@ static HRESULT content_get_shared_handle(struct composition_visual *visual, IUnk
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain, (void **)&swapchain)))
     {
-        IDXGISwapChain_Release(swapchain);
+        IDXGISurface *snap_surface;
+
         /* Publish the retained snapshot, not the live buffer 0: d2d1 clears buffer 0
          * as soon as it starts the next frame, so a consumer sampling the live buffer
          * sees it partly transparent (see visual_snapshot_swapchain_content). */
-        texture = (ID3D11Texture2D *)visual_snapshot_swapchain_content(visual);
-        if (texture)
-            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
-        else
-            hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
-        if (SUCCEEDED(hr))
+        snap_surface = visual_snapshot_swapchain_content(visual);
+        if (snap_surface)
         {
-            if (!dxgi_resource)
-                hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
+            hr = IDXGISurface_QueryInterface(snap_surface, &IID_IDXGIResource, (void **)&dxgi_resource);
+            IDXGISurface_Release(snap_surface);
         }
-        ID3D11Texture2D_Release(texture);
+        else
+        {
+            hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
+            if (SUCCEEDED(hr))
+            {
+                hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
+                ID3D11Texture2D_Release(texture);
+            }
+        }
+        IDXGISwapChain_Release(swapchain);
     }
     else
     {
