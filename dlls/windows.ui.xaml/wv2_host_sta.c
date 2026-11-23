@@ -710,9 +710,9 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
                 (cur_rc.right - cur_rc.left) != ctx->width ||
                 (cur_rc.bottom - cur_rc.top) != ctx->height)
             {
-                ShowWindow( child, SW_SHOW );
+                ShowWindowAsync( child, SW_SHOW );
                 SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
-                              SWP_SHOWWINDOW | SWP_NOACTIVATE );
+                              SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
                 ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
                        child, debugstr_w( cls ), ctx->width, ctx->height );
             }
