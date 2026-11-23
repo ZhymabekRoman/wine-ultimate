@@ -2490,7 +2490,7 @@ static BOOL d2d_geometry_intersect_line_line(struct d2d_geometry *geometry,
     s = (v_q.x * v_qp.y - v_q.y * v_qp.x) / det;
     t = (v_p.x * v_qp.y - v_p.y * v_qp.x) / det;
 
-    if (s < 0.0f || s > 1.0f || t < 0.0f || t > 1.0f)
+    if (!(s >= 0.0f && s <= 1.0f && t >= 0.0f && t <= 1.0f))
         return TRUE;
 
     intersection.x = p[0]->x + v_p.x * s;
@@ -2515,9 +2515,11 @@ static BOOL d2d_geometry_add_bezier_line_intersections(struct d2d_geometry *geom
     d2d_point_calculate_bezier(&intersection, p[0], p[1], p[2], s);
     if (fabsf(q[1]->x - q[0]->x) > fabsf(q[1]->y - q[0]->y))
         t = (intersection.x - q[0]->x) / (q[1]->x - q[0]->x);
-    else
+    else if (q[1]->y != q[0]->y)
         t = (intersection.y - q[0]->y) / (q[1]->y - q[0]->y);
-    if (t < 0.0f || t > 1.0f)
+    else
+        return TRUE;
+    if (!(t >= 0.0f && t <= 1.0f))
         return TRUE;
 
     d2d_point_lerp(&intersection, q[0], q[1], t);
@@ -2580,8 +2582,10 @@ static BOOL d2d_geometry_intersect_bezier_line(struct d2d_geometry *geometry,
         /* P₀ - 2P₁ + P₂ = 0
          * f(t) = (P₀ - 2P₁ + P₂)t² + 2(P₁ - P₀)t + P₀ = 0
          * t = -P₀ / 2(P₁ - P₀) */
+        if (y[1] == y[0])
+            return TRUE;
         root = -y[0] / (2.0f * (y[1] - y[0]));
-        if (root < 0.0f || root > 1.0f)
+        if (!(root >= 0.0f && root <= 1.0f))
             return TRUE;
 
         return d2d_geometry_add_bezier_line_intersections(geometry, intersections, idx_p, p, idx_q, q, root);

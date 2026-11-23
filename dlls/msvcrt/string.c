@@ -3445,7 +3445,9 @@ static void *avx2_memmove_fwd(void *dst, const void *src, size_t n)
 void * __cdecl memmove(void *dst, const void *src, size_t n)
 {
 #if defined(__x86_64__) && !defined(__arm64ec__)
-    if (n >= 64 && (uintptr_t)dst - (uintptr_t)src >= n && msvcrt_str_has_avx2())
+    if (n >= 64 && (uintptr_t)dst - (uintptr_t)src >= n
+            && ((uintptr_t)dst >= (uintptr_t)src || (uintptr_t)src - (uintptr_t)dst >= 32)
+            && msvcrt_str_has_avx2())
         return avx2_memmove_fwd(dst, src, n);
     return sse2_memmove(dst, src, n);
 #else
