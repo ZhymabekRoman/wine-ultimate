@@ -3000,9 +3000,12 @@ static BOOL device_check_swapchains(struct composition_device *device, BOOL *has
                     || rc.bottom != target->last_client_rect.bottom))
         {
             target->last_client_rect = rc;
+            target->needs_redraw = TRUE;
             InterlockedIncrement(&dcomp_tree_version);
             updated = TRUE;
         }
+        if (target->needs_redraw)
+            updated = TRUE;
         if (target->root && visual_tree_check_swapchain(impl_from_IDCompositionVisual(target->root), 0, has_swapchain))
             updated = TRUE;
     }
