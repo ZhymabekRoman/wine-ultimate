@@ -39,6 +39,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,7 +58,7 @@
 #endif
 
 #define ZYGOTE_MAGIC   0x5a475946  /* 'F','Y','G','Z' */
-#define ZYGOTE_VERSION 1
+#define ZYGOTE_VERSION 2
 
 /* request flags, must match dlls/ntdll/unix/process.c */
 #define ZYGOTE_FLAG_DETACHED   0x01  /* setsid() + /dev/null stdio */
@@ -66,25 +67,54 @@
 #define ZYGOTE_FLAG_HAS_CWD    0x08  /* unix cwd dir fd attached */
 #define ZYGOTE_FLAG_HAS_STDIN  0x10  /* stdin fd attached */
 #define ZYGOTE_FLAG_HAS_STDOUT 0x20  /* stdout fd attached */
+#define ZYGOTE_FLAG_HAS_STDERR 0x40  /* stderr fd attached */
+
+#define ZYGOTE_STATUS_OK     0
+#define ZYGOTE_STATUS_ERR   -1
+#define ZYGOTE_STATUS_STALE -2
 
 struct zygote_request
 {
-    unsigned int magic;         /* ZYGOTE_MAGIC */
-    unsigned int version;       /* ZYGOTE_VERSION */
-    unsigned int flags;         /* ZYGOTE_FLAG_* */
-    unsigned int argv_len;      /* size of NUL separated argv block (terminated by empty string) */
-    unsigned int env_len;       /* size of NUL separated envp block (terminated by empty string) */
-    unsigned int reserve_len;   /* size of WINEPRELOADRESERVE value, including NUL */
-    unsigned int winedebug_len; /* size of WINEDEBUG value, including NUL */
+    uint32_t magic;            /* ZYGOTE_MAGIC */
+    uint32_t version;          /* ZYGOTE_VERSION */
+    uint32_t server_protocol;  /* SERVER_PROTOCOL_VERSION */
+    uint32_t flags;            /* ZYGOTE_FLAG_* */
+    uint64_t bin_fingerprint;  /* FNV-1a hash of wine-zygote + ntdll.so + win32u.so stat */
+    uint32_t argv_len;         /* size of NUL separated argv block (terminated by empty string) */
+    uint32_t env_len;          /* size of NUL separated envp block (terminated by empty string) */
+    uint32_t reserve_len;      /* size of WINEPRELOADRESERVE value, including NUL */
+    uint32_t winedebug_len;    /* size of WINEDEBUG value, including NUL */
 };
 
 struct zygote_reply
 {
-    int   status;  /* 0 == success */
-    int   pid;     /* Unix pid of the forked child, -1 on error */
+    int32_t status;  /* ZYGOTE_STATUS_* */
+    int32_t pid;     /* Unix pid of the forked child, -1 on error */
 };
 
-#define ZYGOTE_MAX_FDS 4
+#define ZYGOTE_MAX_FDS 5
+
+struct server_watch
+{
+    int   active;
+    char *sock_path;
+    char *lock_path;
+    dev_t sock_dev;
+    ino_t sock_ino;
+    pid_t server_pid;
+};
+
+struct zygote_state
+{
+    char               *zygote_bin;
+    char               *ntdll_bin;
+    char               *win32u_bin;
+    uint32_t            server_protocol;
+    uint64_t            bin_fingerprint;
+    struct server_watch watch;
+};
+
+static volatile sig_atomic_t quit_requested;
 
 /* canonicalize path and return its directory name */
 static char *realpath_dirname( const char *name )
@@ -146,28 +176,201 @@ static const char *get_self_exe( void )
     return NULL;
 }
 
-/* dlopen ntdll.so, exactly like loader/main.c does, and report its path */
-static void *try_dlopen_ntdll( const char *name, char **out_path )
+/* Must stay in sync with dlls/ntdll/unix/process.c. */
+static uint64_t fnv1a_mix( uint64_t h, const void *data, size_t len )
 {
-    char *dir, *path, *p;
+    const unsigned char *p = data;
+    while (len--)
+    {
+        h ^= *p++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t fnv1a_hash_stat( uint64_t h, const char *path )
+{
+    struct stat st;
+    uint64_t fields[7] = { 0 };
+
+    if (path && stat( path, &st ) == 0)
+    {
+        fields[0] = (uint64_t)st.st_dev;
+        fields[1] = (uint64_t)st.st_ino;
+        fields[2] = (uint64_t)st.st_size;
+        fields[3] = (uint64_t)st.st_mtime;
+        fields[5] = (uint64_t)st.st_ctime;
+#ifdef HAVE_STRUCT_STAT_ST_MTIM
+        fields[4] = (uint64_t)st.st_mtim.tv_nsec;
+        fields[6] = (uint64_t)st.st_ctim.tv_nsec;
+#elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC)
+        fields[4] = (uint64_t)st.st_mtimespec.tv_nsec;
+        fields[6] = (uint64_t)st.st_ctimespec.tv_nsec;
+#endif
+    }
+    return fnv1a_mix( h, fields, sizeof(fields) );
+}
+
+static uint64_t compute_binary_fingerprint( const char *zygote_bin, const char *ntdll_bin,
+                                            const char *win32u_bin )
+{
+    uint64_t h = 14695981039346656037ULL;
+    h = fnv1a_hash_stat( h, zygote_bin );
+    h = fnv1a_hash_stat( h, ntdll_bin );
+    h = fnv1a_hash_stat( h, win32u_bin );
+    return h;
+}
+
+static int resolve_binary_paths( const char *name, char **out_zygote, char **out_ntdll, char **out_win32u )
+{
+    char *dir, *bdir;
+
+    if (!name) return -1;
+    if (!(dir = realpath_dirname( name ))) return -1;
+
+    if ((bdir = remove_tail( dir, "/loader" )))
+    {
+        *out_zygote = build_path( bdir, "loader/wine-zygote" );
+        *out_ntdll  = build_path( bdir, "dlls/ntdll/ntdll.so" );
+        *out_win32u = build_path( bdir, "dlls/win32u/win32u.so" );
+        free( bdir );
+    }
+    else
+    {
+        *out_zygote = build_path( dir, "wine-zygote" );
+        *out_ntdll  = build_path( dir, "ntdll.so" );
+        *out_win32u = build_path( dir, "win32u.so" );
+    }
+    free( dir );
+    return (*out_zygote && *out_ntdll && *out_win32u) ? 0 : -1;
+}
+
+/* dlopen ntdll.so, exactly like loader/main.c does, and report resolved binary paths */
+static void *try_dlopen_ntdll( const char *name, struct zygote_state *st )
+{
+    char *zygote_bin = NULL, *ntdll_bin = NULL, *win32u_bin = NULL;
     void *handle;
 
-    if (!name) return NULL;
-    if (!(dir = realpath_dirname( name ))) return NULL;
-
-    if ((p = remove_tail( dir, "/loader" )))
+    if (resolve_binary_paths( name, &zygote_bin, &ntdll_bin, &win32u_bin ) < 0)
     {
-        free( dir );
-        path = build_path( p, "dlls/ntdll/ntdll.so" );
+        free( zygote_bin );
+        free( ntdll_bin );
+        free( win32u_bin );
+        return NULL;
     }
-    else path = build_path( dir, "ntdll.so" );
 
-    handle = dlopen( path, RTLD_NOW );
-    if (handle && out_path) *out_path = path;
-    else free( path );
-    free( p );
-    free( dir );
+    /* Snapshot binary fingerprint before dlopen so any subsequent replacement is detected. */
+    st->bin_fingerprint = compute_binary_fingerprint( zygote_bin, ntdll_bin, win32u_bin );
+
+    handle = dlopen( ntdll_bin, RTLD_NOW );
+    if (handle)
+    {
+        st->zygote_bin = zygote_bin;
+        st->ntdll_bin  = ntdll_bin;
+        st->win32u_bin = win32u_bin;
+    }
+    else
+    {
+        free( zygote_bin );
+        free( ntdll_bin );
+        free( win32u_bin );
+    }
     return handle;
+}
+
+static int init_server_watch( const char *zygote_sock_path, struct server_watch *w )
+{
+    const char *slash;
+    char *dir;
+    struct stat st;
+    int fd;
+
+    memset( w, 0, sizeof(*w) );
+    if (!(slash = strrchr( zygote_sock_path, '/' ))) return 0;
+    if (!(dir = strndup( zygote_sock_path, slash == zygote_sock_path ? 1 : (size_t)(slash - zygote_sock_path) )))
+        return 0;
+
+    w->sock_path = build_path( dir, "socket" );
+    w->lock_path = build_path( dir, "lock" );
+    free( dir );
+    if (!w->sock_path || !w->lock_path) return 0;
+
+    if (lstat( w->sock_path, &st ) == 0)
+    {
+        w->active = 1;
+        w->sock_dev = st.st_dev;
+        w->sock_ino = st.st_ino;
+        if ((fd = open( w->lock_path, O_RDONLY | O_CLOEXEC )) != -1)
+        {
+            struct flock fl;
+            fl.l_type   = F_WRLCK;
+            fl.l_whence = SEEK_SET;
+            fl.l_start  = 0;
+            fl.l_len    = 1;
+            if (fcntl( fd, F_GETLK, &fl ) == 0 && fl.l_type == F_WRLCK)
+                w->server_pid = fl.l_pid;
+            close( fd );
+        }
+    }
+    else if (errno == ENOENT && strstr( zygote_sock_path, "/server-" ))
+    {
+        /* Wineserver already exited before the zygote finished starting. */
+        return -1;
+    }
+    return 0;
+}
+
+static int is_wineserver_alive( const struct server_watch *w )
+{
+    struct stat st;
+    int fd;
+
+    if (!w->active) return 1;
+    if (lstat( w->sock_path, &st ) != 0) return 0;
+    if (st.st_dev != w->sock_dev || st.st_ino != w->sock_ino) return 0;
+
+    if (w->server_pid > 0)
+    {
+        struct flock fl;
+        int r;
+        if ((fd = open( w->lock_path, O_RDONLY | O_CLOEXEC )) == -1) return 0;
+        fl.l_type   = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start  = 0;
+        fl.l_len    = 1;
+        r = fcntl( fd, F_GETLK, &fl );
+        close( fd );
+        if (r == 0 && (fl.l_type != F_WRLCK || fl.l_pid != w->server_pid)) return 0;
+    }
+    return 1;
+}
+
+static int is_binary_current( const struct zygote_state *st )
+{
+    return compute_binary_fingerprint( st->zygote_bin, st->ntdll_bin, st->win32u_bin ) == st->bin_fingerprint;
+}
+
+static int socket_still_owned( const char *path, const struct stat *bound_st )
+{
+    struct stat st;
+    return lstat( path, &st ) == 0 &&
+           st.st_dev == bound_st->st_dev &&
+           st.st_ino == bound_st->st_ino;
+}
+
+static void cleanup_own_socket( const char *path, const struct stat *bound_st )
+{
+    if (socket_still_owned( path, bound_st )) unlink( path );
+}
+
+static int is_daemon_still_valid( const char *sock_path, const struct stat *bound_st,
+                                  const struct zygote_state *st )
+{
+    if (quit_requested) return 0;
+    if (!socket_still_owned( sock_path, bound_st )) return 0;
+    if (!is_binary_current( st )) return 0;
+    if (!is_wineserver_alive( &st->watch )) return 0;
+    return 1;
 }
 
 static int read_exact( int fd, void *buf, size_t len )
@@ -274,7 +477,7 @@ static void apply_env_block( const char *block )
 
 static void __attribute__((noreturn)) run_child( const struct zygote_request *req,
                                          const struct pollfd *fds, nfds_t nfds,
-                                         int socket_fd, int cwd_fd, int stdin_fd, int stdout_fd,
+                                         int socket_fd, int cwd_fd, int stdin_fd, int stdout_fd, int stderr_fd,
                                          const char *argv_block, const char *env_block,
                                          const char *reserve, const char *winedebug,
                                          const char *self_path,
@@ -297,6 +500,14 @@ static void __attribute__((noreturn)) run_child( const struct zygote_request *re
 
     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+    if (stderr_fd != -1)
+    {
+        if (stderr_fd != 2)
+        {
+            dup2( stderr_fd, 2 );
+            close( stderr_fd );
+        }
+    }
 
     if (cwd_fd != -1)
     {
@@ -311,9 +522,15 @@ static void __attribute__((noreturn)) run_child( const struct zygote_request *re
     sigemptyset( &sa.sa_mask );
     sigaction( SIGPIPE, &sa, NULL );
     sigaction( SIGCHLD, &sa, NULL );
+    sigaction( SIGTERM, &sa, NULL );
+    sigaction( SIGINT, &sa, NULL );
 
     apply_env_block( env_block );
-    if (winedebug) setenv( "WINEDEBUG", winedebug, 1 );
+    if (winedebug)
+    {
+        if (!strncmp( winedebug, "WINEDEBUG=", 10 )) setenv( "WINEDEBUG", winedebug + 10, 1 );
+        else setenv( "WINEDEBUG", winedebug, 1 );
+    }
     if (reserve) setenv( "WINEPRELOADRESERVE", reserve, 1 );
     if (socket_fd != -1)
     {
@@ -344,6 +561,12 @@ static void reap_children( int signum )
         ;
 }
 
+static void handle_quit( int signum )
+{
+    (void)signum;
+    quit_requested = 1;
+}
+
 /* read a file to bring it into the page cache (best effort) */
 static void warm_file( const char *path, size_t max_size )
 {
@@ -363,20 +586,19 @@ static void warm_file( const char *path, size_t max_size )
 }
 
 /* Pre-load the win32 shared objects and warm the PE images every child maps. */
-static void warm_libraries( const char *ntdll_path )
+static void warm_libraries( const char *ntdll_path, const char *win32u_path )
 {
     static const char *pe_names[] = { "ntdll.dll", "win32u.dll", "kernel32.dll", "kernelbase.dll" };
     const char *prefix, *home;
-    char *dir, *build_dir, *path, *tmp;
+    char *dir, *build_dir, *path, *tmp = NULL;
     unsigned int i;
 
     /* the ELF side: win32u.so is dlopened by ntdll on startup */
+    if (win32u_path) dlopen( win32u_path, RTLD_NOW );
+
     if (!(dir = realpath_dirname( ntdll_path ))) return;
     if ((build_dir = remove_tail( dir, "/dlls/ntdll" )))
     {
-        path = build_path( build_dir, "dlls/win32u/win32u.so" );
-        dlopen( path, RTLD_NOW );
-        free( path );
         for (i = 0; i < sizeof(pe_names)/sizeof(*pe_names); i++)
         {
             static const char *pe_dirs[] = { "dlls/ntdll", "dlls/win32u", "dlls/kernel32", "dlls/kernelbase" };
@@ -393,9 +615,6 @@ static void warm_libraries( const char *ntdll_path )
     else
     {
         char *lib_dir = remove_tail( dir, "/x86_64-unix" );
-        path = build_path( dir, "win32u.so" );
-        dlopen( path, RTLD_NOW );
-        free( path );
         if (lib_dir)
         {
             char *win_dir = build_path( lib_dir, "x86_64-windows" );
@@ -425,30 +644,64 @@ static void warm_libraries( const char *ntdll_path )
             free( path );
         }
     }
+    free( tmp );
     free( dir );
 }
 
-static int create_listen_socket( const char *path )
+/* Returns listen fd >= 0, -2 if another live daemon already owns path, or -1 on error. */
+static int create_listen_socket( const char *path, struct stat *bound_st )
 {
     struct sockaddr_un addr;
     int fd;
 
+    if (strlen( path ) >= sizeof(addr.sun_path))
+    {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
     if ((fd = socket( PF_UNIX, SOCK_STREAM, 0 )) == -1) return -1;
     fcntl( fd, F_SETFD, FD_CLOEXEC );
+    memset( &addr, 0, sizeof(addr) );
     addr.sun_family = AF_UNIX;
     snprintf( addr.sun_path, sizeof(addr.sun_path), "%s", path );
 
     if (bind( fd, (struct sockaddr *)&addr, sizeof(addr) ) == -1)
     {
+        int probe, probe_err;
         if (errno != EADDRINUSE)
         {
             close( fd );
             return -1;
         }
+        /* Check if another live daemon already owns this exact versioned socket
+         * before unlinking, preventing duplicate orphaned daemons on startup races. */
+        if ((probe = socket( PF_UNIX, SOCK_STREAM, 0 )) != -1)
+        {
+            fcntl( probe, F_SETFD, FD_CLOEXEC );
+            fcntl( probe, F_SETFL, O_NONBLOCK );
+            if (connect( probe, (struct sockaddr *)&addr, sizeof(addr) ) == 0 ||
+                errno == EINPROGRESS || errno == EAGAIN)
+            {
+                close( probe );
+                close( fd );
+                return -2;
+            }
+            probe_err = errno;
+            close( probe );
+            if (probe_err != ECONNREFUSED && probe_err != ENOENT)
+            {
+                close( fd );
+                errno = probe_err;
+                return -1;
+            }
+        }
         unlink( path );
         if (bind( fd, (struct sockaddr *)&addr, sizeof(addr) ) == -1)
         {
+            int bind_err = errno;
             close( fd );
+            if (bind_err == EADDRINUSE) return -2;
+            errno = bind_err;
             return -1;
         }
     }
@@ -457,12 +710,35 @@ static int create_listen_socket( const char *path )
         close( fd );
         return -1;
     }
+    if (lstat( path, bound_st ) == -1)
+    {
+        close( fd );
+        return -1;
+    }
     return fd;
+}
+
+static void drain_bytes( int fd, size_t len )
+{
+    char buf[4096];
+    while (len)
+    {
+        size_t chunk = len < sizeof(buf) ? len : sizeof(buf);
+        ssize_t r = read( fd, buf, chunk );
+        if (r < 0)
+        {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) break;
+        len -= r;
+    }
 }
 
 /* handle a single request from client; returns 0 on success, -1 to drop client */
 static int handle_client_request( int client, const struct pollfd *pfds, nfds_t pfd_count,
-                                  const char *self_path, void (*wine_main)( int, char ** ))
+                                  const char *self_path, void (*wine_main)( int, char ** ),
+                                  const struct zygote_state *st, int *should_exit )
 {
     struct zygote_request req;
     struct zygote_reply reply;
@@ -470,12 +746,13 @@ static int handle_client_request( int client, const struct pollfd *pfds, nfds_t 
     struct iovec iov = { &req, sizeof(req) };
     struct msghdr msg = { 0 };
     struct cmsghdr *cmsg;
-    int fds[ZYGOTE_MAX_FDS] = { -1, -1, -1, -1 };
+    int fds[ZYGOTE_MAX_FDS] = { -1, -1, -1, -1, -1 };
     unsigned int nfds = 0, idx = 0;
-    int socket_fd = -1, cwd_fd = -1, stdin_fd = -1, stdout_fd = -1;
+    int socket_fd = -1, cwd_fd = -1, stdin_fd = -1, stdout_fd = -1, stderr_fd = -1;
     char *argv_block = NULL, *env_block = NULL, *reserve = NULL, *winedebug = NULL;
     ssize_t r;
     pid_t pid;
+    int binary_stale, server_dead, req_mismatch;
 
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
@@ -488,7 +765,6 @@ static int handle_client_request( int client, const struct pollfd *pfds, nfds_t 
 
     if (r <= 0) return -1;
     if ((size_t)r < sizeof(req) && read_exact( client, (char *)&req + r, sizeof(req) - r ) < 0) return -1;
-    if (req.magic != ZYGOTE_MAGIC || req.version != ZYGOTE_VERSION) return -1;
 
     for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
     {
@@ -500,10 +776,40 @@ static int handle_client_request( int client, const struct pollfd *pfds, nfds_t 
             break;
         }
     }
+    if (req.magic != ZYGOTE_MAGIC || req.version != ZYGOTE_VERSION)
+    {
+        unsigned int j;
+        for (j = 0; j < nfds; j++) if (fds[j] != -1) close( fds[j] );
+        return -1;
+    }
+
     if (req.flags & ZYGOTE_FLAG_HAS_SOCKET) { if (idx < nfds) socket_fd = fds[idx++]; }
     if (req.flags & ZYGOTE_FLAG_HAS_CWD)    { if (idx < nfds) cwd_fd = fds[idx++]; }
     if (req.flags & ZYGOTE_FLAG_HAS_STDIN)  { if (idx < nfds) stdin_fd = fds[idx++]; }
     if (req.flags & ZYGOTE_FLAG_HAS_STDOUT) { if (idx < nfds) stdout_fd = fds[idx++]; }
+    if (req.flags & ZYGOTE_FLAG_HAS_STDERR) { if (idx < nfds) stderr_fd = fds[idx++]; }
+    while (idx < nfds) { if (fds[idx] != -1) close( fds[idx] ); idx++; }
+
+    binary_stale = !is_binary_current( st );
+    server_dead  = !is_wineserver_alive( &st->watch );
+    req_mismatch = (req.server_protocol != st->server_protocol ||
+                    req.bin_fingerprint != st->bin_fingerprint);
+
+    if (binary_stale || server_dead || req_mismatch)
+    {
+        size_t total = (size_t)req.argv_len + req.env_len + req.reserve_len + req.winedebug_len;
+        if (total <= 16 * 1024 * 1024) drain_bytes( client, total );
+        reply.status = ZYGOTE_STATUS_STALE;
+        reply.pid = -1;
+        write_exact( client, &reply, sizeof(reply) );
+        if (socket_fd != -1) close( socket_fd );
+        if (cwd_fd != -1) close( cwd_fd );
+        if (stdin_fd != -1) close( stdin_fd );
+        if (stdout_fd != -1) close( stdout_fd );
+        if (stderr_fd != -1) close( stderr_fd );
+        if (binary_stale || server_dead) *should_exit = 1;
+        return -1;
+    }
 
     if (!(argv_block = read_block( client, req.argv_len ))) goto failed;
     if (req.env_len && !(env_block = read_block( client, req.env_len ))) goto failed;
@@ -514,18 +820,18 @@ static int handle_client_request( int client, const struct pollfd *pfds, nfds_t 
     if ((pid = fork()) == -1)
     {
     failed:
-        reply.status = -1;
+        reply.status = ZYGOTE_STATUS_ERR;
         reply.pid = -1;
         write_exact( client, &reply, sizeof(reply) );
     }
     else if (!pid)
     {
-        run_child( &req, pfds, pfd_count, socket_fd, cwd_fd, stdin_fd, stdout_fd,
+        run_child( &req, pfds, pfd_count, socket_fd, cwd_fd, stdin_fd, stdout_fd, stderr_fd,
                    argv_block, env_block, reserve, winedebug, self_path, wine_main );
     }
     else
     {
-        reply.status = 0;
+        reply.status = ZYGOTE_STATUS_OK;
         reply.pid = pid;
         if (write_exact( client, &reply, sizeof(reply) ) < 0)
         {
@@ -537,6 +843,7 @@ static int handle_client_request( int client, const struct pollfd *pfds, nfds_t 
             if (cwd_fd != -1) close( cwd_fd );
             if (stdin_fd != -1) close( stdin_fd );
             if (stdout_fd != -1) close( stdout_fd );
+            if (stderr_fd != -1) close( stderr_fd );
             return -1;
         }
     }
@@ -549,15 +856,18 @@ static int handle_client_request( int client, const struct pollfd *pfds, nfds_t 
     if (cwd_fd != -1) close( cwd_fd );
     if (stdin_fd != -1) close( stdin_fd );
     if (stdout_fd != -1) close( stdout_fd );
+    if (stderr_fd != -1) close( stderr_fd );
     return 0;
 }
 
 int main( int argc, char *argv[] )
 {
     const char *sock_path;
-    char *ntdll_path = NULL;
+    struct zygote_state state;
+    struct stat bound_sock_st;
     void *handle;
     void (*wine_main)( int, char ** );
+    unsigned int (*get_protocol_version)( void );
     int listen_fd;
     struct pollfd *pfds;
     struct sigaction sa;
@@ -565,14 +875,18 @@ int main( int argc, char *argv[] )
     nfds_t nfds = 1, cap = 64, i;
 
     (void)argc;
+    memset( &state, 0, sizeof(state) );
 
     if (!(sock_path = getenv( "WINEZYGOTESOCKET" )))
     {
         fprintf( stderr, "wine-zygote: WINEZYGOTESOCKET environment variable is not set\n" );
         return 1;
     }
-    if (!(handle = try_dlopen_ntdll( get_self_exe(), &ntdll_path )) &&
-        !(handle = try_dlopen_ntdll( argv[0], &ntdll_path )))
+    if (init_server_watch( sock_path, &state.watch ) < 0)
+        return 0;
+
+    if (!(handle = try_dlopen_ntdll( get_self_exe(), &state )) &&
+        !(handle = try_dlopen_ntdll( argv[0], &state )))
     {
         fprintf( stderr, "wine-zygote: could not load ntdll.so: %s\n", dlerror() );
         return 1;
@@ -582,11 +896,13 @@ int main( int argc, char *argv[] )
         fprintf( stderr, "wine-zygote: __wine_main function not found in ntdll.so\n" );
         return 1;
     }
+    get_protocol_version = (unsigned int (*)( void ))dlsym( handle, "__wine_zygote_protocol_version" );
+    state.server_protocol = get_protocol_version ? get_protocol_version() : 0;
 
-    warm_libraries( ntdll_path );
+    warm_libraries( state.ntdll_bin, state.win32u_bin );
 
     /* ntdll blocks a set of signals before the zygote is exec'd; unblock
-     * them so that SIGCHLD notifications for the forked children arrive */
+     * them so that SIGCHLD and shutdown signals arrive */
     sigemptyset( &mask );
     sigprocmask( SIG_SETMASK, &mask, NULL );
 
@@ -599,30 +915,48 @@ int main( int argc, char *argv[] )
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction( SIGCHLD, &sa, NULL );
 
-    if ((listen_fd = create_listen_socket( sock_path )) == -1)
+    sa.sa_handler = handle_quit;
+    sa.sa_flags = 0;
+    sigaction( SIGTERM, &sa, NULL );
+    sigaction( SIGINT, &sa, NULL );
+
+    listen_fd = create_listen_socket( sock_path, &bound_sock_st );
+    if (listen_fd == -2) return 0;  /* another live daemon already owns this socket */
+    if (listen_fd == -1)
     {
         fprintf( stderr, "wine-zygote: could not bind %s: %s\n", sock_path, strerror( errno ) );
         return 1;
     }
 
-    if (!(pfds = calloc( cap, sizeof(*pfds) ))) return 1;
+    if (!(pfds = calloc( cap, sizeof(*pfds) )))
+    {
+        close( listen_fd );
+        cleanup_own_socket( sock_path, &bound_sock_st );
+        return 1;
+    }
     pfds[0].fd = listen_fd;
     pfds[0].events = POLLIN;
 
     for (;;)
     {
-        int ret;
+        int ret, timeout_ms, should_exit = 0;
 
         /* sweep in case a SIGCHLD was delivered while the mask was being reset */
         while (waitpid( -1, NULL, WNOHANG ) > 0)
             ;
 
-        ret = poll( pfds, nfds, -1 );
+        if (!is_daemon_still_valid( sock_path, &bound_sock_st, &state ))
+            break;
+
+        timeout_ms = (nfds == 1) ? 500 : 2000;
+        ret = poll( pfds, nfds, timeout_ms );
         if (ret < 0)
         {
             if (errno == EINTR) continue;
             break;
         }
+        if (ret == 0) continue;
+
         if (pfds[0].revents & POLLIN)
         {
             int client = accept( listen_fd, NULL, NULL );
@@ -646,7 +980,8 @@ int main( int argc, char *argv[] )
         {
             if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR))
             {
-                if (handle_client_request( pfds[i].fd, pfds, nfds, argv[0], wine_main ) < 0)
+                if (handle_client_request( pfds[i].fd, pfds, nfds, argv[0], wine_main,
+                                           &state, &should_exit ) < 0)
                 {
                     close( pfds[i].fd );
                     pfds[i] = pfds[nfds - 1];
@@ -656,6 +991,11 @@ int main( int argc, char *argv[] )
             }
             i++;
         }
+        if (should_exit) break;
     }
+
+    for (i = 0; i < nfds; i++) close( pfds[i].fd );
+    free( pfds );
+    cleanup_own_socket( sock_path, &bound_sock_st );
     return 0;
 }

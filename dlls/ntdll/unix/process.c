@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -486,7 +487,7 @@ static BOOL is_unix_console_handle( HANDLE handle )
 /* Request sent to the persistent prefix-wide wine-zygote daemon.
  * Must stay in sync with the definition in loader/zygote.c. */
 #define ZYGOTE_MAGIC   0x5a475946  /* 'F','Y','G','Z' */
-#define ZYGOTE_VERSION 1
+#define ZYGOTE_VERSION 2
 
 #define ZYGOTE_FLAG_DETACHED   0x01  /* setsid() + /dev/null stdio */
 #define ZYGOTE_FLAG_UNIX       0x02  /* execv() a Unix binary instead of __wine_main() */
@@ -494,22 +495,31 @@ static BOOL is_unix_console_handle( HANDLE handle )
 #define ZYGOTE_FLAG_HAS_CWD    0x08  /* unix cwd dir fd attached */
 #define ZYGOTE_FLAG_HAS_STDIN  0x10  /* stdin fd attached */
 #define ZYGOTE_FLAG_HAS_STDOUT 0x20  /* stdout fd attached */
+#define ZYGOTE_FLAG_HAS_STDERR 0x40  /* stderr fd attached */
+
+#define ZYGOTE_STATUS_OK     0
+#define ZYGOTE_STATUS_ERR   -1
+#define ZYGOTE_STATUS_STALE -2
+
+#define ZYGOTE_MAX_FDS 5
 
 struct zygote_request
 {
-    ULONG magic;         /* ZYGOTE_MAGIC */
-    ULONG version;       /* ZYGOTE_VERSION */
-    ULONG flags;         /* ZYGOTE_FLAG_* */
-    ULONG argv_len;      /* size of NUL separated argv block (terminated by empty string) */
-    ULONG env_len;       /* size of NUL separated envp block (terminated by empty string) */
-    ULONG reserve_len;   /* size of WINEPRELOADRESERVE value, including NUL */
-    ULONG winedebug_len; /* size of WINEDEBUG value, including NUL */
+    uint32_t magic;            /* ZYGOTE_MAGIC */
+    uint32_t version;          /* ZYGOTE_VERSION */
+    uint32_t server_protocol;  /* SERVER_PROTOCOL_VERSION */
+    uint32_t flags;            /* ZYGOTE_FLAG_* */
+    uint64_t bin_fingerprint;  /* FNV-1a hash of wine-zygote + ntdll.so + win32u.so stat */
+    uint32_t argv_len;         /* size of NUL separated argv block (terminated by empty string) */
+    uint32_t env_len;          /* size of NUL separated envp block (terminated by empty string) */
+    uint32_t reserve_len;      /* size of WINEPRELOADRESERVE value, including NUL */
+    uint32_t winedebug_len;    /* size of WINEDEBUG value, including NUL */
 };
 
 struct zygote_reply
 {
-    NTSTATUS status;
-    pid_t    pid;
+    int32_t status;  /* ZYGOTE_STATUS_* */
+    int32_t pid;     /* Unix pid of the forked child, -1 on error */
 };
 
 struct zygote_spawn_params
@@ -528,9 +538,15 @@ struct zygote_spawn_params
     BOOL        is_unix;
 };
 
+/* Exported for wine-zygote to query the exact SERVER_PROTOCOL_VERSION of the dlopen'd ntdll.so. */
+DECLSPEC_EXPORT unsigned int __wine_zygote_protocol_version(void)
+{
+    return SERVER_PROTOCOL_VERSION;
+}
+
 static pthread_mutex_t zygote_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int zygote_sock = -1;
-static char *zygote_socket_path;
+static uint64_t zygote_sock_fingerprint;
 
 static int read_exact( int fd, void *buf, size_t len )
 {
@@ -567,13 +583,82 @@ static int write_exact( int fd, const void *buf, size_t len )
     return 0;
 }
 
+/* Must stay in sync with loader/zygote.c. */
+static uint64_t zygote_fnv1a_mix( uint64_t h, const void *data, size_t len )
+{
+    const unsigned char *p = data;
+    while (len--)
+    {
+        h ^= *p++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t zygote_fnv1a_hash_stat( uint64_t h, const char *path )
+{
+    struct stat st;
+    uint64_t fields[7] = { 0 };
+
+    if (path && stat( path, &st ) == 0)
+    {
+        fields[0] = (uint64_t)st.st_dev;
+        fields[1] = (uint64_t)st.st_ino;
+        fields[2] = (uint64_t)st.st_size;
+        fields[3] = (uint64_t)st.st_mtime;
+        fields[5] = (uint64_t)st.st_ctime;
+#ifdef HAVE_STRUCT_STAT_ST_MTIM
+        fields[4] = (uint64_t)st.st_mtim.tv_nsec;
+        fields[6] = (uint64_t)st.st_ctim.tv_nsec;
+#elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC)
+        fields[4] = (uint64_t)st.st_mtimespec.tv_nsec;
+        fields[6] = (uint64_t)st.st_ctimespec.tv_nsec;
+#endif
+    }
+    return zygote_fnv1a_mix( h, fields, sizeof(fields) );
+}
+
+static uint64_t zygote_compute_fingerprint( void )
+{
+    char *zygote_bin = NULL, *ntdll_bin = NULL, *win32u_bin = NULL;
+    uint64_t h = 14695981039346656037ULL;
+
+    if (build_dir)
+    {
+        if (asprintf( &zygote_bin, "%s/loader/wine-zygote", build_dir ) == -1) zygote_bin = NULL;
+        if (asprintf( &ntdll_bin,  "%s/dlls/ntdll/ntdll.so", build_dir ) == -1) ntdll_bin = NULL;
+        if (asprintf( &win32u_bin, "%s/dlls/win32u/win32u.so", build_dir ) == -1) win32u_bin = NULL;
+    }
+    else if (wineloader)
+    {
+        const char *slash = strrchr( wineloader, '/' );
+        if (slash)
+        {
+            int dlen = (int)(slash - wineloader);
+            if (asprintf( &zygote_bin, "%.*s/wine-zygote", dlen, wineloader ) == -1) zygote_bin = NULL;
+            if (asprintf( &ntdll_bin,  "%.*s/ntdll.so", dlen, wineloader ) == -1) ntdll_bin = NULL;
+            if (asprintf( &win32u_bin, "%.*s/win32u.so", dlen, wineloader ) == -1) win32u_bin = NULL;
+        }
+    }
+
+    h = zygote_fnv1a_hash_stat( h, zygote_bin );
+    h = zygote_fnv1a_hash_stat( h, ntdll_bin );
+    h = zygote_fnv1a_hash_stat( h, win32u_bin );
+    free( zygote_bin );
+    free( ntdll_bin );
+    free( win32u_bin );
+    return h;
+}
+
 /***********************************************************************
  *           Persistent prefix-wide zygote client
  *
- * Ask the wine-zygote daemon (started lazily on <server_dir>/zygote.sock) to
- * fork() the child.  The daemon already has the wine loader plus ntdll.so and
- * win32u.so mapped, so the child skips execve(wineloader) and the whole ELF
- * bootstrap.  Any mismatch falls back to the classic fork + exec path.
+ * Ask the wine-zygote daemon (started lazily on a versioned/fingerprinted
+ * socket in <server_dir>) to fork() the child.  The daemon already has the
+ * wine loader plus ntdll.so and win32u.so mapped, so the child skips
+ * execve(wineloader) and the whole ELF bootstrap.  Any protocol or binary
+ * mismatch automatically replaces the stale daemon or falls back to the
+ * classic fork + exec path.
  */
 static int zygote_disabled;
 static int zygote_checked;
@@ -592,17 +677,24 @@ static int zygote_usable( const struct pe_image_info *pe_info )
     return 1;
 }
 
-/* build the <server_dir>/zygote.sock path, server_dir as computed in server.c */
-static char *zygote_get_socket_path( void )
+/* build <server_dir>/zygote-<proto>-<fingerprint>.sock, server_dir as computed in server.c */
+static char *zygote_build_socket_path( uint64_t fingerprint )
 {
     const char *path;
-    char *prefix;
+    char *prefix = NULL, *ret = NULL;
     struct stat st;
+    struct sockaddr_un dummy;
 
-    if (zygote_socket_path) return zygote_socket_path;
     if ((path = getenv( "WINEZYGOTESOCKET" )))
-        return zygote_socket_path = strdup( path );
-    if (!(path = getenv( "WINEPREFIX" )))
+    {
+        if (strlen( path ) >= sizeof(dummy.sun_path)) return NULL;
+        return strdup( path );
+    }
+    if (config_dir)
+    {
+        if (!(prefix = strdup( config_dir ))) return NULL;
+    }
+    else if (!(path = getenv( "WINEPREFIX" )))
     {
         const char *home = getenv( "HOME" );
         if (!home) return NULL;
@@ -616,10 +708,16 @@ static char *zygote_get_socket_path( void )
         return NULL;
     }
     free( prefix );
-    if (asprintf( &zygote_socket_path, "/tmp/.wine-%u/server-%llx-%llx/zygote.sock",
+    if (asprintf( &ret, "/tmp/.wine-%u/server-%llx-%llx/zygote-%u-%016llx.sock",
                   (unsigned int)getuid(), (unsigned long long)st.st_dev,
-                  (unsigned long long)st.st_ino ) == -1) return NULL;
-    return zygote_socket_path;
+                  (unsigned long long)st.st_ino, (unsigned int)SERVER_PROTOCOL_VERSION,
+                  (unsigned long long)fingerprint ) == -1) return NULL;
+    if (strlen( ret ) >= sizeof(dummy.sun_path))
+    {
+        free( ret );
+        return NULL;
+    }
+    return ret;
 }
 
 static int zygote_start_daemon( const char *sock_path )
@@ -669,8 +767,10 @@ static int zygote_try_connect( const char *path )
     struct sockaddr_un addr;
     int fd;
 
+    if (strlen( path ) >= sizeof(addr.sun_path)) return -1;
     if ((fd = socket( PF_UNIX, SOCK_STREAM, 0 )) == -1) return -1;
     fcntl( fd, F_SETFD, FD_CLOEXEC );
+    memset( &addr, 0, sizeof(addr) );
     addr.sun_family = AF_UNIX;
     snprintf( addr.sun_path, sizeof(addr.sun_path), "%s", path );
     if (connect( fd, (struct sockaddr *)&addr, sizeof(addr) ) == 0) return fd;
@@ -678,32 +778,41 @@ static int zygote_try_connect( const char *path )
     return -1;
 }
 
-static int zygote_connect( void )
+static int zygote_connect( uint64_t fingerprint )
 {
     char *path;
     int fd, i;
 
     if (zygote_sock != -1) return zygote_sock;
-    if (!(path = zygote_get_socket_path())) return -1;
+    if (!(path = zygote_build_socket_path( fingerprint ))) return -1;
 
     /* Fast path: daemon already listening */
     if ((fd = zygote_try_connect( path )) != -1)
     {
+        free( path );
         zygote_sock = fd;
+        zygote_sock_fingerprint = fingerprint;
         return fd;
     }
 
-    if (zygote_start_daemon( path ) < 0) return -1;
+    if (zygote_start_daemon( path ) < 0)
+    {
+        free( path );
+        return -1;
+    }
     for (i = 0; i < 200; i++)
     {
         if ((fd = zygote_try_connect( path )) != -1)
         {
+            free( path );
             zygote_sock = fd;
+            zygote_sock_fingerprint = fingerprint;
             return fd;
         }
         if (errno != ENOENT && errno != ECONNREFUSED && errno != EAGAIN) break;
         usleep( 5000 );
     }
+    free( path );
     return -1;
 }
 
@@ -753,80 +862,137 @@ static int zygote_spawn( const struct zygote_spawn_params *params, NTSTATUS *out
 {
     struct zygote_request req;
     struct zygote_reply reply;
-    char cbuf[CMSG_SPACE( sizeof(int) * 4 )];
+    char cbuf[CMSG_SPACE( sizeof(int) * ZYGOTE_MAX_FDS )];
     char reserve[64];
     struct iovec iov = { &req, sizeof(req) };
-    struct msghdr msg = { 0 };
+    struct msghdr msg;
     struct cmsghdr *cmsg;
-    int fds[4], nfds = 0;
+    int fds[ZYGOTE_MAX_FDS], nfds, attempt;
+    int has_stderr;
     ssize_t r;
 
     if (!zygote_usable( NULL )) return -1;
 
+    has_stderr = (fcntl( 2, F_GETFD ) != -1);
+
     pthread_mutex_lock( &zygote_mutex );
-    if (zygote_sock == -1 && zygote_connect() == -1)
+
+    for (attempt = 0; attempt < 2; attempt++)
     {
+        uint64_t fp = zygote_compute_fingerprint();
+        int was_cached = (zygote_sock != -1);
+
+        if (zygote_sock != -1 && fp != zygote_sock_fingerprint)
+        {
+            close( zygote_sock );
+            zygote_sock = -1;
+            was_cached = 0;
+        }
+        if (zygote_sock == -1 && zygote_connect( fp ) == -1)
+        {
+            pthread_mutex_unlock( &zygote_mutex );
+            return -1;
+        }
+
+        memset( &req, 0, sizeof(req) );
+        memset( &msg, 0, sizeof(msg) );
+        req.magic           = ZYGOTE_MAGIC;
+        req.version         = ZYGOTE_VERSION;
+        req.server_protocol = SERVER_PROTOCOL_VERSION;
+        req.bin_fingerprint = fp;
+        if (params->detached) req.flags |= ZYGOTE_FLAG_DETACHED;
+        if (params->is_unix) req.flags |= ZYGOTE_FLAG_UNIX;
+        if (params->socket_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_SOCKET;
+        if (params->cwd_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_CWD;
+        if (!params->detached && params->stdin_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_STDIN;
+        if (!params->detached && params->stdout_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_STDOUT;
+        if (has_stderr) req.flags |= ZYGOTE_FLAG_HAS_STDERR;
+        req.argv_len = params->argv_len;
+        req.env_len  = params->env_len;
+        if (params->reserve)
+        {
+            req.reserve_len = strlen( params->reserve ) + 1;
+            snprintf( reserve, sizeof(reserve), "%s", params->reserve );
+        }
+        if (params->winedebug) req.winedebug_len = strlen( params->winedebug ) + 1;
+
+        nfds = 0;
+        if (req.flags & ZYGOTE_FLAG_HAS_SOCKET) fds[nfds++] = params->socket_fd;
+        if (req.flags & ZYGOTE_FLAG_HAS_CWD) fds[nfds++] = params->cwd_fd;
+        if (req.flags & ZYGOTE_FLAG_HAS_STDIN) fds[nfds++] = params->stdin_fd;
+        if (req.flags & ZYGOTE_FLAG_HAS_STDOUT) fds[nfds++] = params->stdout_fd;
+        if (req.flags & ZYGOTE_FLAG_HAS_STDERR) fds[nfds++] = 2;
+
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        if (nfds)
+        {
+            msg.msg_control = cbuf;
+            msg.msg_controllen = CMSG_SPACE( sizeof(int) * nfds );
+            cmsg = CMSG_FIRSTHDR( &msg );
+            cmsg->cmsg_level = SOL_SOCKET;
+            cmsg->cmsg_type = SCM_RIGHTS;
+            cmsg->cmsg_len = CMSG_LEN( sizeof(int) * nfds );
+            memcpy( CMSG_DATA(cmsg), fds, sizeof(int) * nfds );
+        }
+
+        do {
+            r = sendmsg( zygote_sock, &msg, MSG_NOSIGNAL );
+        } while (r < 0 && errno == EINTR);
+
+        if (r != sizeof(req))
+        {
+            int send_err = errno;
+            close( zygote_sock );
+            zygote_sock = -1;
+            if (attempt == 0 && was_cached && (send_err == EPIPE || send_err == ECONNRESET))
+                continue;
+            pthread_mutex_unlock( &zygote_mutex );
+            return -1;
+        }
+
+        if ((req.argv_len && write_exact( zygote_sock, params->argv_block, req.argv_len ) < 0) ||
+            (req.env_len && write_exact( zygote_sock, params->env_block, req.env_len ) < 0) ||
+            (req.reserve_len && write_exact( zygote_sock, reserve, req.reserve_len ) < 0) ||
+            (req.winedebug_len && write_exact( zygote_sock, params->winedebug, req.winedebug_len ) < 0) ||
+            read_exact( zygote_sock, &reply, sizeof(reply) ) < 0)
+        {
+            close( zygote_sock );
+            zygote_sock = -1;
+            pthread_mutex_unlock( &zygote_mutex );
+            return -1;
+        }
+
+        if (reply.status == ZYGOTE_STATUS_STALE)
+        {
+            TRACE( "zygote daemon reported stale binary/protocol, reconnecting\n" );
+            close( zygote_sock );
+            zygote_sock = -1;
+            if (attempt == 0)
+            {
+                usleep( 5000 );
+                continue;
+            }
+            pthread_mutex_unlock( &zygote_mutex );
+            return -1;
+        }
+
+        if (reply.status != ZYGOTE_STATUS_OK)
+        {
+            close( zygote_sock );
+            zygote_sock = -1;
+            pthread_mutex_unlock( &zygote_mutex );
+            return -1;
+        }
+
+        *out_status = STATUS_SUCCESS;
+        TRACE( "zygote forked child %d\n", reply.pid );
         pthread_mutex_unlock( &zygote_mutex );
-        return -1;
+        return 0;
     }
 
-    memset( &req, 0, sizeof(req) );
-    req.magic   = ZYGOTE_MAGIC;
-    req.version = ZYGOTE_VERSION;
-    if (params->detached) req.flags |= ZYGOTE_FLAG_DETACHED;
-    if (params->is_unix) req.flags |= ZYGOTE_FLAG_UNIX;
-    if (params->socket_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_SOCKET;
-    if (params->cwd_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_CWD;
-    if (!params->detached && params->stdin_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_STDIN;
-    if (!params->detached && params->stdout_fd != -1) req.flags |= ZYGOTE_FLAG_HAS_STDOUT;
-    req.argv_len = params->argv_len;
-    req.env_len  = params->env_len;
-    if (params->reserve)
-    {
-        req.reserve_len = strlen( params->reserve ) + 1;
-        snprintf( reserve, sizeof(reserve), "%s", params->reserve );
-    }
-    if (params->winedebug) req.winedebug_len = strlen( params->winedebug ) + 1;
-
-    if (req.flags & ZYGOTE_FLAG_HAS_SOCKET) fds[nfds++] = params->socket_fd;
-    if (req.flags & ZYGOTE_FLAG_HAS_CWD) fds[nfds++] = params->cwd_fd;
-    if (req.flags & ZYGOTE_FLAG_HAS_STDIN) fds[nfds++] = params->stdin_fd;
-    if (req.flags & ZYGOTE_FLAG_HAS_STDOUT) fds[nfds++] = params->stdout_fd;
-
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    if (nfds)
-    {
-        msg.msg_control = cbuf;
-        msg.msg_controllen = CMSG_SPACE( sizeof(int) * nfds );
-        cmsg = CMSG_FIRSTHDR( &msg );
-        cmsg->cmsg_level = SOL_SOCKET;
-        cmsg->cmsg_type = SCM_RIGHTS;
-        cmsg->cmsg_len = CMSG_LEN( sizeof(int) * nfds );
-        memcpy( CMSG_DATA(cmsg), fds, sizeof(int) * nfds );
-    }
-
-    do {
-        r = sendmsg( zygote_sock, &msg, MSG_NOSIGNAL );
-    } while (r < 0 && errno == EINTR);
-
-    if (r != sizeof(req) ||
-        (req.argv_len && write_exact( zygote_sock, params->argv_block, req.argv_len ) < 0) ||
-        (req.env_len && write_exact( zygote_sock, params->env_block, req.env_len ) < 0) ||
-        (req.reserve_len && write_exact( zygote_sock, reserve, req.reserve_len ) < 0) ||
-        (req.winedebug_len && write_exact( zygote_sock, params->winedebug, req.winedebug_len ) < 0) ||
-        read_exact( zygote_sock, &reply, sizeof(reply) ) < 0 || reply.status)
-    {
-        close( zygote_sock );
-        zygote_sock = -1;
-        pthread_mutex_unlock( &zygote_mutex );
-        return -1;
-    }
-
-    *out_status = reply.status;
-    TRACE( "zygote forked child %d\n", reply.pid );
     pthread_mutex_unlock( &zygote_mutex );
-    return 0;
+    return -1;
 }
 /* ask the zygote daemon to fork a new wineloader process; 0 == handled */
 static int zygote_spawn_loader( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd, int unixdir,
