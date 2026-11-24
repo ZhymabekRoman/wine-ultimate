@@ -39,6 +39,19 @@
 
 extern IActivationFactory *geographic_region_factory;
 extern IActivationFactory *calendar_factory;
+extern IActivationFactory *userprofile_preferences_factory;
+extern IActivationFactory *language_activation_factory;
+extern IActivationFactory *font_group_factory;
+extern IActivationFactory *application_languages_factory;
+extern IActivationFactory *decimal_formatter_factory;
+extern IActivationFactory *percent_formatter_factory;
+extern IActivationFactory *calendar_identifiers_factory;
+extern IActivationFactory *clock_identifiers_factory;
+extern IActivationFactory *datetime_formatter_factory;
+extern IActivationFactory *increment_rounder_factory;
+extern IActivationFactory *significant_digits_rounder_factory;
+extern const GUID IID_IReferenceTrackerTarget_glob;
+extern const GUID IID_IReferenceTracker_glob;
 HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out);
 
 #include "wine/debug.h"

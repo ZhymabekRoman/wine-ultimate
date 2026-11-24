@@ -2,7 +2,13 @@ MODULE = windows.globalization.dll
 IMPORTS = combase uuid
 
 SOURCES = \
+	application_languages.c \
 	calendar.c \
 	classes.idl \
+	datetime_formatting.c \
 	geographic_region.c \
-	main.c
+	hstring_vector.c \
+	language.c \
+	main.c \
+	number_formatter.c \
+	number_rounder.c
