@@ -137,8 +137,14 @@ static HRESULT WINAPI iterator_hstring_GetMany( IIterator_HSTRING *iface, UINT32
                                                 HSTRING *items, UINT *count )
 {
     struct iterator_hstring *impl = impl_from_IIterator_HSTRING(iface);
+    HRESULT hr;
+
     TRACE("iface %p, items_size %u, items %p, count %p.\n", iface, items_size, items, count);
-    return IVectorView_HSTRING_GetMany(impl->view, impl->index, items_size, items, count);
+
+    if (!count) return E_POINTER;
+    hr = IVectorView_HSTRING_GetMany(impl->view, impl->index, items_size, items, count);
+    if (SUCCEEDED(hr)) impl->index += *count;
+    return hr;
 }
 
 static const IIterator_HSTRINGVtbl iterator_hstring_vtbl =
@@ -166,10 +172,9 @@ struct hstring_vector
     LONG ref;
 
     ULONG count;
-    HSTRING values[];
+    ULONG capacity;
+    HSTRING *values;
 };
-
-C_ASSERT(sizeof(struct hstring_vector) == offsetof(struct hstring_vector, values[0]));
 
 static inline struct hstring_vector *impl_from_IVectorView_HSTRING(IVectorView_HSTRING *iface)
 {
@@ -180,7 +185,15 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_QueryInterface(IVectorView_HSTRI
         REFIID iid, void **out)
 {
     struct hstring_vector *impl = impl_from_IVectorView_HSTRING(iface);
-    ERR("GLOBALIZATION: vector_QI iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &IID_IMarshal) ||
+        IsEqualGUID(iid, &IID_IReferenceTrackerTarget_glob) ||
+        IsEqualGUID(iid, &IID_IReferenceTracker_glob))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
 
     if (IsEqualGUID(iid, &IID_IUnknown) ||
         IsEqualGUID(iid, &IID_IInspectable) ||
@@ -227,6 +240,7 @@ static ULONG STDMETHODCALLTYPE hstring_vector_Release(IVectorView_HSTRING *iface
     if (ref == 0)
     {
         while (impl->count--) WindowsDeleteString(impl->values[impl->count]);
+        free(impl->values);
         free(impl);
     }
     return ref;
@@ -244,8 +258,9 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_GetIids(IVectorView_HSTRING *ifa
 static HRESULT STDMETHODCALLTYPE hstring_vector_GetRuntimeClassName(IVectorView_HSTRING *iface,
         HSTRING *class_name)
 {
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IVectorView`1<String>";
     if (!class_name) return E_POINTER;
-    return WindowsCreateString(L"Windows.Foundation.Collections.IVectorView`1<String>", 49, class_name);
+    return WindowsCreateString(name, ARRAY_SIZE(name) - 1, class_name);
 }
 
 static HRESULT STDMETHODCALLTYPE hstring_vector_GetTrustLevel(IVectorView_HSTRING *iface,
@@ -260,8 +275,9 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_GetAt(IVectorView_HSTRING *iface
 {
     struct hstring_vector *impl = impl_from_IVectorView_HSTRING(iface);
 
-    ERR("GLOBALIZATION: GetAt iface %p, index %#x, value %p.\n", iface, index, value);
+    TRACE("iface %p, index %#x, value %p.\n", iface, index, value);
 
+    if (!value) return E_POINTER;
     *value = NULL;
     if (index >= impl->count) return E_BOUNDS;
     return WindowsDuplicateString(impl->values[index], value);
@@ -272,7 +288,7 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_get_Size(IVectorView_HSTRING *if
 {
     struct hstring_vector *impl = impl_from_IVectorView_HSTRING(iface);
 
-    ERR("GLOBALIZATION: get_Size iface %p, value %p, returning count %lu.\n", iface, value, impl->count);
+    TRACE("iface %p, value %p, returning count %lu.\n", iface, value, impl->count);
 
     if (!value) return E_POINTER;
     *value = impl->count;
@@ -314,7 +330,8 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_GetMany(IVectorView_HSTRING *ifa
 
     TRACE("iface %p, start_index %#x, items %p, count %p.\n", iface, start_index, items, count);
 
-    memset(items, 0, items_size * sizeof(*items));
+    if (!count || (items_size && !items)) return E_POINTER;
+    if (items_size) memset(items, 0, items_size * sizeof(*items));
 
     for (i = start_index; i < impl->count && i < start_index + items_size; ++i)
         if (FAILED(hr = WindowsDuplicateString(impl->values[i], items + i - start_index)))
@@ -347,15 +364,27 @@ static const struct IVector_HSTRINGVtbl hstring_ivector_vtbl;
 HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out)
 {
     struct hstring_vector *impl;
+    HSTRING *buf = NULL;
 
-    if (!(impl = malloc(offsetof(struct hstring_vector, values[count])))) return E_OUTOFMEMORY;
+    if (!out) return E_POINTER;
+    if (!(impl = calloc(1, sizeof(*impl)))) return E_OUTOFMEMORY;
+    if (count)
+    {
+        if (!(buf = malloc(count * sizeof(HSTRING))))
+        {
+            free(impl);
+            return E_OUTOFMEMORY;
+        }
+        memcpy(buf, values, count * sizeof(HSTRING));
+    }
+
     impl->ref = 1;
-
     impl->IVectorView_HSTRING_iface.lpVtbl = &hstring_vector_vtbl;
     impl->IIterable_HSTRING_iface.lpVtbl = &iterable_view_hstring_vtbl;
     impl->IVector_HSTRING_iface.lpVtbl = &hstring_ivector_vtbl;
     impl->count = count;
-    memcpy(impl->values, values, count * sizeof(HSTRING));
+    impl->capacity = count;
+    impl->values = buf;
 
     *out = &impl->IVectorView_HSTRING_iface;
     return S_OK;
@@ -443,27 +472,36 @@ static HRESULT WINAPI hstring_ivector_IndexOf( IVector_HSTRING *iface, HSTRING e
 static HRESULT WINAPI hstring_ivector_SetAt( IVector_HSTRING *iface, UINT32 index, HSTRING value )
 {
     struct hstring_vector *impl = impl_from_IVector_HSTRING(iface);
+    HSTRING dup = NULL;
+    HRESULT hr;
+
     TRACE("iface %p, index %u, value %p.\n", iface, index, value);
     if (index >= impl->count) return E_BOUNDS;
-    WindowsDuplicateString(value, &impl->values[index]);
+    if (FAILED(hr = WindowsDuplicateString(value, &dup))) return hr;
+    WindowsDeleteString(impl->values[index]);
+    impl->values[index] = dup;
     return S_OK;
 }
 
 static HRESULT hstring_vector_insert( struct hstring_vector *impl, UINT32 index, HSTRING value )
 {
-    struct hstring_vector *grown;
+    HSTRING dup = NULL;
+    HRESULT hr;
 
     if (index > impl->count) return E_BOUNDS;
-    grown = realloc(impl, offsetof(struct hstring_vector, values[impl->count + 1]));
-    if (!grown) return E_OUTOFMEMORY;
-    impl = grown;
-    memmove(grown->values + index + 1, grown->values + index,
-            (grown->count - index) * sizeof(*grown->values));
-    WindowsDuplicateString(value, &grown->values[index]);
-    grown->count++;
-    impl->IVectorView_HSTRING_iface.lpVtbl = &hstring_vector_vtbl;
-    impl->IIterable_HSTRING_iface.lpVtbl = &iterable_view_hstring_vtbl;
-    impl->IVector_HSTRING_iface.lpVtbl = &hstring_ivector_vtbl;
+    if (impl->count >= impl->capacity)
+    {
+        ULONG new_cap = impl->capacity ? impl->capacity * 2 : 4;
+        HSTRING *grown = realloc(impl->values, new_cap * sizeof(*grown));
+        if (!grown) return E_OUTOFMEMORY;
+        impl->values = grown;
+        impl->capacity = new_cap;
+    }
+    if (FAILED(hr = WindowsDuplicateString(value, &dup))) return hr;
+    memmove(impl->values + index + 1, impl->values + index,
+            (impl->count - index) * sizeof(*impl->values));
+    impl->values[index] = dup;
+    impl->count++;
     return S_OK;
 }
 

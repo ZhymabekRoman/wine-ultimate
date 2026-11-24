@@ -75,14 +75,25 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     {
         *factory = clock_identifiers_factory;
     }
-    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter") ||
-             !wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter"))
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter"))
     {
         *factory = decimal_formatter_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter"))
+    {
+        *factory = currency_formatter_factory;
+        IUnknown_AddRef(*factory);
     }
     else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.PercentFormatter"))
     {
         *factory = percent_formatter_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.PermilleFormatter"))
+    {
+        *factory = permille_formatter_factory;
+        IUnknown_AddRef(*factory);
     }
     else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.IncrementNumberRounder"))
     {

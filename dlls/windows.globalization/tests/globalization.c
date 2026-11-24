@@ -219,7 +219,37 @@ static void test_GlobalizationPreferences(void)
     size = 0xdeadbeef;
     hr = IVectorView_HSTRING_get_Size(currencies, &size);
     ok(hr == S_OK, "IVectorView_HSTRING_get_Size failed, hr %#lx\n", hr);
-    todo_wine ok(size != 0 && size != 0xdeadbeef, "IVectorView_HSTRING_get_Size returned %u\n", size);
+    ok(size != 0 && size != 0xdeadbeef, "IVectorView_HSTRING_get_Size returned %u\n", size);
+
+    tmp_str = NULL;
+    hr = IVectorView_HSTRING_GetAt(currencies, 0, &tmp_str);
+    ok(hr == S_OK, "IVectorView_HSTRING_GetAt failed, hr %#lx\n", hr);
+    buf = WindowsGetStringRawBuffer(tmp_str, &len);
+    ok(buf != NULL && len > 0, "currency GetAt(0) returned buf %p, len %u\n", buf, len);
+    WindowsDeleteString(tmp_str);
+
+    {
+        IIterable_HSTRING *iterable = NULL;
+        IIterator_HSTRING *iter = NULL;
+        HSTRING many[2] = { NULL, NULL };
+        UINT count = 0xdeadbeef;
+
+        hr = IVectorView_HSTRING_QueryInterface(currencies, &IID_IIterable_HSTRING, (void **)&iterable);
+        ok(hr == S_OK, "QI IIterable_HSTRING failed, hr %#lx\n", hr);
+        hr = IIterable_HSTRING_First(iterable, &iter);
+        ok(hr == S_OK, "IIterable_HSTRING_First failed, hr %#lx\n", hr);
+        hr = IIterator_HSTRING_GetMany(iter, ARRAY_SIZE(many), many, &count);
+        ok(hr == S_OK, "IIterator_HSTRING_GetMany(1) failed, hr %#lx\n", hr);
+        ok(count == 1, "expected count 1, got %u\n", count);
+        if (many[0]) WindowsDeleteString(many[0]);
+        /* Second GetMany must advance and return 0 (no infinite loop). */
+        count = 0xdeadbeef;
+        hr = IIterator_HSTRING_GetMany(iter, ARRAY_SIZE(many), many, &count);
+        ok(hr == S_OK, "IIterator_HSTRING_GetMany(2) failed, hr %#lx\n", hr);
+        ok(count == 0, "expected count 0 after advance, got %u\n", count);
+        IIterator_HSTRING_Release(iter);
+        IIterable_HSTRING_Release(iterable);
+    }
 
     IVectorView_HSTRING_Release(currencies);
 
@@ -493,6 +523,129 @@ done:
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_CurrencyFormatter(void)
+{
+    static const GUID iid_ICurrencyFormatterFactory =
+        { 0x86c7537e, 0xb938, 0x4aa2, { 0x84, 0xb0, 0x2c, 0x33, 0xdc, 0x5b, 0x14, 0x50 } };
+    static const GUID iid_ICurrencyFormatter =
+        { 0x11730ca5, 0x4b00, 0x41b2, { 0xb3, 0x32, 0x73, 0xb1, 0x2a, 0x49, 0x7d, 0x54 } };
+    static const GUID iid_ICurrencyFormatter2 =
+        { 0x072c2f1d, 0xe7ba, 0x4197, { 0x92, 0x0e, 0x24, 0x7c, 0x92, 0xf7, 0xde, 0xa6 } };
+    static const GUID iid_INumberFormatter =
+        { 0xa5007c49, 0x7676, 0x4db7, { 0x86, 0x31, 0x1b, 0x6f, 0xf2, 0x65, 0xca, 0xa9 } };
+    static const GUID iid_INumberFormatterOptions =
+        { 0x80332d21, 0xaee1, 0x4a39, { 0xba, 0xa2, 0x07, 0xed, 0x8c, 0x96, 0xda, 0xf6 } };
+    static const GUID iid_ISignedZeroOption =
+        { 0xfd1cdd31, 0x0a3c, 0x49c4, { 0xa6, 0x42, 0x96, 0xa1, 0x56, 0x4f, 0x4f, 0x30 } };
+    static const WCHAR class_name[] = L"Windows.Globalization.NumberFormatting.CurrencyFormatter";
+
+    typedef struct { void *const *vtbl; } iface_t;
+    typedef HRESULT (WINAPI *create_code_fn)(void *, HSTRING, void **);
+    typedef HRESULT (WINAPI *create_ctx_fn)(void *, HSTRING, void *, HSTRING, void **);
+    typedef HRESULT (WINAPI *get_hstr_fn)(void *, HSTRING *);
+    typedef HRESULT (WINAPI *get_i32_fn)(void *, INT32 *);
+    typedef HRESULT (WINAPI *put_i32_fn)(void *, INT32);
+    typedef HRESULT (WINAPI *get_bool_fn)(void *, BOOLEAN *);
+    typedef HRESULT (WINAPI *put_bool_fn)(void *, BOOLEAN);
+    typedef HRESULT (WINAPI *fmt_dbl_fn)(void *, double, HSTRING *);
+
+    iface_t *factory = NULL, *cf = NULL, *cf2 = NULL, *nf = NULL, *opts = NULL, *sz = NULL;
+    HSTRING cls, usd, geo, out_str;
+    const WCHAR *buf;
+    INT32 mode = -1, frac = -1;
+    BOOLEAN zero_signed = TRUE;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &cls );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( cls, &iid_ICurrencyFormatterFactory, (void **)&factory );
+    WindowsDeleteString( cls );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "CurrencyFormatter not registered, skipping tests.\n" );
+        return;
+    }
+
+    WindowsCreateString( L"USD", 3, &usd );
+    WindowsCreateString( L"US", 2, &geo );
+
+    /* CreateCurrencyFormatterCodeContext (slot 7) */
+    hr = ((create_ctx_fn)factory->vtbl[7])( factory, usd, NULL, geo, (void **)&cf );
+    ok( hr == S_OK && cf != NULL, "CreateCurrencyFormatterCodeContext hr %#lx, cf %p.\n", hr, cf );
+
+    check_interface( cf, &iid_ICurrencyFormatter );
+    check_interface( cf, &iid_ICurrencyFormatter2 );
+    check_interface( cf, &iid_INumberFormatter );
+    check_interface( cf, &iid_INumberFormatterOptions );
+    check_interface( cf, &iid_ISignedZeroOption );
+
+    /* ICurrencyFormatter::get_Currency (slot 6) */
+    out_str = NULL;
+    hr = ((get_hstr_fn)cf->vtbl[6])( cf, &out_str );
+    ok( hr == S_OK && out_str != NULL, "get_Currency hr %#lx.\n", hr );
+    buf = WindowsGetStringRawBuffer( out_str, NULL );
+    ok( !wcscmp( buf, L"USD" ), "expected USD, got %s.\n", wine_dbgstr_w( buf ) );
+    WindowsDeleteString( out_str );
+
+    /* ICurrencyFormatter2::put_Mode(1) / get_Mode / ApplyRoundingForCurrency */
+    hr = IUnknown_QueryInterface( (IUnknown *)cf, &iid_ICurrencyFormatter2, (void **)&cf2 );
+    ok( hr == S_OK, "QI ICurrencyFormatter2 hr %#lx.\n", hr );
+    hr = ((put_i32_fn)cf2->vtbl[7])( cf2, 1 );
+    ok( hr == S_OK, "put_Mode hr %#lx.\n", hr );
+    hr = ((get_i32_fn)cf2->vtbl[6])( cf2, &mode );
+    ok( hr == S_OK && mode == 1, "get_Mode hr %#lx, mode %d.\n", hr, mode );
+    hr = ((put_i32_fn)cf2->vtbl[8])( cf2, 5 );
+    ok( hr == S_OK, "ApplyRoundingForCurrency hr %#lx.\n", hr );
+    IUnknown_Release( (IUnknown *)cf2 );
+
+    /* INumberFormatterOptions::put_FractionDigits(2) / get_FractionDigits / get_ResolvedLanguage */
+    hr = IUnknown_QueryInterface( (IUnknown *)cf, &iid_INumberFormatterOptions, (void **)&opts );
+    ok( hr == S_OK, "QI INumberFormatterOptions hr %#lx.\n", hr );
+    hr = ((put_i32_fn)opts->vtbl[11])( opts, 2 );
+    ok( hr == S_OK, "put_FractionDigits hr %#lx.\n", hr );
+    hr = ((get_i32_fn)opts->vtbl[10])( opts, &frac );
+    ok( hr == S_OK && frac == 2, "get_FractionDigits hr %#lx, frac %d.\n", hr, frac );
+    out_str = NULL;
+    hr = ((get_hstr_fn)opts->vtbl[18])( opts, &out_str );
+    ok( hr == S_OK && out_str != NULL, "get_ResolvedLanguage hr %#lx.\n", hr );
+    WindowsDeleteString( out_str );
+    IUnknown_Release( (IUnknown *)opts );
+
+    /* ISignedZeroOption (verify 1-byte BOOLEAN access does not corrupt adjacent bytes) */
+    hr = IUnknown_QueryInterface( (IUnknown *)cf, &iid_ISignedZeroOption, (void **)&sz );
+    ok( hr == S_OK, "QI ISignedZeroOption hr %#lx.\n", hr );
+    hr = ((put_bool_fn)sz->vtbl[7])( sz, TRUE );
+    ok( hr == S_OK, "put_IsZeroSigned hr %#lx.\n", hr );
+    zero_signed = FALSE;
+    hr = ((get_bool_fn)sz->vtbl[6])( sz, &zero_signed );
+    ok( hr == S_OK && zero_signed == TRUE, "get_IsZeroSigned hr %#lx, val %u.\n", hr, zero_signed );
+    IUnknown_Release( (IUnknown *)sz );
+
+    /* INumberFormatter::FormatDouble (slot 8) */
+    hr = IUnknown_QueryInterface( (IUnknown *)cf, &iid_INumberFormatter, (void **)&nf );
+    ok( hr == S_OK, "QI INumberFormatter hr %#lx.\n", hr );
+    out_str = NULL;
+    hr = ((fmt_dbl_fn)nf->vtbl[8])( nf, 12.5, &out_str );
+    ok( hr == S_OK && out_str != NULL, "FormatDouble hr %#lx.\n", hr );
+    buf = WindowsGetStringRawBuffer( out_str, NULL );
+    ok( wcsstr( buf, L"12.50" ) != NULL, "unexpected formatted currency %s.\n", wine_dbgstr_w( buf ) );
+    WindowsDeleteString( out_str );
+    IUnknown_Release( (IUnknown *)nf );
+
+    IUnknown_Release( (IUnknown *)cf );
+
+    /* CreateCurrencyFormatterCode (slot 6) */
+    cf = NULL;
+    hr = ((create_code_fn)factory->vtbl[6])( factory, usd, (void **)&cf );
+    ok( hr == S_OK && cf != NULL, "CreateCurrencyFormatterCode hr %#lx.\n", hr );
+    IUnknown_Release( (IUnknown *)cf );
+
+    WindowsDeleteString( geo );
+    WindowsDeleteString( usd );
+    IUnknown_Release( (IUnknown *)factory );
+}
+
 START_TEST(globalization)
 {
     HMODULE kernel32;
@@ -508,6 +661,7 @@ START_TEST(globalization)
     test_Language();
     test_GeographicRegion();
     test_ApplicationLanguages();
+    test_CurrencyFormatter();
 
     RoUninitialize();
 }

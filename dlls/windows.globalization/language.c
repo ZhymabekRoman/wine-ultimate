@@ -393,8 +393,24 @@ static HRESULT STDMETHODCALLTYPE globalization_preferences_get_Clocks(
 static HRESULT STDMETHODCALLTYPE globalization_preferences_get_Currencies(
         IGlobalizationPreferencesStatics *iface, IVectorView_HSTRING **out)
 {
-    FIXME("iface %p, out %p stub!\n", iface, out);
-    return hstring_vector_create(NULL, 0, out);
+    WCHAR currency[LOCALE_NAME_MAX_LENGTH];
+    HSTRING hstring;
+    HRESULT hr;
+
+    TRACE("iface %p, out %p.\n", iface, out);
+
+    if (!out) return E_POINTER;
+
+    if (!GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SINTLSYMBOL, currency, ARRAY_SIZE(currency)) ||
+        !currency[0])
+        wcscpy(currency, L"USD");
+
+    TRACE("returning currency %s\n", debugstr_w(currency));
+
+    if (FAILED(hr = WindowsCreateString(currency, wcslen(currency), &hstring)))
+        return hr;
+
+    return hstring_vector_create(&hstring, 1, out);
 }
 
 static HRESULT STDMETHODCALLTYPE globalization_preferences_get_Languages(
@@ -569,6 +585,37 @@ static HRESULT STDMETHODCALLTYPE language_factory_GetTrustLevel(
     return E_NOTIMPL;
 }
 
+static BOOLEAN is_well_formed_bcp47(const WCHAR *tag)
+{
+    const WCHAR *p = tag;
+    unsigned int len = 0;
+
+    if (!tag || !*tag) return FALSE;
+
+    /* Primary language subtag: 2 or 3 ASCII letters (BCP-47). */
+    while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))
+    {
+        len++;
+        p++;
+    }
+    if (len < 2 || len > 3) return FALSE;
+
+    /* Subsequent subtags: '-' followed by 1..8 ASCII alphanumerics. */
+    while (*p)
+    {
+        if (*p != '-') return FALSE;
+        p++;
+        len = 0;
+        while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9'))
+        {
+            len++;
+            p++;
+        }
+        if (len < 1 || len > 8) return FALSE;
+    }
+    return TRUE;
+}
+
 static HRESULT STDMETHODCALLTYPE language_factory_CreateLanguage(
         ILanguageFactory *iface, HSTRING tag, ILanguage **value)
 {
@@ -578,13 +625,13 @@ static HRESULT STDMETHODCALLTYPE language_factory_CreateLanguage(
 
     TRACE("iface %p, tag %p, value %p.\n", iface, tag, value);
     if (!value) return E_POINTER;
+    *value = NULL;
 
     if (!GetLocaleInfoEx(name, LOCALE_SNAME, buffer, ARRAY_SIZE(buffer)))
     {
-        if (name && wcslen(name) < ARRAY_SIZE(buffer))
-            wcscpy(buffer, name);
-        else
-            wcscpy(buffer, L"en-US");
+        if (!is_well_formed_bcp47(name) || wcslen(name) >= ARRAY_SIZE(buffer))
+            return E_INVALIDARG;
+        wcscpy(buffer, name);
     }
 
     if (!(language = calloc(1, sizeof(*language))))
@@ -655,9 +702,10 @@ static HRESULT STDMETHODCALLTYPE language_statics_GetTrustLevel(
 static HRESULT STDMETHODCALLTYPE language_statics_IsWellFormed(
         ILanguageStatics *iface, HSTRING tag, BOOLEAN *result)
 {
+    const WCHAR *name = WindowsGetStringRawBuffer(tag, NULL);
     TRACE("iface %p, tag %s, result %p.\n", iface, debugstr_hstring(tag), result);
     if (!result) return E_POINTER;
-    *result = TRUE;
+    *result = is_well_formed_bcp47(name);
     return S_OK;
 }
 

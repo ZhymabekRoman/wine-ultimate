@@ -76,7 +76,7 @@ static HRESULT STDMETHODCALLTYPE application_languages_activation_factory_QueryI
 {
     struct application_languages *languages = impl_application_languages_from_IActivationFactory(iface);
 
-    ERR("GLOBALIZATION: QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
     if (IsEqualGUID(iid, &IID_IUnknown) ||
         IsEqualGUID(iid, &IID_IInspectable) ||
@@ -209,7 +209,7 @@ DEFINE_IINSPECTABLE(application_languages_statics, IApplicationLanguagesStatics,
 static HRESULT STDMETHODCALLTYPE application_languages_statics_get_PrimaryLanguageOverride(
         IApplicationLanguagesStatics *iface, HSTRING *value)
 {
-    ERR("GLOBALIZATION: get_PrimaryLanguageOverride iface %p, value %p\n", iface, value);
+    TRACE("iface %p, value %p.\n", iface, value);
     if (!value) return E_POINTER;
     return WindowsCreateString(L"", 0, value);
 }
@@ -217,7 +217,7 @@ static HRESULT STDMETHODCALLTYPE application_languages_statics_get_PrimaryLangua
 static HRESULT STDMETHODCALLTYPE application_languages_statics_put_PrimaryLanguageOverride(
         IApplicationLanguagesStatics *iface, HSTRING value)
 {
-    ERR("GLOBALIZATION: put_PrimaryLanguageOverride iface %p, value %s\n", iface, wine_dbgstr_hstring(value));
+    TRACE("iface %p, value %s.\n", iface, wine_dbgstr_hstring(value));
     return S_OK;
 }
 
@@ -228,7 +228,7 @@ static HRESULT STDMETHODCALLTYPE application_languages_statics_get_Languages(
     HSTRING hstring;
     HRESULT hr;
 
-    ERR("GLOBALIZATION: get_Languages iface %p, out %p\n", iface, value);
+    TRACE("iface %p, out %p.\n", iface, value);
 
     if (!value) return E_POINTER;
 
@@ -239,7 +239,7 @@ static HRESULT STDMETHODCALLTYPE application_languages_statics_get_Languages(
         return hr;
 
     hr = hstring_vector_create(&hstring, 1, value);
-    ERR("GLOBALIZATION: get_Languages returning locale %s, hr %#lx, view %p\n", wine_dbgstr_w(locale), hr, *value);
+    TRACE("returning locale %s, hr %#lx, view %p.\n", wine_dbgstr_w(locale), hr, *value);
     return hr;
 }
 
@@ -250,11 +250,11 @@ static HRESULT STDMETHODCALLTYPE application_languages_statics_get_ManifestLangu
     HSTRING hstring;
     HRESULT hr;
 
-    ERR("GLOBALIZATION: get_ManifestLanguages iface %p, value %p\n", iface, value);
+    TRACE("iface %p, value %p.\n", iface, value);
 
     if (!value) return E_POINTER;
 
-    if (!GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH))
+    if (!GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) || !locale[0])
         wcscpy(locale, L"en-US");
 
     if (FAILED(hr = WindowsCreateString(locale, wcslen(locale), &hstring)))
@@ -348,7 +348,7 @@ static HRESULT WINAPI application_languages_instance_GetRuntimeClassName(
         IApplicationLanguages *iface, HSTRING *class_name)
 {
     return WindowsCreateString(L"Windows.Globalization.ApplicationLanguages",
-                               ARRAYSIZE(L"Windows.Globalization.ApplicationLanguages"), class_name);
+                               ARRAYSIZE(L"Windows.Globalization.ApplicationLanguages") - 1, class_name);
 }
 
 static HRESULT WINAPI application_languages_instance_GetTrustLevel(
