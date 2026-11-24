@@ -182,6 +182,7 @@ static ULONG STDMETHODCALLTYPE d2d_factory_Release(ID2D1Factory7 *iface)
         {
             d2d_effect_registration_cleanup(reg);
         }
+        DeleteCriticalSection(&factory->device_cs);
         DeleteCriticalSection(&factory->cs);
         free(factory);
     }
@@ -409,13 +410,37 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateDrawingStateBlock(ID2D1Factor
 
 static HRESULT d2d_factory_get_device(struct d2d_factory *factory, ID3D10Device1 **device)
 {
+    ID3D10Device1 *dev;
     HRESULT hr = S_OK;
 
-    if (!factory->device && FAILED(hr = D3D10CreateDevice1(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, D3D10_CREATE_DEVICE_BGRA_SUPPORT,
-            D3D10_FEATURE_LEVEL_10_0, D3D10_1_SDK_VERSION, &factory->device)))
-        WARN("Failed to create device, hr %#lx.\n", hr);
+    if ((dev = InterlockedCompareExchangePointer((void **)&factory->device, NULL, NULL)))
+    {
+        *device = dev;
+        return S_OK;
+    }
 
-    *device = factory->device;
+    EnterCriticalSection(&factory->device_cs);
+    if (!(dev = factory->device))
+    {
+        if (FAILED(hr = D3D10CreateDevice1(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, D3D10_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D10_FEATURE_LEVEL_10_0, D3D10_1_SDK_VERSION, &dev)))
+        {
+            WARN("Failed to create device, hr %#lx.\n", hr);
+        }
+        else
+        {
+            ID3D10Multithread *mt;
+            if (SUCCEEDED(ID3D10Device1_QueryInterface(dev, &IID_ID3D10Multithread, (void **)&mt)))
+            {
+                ID3D10Multithread_SetMultithreadProtected(mt, TRUE);
+                ID3D10Multithread_Release(mt);
+            }
+            InterlockedExchangePointer((void **)&factory->device, dev);
+        }
+    }
+    LeaveCriticalSection(&factory->device_cs);
+
+    *device = dev;
     return hr;
 }
 
@@ -1406,6 +1431,7 @@ static void d2d_factory_init(struct d2d_factory *factory, D2D1_FACTORY_TYPE fact
     d2d_factory_reload_sysmetrics(factory);
     list_init(&factory->effects);
     InitializeCriticalSection(&factory->cs);
+    InitializeCriticalSection(&factory->device_cs);
     InitOnceInitialize(&factory->init_builtins);
 }
 

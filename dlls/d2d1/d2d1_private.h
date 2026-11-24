@@ -284,7 +284,6 @@ struct d2d_device_context
     BOOL has_subrect;
     RECT target_subrect;
     ID2D1SvgDocument *last_svg_doc;
-    ID2D1Geometry *layer_mask;
 
     struct d2d_indexed_objects vertex_buffers;
 };
@@ -810,6 +809,7 @@ struct d2d_factory
     INIT_ONCE init_builtins;
 
     CRITICAL_SECTION cs;
+    CRITICAL_SECTION device_cs;
     D2D1_FACTORY_TYPE factory_type;
 };
 

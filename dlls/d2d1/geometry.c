@@ -4900,17 +4900,18 @@ static struct d2d_combine_subseg *d2d_combine_subsegs_build(const struct d2d_com
             subseg->q.y = segment->p.y + (segment->q.y - segment->p.y) * t1;
             subseg->mask = segment->mask;
 
-            /* Snap endpoints to the epsilon grid so that coincident sub-segments
-             * from both geometries produce identical keys and merge. */
-            subseg->p.x = floorf(subseg->p.x * scale + 0.5f) / scale;
-            subseg->p.y = floorf(subseg->p.y * scale + 0.5f) / scale;
-            subseg->q.x = floorf(subseg->q.x * scale + 0.5f) / scale;
-            subseg->q.y = floorf(subseg->q.y * scale + 0.5f) / scale;
+            /* Snap endpoints to the power-of-two grid so that coincident sub-segments
+             * from both geometries produce identical keys and merge while preserving
+             * exact integer and dyadic coordinates without IEEE-754 rounding drift. */
+            subseg->key.x0 = (INT64)floorf(subseg->p.x * scale + 0.5f);
+            subseg->key.y0 = (INT64)floorf(subseg->p.y * scale + 0.5f);
+            subseg->key.x1 = (INT64)floorf(subseg->q.x * scale + 0.5f);
+            subseg->key.y1 = (INT64)floorf(subseg->q.y * scale + 0.5f);
 
-            subseg->key.x0 = (INT64)(subseg->p.x * scale);
-            subseg->key.y0 = (INT64)(subseg->p.y * scale);
-            subseg->key.x1 = (INT64)(subseg->q.x * scale);
-            subseg->key.y1 = (INT64)(subseg->q.y * scale);
+            subseg->p.x = (float)subseg->key.x0 / scale;
+            subseg->p.y = (float)subseg->key.y0 / scale;
+            subseg->q.x = (float)subseg->key.x1 / scale;
+            subseg->q.y = (float)subseg->key.y1 / scale;
 
             if ((subseg->key.x1 < subseg->key.x0
                     || (subseg->key.x1 == subseg->key.x0 && subseg->key.y1 < subseg->key.y0)))
@@ -5006,8 +5007,8 @@ static HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geo
     if (tolerance <= 0.0f)
         tolerance = D2D1_DEFAULT_FLATTENING_TOLERANCE;
 
-    eps = 1e-3f;
-    scale = 4.0f / eps;
+    eps = 1.0f / 1024.0f;
+    scale = 4096.0f;
 
     if (FAILED(hr = d2d_combine_collect_rings(geometry1, NULL, tolerance, &collector1)))
         goto done;
@@ -5238,6 +5239,16 @@ static HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geo
 
         if (vertex_count < 3)
             continue;
+
+        /* Reverse cycle to emit clockwise outer contours (and counter-clockwise
+         * holes) in screen coordinates (Y-down), matching Direct2D's standard
+         * Simplify/CombineWithGeometry orientation expected by dwmcorei. */
+        for (i = 1, j = vertex_count - 1; i < j; ++i, --j)
+        {
+            D2D1_POINT_2F tmp = cycle[i];
+            cycle[i] = cycle[j];
+            cycle[j] = tmp;
+        }
 
         ID2D1SimplifiedGeometrySink_BeginFigure(sink, cycle[0], D2D1_FIGURE_BEGIN_FILLED);
         ID2D1SimplifiedGeometrySink_AddLines(sink, &cycle[1], vertex_count - 1);

@@ -125,14 +125,29 @@ static HANDLE g_commit_completion_event = NULL;
  * Emulated compositor present clock. The composite thread (composite_thread_proc)
  * is the process's vertical-blank cadence: under the X11 backend a Direct3D present
  * produces no D3DKMT vertical-blank event (winex11 has no vblank signalling), so the
- * per-frame Sleep() in that loop is the frame tick. It broadcasts this manual-reset
- * event once per present so the compositor-clock waiters (DCompositionWaitForCompositorClock
- * callers: the CoreMessaging Composition Token / Lifted DMIT / DWM Master Input workers)
- * advance in lockstep with the present cadence, not a blind sleep. Created lazily when
- * the composite thread is first started (first device creation), so the idle cost before
- * any device exists is zero.
+ * per-frame wait in that loop is the frame tick. Each tick advances the sequence
+ * counter and wakes all DCompositionWaitForCompositorClock waiters on the condition
+ * variable so callers block until the next tick (never spinning on a stuck-signalled
+ * manual-reset event).
  */
-static HANDLE g_compositor_clock_event = NULL;
+static CRITICAL_SECTION g_compositor_clock_cs;
+static CRITICAL_SECTION_DEBUG g_compositor_clock_debug =
+{
+    0, 0, &g_compositor_clock_cs,
+    { &g_compositor_clock_debug.ProcessLocksList, &g_compositor_clock_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": g_compositor_clock_cs") }
+};
+static CRITICAL_SECTION g_compositor_clock_cs = { &g_compositor_clock_debug, -1, 0, 0, 0, 0 };
+static CONDITION_VARIABLE g_compositor_clock_cv = CONDITION_VARIABLE_INIT;
+static ULONG g_compositor_clock_seq;
+
+static void signal_compositor_clock(void)
+{
+    EnterCriticalSection(&g_compositor_clock_cs);
+    g_compositor_clock_seq++;
+    WakeAllConditionVariable(&g_compositor_clock_cv);
+    LeaveCriticalSection(&g_compositor_clock_cs);
+}
 
 /*
  * Composition-swapchain present signal. dxgi calls wine_dcomp_swapchain_presented()
@@ -791,7 +806,9 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
         ID3D11Texture2D *src_texture, UINT src_width, UINT src_height,
         UINT dst_width, UINT dst_height, const D3DMATRIX *proj_matrix,
-        float opacity, const D2D_RECT_F *clip_rect, BOOL clear, POINT copy_off)
+        float opacity, const D2D_RECT_F *clip_rect,
+        BOOL has_backdrop_clip, const D2D_RECT_F *backdrop_clip, float backdrop_radius,
+        BOOL clear, POINT copy_off)
 {
     static const float transparent_clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     static const float dark_clear[4] = {0.125f, 0.125f, 0.125f, 1.0f};
@@ -843,24 +860,30 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         vs_data.transform = *proj_matrix;
         blit_data.opacity = opacity;
         blit_data.replace_popup_black = ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP)) ? 1.0f : 0.0f;
-        blit_data.backdrop_radius = target->has_backdrop_clip ? target->backdrop_radius : 0.0f;
+        blit_data.backdrop_radius = has_backdrop_clip ? backdrop_radius : 0.0f;
         blit_data.pad = 0.0f;
         blit_data.clip_rect[0] = clip_rect ? clip_rect->left : 0.0f;
         blit_data.clip_rect[1] = clip_rect ? clip_rect->top : 0.0f;
         blit_data.clip_rect[2] = clip_rect ? clip_rect->right : (FLOAT)dst_width;
         blit_data.clip_rect[3] = clip_rect ? clip_rect->bottom : (FLOAT)dst_height;
-        if ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP) && target->has_backdrop_clip)
+        if ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP) && has_backdrop_clip && backdrop_clip)
         {
-            blit_data.backdrop_rect[0] = target->backdrop_clip.left;
-            blit_data.backdrop_rect[1] = target->backdrop_clip.top;
-            blit_data.backdrop_rect[2] = target->backdrop_clip.right;
-            blit_data.backdrop_rect[3] = target->backdrop_clip.bottom;
+            blit_data.backdrop_rect[0] = backdrop_clip->left;
+            blit_data.backdrop_rect[1] = backdrop_clip->top;
+            blit_data.backdrop_rect[2] = backdrop_clip->right;
+            blit_data.backdrop_rect[3] = backdrop_clip->bottom;
         }
         else
         {
             blit_data.backdrop_rect[0] = blit_data.backdrop_rect[1] = 0.0f;
             blit_data.backdrop_rect[2] = blit_data.backdrop_rect[3] = 0.0f;
         }
+        if ((ex_style & WS_EX_NOREDIRECTIONBITMAP) && (style & WS_POPUP))
+            TRACE("DCOMP: popup blit hwnd %p style %#lx ex %#lx has_bd %u bd=(%.1f,%.1f)-(%.1f,%.1f) r=%.1f\n",
+                    target->hwnd, style, ex_style, has_backdrop_clip,
+                    blit_data.backdrop_rect[0], blit_data.backdrop_rect[1],
+                    blit_data.backdrop_rect[2], blit_data.backdrop_rect[3],
+                    blit_data.backdrop_radius);
         if (apps_use_light_theme())
         {
             blit_data.popup_bg_color[0] = 0.976f;
@@ -946,6 +969,8 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
                                       HWND target_hwnd, POINT pt,
                                       IDXGISurface *dxgi_surface,
                                       float opacity, const D2D_RECT_F *clip_rect,
+                                      BOOL has_backdrop_clip, const D2D_RECT_F *backdrop_clip,
+                                      float backdrop_radius,
                                       BOOL has_transform, const D3DMATRIX *world_transform,
                                       BOOL *out_culled)
 {
@@ -1323,7 +1348,9 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
                         ID3D11Device_GetImmediateContext(target->composite_device, &comp_ctx);
                         hr = composite_surface_to_backbuffer(target, NULL, comp_dev1, comp_ctx,
                                 comp_tex, surface_desc.Width, surface_desc.Height, buf_w, buf_h,
-                                &proj_matrix, opacity, effective_clip, FALSE, (POINT){dst_x, dst_y});
+                                &proj_matrix, opacity, effective_clip,
+                                has_backdrop_clip, backdrop_clip, backdrop_radius,
+                                FALSE, (POINT){dst_x, dst_y});
                         if (comp_ctx) ID3D11DeviceContext_Release(comp_ctx);
                         ID3D11Device1_Release(comp_dev1);
                     }
@@ -1354,6 +1381,7 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
     if (FAILED(hr = composite_surface_to_backbuffer(target, visual, d3d11_device, d3d11_device_context,
             texture, surface_desc.Width, surface_desc.Height, batch ? buf_w : dst_w,
             batch ? buf_h : dst_h, &proj_matrix, opacity, effective_clip,
+            has_backdrop_clip, backdrop_clip, backdrop_radius,
             !batch || !target->composite_batch_cleared,
             batch ? (POINT){dst_x, dst_y} : (POINT){0, 0})))
     {
@@ -1911,6 +1939,9 @@ struct composite_frame
     D3DMATRIX world_transform;                /* accumulated 3D transform to target space */
     D2D_RECT_F target_clip;                   /* accumulated clip in target space */
     BOOL has_clip;
+    BOOL has_backdrop_clip;
+    D2D_RECT_F backdrop_clip;
+    float backdrop_radius;
     BOOL has_transform;
     BOOL is_fallback;
     BOOL rendered;
@@ -2002,6 +2033,9 @@ static void composite_frame_init(struct composite_frame *frame, struct compositi
     dcomp_matrix_identity(&frame->world_transform);
     memset(&frame->target_clip, 0, sizeof(frame->target_clip));
     frame->has_clip = FALSE;
+    frame->has_backdrop_clip = FALSE;
+    memset(&frame->backdrop_clip, 0, sizeof(frame->backdrop_clip));
+    frame->backdrop_radius = 0.0f;
     frame->has_transform = FALSE;
     frame->is_fallback = FALSE;
     frame->rendered = FALSE;
@@ -2525,8 +2559,19 @@ static void collect_device_frames(struct composition_device *device, LONG *out_t
                     composite_frame_cleanup(&device->frame_buf[j]);
                 device->frame_buf_count = target_start;
                 target_queued = 0;
+                target->has_backdrop_clip = FALSE;
                 collect_visual_frames(device, target, root, target->hwnd, 0.0f, 0.0f,
                         &identity, FALSE, 0, NULL, 0, TRUE, &target_queued);
+            }
+            if (target->has_backdrop_clip)
+            {
+                unsigned int j;
+                for (j = target_start; j < device->frame_buf_count; j++)
+                {
+                    device->frame_buf[j].has_backdrop_clip = TRUE;
+                    device->frame_buf[j].backdrop_clip = target->backdrop_clip;
+                    device->frame_buf[j].backdrop_radius = target->backdrop_radius;
+                }
             }
             queued += target_queued;
         }
@@ -2756,12 +2801,21 @@ static void render_composite_frame(struct composite_frame *frame)
 
     if (frame->is_fallback)
     {
+        if (frame->target_hwnd
+                && (GetWindowLongW(frame->target_hwnd, GWL_EXSTYLE) & WS_EX_NOREDIRECTIONBITMAP)
+                && (GetWindowLongW(frame->target_hwnd, GWL_STYLE) & WS_POPUP))
+        {
+            frame->culled = TRUE;
+            return;
+        }
         TRACE("DCOMP: fallback blitting surface %p to hwnd %p.\n", frame->surface, frame->target_hwnd);
         if (SUCCEEDED(IUnknown_QueryInterface(frame->surface->physical_surface,
                 &IID_IDXGISurface, (void **)&dxgi_surface)))
         {
             if (do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
-                    dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform, &culled))
+                    dxgi_surface, opacity, clip,
+                    frame->has_backdrop_clip, &frame->backdrop_clip, frame->backdrop_radius,
+                    frame->has_transform, &frame->world_transform, &culled))
                 frame->rendered = TRUE;
             else if (culled)
                 frame->culled = TRUE;
@@ -2784,7 +2838,9 @@ static void render_composite_frame(struct composite_frame *frame)
                 visual)))
         {
             if (do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
-                    dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform, &culled))
+                    dxgi_surface, opacity, clip,
+                    frame->has_backdrop_clip, &frame->backdrop_clip, frame->backdrop_radius,
+                    frame->has_transform, &frame->world_transform, &culled))
             {
                 frame->rendered = TRUE;
                 dcomp_raise_shared_proxy_host(frame->target_hwnd, visual);
@@ -2816,7 +2872,9 @@ static void render_composite_frame(struct composite_frame *frame)
     if ((dxgi_surface = frame_get_surface(frame, &skip_present)))
     {
         if (do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
-                dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform, &culled))
+                dxgi_surface, opacity, clip,
+                frame->has_backdrop_clip, &frame->backdrop_clip, frame->backdrop_radius,
+                frame->has_transform, &frame->world_transform, &culled))
             frame->rendered = TRUE;
         else if (culled)
             frame->culled = TRUE;
@@ -3374,26 +3432,23 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                     BOOL had_pending;
 
                     had_pending = InterlockedExchange(&device->commit_pending, FALSE);
-                    if (g_compositor_clock_event)
-                        ResetEvent(g_compositor_clock_event);
                     if (composite_device(device) || had_pending || device->last_has_shared)
                     {
                         device->last_composite_qpc = qpc_now();
                         idle_ticks = 0;
                     }
-                    if (g_compositor_clock_event)
-                        SetEvent(g_compositor_clock_event);
+                    signal_compositor_clock();
                 }
                 LeaveCriticalSection(&composite_render_cs);
             }
-            else if (g_compositor_clock_event)
+            else
             {
-                SetEvent(g_compositor_clock_event);
+                signal_compositor_clock();
             }
         }
-        else if (g_compositor_clock_event)
+        else
         {
-            SetEvent(g_compositor_clock_event);
+            signal_compositor_clock();
         }
         if (device->self_release)
             break;
@@ -3544,13 +3599,6 @@ void ensure_composite_thread(struct composition_device *device)
 
     if (start)
     {
-        /* The present clock exists for the lifetime of the process once the first
-         * device starts compositing; DCompositionWaitForCompositorClock paces on it
-         * when it is present. Manual-reset so a frame tick is broadcast to every
-         * compositor-clock waiter, not just one. */
-        if (!g_compositor_clock_event)
-            g_compositor_clock_event = CreateEventW( NULL, TRUE, FALSE, NULL );
-
         /* Auto-reset: one Present since the composite thread last waited releases one
          * idle-wake; successive Presents coalesce. Created before the thread starts so
          * a wine_dcomp_swapchain_presented() from a Present always finds it. */
@@ -3679,8 +3727,7 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
         InterlockedExchange(&device->commit_pending, FALSE);
         if (composite_device(device))
             device->last_composite_qpc = qpc_now();
-        if (g_compositor_clock_event)
-            SetEvent(g_compositor_clock_event);
+        signal_compositor_clock();
         if (g_commit_completion_event)
             SetEvent(g_commit_completion_event);
     }
@@ -6230,15 +6277,18 @@ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handle
     }
 
     sleep_ms = timeout < sleep_ms ? timeout : sleep_ms;
-    if (g_compositor_clock_event)
+    if (sleep_ms > 0)
     {
-        /* Advance on the present cadence: release as soon as the composite thread
-         * lands a frame, bounded by the frame period so the caller is still paced
-         * before the first device starts compositing (event not yet signalled). */
-        WaitForSingleObject( g_compositor_clock_event, sleep_ms );
+        ULONG seq;
+        EnterCriticalSection( &g_compositor_clock_cs );
+        seq = g_compositor_clock_seq;
+        while (g_compositor_clock_seq == seq)
+        {
+            if (!SleepConditionVariableCS( &g_compositor_clock_cv, &g_compositor_clock_cs, sleep_ms ))
+                break;
+        }
+        LeaveCriticalSection( &g_compositor_clock_cs );
     }
-    else
-        Sleep( sleep_ms );
     return WAIT_OBJECT_0 + count;
 }
 

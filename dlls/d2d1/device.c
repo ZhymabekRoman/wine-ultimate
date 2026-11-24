@@ -798,8 +798,6 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         unsigned int i, j, k;
 
         d2d_clip_stack_cleanup(&context->clip_stack);
-        if (context->layer_mask)
-            ID2D1Geometry_Release(context->layer_mask);
         if (context->last_svg_doc)
             IUnknown_Release((IUnknown *)context->last_svg_doc);
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
@@ -2570,11 +2568,7 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
         return;
     }
 
-    if (context->layer_mask)
-        d2d_device_context_FillGeometry(&context->ID2D1DeviceContext6_iface,
-                context->layer_mask, &brush->ID2D1Brush_iface, NULL);
-    else
-        d2d_device_context_FillRectangle(&context->ID2D1DeviceContext6_iface, &d, &brush->ID2D1Brush_iface);
+    d2d_device_context_FillRectangle(&context->ID2D1DeviceContext6_iface, &d, &brush->ID2D1Brush_iface);
     ID2D1Brush_Release(&brush->ID2D1Brush_iface);
 }
 
@@ -3220,17 +3214,6 @@ static void d2d_device_context_push_layer_clip(struct d2d_device_context *contex
         d2d_rect_expand(&transformed_rect, &point);
     }
 
-    if (context->layer_mask)
-    {
-        ID2D1Geometry_Release(context->layer_mask);
-        context->layer_mask = NULL;
-    }
-    if (geometric_mask)
-    {
-        ID2D1Geometry_AddRef(geometric_mask);
-        context->layer_mask = geometric_mask;
-    }
-
     if (!d2d_clip_stack_push(&context->clip_stack, &transformed_rect))
         WARN("Failed to push layer clip rect.\n");
 }
@@ -3265,12 +3248,6 @@ static void STDMETHODCALLTYPE d2d_device_context_PopLayer(ID2D1DeviceContext6 *i
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_pop_layer(context->target.command_list);
-
-    if (context->layer_mask)
-    {
-        ID2D1Geometry_Release(context->layer_mask);
-        context->layer_mask = NULL;
-    }
 
     d2d_clip_stack_pop(&context->clip_stack);
 }
