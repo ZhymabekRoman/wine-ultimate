@@ -426,7 +426,13 @@ struct uwp_element
     double padding_l, padding_t, padding_r, padding_b;
     int h_align;       /* 0=Left, 1=Center, 2=Right, 3=Stretch */
     int v_align;       /* 0=Top, 1=Center, 2=Bottom, 3=Stretch */
+    double spacing;    /* StackPanel.Spacing */
     double font_size;
+    BOOL has_font_size;
+    int font_weight;   /* 0=default, else Win32 FW_* (100..900) */
+    int text_align;    /* 0=Center, 1=Left, 2=Right, 3=Justify */
+    BOOL has_text_align;
+    int text_wrapping; /* 1=NoWrap, 2=Wrap, 3=WrapWholeWords */
     COLORREF bg_color;
     UINT32 bg_argb;
     BYTE bg_alpha;
@@ -566,6 +572,15 @@ struct uwp_element
     UINT img_w, img_h;
     BOOL img_loaded;
     volatile LONG img_loading;
+    /* MediaPlayerElement video frame decoding state */
+    SRWLOCK video_lock;
+    BYTE *video_pixels;
+    UINT video_w, video_h;
+    UINT video_frame_seq;
+    WCHAR video_uri[512];
+    HANDLE video_thread;
+    volatile LONG video_started;
+    volatile LONG video_stop;
     struct uwp_element *next_reg;
     int adopted_faulted_ctor;
     IInspectable *provider_inst;
@@ -1232,6 +1247,8 @@ ULONG WINAPI uwp_cf_Release( IActivationFactory *iface );
 extern const void *uwp_cf_comp_vtbl[64];
 extern const void *uwp_bitmap_image_factory_vtbl[16];
 void uwp_extract_uri_string( IInspectable *uri_obj, WCHAR *out, size_t cap );
+void uwp_media_ensure_started( struct uwp_element *el );
+void uwp_media_stop( struct uwp_element *el );
 void uwp_close_flyout_popup( BOOL fire_closed );
 HRESULT WINAPI uwp_ctrl_ApplyTemplate( void *iface, boolean *ret );
 HRESULT WINAPI uwp_ctrl_Focus( void *iface, int state, boolean *ret );

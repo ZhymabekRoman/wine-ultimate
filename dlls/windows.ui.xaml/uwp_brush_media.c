@@ -27,6 +27,9 @@
 #include "xbf_known_types.h"
 #include "weakreference.h"
 #include "wincodec.h"
+#include "mfapi.h"
+#include "mfidl.h"
+#include "mfreadwrite.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -55,6 +58,8 @@ static HRESULT WINAPI uwp_mpe_put_Source( void *iface, IInspectable *val )
     if (val) IInspectable_AddRef( val );
     if (impl->media_source) IInspectable_Release( impl->media_source );
     impl->media_source = val;
+    InterlockedExchange( &impl->video_started, 0 );
+    uwp_invalidate_window();
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_get_TransportControls( void *iface, IInspectable **out )
@@ -163,6 +168,8 @@ static HRESULT WINAPI uwp_mpe_SetMediaPlayer( void *iface, IInspectable *val )
     if (val) IInspectable_AddRef( val );
     if (impl->media_player) IInspectable_Release( impl->media_player );
     impl->media_player = val;
+    InterlockedExchange( &impl->video_started, 0 );
+    uwp_invalidate_window();
     return S_OK;
 }
 const void *uwp_mpe_vtbl[24] =
@@ -884,3 +891,467 @@ const void *uwp_scb_vtbl[16] =
     [7] = uwp_scb_put_Color,
     [8 ... 15] = uwp_generic_noop,
 };
+
+/* ============================================================================
+ * MediaPlayerElement video decoding via Media Foundation (IMFSourceReader)
+ * ============================================================================ */
+
+static const GUID IID_IMediaPlayerSource2_mpe =
+    { 0x82449b9f, 0x7322, 0x4c0b, { 0xb0, 0x3b, 0x3e, 0x69, 0xa4, 0x82, 0x60, 0xc5 } };
+static const GUID IID_IMediaSource4_mpe =
+    { 0xbdafad57, 0x8eff, 0x4c63, { 0x85, 0xa6, 0x84, 0xde, 0x0a, 0xe3, 0xe4, 0xf2 } };
+static const GUID MF_MT_MAJOR_TYPE_local =
+    { 0x48eba18e, 0xf8c9, 0x4687, { 0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f } };
+static const GUID MF_MT_SUBTYPE_local =
+    { 0xf7e34c9a, 0x42e8, 0x4714, { 0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5 } };
+static const GUID MFMediaType_Video_local =
+    { 0x73646976, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MFVideoFormat_RGB32_local =
+    { 0x00000016, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MFVideoFormat_ARGB32_local =
+    { 0x00000015, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MFVideoFormat_NV12_local =
+    { 0x3231564e, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MFVideoFormat_I420_local =
+    { 0x30323449, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MFVideoFormat_IYUV_local =
+    { 0x56555949, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MFVideoFormat_YV12_local =
+    { 0x32315659, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MF_MT_FRAME_SIZE_local =
+    { 0x1652c33d, 0xd6b2, 0x4012, { 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d } };
+static const GUID MF_MT_DEFAULT_STRIDE_local =
+    { 0x644b4e48, 0x1e02, 0x4516, { 0xb0, 0xeb, 0xc0, 0x1c, 0xa9, 0xd4, 0x9a, 0xc6 } };
+static const GUID MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING_local =
+    { 0xfb394f3d, 0xccf1, 0x42ee, { 0xbb, 0xb3, 0xf9, 0xb8, 0x45, 0xd5, 0x68, 0x1d } };
+
+typedef HRESULT (WINAPI *pfn_MFStartup)( ULONG, DWORD );
+typedef HRESULT (WINAPI *pfn_MFShutdown)( void );
+typedef HRESULT (WINAPI *pfn_MFCreateMediaType)( IMFMediaType ** );
+typedef HRESULT (WINAPI *pfn_MFCreateAttributes)( IMFAttributes **, UINT32 );
+typedef HRESULT (WINAPI *pfn_MFCreateSourceReaderFromURL)( LPCWSTR, IMFAttributes *, IMFSourceReader ** );
+
+static BOOL uwp_mpe_extract_uri( struct uwp_element *el, WCHAR *out, size_t cap )
+{
+    IInspectable *src = NULL;
+    BOOL release_src = FALSE;
+
+    if (!el || !out || !cap) return FALSE;
+    out[0] = 0;
+
+    if (el->media_source)
+    {
+        src = el->media_source;
+    }
+    else if (el->media_player)
+    {
+        void *src2 = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( el->media_player, &IID_IMediaPlayerSource2_mpe, &src2 )) && src2)
+        {
+            HRESULT (WINAPI *get_src)( void *, IInspectable ** ) = (void *)(*(void ***)src2)[6];
+            if (get_src && SUCCEEDED(get_src( src2, &src )) && src)
+                release_src = TRUE;
+            IUnknown_Release( (IUnknown *)src2 );
+        }
+    }
+
+    if (src)
+    {
+        void *ms4 = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( src, &IID_IMediaSource4_mpe, &ms4 )) && ms4)
+        {
+            HRESULT (WINAPI *get_uri)( void *, IInspectable ** ) = (void *)(*(void ***)ms4)[9];
+            IInspectable *uri_obj = NULL;
+            if (get_uri && SUCCEEDED(get_uri( ms4, &uri_obj )) && uri_obj)
+            {
+                uwp_extract_uri_string( uri_obj, out, cap );
+                IInspectable_Release( uri_obj );
+            }
+            IUnknown_Release( (IUnknown *)ms4 );
+        }
+        if (!out[0])
+            uwp_extract_uri_string( src, out, cap );
+        if (release_src)
+            IInspectable_Release( src );
+    }
+    return out[0] != 0;
+}
+
+static BOOL uwp_resolve_media_path( const WCHAR *uri, WCHAR *out_path, size_t cap )
+{
+    const WCHAR *p = uri;
+    WCHAR rel[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0};
+    WCHAR *slash;
+    size_t i;
+
+    if (!uri || !uri[0] || !out_path || !cap) return FALSE;
+    out_path[0] = 0;
+
+    if (!wcsncmp( p, L"ms-appx:///", 11 ) || !wcsncmp( p, L"ms-appx://", 10 ))
+    {
+        p += (!wcsncmp( p, L"ms-appx:///", 11 )) ? 11 : 10;
+        while (*p == '/' || *p == '\\') p++;
+        lstrcpynW( rel, p, ARRAY_SIZE(rel) );
+        for (i = 0; rel[i]; i++) if (rel[i] == '/') rel[i] = '\\';
+        GetModuleFileNameW( NULL, base_dir, ARRAY_SIZE(base_dir) );
+        slash = wcsrchr( base_dir, '\\' );
+        if (slash) *(slash + 1) = 0;
+        swprintf( out_path, cap, L"%s%s", base_dir, rel );
+        return GetFileAttributesW( out_path ) != INVALID_FILE_ATTRIBUTES;
+    }
+    if (!wcsncmp( p, L"file:///", 8 ))
+    {
+        p += 8;
+        lstrcpynW( out_path, p, cap );
+        for (i = 0; out_path[i]; i++) if (out_path[i] == '/') out_path[i] = '\\';
+        return GetFileAttributesW( out_path ) != INVALID_FILE_ATTRIBUTES;
+    }
+    lstrcpynW( out_path, uri, cap );
+    return TRUE;
+}
+
+static inline BYTE clamp_u8( int v )
+{
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (BYTE)v;
+}
+
+static DWORD WINAPI uwp_media_decode_worker( void *param )
+{
+    struct uwp_element *el = (struct uwp_element *)param;
+    HMODULE h_mfplat = NULL, h_mfrw = NULL;
+    pfn_MFStartup pMFStartup;
+    pfn_MFShutdown pMFShutdown;
+    pfn_MFCreateMediaType pMFCreateMediaType;
+    pfn_MFCreateAttributes pMFCreateAttributes;
+    pfn_MFCreateSourceReaderFromURL pMFCreateSourceReaderFromURL;
+    IMFAttributes *attrs = NULL;
+    IMFSourceReader *reader = NULL;
+    IMFMediaType *req_type = NULL, *cur_type = NULL;
+    WCHAR path[MAX_PATH] = {0};
+    GUID out_subtype = { 0 };
+    UINT64 frame_sz = 0;
+    UINT src_w = 0, src_h = 0, dst_w = 0, dst_h = 0;
+    LONG stride = 0;
+    UINT32 u32_stride = 0;
+    BYTE *work_buf = NULL;
+    BOOL mf_started = FALSE, logged_first = FALSE;
+    HRESULT hr;
+
+    if (!el || !uwp_resolve_media_path( el->video_uri, path, ARRAY_SIZE(path) ))
+    {
+        WARN( "uwp_media_decode_worker: failed to resolve path for %s\n", el ? debugstr_w(el->video_uri) : "null" );
+        return 0;
+    }
+
+    CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    h_mfplat = LoadLibraryW( L"mfplat.dll" );
+    h_mfrw = LoadLibraryW( L"mfreadwrite.dll" );
+    if (!h_mfplat || !h_mfrw)
+    {
+        WARN( "uwp_media_decode_worker: mfplat/mfreadwrite unavailable\n" );
+        goto done;
+    }
+
+    pMFStartup = (pfn_MFStartup)GetProcAddress( h_mfplat, "MFStartup" );
+    pMFShutdown = (pfn_MFShutdown)GetProcAddress( h_mfplat, "MFShutdown" );
+    pMFCreateMediaType = (pfn_MFCreateMediaType)GetProcAddress( h_mfplat, "MFCreateMediaType" );
+    pMFCreateAttributes = (pfn_MFCreateAttributes)GetProcAddress( h_mfplat, "MFCreateAttributes" );
+    pMFCreateSourceReaderFromURL = (pfn_MFCreateSourceReaderFromURL)GetProcAddress( h_mfrw, "MFCreateSourceReaderFromURL" );
+    if (!pMFStartup || !pMFCreateMediaType || !pMFCreateSourceReaderFromURL)
+        goto done;
+
+    hr = pMFStartup( MF_VERSION, MFSTARTUP_NOSOCKET );
+    if (FAILED(hr))
+    {
+        WARN( "uwp_media_decode_worker: MFStartup failed %#lx\n", hr );
+        goto done;
+    }
+    mf_started = TRUE;
+
+    if (pMFCreateAttributes && SUCCEEDED(pMFCreateAttributes( &attrs, 1 )) && attrs)
+        IMFAttributes_SetUINT32( attrs, &MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING_local, TRUE );
+
+    hr = pMFCreateSourceReaderFromURL( path, attrs, &reader );
+    if (FAILED(hr) || !reader)
+    {
+        WARN( "uwp_media_decode_worker: MFCreateSourceReaderFromURL(%s) failed %#lx\n", debugstr_w(path), hr );
+        goto done;
+    }
+
+    hr = pMFCreateMediaType( &req_type );
+    if (FAILED(hr) || !req_type) goto done;
+    IMFMediaType_SetGUID( req_type, &MF_MT_MAJOR_TYPE_local, &MFMediaType_Video_local );
+    IMFMediaType_SetGUID( req_type, &MF_MT_SUBTYPE_local, &MFVideoFormat_RGB32_local );
+    hr = IMFSourceReader_SetCurrentMediaType( reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, req_type );
+    if (FAILED(hr))
+    {
+        IMFMediaType_SetGUID( req_type, &MF_MT_SUBTYPE_local, &MFVideoFormat_NV12_local );
+        hr = IMFSourceReader_SetCurrentMediaType( reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, req_type );
+        if (FAILED(hr))
+        {
+            WARN( "uwp_media_decode_worker: SetCurrentMediaType(RGB32/NV12) failed %#lx\n", hr );
+            goto done;
+        }
+    }
+
+    hr = IMFSourceReader_GetCurrentMediaType( reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, &cur_type );
+    if (FAILED(hr) || !cur_type) goto done;
+    IMFMediaType_GetGUID( cur_type, &MF_MT_SUBTYPE_local, &out_subtype );
+    if (FAILED(IMFMediaType_GetUINT64( cur_type, &MF_MT_FRAME_SIZE_local, &frame_sz )))
+        goto done;
+    src_w = (UINT)(frame_sz >> 32);
+    src_h = (UINT)(frame_sz & 0xffffffffu);
+    if (!src_w || !src_h || src_w > 4096 || src_h > 4096) goto done;
+
+    if (SUCCEEDED(IMFMediaType_GetUINT32( cur_type, &MF_MT_DEFAULT_STRIDE_local, &u32_stride )))
+        stride = (LONG)u32_stride;
+    else
+        stride = (LONG)(src_w * 4);
+
+    /* Cap decoded atlas upload size to <= 960x720 while preserving exact aspect ratio */
+    dst_w = src_w;
+    dst_h = src_h;
+    if (dst_w > 960 || dst_h > 720)
+    {
+        double sx = 960.0 / (double)dst_w;
+        double sy = 720.0 / (double)dst_h;
+        double sc = (sx < sy) ? sx : sy;
+        dst_w = max( 1u, (UINT)((double)src_w * sc + 0.5) );
+        dst_h = max( 1u, (UINT)((double)src_h * sc + 0.5) );
+    }
+
+    work_buf = malloc( (size_t)dst_w * dst_h * 4 );
+    if (!work_buf) goto done;
+
+    TRACE( "uwp_media_decode_worker: opened %s (%ux%u -> %ux%u, stride=%ld, subtype=%s)\n",
+           debugstr_w(path), src_w, src_h, dst_w, dst_h, stride, debugstr_guid(&out_subtype) );
+
+    while (!InterlockedCompareExchange( &el->video_stop, 0, 0 ))
+    {
+        DWORD stream_idx = 0, flags = 0;
+        LONGLONG ts = 0;
+        IMFSample *sample = NULL;
+
+        if (el->visibility != 0)
+        {
+            Sleep( 100 );
+            continue;
+        }
+
+        hr = IMFSourceReader_ReadSample( reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
+                                         &stream_idx, &flags, &ts, &sample );
+        if (FAILED(hr))
+        {
+            WARN( "uwp_media_decode_worker: ReadSample failed %#lx\n", hr );
+            break;
+        }
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
+        {
+            static const GUID guid_null = { 0 };
+            PROPVARIANT pos;
+            if (sample) IMFSample_Release( sample );
+            PropVariantInit( &pos );
+            pos.vt = VT_I8;
+            pos.hVal.QuadPart = 0;
+            hr = IMFSourceReader_SetCurrentPosition( reader, &guid_null, &pos );
+            if (FAILED(hr)) break;
+            continue;
+        }
+        if (sample)
+        {
+            IMFMediaBuffer *buf = NULL;
+            if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer( sample, &buf )) && buf)
+            {
+                BYTE *raw = NULL;
+                DWORD max_len = 0, cur_len = 0;
+                if (SUCCEEDED(IMFMediaBuffer_Lock( buf, &raw, &max_len, &cur_len )) && raw && cur_len > 0)
+                {
+                    BOOL is_rgb32 = (cur_len >= (DWORD)((size_t)src_w * src_h * 4)) &&
+                                    (IsEqualGUID( &out_subtype, &MFVideoFormat_RGB32_local ) ||
+                                     IsEqualGUID( &out_subtype, &MFVideoFormat_ARGB32_local ) ||
+                                     (cur_len >= (DWORD)((size_t)src_w * src_h * 4)));
+                    BOOL is_nv12 = !is_rgb32 && (cur_len >= (DWORD)((size_t)src_w * src_h * 3 / 2)) &&
+                                   IsEqualGUID( &out_subtype, &MFVideoFormat_NV12_local );
+                    BOOL is_planar420 = !is_rgb32 && !is_nv12 && (cur_len >= (DWORD)((size_t)src_w * src_h * 3 / 2)) &&
+                                        (IsEqualGUID( &out_subtype, &MFVideoFormat_I420_local ) ||
+                                         IsEqualGUID( &out_subtype, &MFVideoFormat_IYUV_local ) ||
+                                         IsEqualGUID( &out_subtype, &MFVideoFormat_YV12_local ));
+                    BOOL decoded_ok = FALSE;
+
+                    if (!logged_first)
+                    {
+                        logged_first = TRUE;
+                        TRACE( "uwp_media_decode_worker: first frame cur_len=%lu rgb32=%d nv12=%d planar420=%d stride=%ld subtype=%s\n",
+                               (unsigned long)cur_len, is_rgb32, is_nv12, is_planar420, stride, debugstr_guid(&out_subtype) );
+                    }
+
+                    if (is_rgb32)
+                    {
+                        LONG abs_stride = stride < 0 ? -stride : stride;
+                        BOOL bottom_up = (stride < 0);
+                        if (abs_stride < (LONG)(src_w * 4))
+                            abs_stride = (LONG)(src_w * 4);
+                        if ((DWORD)((size_t)abs_stride * src_h) <= cur_len)
+                        {
+                            UINT y, x;
+                            for (y = 0; y < dst_h; y++)
+                            {
+                                UINT sy = (dst_h == src_h) ? y : (UINT)((UINT64)y * src_h / dst_h);
+                                UINT row_idx = bottom_up ? (src_h - 1 - sy) : sy;
+                                const BYTE *srow = raw + (size_t)row_idx * (size_t)abs_stride;
+                                BYTE *drow = work_buf + (size_t)y * dst_w * 4;
+                                for (x = 0; x < dst_w; x++)
+                                {
+                                    UINT sx = (dst_w == src_w) ? x : (UINT)((UINT64)x * src_w / dst_w);
+                                    drow[x * 4 + 0] = srow[sx * 4 + 0];
+                                    drow[x * 4 + 1] = srow[sx * 4 + 1];
+                                    drow[x * 4 + 2] = srow[sx * 4 + 2];
+                                    drow[x * 4 + 3] = 255;
+                                }
+                            }
+                            decoded_ok = TRUE;
+                        }
+                    }
+                    else if (is_nv12 || (!is_planar420 && cur_len >= (DWORD)((size_t)src_w * src_h * 3 / 2)))
+                    {
+                        UINT y_stride = (stride > 0 && (UINT)stride >= src_w) ? (UINT)stride : src_w;
+                        const BYTE *y_plane = raw;
+                        const BYTE *uv_plane = raw + (size_t)y_stride * src_h;
+                        if ((size_t)y_stride * src_h + (size_t)y_stride * (src_h / 2) <= cur_len)
+                        {
+                            UINT y, x;
+                            for (y = 0; y < dst_h; y++)
+                            {
+                                UINT sy = (UINT)((UINT64)y * src_h / dst_h);
+                                const BYTE *yrow = y_plane + (size_t)sy * y_stride;
+                                const BYTE *uvrow = uv_plane + (size_t)(sy >> 1) * y_stride;
+                                BYTE *drow = work_buf + (size_t)y * dst_w * 4;
+                                for (x = 0; x < dst_w; x++)
+                                {
+                                    UINT sx = (UINT)((UINT64)x * src_w / dst_w);
+                                    int Y = (int)yrow[sx] - 16;
+                                    int U = (int)uvrow[(sx & ~1u)] - 128;
+                                    int V = (int)uvrow[(sx & ~1u) + 1] - 128;
+                                    int C = Y < 0 ? 0 : Y * 298;
+                                    drow[x * 4 + 2] = clamp_u8( (C + 409 * V + 128) >> 8 );
+                                    drow[x * 4 + 1] = clamp_u8( (C - 100 * U - 208 * V + 128) >> 8 );
+                                    drow[x * 4 + 0] = clamp_u8( (C + 516 * U + 128) >> 8 );
+                                    drow[x * 4 + 3] = 255;
+                                }
+                            }
+                            decoded_ok = TRUE;
+                        }
+                    }
+                    else if (is_planar420)
+                    {
+                        BOOL swap_uv = IsEqualGUID( &out_subtype, &MFVideoFormat_YV12_local );
+                        UINT y_stride = (stride > 0 && (UINT)stride >= src_w) ? (UINT)stride : src_w;
+                        UINT uv_stride = y_stride / 2;
+                        const BYTE *y_plane = raw;
+                        const BYTE *p1 = raw + (size_t)y_stride * src_h;
+                        const BYTE *p2 = p1 + (size_t)uv_stride * (src_h / 2);
+                        const BYTE *u_plane = swap_uv ? p2 : p1;
+                        const BYTE *v_plane = swap_uv ? p1 : p2;
+                        if ((size_t)y_stride * src_h + (size_t)uv_stride * src_h <= cur_len)
+                        {
+                            UINT y, x;
+                            for (y = 0; y < dst_h; y++)
+                            {
+                                UINT sy = (UINT)((UINT64)y * src_h / dst_h);
+                                const BYTE *yrow = y_plane + (size_t)sy * y_stride;
+                                const BYTE *urow = u_plane + (size_t)(sy >> 1) * uv_stride;
+                                const BYTE *vrow = v_plane + (size_t)(sy >> 1) * uv_stride;
+                                BYTE *drow = work_buf + (size_t)y * dst_w * 4;
+                                for (x = 0; x < dst_w; x++)
+                                {
+                                    UINT sx = (UINT)((UINT64)x * src_w / dst_w);
+                                    int Y = (int)yrow[sx] - 16;
+                                    int U = (int)urow[sx >> 1] - 128;
+                                    int V = (int)vrow[sx >> 1] - 128;
+                                    int C = Y < 0 ? 0 : Y * 298;
+                                    drow[x * 4 + 2] = clamp_u8( (C + 409 * V + 128) >> 8 );
+                                    drow[x * 4 + 1] = clamp_u8( (C - 100 * U - 208 * V + 128) >> 8 );
+                                    drow[x * 4 + 0] = clamp_u8( (C + 516 * U + 128) >> 8 );
+                                    drow[x * 4 + 3] = 255;
+                                }
+                            }
+                            decoded_ok = TRUE;
+                        }
+                    }
+
+                    if (decoded_ok)
+                    {
+                        AcquireSRWLockExclusive( &el->video_lock );
+                        if (!el->video_pixels || el->video_w != dst_w || el->video_h != dst_h)
+                        {
+                            free( el->video_pixels );
+                            el->video_pixels = malloc( (size_t)dst_w * dst_h * 4 );
+                            el->video_w = dst_w;
+                            el->video_h = dst_h;
+                        }
+                        if (el->video_pixels)
+                        {
+                            memcpy( el->video_pixels, work_buf, (size_t)dst_w * dst_h * 4 );
+                            el->video_frame_seq++;
+                        }
+                        ReleaseSRWLockExclusive( &el->video_lock );
+                        uwp_invalidate_window();
+                    }
+                    IMFMediaBuffer_Unlock( buf );
+                }
+                IMFMediaBuffer_Release( buf );
+            }
+            IMFSample_Release( sample );
+            Sleep( 33 );
+        }
+    }
+
+done:
+    free( work_buf );
+    if (cur_type) IMFMediaType_Release( cur_type );
+    if (req_type) IMFMediaType_Release( req_type );
+    if (reader) IMFSourceReader_Release( reader );
+    if (attrs) IMFAttributes_Release( attrs );
+    if (mf_started && pMFShutdown) pMFShutdown();
+    if (h_mfrw) FreeLibrary( h_mfrw );
+    if (h_mfplat) FreeLibrary( h_mfplat );
+    CoUninitialize();
+    return 0;
+}
+
+void uwp_media_stop( struct uwp_element *el )
+{
+    HANDLE th;
+    if (!el) return;
+    InterlockedExchange( &el->video_stop, 1 );
+    th = el->video_thread;
+    el->video_thread = NULL;
+    if (th)
+    {
+        WaitForSingleObject( th, 1000 );
+        CloseHandle( th );
+    }
+    InterlockedExchange( &el->video_started, 0 );
+    InterlockedExchange( &el->video_stop, 0 );
+}
+
+void uwp_media_ensure_started( struct uwp_element *el )
+{
+    WCHAR uri[512] = {0};
+
+    if (!el) return;
+    if (InterlockedCompareExchange( &el->video_started, 0, 0 ) != 0)
+        return;
+    if (!uwp_mpe_extract_uri( el, uri, ARRAY_SIZE(uri) ))
+        return;
+    if (InterlockedCompareExchange( &el->video_started, 1, 0 ) != 0)
+        return;
+
+    lstrcpynW( el->video_uri, uri, ARRAY_SIZE(el->video_uri) );
+    InterlockedExchange( &el->video_stop, 0 );
+    el->video_thread = CreateThread( NULL, 0, uwp_media_decode_worker, el, 0, NULL );
+    if (!el->video_thread)
+        InterlockedExchange( &el->video_started, 0 );
+}

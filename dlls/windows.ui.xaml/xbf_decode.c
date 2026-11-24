@@ -1254,11 +1254,43 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                                 WORD pid, int vt, double num, const WCHAR *sval,
                                 const double vec4[4], BOOL is_res_ref );
 
+static int uwp_parse_font_weight( const WCHAR *s, double num, int vt )
+{
+    if (vt == 0x03 || vt == 0x04)
+    {
+        int w = (int)(num + 0.5);
+        if (w >= 100 && w <= 950) return w;
+    }
+    if (!s || !s[0]) return 0;
+    if (!wcsicmp( s, L"Thin" )) return FW_THIN;
+    if (!wcsicmp( s, L"ExtraLight" ) || !wcsicmp( s, L"UltraLight" )) return FW_EXTRALIGHT;
+    if (!wcsicmp( s, L"Light" )) return FW_LIGHT;
+    if (!wcsicmp( s, L"SemiLight" )) return 350;
+    if (!wcsicmp( s, L"Normal" ) || !wcsicmp( s, L"Regular" )) return FW_NORMAL;
+    if (!wcsicmp( s, L"Medium" )) return FW_MEDIUM;
+    if (!wcsicmp( s, L"SemiBold" ) || !wcsicmp( s, L"DemiBold" )) return FW_SEMIBOLD;
+    if (!wcsicmp( s, L"Bold" )) return FW_BOLD;
+    if (!wcsicmp( s, L"ExtraBold" ) || !wcsicmp( s, L"UltraBold" )) return FW_EXTRABOLD;
+    if (!wcsicmp( s, L"Black" ) || !wcsicmp( s, L"Heavy" )) return FW_HEAVY;
+    if (s[0] >= L'0' && s[0] <= L'9')
+    {
+        int w = (int)wcstol( s, NULL, 10 );
+        if (w >= 100 && w <= 950) return w;
+    }
+    return 0;
+}
+
 void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
                                    struct uwp_rd_bucket *b, struct uwp_rd_entry *se, int depth )
 {
     int i;
+    double saved_fs;
+    BOOL saved_has_fs;
+    int saved_fw;
     if (!el || !se || se->kind != UWP_RD_STYLE || depth > 8) return;
+    saved_fs = el->font_size;
+    saved_has_fs = el->has_font_size;
+    saved_fw = el->font_weight;
     if (uwp_style_is_accent_name( se->key ))
         el->is_accent_style = TRUE;
     if (se->str_val[0])
@@ -1275,6 +1307,14 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
         const struct uwp_style_setter *st = &se->setters[i];
         xbf_apply_property( ctx, el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
     }
+    /* Local typography values take precedence over Style setters regardless of XBF attribute order */
+    if (saved_has_fs)
+    {
+        el->font_size = saved_fs;
+        el->has_font_size = TRUE;
+    }
+    if (saved_fw > 0)
+        el->font_weight = saved_fw;
 }
 
 void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
@@ -1482,14 +1522,14 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
             break;
         case XBF_PROP_COLUMNDEF_MAXWIDTH: /* ColumnDefinition.MaxWidth */
-        case XBF_PROP_FRAMEWORKELEMENT_MAXHEIGHT: /* FrameworkElement.MaxWidth */
+        case XBF_PROP_FRAMEWORKELEMENT_MAXWIDTH: /* FrameworkElement.MaxWidth */
             if (vt == 0x03 || vt == 0x04) el->max_width = num;
             break;
         case XBF_PROP_COLUMNDEF_MINWIDTH: /* ColumnDefinition.MinWidth */
             if (vt == 0x03 || vt == 0x04) el->min_width = num;
             break;
         case XBF_PROP_ROWDEF_MAXHEIGHT: /* RowDefinition.MaxHeight */
-        case XBF_PROP_FRAMEWORKELEMENT_MAXWIDTH: /* FrameworkElement.MaxHeight */
+        case XBF_PROP_FRAMEWORKELEMENT_MAXHEIGHT: /* FrameworkElement.MaxHeight */
             if (vt == 0x03 || vt == 0x04) el->max_height = num;
             break;
         case XBF_PROP_ROWDEF_MINHEIGHT: /* RowDefinition.MinHeight */
@@ -1503,6 +1543,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
             break;
         case XBF_PROP_CONTROL_PADDING: /* Control.Padding */
+        case XBF_PROP_BORDER_PADDING: /* Border.Padding */
         case XBF_PROP_PANEL_IS_IGNORING_TRANSITIONS: /* Border.Padding */
             if (vt == 0x06)
             {
@@ -1511,11 +1552,23 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
             break;
         case XBF_PROP_CONTROL_BORDER_THICKNESS: /* Control.BorderThickness */
+        case XBF_PROP_BORDER_THICKNESS: /* Border.BorderThickness */
         case XBF_PROP_PANEL_CHILDREN_TRANSITIONS: /* Border.BorderThickness */
             if (vt == 0x06)
             {
                 el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
                 el->border_thick_r = vec4[2]; el->border_thick_b = vec4[3];
+            }
+            break;
+        case XBF_PROP_BORDER_CORNER_RADIUS: /* Border.CornerRadius */
+            if (vt == 0x06)
+                el->corner_radius = max( max( vec4[0], vec4[1] ), max( vec4[2], vec4[3] ) );
+            else if (vt == 0x03 || vt == 0x04)
+                el->corner_radius = num;
+            else if (sval && sval[0])
+            {
+                double cr = wcstod( sval, NULL );
+                if (cr > 0.0) el->corner_radius = cr;
             }
             break;
         case XBF_PROP_CONTENT: /* ContentControl.Content */
@@ -1570,15 +1623,33 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_TEXTBLOCK_FONTSIZE: /* TextBlock.FontSize */
             if (vt == 0x03 || vt == 0x04)
             {
-                if (num > 0) el->font_size = num;
+                if (num > 0) { el->font_size = num; el->has_font_size = TRUE; }
             }
             else if (is_res_ref && sval && sval[0])
             {
                 struct uwp_rd_entry *de = NULL;
                 if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
                     de && de->kind == UWP_RD_DOUBLE && de->dval > 0)
+                {
                     el->font_size = de->dval;
+                    el->has_font_size = TRUE;
+                }
             }
+            break;
+        case XBF_PROP_TEXTBLOCK_FONT_WEIGHT: /* TextBlock.FontWeight */
+        case XBF_PROP_CONTROL_FONT_WEIGHT: /* Control.FontWeight */
+        case XBF_PROP_TEXTELEMENT_FONT_WEIGHT: /* TextElement.FontWeight */
+        {
+            int fw = uwp_parse_font_weight( sval, num, vt );
+            if (fw > 0) el->font_weight = fw;
+            break;
+        }
+        case XBF_PROP_TEXTBLOCK_TEXT_ALIGNMENT: /* TextBlock.TextAlignment */
+            el->text_align = (int)num;
+            el->has_text_align = TRUE;
+            break;
+        case XBF_PROP_TEXTBLOCK_TEXT_WRAPPING: /* TextBlock.TextWrapping */
+            el->text_wrapping = (int)num;
             break;
         case XBF_PROP_WIDTH: /* Width */
             if (vt == 0x03 || vt == 0x04) el->width = num;
@@ -1628,7 +1699,19 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             el->v_align = (int)num;
             break;
         case XBF_PROP_ORIENTATION: /* StackPanel.Orientation */
+        case XBF_PROP_STACKPANEL_ORIENTATION: /* StackPanel.Orientation (XBF v2) */
             el->orientation = (int)num;
+            break;
+        case XBF_PROP_STACKPANEL_SPACING: /* StackPanel.Spacing */
+            if (vt == 0x03 || vt == 0x04)
+                el->spacing = num;
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                    el->spacing = de->dval;
+            }
             break;
         case XBF_PROP_UIELEMENT_VISIBILITY_V2: /* UIElement.Visibility (XBF v2) */
         case XBF_PROP_UIELEMENT_VISIBILITY: /* UIElement.Visibility */

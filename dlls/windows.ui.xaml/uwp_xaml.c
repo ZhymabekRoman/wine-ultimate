@@ -4217,6 +4217,9 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->h_align = 3; /* Stretch */
     impl->v_align = 3; /* Stretch */
     impl->font_size = 16.0;
+    impl->text_align = 1; /* Left */
+    impl->text_wrapping = 1; /* NoWrap */
+    InitializeSRWLock( &impl->video_lock );
     g_layout_dirty = TRUE;
     if (impl->kind != UWP_KIND_BRUSH && impl->kind != UWP_KIND_STYLE &&
         impl->kind != UWP_KIND_RESOURCE_DICT && impl->kind != UWP_KIND_COLOR &&

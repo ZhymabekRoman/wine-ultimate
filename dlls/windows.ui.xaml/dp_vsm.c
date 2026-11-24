@@ -2447,7 +2447,46 @@ void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const
         el->is_accent_style = TRUE;
     uwp_ensure_app_resources_loaded();
     if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, key, 0, &se, &sb ) && se && se->kind == UWP_RD_STYLE)
+    {
         uwp_apply_style_entry( ctx, el, sb, se, 0 );
+        return;
+    }
+    /* Standard UWP generic.xaml TextBlock typography styles */
+    if (!wcscmp( key, L"HeaderTextBlockStyle" ))
+    {
+        if (!el->has_font_size) el->font_size = 46.0;
+        if (!el->font_weight) el->font_weight = FW_LIGHT;
+    }
+    else if (!wcscmp( key, L"SubheaderTextBlockStyle" ))
+    {
+        if (!el->has_font_size) el->font_size = 34.0;
+        if (!el->font_weight) el->font_weight = FW_LIGHT;
+    }
+    else if (!wcscmp( key, L"TitleTextBlockStyle" ))
+    {
+        if (!el->has_font_size) el->font_size = 24.0;
+        if (!el->font_weight) el->font_weight = FW_LIGHT;
+    }
+    else if (!wcscmp( key, L"SubtitleTextBlockStyle" ))
+    {
+        if (!el->has_font_size) el->font_size = 20.0;
+        if (!el->font_weight) el->font_weight = FW_NORMAL;
+    }
+    else if (!wcscmp( key, L"BaseTextBlockStyle" ))
+    {
+        if (!el->has_font_size) el->font_size = 14.0;
+        if (!el->font_weight) el->font_weight = FW_SEMIBOLD;
+    }
+    else if (!wcscmp( key, L"BodyTextBlockStyle" ))
+    {
+        if (!el->has_font_size) el->font_size = 14.0;
+        if (!el->font_weight) el->font_weight = FW_NORMAL;
+    }
+    else if (!wcscmp( key, L"CaptionTextBlockStyle" ))
+    {
+        if (!el->has_font_size) el->font_size = 12.0;
+        if (!el->font_weight) el->font_weight = FW_NORMAL;
+    }
 }
 
 static struct uwp_element *uwp_vsm_find_target_in_tree( struct uwp_element *root, const WCHAR *name )

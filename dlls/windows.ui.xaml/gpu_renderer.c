@@ -58,8 +58,11 @@ struct atlas_entry
     int font_height;
     int font_weight;
     UINT dt_flags;
+    UINT box_x;
+    UINT box_y;
     UINT box_w;
     UINT box_h;
+    UINT frame_seq;
     WCHAR text[512];
     float uv[4];
 };
@@ -562,10 +565,13 @@ BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwa
     if (!g_gpu.rtv || g_gpu.rtv_swapchain != swapchain || g_gpu.rtv_width != width || g_gpu.rtv_height != height)
     {
         ID3D11Texture2D *backbuf = NULL;
+        D3D11_TEXTURE2D_DESC bdesc;
         xaml_gpu_release_rtv();
         hr = IDXGISwapChain1_GetBuffer( swapchain, 0, &IID_ID3D11Texture2D, (void **)&backbuf );
         if (FAILED(hr) || !backbuf)
             return FALSE;
+        ID3D11Texture2D_GetDesc( backbuf, &bdesc );
+        TRACE( "xaml_gpu_begin_frame: req=%ux%u backbuf=%ux%u\n", width, height, bdesc.Width, bdesc.Height );
         hr = ID3D11Device_CreateRenderTargetView( dev, (ID3D11Resource *)backbuf, NULL, &g_gpu.rtv );
         ID3D11Texture2D_Release( backbuf );
         if (FAILED(hr) || !g_gpu.rtv)
@@ -867,10 +873,30 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     }
 
     inst = &g_gpu.instances[g_gpu.instance_count++];
-    inst->rect[0] = (float)rc->left;
-    inst->rect[1] = (float)rc->top;
-    inst->rect[2] = (float)(rc->left + (LONG)bw);
-    inst->rect[3] = (float)(rc->top + (LONG)bh);
+    {
+        LONG full_w = rc->right - rc->left;
+        LONG full_h = rc->bottom - rc->top;
+        LONG draw_x = rc->left;
+        LONG draw_y = rc->top;
+        if ((LONG)bw < full_w)
+        {
+            if (align_flags & DT_CENTER)
+                draw_x = rc->left + (full_w - (LONG)bw) / 2;
+            else if (align_flags & DT_RIGHT)
+                draw_x = rc->right - (LONG)bw;
+        }
+        if ((LONG)bh < full_h)
+        {
+            if (align_flags & DT_VCENTER)
+                draw_y = rc->top + (full_h - (LONG)bh) / 2;
+            else if (align_flags & DT_BOTTOM)
+                draw_y = rc->bottom - (LONG)bh;
+        }
+        inst->rect[0] = (float)draw_x;
+        inst->rect[1] = (float)draw_y;
+        inst->rect[2] = (float)(draw_x + (LONG)bw);
+        inst->rect[3] = (float)(draw_y + (LONG)bh);
+    }
     if (clip_rc)
     {
         inst->clip[0] = (float)clip_rc->left;
@@ -898,8 +924,9 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     inst->params[3] = 0.0f;
 }
 
-void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
-                          UINT img_w, UINT img_h, const RECT *dst_rc, const RECT *clip_rc )
+void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
+                             UINT img_w, UINT img_h, UINT frame_seq, const RECT *dst_rc,
+                             const float uv_crop[4], const RECT *clip_rc )
 {
     UINT idx, probe;
     struct atlas_entry *entry = NULL;
@@ -923,7 +950,8 @@ void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *
     }
     if (!entry) entry = &g_gpu.hash_table[idx];
 
-    if (!entry->occupied || !entry->is_image || entry->img_key != img_key)
+    if (!entry->occupied || !entry->is_image || entry->img_key != img_key ||
+        entry->box_w != img_w || entry->box_h != img_h)
     {
         UINT ax = 0, ay = 0;
         D3D11_BOX dst_box;
@@ -940,12 +968,28 @@ void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *
         entry->occupied = TRUE;
         entry->is_image = TRUE;
         entry->img_key = img_key;
+        entry->box_x = ax;
+        entry->box_y = ay;
         entry->box_w = img_w;
         entry->box_h = img_h;
+        entry->frame_seq = frame_seq;
         entry->uv[0] = (float)ax / ATLAS_SIZE;
         entry->uv[1] = (float)ay / ATLAS_SIZE;
         entry->uv[2] = (float)(ax + img_w) / ATLAS_SIZE;
         entry->uv[3] = (float)(ay + img_h) / ATLAS_SIZE;
+    }
+    else if (frame_seq != 0 && entry->frame_seq != frame_seq)
+    {
+        D3D11_BOX dst_box;
+        dst_box.left = entry->box_x;
+        dst_box.top = entry->box_y;
+        dst_box.right = entry->box_x + img_w;
+        dst_box.bottom = entry->box_y + img_h;
+        dst_box.front = 0;
+        dst_box.back = 1;
+        ID3D11DeviceContext_UpdateSubresource( ctx, (ID3D11Resource *)g_gpu.atlas_tex, 0, &dst_box,
+                                               bgra_pixels, img_w * 4, 0 );
+        entry->frame_seq = frame_seq;
     }
 
     inst = &g_gpu.instances[g_gpu.instance_count++];
@@ -973,11 +1017,29 @@ void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *
     inst->fill_color[2] = 1.0f;
     inst->fill_color[3] = 1.0f;
     memset( inst->border_color, 0, sizeof(inst->border_color) );
-    memcpy( inst->uv, entry->uv, sizeof(inst->uv) );
+    if (uv_crop)
+    {
+        float du = entry->uv[2] - entry->uv[0];
+        float dv = entry->uv[3] - entry->uv[1];
+        inst->uv[0] = entry->uv[0] + du * uv_crop[0];
+        inst->uv[1] = entry->uv[1] + dv * uv_crop[1];
+        inst->uv[2] = entry->uv[0] + du * uv_crop[2];
+        inst->uv[3] = entry->uv[1] + dv * uv_crop[3];
+    }
+    else
+    {
+        memcpy( inst->uv, entry->uv, sizeof(inst->uv) );
+    }
     inst->params[0] = 0.0f;
     inst->params[1] = 1.0f;
     inst->params[2] = 1.0f;
     inst->params[3] = 0.0f;
+}
+
+void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
+                          UINT img_w, UINT img_h, const RECT *dst_rc, const RECT *clip_rc )
+{
+    xaml_gpu_push_image_uv( ctx, img_key, bgra_pixels, img_w, img_h, 0, dst_rc, NULL, clip_rc );
 }
 
 static BOOL xaml_gpu_draw_batch( ID3D11DeviceContext *ctx )
