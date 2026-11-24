@@ -520,6 +520,7 @@ struct uwp_element
     IInspectable *nav_args_item;
     BOOL nav_fired;
     boolean nav_stack_enabled;
+    SRWLOCK dp_lock;
     struct uwp_dp_entry *dp_store;
     int dp_cnt;
     int dp_cap;
@@ -1395,6 +1396,7 @@ extern struct xaml_meta_cache_entry *xaml_meta_cache[XAML_META_CACHE_SIZE];
 HRESULT WINAPI dp_args_QI( void *iface, REFIID iid, void **out );
 ULONG WINAPI dp_args_AddRef( void *iface );
 ULONG WINAPI dp_args_Release( void *iface );
+ULONG WINAPI dc_args_Release( void *iface );
 HRESULT WINAPI dp_args_GetIids( void *iface, ULONG *count, IID **iids );
 HRESULT WINAPI dp_args_GetRuntimeClassName( void *iface, HSTRING *name );
 HRESULT WINAPI dp_args_GetTrustLevel( void *iface, TrustLevel *level );

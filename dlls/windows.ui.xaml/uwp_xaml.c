@@ -1726,6 +1726,7 @@ HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, v
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (token) *token = 1;
     if (!impl || !cb) return S_OK;
+    AcquireSRWLockExclusive( &impl->dp_lock );
     if (xaml_vec_grow( (void **)&impl->dp_cbs, &impl->dp_cb_cap, impl->dp_cb_cnt + 1, sizeof(*impl->dp_cbs), 16 ))
     {
         int idx = impl->dp_cb_cnt++;
@@ -1733,26 +1734,35 @@ HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, v
         impl->dp_cbs[idx].dp = dp;
         impl->dp_cbs[idx].callback = (IInspectable *)cb;
         impl->dp_cbs[idx].token = tok;
+        if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
         IUnknown_AddRef( (IUnknown *)cb );
         if (token) *token = tok;
     }
+    ReleaseSRWLockExclusive( &impl->dp_lock );
     return S_OK;
 }
 
 static HRESULT WINAPI uwp_do2_UnregisterPropertyChangedCallback( void *iface, void *dp, INT64 token )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    IInspectable *old_cb = NULL;
+    void *old_dp = NULL;
     int i;
     if (!impl) return S_OK;
+    AcquireSRWLockExclusive( &impl->dp_lock );
     for (i = 0; i < impl->dp_cb_cnt; i++)
     {
         if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].token == token)
         {
-            if (impl->dp_cbs[i].callback) IUnknown_Release( (IUnknown *)impl->dp_cbs[i].callback );
+            old_cb = impl->dp_cbs[i].callback;
+            old_dp = impl->dp_cbs[i].dp;
             impl->dp_cbs[i] = impl->dp_cbs[--impl->dp_cb_cnt];
             break;
         }
     }
+    ReleaseSRWLockExclusive( &impl->dp_lock );
+    if (old_cb) IUnknown_Release( (IUnknown *)old_cb );
+    if ((ULONG_PTR)old_dp >= 0x10000) IUnknown_Release( (IUnknown *)old_dp );
     return S_OK;
 }
 
@@ -2215,6 +2225,17 @@ static HRESULT WINAPI dc_args_QI( void *iface, REFIID iid, void **out )
     *out = NULL;
     return E_NOINTERFACE;
 }
+ULONG WINAPI dc_args_Release( void *iface )
+{
+    struct uwp_dc_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r)
+    {
+        if (a->new_val) IInspectable_Release( a->new_val );
+        free( a );
+    }
+    return r;
+}
 static HRESULT WINAPI dc_args_GetRuntimeClassName( void *iface, HSTRING *name )
 {
     const WCHAR *cls = L"Windows.UI.Xaml.DataContextChangedEventArgs";
@@ -2224,7 +2245,7 @@ const void *dc_args_vtbl[] =
 {
     dc_args_QI,
     dp_args_AddRef,
-    dp_args_Release,
+    dc_args_Release,
     dp_args_GetIids,
     dc_args_GetRuntimeClassName,
     dp_args_GetTrustLevel,
@@ -2412,7 +2433,7 @@ HRESULT WINAPI uwp_fe3_add_DataContextChanged( void *iface, void *handler, Event
                     args->ref = 1;
                     args->new_val = (IInspectable *)cur_dc;
                     h->lpVtbl->Invoke( h, sender, args );
-                    dp_args_Release( args );
+                    dc_args_Release( args );
                 }
                 else IInspectable_Release( (IInspectable *)cur_dc );
             }
@@ -3285,6 +3306,7 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
                            tel->dc_bound_dp_cnt + 1, sizeof(*tel->dc_bound_dps), 8 ))
         {
             tel->dc_bound_dps[tel->dc_bound_dp_cnt].dp = dp;
+            if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
             tel->dc_bound_dps[tel->dc_bound_dp_cnt].binding = bel;
             if (bel) IInspectable_AddRef( &bel->IInspectable_iface );
             tel->dc_bound_dp_cnt++;
@@ -4375,7 +4397,7 @@ const void *uwp_ccc_vtbl[] =
 };
 
 
-static struct { const void *vtbl; LONG ref; } g_dp_routed_args = { (const void *)dp_changed_args_vtbl, 1 };
+static struct uwp_dp_changed_args g_dp_routed_args = { (const void *)dp_changed_args_vtbl, 0x100000, NULL, NULL, NULL };
 /* Loaded/Click/Navigation callbacks receive this: McgMarshal ComInterfaceToObject
  * calls GetRuntimeClassName on it, so it must be an element face naming
  * RoutedEventArgs. */

@@ -1638,6 +1638,7 @@ ULONG WINAPI dp_args_Release( void *iface )
     ULONG r = InterlockedDecrement( &a->ref );
     if (!r)
     {
+        if ((ULONG_PTR)a->dp >= 0x10000) IUnknown_Release( (IUnknown *)a->dp );
         if (a->old_val) IInspectable_Release( a->old_val );
         if (a->new_val) IInspectable_Release( a->new_val );
         free( a );

@@ -144,7 +144,7 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
                 args->new_val = dc;
                 if (dc) IInspectable_AddRef( dc );
                 h->lpVtbl->Invoke( h, sender, args );
-                dp_args_Release( args );
+                dc_args_Release( args );
             }
         }
     }

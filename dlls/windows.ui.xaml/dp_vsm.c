@@ -1506,15 +1506,18 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
         }
     }
 
+    AcquireSRWLockShared( &impl->dp_lock );
     for (i = 0; i < impl->dp_cnt; i++)
     {
         if (impl->dp_store[i].dp == dp)
         {
             *out = impl->dp_store[i].value;
             if (*out) IInspectable_AddRef( *out );
+            ReleaseSRWLockShared( &impl->dp_lock );
             return S_OK;
         }
     }
+    ReleaseSRWLockShared( &impl->dp_lock );
 
     /* Fall back to IPropertyMetadata::get_DefaultValue if DP has metadata */
     {
@@ -1600,18 +1603,29 @@ static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *
         if (!val || wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" )) return;
         rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
         if (!rep || rep == impl || !wcsstr( rep->class_name, L"ItemsRepeater" )) return;
-        for (j = 0; j < rep->dp_cnt; j++)
         {
-            struct dp_internal_layout *rdpl = (struct dp_internal_layout *)rep->dp_store[j].dp;
-            if (rdpl && (ULONG_PTR)rdpl >= 0x10000 && !wcscmp( rdpl->name, repeater_forwards[k].target ))
+            void *target_dp = NULL;
+            AcquireSRWLockShared( &rep->dp_lock );
+            for (j = 0; j < rep->dp_cnt; j++)
             {
-                if (rep->dp_store[j].value != val)
+                struct dp_internal_layout *rdpl = (struct dp_internal_layout *)rep->dp_store[j].dp;
+                if (rdpl && (ULONG_PTR)rdpl >= 0x10000 && !wcscmp( rdpl->name, repeater_forwards[k].target ))
                 {
-                    WARN( "uwp_sync_template_presenter: forwarding %s -> Repeater.%s val=%p\n",
-                          debugstr_w(dpname), debugstr_w(repeater_forwards[k].target), val );
-                    uwp_do_SetValue( &rep->IDependencyObject_iface, rep->dp_store[j].dp, val );
+                    if (rep->dp_store[j].value != val)
+                    {
+                        target_dp = rep->dp_store[j].dp;
+                        IUnknown_AddRef( (IUnknown *)target_dp );
+                    }
+                    break;
                 }
-                break;
+            }
+            ReleaseSRWLockShared( &rep->dp_lock );
+            if (target_dp)
+            {
+                WARN( "uwp_sync_template_presenter: forwarding %s -> Repeater.%s val=%p\n",
+                      debugstr_w(dpname), debugstr_w(repeater_forwards[k].target), val );
+                uwp_do_SetValue( &rep->IDependencyObject_iface, target_dp, val );
+                IUnknown_Release( (IUnknown *)target_dp );
             }
         }
         return;
@@ -1694,25 +1708,40 @@ void uwp_sync_all_template_presenters( struct uwp_element *impl )
     }
 }
 
+static SRWLOCK g_setval_lock = SRWLOCK_INIT;
+
 HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     IInspectable *old_val = NULL;
     WCHAR str_val[256] = {0};
     int i;
-    static struct { struct uwp_element *el; void *dp; } setval_stack[32];
+    static struct { DWORD tid; struct uwp_element *el; void *dp; } setval_stack[64];
     static int setval_depth = 0;
+    DWORD cur_tid = GetCurrentThreadId();
     BOOL found_existing = FALSE;
+    BOOL same_val = FALSE;
+    BOOL pushed_setval = FALSE;
     int si;
 
     if (!impl || !dp) return S_OK;
+    AcquireSRWLockExclusive( &g_setval_lock );
     for (si = 0; si < setval_depth; si++)
     {
-        if (setval_stack[si].el == impl && setval_stack[si].dp == dp)
+        if (setval_stack[si].tid == cur_tid && setval_stack[si].el == impl && setval_stack[si].dp == dp)
+        {
+            ReleaseSRWLockExclusive( &g_setval_lock );
             return S_OK;
+        }
     }
     if (setval_depth >= (int)ARRAY_SIZE(setval_stack))
+    {
+        ReleaseSRWLockExclusive( &g_setval_lock );
         return S_OK;
+    }
+    ReleaseSRWLockExclusive( &g_setval_lock );
+
+    if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
 
     /* Check if val is a string (e.g. CalculationResult.DisplayValue or Content) */
     if (val && uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
@@ -1741,6 +1770,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         uwp_tabview_handle_dp( impl, dpname, val );
     }
 
+    AcquireSRWLockExclusive( &impl->dp_lock );
     for (i = 0; i < impl->dp_cnt; i++)
     {
         if (impl->dp_store[i].dp == dp)
@@ -1748,7 +1778,10 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             found_existing = TRUE;
             old_val = impl->dp_store[i].value;
             if (old_val == val)
-                return S_OK;
+            {
+                same_val = TRUE;
+                break;
+            }
             impl->dp_store[i].value = val;
             if (val) IInspectable_AddRef( val );
             break;
@@ -1757,16 +1790,35 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     if (!found_existing)
     {
         if (!xaml_vec_grow( (void **)&impl->dp_store, &impl->dp_cap, impl->dp_cnt + 1, sizeof(*impl->dp_store), 24 ))
+        {
+            ReleaseSRWLockExclusive( &impl->dp_lock );
+            if ((ULONG_PTR)dp >= 0x10000) IUnknown_Release( (IUnknown *)dp );
             return E_OUTOFMEMORY;
+        }
         impl->dp_store[impl->dp_cnt].dp = dp;
+        if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
         impl->dp_store[impl->dp_cnt].value = val;
         if (val) IInspectable_AddRef( val );
         impl->dp_cnt++;
     }
+    ReleaseSRWLockExclusive( &impl->dp_lock );
 
-    setval_stack[setval_depth].el = impl;
-    setval_stack[setval_depth].dp = dp;
-    setval_depth++;
+    if (same_val)
+    {
+        if ((ULONG_PTR)dp >= 0x10000) IUnknown_Release( (IUnknown *)dp );
+        return S_OK;
+    }
+
+    AcquireSRWLockExclusive( &g_setval_lock );
+    if (setval_depth < (int)ARRAY_SIZE(setval_stack))
+    {
+        setval_stack[setval_depth].tid = cur_tid;
+        setval_stack[setval_depth].el = impl;
+        setval_stack[setval_depth].dp = dp;
+        setval_depth++;
+        pushed_setval = TRUE;
+    }
+    ReleaseSRWLockExclusive( &g_setval_lock );
 
     /* Fire PropertyMetadata PropertyChangedCallback if present */
     {
@@ -1823,6 +1875,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                     args->vtbl = dp_changed_args_vtbl;
                     args->ref = 1;
                     args->dp = dp;
+                    if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
                     args->old_val = old_val;
                     if (old_val) IInspectable_AddRef( old_val );
                     args->new_val = val;
@@ -1854,13 +1907,27 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         }
     }
 
-    /* Fire registered DependencyPropertyChangedCallbacks */
-    for (i = 0; i < impl->dp_cb_cnt; i++)
+    /* Fire registered DependencyPropertyChangedCallbacks (snapshot under lock) */
     {
-        if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].callback)
+        struct xaml_event_handler *cbs_snap[32];
+        int snap_cnt = 0;
+
+        AcquireSRWLockShared( &impl->dp_lock );
+        for (i = 0; i < impl->dp_cb_cnt && snap_cnt < (int)ARRAY_SIZE(cbs_snap); i++)
+        {
+            if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].callback)
+            {
+                cbs_snap[snap_cnt] = (struct xaml_event_handler *)impl->dp_cbs[i].callback;
+                IUnknown_AddRef( (IUnknown *)cbs_snap[snap_cnt] );
+                snap_cnt++;
+            }
+        }
+        ReleaseSRWLockShared( &impl->dp_lock );
+
+        for (i = 0; i < snap_cnt; i++)
         {
             void *sender = impl->outer ? (void *)impl->outer : (void *)&impl->IDependencyObject_iface;
-            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dp_cbs[i].callback;
+            struct xaml_event_handler *h = cbs_snap[i];
             HRESULT cb_hr = S_OK;
             __TRY
             {
@@ -1872,9 +1939,22 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                    i, h, sender, debugstr_w(impl->class_name), dp, cb_hr );
             if (wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
                 WARN( "TileList dp_cb[%d] dp=%p -> hr %#lx\n", i, dp, cb_hr );
+            IUnknown_Release( (IUnknown *)h );
         }
     }
-    if (setval_depth > 0) setval_depth--;
+    if (pushed_setval)
+    {
+        AcquireSRWLockExclusive( &g_setval_lock );
+        for (si = setval_depth - 1; si >= 0; si--)
+        {
+            if (setval_stack[si].tid == cur_tid && setval_stack[si].el == impl && setval_stack[si].dp == dp)
+            {
+                setval_stack[si] = setval_stack[--setval_depth];
+                break;
+            }
+        }
+        ReleaseSRWLockExclusive( &g_setval_lock );
+    }
 
     if (wcsstr( impl->class_name, L"ItemsRepeater" ))
     {
@@ -1897,23 +1977,31 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     }
 
     if (old_val) IInspectable_Release( old_val );
+    if ((ULONG_PTR)dp >= 0x10000) IUnknown_Release( (IUnknown *)dp );
     return S_OK;
 }
 
 HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    IInspectable *old_val = NULL;
+    void *old_dp = NULL;
     int i;
     if (!impl || !dp) return S_OK;
+    AcquireSRWLockExclusive( &impl->dp_lock );
     for (i = 0; i < impl->dp_cnt; i++)
     {
         if (impl->dp_store[i].dp == dp)
         {
-            if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
+            old_val = impl->dp_store[i].value;
+            old_dp = impl->dp_store[i].dp;
             impl->dp_store[i] = impl->dp_store[--impl->dp_cnt];
             break;
         }
     }
+    ReleaseSRWLockExclusive( &impl->dp_lock );
+    if (old_val) IInspectable_Release( old_val );
+    if ((ULONG_PTR)old_dp >= 0x10000) IUnknown_Release( (IUnknown *)old_dp );
     return S_OK;
 }
 
