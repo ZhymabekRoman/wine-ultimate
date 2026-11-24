@@ -79,7 +79,7 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
     {
         if (!impl->is_sprite)
         {
-            FIXME( "IID_ISpriteVisual requested on a ContainerVisual, returning E_NOINTERFACE.\n" );
+            TRACE( "IID_ISpriteVisual requested on a ContainerVisual, returning E_NOINTERFACE.\n" );
             *out = NULL;
             return E_NOINTERFACE;
         }
@@ -377,6 +377,10 @@ void visual_sync_dcomp_clip( struct visual *impl )
             else
                 IDCompositionVisual_SetClip( impl->dcomp_visual, NULL );
         }
+    }
+    else
+    {
+        IDCompositionVisual_SetClip( impl->dcomp_visual, NULL );
     }
 }
 
@@ -1306,7 +1310,7 @@ static HRESULT collection_insert( struct visual_collection *impl, unsigned int i
     impl->count++;
     IInspectable_AddRef( (IInspectable *)&child->IVisual_iface );
     visual_reparent( child, impl->owner );
-    if (impl->owner && impl->owner->dcomp_visual && child->dcomp_visual)
+    if (impl->owner && impl->owner != child && impl->owner->dcomp_visual && child->dcomp_visual)
         IDCompositionVisual_AddVisual( impl->owner->dcomp_visual, child->dcomp_visual, FALSE, NULL );
     return S_OK;
 }
@@ -1320,7 +1324,7 @@ static HRESULT collection_remove_at( struct visual_collection *impl, unsigned in
     memmove( &impl->items[index], &impl->items[index + 1],
             (impl->count - index - 1) * sizeof(*impl->items) );
     impl->count--;
-    if (impl->owner && impl->owner->dcomp_visual && child->dcomp_visual)
+    if (impl->owner && impl->owner != child && impl->owner->dcomp_visual && child->dcomp_visual)
         IDCompositionVisual_RemoveVisual( impl->owner->dcomp_visual, child->dcomp_visual );
     if (child->parent == impl->owner) visual_reparent( child, NULL );
     IInspectable_Release( (IInspectable *)&child->IVisual_iface );

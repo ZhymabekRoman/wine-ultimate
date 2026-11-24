@@ -51,8 +51,6 @@
 #define WIDL_using_Windows_UI_Composition_Interop
 #include "windows.ui.composition.interop.h"
 
-static const WCHAR test_window_class[] = L"winrt_composition_test_window";
-
 static void test_compositor_activation( void )
 {
     IActivationFactory *factory;
@@ -164,6 +162,25 @@ static void test_visuals( struct ICompositor *compositor )
     hr = IVisualCollection_get_Count( collection, &count );
     ok( hr == S_OK && count == 0, "children count should be 0, hr %#lx, count %d.\n", hr, count );
 
+    /* ContainerVisual must NOT answer ISpriteVisual; SpriteVisual must answer both. */
+    {
+        struct ISpriteVisual *sprite = NULL;
+        struct IContainerVisual *sprite_as_cv = NULL;
+
+        hr = IContainerVisual_QueryInterface( visual, &IID_ISpriteVisual, (void **)&sprite );
+        ok( hr == E_NOINTERFACE && !sprite, "ContainerVisual should not answer ISpriteVisual, hr %#lx.\n", hr );
+
+        hr = ICompositor_CreateSpriteVisual( compositor, &sprite );
+        ok( hr == S_OK && sprite, "failed to create sprite visual, hr %#lx.\n", hr );
+        if (sprite)
+        {
+            hr = ISpriteVisual_QueryInterface( sprite, &IID_IContainerVisual, (void **)&sprite_as_cv );
+            ok( hr == S_OK && sprite_as_cv, "SpriteVisual should answer IContainerVisual, hr %#lx.\n", hr );
+            if (sprite_as_cv) IContainerVisual_Release( sprite_as_cv );
+            ISpriteVisual_Release( sprite );
+        }
+    }
+
     IVisualCollection_Release( collection );
     IContainerVisual_Release( visual );
 }
@@ -252,6 +269,57 @@ static void test_brushes_clips_easing( struct ICompositor *compositor )
     ok( hr == S_OK, "failed to put left inset, hr %#lx.\n", hr );
     hr = IInsetClip_get_LeftInset( clip, &inset );
     ok( hr == S_OK && inset == 5.0f, "inset roundtrip failed, hr %#lx, inset %g.\n", hr, inset );
+    {
+        static const GUID IID_ICompositor6_test =
+            { 0x7a38b2bd, 0xcec8, 0x4eeb, { 0x83, 0x0f, 0xd8, 0xd0, 0x7a, 0xed, 0xeb, 0xc3 } };
+        static const GUID IID_ICompositionGeometricClip_test =
+            { 0xc840b581, 0x81c9, 0x4444, { 0xa2, 0xc1, 0xcc, 0xae, 0xce, 0x3a, 0x50, 0xe5 } };
+        IInspectable *comp6 = NULL;
+        IInspectable *gclip = NULL;
+        struct ICompositionClip *base_clip = NULL;
+        struct IContainerVisual *cv = NULL;
+        struct IVisual *vis = NULL;
+
+        iface = NULL;
+        hr = IInsetClip_QueryInterface( clip, &IID_ICompositionGeometricClip_test, &iface );
+        ok( hr == E_NOINTERFACE && !iface, "InsetClip should not answer ICompositionGeometricClip, hr %#lx.\n", hr );
+
+        hr = ICompositor_QueryInterface( compositor, &IID_ICompositor6_test, (void **)&comp6 );
+        ok( hr == S_OK && comp6, "Compositor should answer ICompositor6, hr %#lx.\n", hr );
+        if (comp6)
+        {
+            HRESULT (WINAPI *create_gclip)(void *, void **) = (void *)((void **)comp6->lpVtbl)[6];
+            hr = create_gclip( comp6, (void **)&gclip );
+            ok( hr == S_OK && gclip, "CreateGeometricClip failed, hr %#lx.\n", hr );
+            if (gclip)
+            {
+                iface = NULL;
+                hr = IInspectable_QueryInterface( gclip, &IID_IInsetClip, &iface );
+                ok( hr == E_NOINTERFACE && !iface,
+                        "CompositionGeometricClip should not answer IInsetClip, hr %#lx.\n", hr );
+
+                hr = IInspectable_QueryInterface( gclip, &IID_ICompositionClip, (void **)&base_clip );
+                ok( hr == S_OK && base_clip,
+                        "CompositionGeometricClip should answer ICompositionClip, hr %#lx.\n", hr );
+
+                hr = ICompositor_CreateContainerVisual( compositor, &cv );
+                if (hr == S_OK && cv && base_clip)
+                {
+                    hr = IContainerVisual_QueryInterface( cv, &IID_IVisual, (void **)&vis );
+                    if (hr == S_OK && vis)
+                    {
+                        hr = IVisual_put_Clip( vis, base_clip );
+                        ok( hr == S_OK, "put_Clip(CompositionGeometricClip) failed, hr %#lx.\n", hr );
+                        IVisual_Release( vis );
+                    }
+                    IContainerVisual_Release( cv );
+                }
+                if (base_clip) ICompositionClip_Release( base_clip );
+                IInspectable_Release( gclip );
+            }
+            IInspectable_Release( comp6 );
+        }
+    }
     IInsetClip_Release( clip );
 
     linear = NULL;
@@ -403,10 +471,9 @@ static void test_activation_without_registry( void )
                          RuntimeClass_Windows_UI_Composition_Compositor ),
                     "got class name %s.\n", debugstr_w( WindowsGetStringRawBuffer( name, NULL ) ) );
             WindowsDeleteString( name );
+            IInspectable_Release( instance );
         }
-        IInspectable_Release( instance );
     }
-    if (instance) IInspectable_Release( instance );
 
     if (!compositor)
     {
@@ -592,7 +659,7 @@ static void test_interop_partner_factory( void )
         /* Refcount sanity: a balanced AddRef/Release pair leaves the caller's reference. */
         ref = ICompositor_AddRef( compositor );
         ICompositor_Release( compositor );
-        ok( ref >= 1, "interop compositor refcount started at %u.\n", ref );
+        ok( ref >= 1, "interop compositor refcount started at %lu.\n", ref );
     }
 
     /* Fresh object per call: dcompi runs the constructor + QI + release of the local
@@ -659,7 +726,7 @@ static HWND create_test_window( void )
     cls.lpfnWndProc = DefWindowProcA;
     cls.hInstance = GetModuleHandleA( NULL );
     cls.lpszClassName = "winrt_composition_test_window";
-    ok( RegisterClassA( &cls ), "failed to register class, err %u.\n", GetLastError() );
+    ok( RegisterClassA( &cls ), "failed to register class, err %lu.\n", GetLastError() );
     return CreateWindowA( cls.lpszClassName, "test", 0, 0, 0, 100, 100, NULL, NULL, cls.hInstance, NULL );
 }
 
@@ -714,7 +781,7 @@ START_TEST( comp )
     test_brushes_clips_easing( compositor );
 
     hwnd = create_test_window();
-    ok( !!hwnd, "failed to create test window, err %u.\n", GetLastError() );
+    ok( !!hwnd, "failed to create test window, err %lu.\n", GetLastError() );
     if (hwnd) test_desktop_target( compositor, hwnd );
 
     ICompositor_Release( compositor );

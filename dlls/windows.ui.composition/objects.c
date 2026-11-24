@@ -1396,6 +1396,15 @@ struct easing_function *linear_easing_create( struct compositor *compositor )
  * InsetClip.
  */
 
+static const GUID IID_ICompositionGeometricClip_local =
+    { 0xc840b581, 0x81c9, 0x4444, { 0xa2, 0xc1, 0xcc, 0xae, 0xce, 0x3a, 0x50, 0xe5 } };
+
+static inline BOOL is_composition_clip_subclass_iid( REFIID iid )
+{
+    return IsEqualGUID( iid, &IID_IInsetClip )
+        || IsEqualGUID( iid, &IID_ICompositionGeometricClip_local );
+}
+
 static inline struct inset_clip *impl_from_ICompositionClip( struct ICompositionClip *iface )
 {
     return CONTAINING_RECORD( iface, struct inset_clip, ICompositionClip_iface );
@@ -1406,6 +1415,8 @@ static HRESULT WINAPI inset_clip_QueryInterface( struct ICompositionClip *iface,
     struct inset_clip *impl = impl_from_ICompositionClip( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
 
     if (IsEqualGUID( iid, &IID_IUnknown )
         || IsEqualGUID( iid, &IID_IInspectable )
@@ -1435,8 +1446,8 @@ static HRESULT WINAPI inset_clip_QueryInterface( struct ICompositionClip *iface,
         return S_OK;
     }
 
-    if (is_reference_tracker_target( iid ))
-        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ) || is_composition_clip_subclass_iid( iid ))
+        TRACE( "%s not supported on InsetClip, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     else
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -1637,9 +1648,6 @@ struct inset_clip *inset_clip_create( struct compositor *compositor, FLOAT left,
  * stores on them and stay empty otherwise.
  */
 
-static const GUID IID_ICompositionGeometricClip_local =
-    { 0xc840b581, 0x81c9, 0x4444, { 0xa2, 0xc1, 0xcc, 0xae, 0xce, 0x3a, 0x50, 0xe5 } };
-
 static inline struct geometric_clip *impl_from_geometric_clip( struct ICompositionClip *iface )
 {
     return CONTAINING_RECORD( iface, struct geometric_clip, ICompositionClip_iface );
@@ -1681,8 +1689,8 @@ static HRESULT WINAPI geometric_clip_QueryInterface( struct ICompositionClip *if
         return S_OK;
     }
 
-    if (is_reference_tracker_target( iid ))
-        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ) || is_composition_clip_subclass_iid( iid ))
+        TRACE( "%s not supported on CompositionGeometricClip, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     else
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;

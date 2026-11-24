@@ -60,6 +60,79 @@ static BOOLEAN is_api_contract_present( const HSTRING hname, unsigned int versio
     return FALSE;
 }
 
+static const struct
+{
+    const WCHAR *type_name;
+    const WCHAR *property_name;
+    BOOLEAN present;
+}
+known_properties[] =
+{
+    /* Windows.ApplicationModel.Package: Wine implements IPackage/IPackage2, not IPackage8. */
+    { L"Windows.ApplicationModel.Package", L"SourceUriSchemeName", FALSE },
+    /* Windows.Devices.Enumeration.IDeviceWatcher (UniversalApiContract 1.0). */
+    { L"Windows.Devices.Enumeration.IDeviceWatcher", L"Status", TRUE },
+};
+
+static const WCHAR *const gc_pressure_amount_values[] =
+{
+    L"Low",
+    L"Medium",
+    L"High",
+};
+
+/* Windows.ApplicationModel.Store.Preview.StoreSystemFeature (UniversalApiContract 1.0-6.0). */
+static const WCHAR *const store_system_feature_values[] =
+{
+    L"ArchitectureX86",
+    L"ArchitectureX64",
+    L"ArchitectureArm",
+    L"DirectX9",
+    L"DirectX10",
+    L"DirectX11",
+    L"D3D12HardwareFL11",
+    L"D3D12HardwareFL12",
+    L"Memory300MB",
+    L"Memory750MB",
+    L"Memory1GB",
+    L"Memory2GB",
+    L"CameraFront",
+    L"CameraRear",
+    L"Gyroscope",
+    L"Hover",
+    L"Magnetometer",
+    L"Nfc",
+    L"Resolution720P",
+    L"ResolutionWvga",
+    L"ResolutionWvgaOr720P",
+    L"ResolutionWxga",
+    L"ResolutionWvgaOrWxga",
+    L"ResolutionWxgaOr720P",
+    L"Memory4GB",
+    L"Memory6GB",
+    L"Memory8GB",
+    L"Memory12GB",
+    L"Memory16GB",
+    L"Memory20GB",
+    L"VideoMemory2GB",
+    L"VideoMemory4GB",
+    L"VideoMemory6GB",
+    L"VideoMemory1GB",
+    L"ArchitectureArm64",
+};
+
+static const struct
+{
+    const WCHAR *type_name;
+    const WCHAR *const *values;
+    unsigned int value_count;
+}
+known_enums[] =
+{
+    { L"Windows.Foundation.Metadata.GCPressureAmount", gc_pressure_amount_values, ARRAY_SIZE(gc_pressure_amount_values) },
+    { L"Windows.ApplicationModel.Store.Preview.StoreSystemFeature", store_system_feature_values, ARRAY_SIZE(store_system_feature_values) },
+};
+
 /* Defined further below; referenced by the cached GetIids pair arrays. */
 static const struct IActivationFactoryVtbl api_information_statics_factory_vtbl;
 static const struct IApiInformationStaticsVtbl api_information_statics_vtbl;
@@ -258,22 +331,37 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
         IApiInformationStatics *iface, HSTRING type_name, HSTRING property_name, BOOLEAN *value)
 {
-    const WCHAR *type_str = WindowsGetStringRawBuffer( type_name, NULL );
-    const WCHAR *prop_str = WindowsGetStringRawBuffer( property_name, NULL );
-
-    FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
-            debugstr_hstring(type_name), debugstr_hstring(property_name), value);
+    const WCHAR *type_str, *prop_str;
+    unsigned int i;
 
     if (!type_name || !value)
         return E_INVALIDARG;
 
-    if (type_str && prop_str &&
-        !wcscmp( type_str, L"Windows.ApplicationModel.Package" ) &&
-        !wcscmp( prop_str, L"SourceUriSchemeName" ))
+    if (!property_name || WindowsIsStringEmpty( property_name ))
     {
+        TRACE("iface %p, type_name %s, property_name %s -> FALSE.\n", iface,
+                debugstr_hstring(type_name), debugstr_hstring(property_name));
         *value = FALSE;
         return S_OK;
     }
+
+    type_str = WindowsGetStringRawBuffer( type_name, NULL );
+    prop_str = WindowsGetStringRawBuffer( property_name, NULL );
+
+    for (i = 0; i < ARRAY_SIZE(known_properties); ++i)
+    {
+        if (!wcscmp( type_str, known_properties[i].type_name ) &&
+            !wcscmp( prop_str, known_properties[i].property_name ))
+        {
+            *value = known_properties[i].present;
+            TRACE("iface %p, type_name %s, property_name %s -> %u.\n", iface,
+                    debugstr_hstring(type_name), debugstr_hstring(property_name), *value);
+            return S_OK;
+        }
+    }
+
+    FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
+            debugstr_hstring(type_name), debugstr_hstring(property_name), value);
 
     *value = TRUE;
     return S_OK;
@@ -309,11 +397,52 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPres
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent(
         IApiInformationStatics *iface, HSTRING enum_type_name, HSTRING value_name, BOOLEAN *value)
 {
+    const WCHAR *enum_str, *val_str;
+    unsigned int i, j;
+
+    if (!enum_type_name || !value)
+        return E_INVALIDARG;
+
+    if (!value_name || WindowsIsStringEmpty( value_name ))
+    {
+        TRACE("iface %p, enum_type_name %s, value_name %s -> FALSE.\n", iface,
+                debugstr_hstring(enum_type_name), debugstr_hstring(value_name));
+        *value = FALSE;
+        return S_OK;
+    }
+
+    enum_str = WindowsGetStringRawBuffer( enum_type_name, NULL );
+    val_str = WindowsGetStringRawBuffer( value_name, NULL );
+
+    for (i = 0; i < ARRAY_SIZE(known_enums); ++i)
+    {
+        if (!wcscmp( enum_str, known_enums[i].type_name ))
+        {
+            *value = FALSE;
+            for (j = 0; j < known_enums[i].value_count; ++j)
+            {
+                if (!wcscmp( val_str, known_enums[i].values[j] ))
+                {
+                    *value = TRUE;
+                    break;
+                }
+            }
+            TRACE("iface %p, enum_type_name %s, value_name %s -> %u.\n", iface,
+                    debugstr_hstring(enum_type_name), debugstr_hstring(value_name), *value);
+            return S_OK;
+        }
+    }
+
+    if (wcschr( val_str, '.' ))
+    {
+        TRACE("iface %p, enum_type_name %s, value_name %s -> FALSE.\n", iface,
+                debugstr_hstring(enum_type_name), debugstr_hstring(value_name));
+        *value = FALSE;
+        return S_OK;
+    }
+
     FIXME("iface %p, enum_type_name %s, value_name %s, value %p stub!\n", iface,
             debugstr_hstring(enum_type_name), debugstr_hstring(value_name), value);
-
-    if (!enum_type_name)
-        return E_INVALIDARG;
 
     *value = TRUE;
     return S_OK;

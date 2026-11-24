@@ -485,9 +485,7 @@ static void test_IApiInformationStatics(void)
 
     ret = TRUE;
     hr = IApiInformationStatics_IsPropertyPresent(statics, str, NULL, &ret);
-    todo_wine
     ok(hr == S_OK, "IsPropertyPresent failed, hr %#lx.\n", hr);
-    todo_wine
     ok(ret == FALSE, "IsPropertyPresent returned TRUE.\n");
 
     if (0) /* Crash on Windows */
@@ -498,11 +496,21 @@ static void test_IApiInformationStatics(void)
 
     ret = FALSE;
     hr = IApiInformationStatics_IsPropertyPresent(statics, str, str2, &ret);
-    todo_wine
     ok(hr == S_OK, "IsPropertyPresent failed, hr %#lx.\n", hr);
-    todo_wine
     ok(ret == TRUE, "IsPropertyPresent returned FALSE.\n");
 
+    WindowsDeleteString(str2);
+    WindowsDeleteString(str);
+
+    hr = WindowsCreateString(L"Windows.ApplicationModel.Package",
+            wcslen(L"Windows.ApplicationModel.Package"), &str);
+    ok(hr == S_OK, "WindowsCreateString failed, hr %#lx.\n", hr);
+    hr = WindowsCreateString(L"SourceUriSchemeName", wcslen(L"SourceUriSchemeName"), &str2);
+    ok(hr == S_OK, "WindowsCreateString failed, hr %#lx.\n", hr);
+    ret = TRUE;
+    hr = IApiInformationStatics_IsPropertyPresent(statics, str, str2, &ret);
+    ok(hr == S_OK, "IsPropertyPresent failed, hr %#lx.\n", hr);
+    ok(ret == FALSE, "IsPropertyPresent returned TRUE for unimplemented SourceUriSchemeName.\n");
     WindowsDeleteString(str2);
     WindowsDeleteString(str);
 
@@ -585,9 +593,7 @@ static void test_IApiInformationStatics(void)
 
     ret = TRUE;
     hr = IApiInformationStatics_IsEnumNamedValuePresent(statics, str, NULL, &ret);
-    todo_wine
     ok(hr == S_OK, "IsEnumNamedValuePresent failed, hr %#lx.\n", hr);
-    todo_wine
     ok(ret == FALSE, "IsEnumNamedValuePresent returned TRUE.\n");
 
     if (0) /* Crash on Windows */
@@ -598,19 +604,49 @@ static void test_IApiInformationStatics(void)
 
     ret = FALSE;
     hr = IApiInformationStatics_IsEnumNamedValuePresent(statics, str, str2, &ret);
-    todo_wine
     ok(hr == S_OK, "IsEnumNamedValuePresent failed, hr %#lx.\n", hr);
-    todo_wine
     ok(ret == TRUE, "IsEnumNamedValuePresent returned FALSE.\n");
 
     ret = TRUE;
     hr = IApiInformationStatics_IsEnumNamedValuePresent(statics, str, str, &ret);
-    todo_wine
     ok(hr == S_OK, "IsEnumNamedValuePresent failed, hr %#lx.\n", hr);
-    todo_wine
     ok(ret == FALSE, "IsEnumNamedValuePresent returned TRUE.\n");
 
     WindowsDeleteString(str2);
+    WindowsDeleteString(str);
+
+    /* StoreSystemFeature enum values */
+    hr = WindowsCreateString(L"Windows.ApplicationModel.Store.Preview.StoreSystemFeature",
+            wcslen(L"Windows.ApplicationModel.Store.Preview.StoreSystemFeature"), &str);
+    ok(hr == S_OK, "WindowsCreateString failed, hr %#lx.\n", hr);
+    {
+        static const struct
+        {
+            const WCHAR *name;
+            BOOLEAN expected;
+        }
+        store_feature_cases[] =
+        {
+            { L"ArchitectureX64", TRUE },
+            { L"ArchitectureArm64", TRUE },
+            { L"DirectX11", TRUE },
+            { L"D3D12HardwareFL12", TRUE },
+            { L"Memory16GB", TRUE },
+            { L"VideoMemory6GB", TRUE },
+            { L"NonExistentFeature", FALSE },
+        };
+        for (i = 0; i < ARRAY_SIZE(store_feature_cases); ++i)
+        {
+            hr = WindowsCreateString(store_feature_cases[i].name, wcslen(store_feature_cases[i].name), &str2);
+            ok(hr == S_OK, "WindowsCreateString failed, hr %#lx.\n", hr);
+            ret = !store_feature_cases[i].expected;
+            hr = IApiInformationStatics_IsEnumNamedValuePresent(statics, str, str2, &ret);
+            ok(hr == S_OK, "IsEnumNamedValuePresent(%u) failed, hr %#lx.\n", i, hr);
+            ok(ret == store_feature_cases[i].expected, "IsEnumNamedValuePresent(%ls) returned %u, expected %u.\n",
+                    store_feature_cases[i].name, ret, store_feature_cases[i].expected);
+            WindowsDeleteString(str2);
+        }
+    }
     WindowsDeleteString(str);
 
     /* IsApiContractPresentByMajor */
@@ -1813,7 +1849,7 @@ static void test_PropertySet_MapChanged(void)
     hr = IMap_HSTRING_IInspectable_Insert( map, key, value, &replaced );
     ok( hr == S_OK, "got %#lx\n", hr );
     ok( !replaced, "got replaced %d\n", replaced );
-    ok( handler.called == 1, "got %u calls\n", handler.called );
+    ok( handler.called == 1, "got %lu calls\n", handler.called );
     ok( handler.status == CollectionChange_ItemInserted, "got status %d\n", handler.status );
     ok( !lstrcmpW( handler.key, L"key" ), "got key %s\n", debugstr_w( handler.key ) );
     ok( handler.has_sender, "sender not passed\n" );
@@ -1824,7 +1860,7 @@ static void test_PropertySet_MapChanged(void)
     hr = IMap_HSTRING_IInspectable_Insert( map, key, value, &replaced );
     ok( hr == S_OK, "got %#lx\n", hr );
     ok( replaced, "got replaced %d\n", replaced );
-    ok( handler.called == 2, "got %u calls\n", handler.called );
+    ok( handler.called == 2, "got %lu calls\n", handler.called );
     ok( handler.status == CollectionChange_ItemChanged, "got status %d\n", handler.status );
     ok( !lstrcmpW( handler.key, L"key" ), "got key %s\n", debugstr_w( handler.key ) );
 
@@ -1837,7 +1873,7 @@ static void test_PropertySet_MapChanged(void)
         replaced = TRUE;
         hr = IMap_HSTRING_IInspectable_Insert( obs_as_map, key, value, &replaced );
         ok( hr == S_OK, "got %#lx\n", hr );
-        ok( handler.called == 3, "got %u calls\n", handler.called );
+        ok( handler.called == 3, "got %lu calls\n", handler.called );
         ok( handler.status == CollectionChange_ItemChanged, "got status %d\n", handler.status );
         IMap_HSTRING_IInspectable_Release( obs_as_map );
     }
@@ -1846,7 +1882,7 @@ static void test_PropertySet_MapChanged(void)
     handler.status = (enum CollectionChange)-1;
     hr = IMap_HSTRING_IInspectable_Remove( map, key );
     ok( hr == S_OK, "got %#lx\n", hr );
-    ok( handler.called == 4, "got %u calls\n", handler.called );
+    ok( handler.called == 4, "got %lu calls\n", handler.called );
     ok( handler.status == CollectionChange_ItemRemoved, "got status %d\n", handler.status );
 
     /* Clear fires a single Reset event with a NULL key */
@@ -1859,7 +1895,7 @@ static void test_PropertySet_MapChanged(void)
     handler.status = (enum CollectionChange)-1;
     hr = IMap_HSTRING_IInspectable_Clear( map );
     ok( hr == S_OK, "got %#lx\n", hr );
-    ok( handler.called == 1, "got %u calls\n", handler.called );
+    ok( handler.called == 1, "got %lu calls\n", handler.called );
     ok( handler.status == CollectionChange_Reset, "got status %d\n", handler.status );
     ok( !handler.key[0], "got key %s\n", debugstr_w( handler.key ) );
 
@@ -1869,7 +1905,7 @@ static void test_PropertySet_MapChanged(void)
     handler.called = 0;
     hr = IMap_HSTRING_IInspectable_Clear( map );
     ok( hr == S_OK, "got %#lx\n", hr );
-    ok( handler.called == 0, "got %u calls\n", handler.called );
+    ok( handler.called == 0, "got %lu calls\n", handler.called );
 
     WindowsDeleteString( key );
     IInspectable_Release( value );
