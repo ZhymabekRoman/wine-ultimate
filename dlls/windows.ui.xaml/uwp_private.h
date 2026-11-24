@@ -2966,6 +2966,7 @@ struct uwp_ccc_args
     const void *vtbl;
     LONG ref;
     IInspectable *item;
+    IInspectable *item_container;
     UINT32 phase;
     boolean in_recycle;
     boolean handled;

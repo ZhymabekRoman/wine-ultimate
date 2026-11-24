@@ -82,10 +82,10 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
         uwp_calc_vm_teardown( FALSE );
     }
 
-    if (dc && dc != old_dc && (impl->dt_binding_connector || (impl->binding_connector && impl->dc_cnt == 0)))
+    if (dc && dc != old_dc && impl->dt_binding_connector)
     {
         static const GUID IID_IDTE_g = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
-        void *bc_src = impl->dt_binding_connector ? impl->dt_binding_connector : impl->binding_connector;
+        void *bc_src = impl->dt_binding_connector;
         void *dte = NULL;
         if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)bc_src, &IID_IDTE_g, &dte )) && dte)
         {
@@ -98,6 +98,8 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
                 ccc->ref = 1;
                 ccc->item = dc;
                 IInspectable_AddRef( dc );
+                ccc->item_container = &impl->IInspectable_iface;
+                IInspectable_AddRef( ccc->item_container );
                 ccc->phase = 0;
                 ccc->in_recycle = FALSE;
                 if (proc_bindings)

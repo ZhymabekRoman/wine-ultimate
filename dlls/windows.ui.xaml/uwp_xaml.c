@@ -4307,6 +4307,7 @@ ULONG WINAPI uwp_ccc_Release( void *iface )
     if (r == 0)
     {
         if (a->item) IInspectable_Release( a->item );
+        if (a->item_container) IInspectable_Release( a->item_container );
         free( a );
     }
     return r;
@@ -4330,7 +4331,14 @@ static HRESULT WINAPI uwp_ccc_GetTrustLevel( void *iface, TrustLevel *tl )
     return S_OK;
 }
 
-static HRESULT WINAPI uwp_ccc_get_ItemContainer( void *iface, void **out ) { if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI uwp_ccc_get_ItemContainer( void *iface, void **out )
+{
+    struct uwp_ccc_args *a = (struct uwp_ccc_args *)iface;
+    if (!out) return E_POINTER;
+    *out = a->item_container;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
 static HRESULT WINAPI uwp_ccc_get_InRecycleQueue( void *iface, boolean *out ) { if (out) *out = ((struct uwp_ccc_args *)iface)->in_recycle; return S_OK; }
 static HRESULT WINAPI uwp_ccc_get_ItemIndex( void *iface, INT32 *out ) { if (out) *out = 0; return S_OK; }
 static HRESULT WINAPI uwp_ccc_get_Item( void *iface, IInspectable **out )
