@@ -574,6 +574,7 @@ struct property_value
     unsigned int value_size;
     void *value;
     struct property_value_weakref *weakref;
+    IUnknown *ftm;
     LONG ref;
 };
 
@@ -826,18 +827,110 @@ static const struct
 };
 
 /*
- * CoreCLR's ComWrappers probes for XAML reference tracking interfaces on COM/WinRT
- * wrappers.  Property values do not participate in reference tracker walks, so return
- * E_NOINTERFACE explicitly without noisy FIXME spew.
+ * Known foreign interfaces routinely probed on Windows.Foundation.PropertyValue
+ * instances by WinUI 3, UWP XAML, CoreCLR ComWrappers, and Wine's XAML runtime
+ * as runtime type checks.  PropertyValue never implements these interfaces on
+ * Windows, so return E_NOINTERFACE explicitly via TRACE without FIXME spam.
  */
-static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
-static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
+static const GUID IID_IReferenceTracker                = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+static const GUID IID_IReferenceTrackerTarget          = {0x64bd43f8, 0xbfee, 0x4ec4, {0xb7, 0xeb, 0x29, 0x35, 0x15, 0x8d, 0xae, 0x21}};
+static const GUID IID_IReferenceTrackerInternal        = {0x02dd3ad0, 0xb9de, 0x4b55, {0xa0, 0xc3, 0x50, 0x72, 0x35, 0xea, 0xe8, 0xea}}; /* DirectUI::IReferenceTrackerInternal */
+static const GUID IID_CoreCLR_TaggedImpl               = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}}; /* CoreCLR ComWrappers IID_TaggedImpl */
+static const GUID IID_IDependencyObject_WinUI          = {0xe7beaee7, 0x160e, 0x50f7, {0x87, 0x89, 0xd6, 0x34, 0x63, 0xf9, 0x79, 0xfa}}; /* Microsoft.UI.Xaml.IDependencyObject */
+static const GUID IID_DirectUI_DependencyObject        = {0x0c881986, 0x86e1, 0x40b3, {0x96, 0x42, 0x9e, 0x50, 0x90, 0xa8, 0xa6, 0xb0}}; /* DirectUI::DependencyObject */
+static const GUID IID_DirectUI_ExternalObjectReference = {0xdc678962, 0x0653, 0x4c92, {0x92, 0xcd, 0x95, 0x94, 0x3d, 0x59, 0x39, 0x00}}; /* DirectUI::ExternalObjectReference */
+static const GUID IID_DirectUI_IExpressionBase         = {0x1f8cc8ba, 0x0cc5, 0x4799, {0xa5, 0x05, 0xf3, 0x58, 0xc9, 0x88, 0x6d, 0x12}}; /* DirectUI::IExpressionBase */
+static const GUID IID_DirectUI_IWeakInspectable        = {0xa7a1f8c9, 0xddd1, 0x4541, {0xac, 0x57, 0x3f, 0x0d, 0xc0, 0x2f, 0x4b, 0x89}}; /* DirectUI::IWeakInspectable */
+static const GUID IID_IFrameworkElement_WinUI          = {0xfe08f13d, 0xdc6a, 0x5495, {0xad, 0x44, 0xc2, 0xd8, 0xd2, 0x18, 0x63, 0xb0}}; /* Microsoft.UI.Xaml.IFrameworkElement */
+static const GUID IID_IToolTip_WinUI                   = {0x67e93d74, 0x5e93, 0x59a1, {0x91, 0xbf, 0x41, 0x3e, 0xfb, 0xeb, 0x90, 0x4c}}; /* Microsoft.UI.Xaml.Controls.IToolTip */
+static const GUID IID_IDataTemplateKey_WinUI           = {0x6e704a95, 0x4b2f, 0x5ba8, {0xad, 0xa5, 0x12, 0x61, 0xc8, 0x32, 0xba, 0xed}}; /* Microsoft.UI.Xaml.IDataTemplateKey */
+static const GUID IID_ISelectorItem_WinUI              = {0x5772c4de, 0x60ea, 0x5492, {0x8c, 0x5e, 0xb3, 0x32, 0x3d, 0x5a, 0x3c, 0xa6}}; /* Microsoft.UI.Xaml.Controls.Primitives.ISelectorItem */
+static const GUID IID_IReference_TypeName              = {0x3830ad99, 0xd8da, 0x53f3, {0x98, 0x9b, 0xfc, 0x92, 0xad, 0x22, 0x27, 0x78}}; /* IReference<Windows.UI.Xaml.Interop.TypeName> */
+static const GUID IID_IReference_Visibility_WinUI      = {0x5cfe6772, 0x5d4b, 0x5f4b, {0xbd, 0xb4, 0xf7, 0x68, 0x86, 0x59, 0xff, 0xe4}}; /* IReference<Microsoft.UI.Xaml.Visibility> */
+static const GUID IID_ICustomPropertyProvider          = {0x7c925755, 0x3e48, 0x42b4, {0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f}}; /* Windows.UI.Xaml.Data.ICustomPropertyProvider */
+static const GUID IID_UWP_ELEM_SELF                    = {0x7a1b2c3d, 0x4e5f, 0x4678, {0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x79}}; /* Wine internal windows.ui.xaml element probe */
+
+static BOOL property_value_is_known_negative_iid(REFIID riid)
+{
+    static const GUID *const negative_iids[] =
+    {
+        &IID_IReferenceTracker,
+        &IID_IReferenceTrackerTarget,
+        &IID_IReferenceTrackerInternal,
+        &IID_CoreCLR_TaggedImpl,
+        &IID_IDependencyObject_WinUI,
+        &IID_DirectUI_DependencyObject,
+        &IID_DirectUI_ExternalObjectReference,
+        &IID_DirectUI_IExpressionBase,
+        &IID_DirectUI_IWeakInspectable,
+        &IID_IFrameworkElement_WinUI,
+        &IID_IToolTip_WinUI,
+        &IID_IDataTemplateKey_WinUI,
+        &IID_ISelectorItem_WinUI,
+        &IID_IReference_TypeName,
+        &IID_IReference_Visibility_WinUI,
+        &IID_ICustomPropertyProvider,
+        &IID_UWP_ELEM_SELF,
+        &IID_IUriRuntimeClass,
+        &IID_IStringable,
+        /* Built-in IReference<T> IIDs when queried against a mismatched PropertyType */
+        &IID_IReference_BYTE,
+        &IID_IReference_INT16,
+        &IID_IReference_UINT16,
+        &IID_IReference_INT32,
+        &IID_IReference_UINT32,
+        &IID_IReference_INT64,
+        &IID_IReference_UINT64,
+        &IID_IReference_boolean,
+        &IID_IReference_FLOAT,
+        &IID_IReference_DOUBLE,
+        &IID_IReference_Char16,
+        &IID_IReference_DateTime,
+        &IID_IReference_TimeSpan,
+        &IID_IReference_GUID,
+        &IID_IReference_Point,
+        &IID_IReference_Size,
+        &IID_IReference_Rect,
+        &IID_IReference_HSTRING,
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(negative_iids); i++)
+        if (IsEqualIID(riid, negative_iids[i])) return TRUE;
+    for (i = 0; i < ARRAY_SIZE(iref_array_iids); i++)
+        if (IsEqualIID(riid, &iref_array_iids[i].iid)) return TRUE;
+    return FALSE;
+}
+
+static HRESULT property_value_query_ftm(struct property_value *impl, REFIID riid, void **out)
+{
+    IUnknown *ftm = impl->ftm;
+
+    if (!ftm)
+    {
+        IUnknown *created = NULL;
+        HRESULT hr = CoCreateFreeThreadedMarshaler((IUnknown *)&impl->IPropertyValue_iface, &created);
+        if (FAILED(hr))
+        {
+            *out = NULL;
+            return hr;
+        }
+        ftm = InterlockedCompareExchangePointer((void **)&impl->ftm, created, NULL);
+        if (ftm)
+            IUnknown_Release(created);
+        else
+            ftm = created;
+    }
+    return IUnknown_QueryInterface(ftm, riid, out);
+}
 
 static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *iface, REFIID riid, void **out)
 {
     struct property_value *impl = impl_from_IPropertyValue(iface);
 
     TRACE("%p, %s, %p\n", impl, debugstr_guid(riid), out);
+
+    if (!out) return E_POINTER;
 
     if (IsEqualIID(riid, &IID_IUnknown)
         || IsEqualIID(riid, &IID_IInspectable)
@@ -848,15 +941,9 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
         *out = &impl->IPropertyValue_iface;
         return S_OK;
     }
-    else if (IsEqualIID(riid, &IID_IReferenceTracker)
-             || IsEqualIID(riid, &IID_IReferenceTrackerTarget))
-    {
-        *out = NULL;
-        return E_NOINTERFACE;
-    }
     else if (IsEqualIID(riid, &IID_IMarshal))
     {
-        return CoCreateFreeThreadedMarshaler((IUnknown *)iface, (IUnknown **)out);
+        return property_value_query_ftm(impl, riid, out);
     }
     else if (IsEqualIID(riid, &IID_IWeakReferenceSource))
     {
@@ -988,6 +1075,14 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
         }
     }
 
+    if (property_value_is_known_negative_iid(riid))
+    {
+        TRACE("PropertyValue (type %d) does not implement %s, returning E_NOINTERFACE.\n",
+              impl->type, debugstr_guid(riid));
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
     *out = NULL;
     return E_NOINTERFACE;
@@ -1044,6 +1139,8 @@ static ULONG STDMETHODCALLTYPE property_value_Release(IPropertyValue *iface)
             }
             free(impl->value);
         }
+        if (impl->ftm)
+            IUnknown_Release(impl->ftm);
         free(impl);
     }
 

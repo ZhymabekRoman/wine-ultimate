@@ -23,6 +23,7 @@
 #include <string.h>
 #include <wchar.h>
 
+#define COBJMACROS
 #include "windef.h"
 #include "winbase.h"
 #include "winstring.h"
@@ -30,6 +31,7 @@
 #include "wine/debug.h"
 
 #include "private.h"
+#include "weakreference.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wintypes);
 
@@ -72,17 +74,29 @@ static BOOL uri_has_scheme( const WCHAR *str )
     return *p == ':';
 }
 
+struct uri_weakref
+{
+    IWeakReference IWeakReference_iface;
+    struct windows_uri *obj;
+    LONG ref;
+};
+
 struct windows_uri
 {
     IUriRuntimeClass IUriRuntimeClass_iface;
     IUriRuntimeClassWithAbsoluteCanonicalUri IUriRuntimeClassWithAbsoluteCanonicalUri_iface;
     IStringable IStringable_iface;
+    IWeakReferenceSource IWeakReferenceSource_iface;
+    struct uri_weakref *weakref;
+    IUnknown *ftm;
     LONG ref;
 
     WCHAR *raw;
     WCHAR *scheme, *user, *password, *host, *path, *query, *fragment, *extension;
     INT32 port;
 };
+
+static SRWLOCK uri_weakref_lock = SRWLOCK_INIT;
 
 static inline struct windows_uri *impl_from_IUriRuntimeClass( IUriRuntimeClass *iface )
 {
@@ -91,6 +105,17 @@ static inline struct windows_uri *impl_from_IUriRuntimeClass( IUriRuntimeClass *
 
 static void windows_uri_destroy( struct windows_uri *impl )
 {
+    AcquireSRWLockExclusive( &uri_weakref_lock );
+    if (impl->weakref)
+    {
+        impl->weakref->obj = NULL;
+        impl->weakref = NULL;
+    }
+    ReleaseSRWLockExclusive( &uri_weakref_lock );
+
+    if (impl->ftm)
+        IUnknown_Release( impl->ftm );
+
     heap_free( impl->raw );
     heap_free( impl->scheme );
     heap_free( impl->user );
@@ -211,6 +236,191 @@ static void uri_parse( struct windows_uri *impl )
 static const IUriRuntimeClassVtbl uri_vtbl;
 static const IUriRuntimeClassWithAbsoluteCanonicalUriVtbl uri_acu_vtbl;
 static const IStringableVtbl uri_stringable_vtbl;
+static const IWeakReferenceSourceVtbl uri_weakref_source_vtbl;
+
+static inline struct uri_weakref *impl_from_uri_IWeakReference( IWeakReference *iface )
+{
+    return CONTAINING_RECORD( iface, struct uri_weakref, IWeakReference_iface );
+}
+
+static HRESULT WINAPI uri_weakref_QueryInterface( IWeakReference *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IWeakReference ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        IWeakReference_AddRef( iface );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI uri_weakref_AddRef( IWeakReference *iface )
+{
+    struct uri_weakref *impl = impl_from_uri_IWeakReference( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI uri_weakref_Release( IWeakReference *iface )
+{
+    struct uri_weakref *impl = impl_from_uri_IWeakReference( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        AcquireSRWLockExclusive( &uri_weakref_lock );
+        if (impl->obj) impl->obj->weakref = NULL;
+        ReleaseSRWLockExclusive( &uri_weakref_lock );
+        heap_free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI uri_weakref_Resolve( IWeakReference *iface, REFIID iid, IInspectable **out )
+{
+    struct uri_weakref *impl = impl_from_uri_IWeakReference( iface );
+    struct windows_uri *obj = NULL;
+    HRESULT hr = S_OK;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    AcquireSRWLockExclusive( &uri_weakref_lock );
+    if (impl->obj)
+    {
+        LONG cur = impl->obj->ref;
+        while (cur > 0)
+        {
+            LONG prev = InterlockedCompareExchange( &impl->obj->ref, cur + 1, cur );
+            if (prev == cur)
+            {
+                obj = impl->obj;
+                break;
+            }
+            cur = prev;
+        }
+    }
+    ReleaseSRWLockExclusive( &uri_weakref_lock );
+
+    if (obj)
+    {
+        hr = IUriRuntimeClass_QueryInterface( &obj->IUriRuntimeClass_iface, iid, (void **)out );
+        IUriRuntimeClass_Release( &obj->IUriRuntimeClass_iface );
+    }
+    return hr;
+}
+
+static const IWeakReferenceVtbl uri_weakref_vtbl =
+{
+    uri_weakref_QueryInterface,
+    uri_weakref_AddRef,
+    uri_weakref_Release,
+    uri_weakref_Resolve,
+};
+
+static inline struct windows_uri *impl_from_uri_IWeakReferenceSource( IWeakReferenceSource *iface )
+{
+    return CONTAINING_RECORD( iface, struct windows_uri, IWeakReferenceSource_iface );
+}
+
+static HRESULT WINAPI uri_weakref_source_QueryInterface( IWeakReferenceSource *iface, REFIID iid, void **out )
+{
+    struct windows_uri *impl = impl_from_uri_IWeakReferenceSource( iface );
+    return IUriRuntimeClass_QueryInterface( &impl->IUriRuntimeClass_iface, iid, out );
+}
+
+static ULONG WINAPI uri_weakref_source_AddRef( IWeakReferenceSource *iface )
+{
+    struct windows_uri *impl = impl_from_uri_IWeakReferenceSource( iface );
+    return IUriRuntimeClass_AddRef( &impl->IUriRuntimeClass_iface );
+}
+
+static ULONG WINAPI uri_weakref_source_Release( IWeakReferenceSource *iface )
+{
+    struct windows_uri *impl = impl_from_uri_IWeakReferenceSource( iface );
+    return IUriRuntimeClass_Release( &impl->IUriRuntimeClass_iface );
+}
+
+static HRESULT WINAPI uri_weakref_source_GetWeakReference( IWeakReferenceSource *iface, IWeakReference **out )
+{
+    struct windows_uri *impl = impl_from_uri_IWeakReferenceSource( iface );
+    struct uri_weakref *wr;
+
+    if (!out) return E_POINTER;
+
+    AcquireSRWLockExclusive( &uri_weakref_lock );
+    wr = impl->weakref;
+    if (!wr)
+    {
+        wr = heap_calloc( 1, sizeof(*wr) );
+        if (!wr)
+        {
+            ReleaseSRWLockExclusive( &uri_weakref_lock );
+            *out = NULL;
+            return E_OUTOFMEMORY;
+        }
+        wr->IWeakReference_iface.lpVtbl = &uri_weakref_vtbl;
+        wr->obj = impl;
+        wr->ref = 1;
+        impl->weakref = wr;
+    }
+    else
+    {
+        InterlockedIncrement( &wr->ref );
+    }
+    ReleaseSRWLockExclusive( &uri_weakref_lock );
+
+    *out = &wr->IWeakReference_iface;
+    return S_OK;
+}
+
+static const IWeakReferenceSourceVtbl uri_weakref_source_vtbl =
+{
+    uri_weakref_source_QueryInterface,
+    uri_weakref_source_AddRef,
+    uri_weakref_source_Release,
+    uri_weakref_source_GetWeakReference,
+};
+
+static HRESULT uri_query_ftm( IUnknown *outer, IUnknown **ftm_slot, REFIID iid, void **out )
+{
+    IUnknown *ftm = *ftm_slot;
+
+    if (!ftm)
+    {
+        IUnknown *created = NULL;
+        HRESULT hr = CoCreateFreeThreadedMarshaler( outer, &created );
+        if (FAILED( hr ))
+        {
+            *out = NULL;
+            return hr;
+        }
+        ftm = InterlockedCompareExchangePointer( (void **)ftm_slot, created, NULL );
+        if (ftm)
+            IUnknown_Release( created );
+        else
+            ftm = created;
+    }
+    return IUnknown_QueryInterface( ftm, iid, out );
+}
+
+/*
+ * Known foreign interfaces routinely probed on Windows.Foundation.Uri instances
+ * and factory by WinUI 3, UWP XAML, CoreCLR ComWrappers, and Wine's XAML runtime.
+ * Uri does not implement these interfaces on Windows, so return E_NOINTERFACE
+ * via TRACE without FIXME spam.
+ */
+static const GUID IID_IReferenceTracker         = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}}; /* IReferenceTracker */
+static const GUID IID_IReferenceTrackerTarget   = {0x64bd43f8, 0xbfee, 0x4ec4, {0xb7, 0xeb, 0x29, 0x35, 0x15, 0x8d, 0xae, 0x21}}; /* IReferenceTrackerTarget */
+static const GUID IID_IReferenceTrackerInternal = {0x02dd3ad0, 0xb9de, 0x4b55, {0xa0, 0xc3, 0x50, 0x72, 0x35, 0xea, 0xe8, 0xea}}; /* DirectUI::IReferenceTrackerInternal */
+static const GUID IID_CoreCLR_TaggedImpl        = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}}; /* CoreCLR ComWrappers IID_TaggedImpl */
+static const GUID IID_DirectUI_DependencyObject = {0x0c881986, 0x86e1, 0x40b3, {0x96, 0x42, 0x9e, 0x50, 0x90, 0xa8, 0xa6, 0xb0}}; /* DirectUI::DependencyObject */
+static const GUID IID_IResourceDictionary_WinUI = {0x1b690975, 0xa710, 0x5783, {0xa6, 0xe1, 0x15, 0x83, 0x6f, 0x61, 0x86, 0xc2}}; /* Microsoft.UI.Xaml.IResourceDictionary */
+static const GUID IID_IUIElement_UWP            = {0x676d0be9, 0xb65c, 0x41c6, {0xba, 0x40, 0x58, 0xcf, 0x87, 0xf2, 0x01, 0xc1}}; /* Windows.UI.Xaml.IUIElement */
+static const GUID IID_UWP_ELEM_SELF             = {0x7a1b2c3d, 0x4e5f, 0x4678, {0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x79}}; /* Wine internal windows.ui.xaml element probe */
 
 static HRESULT windows_uri_create( const WCHAR *raw, struct windows_uri **out )
 {
@@ -221,6 +431,7 @@ static HRESULT windows_uri_create( const WCHAR *raw, struct windows_uri **out )
     impl->IUriRuntimeClass_iface.lpVtbl = &uri_vtbl;
     impl->IUriRuntimeClassWithAbsoluteCanonicalUri_iface.lpVtbl = &uri_acu_vtbl;
     impl->IStringable_iface.lpVtbl = &uri_stringable_vtbl;
+    impl->IWeakReferenceSource_iface.lpVtbl = &uri_weakref_source_vtbl;
     impl->ref = 1;
     impl->raw = heap_strdup( raw );
     if (!impl->raw)
@@ -239,6 +450,8 @@ static HRESULT WINAPI uri_QueryInterface( IUriRuntimeClass *iface, REFIID iid, v
     struct windows_uri *impl = impl_from_IUriRuntimeClass( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -259,6 +472,34 @@ static HRESULT WINAPI uri_QueryInterface( IUriRuntimeClass *iface, REFIID iid, v
     {
         IInspectable_AddRef( (*out = &impl->IStringable_iface) );
         return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        IWeakReferenceSource_AddRef( &impl->IWeakReferenceSource_iface );
+        *out = &impl->IWeakReferenceSource_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IMarshal ))
+    {
+        return uri_query_ftm( (IUnknown *)&impl->IUriRuntimeClass_iface, &impl->ftm, iid, out );
+    }
+
+    if (IsEqualGUID( iid, &IID_IPropertyValue ) ||
+        IsEqualGUID( iid, &IID_IUriRuntimeClassFactory ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerInternal ) ||
+        IsEqualGUID( iid, &IID_CoreCLR_TaggedImpl ) ||
+        IsEqualGUID( iid, &IID_DirectUI_DependencyObject ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary_WinUI ) ||
+        IsEqualGUID( iid, &IID_IUIElement_UWP ) ||
+        IsEqualGUID( iid, &IID_UWP_ELEM_SELF ))
+    {
+        TRACE( "Uri does not implement %s, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -576,6 +817,7 @@ struct uri_statics
     LONG ref;
     struct com_interface_entry *iids_cache; /* stable GetIids pair array, see uri_statics_GetIids */
     ULONG iids_count;
+    IUnknown *ftm;
 };
 
 static inline struct uri_statics *impl_from_IActivationFactory( IActivationFactory *iface )
@@ -633,6 +875,21 @@ static HRESULT WINAPI uri_statics_QueryInterface( IActivationFactory *iface, REF
     {
         IInspectable_AddRef( (*out = &impl->IStringable_iface) );
         return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IMarshal ))
+    {
+        return uri_query_ftm( (IUnknown *)&impl->IActivationFactory_iface, &impl->ftm, iid, out );
+    }
+
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerInternal ) ||
+        IsEqualGUID( iid, &IID_CoreCLR_TaggedImpl ))
+    {
+        TRACE( "Uri factory does not implement %s, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );

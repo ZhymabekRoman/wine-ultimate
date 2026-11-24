@@ -1139,6 +1139,57 @@ static void test_IPropertyValueStatics(void)
         hr = IWeakReference_Resolve(wr, &IID_IPropertyValue, &resolved);
         ok(hr == S_OK && resolved == NULL, "Resolve(dead) got %#lx, %p\n", hr, resolved);
         IWeakReference_Release(wr);
+
+        /* IMarshal (FTM) and negative interface probes on PropertyValue */
+        {
+            static const GUID neg_iids[] =
+            {
+                {0xe7beaee7, 0x160e, 0x50f7, {0x87, 0x89, 0xd6, 0x34, 0x63, 0xf9, 0x79, 0xfa}}, /* Microsoft.UI.Xaml.IDependencyObject */
+                {0x02dd3ad0, 0xb9de, 0x4b55, {0xa0, 0xc3, 0x50, 0x72, 0x35, 0xea, 0xe8, 0xea}}, /* DirectUI::IReferenceTrackerInternal */
+                {0x64bd43f8, 0xbfee, 0x4ec4, {0xb7, 0xeb, 0x29, 0x35, 0x15, 0x8d, 0xae, 0x21}}, /* IReferenceTrackerTarget */
+                {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}}, /* IReferenceTracker */
+                {0x0c881986, 0x86e1, 0x40b3, {0x96, 0x42, 0x9e, 0x50, 0x90, 0xa8, 0xa6, 0xb0}}, /* DirectUI::DependencyObject */
+                {0xdc678962, 0x0653, 0x4c92, {0x92, 0xcd, 0x95, 0x94, 0x3d, 0x59, 0x39, 0x00}}, /* DirectUI::ExternalObjectReference */
+                {0x1f8cc8ba, 0x0cc5, 0x4799, {0xa5, 0x05, 0xf3, 0x58, 0xc9, 0x88, 0x6d, 0x12}}, /* DirectUI::IExpressionBase */
+                {0xfe08f13d, 0xdc6a, 0x5495, {0xad, 0x44, 0xc2, 0xd8, 0xd2, 0x18, 0x63, 0xb0}}, /* Microsoft.UI.Xaml.IFrameworkElement */
+                {0x67e93d74, 0x5e93, 0x59a1, {0x91, 0xbf, 0x41, 0x3e, 0xfb, 0xeb, 0x90, 0x4c}}, /* Microsoft.UI.Xaml.Controls.IToolTip */
+                {0x3830ad99, 0xd8da, 0x53f3, {0x98, 0x9b, 0xfc, 0x92, 0xad, 0x22, 0x27, 0x78}}, /* IReference<TypeName> */
+                {0x6e704a95, 0x4b2f, 0x5ba8, {0xad, 0xa5, 0x12, 0x61, 0xc8, 0x32, 0xba, 0xed}}, /* Microsoft.UI.Xaml.IDataTemplateKey */
+                {0x7c925755, 0x3e48, 0x42b4, {0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f}}, /* ICustomPropertyProvider */
+                {0x7a1b2c3d, 0x4e5f, 0x4678, {0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x79}}, /* IID_UWP_ELEM_SELF */
+            };
+            IMarshal *marshal = NULL;
+            CLSID unmarshal_clsid;
+            DWORD msize = 0;
+            unsigned int i;
+
+            hr = IPropertyValueStatics_CreateInt32(statics, 123, &pv);
+            ok(hr == S_OK, "CreateInt32 got %#lx\n", hr);
+
+            hr = IInspectable_QueryInterface(pv, &IID_IMarshal, (void **)&marshal);
+            ok(hr == S_OK && marshal != NULL, "QI IMarshal got %#lx\n", hr);
+            if (SUCCEEDED(hr) && marshal)
+            {
+                memset(&unmarshal_clsid, 0, sizeof(unmarshal_clsid));
+                hr = IMarshal_GetUnmarshalClass(marshal, &IID_IInspectable, pv, MSHCTX_INPROC, NULL, MSHLFLAGS_NORMAL, &unmarshal_clsid);
+                ok(hr == S_OK, "GetUnmarshalClass got %#lx\n", hr);
+                hr = IMarshal_GetMarshalSizeMax(marshal, &IID_IInspectable, pv, MSHCTX_INPROC, NULL, MSHLFLAGS_NORMAL, &msize);
+                ok(hr == S_OK && msize > 0, "GetMarshalSizeMax got %#lx, size %lu\n", hr, msize);
+                IMarshal_Release(marshal);
+            }
+
+            /* Mismatched IReference<Double>, IUriRuntimeClass, IStringable must fail with E_NOINTERFACE */
+            check_interface(pv, &IID_IReference_DOUBLE, FALSE);
+            check_interface(pv, &IID_IUriRuntimeClass, FALSE);
+            check_interface(pv, &IID_IStringable, FALSE);
+            for (i = 0; i < ARRAY_SIZE(neg_iids); i++)
+            {
+                void *out = (void *)0xdeadbeef;
+                hr = IInspectable_QueryInterface(pv, &neg_iids[i], &out);
+                ok(hr == E_NOINTERFACE && out == NULL, "neg_iids[%u]: got %#lx, %p\n", i, hr, out);
+            }
+            IInspectable_Release(pv);
+        }
     }
 
     IPropertyValueStatics_Release(statics);
@@ -1831,6 +1882,129 @@ done:
     RoUninitialize();
 }
 
+static void test_Uri(void)
+{
+    static const GUID neg_iids[] =
+    {
+        {0x0c881986, 0x86e1, 0x40b3, {0x96, 0x42, 0x9e, 0x50, 0x90, 0xa8, 0xa6, 0xb0}}, /* DirectUI::DependencyObject */
+        {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}}, /* IReferenceTracker */
+        {0x7a1b2c3d, 0x4e5f, 0x4678, {0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x79}}, /* IID_UWP_ELEM_SELF */
+        {0x1b690975, 0xa710, 0x5783, {0xa6, 0xe1, 0x15, 0x83, 0x6f, 0x61, 0x86, 0xc2}}, /* Microsoft.UI.Xaml.IResourceDictionary */
+        {0x676d0be9, 0xb65c, 0x41c6, {0xba, 0x40, 0x58, 0xcf, 0x87, 0xf2, 0x01, 0xc1}}, /* Windows.UI.Xaml.IUIElement */
+    };
+    static const WCHAR raw_uri[] = L"https://example.com:8443/path?k=v#frag";
+    IActivationFactory *factory = NULL;
+    IUriRuntimeClassFactory *uri_factory = NULL;
+    IUriRuntimeClass *uri = NULL;
+    IStringable *stringable = NULL;
+    IWeakReferenceSource *wrs = NULL;
+    IWeakReference *wr = NULL;
+    IInspectable *resolved = NULL;
+    IMarshal *marshal = NULL;
+    CLSID unmarshal_clsid;
+    DWORD msize = 0;
+    HSTRING name, raw, str = NULL;
+    unsigned int i;
+    HRESULT hr;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK, "RoInitialize failed, hr %#lx.\n", hr );
+
+    hr = WindowsCreateString( RuntimeClass_Windows_Foundation_Uri,
+                              lstrlenW( RuntimeClass_Windows_Foundation_Uri ), &name );
+    ok( hr == S_OK, "WindowsCreateString got %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( name, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( name );
+    ok( hr == S_OK, "RoGetActivationFactory(Uri) got %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        RoUninitialize();
+        return;
+    }
+
+    check_interface( factory, &IID_IUnknown, TRUE );
+    check_interface( factory, &IID_IInspectable, TRUE );
+    check_interface( factory, &IID_IAgileObject, TRUE );
+    check_interface( factory, &IID_IActivationFactory, TRUE );
+    check_interface( factory, &IID_IUriRuntimeClassFactory, TRUE );
+    check_interface( factory, &IID_IUriEscapeStatics, TRUE );
+    check_interface( factory, &IID_IMarshal, TRUE );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IUriRuntimeClassFactory, (void **)&uri_factory );
+    ok( hr == S_OK, "QI IUriRuntimeClassFactory got %#lx.\n", hr );
+
+    hr = WindowsCreateString( raw_uri, lstrlenW( raw_uri ), &raw );
+    ok( hr == S_OK, "got %#lx.\n", hr );
+    hr = IUriRuntimeClassFactory_CreateUri( uri_factory, raw, &uri );
+    WindowsDeleteString( raw );
+    ok( hr == S_OK && uri != NULL, "CreateUri got %#lx.\n", hr );
+
+    check_interface( uri, &IID_IUnknown, TRUE );
+    check_interface( uri, &IID_IInspectable, TRUE );
+    check_interface( uri, &IID_IAgileObject, TRUE );
+    check_interface( uri, &IID_IUriRuntimeClass, TRUE );
+    check_interface( uri, &IID_IUriRuntimeClassWithAbsoluteCanonicalUri, TRUE );
+    check_interface( uri, &IID_IStringable, TRUE );
+    check_interface( uri, &IID_IWeakReferenceSource, TRUE );
+    check_interface( uri, &IID_IMarshal, TRUE );
+
+    /* IStringable */
+    hr = IUriRuntimeClass_QueryInterface( uri, &IID_IStringable, (void **)&stringable );
+    ok( hr == S_OK, "QI IStringable got %#lx.\n", hr );
+    hr = IStringable_ToString( stringable, &str );
+    ok( hr == S_OK && str != NULL, "ToString got %#lx.\n", hr );
+    WindowsDeleteString( str );
+    IStringable_Release( stringable );
+
+    /* IMarshal (FTM) */
+    hr = IUriRuntimeClass_QueryInterface( uri, &IID_IMarshal, (void **)&marshal );
+    ok( hr == S_OK && marshal != NULL, "QI IMarshal got %#lx.\n", hr );
+    if (SUCCEEDED( hr ) && marshal)
+    {
+        memset( &unmarshal_clsid, 0, sizeof(unmarshal_clsid) );
+        hr = IMarshal_GetUnmarshalClass( marshal, &IID_IUriRuntimeClass, uri, MSHCTX_INPROC, NULL,
+                                         MSHLFLAGS_NORMAL, &unmarshal_clsid );
+        ok( hr == S_OK, "GetUnmarshalClass got %#lx.\n", hr );
+        hr = IMarshal_GetMarshalSizeMax( marshal, &IID_IUriRuntimeClass, uri, MSHCTX_INPROC, NULL,
+                                         MSHLFLAGS_NORMAL, &msize );
+        ok( hr == S_OK && msize > 0, "GetMarshalSizeMax got %#lx, size %lu.\n", hr, msize );
+        IMarshal_Release( marshal );
+    }
+
+    /* Negative interface probes on Uri instance */
+    check_interface( uri, &IID_IPropertyValue, FALSE );
+    check_interface( uri, &IID_IUriRuntimeClassFactory, FALSE );
+    for (i = 0; i < ARRAY_SIZE(neg_iids); i++)
+    {
+        void *out = (void *)0xdeadbeef;
+        hr = IUriRuntimeClass_QueryInterface( uri, &neg_iids[i], &out );
+        ok( hr == E_NOINTERFACE && out == NULL, "uri neg_iids[%u]: got %#lx, %p.\n", i, hr, out );
+    }
+
+    /* IWeakReferenceSource lifecycle */
+    hr = IUriRuntimeClass_QueryInterface( uri, &IID_IWeakReferenceSource, (void **)&wrs );
+    ok( hr == S_OK, "QI IWeakReferenceSource got %#lx.\n", hr );
+    hr = IWeakReferenceSource_GetWeakReference( wrs, &wr );
+    ok( hr == S_OK && wr != NULL, "GetWeakReference got %#lx.\n", hr );
+    IWeakReferenceSource_Release( wrs );
+
+    hr = IWeakReference_Resolve( wr, &IID_IUriRuntimeClass, &resolved );
+    ok( hr == S_OK && resolved != NULL, "Resolve(alive) got %#lx, %p.\n", hr, resolved );
+    IInspectable_Release( resolved );
+
+    IUriRuntimeClass_Release( uri );
+
+    resolved = (IInspectable *)0xdeadbeef;
+    hr = IWeakReference_Resolve( wr, &IID_IUriRuntimeClass, &resolved );
+    ok( hr == S_OK && resolved == NULL, "Resolve(dead) got %#lx, %p.\n", hr, resolved );
+    IWeakReference_Release( wr );
+
+    IUriRuntimeClassFactory_Release( uri_factory );
+    IActivationFactory_Release( factory );
+    RoUninitialize();
+}
+
 START_TEST(wintypes)
 {
     IsWow64Process(GetCurrentProcess(), &is_wow64);
@@ -1839,6 +2013,7 @@ START_TEST(wintypes)
     test_IApiInformationStatics();
     test_IBufferStatics();
     test_IPropertyValueStatics();
+    test_Uri();
     test_RoParseTypeName();
     test_RoResolveNamespace();
     test_RoGetMetaDataFile();
