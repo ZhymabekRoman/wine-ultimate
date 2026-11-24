@@ -32,6 +32,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -123,6 +124,46 @@ timeout_t server_start_time = 0;  /* server startup time */
 char *server_dir = NULL;   /* server directory */
 int server_dir_fd = -1;    /* file descriptor for the server dir */
 int config_dir_fd = -1;    /* file descriptor for the config dir */
+
+int server_prealloc_fd( int fd, size_t size )
+{
+#ifdef __linux__
+    int err;
+    do {
+        err = posix_fallocate( fd, 0, (off_t)size );
+    } while (err == EINTR);
+    if (!err) return 0;
+    if (err != EOPNOTSUPP && err != EINVAL) return -1;
+#endif
+    return ftruncate( fd, (off_t)size );
+}
+
+void *server_create_shm_arena( const char *name, size_t size )
+{
+    int fd;
+    void *ptr;
+
+    if (server_dir_fd == -1) return NULL;
+    unlinkat( server_dir_fd, name, 0 );
+    fd = openat( server_dir_fd, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600 );
+    if (fd == -1 && errno == EEXIST)
+        fd = openat( server_dir_fd, name, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
+    if (fd == -1) return NULL;
+    if (server_prealloc_fd( fd, size ) == -1)
+    {
+        close( fd );
+        unlinkat( server_dir_fd, name, 0 );
+        return NULL;
+    }
+    ptr = mmap( NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED)
+    {
+        unlinkat( server_dir_fd, name, 0 );
+        return NULL;
+    }
+    return ptr;
+}
 
 static struct master_socket *master_socket;  /* the master socket object */
 static struct timeout_user *master_timeout;

@@ -216,24 +216,12 @@ static inline void iocp_shm_spin_unlock( uint32_t *lock )
 
 static void init_iocp_shm(void)
 {
-    int fd;
     void *ptr;
     uint32_t i;
 
     if (iocp_shm_inited) return;
     iocp_shm_inited = 1;
-    if (server_dir_fd == -1) return;
-
-    fd = openat( server_dir_fd, "iocp_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
-    if (fd == -1) return;
-    if (ftruncate( fd, sizeof(struct iocp_shm) ) == -1)
-    {
-        close( fd );
-        return;
-    }
-    ptr = mmap( NULL, sizeof(struct iocp_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
-    close( fd );
-    if (ptr == MAP_FAILED) return;
+    if (!(ptr = server_create_shm_arena( "iocp_shm", sizeof(struct iocp_shm) ))) return;
 
     iocp_shm = ptr;
     memset( iocp_shm, 0, sizeof(*iocp_shm) );

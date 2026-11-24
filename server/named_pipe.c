@@ -1715,7 +1715,7 @@ static void pipe_shm_init_pair( struct pipe_end *server, struct pipe_end *client
 
     if (relay_wanted( server ) || relay_wanted( client )) return;
     if ((sfd = memfd_create( "wine-pipe", MFD_CLOEXEC )) == -1) return;
-    if (ftruncate( sfd, sizeof(struct pipe_shm) ) == -1)
+    if (server_prealloc_fd( sfd, sizeof(struct pipe_shm) ) == -1)
     {
         close( sfd );
         return;

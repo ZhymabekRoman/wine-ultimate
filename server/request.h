@@ -62,6 +62,8 @@ extern int wait_for_lock(void);
 extern int kill_lock_owner( int sig );
 extern char *server_dir;
 extern int server_dir_fd, config_dir_fd;
+extern int server_prealloc_fd( int fd, size_t size );
+extern void *server_create_shm_arena( const char *name, size_t size );
 
 extern void trace_request(void);
 extern void trace_reply( enum request req, const union generic_reply *reply );

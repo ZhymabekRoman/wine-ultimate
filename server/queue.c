@@ -223,23 +223,11 @@ static inline void msg_shm_spin_unlock( uint32_t *lock )
 
 static void init_msg_shm(void)
 {
-    int fd;
     void *ptr;
 
     if (msg_shm_inited) return;
     msg_shm_inited = 1;
-    if (server_dir_fd == -1) return;
-
-    fd = openat( server_dir_fd, "msg_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
-    if (fd == -1) return;
-    if (ftruncate( fd, sizeof(struct msg_shm) ) == -1)
-    {
-        close( fd );
-        return;
-    }
-    ptr = mmap( NULL, sizeof(struct msg_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
-    close( fd );
-    if (ptr == MAP_FAILED) return;
+    if (!(ptr = server_create_shm_arena( "msg_shm", sizeof(struct msg_shm) ))) return;
 
     msg_shm = (struct msg_shm *)ptr;
     msg_shm->version = MSG_SHM_VERSION;

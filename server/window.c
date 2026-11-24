@@ -399,21 +399,11 @@ static struct desktop *win_tree_shm_desktop = NULL;
 
 static void init_win_tree_shm(void)
 {
-    int fd;
     void *ptr;
 
     if (win_tree_shm || win_tree_shm_tried || server_dir_fd == -1) return;
     win_tree_shm_tried = 1;
-    fd = openat( server_dir_fd, "win_tree_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
-    if (fd == -1) return;
-    if (ftruncate( fd, sizeof(struct win_tree_shm) ) == -1)
-    {
-        close( fd );
-        return;
-    }
-    ptr = mmap( NULL, sizeof(struct win_tree_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
-    close( fd );
-    if (ptr == MAP_FAILED) return;
+    if (!(ptr = server_create_shm_arena( "win_tree_shm", sizeof(struct win_tree_shm) ))) return;
 
     win_tree_shm = ptr;
     memset( win_tree_shm, 0, sizeof(*win_tree_shm) );

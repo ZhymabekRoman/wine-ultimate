@@ -151,21 +151,11 @@ static int obj_shm_tried = 0;
 
 static void init_obj_shm(void)
 {
-    int fd;
     void *ptr;
 
     if (obj_shm || obj_shm_tried || server_dir_fd == -1) return;
     obj_shm_tried = 1;
-    fd = openat( server_dir_fd, "obj_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
-    if (fd == -1) return;
-    if (ftruncate( fd, sizeof(struct obj_shm) ) == -1)
-    {
-        close( fd );
-        return;
-    }
-    ptr = mmap( NULL, sizeof(struct obj_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
-    close( fd );
-    if (ptr == MAP_FAILED) return;
+    if (!(ptr = server_create_shm_arena( "obj_shm", sizeof(struct obj_shm) ))) return;
 
     obj_shm = ptr;
     memset( obj_shm, 0, sizeof(*obj_shm) );

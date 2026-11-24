@@ -490,20 +490,9 @@ static void reg_shm_set_neg_open( uint64_t parent_key_id, uint32_t wow_flags,
 
 static void init_reg_shm(void)
 {
-    int fd;
     void *ptr;
 
-    if (server_dir_fd == -1) return;
-    fd = openat( server_dir_fd, "reg_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
-    if (fd == -1) return;
-    if (ftruncate( fd, sizeof(struct reg_shm) ) == -1)
-    {
-        close( fd );
-        return;
-    }
-    ptr = mmap( NULL, sizeof(struct reg_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
-    close( fd );
-    if (ptr == MAP_FAILED) return;
+    if (!(ptr = server_create_shm_arena( "reg_shm", sizeof(struct reg_shm) ))) return;
 
     reg_shm = ptr;
     memset( reg_shm, 0, sizeof(*reg_shm) );
