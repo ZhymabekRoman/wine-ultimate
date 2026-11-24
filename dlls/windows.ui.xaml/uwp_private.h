@@ -1222,6 +1222,7 @@ struct reference_int32;
 struct command_iface;
 /* Generic event delegate: { QueryInterface, AddRef, Release, Invoke(sender, args) }. */
 struct xaml_event_handler;
+COLORREF argb_to_colorref( UINT32 argb );
 UINT32 apply_opacity_to_argb( UINT32 argb, double opacity );
 COLORREF blend_argb_over( UINT32 fg_argb, COLORREF bg_cr );
 IInspectable *box_bool_value( boolean b );
@@ -1797,6 +1798,8 @@ extern BOOL g_island_d3d11_failed;
 BOOL xaml_gpu_begin_frame_rtv( ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv,
                                UINT width, UINT height, COLORREF clear_color );
 BOOL xaml_gpu_end_frame_rtv( ID3D11DeviceContext *ctx, UINT *out_instances, UINT *out_hits, UINT *out_misses );
+BOOL xaml_layout_render_gpu_rtv( HWND hwnd, int width, int height, IInspectable *content,
+                                 ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv );
 extern int g_island_hwnd_cnt;
 extern HWND g_island_hwnds[16];
 extern struct uwp_element *g_last_closed_flyout;

@@ -12,9 +12,11 @@ SOURCES = \
 	dp_vsm.c \
 	frame.c \
 	gpu_renderer.c \
-	layout_gdi.c \
-	layout_gpu.c \
+	image_loader.c \
+	layout_engine.c \
 	main.c \
+	paint_gdi.c \
+	paint_gpu.c \
 	pri.c \
 	swapchain_panel.c \
 	uwp_binding.c \
@@ -24,7 +26,9 @@ SOURCES = \
 	uwp_factories.c \
 	uwp_guids.c \
 	uwp_input.c \
+	uwp_island.c \
 	uwp_reflection.c \
+	uwp_statics.c \
 	uwp_tree_lifecycle.c \
 	uwp_xaml.c \
 	webview2_bridge.c \

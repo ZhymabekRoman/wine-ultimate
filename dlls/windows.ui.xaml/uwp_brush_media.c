@@ -1060,6 +1060,31 @@ const void *uwp_scb_vtbl[16] =
     [8 ... 15] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_brush_get_Opacity( void *iface, double *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = impl ? impl->brush_opacity : 1.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_brush_put_Opacity( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->brush_opacity = val;
+    return S_OK;
+}
+const void *uwp_brush_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_brush_get_Opacity,
+    [7] = uwp_brush_put_Opacity,
+    [8 ... 15] = uwp_generic_noop,
+};
+
 /* ============================================================================
  * Bundled XAML FontFamily parser & AddFontResourceExW cache + IFontFamily/IFontIcon
  * ============================================================================ */
