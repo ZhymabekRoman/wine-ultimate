@@ -765,10 +765,9 @@ static void application_data_fire_data_changed( struct application_data *impl )
 
 /* ---- per-package identity + settings persistence -----------------------
  *
- * Package key = WINE_PACKAGE_FAMILY_NAME (set by the lane launcher for
- * packaged apps, kernelbase appmodel pattern of 36782d4f). Unpackaged
- * fallback = exe base name without extension, mirroring the
- * %LOCALAPPDATA%\<exe> convention.
+ * Package key = GetCurrentPackageFamilyName (resolved from AppxManifest
+ * auto-identity and AppModel registry). Unpackaged fallback = exe base name
+ * without extension, mirroring the %LOCALAPPDATA%\<exe> convention.
  *
  * Settings containers persist to HKCU\Software\<key>\Settings (Local) and
  * ...\RoamingSettings (Roaming) as
@@ -782,13 +781,10 @@ static void application_data_fire_data_changed( struct application_data *impl )
 
 static void get_package_name( WCHAR *buf, DWORD size )
 {
-    static const WCHAR env_name[] = L"WINE_PACKAGE_FAMILY_NAME";
     WCHAR path[MAX_PATH], *p;
     UINT32 pkg_len = size;
     DWORD len;
 
-    len = GetEnvironmentVariableW( env_name, buf, size );
-    if (len && len < size) return;
     if (GetCurrentPackageFamilyName( &pkg_len, buf ) == ERROR_SUCCESS && buf[0]) return;
 
     len = GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );

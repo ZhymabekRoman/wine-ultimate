@@ -28,6 +28,7 @@
 #include "winstring.h"
 #include "errhandlingapi.h"
 #include "winternl.h"
+#include "appmodel.h"
 
 #include "combase_private.h"
 
@@ -436,6 +437,28 @@ static void scan_appmodel_registered_paths_locked( void )
     }
 }
 
+static void scan_current_package_paths_locked( void )
+{
+    BYTE info_buf[8192], *heap_buf = NULL;
+    UINT32 sz = sizeof(info_buf), cnt = 0, i;
+    PACKAGE_INFO *info = (PACKAGE_INFO *)info_buf;
+    LONG ret;
+
+    ret = GetCurrentPackageInfo( 0, &sz, info_buf, &cnt );
+    if (ret == ERROR_INSUFFICIENT_BUFFER && (heap_buf = malloc( sz )))
+    {
+        info = (PACKAGE_INFO *)heap_buf;
+        ret = GetCurrentPackageInfo( 0, &sz, heap_buf, &cnt );
+    }
+    if (ret == ERROR_SUCCESS)
+    {
+        for (i = 0; i < cnt; i++)
+            if (info[i].path && info[i].path[0])
+                scan_appx_manifest_file( info[i].path );
+    }
+    free( heap_buf );
+}
+
 /* True for the WinUI XAML surface (Microsoft.UI.Xaml and Microsoft.UI.Xaml.*),
  * the class family a WinUI 3 app re-implements in its own Microsoft.UI.Xaml.dll
  * and a WinUI 2.8 app leaves on Wine's UWP windows.ui.xaml.dll.  Used to order
@@ -456,6 +479,7 @@ static BOOL is_microsoft_ui_xaml_class( const WCHAR *classid )
 static BOOL keep_builtin_winui_xaml( void )
 {
     WCHAR buf[MAX_PATH];
+    UINT32 pkg_len = ARRAY_SIZE(buf);
     DWORD len = GetModuleFileNameW( NULL, buf, ARRAY_SIZE(buf) );
     if (len && len < ARRAY_SIZE(buf))
     {
@@ -463,7 +487,7 @@ static BOOL keep_builtin_winui_xaml( void )
         base = base ? base + 1 : buf;
         if (!wcsicmp( base, L"WhatsApp.Root.exe" )) return TRUE;
     }
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ) &&
+    if (GetCurrentPackageFamilyName( &pkg_len, buf ) == ERROR_SUCCESS &&
         !wcsicmp( buf, L"5319275A.WhatsAppDesktop_cv1g1gvanyjgm" ))
         return TRUE;
     return FALSE;
@@ -567,8 +591,7 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         if (!defer_xaml || !is_microsoft_ui_xaml_class( static_exact_routes[i].classid ))
             class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
 
-    scan_appx_env_paths_locked( L"WINE_PACKAGE_PATH" );
-    scan_appx_env_paths_locked( L"WINE_FRAMEWORK_PACKAGE_PATH" );
+    scan_current_package_paths_locked();
     scan_appx_env_paths_locked( L"WINEPATH" );
     scan_appx_env_paths_locked( L"PATH" );
     scan_appmodel_registered_paths_locked();

@@ -1190,19 +1190,15 @@ static void set_initial_wm_hints( Display *display, Window window, HWND hwnd )
      * app whose window class is named after the package (windows.ui CoreWindow)
      * shows the package short name; fall back to the process name. */
     wclass[0] = 0;
-    if (!(name = getenv( "WINE_PACKAGE_CLASS" )) || !name[0])
-        name = NULL;
-    else if (!(name = strdup( name )))
-        name = NULL;
-    if (!name && hwnd)
+    if (hwnd)
     {
-        UNICODE_STRING name;
-        name.Buffer = wclass;
-        name.MaximumLength = sizeof(wclass);
-        name.Length = 0;
-        if (!NtUserGetClassName( hwnd, TRUE, &name )) wclass[0] = 0;
+        UNICODE_STRING cls;
+        cls.Buffer = wclass;
+        cls.MaximumLength = sizeof(wclass);
+        cls.Length = 0;
+        if (!NtUserGetClassName( hwnd, TRUE, &cls )) wclass[0] = 0;
     }
-    if (!name && wclass[0])
+    if (wclass[0])
     {
         int len = lstrlenW( wclass );
         if ((name = malloc((len + 1) * 3 + 1)))

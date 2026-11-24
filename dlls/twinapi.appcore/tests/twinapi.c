@@ -22,6 +22,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winuser.h"
+#include "appmodel.h"
 
 #define COBJMACROS
 #include "initguid.h"
@@ -1349,13 +1350,16 @@ static void test_CoreApplication_properties(void)
 
     hr = pSHGetFolderPathW( NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, base );
     ok( hr == S_OK, "SHGetFolderPathW failed, hr %#lx\n", hr );
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", family, ARRAY_SIZE(family) ))
     {
-        GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) );
-        if ((p = wcsrchr( exe, L'\\' ))) p++;
-        else p = exe;
-        lstrcpyW( family, p );
-        if ((p = wcsrchr( family, L'.' )) && p > family) *p = 0;
+        UINT32 pkg_len = ARRAY_SIZE(family);
+        if (GetCurrentPackageFamilyName( &pkg_len, family ) != ERROR_SUCCESS || !family[0])
+        {
+            GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) );
+            if ((p = wcsrchr( exe, L'\\' ))) p++;
+            else p = exe;
+            lstrcpyW( family, p );
+            if ((p = wcsrchr( family, L'.' )) && p > family) *p = 0;
+        }
     }
     swprintf( ini_path, ARRAY_SIZE(ini_path), L"%ls\\%ls\\Session\\state.ini", base, family );
     DeleteFileW( ini_path );

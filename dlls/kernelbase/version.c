@@ -1563,7 +1563,7 @@ BOOL WINAPI GetVersionExW( OSVERSIONINFOW *info )
     return TRUE;
 }
 
-static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name );
+static LONG package_str_from_registry( const WCHAR *reg_value, UINT32 *length, WCHAR *out );
 static LONG package_fill_str( const WCHAR *src, UINT32 *length, WCHAR *out );
 static BOOL get_current_package_full_name( WCHAR *buf, UINT32 cch );
 LONG WINAPI GetCurrentPackagePath( UINT32 *length, WCHAR *path );
@@ -1572,14 +1572,12 @@ LONG WINAPI PackageFamilyNameFromFullName( const WCHAR *full_name, UINT32 *lengt
 LONG WINAPI PackageIdFromFullName( const WCHAR *full_name, UINT32 flags, UINT32 *buffer_length, BYTE *buffer );
 
 /*
- * Package identity, two layers.
+ * Package identity, two sources:
  *
- *  1. Env vars (WINE_PACKAGE_FULL_NAME / WINE_PACKAGE_FAMILY_NAME / WINE_PACKAGE_PATH /
- *     WINE_PACKAGE_AUMID / WINE_FRAMEWORK_PACKAGE_*) pin an identity per run; a gate
- *     sets them to override everything.
- *  2. Below the env vars sits the package registration -- the facts the Windows
- *     apprepository service keeps in its StateRepository, in the registry, seeded
- *     per prefix (the layout Wine's apprepository consumers read):
+ *  1. Auto-identity from AppxManifest.xml beside the running executable
+ *     (resolved once into appmodel_auto_cache and mirrored into HKCU).
+ *  2. The package registration -- the facts the Windows apprepository service
+ *     keeps in its StateRepository, in the registry, seeded per prefix:
  *
  *       <root>\Software\Microsoft\Windows NT\CurrentVersion\AppModel\
  *         Exes\<exe base name>   PackageFullName, PackagePath, ApplicationUserModelId
@@ -2220,30 +2218,15 @@ static LONG package_str_from_registry( const WCHAR *value, UINT32 *length, WCHAR
     return package_fill_str( buf, length, out );
 }
 
-/* Env var first (per-run override), registration second. */
-static LONG package_str( const WCHAR *env_var, const WCHAR *reg_value, UINT32 *length, WCHAR *out )
-{
-    LONG ret = package_str_from_env( env_var, length, out );
-
-    if (ret != APPMODEL_ERROR_NO_PACKAGE) return ret;
-    return package_str_from_registry( reg_value, length, out );
-}
-
-/* Path of a registered package: the env paths describe the running package and
- * its env framework; the registration covers every deployed package. */
+/* Path of a registered or manifest-resolved package. */
 static BOOL package_path_for( const WCHAR *full_name, WCHAR *buf, DWORD cch )
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
-    WCHAR cur[512] = L"", fw[512] = L"", subkey[576];
+    WCHAR cur[512] = L"", subkey[576];
     SIZE_T i;
 
     appmodel_ensure_auto_identity();
     get_current_package_full_name( cur, ARRAY_SIZE(cur) );
-    if (cur[0] && !wcsicmp( cur, full_name ) &&
-        GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch )) return TRUE;
-    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ) &&
-        !wcsicmp( fw, full_name ) &&
-        GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_PATH", buf, cch )) return TRUE;
     if (appmodel_auto_cache.valid)
     {
         for (i = 0; i < appmodel_auto_cache.fw_count; i++)
@@ -2341,15 +2324,18 @@ static void appmodel_enum_packages( struct pkg_entry *entries, UINT32 *n )
 }
 
 /* The registered package set, narrowed to one family when family is non-NULL:
- * the running package first, then the env framework, then the registration. */
+ * the running package first, its auto-identity frameworks, then the registration. */
 static UINT32 collect_packages( struct pkg_entry *entries, const WCHAR *family )
 {
-    WCHAR full[512], fw[512];
+    WCHAR full[512];
     UINT32 n = 0, i, j;
 
     if (get_current_package_full_name( full, ARRAY_SIZE(full) )) pkg_entry_add( entries, &n, full, FALSE );
-    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
-        pkg_entry_add( entries, &n, fw, TRUE );
+    if (appmodel_auto_cache.valid)
+    {
+        for (i = 0; i < appmodel_auto_cache.fw_count; i++)
+            pkg_entry_add( entries, &n, appmodel_auto_cache.fw_full[i], TRUE );
+    }
     appmodel_enum_packages( entries, &n );
 
     if (!family) return n;
@@ -2366,7 +2352,7 @@ static UINT32 collect_packages( struct pkg_entry *entries, const WCHAR *family )
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *length, WCHAR *id )
 {
-    LONG ret = package_str( L"WINE_PACKAGE_AUMID", L"ApplicationUserModelId", length, id );
+    LONG ret = package_str_from_registry( L"ApplicationUserModelId", length, id );
     if (ret == APPMODEL_ERROR_NO_PACKAGE)
     {
         FIXME( "(%p %p): stub\n", length, id );
@@ -2417,18 +2403,6 @@ HRESULT WINAPI ParseApplicationUserModelId( const WCHAR *app_user_model_id, UINT
     return S_OK;
 }
 
-/* EXPERIMENT: source package identity from env vars so packaged apps (WhatsApp
- * WinUI3) get a non-empty package context. Set WINE_PACKAGE_FULL_NAME /
- * WINE_PACKAGE_FAMILY_NAME when launching. */
-static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name )
-{
-    WCHAR buf[512];
-    DWORD len = GetEnvironmentVariableW( var, buf, ARRAY_SIZE(buf) );
-    if (!len || len >= ARRAY_SIZE(buf)) return APPMODEL_ERROR_NO_PACKAGE;
-    if (!length) return ERROR_INVALID_PARAMETER;
-    return package_fill_str( buf, length, name );
-}
-
 /***********************************************************************
  *         GetCurrentPackageFamilyName   (kernelbase.@)
  */
@@ -2436,7 +2410,7 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length,
 {
     WCHAR full[512], fam[256];
     UINT32 len = ARRAY_SIZE(fam);
-    LONG ret = package_str( L"WINE_PACKAGE_FAMILY_NAME", L"PackageFamilyName", length, name );
+    LONG ret = package_str_from_registry( L"PackageFamilyName", length, name );
 
     if (ret != APPMODEL_ERROR_NO_PACKAGE) return ret;
     /* a package with an identity has a family: derive it from the full name */
@@ -2453,13 +2427,13 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length,
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, WCHAR *name )
 {
-    LONG ret = package_str( L"WINE_PACKAGE_FULL_NAME", L"PackageFullName", length, name );
+    LONG ret = package_str_from_registry( L"PackageFullName", length, name );
     if (ret == APPMODEL_ERROR_NO_PACKAGE) FIXME( "(%p %p): no package\n", length, name );
     return ret;
 }
 
 
-/* get the current package full name (env var, then registration) into a stack buffer */
+/* get the current package full name (auto-identity, then registration) into a stack buffer */
 static BOOL get_current_package_full_name( WCHAR *buf, UINT32 cch )
 {
     UINT32 len = cch;
@@ -2554,7 +2528,7 @@ static void appmodel_add_pkg_dependencies( struct pkg_entry *entries, UINT32 *n,
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
     struct pkg_entry entries[MAX_PKG_ENTRIES];
-    WCHAR full[512], fw[512];
+    WCHAR full[512];
     BYTE id_buf[512];
     PACKAGE_INFO *info;
     SIZE_T need = 0, str_off;
@@ -2565,18 +2539,15 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
 
     n = 0;
     full[0] = 0;
-    if (get_current_package_full_name( full, ARRAY_SIZE(full) )) pkg_entry_add( entries, &n, full, FALSE );
-    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
-        pkg_entry_add( entries, &n, fw, TRUE );
-    else
+    if (get_current_package_full_name( full, ARRAY_SIZE(full) ))
     {
-        if (full[0])
-            appmodel_add_pkg_dependencies( entries, &n, full );
-        if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ) && appmodel_auto_cache.valid)
-        {
-            for (i = 0; i < appmodel_auto_cache.fw_count; i++)
-                pkg_entry_add( entries, &n, appmodel_auto_cache.fw_full[i], TRUE );
-        }
+        pkg_entry_add( entries, &n, full, FALSE );
+        appmodel_add_pkg_dependencies( entries, &n, full );
+    }
+    if (appmodel_auto_cache.valid)
+    {
+        for (i = 0; i < appmodel_auto_cache.fw_count; i++)
+            pkg_entry_add( entries, &n, appmodel_auto_cache.fw_full[i], TRUE );
     }
     if (!n)
     {
@@ -2851,8 +2822,7 @@ LONG WINAPI GetPackagePathByFullName(const WCHAR *name, UINT32 *len, WCHAR *path
     if (!len || !name)
         return ERROR_INVALID_PARAMETER;
 
-    /* env layer (WINE_PACKAGE_PATH, WINE_FRAMEWORK_PACKAGE_PATH) first, then
-     * the PackagePath of the registered deployment */
+    /* auto-identity first, then the PackagePath of the registered deployment */
     if (package_path_for( name, buf, ARRAY_SIZE(buf) )) return package_fill_str( buf, len, path );
 
     FIXME( "(%s %p %p): no package path\n", debugstr_w(name), len, path );
@@ -2872,13 +2842,13 @@ LONG WINAPI GetPackagePathByFullName2(const WCHAR *name, UINT32 type, UINT32 *le
 /*
  * Package identity v2/v3 layer.
  *
- * Extends the env-var driven v1 layer (WINE_PACKAGE_FULL_NAME / WINE_PACKAGE_PATH /
- * WINE_FRAMEWORK_PACKAGE_*) to the widened APIs packaged UWP apps ask for on
- * Win10+: 64-bit buffer sizes, the extended PACKAGE_INFO2/PACKAGE_INFO3 layouts,
- * package context strings, FindPackagesByPackageFamily, and CloseState.
+ * Extends the v1 AppModel layer (AppxManifest auto-identity + AppModel registry)
+ * to the widened APIs packaged UWP apps ask for on Win10+: 64-bit buffer sizes,
+ * the extended PACKAGE_INFO2/PACKAGE_INFO3 layouts, package context strings,
+ * FindPackagesByPackageFamily, and CloseState.
  * The context strings are opaque on Windows; the only identity this layer has
  * is the full name, so the context APIs hand that back. Family queries answer
- * against the running package and its framework, the only packages there are.
+ * against the running package and its frameworks.
  */
 
 #define PACKAGE_INSTALL_STATE_AVAILABLE_ 0
@@ -2994,11 +2964,11 @@ LONG WINAPI GetCurrentPackagePath2( const UINT32 flags, UINT32 *length, WCHAR *p
     return GetCurrentPackagePath( length, path );
 }
 
-static LONG package_context_from_env( const UINT32 flags, UINT32 *length, WCHAR *buffer )
+static LONG package_context_from_registry( const UINT32 flags, UINT32 *length, WCHAR *buffer )
 {
     static int once;
     if (!once++) FIXME( "package contexts are opaque on Windows; returning the package full name.\n" );
-    return package_str( L"WINE_PACKAGE_FULL_NAME", L"PackageFullName", length, buffer );
+    return package_str_from_registry( L"PackageFullName", length, buffer );
 }
 
 /***********************************************************************
@@ -3007,7 +2977,7 @@ static LONG package_context_from_env( const UINT32 flags, UINT32 *length, WCHAR 
 LONG WINAPI GetCurrentPackageContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
 {
     TRACE( "(%#x %p %p)\n", flags, length, buffer );
-    return package_context_from_env( flags, length, buffer );
+    return package_context_from_registry( flags, length, buffer );
 }
 
 /***********************************************************************
@@ -3016,7 +2986,7 @@ LONG WINAPI GetCurrentPackageContext( const UINT32 flags, UINT32 *length, WCHAR 
 LONG WINAPI GetCurrentPackageApplicationContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
 {
     TRACE( "(%#x %p %p)\n", flags, length, buffer );
-    return package_context_from_env( flags, length, buffer );
+    return package_context_from_registry( flags, length, buffer );
 }
 
 /***********************************************************************
@@ -3025,7 +2995,7 @@ LONG WINAPI GetCurrentPackageApplicationContext( const UINT32 flags, UINT32 *len
 LONG WINAPI GetCurrentPackageApplicationResourcesContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
 {
     TRACE( "(%#x %p %p)\n", flags, length, buffer );
-    return package_context_from_env( flags, length, buffer );
+    return package_context_from_registry( flags, length, buffer );
 }
 
 /***********************************************************************
@@ -3034,7 +3004,7 @@ LONG WINAPI GetCurrentPackageApplicationResourcesContext( const UINT32 flags, UI
 LONG WINAPI GetCurrentPackageGlobalizationContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
 {
     TRACE( "(%#x %p %p)\n", flags, length, buffer );
-    return package_context_from_env( flags, length, buffer );
+    return package_context_from_registry( flags, length, buffer );
 }
 
 /***********************************************************************

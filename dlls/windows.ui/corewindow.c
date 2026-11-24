@@ -2919,9 +2919,9 @@ static const ICoreWindowAdapterInteropVtbl core_window_adapter_vtbl =
  * as WM_CLASS: the package's short name (DisplayName identity), not the exe name.
  * Resolution order: seeded AppModel registry identity (ApplicationShortName, then
  * DisplayName on the package key and its VisualElements subkey, HKCU before HKLM),
- * then the WINE_PACKAGE_AUMID app id (the part after '!'), then the classic name.
- * windows.ui.xaml seeds ApplicationShortName from the manifest-resolved DisplayName
- * at package init; a XAML app therefore lands on its package display name. */
+ * then the GetCurrentApplicationUserModelId app id (the part after '!'), then the
+ * classic name. windows.ui.xaml seeds ApplicationShortName from the manifest-resolved
+ * DisplayName at package init; a XAML app therefore lands on its package display name. */
 static const WCHAR *core_window_class_name( void )
 {
     static const WCHAR default_class[] = L"Windows.UI.Core.CoreWindow";
@@ -2973,8 +2973,8 @@ static const WCHAR *core_window_class_name( void )
         }
     }
 
-    len = GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", val, ARRAY_SIZE(val) );
-    if (len && len < ARRAY_SIZE( val ))
+    len = ARRAY_SIZE(val);
+    if (GetCurrentApplicationUserModelId( &len, val ) == ERROR_SUCCESS && val[0])
     {
         WCHAR *p = wcschr( val, L'!' );
         const WCHAR *app = p ? p + 1 : val;

@@ -18,6 +18,7 @@
  */
 
 #include "private.h"
+#include "appmodel.h"
 #include "roapi.h"
 #include "wine/exception.h"
 #include "shellapi.h"
@@ -1880,41 +1881,15 @@ static HRESULT WINAPI core_application_GetTrustLevel( ICoreApplication *iface, T
 
 static HRESULT WINAPI core_application_get_Id( ICoreApplication *iface, HSTRING *value )
 {
-    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
-    WCHAR aumid[512] = {0}, exe[MAX_PATH], subkey[600];
-    const WCHAR *bang, *slash;
-    SIZE_T i;
+    WCHAR aumid[512] = {0};
+    const WCHAR *bang;
+    UINT32 len = ARRAY_SIZE( aumid );
 
     TRACE( "iface %p, value %p.\n", iface, value );
     if (!value) return E_POINTER;
 
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", aumid, ARRAY_SIZE( aumid ) ))
-        aumid[0] = 0;
-
-    if (!aumid[0] && GetModuleFileNameW( NULL, exe, ARRAY_SIZE( exe ) ) &&
-        (slash = wcsrchr( exe, L'\\' )) && slash[1])
-    {
-        swprintf( subkey, ARRAY_SIZE( subkey ),
-                  L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Exes\\%ls", slash + 1 );
-        for (i = 0; i < ARRAY_SIZE( roots ); i++)
-        {
-            HKEY hkey;
-            DWORD type = 0, size = sizeof(aumid);
-            if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &hkey ) == ERROR_SUCCESS)
-            {
-                if (RegQueryValueExW( hkey, L"ApplicationUserModelId", NULL, &type, (BYTE *)aumid, &size ) == ERROR_SUCCESS &&
-                    type == REG_SZ && aumid[0])
-                {
-                    RegCloseKey( hkey );
-                    break;
-                }
-                aumid[0] = 0;
-                RegCloseKey( hkey );
-            }
-        }
-    }
-
-    if ((bang = wcschr( aumid, L'!' )) && bang[1])
+    if (GetCurrentApplicationUserModelId( &len, aumid ) == ERROR_SUCCESS &&
+        (bang = wcschr( aumid, L'!' )) && bang[1])
         return WindowsCreateString( bang + 1, wcslen( bang + 1 ), value );
     return WindowsCreateString( NULL, 0, value );
 }
@@ -2049,10 +2024,10 @@ static inline const struct core_properties_inner_vtbl *core_properties_inner_vt(
 static void core_app_get_family_name( WCHAR *buf, DWORD cch )
 {
     WCHAR exe[MAX_PATH], *p;
+    UINT32 pkg_len = cch;
     DWORD len;
 
-    len = GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, cch );
-    if (len && len < cch) return;
+    if (GetCurrentPackageFamilyName( &pkg_len, buf ) == ERROR_SUCCESS && buf[0]) return;
 
     len = GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) );
     if (!len || len >= ARRAY_SIZE(exe))

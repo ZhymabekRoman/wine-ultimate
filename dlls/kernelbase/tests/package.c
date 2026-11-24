@@ -1,5 +1,5 @@
 /*
- * Package identity tests for the env-var layer (WINE_PACKAGE_FULL_NAME / WINE_PACKAGE_PATH)
+ * Package identity tests for the AppModel registry layer (Exes\<exe>, Identity, Packages)
  * and its v2/v3 extensions: GetCurrentPackageInfo2/3, GetCurrentPackagePath2,
  * the package context APIs, FindPackagesByPackageFamily and CloseState.
  *
@@ -54,19 +54,52 @@ static void *kb_export( const char *name )
     return mod ? (void *)GetProcAddress( mod, name ) : NULL;
 }
 
-static void set_test_env( void )
+#define REG_APPMODEL L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel"
+
+static BOOL set_test_exe_reg( const WCHAR *pkg_path )
 {
-    SetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", FULL_NAME );
-    SetEnvironmentVariableW( L"WINE_PACKAGE_PATH", PKG_PATH );
+    WCHAR exe[256], subkey[512], value[512];
+    HKEY hkey;
+    DWORD len;
+
+    len = GetModuleFileNameW( 0, exe, ARRAY_SIZE(exe) );
+    ok( len && len < ARRAY_SIZE(exe), "module name len %lu\n", len );
+    if (!len || len >= ARRAY_SIZE(exe)) return FALSE;
+
+    lstrcpyW( subkey, REG_APPMODEL L"\\Exes\\" );
+    {
+        WCHAR *p = wcsrchr( exe, L'\\' );
+        lstrcatW( subkey, p ? p + 1 : exe );
+    }
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+    {
+        win_skip( "cannot create the AppModel Exes key\n" );
+        return FALSE;
+    }
+    lstrcpyW( value, FULL_NAME );
+    RegSetValueExW( hkey, L"PackageFullName", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
+    lstrcpyW( value, pkg_path );
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
+    lstrcpyW( value, FAMILY_NAME L"!App" );
+    RegSetValueExW( hkey, L"ApplicationUserModelId", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
+    RegCloseKey( hkey );
+    return TRUE;
 }
 
-static void clear_test_env( void )
+static void clear_test_exe_reg( void )
 {
-    SetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", NULL );
-    SetEnvironmentVariableW( L"WINE_PACKAGE_PATH", NULL );
+    WCHAR exe[256], subkey[512];
+    DWORD len = GetModuleFileNameW( 0, exe, ARRAY_SIZE(exe) );
+    if (len && len < ARRAY_SIZE(exe))
+    {
+        WCHAR *p = wcsrchr( exe, L'\\' );
+        lstrcpyW( subkey, REG_APPMODEL L"\\Exes\\" );
+        lstrcatW( subkey, p ? p + 1 : exe );
+        RegDeleteTreeW( HKEY_CURRENT_USER, subkey );
+    }
 }
 
-/* baseline: the v1 env layer the v2/v3 APIs sit on */
+/* baseline: the v1 AppModel registry layer the v2/v3 APIs sit on */
 static void test_v1_baseline( void )
 {
     WCHAR buf[256];
@@ -364,12 +397,11 @@ static void test_open_package_info_for_user( void )
 }
 
 /*
- * Registry layer: below the env vars sits the package registration seeded in
+ * Registry layer: package registration seeded in
  * <root>\Software\Microsoft\Windows NT\CurrentVersion\AppModel -- Exes\<image>
  * names the package an image runs as, Identity is the fallback, Packages\
- * <FullName> is the deployment view. The env vars stay the per-run override.
+ * <FullName> is the deployment view.
  */
-#define REG_APPMODEL L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel"
 #define REG_PKG_PATH PKG_PATH L"\\reg"
 #define REG_FW_NAME  L"WineWpTest_9.9.9.9_x64__8wekyb3d8bbwe"
 #define REG_FW_PATH  PKG_PATH L"\\fw"
@@ -389,32 +421,10 @@ typedef LONG (WINAPI *family_for_user_fn)( const WCHAR *user, HANDLE process, UI
 
 static void set_test_registry( void )
 {
-    WCHAR exe[256], subkey[512], value[512];
+    WCHAR subkey[512], value[512];
     HKEY hkey;
-    DWORD len;
 
-    len = GetModuleFileNameW( 0, exe, ARRAY_SIZE(exe) );
-    ok( len && len < ARRAY_SIZE(exe), "module name len %lu\n", len );
-    if (!len || len >= ARRAY_SIZE(exe)) return;
-
-    lstrcpyW( subkey, REG_APPMODEL L"\\Exes\\" );
-    /* keep only the image base name */
-    {
-        WCHAR *p = wcsrchr( exe, L'\\' );
-        lstrcatW( subkey, p ? p + 1 : exe );
-    }
-    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
-    {
-        win_skip( "cannot create the AppModel Exes key\n" );
-        return;
-    }
-    lstrcpyW( value, FULL_NAME );
-    RegSetValueExW( hkey, L"PackageFullName", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
-    lstrcpyW( value, REG_PKG_PATH );
-    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
-    lstrcpyW( value, FAMILY_NAME L"!App" );
-    RegSetValueExW( hkey, L"ApplicationUserModelId", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
-    RegCloseKey( hkey );
+    if (!set_test_exe_reg( REG_PKG_PATH )) return;
 
     /* a registered framework package of the test family */
     lstrcpyW( subkey, REG_APPMODEL L"\\Packages\\" REG_FW_NAME );
@@ -439,7 +449,9 @@ static void set_test_registry( void )
 
 static void clear_test_registry( void )
 {
-    RegDeleteTreeW( HKEY_CURRENT_USER, REG_APPMODEL );
+    clear_test_exe_reg();
+    RegDeleteTreeW( HKEY_CURRENT_USER, REG_APPMODEL L"\\Packages\\" REG_FW_NAME );
+    RegDeleteTreeW( HKEY_CURRENT_USER, REG_APPMODEL L"\\Packages\\" REG_ROOT_NAME );
 }
 
 static void check_for_user( const char *name );
@@ -680,15 +692,7 @@ static void check_for_user( const char *name )
 static void test_package_registry( void )
 {
     set_test_registry();
-
-    /* no env: the registration is the identity */
-    clear_test_env();
     check_from_registry( "registry", REG_PKG_PATH );
-
-    /* env wins over the registration */
-    set_test_env();
-    check_from_registry( "env-over-registry", PKG_PATH );
-
     clear_test_registry();
 }
 
@@ -728,17 +732,19 @@ static void test_get_package_application_ids( void )
 
 START_TEST( package )
 {
-    set_test_env();
-    test_v1_baseline();
-    test_package_path2();
-    test_package_info_v2_v3();
-    test_package_contexts();
-    test_find_packages_by_family();
-    test_close_state();
-    test_fls_get_value2();
-    test_open_package_info_by_full_name();
-    test_open_package_info_for_user();
-    test_get_package_application_ids();
-    clear_test_env();
+    if (set_test_exe_reg( PKG_PATH ))
+    {
+        test_v1_baseline();
+        test_package_path2();
+        test_package_info_v2_v3();
+        test_package_contexts();
+        test_find_packages_by_family();
+        test_close_state();
+        test_fls_get_value2();
+        test_open_package_info_by_full_name();
+        test_open_package_info_for_user();
+        test_get_package_application_ids();
+        clear_test_exe_reg();
+    }
     test_package_registry();
 }

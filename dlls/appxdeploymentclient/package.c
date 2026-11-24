@@ -3569,18 +3569,35 @@ static void registration_read( struct registration *reg, const WCHAR *family, co
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
-    WCHAR full[PACKAGE_FULL_NAME_MAX_LENGTH + 1], key[600], subkey[620], fw[512];
+    WCHAR full[PACKAGE_FULL_NAME_MAX_LENGTH + 1], key[600], subkey[620];
     SIZE_T r, i;
 
     reg->count = 0;
 
-    /* the running package and the env framework: the identity APIs' graph */
+    /* the running package and its framework graph */
     {
-        UINT32 len = ARRAY_SIZE(full);
-        if (!GetCurrentPackageFullName( &len, full )) registration_add( reg, full, FALSE );
+        BYTE info_buf[8192], *heap_buf = NULL;
+        UINT32 sz = sizeof(info_buf), cnt = 0;
+        PACKAGE_INFO *info = (PACKAGE_INFO *)info_buf;
+        LONG ret = GetCurrentPackageInfo( 0, &sz, info_buf, &cnt );
+        if (ret == ERROR_INSUFFICIENT_BUFFER && (heap_buf = malloc( sz )))
+        {
+            info = (PACKAGE_INFO *)heap_buf;
+            ret = GetCurrentPackageInfo( 0, &sz, heap_buf, &cnt );
+        }
+        if (ret == ERROR_SUCCESS)
+        {
+            for (i = 0; i < cnt; i++)
+                if (info[i].packageFullName && info[i].packageFullName[0])
+                    registration_add( reg, info[i].packageFullName, !!(info[i].flags & 1) );
+        }
+        else
+        {
+            UINT32 len = ARRAY_SIZE(full);
+            if (!GetCurrentPackageFullName( &len, full )) registration_add( reg, full, FALSE );
+        }
+        free( heap_buf );
     }
-    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
-        registration_add( reg, fw, TRUE );
 
     for (r = 0; r < ARRAY_SIZE(roots); r++)
     {

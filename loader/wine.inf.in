@@ -671,10 +671,9 @@ HKLM,Software\Classes\CLSID\{378E0446-5384-43B7-8877-E7DBDD883446}\InprocServer3
 ; Store and its framework packages already deployed - kernelbase answers the
 ; identity APIs from here (Exes\<image>, Identity fallback, Packages\<FullName>)
 ; and appxdeploymentclient reads the same Packages key for installed-location
-; and family enumeration (HKCU view, hence the mirrored HKLM lines).  The Store
-; live-launch lane pins the same values per run through WINE_PACKAGE_*; this
-; makes them durable.  Paths point at the staged AppxPackages tree; a prefix on
-; another host re-stages by overriding these values.
+; and family enumeration (HKCU view, hence the mirrored HKLM lines).  Paths
+; point at the staged AppxPackages tree; a prefix on another host re-stages
+; by overriding these values.
 [PackageIdentity]
 HKLM,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Packages\Microsoft.WindowsStore_22401.1400.6.0_x64__8wekyb3d8bbwe,,16
 HKLM,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Packages\Microsoft.WindowsStore_22401.1400.6.0_x64__8wekyb3d8bbwe,"PackagePath",2,"Z:\home\olge\WhatsappDecompile\AppxPackages\Program Files\WindowsApps\Microsoft.WindowsStore_22401.1400.6.0_x64__8wekyb3d8bbwe"

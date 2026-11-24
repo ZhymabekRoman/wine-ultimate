@@ -2363,23 +2363,14 @@ static BOOL WINAPI init_current_package_logo( INIT_ONCE *once, void *param, void
     len = ARRAY_SIZE( full_name );
     if (GetCurrentPackageFullName( &len, full_name ) != ERROR_SUCCESS)
         full_name[0] = 0;
-    if (!full_name[0])
-        GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", full_name, ARRAY_SIZE( full_name ) );
 
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", aumid, ARRAY_SIZE( aumid ) ) && aumid[0])
-    {
-        if ((bang = wcschr( aumid, L'!' )) && bang[1])
-            lstrcpynW( app_id, bang + 1, ARRAY_SIZE( app_id ) );
-    }
-    if (!app_id[0])
-    {
-        len = ARRAY_SIZE( aumid );
-        if (GetCurrentApplicationUserModelId( &len, aumid ) == ERROR_SUCCESS &&
-            (bang = wcschr( aumid, L'!' )) && bang[1])
-            lstrcpynW( app_id, bang + 1, ARRAY_SIZE( app_id ) );
-    }
+    len = ARRAY_SIZE( aumid );
+    if (GetCurrentApplicationUserModelId( &len, aumid ) == ERROR_SUCCESS &&
+        (bang = wcschr( aumid, L'!' )) && bang[1])
+        lstrcpynW( app_id, bang + 1, ARRAY_SIZE( app_id ) );
 
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", pkg_dir, ARRAY_SIZE( pkg_dir ) ) || !pkg_dir[0])
+    len = ARRAY_SIZE( pkg_dir );
+    if (GetCurrentPackagePath( &len, pkg_dir ) != ERROR_SUCCESS)
         pkg_dir[0] = 0;
 
     if ((!full_name[0] || !pkg_dir[0]) && GetModuleFileNameW( NULL, exe_path, ARRAY_SIZE( exe_path ) ))

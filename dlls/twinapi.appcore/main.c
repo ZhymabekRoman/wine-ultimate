@@ -18,6 +18,7 @@
 
 #include "initguid.h"
 #include "private.h"
+#include "appmodel.h"
 
 #include "unixlib.h"
 #include "pri.h"
@@ -2320,68 +2321,15 @@ static pri_index *cached_pri_index;
 static INIT_ONCE pri_init_once = INIT_ONCE_STATIC_INIT;
 
 /* Install directory of the running package (Package.Current.InstalledLocation):
- * WINE_PACKAGE_PATH env first, then the AppModel registration
- * (Exes\<exe> -> PackageFullName -> Packages\<name>\PackagePath /
- * PackageRootPath), same resolution order as windows.applicationmodel.
- * Leaves buf empty when the process carries no package identity. */
+ * resolved through GetCurrentPackagePath (AppxManifest auto-identity and
+ * AppModel registration). Leaves buf empty when the process carries no
+ * package identity. */
 static void package_installed_location( WCHAR *buf, DWORD cch )
 {
-    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
-    static const WCHAR appmodel_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
-    WCHAR subkey[576], name[MAX_PATH], exe[MAX_PATH];
-    SIZE_T i;
+    UINT32 len = cch;
 
     buf[0] = 0;
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch ) && buf[0]) return;
-
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE( name ) ))
-    {
-        WCHAR *slash, exename[MAX_PATH];
-
-        name[0] = 0;
-        if (!GetModuleFileNameW( NULL, exe, ARRAY_SIZE( exe ) )) return;
-        if (!(slash = wcsrchr( exe, '\\' ))) return;
-        lstrcpyW( exename, slash + 1 );
-        lstrcpyW( subkey, appmodel_key );
-        lstrcatW( subkey, L"\\Exes\\" );
-        lstrcatW( subkey, exename );
-        for (i = 0; i < ARRAY_SIZE( roots ); i++)
-        {
-            HKEY key;
-            DWORD type, size = sizeof(name);
-            if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key )) continue;
-            if (!RegQueryValueExW( key, L"PackageFullName", 0, &type, (BYTE *)name, &size )
-                    && type == REG_SZ && size)
-            {
-                RegCloseKey( key );
-                break;
-            }
-            RegCloseKey( key );
-        }
-    }
-    if (!name[0]) return;
-
-    lstrcpyW( subkey, appmodel_key );
-    lstrcatW( subkey, L"\\Packages\\" );
-    lstrcatW( subkey, name );
-    for (i = 0; i < ARRAY_SIZE( roots ); i++)
-    {
-        static const WCHAR *const values[] = { L"PackagePath", L"PackageRootPath" };
-        HKEY key;
-        SIZE_T j;
-
-        if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key )) continue;
-        for (j = 0; j < ARRAY_SIZE( values ); j++)
-        {
-            DWORD type, size = cch * sizeof(*buf);
-            if (!RegQueryValueExW( key, values[j], 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
-            {
-                RegCloseKey( key );
-                return;
-            }
-        }
-        RegCloseKey( key );
-    }
+    if (GetCurrentPackagePath( &len, buf ) == ERROR_SUCCESS && buf[0]) return;
     buf[0] = 0;
 }
 

@@ -1640,7 +1640,6 @@ HRESULT RuntimeHost_GetInterface(RuntimeHost *This, REFCLSID clsid, REFIID riid,
 BOOL mscoree_get_package_path(WCHAR *buf, DWORD cch)
 {
     UINT32 len = cch;
-    if (GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", buf, cch) && buf[0]) return TRUE;
     if (GetCurrentPackagePath(&len, buf) == ERROR_SUCCESS && buf[0]) return TRUE;
     buf[0] = 0;
     return FALSE;
@@ -1650,11 +1649,33 @@ BOOL mscoree_get_framework_package_path(WCHAR *buf, DWORD cch)
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     static const WCHAR pkgs_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    BYTE info_buf[8192], *heap_buf = NULL;
+    UINT32 sz = sizeof(info_buf), cnt = 0;
+    PACKAGE_INFO *info = (PACKAGE_INFO *)info_buf;
+    LONG ret;
     WCHAR key_name[512], sub_path[600];
     SIZE_T r;
     DWORD i;
 
-    if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", buf, cch) && buf[0]) return TRUE;
+    ret = GetCurrentPackageInfo(0, &sz, info_buf, &cnt);
+    if (ret == ERROR_INSUFFICIENT_BUFFER && (heap_buf = malloc(sz)))
+    {
+        info = (PACKAGE_INFO *)heap_buf;
+        ret = GetCurrentPackageInfo(0, &sz, heap_buf, &cnt);
+    }
+    if (ret == ERROR_SUCCESS)
+    {
+        for (i = 0; i < cnt; i++)
+        {
+            if ((info[i].flags & 1) && info[i].path && info[i].path[0] && wcslen(info[i].path) < cch)
+            {
+                lstrcpyW(buf, info[i].path);
+                free(heap_buf);
+                return TRUE;
+            }
+        }
+    }
+    free(heap_buf);
 
     for (r = 0; r < ARRAY_SIZE(roots); r++)
     {

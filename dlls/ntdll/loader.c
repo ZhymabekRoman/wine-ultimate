@@ -3086,9 +3086,8 @@ static const WCHAR *get_package_load_path( void )
         return cached_pkg_load_path;
 
     {
-        WCHAR pkg_dir[MAX_PATH] = {0}, fw_env[MAX_PATH] = {0}, manifest_path[MAX_PATH + 32];
+        WCHAR pkg_dir[MAX_PATH] = {0}, manifest_path[MAX_PATH + 32];
         WCHAR full_name[PKG_NAME_MAX] = {0};
-        UNICODE_STRING env_name, env_val;
         const WCHAR *image = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
         WCHAR *buf = NULL;
         SIZE_T cap = 0, len = 0;
@@ -3096,21 +3095,7 @@ static const WCHAR *get_package_load_path( void )
 
         RtlOpenCurrentUser( KEY_READ, &hkcu );
 
-        RtlInitUnicodeString( &env_name, L"WINE_PACKAGE_FULL_NAME" );
-        env_val.Buffer = full_name;
-        env_val.Length = 0;
-        env_val.MaximumLength = sizeof(full_name) - sizeof(WCHAR);
-        if (!RtlQueryEnvironmentVariable_U( NULL, &env_name, &env_val ) && env_val.Length)
-            full_name[env_val.Length / sizeof(WCHAR)] = 0;
-
-        RtlInitUnicodeString( &env_name, L"WINE_PACKAGE_PATH" );
-        env_val.Buffer = pkg_dir;
-        env_val.Length = 0;
-        env_val.MaximumLength = sizeof(pkg_dir) - sizeof(WCHAR);
-        if (!RtlQueryEnvironmentVariable_U( NULL, &env_name, &env_val ) && env_val.Length)
-            pkg_dir[env_val.Length / sizeof(WCHAR)] = 0;
-
-        if (!pkg_dir[0] && image && image[0])
+        if (image && image[0])
         {
             const WCHAR *end = get_module_path_end( image );
             SIZE_T dlen = end - image;
@@ -3129,7 +3114,7 @@ static const WCHAR *get_package_load_path( void )
             }
         }
 
-        if (!pkg_dir[0] && image && image[0])
+        if ((!pkg_dir[0] || !full_name[0]) && image && image[0])
         {
             const WCHAR *slash = wcsrchr( image, '\\' );
             const WCHAR *exe_name = slash ? slash + 1 : image;
@@ -3152,7 +3137,7 @@ static const WCHAR *get_package_load_path( void )
                     NtClose( hkey );
                 }
             }
-            if (!pkg_dir[0] && wcslen( exe_name ) < 260)
+            if ((!pkg_dir[0] || !full_name[0]) && wcslen( exe_name ) < 260)
             {
                 wcscpy( key_path, L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Exes\\" );
                 wcscat( key_path, exe_name );
@@ -3201,16 +3186,6 @@ static const WCHAR *get_package_load_path( void )
                 wcscpy( deps_dir, pkg_dir );
                 wcscat( deps_dir, L"\\dependencies" );
                 pkg_scan_subdirs( deps_dir, NULL, &buf, &cap, &len );
-            }
-
-            RtlInitUnicodeString( &env_name, L"WINE_FRAMEWORK_PACKAGE_PATH" );
-            env_val.Buffer = fw_env;
-            env_val.Length = 0;
-            env_val.MaximumLength = sizeof(fw_env) - sizeof(WCHAR);
-            if (!RtlQueryEnvironmentVariable_U( NULL, &env_name, &env_val ) && env_val.Length)
-            {
-                fw_env[env_val.Length / sizeof(WCHAR)] = 0;
-                pkg_path_append_dir( &buf, &cap, &len, fw_env );
             }
 
             wcscpy( parent_dir, pkg_dir );
