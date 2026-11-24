@@ -6,7 +6,9 @@ SOURCES = \
 	application.c \
 	classes.idl \
 	color_helper.c \
+	controls_menu_dialog.c \
 	controls_nav.c \
+	controls_text_grid.c \
 	core_input.c \
 	core_window_wrap.c \
 	dp_vsm.c \
@@ -24,18 +26,21 @@ SOURCES = \
 	uwp_brush_media.c \
 	uwp_collections.c \
 	uwp_controls.c \
+	uwp_depobj.c \
 	uwp_factories.c \
 	uwp_framework_element.c \
 	uwp_guids.c \
 	uwp_input.c \
 	uwp_island.c \
 	uwp_reflection.c \
+	uwp_resources.c \
 	uwp_statics.c \
 	uwp_tree_lifecycle.c \
 	uwp_vm_bridge.c \
 	uwp_xaml.c \
 	webview2_bridge.c \
 	winui_collections.c \
+	winui_elements.c \
 	winui_events.c \
 	wv2_async_profile.c \
 	wv2_events.c \
