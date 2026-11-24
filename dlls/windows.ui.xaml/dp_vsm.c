@@ -1266,6 +1266,18 @@ enum uwp_vsm_prop_kind
     UWP_VSM_PROP_GRID_COL,
     UWP_VSM_PROP_GRID_COL_SPAN,
     UWP_VSM_PROP_FONT_SIZE,
+    UWP_VSM_PROP_OPACITY,
+    UWP_VSM_PROP_MARGIN,
+    UWP_VSM_PROP_PADDING,
+    UWP_VSM_PROP_H_ALIGN,
+    UWP_VSM_PROP_V_ALIGN,
+    UWP_VSM_PROP_TEXT_ALIGN,
+    UWP_VSM_PROP_MAX_LINES,
+    UWP_VSM_PROP_BG,
+    UWP_VSM_PROP_FG,
+    UWP_VSM_PROP_ORIENTATION,
+    UWP_VSM_PROP_ITEM_TPL_SEL,
+    UWP_VSM_PROP_ITEM_TPL,
 };
 
 
@@ -1275,6 +1287,12 @@ struct uwp_vsm_snapshot_entry
     enum uwp_vsm_prop_kind prop_kind;
     int old_int;
     double old_num;
+    double old_vec4[4];
+    UINT32 old_argb;
+    COLORREF old_cr;
+    BYTE old_alpha;
+    BOOL old_flag;
+    IInspectable *old_obj;
 };
 
 
@@ -2901,6 +2919,39 @@ static void uwp_vsm_record_snapshot( struct uwp_vsm_group *grp, struct uwp_eleme
     case UWP_VSM_PROP_GRID_COL:      e->old_int = target->grid_col; break;
     case UWP_VSM_PROP_GRID_COL_SPAN: e->old_int = target->grid_col_span; break;
     case UWP_VSM_PROP_FONT_SIZE:     e->old_num = target->font_size; break;
+    case UWP_VSM_PROP_OPACITY:       e->old_num = target->opacity; break;
+    case UWP_VSM_PROP_MARGIN:
+        e->old_vec4[0] = target->margin_l; e->old_vec4[1] = target->margin_t;
+        e->old_vec4[2] = target->margin_r; e->old_vec4[3] = target->margin_b;
+        break;
+    case UWP_VSM_PROP_PADDING:
+        e->old_vec4[0] = target->padding_l; e->old_vec4[1] = target->padding_t;
+        e->old_vec4[2] = target->padding_r; e->old_vec4[3] = target->padding_b;
+        break;
+    case UWP_VSM_PROP_H_ALIGN:       e->old_int = target->h_align; break;
+    case UWP_VSM_PROP_V_ALIGN:       e->old_int = target->v_align; break;
+    case UWP_VSM_PROP_TEXT_ALIGN:
+        e->old_int = target->text_align;
+        e->old_flag = target->has_text_align;
+        break;
+    case UWP_VSM_PROP_MAX_LINES:     e->old_int = target->max_lines; break;
+    case UWP_VSM_PROP_BG:
+        e->old_flag = target->has_bg; e->old_cr = target->bg_color;
+        e->old_argb = target->bg_argb; e->old_alpha = target->bg_alpha;
+        break;
+    case UWP_VSM_PROP_FG:
+        e->old_flag = target->has_fg; e->old_cr = target->fg_color;
+        e->old_argb = target->fg_argb; e->old_alpha = target->fg_alpha;
+        break;
+    case UWP_VSM_PROP_ORIENTATION:   e->old_int = target->orientation; break;
+    case UWP_VSM_PROP_ITEM_TPL_SEL:
+        e->old_obj = target->item_template_selector;
+        if (e->old_obj) IInspectable_AddRef( e->old_obj );
+        break;
+    case UWP_VSM_PROP_ITEM_TPL:
+        e->old_obj = target->item_template;
+        if (e->old_obj) IInspectable_AddRef( e->old_obj );
+        break;
     default: break;
     }
 }
@@ -2933,10 +2984,74 @@ static void uwp_vsm_restore_snapshots( struct uwp_vsm_group *grp )
         case UWP_VSM_PROP_GRID_COL:      target->grid_col       = e->old_int; break;
         case UWP_VSM_PROP_GRID_COL_SPAN: target->grid_col_span  = e->old_int; break;
         case UWP_VSM_PROP_FONT_SIZE:     target->font_size      = e->old_num; break;
+        case UWP_VSM_PROP_OPACITY:       target->opacity        = e->old_num; break;
+        case UWP_VSM_PROP_MARGIN:
+            target->margin_l = e->old_vec4[0]; target->margin_t = e->old_vec4[1];
+            target->margin_r = e->old_vec4[2]; target->margin_b = e->old_vec4[3];
+            break;
+        case UWP_VSM_PROP_PADDING:
+            target->padding_l = e->old_vec4[0]; target->padding_t = e->old_vec4[1];
+            target->padding_r = e->old_vec4[2]; target->padding_b = e->old_vec4[3];
+            break;
+        case UWP_VSM_PROP_H_ALIGN:       target->h_align        = e->old_int; break;
+        case UWP_VSM_PROP_V_ALIGN:       target->v_align        = e->old_int; break;
+        case UWP_VSM_PROP_TEXT_ALIGN:
+            target->text_align = e->old_int;
+            target->has_text_align = e->old_flag;
+            break;
+        case UWP_VSM_PROP_MAX_LINES:     target->max_lines      = e->old_int; break;
+        case UWP_VSM_PROP_BG:
+            target->has_bg = e->old_flag; target->bg_color = e->old_cr;
+            target->bg_argb = e->old_argb; target->bg_alpha = e->old_alpha;
+            break;
+        case UWP_VSM_PROP_FG:
+            target->has_fg = e->old_flag; target->fg_color = e->old_cr;
+            target->fg_argb = e->old_argb; target->fg_alpha = e->old_alpha;
+            break;
+        case UWP_VSM_PROP_ORIENTATION:   target->orientation    = e->old_int; break;
+        case UWP_VSM_PROP_ITEM_TPL_SEL:
+            if (target->item_template_selector) IInspectable_Release( target->item_template_selector );
+            target->item_template_selector = e->old_obj;
+            break;
+        case UWP_VSM_PROP_ITEM_TPL:
+            if (target->item_template) IInspectable_Release( target->item_template );
+            target->item_template = e->old_obj;
+            break;
         default: break;
         }
     }
     grp->snapshot_cnt = 0;
+}
+
+static BOOL uwp_vsm_parse_thickness( struct uwp_element *scope, const struct uwp_vsm_setter *s, double out[4] )
+{
+    if (s->val_str[0])
+    {
+        struct uwp_rd_entry *te = NULL;
+        if (s->is_res_ref && uwp_rd_find_entry( NULL, scope, s->val_str, 0, &te, NULL ) && te && te->kind == UWP_RD_THICKNESS)
+        {
+            memcpy( out, te->vec4, 4 * sizeof(double) );
+            return TRUE;
+        }
+        {
+            double v[4] = {0};
+            int cnt = 0;
+            const WCHAR *p = s->val_str;
+            while (*p && cnt < 4)
+            {
+                WCHAR *endp = NULL;
+                while (*p == L' ' || *p == L',') p++;
+                if (!*p) break;
+                v[cnt++] = wcstod( p, &endp );
+                if (!endp || endp == p) break;
+                p = endp;
+            }
+            if (cnt == 1) { out[0] = out[1] = out[2] = out[3] = v[0]; return TRUE; }
+            if (cnt == 2) { out[0] = out[2] = v[0]; out[1] = out[3] = v[1]; return TRUE; }
+            if (cnt == 4) { memcpy( out, v, 4 * sizeof(double) ); return TRUE; }
+        }
+    }
+    return FALSE;
 }
 
 static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_group *grp,
@@ -3057,6 +3172,146 @@ static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_grou
         {
             uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_FONT_SIZE );
             target->font_size = fs;
+        }
+    }
+    else if (wcsstr( prop, L"Opacity" ))
+    {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_OPACITY );
+        target->opacity = uwp_vsm_parse_double( scope, s );
+    }
+    else if (wcsstr( prop, L"Margin" ))
+    {
+        double v[4];
+        if (uwp_vsm_parse_thickness( scope, s, v ))
+        {
+            uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_MARGIN );
+            target->margin_l = v[0]; target->margin_t = v[1];
+            target->margin_r = v[2]; target->margin_b = v[3];
+        }
+    }
+    else if (wcsstr( prop, L"Padding" ))
+    {
+        double v[4];
+        if (uwp_vsm_parse_thickness( scope, s, v ))
+        {
+            uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_PADDING );
+            target->padding_l = v[0]; target->padding_t = v[1];
+            target->padding_r = v[2]; target->padding_b = v[3];
+        }
+    }
+    else if (wcsstr( prop, L"HorizontalAlignment" ))
+    {
+        int ha = target->h_align;
+        if (s->val_str[0])
+        {
+            if (!wcsicmp( s->val_str, L"Left" )) ha = 0;
+            else if (!wcsicmp( s->val_str, L"Center" )) ha = 1;
+            else if (!wcsicmp( s->val_str, L"Right" )) ha = 2;
+            else if (!wcsicmp( s->val_str, L"Stretch" )) ha = 3;
+        }
+        else ha = (int)s->num;
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_H_ALIGN );
+        target->h_align = ha;
+    }
+    else if (wcsstr( prop, L"VerticalAlignment" ))
+    {
+        int va = target->v_align;
+        if (s->val_str[0])
+        {
+            if (!wcsicmp( s->val_str, L"Top" )) va = 0;
+            else if (!wcsicmp( s->val_str, L"Center" )) va = 1;
+            else if (!wcsicmp( s->val_str, L"Bottom" )) va = 2;
+            else if (!wcsicmp( s->val_str, L"Stretch" )) va = 3;
+        }
+        else va = (int)s->num;
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_V_ALIGN );
+        target->v_align = va;
+    }
+    else if (wcsstr( prop, L"TextAlignment" ) || wcsstr( prop, L"HorizontalTextAlignment" ))
+    {
+        int ta = target->text_align;
+        if (s->val_str[0])
+        {
+            if (!wcsicmp( s->val_str, L"Center" )) ta = 0;
+            else if (!wcsicmp( s->val_str, L"Left" )) ta = 1;
+            else if (!wcsicmp( s->val_str, L"Right" )) ta = 2;
+            else if (!wcsicmp( s->val_str, L"Justify" )) ta = 3;
+        }
+        else ta = (int)s->num;
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_TEXT_ALIGN );
+        target->text_align = ta;
+        target->has_text_align = TRUE;
+    }
+    else if (wcsstr( prop, L"MaxLines" ))
+    {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_MAX_LINES );
+        target->max_lines = max( 0, (int)uwp_vsm_parse_double( scope, s ) );
+    }
+    else if (wcsstr( prop, L"Orientation" ))
+    {
+        int ori = target->orientation;
+        if (s->val_str[0])
+        {
+            if (!wcsicmp( s->val_str, L"Horizontal" )) ori = 1;
+            else if (!wcsicmp( s->val_str, L"Vertical" )) ori = 0;
+        }
+        else ori = (int)s->num;
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_ORIENTATION );
+        target->orientation = ori;
+    }
+    else if (wcsstr( prop, L"Background" ) || wcsstr( prop, L"Foreground" ))
+    {
+        UINT32 argb = 0;
+        BOOL is_bg = wcsstr( prop, L"Background" ) != NULL;
+        if (s->val_str[0] && uwp_resolve_brush_or_color( scope ? scope->rd_bucket : NULL, target, s->val_str, 0, &argb ))
+        {
+            uwp_vsm_record_snapshot( grp, target, is_bg ? UWP_VSM_PROP_BG : UWP_VSM_PROP_FG );
+            if (is_bg)
+            {
+                target->has_bg = TRUE;
+                target->bg_argb = argb;
+                target->bg_alpha = (BYTE)((argb >> 24) & 0xff);
+                target->bg_color = RGB( (argb >> 16) & 0xff, (argb >> 8) & 0xff, argb & 0xff );
+            }
+            else
+            {
+                target->has_fg = TRUE;
+                target->fg_argb = argb;
+                target->fg_alpha = (BYTE)((argb >> 24) & 0xff);
+                target->fg_color = RGB( (argb >> 16) & 0xff, (argb >> 8) & 0xff, argb & 0xff );
+            }
+        }
+    }
+    else if (wcsstr( prop, L"Style" ) && s->val_str[0])
+    {
+        uwp_apply_style_by_name( NULL, target, s->val_str );
+    }
+    else if ((wcsstr( prop, L"ItemTemplateSelector" ) || wcsstr( prop, L"ItemTemplate" ) || wcsstr( prop, L"ItemsPanel" )) &&
+             s->val_str[0])
+    {
+        struct uwp_rd_entry *re = NULL;
+        struct uwp_rd_bucket *fb = NULL;
+        if (uwp_rd_find_entry( scope ? scope->rd_bucket : NULL, target, s->val_str, 0, &re, &fb ) && re)
+        {
+            IInspectable *res_val = uwp_rd_materialize_entry( fb, re );
+            if (res_val)
+            {
+                if (wcsstr( prop, L"ItemTemplateSelector" ))
+                {
+                    uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_ITEM_TPL_SEL );
+                    if (target->item_template_selector) IInspectable_Release( target->item_template_selector );
+                    target->item_template_selector = res_val;
+                    IInspectable_AddRef( res_val );
+                }
+                else if (wcsstr( prop, L"ItemTemplate" ))
+                {
+                    uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_ITEM_TPL );
+                    if (target->item_template) IInspectable_Release( target->item_template );
+                    target->item_template = res_val;
+                    IInspectable_AddRef( res_val );
+                }
+                IInspectable_Release( res_val );
+            }
         }
     }
 }
@@ -3315,10 +3570,114 @@ static HRESULT WINAPI sb_get_hstr_empty( void *iface, void *elem, HSTRING *out )
     if (out) *out = NULL;
     return S_OK;
 }
-static HRESULT WINAPI sb_set_noop( void *iface, void *elem, void *val )
+static HRESULT WINAPI sb_SetTargetProperty( void *iface, void *elem, HSTRING path )
 {
+    struct uwp_element *anim = uwp_elem_from_any( elem );
+    const WCHAR *s = WindowsGetStringRawBuffer( path, NULL );
+    if (anim && s && s[0])
+        vsm_clean_prop_name( s, anim->anim_target_prop, ARRAY_SIZE(anim->anim_target_prop) );
     return S_OK;
 }
+static HRESULT WINAPI sb_SetTargetName( void *iface, void *elem, HSTRING name )
+{
+    struct uwp_element *anim = uwp_elem_from_any( elem );
+    const WCHAR *s = WindowsGetStringRawBuffer( name, NULL );
+    if (anim && s && s[0])
+        lstrcpynW( anim->anim_target_name, s, ARRAY_SIZE(anim->anim_target_name) );
+    return S_OK;
+}
+static HRESULT WINAPI sb_SetTarget( void *iface, void *elem, void *target )
+{
+    struct uwp_element *anim = uwp_elem_from_any( elem );
+    struct uwp_element *tel = uwp_elem_from_any( target );
+    if (anim && tel)
+        anim->anim_target_el = tel;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_sb_get_Children( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return S_OK;
+    if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+    *out = impl->children_coll;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_sb_Begin( void *iface )
+{
+    struct uwp_element *sb = uwp_elem_from_any( iface );
+    struct uwp_vec_view *v;
+    unsigned int i;
+    BOOL changed = FALSE;
+
+    if (!sb || !sb->children_coll) return S_OK;
+    v = CONTAINING_RECORD( sb->children_coll, struct uwp_vec_view, IInspectable_iface );
+    for (i = 0; v && i < v->count; i++)
+    {
+        struct uwp_element *anim = uwp_elem_from_any( v->items[i] );
+        struct uwp_element *target;
+        const WCHAR *prop;
+        if (!anim || !anim->anim_has_to) continue;
+        target = anim->anim_target_el;
+        if (!target && anim->anim_target_name[0])
+        {
+            struct uwp_element *scope = anim->owner_component ? anim->owner_component : sb->owner_component;
+            target = uwp_vsm_find_target( scope, anim->anim_target_name );
+        }
+        if (!target) continue;
+        prop = anim->anim_target_prop;
+        if (!prop[0] || wcsstr( prop, L"Opacity" ))
+        {
+            target->opacity = anim->anim_to;
+            changed = TRUE;
+        }
+        else if (!wcscmp( prop, L"Width" ) || wcsstr( prop, L".Width" ))
+        {
+            target->width = anim->anim_to;
+            changed = TRUE;
+        }
+        else if (!wcscmp( prop, L"Height" ) || wcsstr( prop, L".Height" ))
+        {
+            target->height = anim->anim_to;
+            changed = TRUE;
+        }
+        TRACE( "IStoryboard::Begin applied %s.%s = %g\n",
+               debugstr_w(target->name[0] ? target->name : target->class_name),
+               debugstr_w(prop), anim->anim_to );
+    }
+    if (changed)
+    {
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+
+const void *uwp_sb_vtbl[24] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_sb_get_Children, /* get_Children */
+    [7] = uwp_generic_noop,    /* Seek */
+    [8] = uwp_generic_noop,    /* Stop */
+    [9] = uwp_sb_Begin,        /* Begin */
+    [10] = uwp_generic_noop,   /* Pause */
+    [11] = uwp_generic_noop,   /* Resume */
+    [12] = uwp_generic_noop,   /* GetCurrentState */
+    [13] = uwp_generic_noop,   /* GetCurrentTime */
+    [14] = uwp_generic_noop,   /* SeekAlignedToLastTick */
+    [15] = uwp_sb_Begin,       /* SkipToFill */
+    [16 ... 23] = uwp_generic_noop,
+};
+
 /* IStoryboardStatics ({d82f07d8-73d5-4379-bd48-7e05184a8bad}):
  *   slot 6:  get_TargetPropertyProperty
  *   slot 7:  GetTargetProperty
@@ -3337,11 +3696,11 @@ static const void *sb_statics_vtbl[16] =
     [5] = uwp_cf_GetTrustLevel,
     [6] = vsm_get_CustomVisualStateManagerProperty,
     [7] = sb_get_hstr_empty,
-    [8] = sb_set_noop,
+    [8] = sb_SetTargetProperty,
     [9] = vsm_get_CustomVisualStateManagerProperty,
     [10] = sb_get_hstr_empty,
-    [11] = sb_set_noop,
-    [12] = sb_set_noop,
+    [11] = sb_SetTargetName,
+    [12] = sb_SetTarget,
     [13 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory sb_factory_obj =

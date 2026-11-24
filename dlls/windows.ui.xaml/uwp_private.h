@@ -90,6 +90,7 @@ enum uwp_elem_kind
     UWP_KIND_COLOR,
     UWP_KIND_ACCELERATOR,
     UWP_KIND_XAML_COMMAND,
+    UWP_KIND_WRAP_PANEL,
 };
 
 enum uwp_rd_kind
@@ -353,6 +354,10 @@ struct uwp_element
     IInspectable IGradientStop_iface;
     IInspectable IPathGeometry_iface;
     IInspectable IPathFigure_iface;
+    IInspectable IRichTextBlock_iface;
+    IInspectable ITextBlock2_iface;
+    IInspectable ITextBlock6_iface;
+    IInspectable IStoryboard_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
     IDispatch IDispatch_iface;
     IInspectable IReferenceTrackerTarget_iface;
@@ -454,6 +459,7 @@ struct uwp_element
     int text_align;    /* 0=Center, 1=Left, 2=Right, 3=Justify */
     BOOL has_text_align;
     int text_wrapping; /* 1=NoWrap, 2=Wrap, 3=WrapWholeWords */
+    int max_lines;     /* 0=unlimited */
     COLORREF bg_color;
     UINT32 bg_argb;
     BYTE bg_alpha;
@@ -675,8 +681,15 @@ struct uwp_element
     DWORD template_xbf_size;
     DWORD template_sub_idx;
     IInspectable *template_owner_comp;
+    struct uwp_rd_bucket *template_rd_bucket;
     struct uwp_element *template_root;
     BOOL template_inflated;
+    /* Storyboard / DoubleAnimation target state */
+    WCHAR anim_target_name[96];
+    WCHAR anim_target_prop[96];
+    struct uwp_element *anim_target_el;
+    double anim_to;
+    BOOL anim_has_to;
     struct xaml_event_registry asb_text_changed_reg;
     struct xaml_event_registry asb_query_submitted_reg;
     struct xaml_event_registry asb_suggestion_chosen_reg;
@@ -1267,6 +1280,12 @@ const BYTE *pri_get_data( DWORD *out_size );
 void pri_map_file_to( const WCHAR *pri_path, const BYTE **out_data, DWORD *out_size );
 struct uwp_rd_entry *rd_bucket_upsert( struct uwp_rd_bucket *b, const WCHAR *key );
 IInspectable *uwp_instantiate_xbf_substream( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx, IInspectable *owner_comp );
+IInspectable *uwp_instantiate_xbf_substream_rd( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx, IInspectable *owner_comp, struct uwp_rd_bucket *rd_bucket );
+size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, size_t out_cap );
+extern const void *uwp_rtb_vtbl[64];
+extern const void *uwp_tb2_vtbl[24];
+extern const void *uwp_tb6_vtbl[16];
+extern const void *uwp_sb_vtbl[24];
 void uwp_asb_fire_text_changed( struct uwp_element *el );
 void uwp_asb_fire_query_submitted( struct uwp_element *el );
 void uwp_keyboard_press_char( WCHAR ch );
@@ -2732,6 +2751,9 @@ extern INIT_ONCE g_pri_once;
 extern DWORD g_pri_size;
 extern struct uwp_rd_bucket *g_rd_buckets_head;
 extern IDependencyProperty *g_routed_event_ptr_pressed;
+extern IDependencyProperty *g_routed_event_ptr_released;
+extern IDependencyProperty *g_routed_event_tapped;
+extern IDependencyProperty *g_routed_event_other;
 extern HWND g_sub_popup_hwnd;
 extern int g_theme_rd_sentinel;
 extern struct pri_xbf_catalog g_winui_pri_cat;
@@ -3244,7 +3266,7 @@ extern const void *uwp_frame3_vtbl[16];
 extern const void *uwp_frame5_vtbl[16];
 extern const void *uwp_frame2_vtbl[16];
 extern const void *uwp_page_vtbl[16];
-extern const void *uwp_sv_vtbl[64];
+extern const void *uwp_sv_vtbl[72];
 extern const void *uwp_data_template_vtbl[];
 extern const void *uwp_dts_vtbl[];
 extern const void *uwp_dts2_vtbl[];

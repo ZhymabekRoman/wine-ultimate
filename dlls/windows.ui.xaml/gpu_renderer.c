@@ -29,8 +29,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 #define ATLAS_SIZE        2048
 #define ATLAS_HASH_SIZE   2048
 #define FONT_CACHE_SIZE   64
-#define SCRATCH_MAX_W     1920
-#define SCRATCH_MAX_H     512
+#define SCRATCH_MAX_W     2560
+#define SCRATCH_MAX_H     1024
 
 struct xaml_gpu_instance
 {
@@ -862,7 +862,7 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
     struct atlas_entry *entry = NULL;
     struct xaml_gpu_instance *inst;
     UINT align_flags;
-    WCHAR clean_buf[512];
+    WCHAR clean_buf[2048];
     WCHAR face[64];
 
     if (!g_gpu.initialized || !text || !text[0] || !rc) return;
@@ -874,12 +874,12 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
     if (bw > SCRATCH_MAX_W) bw = SCRATCH_MAX_W;
     if (bh > SCRATCH_MAX_H) bh = SCRATCH_MAX_H;
     tlen = wcslen( text );
-    if (tlen > 511) tlen = 511;
+    if (tlen > 2047) tlen = 2047;
     if (dt_flags & DT_SINGLELINE)
     {
         size_t out_i = 0;
         BOOL prev_sp = FALSE;
-        for (ci = 0; ci < tlen && out_i < 511; ci++)
+        for (ci = 0; ci < tlen && out_i < 2047; ci++)
         {
             WCHAR c = text[ci];
             if (c == '\r' || c == '\n' || c == '\t' || c < 0x20)

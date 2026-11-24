@@ -258,8 +258,15 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                 UINT32 cur_node_idx = (~0u);
                 UINT8 nflags = 0;
                 const WCHAR *short_n = L"";
+                BOOL reuse_active_rd = (rd_tbl != NULL && obj_sp == 0 && is_rd_type && active_rd_node_idx != (~0u));
                 if (is_rd_type) nflags |= XBF_AOT_NODE_IS_RD;
-                if (op == 0x17 && ctx->root_el)
+                if (reuse_active_rd)
+                {
+                    cur_node_idx = active_rd_node_idx;
+                    if (cur_node_idx < ctx->aot->node_cnt)
+                        ctx->aot->nodes[cur_node_idx].flags |= XBF_AOT_NODE_IS_RD;
+                }
+                else if (op == 0x17 && ctx->root_el)
                 {
                     nflags |= XBF_AOT_NODE_ROOT_REUSE;
                     cur_node_idx = 0;
@@ -303,7 +310,7 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                     cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
                                                      (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
                 }
-                if (cur_node_idx != (~0u))
+                if (cur_node_idx != (~0u) && !reuse_active_rd)
                 {
                     struct xbf_aot_op aop = {0};
                     aop.kind = XBF_AOT_OP_CREATE_NODE;
@@ -551,6 +558,21 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                         top_sv->vsm_is_res_ref = is_res_ref;
                         top_sv->vsm_has_val = TRUE;
                     }
+                    else if ((top_sv->tid == 0x80c8 || top_sv->tid == 0x80ca) && st) /* DoubleAnimation */
+                    {
+                        if (pid == XBF_PROP_STORYBOARD_TARGET_NAME && sbuf[0])
+                            lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
+                        else if (pid == XBF_PROP_STORYBOARD_TARGET_PROPERTY && sbuf[0])
+                            vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
+                        else if (pid == 0x816f) /* DoubleAnimation.To */
+                        {
+                            lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
+                            top_sv->vsm_vt = vt;
+                            top_sv->vsm_num = num;
+                            top_sv->vsm_is_res_ref = is_res_ref;
+                            top_sv->vsm_has_val = TRUE;
+                        }
+                    }
                 }
             }
         }
@@ -602,6 +624,29 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                                                   val_stack[obj_sp - 1].vsm_prop,
                                                   last_popped.vsm_val_str, last_popped.vsm_vt,
                                                   last_popped.vsm_num, last_popped.vsm_is_res_ref );
+                    }
+                    else if ((last_popped.tid == 0x80c8 || last_popped.tid == 0x80ca) && st &&
+                             last_popped.vsm_target[0] && last_popped.vsm_prop[0] && last_popped.vsm_has_val)
+                    {
+                        uwp_vsm_state_add_setter( st, last_popped.vsm_target, last_popped.vsm_prop,
+                                                  last_popped.vsm_val_str, last_popped.vsm_vt,
+                                                  last_popped.vsm_num, last_popped.vsm_is_res_ref );
+                    }
+                    else if (last_popped.tid == XBF_TYPE_VISUAL_STATE && st && !st->name[0])
+                    {
+                        WCHAR synth[64];
+                        swprintf( synth, ARRAY_SIZE(synth), L"__vsm_g%d_s%d",
+                                  vsm_holder->vsm_group_cnt - 1, grp->state_cnt - 1 );
+                        lstrcpynW( st->name, synth, ARRAY_SIZE(st->name) );
+                        if (last_popped_node_idx != (~0u))
+                        {
+                            struct xbf_aot_op aop = {0};
+                            aop.kind = XBF_AOT_OP_SET_XNAME;
+                            aop.node_idx = last_popped_node_idx;
+                            aop.child_idx = (~0u);
+                            aop.str_off = xbf_aot_intern_str( ctx->aot, synth );
+                            xbf_aot_emit_op( ctx->aot, &aop );
+                        }
                     }
                 }
 
@@ -1349,15 +1394,17 @@ void uwp_realize_deferred_entry( struct uwp_defer_entry *de )
     }
 }
 
-IInspectable *uwp_instantiate_xbf_substream( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx, IInspectable *owner_comp )
+IInspectable *uwp_instantiate_xbf_substream_rd( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx,
+                                                IInspectable *owner_comp, struct uwp_rd_bucket *rd_bucket )
 {
     struct uwp_element *created = NULL;
     void *conn = NULL;
     if (!xbf_data || !xbf_size) return NULL;
     if (owner_comp)
         IInspectable_QueryInterface( owner_comp, &IID_IComponentConnector_UWP_g, &conn );
-    uwp_parse_and_build_xbf( xbf_data, xbf_size, owner_comp, conn, TRUE, uwp_get_app_outer(),
-                             (int)sub_idx, NULL, &created );
+    uwp_ensure_app_resources_loaded();
+    uwp_parse_xbf_internal( xbf_data, xbf_size, owner_comp, conn, TRUE, uwp_get_app_outer(),
+                            (int)sub_idx, NULL, &created, NULL, rd_bucket, FALSE );
     if (conn) IUnknown_Release( (IUnknown *)conn );
     if (!created) return NULL;
     {
@@ -1365,6 +1412,11 @@ IInspectable *uwp_instantiate_xbf_substream( const BYTE *xbf_data, DWORD xbf_siz
         IInspectable_AddRef( ret );
         return ret;
     }
+}
+
+IInspectable *uwp_instantiate_xbf_substream( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx, IInspectable *owner_comp )
+{
+    return uwp_instantiate_xbf_substream_rd( xbf_data, xbf_size, sub_idx, owner_comp, NULL );
 }
 
 BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *app_outer )

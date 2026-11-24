@@ -774,7 +774,35 @@ const void *uwp_page_vtbl[16] =
     [12 ... 15] = uwp_generic_noop,
 };
 
-const void *uwp_sv_vtbl[64] =
+static HRESULT WINAPI uwp_sv_get_zero_double( void *iface, double *out )
+{
+    if (out) *out = 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_get_viewport_w( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->actual_w > 0.0) ? impl->actual_w : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_get_viewport_h( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->actual_h > 0.0) ? impl->actual_h : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_get_zoom( void *iface, float *out )
+{
+    if (out) *out = 1.0f;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_get_collapsed( void *iface, int *out )
+{
+    if (out) *out = 1; /* Collapsed */
+    return S_OK;
+}
+
+const void *uwp_sv_vtbl[72] =
 {
     [0] = uwp_sub_QueryInterface,
     [1] = uwp_sub_AddRef,
@@ -782,10 +810,25 @@ const void *uwp_sv_vtbl[64] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 49] = uwp_generic_noop,
-    [50] = uwp_ui_event_add, /* add_ViewChanged */
-    [51] = uwp_generic_noop, /* remove_ViewChanged */
-    [52 ... 63] = uwp_generic_noop,
+    [6 ... 40] = uwp_generic_noop,
+    [41] = uwp_sv_get_zero_double,  /* get_HorizontalOffset */
+    [42] = uwp_sv_get_viewport_w,   /* get_ViewportWidth */
+    [43] = uwp_sv_get_zero_double,  /* get_ScrollableWidth */
+    [44] = uwp_sv_get_zero_double,  /* get_VerticalOffset */
+    [45] = uwp_sv_get_viewport_h,   /* get_ViewportHeight */
+    [46] = uwp_sv_get_zero_double,  /* get_ScrollableHeight */
+    [47] = uwp_sv_get_viewport_w,   /* get_ExtentWidth */
+    [48] = uwp_sv_get_viewport_h,   /* get_ExtentHeight */
+    [49] = uwp_sv_get_zoom,         /* get_ZoomFactor */
+    [50] = uwp_sv_get_zoom,         /* get_MinZoomFactor */
+    [51] = uwp_generic_noop,
+    [52] = uwp_sv_get_zoom,         /* get_MaxZoomFactor */
+    [53 ... 57] = uwp_generic_noop,
+    [58] = uwp_sv_get_collapsed,    /* get_ComputedHorizontalScrollBarVisibility */
+    [59] = uwp_sv_get_collapsed,    /* get_ComputedVerticalScrollBarVisibility */
+    [60] = uwp_ui_event_add,        /* add_ViewChanged */
+    [61] = uwp_generic_noop,        /* remove_ViewChanged */
+    [62 ... 71] = uwp_generic_noop,
 };
 
 enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
@@ -796,6 +839,7 @@ enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
     if (wcsstr( cls, L"RowDefinition" )) return UWP_KIND_ROW_DEF;
     if (wcsstr( cls, L"ColumnDefinition" )) return UWP_KIND_COL_DEF;
     if (wcsstr( cls, L"StackPanel" )) return UWP_KIND_STACK_PANEL;
+    if (wcsstr( cls, L"WrapPanel" )) return UWP_KIND_WRAP_PANEL;
     if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.Image" ) || !wcscmp( cls, L"Image" )) return UWP_KIND_IMAGE;
     if (wcsstr( cls, L"ProgressRing" )) return UWP_KIND_PROGRESS_RING;
     if (wcsstr( cls, L"Grid" ) || wcsstr( cls, L"Panel" ) || wcsstr( cls, L"Canvas" )) return UWP_KIND_GRID;
@@ -889,8 +933,6 @@ static HRESULT WINAPI uwp_dts_SelectTemplate( IInspectable *iface, IInspectable 
         if (fn) fn( ovr, item, (void **)out );
         IUnknown_Release( (IUnknown *)ovr );
     }
-    if (!*out)
-        element_create_typed( L"Windows.UI.Xaml.DataTemplate", (void **)out );
     return S_OK;
 }
 
@@ -913,8 +955,6 @@ static HRESULT WINAPI uwp_dts2_SelectTemplateForItem( IInspectable *iface, IInsp
         if (fn) fn( ovr, item, NULL, (void **)out );
         IUnknown_Release( (IUnknown *)ovr );
     }
-    if (!*out)
-        element_create_typed( L"Windows.UI.Xaml.DataTemplate", (void **)out );
     return S_OK;
 }
 

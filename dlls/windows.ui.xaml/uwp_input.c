@@ -870,14 +870,17 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
             void *ctrl_ovr = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( cur->outer, &IID_IControlOverrides_UWP, &ctrl_ovr )) && ctrl_ovr)
             {
-                HRESULT (WINAPI *on_tapped)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[14];
-                if (on_tapped)
+                if (!((char *)ctrl_ovr >= (char *)cur && (char *)ctrl_ovr < (char *)(cur + 1)))
                 {
-                    WARN( "uwp_fire_tapped_bubble: IControlOverrides::OnTapped on %s (%s) txt=%s\n",
-                          debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(cur->text) );
-                    __TRY { on_tapped( ctrl_ovr, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
-                    __EXCEPT_ALL {}
-                    __ENDTRY;
+                    HRESULT (WINAPI *on_tapped)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[14];
+                    if (on_tapped)
+                    {
+                        WARN( "uwp_fire_tapped_bubble: IControlOverrides::OnTapped on %s (%s) txt=%s\n",
+                              debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(cur->text) );
+                        __TRY { on_tapped( ctrl_ovr, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
+                        __EXCEPT_ALL {}
+                        __ENDTRY;
+                    }
                 }
                 IUnknown_Release( (IUnknown *)ctrl_ovr );
             }
@@ -942,20 +945,23 @@ BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_eve
             void *ctrl_ovr = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( cur->outer, &IID_IControlOverrides_UWP, &ctrl_ovr )) && ctrl_ovr)
             {
-                HRESULT (WINAPI *on_ptr)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[ovr_slot];
-                if (on_ptr)
+                if (!((char *)ctrl_ovr >= (char *)cur && (char *)ctrl_ovr < (char *)(cur + 1)))
                 {
-                    __TRY
+                    HRESULT (WINAPI *on_ptr)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[ovr_slot];
+                    if (on_ptr)
                     {
-                        on_ptr( ctrl_ovr, &args->IPointerRoutedEventArgs_vtbl );
-                        fired = TRUE;
+                        __TRY
+                        {
+                            on_ptr( ctrl_ovr, &args->IPointerRoutedEventArgs_vtbl );
+                            fired = TRUE;
+                        }
+                        __EXCEPT_ALL
+                        {
+                            TRACE( "uwp_fire_element_pointer: IControlOverrides[%d] faulted on %s\n",
+                                   ovr_slot, debugstr_w(cur->class_name) );
+                        }
+                        __ENDTRY;
                     }
-                    __EXCEPT_ALL
-                    {
-                        TRACE( "uwp_fire_element_pointer: IControlOverrides[%d] faulted on %s\n",
-                               ovr_slot, debugstr_w(cur->class_name) );
-                    }
-                    __ENDTRY;
                 }
                 IUnknown_Release( (IUnknown *)ctrl_ovr );
             }

@@ -3527,6 +3527,79 @@ const void *uwp_grid3_vtbl[16] =
     [10 ... 15] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_tb_get_TextWrapping( void *iface, INT32 *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->text_wrapping : 1;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tb_put_TextWrapping( void *iface, INT32 val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        impl->text_wrapping = val;
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tb_get_MaxLines( void *iface, INT32 *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->max_lines : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tb_put_MaxLines( void *iface, INT32 val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        impl->max_lines = max( 0, val );
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+static BOOL uwp_tb_is_trimmed_or_overflow( const struct uwp_element *impl )
+{
+    WCHAR rich_buf[2048];
+    const WCHAR *txt;
+    double fs, max_w, est_w;
+    int lines = 1, nl_lines = 1;
+    const WCHAR *p;
+
+    if (!impl || impl->max_lines <= 0) return FALSE;
+    txt = impl->text;
+    if (!txt[0] && impl->inlines_coll && uwp_flatten_inlines_text( impl, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
+        txt = rich_buf;
+    if (!txt[0]) return FALSE;
+    for (p = txt; *p; p++) if (*p == L'\n') nl_lines++;
+    lines = nl_lines;
+    fs = (impl->font_size > 0.0 ? impl->font_size : 14.0);
+    max_w = (impl->actual_w > 32.0) ? (impl->actual_w - 16.0) : 600.0;
+    if (impl->max_width > 0.0 && impl->max_width < max_w) max_w = impl->max_width;
+    est_w = (double)wcslen( txt ) * fs * 0.56;
+    if (max_w > 32.0 && est_w > max_w)
+    {
+        int wrap_lines = (int)((est_w + max_w - 1.0) / max_w);
+        if (wrap_lines > lines) lines = wrap_lines;
+    }
+    return lines > impl->max_lines;
+}
+static HRESULT WINAPI uwp_tb_get_IsTextTrimmed( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = uwp_tb_is_trimmed_or_overflow( impl ) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_rtb_get_HasOverflowContent( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = uwp_tb_is_trimmed_or_overflow( impl ) ? TRUE : FALSE;
+    return S_OK;
+}
+
 const void *uwp_tb_vtbl[64] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -3539,14 +3612,67 @@ const void *uwp_tb_vtbl[64] =
     [7] = uwp_ctrl_put_FontSize,     /* put_FontSize */
     [8] = uwp_ctrl_get_FontFamily,   /* get_FontFamily */
     [9] = uwp_ctrl_put_FontFamily,   /* put_FontFamily */
-    [10 ... 23] = uwp_generic_noop,
+    [10 ... 19] = uwp_generic_noop,
+    [20] = uwp_tb_get_TextWrapping,  /* get_TextWrapping */
+    [21] = uwp_tb_put_TextWrapping,  /* put_TextWrapping */
+    [22 ... 23] = uwp_generic_noop,
     [24] = uwp_tb_get_Inlines,
     [25] = uwp_generic_noop,
     [26] = uwp_tb_get_Text,
     [27] = uwp_tb_put_Text,
-    [28 ... 33] = uwp_generic_noop,
+    [28] = uwp_tb_get_Inlines,       /* get_Inlines */
+    [29 ... 33] = uwp_generic_noop,
     [34] = uwp_tb_get_Inlines,
     [35 ... 63] = uwp_generic_noop,
+};
+
+const void *uwp_rtb_vtbl[64] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_ctrl_get_FontSize,          /* get_FontSize */
+    [7] = uwp_ctrl_put_FontSize,          /* put_FontSize */
+    [8] = uwp_ctrl_get_FontFamily,        /* get_FontFamily */
+    [9] = uwp_ctrl_put_FontFamily,        /* put_FontFamily */
+    [10 ... 19] = uwp_generic_noop,
+    [20] = uwp_tb_get_TextWrapping,       /* get_TextWrapping */
+    [21] = uwp_tb_put_TextWrapping,       /* put_TextWrapping */
+    [22 ... 23] = uwp_generic_noop,
+    [24] = uwp_tb_get_Inlines,
+    [25 ... 33] = uwp_generic_noop,
+    [34] = uwp_tb_get_Inlines,            /* get_Blocks */
+    [35] = uwp_rtb_get_HasOverflowContent,/* get_HasOverflowContent */
+    [36 ... 63] = uwp_generic_noop,
+};
+
+const void *uwp_tb2_vtbl[24] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 7] = uwp_generic_noop,
+    [8] = uwp_tb_get_MaxLines,            /* get_MaxLines */
+    [9] = uwp_tb_put_MaxLines,            /* put_MaxLines */
+    [10 ... 23] = uwp_generic_noop,
+};
+
+const void *uwp_tb6_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_tb_get_IsTextTrimmed,       /* get_IsTextTrimmed */
+    [7 ... 15] = uwp_generic_noop,
 };
 
 const void *uwp_paragraph_vtbl[64] =

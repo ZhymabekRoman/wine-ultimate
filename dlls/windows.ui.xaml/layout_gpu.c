@@ -1242,6 +1242,108 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
     return FALSE;
 }
 
+size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, size_t out_cap )
+{
+    struct uwp_vec_view *v;
+    unsigned int i, j;
+    size_t pos = 0;
+
+    if (!out_buf || out_cap < 2) return 0;
+    out_buf[0] = 0;
+    if (!el || !el->inlines_coll) return 0;
+
+    v = CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+    for (i = 0; v && i < v->count && pos + 2 < out_cap; i++)
+    {
+        struct uwp_element *blk = uwp_elem_from_any( v->items[i] );
+        if (!blk) continue;
+        if (blk->text[0])
+        {
+            if (pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
+            lstrcpynW( out_buf + pos, blk->text, (int)(out_cap - pos) );
+            pos += wcslen( out_buf + pos );
+        }
+        else if (blk->inlines_coll)
+        {
+            struct uwp_vec_view *iv = CONTAINING_RECORD( blk->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+            if (pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
+            for (j = 0; iv && j < iv->count && pos + 2 < out_cap; j++)
+            {
+                struct uwp_element *inl = uwp_elem_from_any( iv->items[j] );
+                if (!inl && iv->items[j])
+                {
+                    static const GUID IID_IRun_g =
+                        { 0x59553c83, 0x0e14, 0x49bd, { 0xb8, 0x4b, 0xc5, 0x26, 0xf3, 0x03, 0x43, 0x49 } };
+                    void *run_iface = NULL;
+                    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_IRun_g, &run_iface )) && run_iface)
+                    {
+                        HSTRING htxt = NULL;
+                        HRESULT (WINAPI *get_txt)(void *, HSTRING *) = (void *)(*(void ***)run_iface)[6];
+                        if (get_txt && SUCCEEDED(get_txt( run_iface, &htxt )) && htxt)
+                        {
+                            const WCHAR *s = WindowsGetStringRawBuffer( htxt, NULL );
+                            if (s && s[0])
+                            {
+                                lstrcpynW( out_buf + pos, s, (int)(out_cap - pos) );
+                                pos += wcslen( out_buf + pos );
+                            }
+                            WindowsDeleteString( htxt );
+                        }
+                        IUnknown_Release( (IUnknown *)run_iface );
+                    }
+                    else
+                    {
+                        static const GUID IID_ISpan_g =
+                            { 0x54f03373, 0xc273, 0x4f3b, { 0xb3, 0x71, 0x6e, 0x2b, 0x4b, 0x2a, 0x96, 0x91 } };
+                        void *span_iface = NULL;
+                        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_g, &span_iface )) && span_iface)
+                        {
+                            void *sub_inlines = NULL;
+                            HRESULT (WINAPI *get_inlines)(void *, void **) = (void *)(*(void ***)span_iface)[6];
+                            if (get_inlines && SUCCEEDED(get_inlines( span_iface, &sub_inlines )) && sub_inlines)
+                            {
+                                struct uwp_vec_view *sv = CONTAINING_RECORD( sub_inlines, struct uwp_vec_view, IInspectable_iface );
+                                unsigned int k;
+                                for (k = 0; sv && k < sv->count && pos + 2 < out_cap; k++)
+                                {
+                                    struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
+                                    if (sub && sub->text[0])
+                                    {
+                                        lstrcpynW( out_buf + pos, sub->text, (int)(out_cap - pos) );
+                                        pos += wcslen( out_buf + pos );
+                                    }
+                                }
+                                IInspectable_Release( (IInspectable *)sub_inlines );
+                            }
+                            IUnknown_Release( (IUnknown *)span_iface );
+                        }
+                    }
+                }
+                else if (inl && inl->text[0])
+                {
+                    lstrcpynW( out_buf + pos, inl->text, (int)(out_cap - pos) );
+                    pos += wcslen( out_buf + pos );
+                }
+                else if (inl && inl->inlines_coll)
+                {
+                    struct uwp_vec_view *sv = CONTAINING_RECORD( inl->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+                    unsigned int k;
+                    for (k = 0; sv && k < sv->count && pos + 2 < out_cap; k++)
+                    {
+                        struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
+                        if (sub && sub->text[0])
+                        {
+                            lstrcpynW( out_buf + pos, sub->text, (int)(out_cap - pos) );
+                            pos += wcslen( out_buf + pos );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return pos;
+}
+
 static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el );
 
 static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
@@ -1263,7 +1365,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
            el ? el->has_bg : 0, el ? el->bg_argb : 0,
            el ? el->visibility : 0xffff,
            (void *)(el ? el->children_coll : NULL), (void *)(el ? el->content : NULL) );
-    if (!el || !el->has_bounds || el->visibility != 0) return;
+    if (!el || !el->has_bounds || el->visibility != 0 || el->opacity <= 0.005) return;
     if (el->evc_cnt > 0 && !el->evc_fired)
         uwp_fire_evc_if_needed( el );
     if (el->items_source && !el->children_coll)
@@ -2235,104 +2337,16 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             return;
         }
         {
-            WCHAR rich_buf[1024];
+            WCHAR rich_buf[2048];
             const WCHAR *draw_txt = el->text;
             BOOL is_rich = FALSE;
             if (!draw_txt[0] && el->inlines_coll)
             {
-                struct uwp_vec_view *v = CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
-                unsigned int i, j;
-                size_t pos = 0;
-                rich_buf[0] = 0;
-                for (i = 0; v && i < v->count && pos + 2 < ARRAY_SIZE(rich_buf); i++)
+                if (uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
                 {
-                    struct uwp_element *blk = uwp_elem_from_any( v->items[i] );
-                    if (!blk) continue;
-                    if (blk->text[0])
-                    {
-                        if (pos > 0 && rich_buf[pos - 1] != '\n') rich_buf[pos++] = '\n';
-                        lstrcpynW( rich_buf + pos, blk->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
-                        pos += wcslen( rich_buf + pos );
-                    }
-                    else if (blk->inlines_coll)
-                    {
-                        struct uwp_vec_view *iv = CONTAINING_RECORD( blk->inlines_coll, struct uwp_vec_view, IInspectable_iface );
-                        if (pos > 0 && rich_buf[pos - 1] != '\n') rich_buf[pos++] = '\n';
-                        for (j = 0; iv && j < iv->count && pos + 2 < ARRAY_SIZE(rich_buf); j++)
-                        {
-                            struct uwp_element *inl = uwp_elem_from_any( iv->items[j] );
-                            if (!inl && iv->items[j])
-                            {
-                                static const GUID IID_IRun_g =
-                                    { 0x59553c83, 0x0e14, 0x49bd, { 0xb8, 0x4b, 0xc5, 0x26, 0xf3, 0x03, 0x43, 0x49 } };
-                                void *run_iface = NULL;
-                                if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_IRun_g, &run_iface )) && run_iface)
-                                {
-                                    HSTRING htxt = NULL;
-                                    HRESULT (WINAPI *get_txt)(void *, HSTRING *) = (void *)(*(void ***)run_iface)[6];
-                                    if (get_txt && SUCCEEDED(get_txt( run_iface, &htxt )) && htxt)
-                                    {
-                                        const WCHAR *s = WindowsGetStringRawBuffer( htxt, NULL );
-                                        if (s && s[0])
-                                        {
-                                            lstrcpynW( rich_buf + pos, s, (int)(ARRAY_SIZE(rich_buf) - pos) );
-                                            pos += wcslen( rich_buf + pos );
-                                        }
-                                        WindowsDeleteString( htxt );
-                                    }
-                                    IUnknown_Release( (IUnknown *)run_iface );
-                                }
-                                else
-                                {
-                                    static const GUID IID_ISpan_g =
-                                        { 0x54f03373, 0xc273, 0x4f3b, { 0xb3, 0x71, 0x6e, 0x2b, 0x4b, 0x2a, 0x96, 0x91 } };
-                                    void *span_iface = NULL;
-                                    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_g, &span_iface )) && span_iface)
-                                    {
-                                        void *sub_inlines = NULL;
-                                        HRESULT (WINAPI *get_inlines)(void *, void **) = (void *)(*(void ***)span_iface)[6];
-                                        if (get_inlines && SUCCEEDED(get_inlines( span_iface, &sub_inlines )) && sub_inlines)
-                                        {
-                                            struct uwp_vec_view *sv = CONTAINING_RECORD( sub_inlines, struct uwp_vec_view, IInspectable_iface );
-                                            unsigned int k;
-                                            for (k = 0; sv && k < sv->count && pos + 2 < ARRAY_SIZE(rich_buf); k++)
-                                            {
-                                                struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
-                                                if (sub && sub->text[0])
-                                                {
-                                                    lstrcpynW( rich_buf + pos, sub->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
-                                                    pos += wcslen( rich_buf + pos );
-                                                }
-                                            }
-                                            IInspectable_Release( (IInspectable *)sub_inlines );
-                                        }
-                                        IUnknown_Release( (IUnknown *)span_iface );
-                                    }
-                                }
-                            }
-                            else if (inl && inl->text[0])
-                            {
-                                lstrcpynW( rich_buf + pos, inl->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
-                                pos += wcslen( rich_buf + pos );
-                            }
-                            else if (inl && inl->inlines_coll)
-                            {
-                                struct uwp_vec_view *sv = CONTAINING_RECORD( inl->inlines_coll, struct uwp_vec_view, IInspectable_iface );
-                                unsigned int k;
-                                for (k = 0; sv && k < sv->count && pos + 2 < ARRAY_SIZE(rich_buf); k++)
-                                {
-                                    struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
-                                    if (sub && sub->text[0])
-                                    {
-                                        lstrcpynW( rich_buf + pos, sub->text, (int)(ARRAY_SIZE(rich_buf) - pos) );
-                                        pos += wcslen( rich_buf + pos );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    draw_txt = rich_buf;
+                    is_rich = TRUE;
                 }
-                if (rich_buf[0]) { draw_txt = rich_buf; is_rich = TRUE; }
             }
             if (draw_txt[0])
             {
@@ -2375,9 +2389,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     else
                         hflag = DT_LEFT;
 
-                    if (is_rich)
-                        dt = hflag | DT_TOP | DT_WORDBREAK;
-                    else if (el->text_wrapping >= 2 && (trc.bottom - trc.top) > (int)(fh * 1.8))
+                    if (is_rich || el->text_wrapping >= 2)
                         dt = hflag | DT_TOP | DT_WORDBREAK;
                     else
                     {
@@ -3962,29 +3974,43 @@ static HRESULT WINAPI uwp_cf_dp_prop( void *iface, void **out )
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
 
+static HRESULT uwp_cf_routed_event_slot( IDependencyProperty **slot, void **out )
+{
+    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (!*slot)
+        uwp_element_create( L"Windows.UI.Xaml.RoutedEvent", NULL, NULL, (void **)slot );
+    *out = *slot;
+    if (*out) IUnknown_AddRef( (IUnknown *)*out );
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
     if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
     if (f && f->class_name && !wcscmp( f->class_name, L"Windows.UI.Xaml.UIElement" ))
-    {
-        if (!g_routed_event_ptr_pressed)
-            uwp_element_create( L"Windows.UI.Xaml.RoutedEvent", NULL, NULL, (void **)&g_routed_event_ptr_pressed );
-        *out = g_routed_event_ptr_pressed;
-        if (*out) IUnknown_AddRef( (IUnknown *)*out );
-        return S_OK;
-    }
+        return uwp_cf_routed_event_slot( &g_routed_event_other, out );
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
 
-static HRESULT WINAPI uwp_cf_routed_event( void *iface, void **out )
+static HRESULT WINAPI uwp_cf_routed_event_other( void *iface, void **out )
 {
-    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
-    if (!g_routed_event_ptr_pressed)
-        uwp_element_create( L"Windows.UI.Xaml.RoutedEvent", NULL, NULL, (void **)&g_routed_event_ptr_pressed );
-    *out = g_routed_event_ptr_pressed;
-    if (*out) IUnknown_AddRef( (IUnknown *)*out );
-    return S_OK;
+    return uwp_cf_routed_event_slot( &g_routed_event_other, out );
+}
+
+static HRESULT WINAPI uwp_cf_routed_event_ptr_pressed( void *iface, void **out )
+{
+    return uwp_cf_routed_event_slot( &g_routed_event_ptr_pressed, out );
+}
+
+static HRESULT WINAPI uwp_cf_routed_event_ptr_released( void *iface, void **out )
+{
+    return uwp_cf_routed_event_slot( &g_routed_event_ptr_released, out );
+}
+
+static HRESULT WINAPI uwp_cf_routed_event_tapped( void *iface, void **out )
+{
+    return uwp_cf_routed_event_slot( &g_routed_event_tapped, out );
 }
 
 static const GUID IID_IUIElementStatics4_UWP =
@@ -4004,7 +4030,7 @@ static const void *uwp_uielement_routed_statics_vtbl[32] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6 ... 31] = uwp_cf_routed_event,
+    [6 ... 31] = uwp_cf_routed_event_other,
 };
 static const void *uwp_uielement_routed_statics_obj = uwp_uielement_routed_statics_vtbl;
 
@@ -4049,8 +4075,13 @@ static const void *uwp_uielement_statics_vtbl[64] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6 ... 22] = uwp_cf_routed_event,
-    [23 ... 24] = uwp_cf_routed_event,
+    [6 ... 8] = uwp_cf_routed_event_other,
+    [9] = uwp_cf_routed_event_ptr_pressed,
+    [10] = uwp_cf_routed_event_other,
+    [11] = uwp_cf_routed_event_ptr_released,
+    [12 ... 15] = uwp_cf_routed_event_other,
+    [16] = uwp_cf_routed_event_tapped,
+    [17 ... 24] = uwp_cf_routed_event_other,
     [25 ... 63] = uwp_cf_dp_prop,
 };
 static const void *uwp_uielement_statics_obj = uwp_uielement_statics_vtbl;

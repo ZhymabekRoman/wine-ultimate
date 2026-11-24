@@ -1471,8 +1471,19 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IBorder_iface;
     else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ))
         *out = &impl->ITextBlock_iface;
-    else if ((iid->Data1 == 0xe5fff9e2 && iid->Data2 == 0xb968 && iid->Data3 == 0x49e7) || /* IRichTextBlock */
-             (iid->Data1 == 0xf83ef59a && iid->Data2 == 0xfa61 && iid->Data3 == 0x4bef) || /* IParagraph */
+    else if (iid->Data1 == 0xe5fff9e2 && iid->Data2 == 0xb968 && iid->Data3 == 0x49e7) /* IRichTextBlock */
+        *out = &impl->IRichTextBlock_iface;
+    else if (IsEqualGUID( iid, &IID_ITextBlock2_UWP ) ||
+             (iid->Data1 == 0x3f209013 && iid->Data2 == 0x03e7 && iid->Data3 == 0x4508)) /* IRichTextBlock2 */
+        *out = &impl->ITextBlock2_iface;
+    else if (IsEqualGUID( iid, &IID_ITextBlock6_UWP ) ||
+             (iid->Data1 == 0xce5eb4c8 && iid->Data2 == 0x2f10 && iid->Data3 == 0x4b88) || /* ITextBlock6 */
+             (iid->Data1 == 0x394b0030 && iid->Data2 == 0x9f4e && iid->Data3 == 0x41e6))   /* IRichTextBlock6 */
+        *out = &impl->ITextBlock6_iface;
+    else if ((iid->Data1 == 0x0bc465dc && iid->Data2 == 0xbe4d && iid->Data3 == 0x4d0d) || /* IStoryboard */
+             (iid->Data1 == 0x04d41bb3 && iid->Data2 == 0x8721 && iid->Data3 == 0x519e))   /* IStoryboard (WinUI3) */
+        *out = &impl->IStoryboard_iface;
+    else if ((iid->Data1 == 0xf83ef59a && iid->Data2 == 0xfa61 && iid->Data3 == 0x4bef) || /* IParagraph */
              (iid->Data1 == 0x54f03373 && iid->Data2 == 0xc273 && iid->Data3 == 0x4f3b) || /* ISpan */
              (iid->Data1 == 0x9839d4a9 && iid->Data2 == 0x02af && iid->Data3 == 0x4811))   /* ISpan (UWP) */
         *out = &impl->IParagraph_iface;
@@ -1514,9 +1525,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IButton_UWP ) ||
              IsEqualGUID( iid, &IID_IButtonWithFlyout_UWP ) ||
              IsEqualGUID( iid, &IID_IToggleButtonOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_ITextBlock2_UWP ) ||
              IsEqualGUID( iid, &IID_ITextBlock3_UWP ) ||
-             IsEqualGUID( iid, &IID_ITextBlock6_UWP ) ||
              IsEqualGUID( iid, &IID_ITextBlock_Calc2 ) ||
              IsEqualGUID( iid, &IID_ITextBlock_Calc3 ) ||
              IsEqualGUID( iid, &IID_ITextBlock_Calc4 ) ||
@@ -1865,6 +1874,9 @@ static HRESULT WINAPI uwp_ui_get_Visibility( void *iface, int *vis )
 static HRESULT WINAPI uwp_ui_put_Visibility( void *iface, int vis )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+        TRACE( "uwp_ui_put_Visibility %s (%s) %d -> %d\n",
+               debugstr_w(impl->class_name), debugstr_w(impl->name), impl->visibility, vis );
     if (impl && impl->visibility != vis)
     {
         impl->visibility = vis;
@@ -2402,15 +2414,28 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
         }
     }
 
-    /* 2. Search named elements in root, impl, and global list */
-    for (i = 0; i < root->named_cnt; i++)
+    /* 2. Search named elements in impl, root, and global list */
+    for (i = 0; i < impl->named_cnt; i++)
     {
-        struct uwp_element *el = root->named_elems[i];
-        if (el && !wcscmp( el->name, want ))
+        struct uwp_element *nel = impl->named_elems[i];
+        if (nel && !wcscmp( nel->name, want ))
         {
-            *out = el->outer ? el->outer : &el->IInspectable_iface;
+            *out = nel->outer ? nel->outer : &nel->IInspectable_iface;
             IInspectable_AddRef( (IInspectable *)*out );
             return S_OK;
+        }
+    }
+    if (root != impl)
+    {
+        for (i = 0; i < root->named_cnt; i++)
+        {
+            struct uwp_element *nel = root->named_elems[i];
+            if (nel && !wcscmp( nel->name, want ))
+            {
+                *out = nel->outer ? nel->outer : &nel->IInspectable_iface;
+                IInspectable_AddRef( (IInspectable *)*out );
+                return S_OK;
+            }
         }
     }
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
@@ -2816,9 +2841,20 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
     if (el->template_xbf_data && el->template_xbf_size)
     {
         IInspectable *tpl_obj;
+        struct uwp_rd_bucket *tpl_rd = el->template_rd_bucket ? el->template_rd_bucket : sb;
+        if (!tpl_rd)
+        {
+            struct uwp_element *anc;
+            for (anc = el; anc; anc = anc->parent)
+            {
+                if (anc->rd_bucket) { tpl_rd = anc->rd_bucket; break; }
+            }
+            if (!tpl_rd && el->owner_component && el->owner_component->rd_bucket)
+                tpl_rd = el->owner_component->rd_bucket;
+        }
         el->template_inflated = TRUE;
-        tpl_obj = uwp_instantiate_xbf_substream( el->template_xbf_data, el->template_xbf_size,
-                                                 el->template_sub_idx, NULL );
+        tpl_obj = uwp_instantiate_xbf_substream_rd( el->template_xbf_data, el->template_xbf_size,
+                                                    el->template_sub_idx, NULL, tpl_rd );
         if (tpl_obj)
         {
             struct uwp_element *tpl_root = uwp_elem_from_any( tpl_obj );
@@ -2956,7 +2992,27 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
     TRACE( "GetTemplateChild(%s) on %s (%s)\n",
            debugstr_w(nm), debugstr_w(impl->class_name), debugstr_w(impl->name) );
 
-    if (!wcscmp( nm, L"TextContainer" ))
+    /* Prefer real elements instantiated from the control's inflated XBF ControlTemplate
+     * before falling back to synthetic template parts. */
+    if (impl->template_root && impl->named_cnt > 0 &&
+        wcscmp( nm, L"TextContainer" ) != 0 && wcscmp( nm, L"NormalOutput" ) != 0)
+    {
+        int i;
+        for (i = 0; i < impl->named_cnt; i++)
+        {
+            if (impl->named_elems[i] && !wcscmp( impl->named_elems[i]->name, nm ))
+            {
+                child = impl->named_elems[i];
+                break;
+            }
+        }
+    }
+
+    if (child)
+    {
+        /* Found in inflated ControlTemplate */
+    }
+    else if (!wcscmp( nm, L"TextContainer" ))
     {
         if (!impl->tpl_text_container)
         {
@@ -3106,36 +3162,6 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                 uwp_element_add_named( impl, child );
             }
         }
-        if (child && wcsstr( impl->class_name, L"NavigationView" ) &&
-            (!wcscmp( nm, L"TogglePaneButton" ) || !wcscmp( nm, L"MenuItemsHost" ) ||
-             !wcscmp( nm, L"FooterMenuItemsHost" )))
-        {
-            BOOL already_attached = FALSE;
-            child->parent = impl;
-            if (!wcscmp( nm, L"TogglePaneButton" ))
-            {
-                child->width = 40.0;
-                child->height = 36.0;
-                if (!child->text[0])
-                    lstrcpynW( child->text, L"\x2630", ARRAY_SIZE(child->text) );
-            }
-            if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
-            if (impl->children_coll)
-            {
-                struct uwp_vec_view *v = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
-                unsigned int vi;
-                for (vi = 0; vi < v->count; vi++)
-                {
-                    if (uwp_elem_from_any( v->items[vi] ) == child)
-                    {
-                        already_attached = TRUE;
-                        break;
-                    }
-                }
-                if (!already_attached)
-                    uwp_vec_Append( impl->children_coll, child->outer ? child->outer : &child->IInspectable_iface );
-            }
-        }
     }
     else
     {
@@ -3144,6 +3170,37 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
             WARN( "GetTemplateChild(%s) on %s (%s) -> NULL\n",
                   debugstr_w(nm), debugstr_w(impl->class_name), debugstr_w(impl->name) );
         return hr_fn;
+    }
+
+    if (child && wcsstr( impl->class_name, L"NavigationView" ) &&
+        (!wcscmp( nm, L"TogglePaneButton" ) || !wcscmp( nm, L"MenuItemsHost" ) ||
+         !wcscmp( nm, L"FooterMenuItemsHost" )))
+    {
+        BOOL already_attached = FALSE;
+        child->parent = impl;
+        if (!wcscmp( nm, L"TogglePaneButton" ))
+        {
+            child->width = 40.0;
+            child->height = 36.0;
+            if (!child->text[0])
+                lstrcpynW( child->text, L"\x2630", ARRAY_SIZE(child->text) );
+        }
+        if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+        if (impl->children_coll)
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int vi;
+            for (vi = 0; vi < v->count; vi++)
+            {
+                if (uwp_elem_from_any( v->items[vi] ) == child)
+                {
+                    already_attached = TRUE;
+                    break;
+                }
+            }
+            if (!already_attached)
+                uwp_vec_Append( impl->children_coll, child->outer ? child->outer : &child->IInspectable_iface );
+        }
     }
 
     if (child)
@@ -3200,15 +3257,30 @@ static const void *uwp_do2_vtbl[16] =
 };
 
 IDependencyProperty *g_routed_event_ptr_pressed = NULL;
+IDependencyProperty *g_routed_event_ptr_released = NULL;
+IDependencyProperty *g_routed_event_tapped = NULL;
+IDependencyProperty *g_routed_event_other = NULL;
 
 static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *handler, boolean handled_too )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct xaml_event_registry *target_reg = NULL;
+    BOOL is_tapped = FALSE;
     (void)handled_too;
     if (!impl || !handler) return S_OK;
     WARN( "uwp_ui_AddHandler on %s (%s) ev=%p ptr_ev=%p handler=%p handled_too=%d\n",
           debugstr_w(impl->class_name), debugstr_w(impl->name), routed_event, g_routed_event_ptr_pressed, handler, handled_too );
     if (g_routed_event_ptr_pressed && routed_event == (void *)g_routed_event_ptr_pressed)
+        target_reg = &impl->ptr_pressed_reg;
+    else if (g_routed_event_ptr_released && routed_event == (void *)g_routed_event_ptr_released)
+        target_reg = &impl->ptr_released_reg;
+    else if (g_routed_event_tapped && routed_event == (void *)g_routed_event_tapped)
+    {
+        target_reg = &impl->tapped_reg;
+        is_tapped = TRUE;
+    }
+
+    if (target_reg && !is_tapped)
     {
         static const GUID IID_IPointerEventHandler_UWP =
             { 0xe4385929, 0xc004, 0x4bcf, { 0x89, 0x70, 0x35, 0x94, 0x86, 0xe3, 0x9f, 0x88 } };
@@ -3220,7 +3292,7 @@ static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *
         if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)handler, &IID_IPointerEventHandler_UWP, &peh )) && peh)
         {
             del = peh;
-            xaml_event_registry_add( &impl->ptr_pressed_reg, del, NULL );
+            xaml_event_registry_add( target_reg, del, NULL );
             IUnknown_Release( (IUnknown *)peh );
         }
         else if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)handler, &IID_IReference_PointerEventHandler, &iref )) && iref)
@@ -3229,19 +3301,29 @@ static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *
             HRESULT (WINAPI *get_val)(void *, void **) = (void *)(*(void ***)iref)[6];
             if (get_val && SUCCEEDED(get_val( iref, &unwrapped )) && unwrapped)
             {
-                del = unwrapped;
-                xaml_event_registry_add( &impl->ptr_pressed_reg, del, NULL );
+                if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)unwrapped, &IID_IPointerEventHandler_UWP, &peh )) && peh)
+                {
+                    del = peh;
+                    xaml_event_registry_add( target_reg, del, NULL );
+                    IUnknown_Release( (IUnknown *)peh );
+                }
                 IUnknown_Release( (IUnknown *)unwrapped );
             }
             IUnknown_Release( (IUnknown *)iref );
         }
-        else
-        {
-            del = handler;
-            xaml_event_registry_add( &impl->ptr_pressed_reg, del, NULL );
-        }
-        TRACE( "IUIElement::AddHandler(PointerPressed) on %s (%s) -> del %p\n",
+        TRACE( "IUIElement::AddHandler(Pointer) on %s (%s) -> del %p\n",
                debugstr_w(impl->class_name), debugstr_w(impl->name), del );
+    }
+    else if (target_reg && is_tapped)
+    {
+        static const GUID IID_ITappedEventHandler_UWP =
+            { 0x68d940cc, 0x9ff0, 0x49ce, { 0xb1, 0x41, 0x3f, 0x07, 0xec, 0x47, 0x7b, 0x97 } };
+        void *teh = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)handler, &IID_ITappedEventHandler_UWP, &teh )) && teh)
+        {
+            xaml_event_registry_add( target_reg, teh, NULL );
+            IUnknown_Release( (IUnknown *)teh );
+        }
     }
     return S_OK;
 }
@@ -3389,6 +3471,28 @@ static HRESULT WINAPI uwp_ui_InvalidateLayout( void *iface )
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_ui_get_Opacity( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->opacity : 1.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ui_put_Opacity( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        if (val < 0.0) val = 0.0;
+        if (val > 1.0) val = 1.0;
+        if (impl->opacity != val)
+        {
+            impl->opacity = val;
+            uwp_invalidate_window();
+        }
+    }
+    return S_OK;
+}
+
 static const void *uwp_ui_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -3398,7 +3502,10 @@ static const void *uwp_ui_vtbl[128] =
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
     [6] = uwp_ui_get_DesiredSize,
-    [7 ... 18] = uwp_generic_noop,
+    [7 ... 8] = uwp_generic_noop,
+    [9] = uwp_ui_get_Opacity,
+    [10] = uwp_ui_put_Opacity,
+    [11 ... 18] = uwp_generic_noop,
     [19] = uwp_ui_get_IsHitTestVisible,
     [20] = uwp_ui_put_IsHitTestVisible,
     [21] = uwp_ui_get_Visibility,
@@ -4594,6 +4701,10 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IGradientStop_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grad_stop_vtbl;
     impl->IPathGeometry_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_path_geom_vtbl;
     impl->IPathFigure_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_path_geom_f2_vtbl;
+    impl->IRichTextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rtb_vtbl;
+    impl->ITextBlock2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb2_vtbl;
+    impl->ITextBlock6_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb6_vtbl;
+    impl->IStoryboard_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_sb_vtbl;
     impl->media_stretch = 2; /* Uniform */
     impl->tile_align_x = 1; /* Center */
     impl->tile_align_y = 1; /* Center */
@@ -4624,7 +4735,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->v_align = 3; /* Stretch */
     impl->font_size = 16.0;
     impl->text_align = 1; /* Left */
-    impl->text_wrapping = 1; /* NoWrap */
+    impl->text_wrapping = wcsstr( impl->class_name, L"RichTextBlock" ) ? 2 : 1; /* RichTextBlock defaults to Wrap */
     impl->selected_index = -1;
     impl->hovered_dropdown_idx = -1;
     impl->nav_open_pane_length = 280.0;

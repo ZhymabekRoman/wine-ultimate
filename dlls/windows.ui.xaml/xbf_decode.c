@@ -1301,11 +1301,76 @@ static int uwp_parse_font_weight( const WCHAR *s, double num, int vt )
     return 0;
 }
 
+static BOOL xbf_resolve_double_prop( struct xbf_ctx *ctx, struct uwp_element *el,
+                                     int vt, double num, const WCHAR *sval, BOOL is_res_ref,
+                                     double *out_val )
+{
+    if (vt == 0x03 || vt == 0x04)
+    {
+        *out_val = num;
+        return TRUE;
+    }
+    if (is_res_ref && sval && sval[0])
+    {
+        struct uwp_rd_entry *de = NULL;
+        struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
+        if (uwp_rd_find_entry( hint_rd, el, sval, 0, &de, NULL ) && de && de->kind == UWP_RD_DOUBLE)
+        {
+            *out_val = de->dval;
+            return TRUE;
+        }
+    }
+    if (sval && sval[0])
+    {
+        WCHAR *endp = NULL;
+        double d = wcstod( sval, &endp );
+        if (endp && endp != sval)
+        {
+            *out_val = d;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *el,
                                       const WCHAR *owner_cls, const WCHAR *prop_name,
                                       int vt, double num, const WCHAR *sval, BOOL is_res_ref )
 {
+    double resolved_d = 0.0;
+    BOOL has_resolved_d = FALSE;
     if (!el || !prop_name || !prop_name[0]) return;
+    if (!wcscmp( prop_name, L"Visibility" ))
+    {
+        if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+            el->visibility = !wcsicmp( sval, L"Collapsed" ) ? 1 : 0;
+        else
+            el->visibility = (int)num;
+        return;
+    }
+    if (!wcscmp( prop_name, L"Opacity" ))
+    {
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ))
+            el->opacity = resolved_d;
+        return;
+    }
+    if (!wcscmp( prop_name, L"MaxLines" ))
+    {
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ))
+            el->max_lines = max( 0, (int)resolved_d );
+        return;
+    }
+    if (!wcscmp( prop_name, L"TextWrapping" ))
+    {
+        if (sval && sval[0])
+        {
+            if (!wcsicmp( sval, L"NoWrap" )) el->text_wrapping = 1;
+            else if (!wcsicmp( sval, L"WrapWholeWords" )) el->text_wrapping = 3;
+            else if (!wcsicmp( sval, L"Wrap" )) el->text_wrapping = 2;
+        }
+        else el->text_wrapping = (int)num;
+        return;
+    }
     if (!wcscmp( prop_name, L"DisplayMemberPath" ) && sval && sval[0])
     {
         lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
@@ -1337,23 +1402,35 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
     }
     else if (!wcscmp( prop_name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
     {
-        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-        if (d > 0.0) el->nav_open_pane_length = d;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
+        {
+            el->nav_open_pane_length = resolved_d;
+            has_resolved_d = TRUE;
+        }
     }
     else if (!wcscmp( prop_name, L"CompactPaneLength" ) && uwp_is_nav_view( el ))
     {
-        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-        if (d > 0.0) el->nav_compact_pane_length = d;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
+        {
+            el->nav_compact_pane_length = resolved_d;
+            has_resolved_d = TRUE;
+        }
     }
     else if (!wcscmp( prop_name, L"CompactModeThresholdWidth" ) && uwp_is_nav_view( el ))
     {
-        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-        if (d > 0.0) el->nav_compact_threshold = d;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
+        {
+            el->nav_compact_threshold = resolved_d;
+            has_resolved_d = TRUE;
+        }
     }
     else if (!wcscmp( prop_name, L"ExpandedModeThresholdWidth" ) && uwp_is_nav_view( el ))
     {
-        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-        if (d > 0.0) el->nav_expanded_threshold = d;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
+        {
+            el->nav_expanded_threshold = resolved_d;
+            has_resolved_d = TRUE;
+        }
     }
     else if (!wcscmp( prop_name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
     {
@@ -1377,7 +1454,13 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
         if (ao)
         {
             IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-            if (vt == 0x01 || vt == 0x02)
+            if (has_resolved_d)
+            {
+                WCHAR nbuf[64];
+                swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", resolved_d );
+                uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, nbuf );
+            }
+            else if (vt == 0x01 || vt == 0x02)
                 uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, (vt == 0x02) ? L"True" : L"False" );
             else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
                 uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, sval );
@@ -1399,7 +1482,6 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
             }
         }
     }
-    (void)is_res_ref;
 }
 
 void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
@@ -1431,6 +1513,7 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
         el->template_xbf_data = se->template_xbf_data;
         el->template_xbf_size = se->template_xbf_size;
         el->template_sub_idx = se->template_sub_idx;
+        if (b) el->template_rd_bucket = b;
     }
     for (i = 0; i < se->setter_cnt; i++)
     {
@@ -1722,17 +1805,44 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_CONTROL_BORDER_THICKNESS: /* Control.BorderThickness */
         case XBF_PROP_BORDER_THICKNESS: /* Border.BorderThickness */
         case XBF_PROP_PANEL_CHILDREN_TRANSITIONS: /* Border.BorderThickness */
+        case 0x8696: /* Grid.BorderThickness */
+        case 0x869e: /* StackPanel.BorderThickness */
             if (vt == 0x06)
             {
                 el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
                 el->border_thick_r = vec4[2]; el->border_thick_b = vec4[3];
             }
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *te = NULL;
+                struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
+                if (uwp_rd_find_entry( hint_rd, el, sval, 0, &te, NULL ) && te && te->kind == UWP_RD_THICKNESS)
+                {
+                    el->border_thick_l = te->vec4[0]; el->border_thick_t = te->vec4[1];
+                    el->border_thick_r = te->vec4[2]; el->border_thick_b = te->vec4[3];
+                }
+            }
             break;
         case XBF_PROP_BORDER_CORNER_RADIUS: /* Border.CornerRadius */
+        case 0x8697: /* Grid.CornerRadius */
+        case 0x869f: /* StackPanel.CornerRadius */
+        case 0x885f: /* Control.CornerRadius */
             if (vt == 0x06)
                 el->corner_radius = max( max( vec4[0], vec4[1] ), max( vec4[2], vec4[3] ) );
             else if (vt == 0x03 || vt == 0x04)
                 el->corner_radius = num;
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *ce = NULL;
+                struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
+                if (uwp_rd_find_entry( hint_rd, el, sval, 0, &ce, NULL ) && ce)
+                {
+                    if (ce->kind == UWP_RD_THICKNESS)
+                        el->corner_radius = max( max( ce->vec4[0], ce->vec4[1] ), max( ce->vec4[2], ce->vec4[3] ) );
+                    else if (ce->kind == UWP_RD_DOUBLE && ce->dval > 0.0)
+                        el->corner_radius = ce->dval;
+                }
+            }
             else if (sval && sval[0])
             {
                 double cr = wcstod( sval, NULL );
@@ -1844,7 +1954,22 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             el->has_text_align = TRUE;
             break;
         case XBF_PROP_TEXTBLOCK_TEXT_WRAPPING: /* TextBlock.TextWrapping */
-            el->text_wrapping = (int)num;
+        case 0x82cc: /* RichTextBlock.TextWrapping */
+            if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+            {
+                if (!wcsicmp( sval, L"NoWrap" )) el->text_wrapping = 1;
+                else if (!wcsicmp( sval, L"WrapWholeWords" )) el->text_wrapping = 3;
+                else if (!wcsicmp( sval, L"Wrap" )) el->text_wrapping = 2;
+            }
+            else
+                el->text_wrapping = (int)num;
+            break;
+        case 0x831b: /* TextBlock.MaxLines */
+        case 0x82c0: /* RichTextBlock.MaxLines */
+            if (vt == 0x03 || vt == 0x04)
+                el->max_lines = max( 0, (int)num );
+            else if (sval && sval[0])
+                el->max_lines = max( 0, (int)wcstol( sval, NULL, 10 ) );
             break;
         case XBF_PROP_WIDTH: /* Width */
             if (vt == 0x03 || vt == 0x04) el->width = num;
@@ -1910,8 +2035,35 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             break;
         case XBF_PROP_UIELEMENT_VISIBILITY_V2: /* UIElement.Visibility (XBF v2) */
         case XBF_PROP_UIELEMENT_VISIBILITY: /* UIElement.Visibility */
-            el->visibility = (int)num;
+            if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+                el->visibility = !wcsicmp( sval, L"Collapsed" ) ? 1 : 0;
+            else
+                el->visibility = (int)num;
             break;
+        case 0x812f: /* UIElement.Opacity */
+            if (vt == 0x03 || vt == 0x04)
+                el->opacity = num;
+            else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+                el->opacity = wcstod( sval, NULL );
+            break;
+        case XBF_PROP_STORYBOARD_TARGET_NAME: /* Storyboard.TargetName */
+            if (sval && sval[0])
+                lstrcpynW( el->anim_target_name, sval, ARRAY_SIZE(el->anim_target_name) );
+            break;
+        case XBF_PROP_STORYBOARD_TARGET_PROPERTY: /* Storyboard.TargetProperty */
+            if (sval && sval[0])
+                vsm_clean_prop_name( sval, el->anim_target_prop, ARRAY_SIZE(el->anim_target_prop) );
+            break;
+        case 0x816f: /* DoubleAnimation.To */
+        {
+            double to_val = 0.0;
+            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &to_val ))
+            {
+                el->anim_to = to_val;
+                el->anim_has_to = TRUE;
+            }
+            break;
+        }
         case XBF_PROP_ACCELERATOR_KEY: /* KeyboardAccelerator.Key */
             el->accel_key = (UINT)num;
             uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
@@ -1973,23 +2125,27 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         }
         else if (!wcscmp( pi->name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
         {
-            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-            if (d > 0.0) el->nav_open_pane_length = d;
+            double d = 0.0;
+            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
+                el->nav_open_pane_length = d;
         }
         else if (!wcscmp( pi->name, L"CompactPaneLength" ) && uwp_is_nav_view( el ))
         {
-            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-            if (d > 0.0) el->nav_compact_pane_length = d;
+            double d = 0.0;
+            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
+                el->nav_compact_pane_length = d;
         }
         else if (!wcscmp( pi->name, L"CompactModeThresholdWidth" ) && uwp_is_nav_view( el ))
         {
-            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-            if (d > 0.0) el->nav_compact_threshold = d;
+            double d = 0.0;
+            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
+                el->nav_compact_threshold = d;
         }
         else if (!wcscmp( pi->name, L"ExpandedModeThresholdWidth" ) && uwp_is_nav_view( el ))
         {
-            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
-            if (d > 0.0) el->nav_expanded_threshold = d;
+            double d = 0.0;
+            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
+                el->nav_expanded_threshold = d;
         }
         else if (!wcscmp( pi->name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
         {
@@ -2095,30 +2251,24 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             {
                 const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
                 IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-                BOOL is_nav_prop = (!wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
-                    (!wcscmp( pi->name, L"PaneDisplayMode" ) || !wcscmp( pi->name, L"IsPaneOpen" ) ||
-                     !wcscmp( pi->name, L"OpenPaneLength" ) || !wcscmp( pi->name, L"CompactPaneLength" ) ||
-                     !wcscmp( pi->name, L"IsSettingsVisible" ) || !wcscmp( pi->name, L"IsPaneToggleButtonVisible" ) ||
-                     !wcscmp( pi->name, L"CompactModeThresholdWidth" ) || !wcscmp( pi->name, L"ExpandedModeThresholdWidth" )));
+                BOOL is_nav_pane_mode = (!wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
+                                         !wcscmp( pi->name, L"PaneDisplayMode" ));
                 if (vt == 0x01 || vt == 0x02)
                     uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, (vt == 0x02) ? L"True" : L"False" );
-                else if (vt == 0x05 && (wcsstr( owner_cls, L"Breakpoint" ) || is_nav_prop))
+                else if (vt == 0x05 && sval && sval[0])
                     uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, sval );
-                else if (wcsstr( owner_cls, L"Breakpoint" ) || is_nav_prop)
+                else if (is_nav_pane_mode)
+                {
+                    static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
+                    int m = (int)num;
+                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target,
+                                                (m >= 0 && m < 5) ? modes[m] : L"Auto" );
+                }
+                else
                 {
                     WCHAR nbuf[64];
-                    if (is_nav_prop && !wcscmp( pi->name, L"PaneDisplayMode" ))
-                    {
-                        static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
-                        int m = (int)num;
-                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target,
-                                                    (m >= 0 && m < 5) ? modes[m] : L"Auto" );
-                    }
-                    else
-                    {
-                        swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
-                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
-                    }
+                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
+                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
                 }
             }
         }

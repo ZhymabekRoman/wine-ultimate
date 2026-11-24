@@ -428,6 +428,8 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
     struct xbf_ctx fake_ctx = {0};
     struct uwp_element **nodes_el = NULL;
     IInspectable **nodes_raw = NULL;
+    UINT32 *deferred_res_ops = NULL;
+    int deferred_res_cnt = 0, deferred_res_cap = 0;
     void *dt_binding = NULL;
     UINT32 i;
 
@@ -472,6 +474,35 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
         {
             nodes_el[0] = root_el;
             nodes_raw[0] = component ? component : (root_el->outer ? root_el->outer : &root_el->IInspectable_iface);
+        }
+    }
+
+    /* 1b. Replay VSM groups, states, and setters before Step 2 Connect/StateTriggers */
+    if (root_el && hdr->vsm_group_cnt > 0)
+    {
+        UINT32 g, s, t;
+        for (g = 0; g < hdr->vsm_group_cnt; g++)
+        {
+            const struct xbf_aot_vsm_group *ag = &vsm_groups[g];
+            struct uwp_vsm_group *grp = uwp_vsm_add_group( root_el, xbf_aot_str( hdr, ag->name_off ) );
+            if (!grp) break;
+            for (s = 0; s < ag->state_cnt && ag->state_start + s < hdr->vsm_state_cnt; s++)
+            {
+                const struct xbf_aot_vsm_state *as = &vsm_states[ag->state_start + s];
+                struct uwp_vsm_state *st = uwp_vsm_add_state( grp, xbf_aot_str( hdr, as->name_off ) );
+                if (!st) break;
+                st->has_trigger = as->has_trigger != 0;
+                st->min_window_width = as->min_window_width;
+                st->min_window_height = as->min_window_height;
+                for (t = 0; t < as->setter_cnt && as->setter_start + t < hdr->vsm_setter_cnt; t++)
+                {
+                    const struct xbf_aot_vsm_setter *at = &vsm_setters[as->setter_start + t];
+                    uwp_vsm_state_add_setter( st, xbf_aot_str( hdr, at->target_off ),
+                                              xbf_aot_str( hdr, at->property_off ),
+                                              xbf_aot_str( hdr, at->val_str_off ),
+                                              at->vt, at->num, at->is_res_ref != 0 );
+                }
+            }
         }
     }
 
@@ -594,7 +625,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 if (nd->flags & XBF_AOT_NODE_IS_RD)
                 {
                     el->kind = UWP_KIND_RESOURCE_DICT;
-                    if ((nd->flags & XBF_AOT_NODE_ROOT_REUSE) && target_rd)
+                    if (((nd->flags & XBF_AOT_NODE_ROOT_REUSE) || op->node_idx == 0) && target_rd)
                     {
                         el->rd_bucket = target_rd;
                         target_rd->owner_el = el;
@@ -728,6 +759,18 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
             {
                 const WCHAR *sval = xbf_aot_str( hdr, op->str_off );
                 struct xbf_stack_val tmp_sv = {0};
+                if (op->is_res_ref && sval && sval[0])
+                {
+                    struct uwp_rd_entry *re = NULL;
+                    struct uwp_rd_bucket *hint_rd = fake_ctx.root_el ? fake_ctx.root_el->rd_bucket : fake_ctx.target_rd;
+                    if (!uwp_rd_find_entry( hint_rd, el, sval, 0, &re, NULL ) || !re)
+                    {
+                        if (xaml_vec_grow( (void **)&deferred_res_ops, &deferred_res_cap,
+                                           deferred_res_cnt + 1, sizeof(*deferred_res_ops), 16 ))
+                            deferred_res_ops[deferred_res_cnt++] = i;
+                        break;
+                    }
+                }
                 tmp_sv.raw = raw;
                 xbf_apply_property( &fake_ctx, el, el ? NULL : &tmp_sv, op->pid, op->vt, op->num, sval,
                                     op->vec4, op->is_res_ref != 0 );
@@ -840,7 +883,9 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 }
                 if (!handled_custom && parent_el &&
                     (op->pid == XBF_PROP_PANEL_CHILDREN || op->pid == XBF_PROP_ITEMS ||
-                     parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL))
+                     parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL ||
+                     parent_el->kind == UWP_KIND_WRAP_PANEL ||
+                     wcsstr( parent_el->class_name, L"Storyboard" )))
                 {
                     if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
                     uwp_vec_Append( parent_el->children_coll, child_raw );
@@ -1122,9 +1167,9 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     sv.template_owner_comp = component;
                 }
                 uwp_rd_store_stack_val( dest_rd, key, &sv );
-                if (target_rd && target_rd != dest_rd)
-                    uwp_rd_store_stack_val( target_rd, key, &sv );
-                if (root_el)
+                if (root_el && (!parent_el || !parent_el->name[0] ||
+                                (wcsicmp( parent_el->name, L"HighContrast" ) &&
+                                 wcsicmp( parent_el->name, L"Light" ))))
                 {
                     struct uwp_rd_bucket *root_rd = uwp_rd_bucket_for_el( root_el, TRUE );
                     if (root_rd && root_rd != dest_rd && root_rd != target_rd)
@@ -1136,30 +1181,44 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
         }
     }
 
-    /* 3. Replay VSM groups, states, and setters */
-    if (root_el && hdr->vsm_group_cnt > 0)
+    /* 2b. Second pass: replay deferred forward StaticResource property assignments */
+    if (deferred_res_cnt > 0)
     {
-        UINT32 g, s, t;
-        for (g = 0; g < hdr->vsm_group_cnt; g++)
+        int d;
+        for (d = 0; d < deferred_res_cnt; d++)
         {
-            const struct xbf_aot_vsm_group *ag = &vsm_groups[g];
-            struct uwp_vsm_group *grp = uwp_vsm_add_group( root_el, xbf_aot_str( hdr, ag->name_off ) );
-            if (!grp) break;
-            for (s = 0; s < ag->state_cnt && ag->state_start + s < hdr->vsm_state_cnt; s++)
+            const struct xbf_aot_op *op = &ops[deferred_res_ops[d]];
+            struct uwp_element *el = (op->node_idx < hdr->node_cnt) ? nodes_el[op->node_idx] : NULL;
+            IInspectable *raw = (op->node_idx < hdr->node_cnt) ? nodes_raw[op->node_idx] : NULL;
+            if (el || raw)
             {
-                const struct xbf_aot_vsm_state *as = &vsm_states[ag->state_start + s];
-                struct uwp_vsm_state *st = uwp_vsm_add_state( grp, xbf_aot_str( hdr, as->name_off ) );
-                if (!st) break;
-                st->has_trigger = as->has_trigger != 0;
-                st->min_window_width = as->min_window_width;
-                st->min_window_height = as->min_window_height;
-                for (t = 0; t < as->setter_cnt && as->setter_start + t < hdr->vsm_setter_cnt; t++)
+                const WCHAR *sval = xbf_aot_str( hdr, op->str_off );
+                struct xbf_stack_val tmp_sv = {0};
+                tmp_sv.raw = raw;
+                xbf_apply_property( &fake_ctx, el, el ? NULL : &tmp_sv, op->pid, op->vt, op->num, sval,
+                                    op->vec4, op->is_res_ref != 0 );
+            }
+        }
+    }
+
+    /* 3. Re-apply any StateTriggerBase triggers activated during Step 2 now that all named elements exist */
+    if (nodes_el && hdr->node_cnt > 0)
+    {
+        for (i = 0; i < hdr->node_cnt; i++)
+        {
+            struct uwp_element *trig = nodes_el[i];
+            if (trig && trig->state_trigger_active)
+            {
+                struct uwp_element *p;
+                for (p = trig->parent; p; p = p->parent)
                 {
-                    const struct xbf_aot_vsm_setter *at = &vsm_setters[as->setter_start + t];
-                    uwp_vsm_state_add_setter( st, xbf_aot_str( hdr, at->target_off ),
-                                              xbf_aot_str( hdr, at->property_off ),
-                                              xbf_aot_str( hdr, at->val_str_off ),
-                                              at->vt, at->num, at->is_res_ref != 0 );
+                    if (!wcscmp( p->class_name, L"Windows.UI.Xaml.VisualState" ) && p->name[0])
+                    {
+                        struct uwp_element *scope = p->owner_component ? p->owner_component : root_el;
+                        if (scope)
+                            uwp_vsm_goto_state_on_tree( scope, p->name );
+                        break;
+                    }
                 }
             }
         }
@@ -1188,6 +1247,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
     }
 
     if (dt_binding) IUnknown_Release( (IUnknown *)dt_binding );
+    free( deferred_res_ops );
     free( nodes_el );
     free( nodes_raw );
 }
