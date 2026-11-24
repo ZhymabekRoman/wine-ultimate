@@ -399,6 +399,24 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     if (!refcount)
     {
         IWineDXGIDevice *device = swapchain->device;
+        ID3D11Texture2D *snap_to_release[3];
+        unsigned int i;
+
+        AcquireSRWLockExclusive(&swapchain->snap_lock);
+        for (i = 0; i < 3; ++i)
+        {
+            snap_to_release[i] = swapchain->snap_tex[i];
+            swapchain->snap_tex[i] = NULL;
+        }
+        swapchain->snap_valid = FALSE;
+        ReleaseSRWLockExclusive(&swapchain->snap_lock);
+
+        for (i = 0; i < 3; ++i)
+        {
+            if (snap_to_release[i])
+                ID3D11Texture2D_Release(snap_to_release[i]);
+        }
+
         if (swapchain->zc_tex)
         {
             wined3d_mutex_lock();
@@ -930,6 +948,128 @@ static BOOL dxgi_swapchain_is_dcomp_captured(struct d3d11_swapchain *swapchain)
     return FALSE;
 }
 
+static void d3d11_swapchain_snapshot_present(struct d3d11_swapchain *swapchain)
+{
+    ID3D11Device *d3d_dev = NULL;
+    ID3D11DeviceContext *d3d_ctx = NULL;
+    ID3D11Texture2D *src = NULL, *dst = NULL;
+    ID3D11Texture2D *to_release[3] = { NULL, NULL, NULL };
+    D3D11_TEXTURE2D_DESC src_desc, dst_desc;
+    UINT write_idx, rel_cnt = 0, i;
+    HRESULT hr;
+
+    if (FAILED(IWineDXGIDevice_QueryInterface(swapchain->device, &IID_ID3D11Device, (void **)&d3d_dev)) || !d3d_dev)
+        return;
+
+    ID3D11Device_GetImmediateContext(d3d_dev, &d3d_ctx);
+    if (!d3d_ctx)
+    {
+        ID3D11Device_Release(d3d_dev);
+        return;
+    }
+
+    if (FAILED(d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface, 0,
+            &IID_ID3D11Texture2D, (void **)&src)) || !src)
+    {
+        ID3D11DeviceContext_Release(d3d_ctx);
+        ID3D11Device_Release(d3d_dev);
+        return;
+    }
+
+    ID3D11Texture2D_GetDesc(src, &src_desc);
+    if (!src_desc.Width || !src_desc.Height)
+    {
+        ID3D11Texture2D_Release(src);
+        ID3D11DeviceContext_Release(d3d_ctx);
+        ID3D11Device_Release(d3d_dev);
+        return;
+    }
+
+    /* Never hold snap_lock across D3D11/wined3d calls to avoid lock inversion with wined3d_mutex. */
+    AcquireSRWLockShared(&swapchain->snap_lock);
+    write_idx = swapchain->snap_valid ? ((swapchain->snap_front + 1) % 3) : 0;
+    if (swapchain->snap_tex[write_idx]
+            && swapchain->snap_width == src_desc.Width
+            && swapchain->snap_height == src_desc.Height
+            && swapchain->snap_format == src_desc.Format)
+    {
+        dst = swapchain->snap_tex[write_idx];
+        ID3D11Texture2D_AddRef(dst);
+    }
+    ReleaseSRWLockShared(&swapchain->snap_lock);
+
+    if (!dst)
+    {
+        memset(&dst_desc, 0, sizeof(dst_desc));
+        dst_desc.Width = src_desc.Width;
+        dst_desc.Height = src_desc.Height;
+        dst_desc.MipLevels = 1;
+        dst_desc.ArraySize = 1;
+        dst_desc.Format = src_desc.Format;
+        dst_desc.SampleDesc.Count = 1;
+        dst_desc.SampleDesc.Quality = 0;
+        dst_desc.Usage = D3D11_USAGE_DEFAULT;
+        dst_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        dst_desc.CPUAccessFlags = 0;
+        dst_desc.MiscFlags = 0;
+
+        hr = ID3D11Device_CreateTexture2D(d3d_dev, &dst_desc, NULL, &dst);
+        if (FAILED(hr) || !dst)
+        {
+            WARN("Failed to create snapshot texture %ux%u fmt %u, hr %#lx.\n",
+                    src_desc.Width, src_desc.Height, src_desc.Format, hr);
+            ID3D11Texture2D_Release(src);
+            ID3D11DeviceContext_Release(d3d_ctx);
+            ID3D11Device_Release(d3d_dev);
+            return;
+        }
+    }
+
+    if (src_desc.SampleDesc.Count > 1)
+        ID3D11DeviceContext_ResolveSubresource(d3d_ctx, (ID3D11Resource *)dst, 0,
+                (ID3D11Resource *)src, 0, src_desc.Format);
+    else
+        ID3D11DeviceContext_CopyResource(d3d_ctx, (ID3D11Resource *)dst, (ID3D11Resource *)src);
+    ID3D11DeviceContext_Flush(d3d_ctx);
+
+    ID3D11Texture2D_Release(src);
+    ID3D11DeviceContext_Release(d3d_ctx);
+    ID3D11Device_Release(d3d_dev);
+
+    AcquireSRWLockExclusive(&swapchain->snap_lock);
+    if (swapchain->snap_width != src_desc.Width
+            || swapchain->snap_height != src_desc.Height
+            || swapchain->snap_format != src_desc.Format)
+    {
+        for (i = 0; i < 3; ++i)
+        {
+            if (i != write_idx && swapchain->snap_tex[i])
+            {
+                to_release[rel_cnt++] = swapchain->snap_tex[i];
+                swapchain->snap_tex[i] = NULL;
+            }
+        }
+    }
+    if (swapchain->snap_tex[write_idx] != dst)
+    {
+        if (swapchain->snap_tex[write_idx])
+            to_release[rel_cnt++] = swapchain->snap_tex[write_idx];
+        swapchain->snap_tex[write_idx] = dst;
+        dst = NULL;
+    }
+    swapchain->snap_width = src_desc.Width;
+    swapchain->snap_height = src_desc.Height;
+    swapchain->snap_format = src_desc.Format;
+    swapchain->snap_front = write_idx;
+    swapchain->snap_valid = TRUE;
+    ReleaseSRWLockExclusive(&swapchain->snap_lock);
+
+    if (dst)
+        ID3D11Texture2D_Release(dst);
+    for (i = 0; i < rel_cnt; ++i)
+        ID3D11Texture2D_Release(to_release[i]);
+}
+
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
@@ -976,6 +1116,7 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         /* Composition, DComp-exported, or DComp-captured swapchain: pixels were
          * exported directly to DComp SHM; skip X11/GLX/Vulkan SwapBuffers on the
          * cloaked/offscreen HWND so XWayland never stalls waiting for wl_surface.frame. */
+        d3d11_swapchain_snapshot_present(swapchain);
         if (!(flags & DXGI_PRESENT_DO_NOT_SEQUENCE))
             InterlockedIncrement(&swapchain->present_count);
         /* A composition swapchain (SwapChainPanel) has no window of its own: the
@@ -1781,6 +1922,50 @@ void d3d11_swapchain_mark_composition(IDXGISwapChain1 *iface)
     }
 }
 
+HRESULT WINAPI dxgi_swapchain_get_presented_surface(IDXGISwapChain *swapchain, IDXGISurface **surface)
+{
+    struct d3d11_swapchain *impl;
+    IDXGISwapChain4 *iface4;
+    ID3D11Texture2D *tex = NULL;
+    BOOL is_comp;
+    HRESULT hr;
+
+    if (!surface)
+        return E_POINTER;
+    *surface = NULL;
+    if (!swapchain)
+        return E_INVALIDARG;
+
+    if (FAILED(IDXGISwapChain_QueryInterface(swapchain, &IID_IDXGISwapChain4, (void **)&iface4)))
+        return E_FAIL;
+
+    if ((const void *)iface4->lpVtbl != (const void *)&d3d11_swapchain_vtbl)
+    {
+        IDXGISwapChain4_Release(iface4);
+        return E_FAIL;
+    }
+
+    impl = d3d11_swapchain_from_IDXGISwapChain4(iface4);
+    AcquireSRWLockShared(&impl->snap_lock);
+    if (impl->snap_valid && impl->snap_tex[impl->snap_front])
+    {
+        tex = impl->snap_tex[impl->snap_front];
+        ID3D11Texture2D_AddRef(tex);
+    }
+    is_comp = impl->is_composition_surface;
+    ReleaseSRWLockShared(&impl->snap_lock);
+    IDXGISwapChain4_Release(iface4);
+
+    if (tex)
+    {
+        hr = ID3D11Texture2D_QueryInterface(tex, &IID_IDXGISurface, (void **)surface);
+        ID3D11Texture2D_Release(tex);
+        return hr;
+    }
+
+    return is_comp ? S_FALSE : E_FAIL;
+}
+
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc, UINT dxgi_flags)
 {
@@ -1803,6 +1988,15 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     swapchain->IDXGISwapChainPartner_iface.lpVtbl = (const IUnknownVtbl *)dxgi_swapchain_partner_vtbl;
     swapchain->state_parent.ops = &d3d11_swapchain_state_parent_ops;
     swapchain->refcount = 1;
+    InitializeSRWLock(&swapchain->snap_lock);
+    swapchain->snap_tex[0] = NULL;
+    swapchain->snap_tex[1] = NULL;
+    swapchain->snap_tex[2] = NULL;
+    swapchain->snap_front = 0;
+    swapchain->snap_width = 0;
+    swapchain->snap_height = 0;
+    swapchain->snap_format = DXGI_FORMAT_UNKNOWN;
+    swapchain->snap_valid = FALSE;
     swapchain->swap_effect = dxgi_swap_effect_from_wined3d(desc->swap_effect);
     swapchain->flip_model = (swapchain->swap_effect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
             || swapchain->swap_effect == DXGI_SWAP_EFFECT_FLIP_DISCARD);

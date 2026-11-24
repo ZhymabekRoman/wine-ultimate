@@ -246,6 +246,13 @@ struct d3d11_swapchain
     UINT zc_height;
     BOOL zc_failed;
     DXGI_MATRIX_3X2_F matrix_transform;
+    SRWLOCK snap_lock;
+    ID3D11Texture2D *snap_tex[3];
+    UINT snap_front;
+    UINT snap_width;
+    UINT snap_height;
+    DXGI_FORMAT snap_format;
+    BOOL snap_valid;
 };
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,

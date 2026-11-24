@@ -7,4 +7,5 @@
 @ stdcall DXGIDisableVBlankVirtualization()
 @ stdcall dxgi_get_wined3d_swapchain(ptr)
 @ stdcall dxgi_bind_external_memory(ptr ptr int64)
+@ stdcall dxgi_swapchain_get_presented_surface(ptr ptr)
 @ stdcall DXGIEnableVBlankVirtualization()

@@ -48,6 +48,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
  * swapchain, for direct-to-display composition. */
 struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
 HRESULT WINAPI dxgi_bind_external_memory(IUnknown *obj, HANDLE nt_handle, UINT64 alloc_size);
+HRESULT WINAPI dxgi_swapchain_get_presented_surface(IDXGISwapChain *swapchain, IDXGISurface **surface);
 
 /* D3DKMTWaitForVerticalBlankEvent (d3d11.spec, exported by d3d11.dll; the
  * winex11 build is a stub that returns immediately) and the win32u syscall it
@@ -2229,7 +2230,12 @@ static void collect_visual_frames(struct composition_device *device, struct comp
                 UINT present_count = 0;
                 device->last_has_swapchain = TRUE;
                 if (SUCCEEDED(IDXGISwapChain_GetLastPresentCount((IDXGISwapChain *)visual->content, &present_count)))
-                    content_ver += present_count + 1;
+                {
+                    if (!present_count)
+                        has_drawn_content = FALSE;
+                    else
+                        content_ver += present_count + 1;
+                }
             }
         }
         if (visual->is_shared_proxy)
@@ -2594,7 +2600,7 @@ static FLOAT visual_get_clip_radius(const struct composition_visual *visual)
     return radius;
 }
 
-static IDXGISurface *frame_get_surface(struct composite_frame *frame)
+static IDXGISurface *frame_get_surface(struct composite_frame *frame, BOOL *skip_present)
 {
     ID3D11Texture2D *texture = NULL;
     IDXGISwapChain1 *swapchain = NULL;
@@ -2604,6 +2610,9 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
     ID3D11Resource *d3d_res = NULL;
     IDXGISurface *dxgi_surface = NULL;
     HRESULT hr;
+
+    if (skip_present)
+        *skip_present = FALSE;
 
     if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDCompositionSurface, (void **)&surface)))
     {
@@ -2624,25 +2633,37 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
     {
         /* Composition swapchains skip X11 SwapBuffers in dxgi Present1, so the
          * rendered frame stays in buffer 0 rather than rotating to BufferCount - 1.
-         * Sample the retained snapshot of buffer 0: d2d1 clears buffer 0 when it
-         * begins the next frame, and reading it live shows transparent blocks. */
-        if ((dxgi_surface = visual_snapshot_swapchain_content(frame->visual)))
-            hr = S_OK;
-        else
+         * Sample the render-thread snapshot ring from dxgi: d2d1 clears buffer 0
+         * when it begins the next frame, and reading it live shows transparent blocks. */
+        hr = dxgi_swapchain_get_presented_surface((IDXGISwapChain *)swapchain, &dxgi_surface);
+        if (hr == S_FALSE)
+        {
+            if (skip_present)
+                *skip_present = TRUE;
+        }
+        else if (hr != S_OK)
+        {
             hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+            if (FAILED(hr))
+                ERR("Failed to get the swapchain buffer 0, hr %#lx.\n", hr);
+        }
         IDXGISwapChain1_Release(swapchain);
-        if (FAILED(hr))
-            ERR("Failed to get the swapchain buffer 0, hr %#lx.\n", hr);
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain_v1)))
     {
-        if ((dxgi_surface = visual_snapshot_swapchain_content(frame->visual)))
-            hr = S_OK;
-        else
+        hr = dxgi_swapchain_get_presented_surface(swapchain_v1, &dxgi_surface);
+        if (hr == S_FALSE)
+        {
+            if (skip_present)
+                *skip_present = TRUE;
+        }
+        else if (hr != S_OK)
+        {
             hr = IDXGISwapChain_GetBuffer(swapchain_v1, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+            if (FAILED(hr))
+                ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
+        }
         IDXGISwapChain_Release(swapchain_v1);
-        if (FAILED(hr))
-            ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISurface, (void **)&dxgi_surface)))
     {
@@ -2699,7 +2720,7 @@ static void render_composite_frame(struct composite_frame *frame)
     IDXGISurface *dxgi_surface;
     RECT dst_rect;
     float opacity;
-    BOOL culled = FALSE;
+    BOOL culled = FALSE, skip_present = FALSE;
 
     /* The frame holds a reference to the visual, so reading its effect-group
      * opacity here is pure memory; the accumulated target-space clip was
@@ -2767,7 +2788,7 @@ static void render_composite_frame(struct composite_frame *frame)
      * IDXGISwapChain / IDXGISurface directly; the blit samples or copies it on
      * the GPU into the target's presentation swapchain, applying the visual
      * opacity and clip, and presents the visual's region of the window. */
-    if ((dxgi_surface = frame_get_surface(frame)))
+    if ((dxgi_surface = frame_get_surface(frame, &skip_present)))
     {
         if (do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
                 dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform, &culled))
@@ -2777,6 +2798,11 @@ static void render_composite_frame(struct composite_frame *frame)
         IDXGISurface_Release(dxgi_surface);
         if (frame->rendered || frame->culled)
             goto done;
+    }
+    else if (skip_present)
+    {
+        frame->culled = TRUE;
+        goto done;
     }
 
     if (frame->visual && frame->visual->wined3d_swapchain && opacity == 1.0f && !clip
