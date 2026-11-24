@@ -588,13 +588,27 @@ void d3d_texture2d_link_shared(struct d3d_texture2d *dst, IUnknown *owner_unk)
     src = unsafe_impl_from_ID3D11Texture2D(src_iface);
     if (src && src != dst)
     {
+        IDXGISwapChain *sc = src->swapchain ? wined3d_swapchain_get_parent(src->swapchain) : NULL;
+        BOOL tag_swapchain = FALSE;
+
         EnterCriticalSection(&shared_tex_cs);
         if (!dst->shared_source)
         {
             dst->shared_source = src;
             list_add_tail(&src->shared_peers, &dst->shared_peer_entry);
+            if (sc)
+            {
+                IDXGISwapChain_AddRef(sc);
+                dst->shared_swapchain = sc;
+                dst->shared_present_count = 0;
+                tag_swapchain = TRUE;
+            }
         }
         LeaveCriticalSection(&shared_tex_cs);
+
+        if (tag_swapchain && sc)
+            ID3D11Texture2D_SetPrivateDataInterface(&dst->ID3D11Texture2D_iface,
+                    &IID_IDXGISwapChain, (const IUnknown *)sc);
     }
     ID3D11Texture2D_Release(src_iface);
 }
@@ -606,6 +620,8 @@ void d3d_texture2d_sync_from_shared(ID3D11Resource *resource, struct d3d11_devic
     struct wined3d_map_desc map_desc;
     D3D11_RESOURCE_DIMENSION dim;
     ID3D11Texture2D *staging_iface;
+    UINT present_count = 0;
+    BOOL from_swapchain = FALSE;
     HRESULT hr;
 
     if (!resource || !dst_ctx || dst_ctx->type != D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -616,25 +632,51 @@ void d3d_texture2d_sync_from_shared(ID3D11Resource *resource, struct d3d11_devic
         return;
 
     dst = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)resource);
-    if (!dst || !dst->shared_source)
+    if (!dst || (!dst->shared_source && !dst->shared_swapchain))
         return;
 
-    EnterCriticalSection(&shared_tex_cs);
-    src = dst->shared_source;
-    if (src)
+    if (dst->shared_swapchain)
     {
-        LONG ref;
-        do
-        {
-            ref = src->refcount;
-            if (ref <= 0)
-            {
-                src = NULL;
-                break;
-            }
-        } while (InterlockedCompareExchange(&src->refcount, ref + 1, ref) != ref);
+        IDXGISurface *presented_surf = NULL;
+        ID3D11Texture2D *snap_tex = NULL;
+
+        if (FAILED(IDXGISwapChain_GetLastPresentCount(dst->shared_swapchain, &present_count))
+                || !present_count || dst->shared_present_count == present_count)
+            return;
+
+        hr = dxgi_swapchain_get_presented_surface(dst->shared_swapchain, &presented_surf);
+        if (hr != S_OK || !presented_surf)
+            return;
+
+        hr = IDXGISurface_QueryInterface(presented_surf, &IID_ID3D11Texture2D, (void **)&snap_tex);
+        IDXGISurface_Release(presented_surf);
+        if (FAILED(hr) || !snap_tex)
+            return;
+
+        src = unsafe_impl_from_ID3D11Texture2D(snap_tex);
+        from_swapchain = TRUE;
+        TRACE("Syncing shared texture %p from swapchain %p presented snapshot %p (present_count %u).\n",
+                dst, dst->shared_swapchain, src, present_count);
     }
-    LeaveCriticalSection(&shared_tex_cs);
+    else
+    {
+        EnterCriticalSection(&shared_tex_cs);
+        src = dst->shared_source;
+        if (src)
+        {
+            LONG ref;
+            do
+            {
+                ref = src->refcount;
+                if (ref <= 0)
+                {
+                    src = NULL;
+                    break;
+                }
+            } while (InterlockedCompareExchange(&src->refcount, ref + 1, ref) != ref);
+        }
+        LeaveCriticalSection(&shared_tex_cs);
+    }
 
     if (!src)
         return;
@@ -650,11 +692,27 @@ void d3d_texture2d_sync_from_shared(ID3D11Resource *resource, struct d3d11_devic
         wined3d_device_context_copy_sub_resource_region(dst_ctx->wined3d_context,
                 wined3d_texture_get_resource(dst->wined3d_texture), 0, 0, 0, 0,
                 wined3d_texture_get_resource(src->wined3d_texture), 0, NULL, 0);
+        if (from_swapchain)
+            dst->shared_present_count = present_count;
         ID3D11Texture2D_Release(&src->ID3D11Texture2D_iface);
         return;
     }
 
     staging_iface = dst->shared_staging;
+    if (staging_iface)
+    {
+        staging = impl_from_ID3D11Texture2D(staging_iface);
+        if (staging->desc.Width != src->desc.Width
+                || staging->desc.Height != src->desc.Height
+                || staging->desc.Format != src->desc.Format
+                || staging->device != src->device)
+        {
+            ID3D11Texture2D *old_staging = InterlockedExchangePointer((void **)&dst->shared_staging, NULL);
+            if (old_staging)
+                ID3D11Texture2D_Release(old_staging);
+            staging_iface = NULL;
+        }
+    }
     if (!staging_iface)
     {
         D3D11_TEXTURE2D_DESC st_desc = src->desc;
@@ -694,6 +752,8 @@ void d3d_texture2d_sync_from_shared(ID3D11Resource *resource, struct d3d11_devic
                     map_desc.data, map_desc.row_pitch, map_desc.slice_pitch, 0);
             wined3d_device_context_unmap(src_dev->immediate_context.wined3d_context,
                     wined3d_texture_get_resource(staging->wined3d_texture), 0);
+            if (from_swapchain)
+                dst->shared_present_count = present_count;
         }
     }
 
@@ -711,8 +771,11 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
     {
         ID3D11Device5 *device = texture->device;
         ID3D11Texture2D *staging = InterlockedExchangePointer((void **)&texture->shared_staging, NULL);
+        IDXGISwapChain *shared_sc = InterlockedExchangePointer((void **)&texture->shared_swapchain, NULL);
         if (staging)
             ID3D11Texture2D_Release(staging);
+        if (shared_sc)
+            IDXGISwapChain_Release(shared_sc);
         if (texture->swapchain)
             wined3d_swapchain_decref(texture->swapchain);
         /* Releasing the texture may free the d3d11 object, so do not access it

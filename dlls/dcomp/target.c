@@ -356,7 +356,7 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
         {
             RECT rc = {0};
             int cw = 1, ch = 1;
-            DWORD style = WS_CHILD | WS_CLIPSIBLINGS;
+            DWORD style = WS_CHILD | WS_CLIPSIBLINGS | WS_DISABLED;
 
             if (topmost)
             {

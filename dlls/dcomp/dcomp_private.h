@@ -153,6 +153,7 @@ struct composition_surface
     RECT draw_rect;
     IUnknown *physical_surface;
     GUID physical_surface_iid;
+    IDXGISwapChain *source_swapchain;
     UINT width;
     UINT height;
     HWND source_hwnd;

@@ -188,12 +188,16 @@ struct d3d_texture2d
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Device5 *device;
     struct d3d_texture2d *shared_source;
+    IDXGISwapChain *shared_swapchain;
+    UINT shared_present_count;
     ID3D11Texture2D *shared_staging;
     struct list shared_peer_entry;
     struct list shared_peers;
     BOOL has_guard_rect;
     RECT guard_rect;
 };
+
+HRESULT WINAPI dxgi_swapchain_get_presented_surface(IDXGISwapChain *swapchain, IDXGISurface **surface);
 
 static inline struct d3d_texture2d *impl_from_ID3D11Texture2D(ID3D11Texture2D *iface)
 {

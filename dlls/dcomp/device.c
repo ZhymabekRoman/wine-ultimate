@@ -2221,7 +2221,19 @@ static void collect_visual_frames(struct composition_device *device, struct comp
             struct composition_surface *surf = unsafe_impl_from_IDCompositionSurface((IDCompositionSurface *)visual->content);
             if (surf)
             {
-                if (surf->factory && !surf->content_version)
+                if (surf->source_swapchain)
+                {
+                    UINT present_count = 0;
+                    device->last_has_swapchain = TRUE;
+                    if (SUCCEEDED(IDXGISwapChain_GetLastPresentCount(surf->source_swapchain, &present_count)))
+                    {
+                        if (!present_count)
+                            has_drawn_content = FALSE;
+                        else
+                            content_ver += present_count + 1;
+                    }
+                }
+                else if (surf->factory && !surf->content_version)
                     has_drawn_content = FALSE;
                 content_ver += surf->content_version;
             }
@@ -2618,6 +2630,19 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame, BOOL *skip
     {
         struct composition_surface *surface_impl = unsafe_impl_from_IDCompositionSurface(surface);
 
+        if (surface_impl && surface_impl->source_swapchain)
+        {
+            UINT present_count = 0;
+            if (FAILED(IDXGISwapChain_GetLastPresentCount(surface_impl->source_swapchain, &present_count))
+                    || !present_count)
+            {
+                if (skip_present)
+                    *skip_present = TRUE;
+                IDCompositionSurface_Release(surface);
+                return NULL;
+            }
+        }
+
         if (surface_impl)
         {
             if (surface_impl->physical_surface)
@@ -2988,15 +3013,30 @@ static BOOL visual_tree_check_swapchain(const struct composition_visual *visual,
     if (!visual || depth > 256)
         return FALSE;
 
-    if (visual->content && visual->wined3d_swapchain)
+    if (visual->content)
     {
-        UINT present_count = 0;
-        unsigned int content_ver = visual->content_version;
-        *has_swapchain = TRUE;
-        if (SUCCEEDED(IDXGISwapChain_GetLastPresentCount((IDXGISwapChain *)visual->content, &present_count)))
-            content_ver += present_count + 1;
-        if (content_ver != visual->composited_version)
-            updated = TRUE;
+        struct composition_surface *surf = unsafe_impl_from_IDCompositionSurface((IDCompositionSurface *)visual->content);
+        IDXGISwapChain *sc = NULL;
+
+        if (surf && surf->source_swapchain)
+            sc = surf->source_swapchain;
+        else if (!surf && visual->wined3d_swapchain)
+            sc = (IDXGISwapChain *)visual->content;
+
+        if (sc)
+        {
+            UINT present_count = 0;
+            unsigned int content_ver = visual->content_version;
+            if (surf)
+                content_ver += surf->content_version;
+            *has_swapchain = TRUE;
+            if (SUCCEEDED(IDXGISwapChain_GetLastPresentCount(sc, &present_count)) && present_count)
+            {
+                content_ver += present_count + 1;
+                if (content_ver != visual->composited_version)
+                    updated = TRUE;
+            }
+        }
     }
 
     LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, const struct composition_visual, entry)

@@ -23,6 +23,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "dcomp_private.h"
+#include "d3d11_4.h"
 #include "wine/debug.h"
 
 /* wine/heap.h and the winecrt0 heap helpers are not present in this tree;
@@ -97,6 +98,8 @@ static ULONG STDMETHODCALLTYPE surface_Release(IDCompositionSurfaceUnknown *ifac
             ID3D11ShaderResourceView_Release(surface->cached_srv);
         if (surface->cached_srv_device)
             ID3D11Device_Release(surface->cached_srv_device);
+        if (surface->source_swapchain)
+            IDXGISwapChain_Release(surface->source_swapchain);
         if (surface->physical_surface)
             IUnknown_Release(surface->physical_surface);
         if (surface->factory)
@@ -134,6 +137,12 @@ HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXG
     surface->physical_surface = (IUnknown *)dxgi_surface;
     IDXGISurface_AddRef(dxgi_surface);
     surface->physical_surface_iid = IID_IDXGISurface;
+    {
+        UINT sc_size = sizeof(surface->source_swapchain);
+        if (FAILED(IDXGISurface_GetPrivateData(dxgi_surface, &IID_IDXGISwapChain,
+                &sc_size, &surface->source_swapchain)))
+            surface->source_swapchain = NULL;
+    }
     surface->width = desc.Width;
     surface->height = desc.Height;
     surface->pixel_format = desc.Format;
@@ -302,8 +311,10 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
     struct composition_device *device = impl_from_IDCompositionDevice(factory->device);
     ID3D11Resource *dst_resource, *src_resource;
     ID3D11DeviceContext *d3d11_device_context;
+    ID3D11Multithread *multithread = NULL;
     ID3D11Device *d3d11_device;
     D3D11_BOX box;
+    RECT draw_rect;
     HRESULT hr;
 
     TRACE("iface %p.\n", iface);
@@ -314,10 +325,7 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
         dcomp_unlock();
         return DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED;
     }
-    device->drawing_surface = NULL;
-    surface->content_version++;
-    InterlockedIncrement(&dcomp_tree_version);
-    g_last_rendered_surface = surface;
+    draw_rect = surface->draw_rect;
     dcomp_unlock();
     TRACE("DCOMP: surface_EndDraw surface %p (size %ux%u)\n", surface, surface->width, surface->height);
 
@@ -327,6 +335,11 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
     if (FAILED(hr))
     {
         FIXME("Failed to get a d3d11 device, should a new one be created? hr %#lx\n", hr);
+        dcomp_lock();
+        if (device->drawing_surface == &surface->IDCompositionSurfaceUnknown_iface)
+            device->drawing_surface = NULL;
+        SetRectEmpty(&surface->draw_rect);
+        dcomp_unlock();
         return hr;
     }
 
@@ -335,6 +348,11 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
     {
         FIXME("Failed to get the source ID3D11Resource.\n");
         ID3D11Device_Release(d3d11_device);
+        dcomp_lock();
+        if (device->drawing_surface == &surface->IDCompositionSurfaceUnknown_iface)
+            device->drawing_surface = NULL;
+        SetRectEmpty(&surface->draw_rect);
+        dcomp_unlock();
         return hr;
     }
 
@@ -344,25 +362,47 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
         FIXME("Failed to get the destination ID3D11Resource.\n");
         ID3D11Resource_Release(src_resource);
         ID3D11Device_Release(d3d11_device);
+        dcomp_lock();
+        if (device->drawing_surface == &surface->IDCompositionSurfaceUnknown_iface)
+            device->drawing_surface = NULL;
+        SetRectEmpty(&surface->draw_rect);
+        dcomp_unlock();
         return hr;
     }
 
-    box.left = surface->draw_rect.left;
-    box.top = surface->draw_rect.top;
+    box.left = draw_rect.left;
+    box.top = draw_rect.top;
     box.front = 0;
-    box.right = surface->draw_rect.right;
-    box.bottom = surface->draw_rect.bottom;
+    box.right = draw_rect.right;
+    box.bottom = draw_rect.bottom;
     box.back = 1;
 
     ID3D11Device_GetImmediateContext(d3d11_device, &d3d11_device_context);
+    if (SUCCEEDED(ID3D11DeviceContext_QueryInterface(d3d11_device_context,
+            &IID_ID3D11Multithread, (void **)&multithread)))
+        ID3D11Multithread_Enter(multithread);
     ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, dst_resource, 0,
-            surface->draw_rect.left, surface->draw_rect.top, 0, src_resource, 0, &box);
+            draw_rect.left, draw_rect.top, 0, src_resource, 0, &box);
+    ID3D11DeviceContext_Flush(d3d11_device_context);
+    if (multithread)
+    {
+        ID3D11Multithread_Leave(multithread);
+        ID3D11Multithread_Release(multithread);
+    }
     ID3D11DeviceContext_Release(d3d11_device_context);
     ID3D11Resource_Release(dst_resource);
     ID3D11Resource_Release(src_resource);
     ID3D11Device_Release(d3d11_device);
 
+    dcomp_lock();
+    if (device->drawing_surface == &surface->IDCompositionSurfaceUnknown_iface)
+        device->drawing_surface = NULL;
     SetRectEmpty(&surface->draw_rect);
+    surface->content_version++;
+    InterlockedIncrement(&dcomp_tree_version);
+    g_last_rendered_surface = surface;
+    dcomp_unlock();
+
     if (device->wake_event)
         SetEvent(device->wake_event);
     return S_OK;
@@ -476,7 +516,7 @@ static HRESULT composition_surface_resize(struct composition_surface *surface, U
     free(surface->trim_rects);
     surface->trim_rects = NULL;
     surface->trim_count = 0;
-    surface->content_version++;
+    surface->content_version = 0;
     InterlockedIncrement(&dcomp_tree_version);
     dcomp_unlock();
     return S_OK;
