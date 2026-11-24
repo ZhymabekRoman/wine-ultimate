@@ -1839,6 +1839,11 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (sval && sval[0])
                 lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
             break;
+        case 0x824d: /* Image.Stretch */
+        case XBF_PROP_TILEBRUSH_STRETCH:
+            if (vt == 0x04 || vt == 0x0b)
+                el->media_stretch = (int)num;
+            break;
         case XBF_PROP_AUTOMATION_NAME: /* AutomationProperties.Name - never leak into visible text */
             if (sval && sval[0])
                 lstrcpynW( el->automation_name, sval, ARRAY_SIZE(el->automation_name) );
@@ -1880,6 +1885,23 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
             break;
         case XBF_PROP_TEXTELEMENT_FONT_FAMILY:
+            if (vt == 0x03 || vt == 0x04)
+            {
+                if (num > 0) { el->font_size = num; el->has_font_size = TRUE; }
+                break;
+            }
+            if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE && de->dval > 0)
+                {
+                    el->font_size = de->dval;
+                    el->has_font_size = TRUE;
+                    break;
+                }
+            }
+            /* fall through */
         case XBF_PROP_CONTENTPRESENTER_FONT_FAMILY:
         case XBF_PROP_CONTROL_FONT_FAMILY:
         case XBF_PROP_TEXTBLOCK_FONT_FAMILY:
@@ -2139,6 +2161,22 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                  (el->kind == UWP_KIND_TEXT_BLOCK || wcsstr( el->class_name, L"Run" ) || wcsstr( el->class_name, L"Inline" )))
         {
             lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
+        }
+        else if ((!wcscmp( pi->name, L"Source" ) || !wcscmp( pi->name, L"UriSource" ) || !wcscmp( pi->name, L"ImageSource" )) &&
+                 sval && sval[0] && !is_res_ref)
+        {
+            lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
+        }
+        else if (!wcscmp( pi->name, L"Stretch" ))
+        {
+            if (vt == 0x04 || vt == 0x0b) el->media_stretch = (int)num;
+            else if (sval && sval[0])
+            {
+                if (!wcsicmp( sval, L"None" )) el->media_stretch = 0;
+                else if (!wcsicmp( sval, L"Fill" )) el->media_stretch = 1;
+                else if (!wcsicmp( sval, L"Uniform" )) el->media_stretch = 2;
+                else if (!wcsicmp( sval, L"UniformToFill" )) el->media_stretch = 3;
+            }
         }
         else if (!wcscmp( pi->name, L"FontFamily" ) && sval && sval[0])
         {

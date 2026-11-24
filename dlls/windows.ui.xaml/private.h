@@ -113,6 +113,9 @@ void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *
 void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
                              UINT img_w, UINT img_h, UINT frame_seq, const RECT *dst_rc,
                              const float uv_crop[4], const RECT *clip_rc );
+void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
+                                     UINT img_w, UINT img_h, UINT frame_seq, const RECT *dst_rc,
+                                     const float uv_crop[4], const RECT *clip_rc, float radius, float opacity );
 BOOL xaml_gpu_end_frame( ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
                          UINT *out_instances, UINT *out_hits, UINT *out_misses );
 HRESULT xaml_window_present_current( void );

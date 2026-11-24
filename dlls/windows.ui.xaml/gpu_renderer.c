@@ -213,8 +213,17 @@ static const char xaml_uber_hlsl[] =
     "    }\n"
     "    else if (mode < 1.5)\n"
     "    {\n"
+    "        float outer_alpha = 1.0;\n"
+    "        if (max(max(inp.radii.x, inp.radii.y), max(inp.radii.z, inp.radii.w)) > 0.0)\n"
+    "        {\n"
+    "            float2 center = 0.5 * (inp.rect.xy + inp.rect.zw);\n"
+    "            float2 half_ext = 0.5 * (inp.rect.zw - inp.rect.xy);\n"
+    "            float d = sdRoundBox(inp.p_pos - center, half_ext, inp.radii);\n"
+    "            outer_alpha = saturate(0.5 - d);\n"
+    "            if (outer_alpha <= 0.0) discard;\n"
+    "        }\n"
     "        float4 tex = atlas_tex.Sample(atlas_samp, inp.uv_coord.xy);\n"
-    "        float a = tex.a * inp.fill_color.a * opacity;\n"
+    "        float a = tex.a * inp.fill_color.a * outer_alpha * opacity;\n"
     "        if (a <= 0.001) discard;\n"
     "        return float4(tex.rgb * inp.fill_color.rgb * a, a);\n"
     "    }\n"
@@ -1060,9 +1069,9 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     xaml_gpu_push_text_font( ctx, text, NULL, font_height, font_weight, dt_flags, rc, clip_rc, color, opacity );
 }
 
-void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
-                             UINT img_w, UINT img_h, UINT frame_seq, const RECT *dst_rc,
-                             const float uv_crop[4], const RECT *clip_rc )
+void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
+                                     UINT img_w, UINT img_h, UINT frame_seq, const RECT *dst_rc,
+                                     const float uv_crop[4], const RECT *clip_rc, float radius, float opacity )
 {
     UINT idx, probe;
     struct atlas_entry *entry = NULL;
@@ -1147,7 +1156,10 @@ void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYT
         inst->clip[2] = (float)g_gpu.frame_width;
         inst->clip[3] = (float)g_gpu.frame_height;
     }
-    memset( inst->radii, 0, sizeof(inst->radii) );
+    inst->radii[0] = max( 0.0f, radius );
+    inst->radii[1] = max( 0.0f, radius );
+    inst->radii[2] = max( 0.0f, radius );
+    inst->radii[3] = max( 0.0f, radius );
     inst->fill_color[0] = 1.0f;
     inst->fill_color[1] = 1.0f;
     inst->fill_color[2] = 1.0f;
@@ -1167,9 +1179,16 @@ void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYT
         memcpy( inst->uv, entry->uv, sizeof(inst->uv) );
     }
     inst->params[0] = 0.0f;
-    inst->params[1] = 1.0f;
+    inst->params[1] = opacity;
     inst->params[2] = 1.0f;
     inst->params[3] = 0.0f;
+}
+
+void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
+                             UINT img_w, UINT img_h, UINT frame_seq, const RECT *dst_rc,
+                             const float uv_crop[4], const RECT *clip_rc )
+{
+    xaml_gpu_push_image_uv_rounded( ctx, img_key, bgra_pixels, img_w, img_h, frame_seq, dst_rc, uv_crop, clip_rc, 0.0f, 1.0f );
 }
 
 void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,

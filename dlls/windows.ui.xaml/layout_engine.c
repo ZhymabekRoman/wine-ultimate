@@ -60,17 +60,20 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
     for (i = 0; v && i < v->count && pos + 2 < out_cap; i++)
     {
         struct uwp_element *blk = uwp_elem_from_any( v->items[i] );
+        BOOL is_para;
         if (!blk) continue;
+        is_para = wcsstr( blk->class_name, L"Paragraph" ) != NULL ||
+                  wcsstr( blk->class_name, L"LineBreak" ) != NULL;
         if (blk->text[0])
         {
-            if (pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
+            if (is_para && pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
             lstrcpynW( out_buf + pos, blk->text, (int)(out_cap - pos) );
             pos += wcslen( out_buf + pos );
         }
         else if (blk->inlines_coll)
         {
             struct uwp_vec_view *iv = CONTAINING_RECORD( blk->inlines_coll, struct uwp_vec_view, IInspectable_iface );
-            if (pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
+            if (is_para && pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
             for (j = 0; iv && j < iv->count && pos + 2 < out_cap; j++)
             {
                 struct uwp_element *inl = uwp_elem_from_any( iv->items[j] );
@@ -577,9 +580,26 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         best = el->width;
     else if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
-        double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
+        WCHAR rich_buf[2048];
+        const WCHAR *txt = el->text;
+        double raw_fs = (el->font_size > 0.0 ? el->font_size : 14.0);
+        double fs;
         double cw_factor = (el->font_weight >= FW_SEMIBOLD) ? 0.66 : 0.60;
-        size_t len = wcslen( el->text );
+        size_t len;
+        if (!txt[0] && el->inlines_coll && uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
+        {
+            struct uwp_vec_view *iv = CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int ik;
+            txt = rich_buf;
+            for (ik = 0; iv && ik < iv->count; ik++)
+            {
+                struct uwp_element *inl = uwp_elem_from_any( iv->items[ik] );
+                if (inl && inl->has_font_size && inl->font_size > raw_fs)
+                    raw_fs = inl->font_size;
+            }
+        }
+        fs = raw_fs * g_layout_scale;
+        len = wcslen( txt );
         if (len > 0)
             best = (double)len * fs * cw_factor + 20.0;
     }
@@ -633,8 +653,14 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
                 vis++;
             }
         }
-        if (el->orientation == 1 && vis > 1 && el->spacing > 0.0)
-            acc += (double)(vis - 1) * el->spacing;
+        if (el->orientation == 1 && vis > 0 && el->spacing > 0.0)
+        {
+            struct uwp_element *ch0 = (children->count > 0) ? uwp_elem_from_any( children->items[0] ) : NULL;
+            unsigned int gaps = (vis > 1) ? (vis - 1) : 0;
+            if (ch0 && ch0 != el && ch0->visibility != 0)
+                gaps++;
+            acc += (double)gaps * el->spacing;
+        }
         best = acc;
     }
     else if (el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL || el->kind == UWP_KIND_USER_CONTROL)
@@ -935,7 +961,7 @@ static int uwp_align_axis( LONG *start, LONG *end, double explicit_size, int ali
         int es = (int)(explicit_size + 0.5);
         if (es < span)
         {
-            if (align == 1) *start += (span - es) / 2;
+            if (align == 1 || align == 3) *start += (span - es) / 2;
             else if (align == 2) *start = *end - es;
             *end = *start + es;
             return es;
@@ -1235,8 +1261,14 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         }
         if (vis_cnt > 1 && el->orientation == 0)
             fixed_h += (int)(vis_cnt - 1) * spacing_px;
-        if (vis_cnt > 1 && el->orientation == 1)
-            horiz_total_nw += (double)(vis_cnt - 1) * spacing_px;
+        if (vis_cnt > 0 && el->orientation == 1)
+        {
+            struct uwp_element *ch0 = (children->count > 0) ? uwp_elem_from_any( children->items[0] ) : NULL;
+            unsigned int gaps = (vis_cnt > 1) ? (vis_cnt - 1) : 0;
+            if (ch0 && ch0 != el && ch0->visibility != 0)
+                gaps++;
+            horiz_total_nw += (double)gaps * spacing_px;
+        }
         if (vis_cnt > 0)
         {
             int idx = 0, auto_idx = 0, cur_y = rc.top, cur_x = rc.left;
@@ -1244,6 +1276,12 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             double horiz_scale = (el->orientation == 1 && horiz_unmeasured_cnt == 0 && horiz_total_nw > (double)w && w > 0)
                 ? ((double)w / horiz_total_nw) : 1.0;
             BOOL in_scroll = FALSE;
+            if (el->orientation == 1 && use_horiz_flow && spacing_px > 0 && children->count > 1)
+            {
+                struct uwp_element *ch0 = uwp_elem_from_any( children->items[0] );
+                if (ch0 && ch0 != el && ch0->visibility != 0)
+                    cur_x += (int)(spacing_px * horiz_scale + 0.5);
+            }
             if (el->orientation == 0 && auto_cnt > 1 && auto_total_h / auto_cnt < 140)
             {
                 struct uwp_element *p;
@@ -1484,6 +1522,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             unsigned int k;
             int menu_top = rc.top + (show_toggle ? (int)(48 * sc + 0.5f) : (int)(12 * sc + 0.5f));
             int footer_h = 0, footer_top;
+            BOOL wide_pane = (pane_w >= (int)(130 * sc));
 
             for (k = 0; k < children->count; k++)
             {
@@ -1501,8 +1540,12 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                             if (!fch) continue;
                             if (!wcscmp( fch->name, L"SettingsItem" ))
                             {
-                                if (el->nav_is_settings_visible && el->nav_is_pane_open)
+                                if (el->nav_is_settings_visible && wide_pane)
                                     footer_vis_cnt++;
+                            }
+                            else if (!wide_pane && (uwp_is_nav_header( fch ) || uwp_is_nav_separator( fch )))
+                            {
+                                continue;
                             }
                             else if (fch->visibility == 0)
                             {
@@ -1514,16 +1557,16 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             }
             if (footer_vis_cnt > 0)
             {
-                footer_h = el->nav_is_pane_open
+                footer_h = wide_pane
                     ? min( (int)(160 * sc), footer_vis_cnt * (int)(40 * sc) + (int)(12 * sc) )
-                    : min( (int)(140 * sc), footer_vis_cnt * (int)(58 * sc) + (int)(12 * sc) );
+                    : min( (int)(180 * sc), footer_vis_cnt * (int)(58 * sc) + (int)(8 * sc) );
             }
             else if (has_footer_host && pane_visible && pane_w > 0)
             {
                 /* Reserve initial footer strip so WinUI ItemsRepeater runs Measure/Arrange and materializes footer items */
-                footer_h = el->nav_is_pane_open
+                footer_h = wide_pane
                     ? (el->nav_is_settings_visible ? (int)(46 * sc) : (int)(40 * sc))
-                    : (int)(120 * sc);
+                    : (int)(124 * sc);
             }
             footer_top = max( menu_top + (int)(60 * sc), (int)rc.bottom - footer_h - 4 );
 

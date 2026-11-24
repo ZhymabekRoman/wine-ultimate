@@ -691,7 +691,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             uwp_sync_template_presenter( impl, dpl->name, val );
         if (dpl && !wcscmp( dpl->name, L"Style" ))
             uwp_fe_put_Style( &impl->IInspectable_iface, val );
-        if (impl->kind == UWP_KIND_IMAGE && dpl && !wcscmp( dpl->name, L"Source" ))
+        if (dpl && (!wcscmp( dpl->name, L"Source" ) || !wcscmp( dpl->name, L"UriSource" ) || !wcscmp( dpl->name, L"ImageSource" )))
         {
             if (impl->img_source != val)
             {
@@ -699,18 +699,35 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 impl->img_source = val;
                 if (impl->img_source) IInspectable_AddRef( impl->img_source );
             }
-            impl->image_src[0] = 0;
             if (val)
             {
+                WCHAR resolved_src[512] = {0};
                 struct uwp_element *src_el = uwp_elem_from_any( val );
                 if (src_el && src_el->image_src[0])
-                    lstrcpynW( impl->image_src, src_el->image_src, ARRAY_SIZE(impl->image_src) );
-                else if (!uwp_unbox_string( val, impl->image_src, ARRAY_SIZE(impl->image_src) ))
-                    uwp_extract_uri_string( val, impl->image_src, ARRAY_SIZE(impl->image_src) );
+                    lstrcpynW( resolved_src, src_el->image_src, ARRAY_SIZE(resolved_src) );
+                else if (!uwp_unbox_string( val, resolved_src, ARRAY_SIZE(resolved_src) ))
+                    uwp_extract_uri_string( val, resolved_src, ARRAY_SIZE(resolved_src) );
+                if (resolved_src[0])
+                {
+                    lstrcpynW( impl->image_src, resolved_src, ARRAY_SIZE(impl->image_src) );
+                    impl->img_loaded = FALSE;
+                    InterlockedExchange( &impl->img_loading, 0 );
+                    if (impl->parent && impl->parent->kind == UWP_KIND_IMAGE)
+                    {
+                        lstrcpynW( impl->parent->image_src, resolved_src, ARRAY_SIZE(impl->parent->image_src) );
+                        impl->parent->img_loaded = FALSE;
+                        InterlockedExchange( &impl->parent->img_loading, 0 );
+                    }
+                    uwp_invalidate_window();
+                }
             }
-            impl->img_loaded = FALSE;
-            InterlockedExchange( &impl->img_loading, 0 );
-            uwp_invalidate_window();
+            else if (impl->kind == UWP_KIND_IMAGE)
+            {
+                impl->image_src[0] = 0;
+                impl->img_loaded = FALSE;
+                InterlockedExchange( &impl->img_loading, 0 );
+                uwp_invalidate_window();
+            }
         }
         if (dpl && wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
         {

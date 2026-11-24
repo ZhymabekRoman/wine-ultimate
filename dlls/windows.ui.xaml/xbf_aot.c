@@ -869,6 +869,39 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     if (owner_cls[0] && target)
                         handled_custom = uwp_add_custom_xaml_collection_item( ao, owner_cls, pi->name, target, child_raw );
                 }
+                if (!handled_custom && parent_el &&
+                    (op->pid == 0x8315 || parent_el->kind == UWP_KIND_TEXT_BLOCK ||
+                     wcsstr( parent_el->class_name, L"RichTextBlock" ) ||
+                     wcsstr( parent_el->class_name, L"Span" ) ||
+                     wcsstr( parent_el->class_name, L"Paragraph" )) &&
+                    child_el && (wcsstr( child_el->class_name, L"Run" ) ||
+                                 wcsstr( child_el->class_name, L"Span" ) ||
+                                 wcsstr( child_el->class_name, L"Inline" ) ||
+                                 wcsstr( child_el->class_name, L"Paragraph" ) ||
+                                 wcsstr( child_el->class_name, L"LineBreak" )))
+                {
+                    if (!parent_el->inlines_coll)
+                    {
+                        uwp_vec_create( parent_el, &parent_el->inlines_coll );
+                        if (parent_el->inlines_coll)
+                        {
+                            struct uwp_vec_view *iv = CONTAINING_RECORD( parent_el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
+                            iv->runtime_class = wcsstr( parent_el->class_name, L"RichTextBlock" )
+                                ? L"Windows.UI.Xaml.Documents.BlockCollection"
+                                : L"Windows.UI.Xaml.Documents.InlineCollection";
+                        }
+                    }
+                    if (parent_el->inlines_coll)
+                        uwp_vec_Append( parent_el->inlines_coll, child_raw );
+                    child_el->parent = parent_el;
+                    if (child_el->text[0])
+                    {
+                        size_t cur = wcslen( parent_el->text );
+                        if (cur + 1 < ARRAY_SIZE(parent_el->text))
+                            lstrcpynW( parent_el->text + cur, child_el->text, (int)(ARRAY_SIZE(parent_el->text) - cur) );
+                    }
+                    handled_custom = TRUE;
+                }
                 if (!handled_custom && parent_el && parent_el->kind == UWP_KIND_TEXT_BLOCK &&
                     child_el && child_el->text[0])
                 {
@@ -1044,6 +1077,22 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     if (parent_el->pane) IInspectable_Release( parent_el->pane );
                     parent_el->pane = child_raw;
                     IInspectable_AddRef( child_raw );
+                    if (child_el) child_el->parent = parent_el;
+                }
+                else if (child_raw && op->sv_kind == UWP_RD_OBJ &&
+                         (op->pid == XBF_PROP_IMAGE_SOURCE ||
+                          (op->pid < hdr->prop_cnt &&
+                           (!wcscmp( fake_ctx.props[op->pid].name, L"Source" ) ||
+                            !wcscmp( fake_ctx.props[op->pid].name, L"ImageSource" )))))
+                {
+                    if (parent_el->img_source != child_raw)
+                    {
+                        if (parent_el->img_source) IInspectable_Release( parent_el->img_source );
+                        parent_el->img_source = child_raw;
+                        IInspectable_AddRef( child_raw );
+                    }
+                    if (child_el && child_el->image_src[0] && !parent_el->image_src[0])
+                        lstrcpynW( parent_el->image_src, child_el->image_src, ARRAY_SIZE(parent_el->image_src) );
                     if (child_el) child_el->parent = parent_el;
                 }
                 else if (child_raw && op->sv_kind == UWP_RD_OBJ &&

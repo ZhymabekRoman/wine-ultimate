@@ -380,7 +380,7 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
     {
         BYTE *px = NULL;
         UINT pw = 0, ph = 0;
-        UINT max_dim = 192;
+        UINT max_dim = 384;
         if (wcsstr( el->class_name, L"LoadedImageSurface" ) || wcsstr( el->name, L"Hero" ) ||
             (el->has_bounds && ((el->bounds.right - el->bounds.left) > 320 || (el->bounds.bottom - el->bounds.top) > 320)))
             max_dim = 1024;
@@ -417,7 +417,19 @@ void uwp_load_image_asset( struct uwp_element *el )
 {
     WCHAR rel[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0}, candidate[MAX_PATH] = {0};
     const WCHAR *p = el->image_src;
-    static const WCHAR *scales[] = { L"", L".scale-100", L".scale-125", L".scale-150", L".scale-200", L".scale-400" };
+    static const WCHAR *const scales_small[] = {
+        L"", L".targetsize-24_altform-unplated", L".targetsize-24",
+        L".targetsize-32_altform-unplated", L".targetsize-32",
+        L".scale-100", L".scale-125", L".scale-150", L".scale-200", L".scale-400"
+    };
+    static const WCHAR *const scales_default[] = {
+        L"", L".scale-100", L".scale-125", L".scale-150", L".scale-200", L".scale-400",
+        L".targetsize-24_altform-unplated", L".targetsize-24",
+        L".targetsize-32_altform-unplated", L".targetsize-32"
+    };
+    BOOL prefer_small;
+    const WCHAR *const *scales;
+    size_t scale_cnt;
     WCHAR *slash, *dot;
     size_t i;
     IWICImagingFactory *wic = NULL;
@@ -427,6 +439,10 @@ void uwp_load_image_asset( struct uwp_element *el )
     UINT w = 0, h = 0;
 
     if (!el || el->img_loaded || !el->image_src[0]) return;
+    prefer_small = (el->width > 0.0 && el->width <= 32.0) ||
+                   (el->has_bounds && (el->bounds.right - el->bounds.left) > 0 && (el->bounds.right - el->bounds.left) <= 32);
+    scales = prefer_small ? scales_small : scales_default;
+    scale_cnt = prefer_small ? ARRAY_SIZE(scales_small) : ARRAY_SIZE(scales_default);
     if (!wcsncmp( p, L"http://", 7 ) || !wcsncmp( p, L"https://", 8 ))
     {
         int ci;
@@ -465,7 +481,7 @@ void uwp_load_image_asset( struct uwp_element *el )
     if (slash) *(slash + 1) = 0;
 
     dot = wcsrchr( rel, '.' );
-    for (i = 0; i < ARRAY_SIZE(scales); i++)
+    for (i = 0; i < scale_cnt; i++)
     {
         if (i > 0 && !dot) break;
         if (i == 0)
