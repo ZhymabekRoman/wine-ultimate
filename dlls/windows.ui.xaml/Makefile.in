@@ -18,18 +18,21 @@ SOURCES = \
 	paint_gdi.c \
 	paint_gpu.c \
 	pri.c \
+	resource_dict.c \
 	swapchain_panel.c \
 	uwp_binding.c \
 	uwp_brush_media.c \
 	uwp_collections.c \
 	uwp_controls.c \
 	uwp_factories.c \
+	uwp_framework_element.c \
 	uwp_guids.c \
 	uwp_input.c \
 	uwp_island.c \
 	uwp_reflection.c \
 	uwp_statics.c \
 	uwp_tree_lifecycle.c \
+	uwp_vm_bridge.c \
 	uwp_xaml.c \
 	webview2_bridge.c \
 	winui_collections.c \
@@ -37,6 +40,7 @@ SOURCES = \
 	wv2_async_profile.c \
 	wv2_events.c \
 	wv2_host_sta.c \
+	xaml_window.c \
 	xbf_aot.c \
 	xbf_decode.c \
 	xbf_instantiate.c \

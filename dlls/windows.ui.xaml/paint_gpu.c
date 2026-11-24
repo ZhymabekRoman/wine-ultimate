@@ -1433,6 +1433,40 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
     }
 }
 
+static BOOL is_clr_type_name( const WCHAR *s )
+{
+    const WCHAR *p;
+    BOOL has_dot = FALSE;
+
+    if (!s || !s[0]) return FALSE;
+    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_'))
+        return FALSE;
+
+    for (p = s; *p; p++)
+    {
+        WCHAR c = *p;
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+            return FALSE;
+        if (c == '.')
+        {
+            WCHAR prev = p[-1], next = p[1];
+            BOOL prev_ok = (prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
+                           (prev >= '0' && prev <= '9') || prev == '_';
+            BOOL next_ok = (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') ||
+                           next == '_';
+            if (!prev_ok || !next_ok) return FALSE;
+            has_dot = TRUE;
+        }
+        else if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') || c == '_' || c == '+' || c == '`' ||
+                   c == '[' || c == ']' || c == ','))
+        {
+            return FALSE;
+        }
+    }
+    return has_dot;
+}
+
 static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     WCHAR label[128] = {0};
@@ -1499,7 +1533,7 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
         {
             WCHAR str_buf[128] = {0};
             if (uwp_inspectable_to_string( el->content, str_buf, ARRAY_SIZE(str_buf) ) &&
-                wcsncmp( str_buf, L"WinStore.", 9 ) && wcsncmp( str_buf, L"Windows.", 8 ))
+                !is_clr_type_name( str_buf ))
                 lstrcpynW( label, str_buf, ARRAY_SIZE(label) );
         }
         if (label[0])

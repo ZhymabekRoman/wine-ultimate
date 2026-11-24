@@ -1906,7 +1906,7 @@ struct uwp_pointer_routed_args
     boolean handled;
 };
 
-/* Calc view-model bridge (uwp_xaml.c). */
+/* Calc view-model bridge (uwp_vm_bridge.c). */
 int  uwp_resolve_button_calc_code( struct uwp_element *btn );
 void uwp_calc_vm_ensure( void );
 void uwp_calc_vm_send( int code, IInspectable *cmd_param );
@@ -1914,7 +1914,16 @@ void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name );
 void uwp_calc_vm_teardown( BOOL final_cleanup );
 void uwp_sync_calc_display_from_vm( void );
 
-/* Binding engine (uwp_xaml.c). */
+/* DependencyObject2 / UIElement / FrameworkElement (uwp_framework_element.c). */
+HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token );
+extern const void *uwp_do_vtbl[16];
+extern const void *uwp_do2_vtbl[16];
+extern const void *uwp_ui_vtbl[128];
+extern const void *uwp_fe_vtbl[112];
+extern const void *uwp_visual_state_vtbl[32];
+extern const void *uwp_noop_vtbl[128];
+
+/* Binding engine (uwp_framework_element.c). */
 void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
                             const WCHAR *prop_name, const WCHAR *path, IInspectable *src );
 ULONG WINAPI uwp_ccc_Release( void *iface );
