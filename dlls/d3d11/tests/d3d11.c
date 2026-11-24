@@ -2483,7 +2483,21 @@ static void test_immediate_context(void)
     ok(refcount == expected_refcount, "Got refcount %lu, expected %lu.\n", refcount, expected_refcount);
 
     enabled = ID3D11Multithread_GetMultithreadProtected(multithread);
-    todo_wine ok(!enabled, "Multithread protection is %#x.\n", enabled);
+    ok(!enabled, "Multithread protection is %#x.\n", enabled);
+    enabled = ID3D11Multithread_SetMultithreadProtected(multithread, TRUE);
+    ok(!enabled, "Previous multithread protection is %#x.\n", enabled);
+    enabled = ID3D11Multithread_GetMultithreadProtected(multithread);
+    ok(enabled == TRUE, "Multithread protection is %#x.\n", enabled);
+    enabled = ID3D11Multithread_SetMultithreadProtected(multithread, 2);
+    ok(enabled == TRUE, "Previous multithread protection is %#x.\n", enabled);
+    enabled = ID3D11Multithread_GetMultithreadProtected(multithread);
+    ok(enabled == TRUE, "Multithread protection is %#x.\n", enabled);
+    ID3D11Multithread_Enter(multithread);
+    ID3D11Multithread_Leave(multithread);
+    enabled = ID3D11Multithread_SetMultithreadProtected(multithread, FALSE);
+    ok(enabled == TRUE, "Previous multithread protection is %#x.\n", enabled);
+    enabled = ID3D11Multithread_GetMultithreadProtected(multithread);
+    ok(!enabled, "Multithread protection is %#x.\n", enabled);
 
     ID3D11Multithread_Release(multithread);
 
@@ -2499,6 +2513,46 @@ static void test_immediate_context(void)
     buffer[1] = create_buffer(device, D3D11_BIND_CONSTANT_BUFFER, 16, &buffer_contents[4]);
 
     ID3D11DeviceContext_CopyResource(immediate_context, (ID3D11Resource *)buffer[1], (ID3D11Resource *)buffer[0]);
+
+    {
+        ID3D11DeviceContext1 *context1;
+
+        hr = ID3D11DeviceContext_QueryInterface(immediate_context, &IID_ID3D11DeviceContext1, (void **)&context1);
+        if (SUCCEEDED(hr))
+        {
+            D3D11_TEXTURE2D_DESC tex_desc = {0};
+            ID3D11RenderTargetView *rtv;
+            ID3D11Texture2D *tex;
+            D3D11_RECT rect = {0, 0, 8, 8};
+
+            ID3D11DeviceContext1_DiscardResource(context1, NULL);
+            ID3D11DeviceContext1_DiscardResource(context1, (ID3D11Resource *)buffer[0]);
+            ID3D11DeviceContext1_DiscardView(context1, NULL);
+            ID3D11DeviceContext1_DiscardView1(context1, NULL, NULL, 0);
+
+            tex_desc.Width = 16;
+            tex_desc.Height = 16;
+            tex_desc.MipLevels = 1;
+            tex_desc.ArraySize = 1;
+            tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            tex_desc.SampleDesc.Count = 1;
+            tex_desc.Usage = D3D11_USAGE_DEFAULT;
+            tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+            hr = ID3D11Device_CreateTexture2D(device, &tex_desc, NULL, &tex);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)tex, NULL, &rtv);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+            ID3D11DeviceContext1_DiscardResource(context1, (ID3D11Resource *)tex);
+            ID3D11DeviceContext1_DiscardView(context1, (ID3D11View *)rtv);
+            ID3D11DeviceContext1_DiscardView1(context1, (ID3D11View *)rtv, NULL, 0);
+            ID3D11DeviceContext1_DiscardView1(context1, (ID3D11View *)rtv, &rect, 1);
+
+            ID3D11RenderTargetView_Release(rtv);
+            ID3D11Texture2D_Release(tex);
+            ID3D11DeviceContext1_Release(context1);
+        }
+    }
 
     hr = ID3D11DeviceContext_FinishCommandList(immediate_context, FALSE, &command_list);
     ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);

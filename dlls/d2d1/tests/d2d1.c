@@ -2425,8 +2425,40 @@ static void test_state_block(BOOL d3d11)
     ID2D1RenderTarget_BeginDraw(rt);
     ID2D1RenderTarget_SaveDrawingState(rt, (ID2D1DrawingStateBlock *)&ptr);
     ID2D1RenderTarget_RestoreDrawingState(rt, (ID2D1DrawingStateBlock *)&ptr);
+    hr = ID2D1RenderTarget_Flush(rt, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    {
+        D2D1_TAG tag1 = 0xdead, tag2 = 0xbeef;
+
+        ID2D1RenderTarget_SetTags(rt, 0x1111, 0x2222);
+        hr = ID2D1RenderTarget_Flush(rt, &tag1, &tag2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(!tag1 && !tag2, "Got unexpected tags %s:%s.\n",
+                wine_dbgstr_longlong(tag1), wine_dbgstr_longlong(tag2));
+    }
     hr = ID2D1RenderTarget_EndDraw(rt, NULL, NULL);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    if (ctx.context)
+    {
+        D2D1_TAG tag1 = 0xdead, tag2 = 0xbeef;
+        ID2D1Image *prev_target = NULL;
+
+        ID2D1DeviceContext_GetTarget(ctx.context, &prev_target);
+        ID2D1DeviceContext_SetTarget(ctx.context, NULL);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_SetTags(ctx.context, 0x1234, 0x5678);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        hr = ID2D1DeviceContext_Flush(ctx.context, &tag1, &tag2);
+        ok(hr == D2DERR_WRONG_STATE, "Got unexpected hr %#lx.\n", hr);
+        ok(tag1 == 0x1234 && tag2 == 0x5678, "Got unexpected tags %s:%s.\n",
+                wine_dbgstr_longlong(tag1), wine_dbgstr_longlong(tag2));
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == D2DERR_WRONG_STATE, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_SetTarget(ctx.context, prev_target);
+        if (prev_target)
+            ID2D1Image_Release(prev_target);
+    }
 
     release_test_context(&ctx);
 }

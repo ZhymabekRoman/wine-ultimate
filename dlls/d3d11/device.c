@@ -2861,12 +2861,24 @@ static void STDMETHODCALLTYPE d3d11_device_context_UpdateSubresource1(ID3D11Devi
 static void STDMETHODCALLTYPE d3d11_device_context_DiscardResource(ID3D11DeviceContext4 *iface,
         ID3D11Resource *resource)
 {
-    FIXME("iface %p, resource %p stub!\n", iface, resource);
+    TRACE("iface %p, resource %p.\n", iface, resource);
+
+    if (!resource)
+        return;
+
+    /* DiscardResource is an optimization hint indicating previous resource
+     * contents are no longer needed; keeping contents intact is spec-valid. */
 }
 
 static void STDMETHODCALLTYPE d3d11_device_context_DiscardView(ID3D11DeviceContext4 *iface, ID3D11View *view)
 {
-    FIXME("iface %p, view %p stub!\n", iface, view);
+    TRACE("iface %p, view %p.\n", iface, view);
+
+    if (!view)
+        return;
+
+    /* DiscardView is an optimization hint indicating previous view contents
+     * are no longer needed; keeping contents intact is spec-valid. */
 }
 
 static void STDMETHODCALLTYPE d3d11_device_context_VSSetConstantBuffers1(ID3D11DeviceContext4 *iface,
@@ -3047,7 +3059,20 @@ static void STDMETHODCALLTYPE d3d11_device_context_ClearView(ID3D11DeviceContext
 static void STDMETHODCALLTYPE d3d11_device_context_DiscardView1(ID3D11DeviceContext4 *iface, ID3D11View *view,
         const D3D11_RECT *rects, UINT num_rects)
 {
-    FIXME("iface %p, view %p, rects %p, num_rects %u stub!\n", iface, view, rects, num_rects);
+    TRACE("iface %p, view %p, rects %p, num_rects %u.\n", iface, view, rects, num_rects);
+
+    if (!view)
+        return;
+
+    if (num_rects && !rects)
+    {
+        WARN("Invalid rects pointer with num_rects %u.\n", num_rects);
+        return;
+    }
+
+    /* DiscardView1 is an optimization hint indicating previous contents within
+     * the specified rectangles are no longer needed; keeping contents intact is
+     * spec-valid. */
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_context_UpdateTileMappings(ID3D11DeviceContext4 *iface,
@@ -4680,16 +4705,31 @@ static void STDMETHODCALLTYPE d3d11_multithread_Leave(ID3D11Multithread *iface)
 static BOOL STDMETHODCALLTYPE d3d11_multithread_SetMultithreadProtected(
         ID3D11Multithread *iface, BOOL enable)
 {
-    FIXME("iface %p, enable %#x stub!\n", iface, enable);
+    struct d3d11_device_context *context = impl_from_ID3D11Multithread(iface);
+    BOOL previous;
 
-    return TRUE;
+    TRACE("iface %p, enable %#x.\n", iface, enable);
+
+    wined3d_mutex_lock();
+    previous = context->device->multithread_protected;
+    context->device->multithread_protected = !!enable;
+    wined3d_mutex_unlock();
+
+    return previous;
 }
 
 static BOOL STDMETHODCALLTYPE d3d11_multithread_GetMultithreadProtected(ID3D11Multithread *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct d3d11_device_context *context = impl_from_ID3D11Multithread(iface);
+    BOOL protected;
 
-    return TRUE;
+    TRACE("iface %p.\n", iface);
+
+    wined3d_mutex_lock();
+    protected = context->device->multithread_protected;
+    wined3d_mutex_unlock();
+
+    return protected;
 }
 
 static const struct ID3D11MultithreadVtbl d3d11_multithread_vtbl =
@@ -9548,16 +9588,31 @@ static void STDMETHODCALLTYPE d3d10_multithread_Leave(ID3D10Multithread *iface)
 
 static BOOL STDMETHODCALLTYPE d3d10_multithread_SetMultithreadProtected(ID3D10Multithread *iface, BOOL enable)
 {
-    FIXME("iface %p, enable %#x stub!\n", iface, enable);
+    struct d3d_device *device = impl_from_ID3D10Multithread(iface);
+    BOOL previous;
 
-    return TRUE;
+    TRACE("iface %p, enable %#x.\n", iface, enable);
+
+    wined3d_mutex_lock();
+    previous = device->multithread_protected;
+    device->multithread_protected = !!enable;
+    wined3d_mutex_unlock();
+
+    return previous;
 }
 
 static BOOL STDMETHODCALLTYPE d3d10_multithread_GetMultithreadProtected(ID3D10Multithread *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct d3d_device *device = impl_from_ID3D10Multithread(iface);
+    BOOL protected;
 
-    return TRUE;
+    TRACE("iface %p.\n", iface);
+
+    wined3d_mutex_lock();
+    protected = device->multithread_protected;
+    wined3d_mutex_unlock();
+
+    return protected;
 }
 
 static const struct ID3D10MultithreadVtbl d3d10_multithread_vtbl =
@@ -10148,6 +10203,7 @@ void d3d_device_init(struct d3d_device *device, void *outer_unknown)
     /* COM aggregation always takes place */
     device->outer_unk = outer_unknown;
     device->d3d11_only = FALSE;
+    device->multithread_protected = TRUE;
     device->state = NULL;
 
     d3d11_device_context_init(&device->immediate_context, device, D3D11_DEVICE_CONTEXT_IMMEDIATE);

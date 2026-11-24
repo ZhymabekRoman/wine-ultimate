@@ -3255,15 +3255,41 @@ static void STDMETHODCALLTYPE d2d_device_context_PopLayer(ID2D1DeviceContext6 *i
 static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *iface, D2D1_TAG *tag1, D2D1_TAG *tag2)
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+    ID3D11DeviceContext *d3d_context;
+    HRESULT hr;
 
-    FIXME("iface %p, tag1 %p, tag2 %p stub!\n", iface, tag1, tag2);
+    TRACE("iface %p, tag1 %p, tag2 %p.\n", iface, tag1, tag2);
 
-    d2d_device_context_resolve_msaa(context);
+    if (context->target.type != D2D_TARGET_COMMAND_LIST)
+    {
+        if (context->cs)
+            EnterCriticalSection(context->cs);
 
-    if (context->ops && context->ops->device_context_present)
-        context->ops->device_context_present(context->outer_unknown);
+        d2d_device_context_resolve_msaa(context);
 
-    return S_OK;
+        if (context->d3d_device)
+        {
+            ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
+            ID3D11DeviceContext_Flush(d3d_context);
+            ID3D11DeviceContext_Release(d3d_context);
+        }
+
+        if (context->cs)
+            LeaveCriticalSection(context->cs);
+
+        if (SUCCEEDED(context->error.code) && context->ops && context->ops->device_context_present)
+        {
+            if (FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
+                context->error.code = hr;
+        }
+    }
+
+    if (tag1)
+        *tag1 = context->error.tag1;
+    if (tag2)
+        *tag2 = context->error.tag2;
+
+    return context->error.code;
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_SaveDrawingState(ID2D1DeviceContext6 *iface,
