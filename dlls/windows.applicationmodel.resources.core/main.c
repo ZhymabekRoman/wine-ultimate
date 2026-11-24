@@ -5360,163 +5360,30 @@ static const WCHAR *mrtcore_tail( const WCHAR *name )
     return !wcsncmp( name, prefix, len ) ? name + len : NULL;
 }
 
-/* GCHandle pin-buffer pre-arm (re-arm wave, 2026-11-07).
+/* Extended-service vtable swap (nest-collapse wave, 2026-11-08).
  *
- * This SharedLibrary.dll build (net10-shape CoreLib on the 2.2-generation
- * mrt100 app-locals) arms RuntimeExceptionHelpers.s_ExceptionInfoBufferPinningHandle
- * (static slot SL+0x55de30) only when the native _RhSetErrorInfoBuffer reports
- * "not first registration".  mrt100_app PalSetWerDataBuffer (SL_app+0x80808)
- * calls the Extended-service vtable slot with an out-parameter the 2.2
- * mrt100.dll SetHardwareExceptionHandler never writes, so the call returns the
- * stack residue -- "true" every time.  Pass 1 of the culture walk therefore
- * throws InvalidOperationException from GCHandle.get_Target (the catch at
- * SL+0x98b94d swallows it and skips the arming store), and the c0000602
- * second pass (mrt100_app RhpFailFastForPInvokeExceptionPreemp, SL_app+0x3eb81)
- * re-throws from the same empty handle and exits.
+ * mrt100_app PalSetWerDataBuffer (RVA 0x80808) is the net10-shape
+ * SetWerDataBuffer(buffer, out old-buffer): it calls vtable+24 on the
+ * {2f4bac61-3ab9-46a0-8d62-1f3ff88090fa} face (QI'd from the mrt100.dll
+ * service object in PalInit, mrt100_app RVA 0x80682).  The 2.2-generation
+ * mrt100.dll answers slot+24 with SetHardwareExceptionHandler (RVA 0x2210):
+ * it stores the buffer pointer into g_pfnHardwareExceptionHandler (evicting
+ * the Redhawk filter) and never writes the out-parameter.
  *
- * Pre-arm the slot with a wine-heap PinnedObjectHandle-shaped cell whose
- * target is a fake System.Byte[] living in a zero-init .bss hole (no xrefs,
- * outside the scanned static block: SL+0x55df60), so get_Target answers a
- * non-empty pinned handle on both passes: the settled e0434352/c0000602 pair
- * completes and the culture walk re-enters toward the Map plane.
- */
-/* Redhawk GC handle cell allocator:
- * In Redhawk, GCHandle slots are evaluated by the write barrier RhpAssignRef
- * (mrt100_app+0x52288) using the 64KB card formula:
- *   rsi = (rcx & ~0xffff) + ((movzwl(cx) - 0x1000) >> 7)
- * If the cell address has (rcx & 0xffff) < 0x1000 (such as static variables in .bss),
- * the subtraction underflows 64-bit to 0xffffffffffff... and computes an address
- * at 32 TB (0x0200000000000000 + base), causing an instant access violation at 0x522c3.
- * We allocate cells from a 64KB VirtualAlloc block at or above offset 0x1000, with
- * the first 4KB (0x0000..0x0fff) serving as the clean card table.
- */
-static UINT_PTR *alloc_gchandle_cell(void)
-{
-    static char *cell_pool;
-    static size_t cell_offset = 0x1000;
-    UINT_PTR *cell;
-
-    if (!cell_pool)
-    {
-        cell_pool = VirtualAlloc( NULL, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
-        if (!cell_pool) return NULL;
-    }
-    if (cell_offset + 16 > 0x10000) return NULL;
-    cell = (UINT_PTR *)(cell_pool + cell_offset);
-    cell_offset += 16;
-    return cell;
-}
-
-static void mrm_prearm_pinbuffer(void)
-{
-    static HMODULE hmod;
-    static UINT_PTR *cell_store;
-    static void *cell;
-    unsigned char *base;
-    UINT_PTR *slot, *fake;
-
-    if (cell) return;
-    if (!hmod && !(hmod = GetModuleHandleA("SharedLibrary.dll"))) return;
-    base = (unsigned char *)hmod;
-
-    slot = (UINT_PTR *)(base + 0x55de30);   /* s_ExceptionInfoBufferPinningHandle */
-    if (*slot)                              /* arm once, when slot is empty */
-        return;
-
-    fake = VirtualAlloc( NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
-    if (!fake) return;
-
-    fake[0] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
-    fake[1] = 0x800;                        /* Length: 2KB payload window */
-    /* p218: the culture-walk consumer reads the pinned payload as the PRM
-     * qualifier window (mrt100_app+0x522c3 card-walk over the pinbuffer).
-     * Seed the head with the UTF-16 Language qualifier so the walk finds
-     * "en-US" at payload+0 instead of a 1-byte stub. */
-    {
-        static const WCHAR enus[] = { 'e','n','-','U','S' };
-        unsigned char *payload = (unsigned char *)(fake + 2);
-        memcpy( payload, enus, sizeof(enus) );
-    }
-    cell_store = alloc_gchandle_cell();
-    if (!cell_store) return;
-    cell_store[0] = (UINT_PTR)fake;         /* PinnedObjectHandle::m_object */
-    cell_store[1] = 0;
-    cell = cell_store;
-    *slot = (UINT_PTR)cell_store | 1;       /* GCHandle pinned tag */
-    TRACE("prearm pinbuffer slot %p = %p\n", slot, (void *)*slot);
-
-    /* p216: the WER pass-2 reader (fatal capture p212: PalSetWerDataBuffer
-     * +0x3b <- SharedLibrary+0x7e33b3) consults the pin-handle static beside
-     * the pinbuffer slot, not the SetWerDataBuffer out-param (p214 proved the
-     * out-param cell is consumed by pass 1).  Arm the adjacent zero
-     * GCHandle statics with the same fake-System.Byte[] cell shape, one
-     * dedicated fake per slot from the .bss holes. */
-    {
-        int n;
-        for (n = 0; n < 2; n++)
-        {
-            UINT_PTR *ws = (UINT_PTR *)(base + 0x55de38) + n * 2;
-            UINT_PTR *f;
-            UINT_PTR *c;
-            if (*ws) continue;
-            f = VirtualAlloc( NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
-            c = alloc_gchandle_cell();
-            if (!f || !c) continue;
-            f[0] = (UINT_PTR)(base + 0xe0f80);
-            f[1] = 1;
-            c[0] = (UINT_PTR)f;
-            c[1] = 0;
-            *ws = (UINT_PTR)c | 1;
-            TRACE("prearm pinbuffer wer-slot %p armed\n", ws);
-        }
-    }
-}
-
-static void mrm_prearm_werhandle(void)
-{
-    static HMODULE hmod;
-    unsigned char *base;
-    UINT_PTR *p;
-    int armed = 0;
-
-    if (!hmod && !(hmod = GetModuleHandleA("SharedLibrary.dll"))) return;
-    base = (unsigned char *)hmod;
-
-    for (p = (UINT_PTR *)(base + 0x55de00); p < (UINT_PTR *)(base + 0x55de80); p++)
-    {
-        UINT_PTR *c;
-        if (*p != (UINT_PTR)-1) continue;
-        if (armed >= 2) return;
-        c = alloc_gchandle_cell();
-        if (!c) return;
-        p[1] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
-        p[2] = 1;                            /* Length */
-        c[0] = (UINT_PTR)(p + 1);            /* m_object = the fake inline */
-        c[1] = 0;
-        *p = (UINT_PTR)c | 1;
-        TRACE("prearm werhandle slot %p armed\n", p);
-        armed++;
-    }
-}
-
-/* Frozen-reference arena commit (inflate-plateau wave, 2026-11-08).
+ * The native responder already exists in this mrt100.dll at vtable[7]:
+ * Wer_SetWerDataBuffer (RVA 0x1470, "*out = old buffer; store; S_OK").
+ * Swap slot+24 directly onto it so:
+ *  - First call returns *out = NULL: SharedLibrary's SetErrorInfoBuffer skips
+ *    GCHandle.get_Target and calls real GCHandle.Alloc(buffer, Pinned) via
+ *    mrt100_app!RhpHandleAlloc, registering a genuine GC-tracked pinned handle.
+ *  - Subsequent calls return the prior buffer, GCHandle.get_Target reads the
+ *    still-pinned byte[] safely across GCs, and GCHandle.set_Target updates it
+ *    via mrt100_app!RhHandleSet without dangling GC pointers.
  *
- * mrt100_app R2R data bakes tagged GC references into the runtime heap at
- * its link-time layout: heap snapshot objects read as 0x1801020001-style
- * absolute refs (TypeManager space base 0x1801000000, app Mcg module-0).
- * The runtime heap is a 384MB (nil)-hinted MEM_RESERVE|MEM_COMMIT block
- * (measured: `NtAllocateVirtualMemory (nil) 18000000 202000 1`), which the
- * Wine loader lands at a host-flavored VA (observed 0x7fc2bd3e0000) — the
- * 0x1801xxxxxx slots the frozen refs name stay address holes.  Every WER
- * publish of the culture walk re-reads one such ref: the MSZip decompress
- * of the WER data buffer loads z_stream.next_in=0x1801020001, the inflate
- * faults on *next_in, the app SEH/VEH pair runs the buffer-as-code stub
- * chain, resume, retry: 18.9k identical AV pairs at ~210/s (plateau).
- *
- * Commit the first 16MB of that arena as zero pages from the first
- * activation: the frozen "MSZip header" reads 24 zero bytes, inflate
- * retires with a consumed-stored-block result, the WER publish completes
- * and the culture walk proceeds toward the Map plane.
+ * Pre-arming SharedLibrary+0x55de30 with a VirtualAlloc cell outside Redhawk's
+ * GC handle table prevented GCHandle.Alloc from ever running, leaving the real
+ * managed byte[] unpinned so GC freed/moved it and caused an AV at
+ * mrt100_app+0x3cf0e (RhTypeCast_IsInstanceOfArray) -> FailFast 0xc0000602.
  */
 static void mrm_prearm_arena(void)
 {
@@ -5533,63 +5400,11 @@ static void mrm_prearm_arena(void)
     if (p) committed = p;
 }
 
-/* Extended-service vtable swap (nest-collapse wave, 2026-11-08).
- *
- * mrt100_app PalSetWerDataBuffer (RVA 0x80808) is the net10-shape
- * SetWerDataBuffer(buffer, out old-buffer): it calls vtable+24 on the
- * {2f4bac61-3ab9-46a0-8d62-1f3ff88090fa} face (QI'd from the mrt100.dll
- * service object in PalInit, mrt100_app RVA 0x80682) and returns the
- * out-parameter as the "first registration" answer of the WER publish
- * (pinbuffer pre-arm, 2a3f9875).  The 2.2-generation mrt100.dll answers
- * slot+24 with SetHardwareExceptionHandler (RVA 0x2210, measured live; the
- * base face keeps the 0x1ea0 twin): it stores the buffer pointer into
- * g_pfnHardwareExceptionHandler (RVA 0xa098, evicting the Redhawk filter
- * published at startup) and never writes the out-parameter.  Every AV after that single publish then dispatches
- * HardwareVectoredExceptionHandler (RVA 0x1450) into the buffer-as-code
- * stub (write to [0]), whose resume faults again: 284 nested write-AVs at
- * 0xE40 stack each, killed by the stack stack-overflow at
- * application_QueryInterface {06499997}.
- *
- * The net10-shape responder already exists in this mrt100.dll:
- * Wer_SetWerDataBuffer (RVA 0x1470, "*out = old buffer; store; S_OK"),
- * published at vtable+48.  Swap slot+24 onto it from the first activation:
- * the publish writes its out-parameter, g_pfnHardwareExceptionHandler keeps
- * the Redhawk filter, and the AV storm nests one deep.  The vtable lives in
- * the zero-characteristics .rdata of this MinGW build, which Wine maps
- * writable, so the swap is a single store into the loaded image.
- */
-/* p214: second-pass barrier target.  Wer_SetWerDataBuffer answers the first
- * publish with *out = NULL (its g_pWerDataBuffer is zero); the app stores that
- * into the WER pin-handle, and the fifth publish's second pass reads it back
- * as GCHandle -1: the card helper (mrt100_app+0x522c3) faults reading the card
- * of -1 with no handler left and the process dies (fatal capture p212:
- * PalSetWerDataBuffer+0x3b <- SharedLibrary+0x7e33b3).  Wrap the native
- * responder: on the first call (native out == NULL) hand the app a stable
- * PinnedObjectHandle cell tagged like a real pinned GCHandle (the pinbuffer
- * shape: cell -> fake System.Byte[] over SharedLibrary's EEType) so the
- * pass-2 barrier target is committed and never -1. */
-static UINT_PTR mrm_wer_fake[2];
-static UINT_PTR *mrm_wer_cell;
-static void (WINAPI *mrm_wer_native)(void *, void *, void **);
-
-static HRESULT WINAPI mrm_wer_set_buffer( void *iface, void *buffer, void **out )
-{
-    if (mrm_wer_native)
-    {
-        HRESULT (WINAPI *fn)( void *, void *, void ** ) = (void *)mrm_wer_native;
-        fn( iface, buffer, out );             /* store buffer, out = old g */
-    }
-    if (out && !*out && mrm_wer_cell && mrm_wer_cell[0])
-        *out = (void *)((UINT_PTR)mrm_wer_cell | 1);  /* first publish: stable handle, never -1 */
-    return 0;                                 /* S_OK */
-}
-
 static void mrm_prearm_werfacade(void)
 {
     static HMODULE hmod;
     unsigned char *base;
     void **instance, **vtable;
-    HMODULE sl;
     DWORD old;
     int i;
 
@@ -5603,7 +5418,7 @@ static void mrm_prearm_werfacade(void)
     instance = (void **)(base + 0x4020);        /* g_ExtendedServicesInstance */
     vtable = instance ? (void **)*instance : NULL;
     if (!vtable) return;
-    if (vtable[3] == (void *)mrm_wer_set_buffer) return;   /* already swapped (idempotent) */
+    if (vtable[3] == base + 0x1470) return;     /* already swapped (idempotent) */
     for (i = 4; i < 16; i++)                    /* locate the SetWerDataBuffer responder */
         if (vtable[i] == base + 0x1470) break;
     if (i == 16)
@@ -5612,22 +5427,10 @@ static void mrm_prearm_werfacade(void)
               base, vtable, vtable[3]);
         return;
     }
-    mrm_wer_native = (void *)vtable[i];
-    if (!mrm_wer_cell && (sl = GetModuleHandleA("SharedLibrary.dll")))
-    {
-        mrm_wer_fake[0] = (UINT_PTR)((unsigned char *)sl + 0xe0f80);  /* EEType_System::Byte[] */
-        mrm_wer_fake[1] = 1;                    /* Length: GC-scan safe */
-        mrm_wer_cell = alloc_gchandle_cell();
-        if (mrm_wer_cell)
-        {
-            mrm_wer_cell[0] = (UINT_PTR)mrm_wer_fake;  /* PinnedObjectHandle::m_object */
-            mrm_wer_cell[1] = 0;
-        }
-    }
     VirtualProtect( &vtable[3], sizeof(*vtable), PAGE_READWRITE, &old );
-    vtable[3] = (void *)mrm_wer_set_buffer;     /* native store + stable pass-2 handle */
+    vtable[3] = vtable[i];                      /* native Wer_SetWerDataBuffer (NULL on 1st call) */
     VirtualProtect( &vtable[3], sizeof(*vtable), old, &old );
-    TRACE("prearm extended face: vtable+24 -> wrapped SetWerDataBuffer slot %d\n", i);
+    TRACE("prearm extended face: vtable+24 -> native SetWerDataBuffer slot %d\n", i);
 }
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
@@ -5637,7 +5440,6 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 
     TRACE("class %s, factory %p.\n", debugstr_hstring(classid), factory);
 
-    mrm_prearm_pinbuffer();
     mrm_prearm_werfacade();
     mrm_prearm_arena();
 
