@@ -513,9 +513,9 @@ LRESULT WINAPI PackTouchHitTestingProximityEvaluation(const TOUCH_HIT_TESTING_IN
  */
 BOOL WINAPI GetPointerType(UINT32 id, POINTER_INPUT_TYPE *type)
 {
-    FIXME("(%d %p): stub\n", id, type);
+    TRACE("(%u %p)\n", id, type);
 
-    if(!id || !type)
+    if (id != 1 || !type)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;

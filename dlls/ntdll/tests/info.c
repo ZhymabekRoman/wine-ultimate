@@ -3891,6 +3891,59 @@ static void test_thread_info(void)
     ok( status == STATUS_INFO_LENGTH_MISMATCH, "failed %lx\n", status );
     ok( data == 0xcccccccc, "wrong data %lx\n", data );
     ok( len == 0xdeadbeef, "wrong len %lu\n", len );
+
+    {
+        THREAD_POWER_THROTTLING_STATE throttle = { 1, 0x1, 0x1 };
+
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) - 1 );
+        ok( status == STATUS_INFO_LENGTH_MISMATCH, "got %#lx\n", status );
+
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          NULL, sizeof(throttle) );
+        ok( status == STATUS_ACCESS_VIOLATION, "got %#lx\n", status );
+
+        throttle.Version = 0;
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) );
+        ok( status == STATUS_INVALID_PARAMETER, "got %#lx\n", status );
+
+        throttle.Version = 2;
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) );
+        ok( status == STATUS_INVALID_PARAMETER, "got %#lx\n", status );
+
+        throttle.Version = 1;
+        throttle.ControlMask = 0x2;
+        throttle.StateMask = 0;
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) );
+        ok( status == STATUS_INVALID_PARAMETER, "got %#lx\n", status );
+
+        throttle.ControlMask = 0x1;
+        throttle.StateMask = 0x2;
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) );
+        ok( status == STATUS_INVALID_PARAMETER, "got %#lx\n", status );
+
+        throttle.ControlMask = 0x1;
+        throttle.StateMask = 0x1;
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) );
+        ok( status == STATUS_SUCCESS, "got %#lx\n", status );
+
+        throttle.ControlMask = 0x1;
+        throttle.StateMask = 0;
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) );
+        ok( status == STATUS_SUCCESS, "got %#lx\n", status );
+
+        throttle.ControlMask = 0;
+        throttle.StateMask = 0;
+        status = pNtSetInformationThread( GetCurrentThread(), ThreadPowerThrottlingState,
+                                          &throttle, sizeof(throttle) );
+        ok( status == STATUS_SUCCESS, "got %#lx\n", status );
+    }
 }
 
 static void test_debug_object(void)

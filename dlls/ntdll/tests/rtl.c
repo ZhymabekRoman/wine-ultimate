@@ -3841,10 +3841,12 @@ static void test_RtlGetDeviceFamilyInfoEnum(void)
     family = 1234567;
     form = 1234567;
     pRtlGetDeviceFamilyInfoEnum(&version, &family, &form);
-    ok( version != 0x1234567, "got unexpected unchanged value 0x1234567\n" );
+    ok( version != 0x1234567 && version != 0, "got unexpected value %#I64x\n", version );
     ok( family <= DEVICEFAMILYINFOENUM_MAX, "got unexpected %lu\n", family );
-    ok( form <= DEVICEFAMILYDEVICEFORM_MAX, "got unexpected %lu\n", form );
+    ok( form <= DEVICEFAMILYDEVICEFORM_MAX && form != DEVICEFAMILYDEVICEFORM_UNKNOWN, "got unexpected %lu\n", form );
     trace( "UAP version is %#I64x, device family is %lu, form factor is %lu\n", version, family, form );
+
+    pRtlGetDeviceFamilyInfoEnum(NULL, NULL, NULL);
 }
 
 struct test_rb_tree_entry

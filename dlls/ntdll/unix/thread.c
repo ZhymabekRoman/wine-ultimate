@@ -2822,10 +2822,20 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
         return STATUS_SUCCESS;
 
     case ThreadPowerThrottlingState:
-        if (length != sizeof(THREAD_POWER_THROTTLING_STATE)) return STATUS_INFO_LENGTH_MISMATCH;
-        if (!data) return STATUS_ACCESS_VIOLATION;
-        FIXME( "ThreadPowerThrottling stub!\n" );
+    {
+        const THREAD_POWER_THROTTLING_STATE *state = data;
+        const ULONG valid_flags = 0x1; /* THREAD_POWER_THROTTLING_EXECUTION_SPEED */
+
+        if (length != sizeof(*state)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!state) return STATUS_ACCESS_VIOLATION;
+        if (state->Version != 1 /* THREAD_POWER_THROTTLING_CURRENT_VERSION */)
+            return STATUS_INVALID_PARAMETER;
+        if ((state->ControlMask & ~valid_flags) || (state->StateMask & ~valid_flags))
+            return STATUS_INVALID_PARAMETER;
+        TRACE( "ThreadPowerThrottlingState: handle %p, control %#x, state %#x\n",
+               handle, (unsigned int)state->ControlMask, (unsigned int)state->StateMask );
         return STATUS_SUCCESS;
+    }
 
     case ThreadIdealProcessor:
     {
