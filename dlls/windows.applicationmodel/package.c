@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "private.h"
+#include "appmodel.h"
 #include "objbase.h"
 #include "wine/debug.h"
 
@@ -192,43 +193,46 @@ BOOL package_get_reg_str( const WCHAR *prop_name, WCHAR *buf, DWORD cch )
         }
     }
 
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE(name) ))
     {
-        lstrcpyW( subkey, appmodel_reg_key );
-        lstrcatW( subkey, L"\\Packages\\" );
-        lstrcatW( subkey, name );
-        for (i = 0; i < ARRAY_SIZE(roots); i++)
+        UINT32 len = ARRAY_SIZE(name);
+        if (GetCurrentPackageFullName( &len, name ) == ERROR_SUCCESS && name[0])
         {
-            HKEY key;
-            DWORD type, size = cch * sizeof(WCHAR);
-            if (!RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key ))
+            lstrcpyW( subkey, appmodel_reg_key );
+            lstrcatW( subkey, L"\\Packages\\" );
+            lstrcatW( subkey, name );
+            for (i = 0; i < ARRAY_SIZE(roots); i++)
             {
-                if (!RegQueryValueExW( key, prop_name, 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+                HKEY key;
+                DWORD type, size = cch * sizeof(WCHAR);
+                if (!RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key ))
                 {
+                    if (!RegQueryValueExW( key, prop_name, 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+                    {
+                        RegCloseKey( key );
+                        return TRUE;
+                    }
                     RegCloseKey( key );
-                    return TRUE;
                 }
-                RegCloseKey( key );
             }
         }
     }
     return FALSE;
 }
 
-/* Install directory of the running package: env override first (per-run),
+/* Install directory of the running package: GetCurrentPackagePath first,
  * then the AppModel registration (PackagePath, then the installer-recorded
- * PackageRootPath), then the executable directory as the last resort. Same
- * resolution order as the kernel32 package identity helpers. */
+ * PackageRootPath), then the executable directory as the last resort. */
 static void package_root_path( WCHAR *buf, DWORD cch )
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     WCHAR subkey[576], name[MAX_PATH];
+    UINT32 path_len = cch, full_len = ARRAY_SIZE(name);
     SIZE_T i;
 
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch )) return;
+    if (GetCurrentPackagePath( &path_len, buf ) == ERROR_SUCCESS && buf[0]) return;
 
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE(name) ) &&
-        !package_get_reg_str( L"PackageFullName", name, ARRAY_SIZE(name) ))
+    if (!package_get_reg_str( L"PackageFullName", name, ARRAY_SIZE(name) ) &&
+        GetCurrentPackageFullName( &full_len, name ) != ERROR_SUCCESS)
         name[0] = 0;
 
     if (name[0])
@@ -1459,14 +1463,39 @@ static HRESULT WINAPI package_id_GetTrustLevel( IPackageId *iface, TrustLevel *l
     return S_OK;
 }
 
+struct package_manifest_meta
+{
+    WCHAR manifest_path[MAX_PATH + 32];
+    WCHAR id_name[256];
+    WCHAR id_publisher[512];
+    WCHAR id_version[64];
+    WCHAR display_name[256];
+    WCHAR publisher_display_name[256];
+    WCHAR description[512];
+    BOOL loaded;
+};
+
+static void get_package_manifest_meta( struct package_manifest_meta *out );
+
 static HRESULT WINAPI package_id_get_Name( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH], *us;
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ) &&
-        !package_get_reg_str( L"PackageFamilyName", buf, ARRAY_SIZE(buf) ) &&
-        !GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ) &&
-        !package_get_reg_str( L"PackageFullName", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"5319275A.WhatsAppDesktop" );
+    UINT32 len = ARRAY_SIZE(buf);
+    struct package_manifest_meta meta;
+
+    if (GetCurrentPackageFamilyName( &len, buf ) == ERROR_SUCCESS && buf[0])
+        ;
+    else if (len = ARRAY_SIZE(buf), GetCurrentPackageFullName( &len, buf ) == ERROR_SUCCESS && buf[0])
+        ;
+    else if (package_get_reg_str( L"PackageFamilyName", buf, ARRAY_SIZE(buf) ) ||
+             package_get_reg_str( L"PackageFullName", buf, ARRAY_SIZE(buf) ))
+        ;
+    else
+    {
+        get_package_manifest_meta( &meta );
+        if (meta.id_name[0]) lstrcpynW( buf, meta.id_name, ARRAY_SIZE(buf) );
+        else buf[0] = 0;
+    }
     if ((us = wcschr( buf, '_' ))) *us = 0;
     return WindowsCreateString( buf, wcslen(buf), value );
 }
@@ -1475,13 +1504,17 @@ static HRESULT WINAPI package_id_get_Version( IPackageId *iface, struct PackageV
 {
     WCHAR full[MAX_PATH];
     const WCHAR *us;
+    UINT32 len = ARRAY_SIZE(full);
+    struct package_manifest_meta meta;
     unsigned int maj = 0, min = 0, bld = 0, rev = 0;
 
     if (!value) return E_POINTER;
     full[0] = 0;
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", full, ARRAY_SIZE(full) ) &&
-        !package_get_reg_str( L"PackageFullName", full, ARRAY_SIZE(full) ))
-        full[0] = 0;
+    if (GetCurrentPackageFullName( &len, full ) != ERROR_SUCCESS || !full[0])
+    {
+        if (!package_get_reg_str( L"PackageFullName", full, ARRAY_SIZE(full) ))
+            full[0] = 0;
+    }
     if (full[0] && (us = wcschr( full, '_' )) &&
         swscanf( us + 1, L"%u.%u.%u.%u", &maj, &min, &bld, &rev ) == 4)
     {
@@ -1491,9 +1524,18 @@ static HRESULT WINAPI package_id_get_Version( IPackageId *iface, struct PackageV
         value->Revision = (UINT16)rev;
         return S_OK;
     }
-    value->Major = 2;
-    value->Minor = 2620;
-    value->Build = 102;
+    get_package_manifest_meta( &meta );
+    if (meta.id_version[0] && swscanf( meta.id_version, L"%u.%u.%u.%u", &maj, &min, &bld, &rev ) == 4)
+    {
+        value->Major = (UINT16)maj;
+        value->Minor = (UINT16)min;
+        value->Build = (UINT16)bld;
+        value->Revision = (UINT16)rev;
+        return S_OK;
+    }
+    value->Major = 0;
+    value->Minor = 0;
+    value->Build = 0;
     value->Revision = 0;
     return S_OK;
 }
@@ -1513,36 +1555,57 @@ static HRESULT WINAPI package_id_get_ResourceId( IPackageId *iface, HSTRING *val
 static HRESULT WINAPI package_id_get_Publisher( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER", buf, ARRAY_SIZE(buf) ) &&
-        !package_get_reg_str( L"PackagePublisher", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"CN=Unknown" );
+    struct package_manifest_meta meta;
+
+    if (!package_get_reg_str( L"PackagePublisher", buf, ARRAY_SIZE(buf) ))
+    {
+        get_package_manifest_meta( &meta );
+        if (meta.id_publisher[0]) lstrcpynW( buf, meta.id_publisher, ARRAY_SIZE(buf) );
+        else buf[0] = 0;
+    }
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_PublisherId( IPackageId *iface, HSTRING *value )
 {
-    WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER_ID", buf, ARRAY_SIZE(buf) ) &&
-        !package_get_reg_str( L"PackagePublisherId", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"0000000000000" );
+    WCHAR buf[MAX_PATH], *sep;
+    UINT32 len = ARRAY_SIZE(buf);
+
+    if (!package_get_reg_str( L"PackagePublisherId", buf, ARRAY_SIZE(buf) ))
+    {
+        buf[0] = 0;
+        if ((GetCurrentPackageFamilyName( &len, buf ) == ERROR_SUCCESS && buf[0]) ||
+            package_get_reg_str( L"PackageFamilyName", buf, ARRAY_SIZE(buf) ))
+        {
+            if ((sep = wcsrchr( buf, '_' )) && sep[1])
+                memmove( buf, sep + 1, (wcslen( sep + 1 ) + 1) * sizeof(WCHAR) );
+            else
+                buf[0] = 0;
+        }
+        else buf[0] = 0;
+    }
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_FullName( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ) &&
+    UINT32 len = ARRAY_SIZE(buf);
+
+    if ((GetCurrentPackageFullName( &len, buf ) != ERROR_SUCCESS || !buf[0]) &&
         !package_get_reg_str( L"PackageFullName", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"UnknownPackage_1.0.0.0_neutral__0000000000000" );
+        buf[0] = 0;
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_FamilyName( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ) &&
+    UINT32 len = ARRAY_SIZE(buf);
+
+    if ((GetCurrentPackageFamilyName( &len, buf ) != ERROR_SUCCESS || !buf[0]) &&
         !package_get_reg_str( L"PackageFamilyName", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"UnknownPackage_0000000000000" );
+        buf[0] = 0;
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
@@ -1629,20 +1692,618 @@ static const struct IPackageVtbl package_vtbl =
 
 DEFINE_IINSPECTABLE( package2, IPackage2, struct package, IPackage_iface )
 
+static SRWLOCK package_meta_lock = SRWLOCK_INIT;
+static struct package_manifest_meta package_meta_cache;
+
+static BOOL xml_is_space_w( WCHAR c )
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static void xml_trim_w( WCHAR *s )
+{
+    WCHAR *start = s, *end;
+
+    while (*start && xml_is_space_w( *start )) start++;
+    if (start != s) memmove( s, start, (wcslen( start ) + 1) * sizeof(WCHAR) );
+    end = s + wcslen( s );
+    while (end > s && xml_is_space_w( end[-1] )) *--end = 0;
+}
+
+static void xml_unescape_w( WCHAR *s )
+{
+    WCHAR *r = s, *w = s;
+
+    while (*r)
+    {
+        if (*r == '&')
+        {
+            if (!wcsncmp( r, L"&amp;", 5 )) { *w++ = '&'; r += 5; continue; }
+            if (!wcsncmp( r, L"&lt;", 4 )) { *w++ = '<'; r += 4; continue; }
+            if (!wcsncmp( r, L"&gt;", 4 )) { *w++ = '>'; r += 4; continue; }
+            if (!wcsncmp( r, L"&quot;", 6 )) { *w++ = '"'; r += 6; continue; }
+            if (!wcsncmp( r, L"&apos;", 6 )) { *w++ = '\''; r += 6; continue; }
+            if (r[1] == '#')
+            {
+                WCHAR *semi = wcschr( r + 2, ';' );
+                if (semi && semi - (r + 2) <= 8)
+                {
+                    unsigned long cp = (r[2] == 'x' || r[2] == 'X')
+                            ? wcstoul( r + 3, NULL, 16 )
+                            : wcstoul( r + 2, NULL, 10 );
+                    if (cp > 0 && cp <= 0xffff)
+                    {
+                        *w++ = (WCHAR)cp;
+                        r = semi + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        *w++ = *r++;
+    }
+    *w = 0;
+}
+
+static const WCHAR *xml_skip_ignored_w( const WCHAR *p, const WCHAR *limit )
+{
+    const WCHAR *end;
+
+    if (p + 4 <= limit && !wcsncmp( p, L"<!--", 4 ))
+    {
+        end = wcsstr( p + 4, L"-->" );
+        return (end && end + 3 <= limit) ? end + 3 : limit;
+    }
+    if (p + 2 <= limit && !wcsncmp( p, L"<?", 2 ))
+    {
+        end = wcsstr( p + 2, L"?>" );
+        return (end && end + 2 <= limit) ? end + 2 : limit;
+    }
+    if (p + 9 <= limit && !wcsncmp( p, L"<![CDATA[", 9 ))
+    {
+        end = wcsstr( p + 9, L"]]>" );
+        return (end && end + 3 <= limit) ? end + 3 : limit;
+    }
+    return NULL;
+}
+
+static const WCHAR *xml_find_tag_gt_w( const WCHAR *tag, const WCHAR *limit )
+{
+    const WCHAR *p = tag + 1;
+    WCHAR quote = 0;
+
+    while (p < limit && *p)
+    {
+        if (quote)
+        {
+            if (*p == quote) quote = 0;
+        }
+        else if (*p == '"' || *p == '\'')
+        {
+            quote = *p;
+        }
+        else if (*p == '>')
+        {
+            return p;
+        }
+        p++;
+    }
+    return NULL;
+}
+
+static BOOL xml_name_matches_w( const WCHAR *name_start, SIZE_T name_len,
+                                const WCHAR *target, BOOL allow_ns_prefix )
+{
+    SIZE_T target_len = wcslen( target );
+
+    if (!allow_ns_prefix)
+        return name_len == target_len && !wcsncmp( name_start, target, target_len );
+
+    if (name_len == target_len && !wcsncmp( name_start, target, target_len ))
+        return TRUE;
+    if (name_len > target_len + 1 &&
+        name_start[name_len - target_len - 1] == ':' &&
+        !wcsncmp( name_start + name_len - target_len, target, target_len ))
+        return TRUE;
+    return FALSE;
+}
+
+static const WCHAR *xml_find_tag_w( const WCHAR *start, const WCHAR *limit,
+                                    const WCHAR *name, BOOL allow_ns_prefix,
+                                    const WCHAR **gt_out )
+{
+    const WCHAR *p = start;
+
+    while (p < limit && (p = wcschr( p, '<' )) && p < limit)
+    {
+        const WCHAR *skip, *gt, *name_start, *name_end;
+
+        if ((skip = xml_skip_ignored_w( p, limit )))
+        {
+            p = skip;
+            continue;
+        }
+        if (!(gt = xml_find_tag_gt_w( p, limit ))) return NULL;
+        if (p + 1 < gt && p[1] != '/' && p[1] != '!')
+        {
+            name_start = p + 1;
+            name_end = name_start;
+            while (name_end < gt && !xml_is_space_w( *name_end ) && *name_end != '/')
+                name_end++;
+            if (xml_name_matches_w( name_start, name_end - name_start, name, allow_ns_prefix ))
+            {
+                if (gt_out) *gt_out = gt;
+                return p;
+            }
+        }
+        p = gt + 1;
+    }
+    return NULL;
+}
+
+static BOOL xml_find_element_range_w( const WCHAR *start, const WCHAR *limit, const WCHAR *name,
+                                      const WCHAR **content_start, const WCHAR **content_end )
+{
+    const WCHAR *p = start, *open_gt, *q;
+    SIZE_T target_len = wcslen( name );
+    int depth;
+
+    while ((p = xml_find_tag_w( p, limit, name, FALSE, &open_gt )))
+    {
+        const WCHAR *tail = open_gt;
+        while (tail > p && xml_is_space_w( tail[-1] )) tail--;
+        if (tail > p && tail[-1] == '/')
+        {
+            p = open_gt + 1;
+            continue;
+        }
+
+        depth = 1;
+        q = open_gt + 1;
+        while (q < limit && (q = wcschr( q, '<' )) && q < limit)
+        {
+            const WCHAR *skip, *gt, *ns, *ne;
+
+            if ((skip = xml_skip_ignored_w( q, limit )))
+            {
+                q = skip;
+                continue;
+            }
+            if (!(gt = xml_find_tag_gt_w( q, limit ))) return FALSE;
+            if (q + 1 < gt && q[1] == '/')
+            {
+                ns = q + 2;
+                ne = ns;
+                while (ne < gt && !xml_is_space_w( *ne )) ne++;
+                if ((SIZE_T)(ne - ns) == target_len && !wcsncmp( ns, name, target_len ))
+                {
+                    if (--depth == 0)
+                    {
+                        *content_start = open_gt + 1;
+                        *content_end = q;
+                        return TRUE;
+                    }
+                }
+            }
+            else if (q + 1 < gt && q[1] != '!')
+            {
+                const WCHAR *t2 = gt;
+                while (t2 > q && xml_is_space_w( t2[-1] )) t2--;
+                if (!(t2 > q && t2[-1] == '/'))
+                {
+                    ns = q + 1;
+                    ne = ns;
+                    while (ne < gt && !xml_is_space_w( *ne ) && *ne != '/') ne++;
+                    if ((SIZE_T)(ne - ns) == target_len && !wcsncmp( ns, name, target_len ))
+                        depth++;
+                }
+            }
+            q = gt + 1;
+        }
+        return FALSE;
+    }
+    return FALSE;
+}
+
+static BOOL xml_extract_element_text_w( const WCHAR *start, const WCHAR *limit,
+                                        const WCHAR *name, WCHAR *out, DWORD cch )
+{
+    const WCHAR *cstart, *cend;
+    SIZE_T len;
+
+    if (!cch) return FALSE;
+    out[0] = 0;
+    if (!xml_find_element_range_w( start, limit, name, &cstart, &cend )) return FALSE;
+    len = min( (SIZE_T)(cend - cstart), (SIZE_T)(cch - 1) );
+    memcpy( out, cstart, len * sizeof(WCHAR) );
+    out[len] = 0;
+    xml_unescape_w( out );
+    xml_trim_w( out );
+    return out[0] != 0;
+}
+
+static BOOL xml_tag_get_attr_w( const WCHAR *tag, const WCHAR *gt,
+                                const WCHAR *attr, WCHAR *out, DWORD cch )
+{
+    const WCHAR *p = tag + 1;
+    SIZE_T attr_len = wcslen( attr );
+
+    if (!cch) return FALSE;
+    out[0] = 0;
+    while (p < gt && !xml_is_space_w( *p ) && *p != '/') p++;
+
+    while (p < gt)
+    {
+        const WCHAR *ks, *ke, *vs, *ve;
+        WCHAR quote;
+
+        while (p < gt && (xml_is_space_w( *p ) || *p == '/')) p++;
+        if (p >= gt) break;
+        ks = p;
+        while (p < gt && *p != '=' && !xml_is_space_w( *p ) && *p != '/') p++;
+        ke = p;
+        while (p < gt && xml_is_space_w( *p )) p++;
+        if (p >= gt || *p != '=') continue;
+        p++;
+        while (p < gt && xml_is_space_w( *p )) p++;
+        if (p >= gt || (*p != '"' && *p != '\'')) continue;
+        quote = *p++;
+        vs = p;
+        while (p < gt && *p != quote) p++;
+        ve = p;
+        if (p < gt && *p == quote) p++;
+
+        if ((SIZE_T)(ke - ks) == attr_len && !wcsncmp( ks, attr, attr_len ))
+        {
+            SIZE_T len = min( (SIZE_T)(ve - vs), (SIZE_T)(cch - 1) );
+            memcpy( out, vs, len * sizeof(WCHAR) );
+            out[len] = 0;
+            xml_unescape_w( out );
+            xml_trim_w( out );
+            return out[0] != 0;
+        }
+    }
+    return FALSE;
+}
+
+static WCHAR *read_manifest_wide( const WCHAR *path )
+{
+    HANDLE file;
+    DWORD size, rd = 0;
+    char *raw;
+    WCHAR *xml = NULL;
+
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+
+    size = GetFileSize( file, NULL );
+    if (!size || size == INVALID_FILE_SIZE || size > 4 * 1024 * 1024 ||
+        !(raw = malloc( size + 2 )))
+    {
+        CloseHandle( file );
+        return NULL;
+    }
+    if (!ReadFile( file, raw, size, &rd, NULL ) || !rd)
+    {
+        free( raw );
+        CloseHandle( file );
+        return NULL;
+    }
+    CloseHandle( file );
+    raw[rd] = 0;
+    raw[rd + 1] = 0;
+
+    if (rd >= 2 && (unsigned char)raw[0] == 0xff && (unsigned char)raw[1] == 0xfe)
+    {
+        DWORD wlen = (rd - 2) / sizeof(WCHAR);
+        if ((xml = malloc( (wlen + 1) * sizeof(WCHAR) )))
+        {
+            memcpy( xml, raw + 2, wlen * sizeof(WCHAR) );
+            xml[wlen] = 0;
+        }
+    }
+    else
+    {
+        const char *utf8 = raw;
+        int wlen;
+        if (rd >= 3 && (unsigned char)raw[0] == 0xef &&
+            (unsigned char)raw[1] == 0xbb && (unsigned char)raw[2] == 0xbf)
+            utf8 += 3;
+        wlen = MultiByteToWideChar( CP_UTF8, 0, utf8, -1, NULL, 0 );
+        if (wlen > 0 && (xml = malloc( (SIZE_T)wlen * sizeof(WCHAR) )))
+            MultiByteToWideChar( CP_UTF8, 0, utf8, -1, xml, wlen );
+    }
+
+    free( raw );
+    return xml;
+}
+
+static BOOL is_ms_resource_uri( const WCHAR *s )
+{
+    return s && !wcsnicmp( s, L"ms-resource:", 12 );
+}
+
+static BOOL resolve_ms_resource_uri( const WCHAR *uri, WCHAR *out, DWORD cch )
+{
+    static const IID iid_resource_loader_statics2 =
+        {0x0cc04141, 0x6466, 0x4989, {0x94, 0x94, 0x0b, 0x82, 0xdf, 0xc5, 0x3f, 0x1f}};
+    static const WCHAR class_name[] = L"Windows.ApplicationModel.Resources.ResourceLoader";
+    const WCHAR *p, *candidates[2];
+    WCHAR key[256];
+    HSTRING hclass = NULL;
+    void *statics = NULL, *loader = NULL;
+    HRESULT (STDMETHODCALLTYPE *get_for_view_independent)( void *, void ** );
+    HRESULT (STDMETHODCALLTYPE *get_string)( void *, HSTRING, HSTRING * );
+    ULONG (STDMETHODCALLTYPE *release_fn)( void * );
+    UINT32 cand_count = 0, i;
+    BOOL resolved = FALSE;
+
+    if (!is_ms_resource_uri( uri ) || !out || !cch) return FALSE;
+    out[0] = 0;
+
+    p = uri + 12;
+    if (p[0] == '/' && p[1] == '/')
+    {
+        p += 2;
+        while (*p && *p != '/') p++;
+        if (*p == '/') p++;
+    }
+    else if (*p == '/')
+    {
+        p++;
+    }
+    if (!*p) return FALSE;
+
+    lstrcpynW( key, p, ARRAY_SIZE(key) );
+    candidates[cand_count++] = key;
+    if (!wcsnicmp( key, L"Resources/", 10 ) || !wcsnicmp( key, L"Resources\\", 10 ))
+    {
+        if (key[10]) candidates[cand_count++] = key + 10;
+    }
+
+    if (FAILED( WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &hclass ) ))
+        return FALSE;
+    if (FAILED( RoGetActivationFactory( hclass, &iid_resource_loader_statics2, &statics ) ) || !statics)
+    {
+        WindowsDeleteString( hclass );
+        return FALSE;
+    }
+    WindowsDeleteString( hclass );
+
+    get_for_view_independent = (void *)((void **)(*(void **)statics))[8];
+    if (SUCCEEDED( get_for_view_independent( statics, &loader ) ) && loader)
+    {
+        get_string = (void *)((void **)(*(void **)loader))[6];
+        for (i = 0; i < cand_count && !resolved; i++)
+        {
+            HSTRING hkey = NULL, hval = NULL;
+            if (SUCCEEDED( WindowsCreateString( candidates[i], wcslen( candidates[i] ), &hkey ) ))
+            {
+                if (SUCCEEDED( get_string( loader, hkey, &hval ) ) && hval)
+                {
+                    const WCHAR *raw = WindowsGetStringRawBuffer( hval, NULL );
+                    if (raw && raw[0] && wcsicmp( raw, candidates[i] ) && !is_ms_resource_uri( raw ))
+                    {
+                        lstrcpynW( out, raw, cch );
+                        resolved = out[0] != 0;
+                    }
+                    WindowsDeleteString( hval );
+                }
+                WindowsDeleteString( hkey );
+            }
+        }
+        release_fn = (void *)((void **)(*(void **)loader))[2];
+        release_fn( loader );
+    }
+
+    release_fn = (void *)((void **)(*(void **)statics))[2];
+    release_fn( statics );
+    return resolved;
+}
+
+static BOOL resolve_manifest_string( const WCHAR *raw, WCHAR *out, DWORD cch )
+{
+    if (!raw || !raw[0] || !out || !cch) return FALSE;
+    if (!is_ms_resource_uri( raw ))
+    {
+        lstrcpynW( out, raw, cch );
+        return out[0] != 0;
+    }
+    return resolve_ms_resource_uri( raw, out, cch );
+}
+
+static BOOL extract_cn_from_publisher( const WCHAR *pub, WCHAR *out, DWORD cch )
+{
+    const WCHAR *p = pub, *start, *end;
+    SIZE_T len;
+
+    if (!pub || !pub[0] || !out || !cch) return FALSE;
+    out[0] = 0;
+
+    while (*p)
+    {
+        while (*p && (xml_is_space_w( *p ) || *p == ',')) p++;
+        if (!wcsnicmp( p, L"CN=", 3 ))
+        {
+            p += 3;
+            while (*p && xml_is_space_w( *p )) p++;
+            if (*p == '"')
+            {
+                start = ++p;
+                while (*p && *p != '"') p++;
+                end = p;
+            }
+            else
+            {
+                start = p;
+                while (*p && *p != ',') p++;
+                end = p;
+            }
+            len = min( (SIZE_T)(end - start), (SIZE_T)(cch - 1) );
+            memcpy( out, start, len * sizeof(WCHAR) );
+            out[len] = 0;
+            xml_trim_w( out );
+            return out[0] != 0;
+        }
+        while (*p && *p != ',')
+        {
+            if (*p == '"')
+            {
+                p++;
+                while (*p && *p != '"') p++;
+                if (*p == '"') p++;
+            }
+            else p++;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL load_package_manifest_metadata( const WCHAR *manifest_path, struct package_manifest_meta *meta )
+{
+    WCHAR *xml;
+    WCHAR prop_disp[256] = {0}, prop_pub[256] = {0}, prop_desc[512] = {0};
+    WCHAR vis_disp[256] = {0};
+    WCHAR buf[512];
+    BOOL from_manifest = FALSE;
+
+    memset( meta, 0, sizeof(*meta) );
+    lstrcpynW( meta->manifest_path, manifest_path, ARRAY_SIZE(meta->manifest_path) );
+
+    if ((xml = read_manifest_wide( manifest_path )))
+    {
+        const WCHAR *xml_end = xml + wcslen( xml );
+        const WCHAR *props_start, *props_end, *tag, *gt;
+
+        from_manifest = TRUE;
+        if (xml_find_element_range_w( xml, xml_end, L"Properties", &props_start, &props_end ))
+        {
+            xml_extract_element_text_w( props_start, props_end, L"DisplayName", prop_disp, ARRAY_SIZE(prop_disp) );
+            xml_extract_element_text_w( props_start, props_end, L"PublisherDisplayName", prop_pub, ARRAY_SIZE(prop_pub) );
+            xml_extract_element_text_w( props_start, props_end, L"Description", prop_desc, ARRAY_SIZE(prop_desc) );
+        }
+        if ((tag = xml_find_tag_w( xml, xml_end, L"Identity", FALSE, &gt )))
+        {
+            xml_tag_get_attr_w( tag, gt, L"Name", meta->id_name, ARRAY_SIZE(meta->id_name) );
+            xml_tag_get_attr_w( tag, gt, L"Publisher", meta->id_publisher, ARRAY_SIZE(meta->id_publisher) );
+            xml_tag_get_attr_w( tag, gt, L"Version", meta->id_version, ARRAY_SIZE(meta->id_version) );
+        }
+        if ((tag = xml_find_tag_w( xml, xml_end, L"VisualElements", TRUE, &gt )))
+        {
+            xml_tag_get_attr_w( tag, gt, L"DisplayName", vis_disp, ARRAY_SIZE(vis_disp) );
+        }
+        free( xml );
+    }
+
+    if (!resolve_manifest_string( prop_disp, meta->display_name, ARRAY_SIZE(meta->display_name) ) &&
+        !resolve_manifest_string( vis_disp, meta->display_name, ARRAY_SIZE(meta->display_name) ))
+    {
+        BOOL got_disp = FALSE;
+        UINT32 len = ARRAY_SIZE(buf);
+
+        if (package_get_reg_str( L"DisplayName", buf, ARRAY_SIZE(buf) ))
+            got_disp = resolve_manifest_string( buf, meta->display_name, ARRAY_SIZE(meta->display_name) );
+        if (!got_disp && package_get_reg_str( L"ApplicationShortName", buf, ARRAY_SIZE(buf) ))
+            got_disp = resolve_manifest_string( buf, meta->display_name, ARRAY_SIZE(meta->display_name) );
+        if (!got_disp && meta->id_name[0])
+        {
+            lstrcpynW( meta->display_name, meta->id_name, ARRAY_SIZE(meta->display_name) );
+            got_disp = TRUE;
+        }
+        if (!got_disp &&
+            ((GetCurrentPackageFamilyName( &len, buf ) == ERROR_SUCCESS && buf[0]) ||
+             (len = ARRAY_SIZE(buf), GetCurrentPackageFullName( &len, buf ) == ERROR_SUCCESS && buf[0]) ||
+             package_get_reg_str( L"PackageFamilyName", buf, ARRAY_SIZE(buf) ) ||
+             package_get_reg_str( L"PackageFullName", buf, ARRAY_SIZE(buf) )))
+        {
+            WCHAR *us = wcschr( buf, '_' );
+            if (us) *us = 0;
+            lstrcpynW( meta->display_name, buf, ARRAY_SIZE(meta->display_name) );
+            got_disp = TRUE;
+        }
+        if (!got_disp && GetModuleFileNameW( NULL, buf, ARRAY_SIZE(buf) ))
+        {
+            WCHAR *slash = wcsrchr( buf, '\\' ), *base = slash ? slash + 1 : buf, *dot = wcsrchr( base, '.' );
+            if (dot) *dot = 0;
+            lstrcpynW( meta->display_name, base, ARRAY_SIZE(meta->display_name) );
+        }
+    }
+
+    if (!resolve_manifest_string( prop_pub, meta->publisher_display_name, ARRAY_SIZE(meta->publisher_display_name) ))
+    {
+        BOOL got_pub = FALSE;
+
+        if (package_get_reg_str( L"PublisherDisplayName", buf, ARRAY_SIZE(buf) ))
+            got_pub = resolve_manifest_string( buf, meta->publisher_display_name, ARRAY_SIZE(meta->publisher_display_name) );
+        if (!got_pub)
+            got_pub = extract_cn_from_publisher( meta->id_publisher, meta->publisher_display_name, ARRAY_SIZE(meta->publisher_display_name) );
+        if (!got_pub && package_get_reg_str( L"PackagePublisher", buf, ARRAY_SIZE(buf) ))
+            extract_cn_from_publisher( buf, meta->publisher_display_name, ARRAY_SIZE(meta->publisher_display_name) );
+    }
+
+    resolve_manifest_string( prop_desc, meta->description, ARRAY_SIZE(meta->description) );
+    meta->loaded = from_manifest;
+    TRACE( "manifest %s -> DisplayName=%s PublisherDisplayName=%s\n",
+           debugstr_w( manifest_path ), debugstr_w( meta->display_name ),
+           debugstr_w( meta->publisher_display_name ) );
+    return from_manifest;
+}
+
+static void get_package_manifest_meta( struct package_manifest_meta *out )
+{
+    WCHAR dir[MAX_PATH], manifest_path[MAX_PATH + 32];
+    SIZE_T len;
+
+    package_root_path( dir, ARRAY_SIZE(dir) );
+    len = wcslen( dir );
+    if (len && dir[len - 1] == '\\')
+        swprintf( manifest_path, ARRAY_SIZE(manifest_path), L"%lsAppxManifest.xml", dir );
+    else if (len)
+        swprintf( manifest_path, ARRAY_SIZE(manifest_path), L"%ls\\AppxManifest.xml", dir );
+    else
+        manifest_path[0] = 0;
+
+    AcquireSRWLockShared( &package_meta_lock );
+    if (package_meta_cache.loaded && !wcsicmp( package_meta_cache.manifest_path, manifest_path ))
+    {
+        *out = package_meta_cache;
+        ReleaseSRWLockShared( &package_meta_lock );
+        return;
+    }
+    ReleaseSRWLockShared( &package_meta_lock );
+
+    if (load_package_manifest_metadata( manifest_path, out ))
+    {
+        AcquireSRWLockExclusive( &package_meta_lock );
+        package_meta_cache = *out;
+        ReleaseSRWLockExclusive( &package_meta_lock );
+    }
+}
+
 static HRESULT WINAPI package2_get_DisplayName( IPackage2 *iface, HSTRING *value )
 {
+    struct package_manifest_meta meta;
+
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"Microsoft Store", 15, value );
+    get_package_manifest_meta( &meta );
+    return WindowsCreateString( meta.display_name, wcslen( meta.display_name ), value );
 }
 static HRESULT WINAPI package2_get_PublisherDisplayName( IPackage2 *iface, HSTRING *value )
 {
+    struct package_manifest_meta meta;
+
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"Microsoft Corporation", 21, value );
+    get_package_manifest_meta( &meta );
+    return WindowsCreateString( meta.publisher_display_name, wcslen( meta.publisher_display_name ), value );
 }
 static HRESULT WINAPI package2_get_Description( IPackage2 *iface, HSTRING *value )
 {
+    struct package_manifest_meta meta;
+
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"", 0, value );
+    get_package_manifest_meta( &meta );
+    return WindowsCreateString( meta.description, wcslen( meta.description ), value );
 }
 static HRESULT WINAPI package2_get_Logo( IPackage2 *iface, IUriRuntimeClass **value )
 {

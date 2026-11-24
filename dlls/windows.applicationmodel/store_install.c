@@ -3118,8 +3118,7 @@ static HRESULT WINAPI store_ctx_GetStoreProductForCurrentAppAsync( void *iface, 
     struct store_product *prod;
     struct store_product_result *res;
 
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_NAME", buf, ARRAY_SIZE(buf) ) ||
-        package_get_reg_str( L"PackageName", buf, ARRAY_SIZE(buf) ))
+    if (package_get_reg_str( L"PackageName", buf, ARRAY_SIZE(buf) ))
         pkg_id = buf;
 
     prod = store_product_create( pkg_id, L"Microsoft Store", L"Microsoft Store", L"Application" );
@@ -3202,8 +3201,7 @@ static void get_app_store_products( const WCHAR *req_id, HSTRING *keys, IInspect
         WCHAR buf[MAX_PATH];
         const WCHAR *pkg_id = L"Microsoft.WindowsStore_8wekyb3d8bbwe";
         struct store_product *prod;
-        if (GetEnvironmentVariableW( L"WINE_PACKAGE_NAME", buf, ARRAY_SIZE(buf) ) ||
-            package_get_reg_str( L"PackageName", buf, ARRAY_SIZE(buf) ))
+        if (package_get_reg_str( L"PackageName", buf, ARRAY_SIZE(buf) ))
             pkg_id = buf;
         prod = store_product_create( pkg_id, L"Microsoft Store", L"Microsoft Store", L"Application" );
         if (prod)

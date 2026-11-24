@@ -34,20 +34,11 @@ static const WCHAR ms_appx_prefix[] = L"ms-appx:///";
 /* ------------------------------------------------------------------------- *
  * Package identity
  *
- * AppInfo describes the package the process was launched from.  The process
- * identity is published through the WINE_PACKAGE_* environment variables (see
- * the package identity support in kernelbase), so an unpackaged process
- * reports empty strings the way a real unpackaged process does.
+ * AppInfo describes the package the process was launched from using the
+ * AppModel package identity APIs (GetCurrentPackageFamilyName / FullName /
+ * Path / AUMID), so an unpackaged process reports empty strings the way a
+ * real unpackaged process does.
  * ------------------------------------------------------------------------- */
-
-static WCHAR *get_env_dup( const WCHAR *name )
-{
-    WCHAR buf[MAX_PATH];
-    DWORD len = GetEnvironmentVariableW( name, buf, ARRAY_SIZE(buf) );
-
-    if (!len || len >= ARRAY_SIZE(buf)) return NULL;
-    return wcsdup( buf );
-}
 
 /* A package full name is '<name>_<version>_<arch>__<publisher>', the family
  * name keeps only '<name>_<publisher>'. */
@@ -74,16 +65,9 @@ static WCHAR *derive_family_name( const WCHAR *full_name )
 
 static WCHAR *get_package_family_name(void)
 {
-    WCHAR buf[MAX_PATH], *full_name, *family;
+    WCHAR buf[MAX_PATH];
     UINT32 len = ARRAY_SIZE(buf);
 
-    if ((family = get_env_dup( L"WINE_PACKAGE_FAMILY_NAME" ))) return family;
-    if ((full_name = get_env_dup( L"WINE_PACKAGE_FULL_NAME" )))
-    {
-        family = derive_family_name( full_name );
-        free( full_name );
-        if (family) return family;
-    }
     if (GetCurrentPackageFamilyName( &len, buf ) == ERROR_SUCCESS && buf[0])
         return wcsdup( buf );
     if (len = ARRAY_SIZE(buf), GetCurrentPackageFullName( &len, buf ) == ERROR_SUCCESS && buf[0])
@@ -101,14 +85,11 @@ static WCHAR *get_package_family_name(void)
 
 static WCHAR *get_manifest_path(void)
 {
-    WCHAR buf[MAX_PATH], *dir, *path;
+    WCHAR buf[MAX_PATH], *dir = NULL, *path;
     UINT32 len = ARRAY_SIZE(buf);
 
-    if (!(dir = get_env_dup( L"WINE_PACKAGE_PATH" )))
-    {
-        if (GetCurrentPackagePath( &len, buf ) == ERROR_SUCCESS && buf[0])
-            dir = wcsdup( buf );
-    }
+    if (GetCurrentPackagePath( &len, buf ) == ERROR_SUCCESS && buf[0])
+        dir = wcsdup( buf );
     if (!dir) return NULL;
     if (!(path = malloc( (lstrlenW( dir ) + 2 + ARRAY_SIZE(manifest_name)) * sizeof(*path) )))
     {
@@ -660,12 +641,9 @@ static inline struct appinfo *impl_from_IAppInfo( IAppInfo *iface )
  * manifest names it directly for an unpackaged process. */
 static WCHAR *get_application_id(void)
 {
-    WCHAR buf[MAX_PATH], *aumid, *id = NULL, *sep, *path;
+    WCHAR buf[MAX_PATH], *id = NULL, *sep, *path;
     UINT32 len = ARRAY_SIZE(buf);
 
-    if ((aumid = get_env_dup( L"WINE_PACKAGE_AUMID" )) && (sep = wcschr( aumid, '!' ))) id = wcsdup( sep + 1 );
-    free( aumid );
-    if (id) return id;
     if (GetCurrentApplicationUserModelId( &len, buf ) == ERROR_SUCCESS && (sep = wcschr( buf, '!' )))
         return wcsdup( sep + 1 );
 
@@ -691,7 +669,6 @@ static WCHAR *get_app_user_model_id(void)
     WCHAR buf[MAX_PATH], *aumid, *family, *id;
     UINT32 len = ARRAY_SIZE(buf);
 
-    if ((aumid = get_env_dup( L"WINE_PACKAGE_AUMID" ))) return aumid;
     if (GetCurrentApplicationUserModelId( &len, buf ) == ERROR_SUCCESS && buf[0])
         return wcsdup( buf );
     if (!(family = get_package_family_name() )) return NULL;
