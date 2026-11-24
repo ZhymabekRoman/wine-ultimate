@@ -45,6 +45,7 @@ extern const GUID IID_IComponentConnector_WinUI;
 
 /* Core / Property / Collection / Stringable IIDs */
 extern const GUID IID_IPropertyValue_g;
+extern const GUID IID_ICustomPropertyProvider_UWP;
 extern const GUID IID_IUriRuntimeClass_g;
 extern const GUID IID_IStringable_UWP;
 extern const GUID IID_IBindableIterable_UWP;

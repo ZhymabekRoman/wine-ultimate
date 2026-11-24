@@ -595,65 +595,11 @@ int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int
 
     if (!tv || !out_items || max_items <= 0) return 0;
 
-    if (tv->tab_items_source && (ULONG_PTR)tv->tab_items_source >= 0x10000)
-    {
-        void *vec = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVector_IInspectable_UWP, &vec )) ||
-            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVectorView_IInspectable_WinUI, &vec )) ||
-            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IBindableVector_UWP, &vec )))
-        {
-            HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
-            HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
-            unsigned int sz = 0, i;
-            if (get_sz && SUCCEEDED(get_sz( vec, &sz )))
-            {
-                for (i = 0; i < sz && count < max_items; i++)
-                {
-                    void *it = NULL;
-                    if (get_at && SUCCEEDED(get_at( vec, i, &it )) && it)
-                        out_items[count++] = (IInspectable *)it;
-                }
-            }
-            IUnknown_Release( (IUnknown *)vec );
-        }
-        else if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IIterable_IInspectable_UWP, &vec )) && vec)
-        {
-            HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
-            void *iter = NULL;
-            if (first && SUCCEEDED(first( vec, &iter )) && iter)
-            {
-                HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
-                HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
-                HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
-                boolean has = FALSE;
-                while (count < max_items && has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
-                {
-                    void *it = NULL;
-                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
-                        out_items[count++] = (IInspectable *)it;
-                    has = FALSE;
-                    if (!move_next || FAILED(move_next( iter, &has )) || !has) break;
-                }
-                IUnknown_Release( (IUnknown *)iter );
-            }
-            IUnknown_Release( (IUnknown *)vec );
-        }
-    }
+    if (tv->tab_items_source)
+        count = (int)uwp_winrt_vec_snapshot( tv->tab_items_source, out_items, (unsigned int)max_items );
 
     if (count == 0 && tv->children_coll)
-    {
-        struct uwp_vec_view *v = CONTAINING_RECORD( tv->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int i;
-        for (i = 0; i < v->count && count < max_items; i++)
-        {
-            if (v->items[i])
-            {
-                out_items[count] = v->items[i];
-                IInspectable_AddRef( out_items[count] );
-                count++;
-            }
-        }
-    }
+        count = (int)uwp_winrt_vec_snapshot( tv->children_coll, out_items, (unsigned int)max_items );
 
     if (count == 0 && tv->selected_item)
     {
@@ -1026,67 +972,11 @@ int uwp_selector_get_items( struct uwp_element *el, IInspectable **out_items, in
 
     if (!el || !out_items || max_items <= 0) return 0;
 
-    if (el->items_source && (ULONG_PTR)el->items_source >= 0x10000)
-    {
-        void *vec = NULL;
-        if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVector_IInspectable_UWP, &vec )) ||
-             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_IInspectable_WinUI, &vec )) ||
-             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableVector_UWP, &vec )) ||
-             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_Object_UWP, &vec ))) && vec)
-        {
-            HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
-            HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
-            UINT32 sz = 0, i;
-            if (get_sz && get_at && SUCCEEDED(get_sz( vec, &sz )))
-            {
-                for (i = 0; i < sz && count < max_items; i++)
-                {
-                    void *it = NULL;
-                    if (SUCCEEDED(get_at( vec, i, &it )) && it)
-                        out_items[count++] = (IInspectable *)it;
-                }
-            }
-            IUnknown_Release( (IUnknown *)vec );
-        }
-        else if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IIterable_IInspectable_UWP, &vec )) ||
-                  SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableIterable_UWP, &vec ))) && vec)
-        {
-            HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
-            void *iter = NULL;
-            if (first && SUCCEEDED(first( vec, &iter )) && iter)
-            {
-                HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
-                HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
-                HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
-                boolean has = FALSE;
-                while (count < max_items && has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
-                {
-                    void *it = NULL;
-                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
-                        out_items[count++] = (IInspectable *)it;
-                    has = FALSE;
-                    if (!move_next || FAILED(move_next( iter, &has )) || !has) break;
-                }
-                IUnknown_Release( (IUnknown *)iter );
-            }
-            IUnknown_Release( (IUnknown *)vec );
-        }
-    }
+    if (el->items_source)
+        count = (int)uwp_winrt_vec_snapshot( el->items_source, out_items, (unsigned int)max_items );
 
     if (count == 0 && el->children_coll)
-    {
-        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int i;
-        for (i = 0; i < v->count && count < max_items; i++)
-        {
-            if (v->items[i])
-            {
-                out_items[count] = v->items[i];
-                IInspectable_AddRef( out_items[count] );
-                count++;
-            }
-        }
-    }
+        count = (int)uwp_winrt_vec_snapshot( el->children_coll, out_items, (unsigned int)max_items );
     return count;
 }
 
@@ -1146,21 +1036,7 @@ void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WC
         if (uwp_vm_query_string_prop( item, cb_props, ARRAY_SIZE(cb_props), buf, buf_len ) && buf[0])
             return;
     }
-    {
-        void *strable = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_IStringable_UWP, &strable )) && strable)
-        {
-            HSTRING hs = NULL;
-            HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-            if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
-            {
-                const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
-                if (s && s[0]) lstrcpynW( buf, s, buf_len );
-                WindowsDeleteString( hs );
-            }
-            IUnknown_Release( (IUnknown *)strable );
-        }
-    }
+    uwp_inspectable_to_string( item, buf, buf_len );
 }
 
 BOOL uwp_combobox_compute_popup_rect( struct uwp_element *cb, int item_cnt, int win_w, int win_h,
@@ -1608,23 +1484,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                 bel->has_bg = TRUE;
                 bel->bg_argb = 0xE02A2A2A;
                 bel->bg_alpha = 224;
-                uwp_unbox_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
-                if (!bel->text[0])
-                {
-                    void *strable = NULL;
-                    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)item, &IID_IStringable_UWP, &strable )) && strable)
-                    {
-                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-                        HSTRING hs = NULL;
-                        if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
-                        {
-                            const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
-                            if (raw && raw[0]) lstrcpynW( bel->text, raw, ARRAY_SIZE(bel->text) );
-                            WindowsDeleteString( hs );
-                        }
-                        IUnknown_Release( (IUnknown *)strable );
-                    }
-                }
+                uwp_inspectable_to_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
                 if (!bel->text[0]) lstrcpynW( bel->text, L"\x25A1", ARRAY_SIZE(bel->text) );
                 uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
             }
@@ -1635,64 +1495,17 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
 
 void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src )
 {
-    void *vec = NULL;
-    UINT32 count = 0, i;
+    IInspectable *items[64];
+    unsigned int count, i;
 
     if (!impl || !src) return;
-    if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVector_IInspectable_UWP, &vec )) ||
-         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_IInspectable_WinUI, &vec )) ||
-         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableVector_UWP, &vec )) ||
-         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Object_UWP, &vec ))) && vec)
+    count = uwp_winrt_vec_snapshot( src, items, ARRAY_SIZE(items) );
+    if (!count) return;
+    if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+    for (i = 0; i < count; i++)
     {
-        HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
-        HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
-        if (get_size && get_at && SUCCEEDED(get_size( vec, &count )) && count > 0)
-        {
-            if (count > 64) count = 64;
-            if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
-            for (i = 0; i < count; i++)
-            {
-                void *item = NULL;
-                if (SUCCEEDED(get_at( vec, i, &item )) && item)
-                {
-                    uwp_items_ctrl_append_item( impl, item );
-                    IUnknown_Release( (IUnknown *)item );
-                }
-            }
-        }
-        IUnknown_Release( (IUnknown *)vec );
-    }
-    else if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IIterable_IInspectable_UWP, &vec )) ||
-              SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableIterable_UWP, &vec ))) && vec)
-    {
-        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
-        void *iter = NULL;
-        if (first && SUCCEEDED(first( vec, &iter )) && iter)
-        {
-            HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
-            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
-            HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
-            boolean has = FALSE;
-            int n = 0;
-            if (has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
-            {
-                if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
-                while (has && n < 64)
-                {
-                    void *item = NULL;
-                    if (get_cur && SUCCEEDED(get_cur( iter, &item )) && item)
-                    {
-                        uwp_items_ctrl_append_item( impl, item );
-                        IUnknown_Release( (IUnknown *)item );
-                    }
-                    n++;
-                    has = FALSE;
-                    if (!move_next || FAILED(move_next( iter, &has ))) break;
-                }
-            }
-            IUnknown_Release( (IUnknown *)iter );
-        }
-        IUnknown_Release( (IUnknown *)vec );
+        uwp_items_ctrl_append_item( impl, items[i] );
+        IInspectable_Release( items[i] );
     }
 }
 

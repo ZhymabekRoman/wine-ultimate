@@ -1437,6 +1437,9 @@ BOOL uwp_combobox_compute_popup_rect( struct uwp_element *cb, int item_cnt, int 
                                       RECT *out_rc, int *out_item_h, int *out_vis_cnt, int *out_pad_y );
 BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int wheel_delta, int width, int height, IInspectable *root_content );
 BOOL uwp_vm_supports_display_or_cmd( IInspectable *vm );
+BOOL uwp_inspectable_to_string( IInspectable *obj, WCHAR *buf, int buf_cch );
+BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props, unsigned int count,
+                                     WCHAR *out, size_t out_len, int depth );
 BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
                                WCHAR *out, size_t out_len );
 extern struct uwp_element *g_open_combobox;
@@ -1548,6 +1551,8 @@ HRESULT WINAPI uwp_vec_Append( void *iface, void *item );
 
 HRESULT WINAPI uwp_vec_GetAt( void *iface, unsigned int idx, void **item );
 HRESULT WINAPI uwp_vec_get_Size( void *iface, unsigned int *sz );
+unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_items, unsigned int max_items );
+unsigned int uwp_winrt_vec_count( IInspectable *coll );
 
 struct uwp_vsm_group *uwp_vsm_add_group( struct uwp_element *el, const WCHAR *name );
 

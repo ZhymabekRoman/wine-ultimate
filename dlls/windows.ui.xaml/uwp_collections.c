@@ -814,3 +814,139 @@ const void *uwp_el_iterable_vtbl[16] =
     [7 ... 15] = uwp_generic_noop,
 };
 
+unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_items, unsigned int max_items )
+{
+    static const GUID *const vec_iids[] =
+    {
+        &IID_IVector_IInspectable_UWP,
+        &IID_IVectorView_IInspectable_WinUI,
+        &IID_IBindableVector_UWP,
+        &IID_IVectorView_Object_UWP,
+    };
+    static const GUID *const iter_iids[] =
+    {
+        &IID_IIterable_IInspectable_UWP,
+        &IID_IBindableIterable_UWP,
+    };
+    unsigned int count = 0, qi;
+    void *vec = NULL;
+
+    if (!coll || (ULONG_PTR)coll < 0x10000 || !out_items || !max_items) return 0;
+
+    if (coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_vtbl ||
+        coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_iterable_vtbl)
+    {
+        struct uwp_vec_view *v = (coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_vtbl)
+            ? CONTAINING_RECORD( coll, struct uwp_vec_view, IInspectable_iface )
+            : CONTAINING_RECORD( coll, struct uwp_vec_view, IIterable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count && count < max_items; i++)
+        {
+            if (v->items[i])
+            {
+                out_items[count] = v->items[i];
+                IInspectable_AddRef( out_items[count] );
+                count++;
+            }
+        }
+        return count;
+    }
+
+    for (qi = 0; qi < ARRAY_SIZE(vec_iids); qi++)
+    {
+        if (SUCCEEDED(IInspectable_QueryInterface( coll, vec_iids[qi], &vec )) && vec)
+            break;
+        vec = NULL;
+    }
+    if (vec)
+    {
+        HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
+        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
+        unsigned int sz = 0, i;
+        if (get_sz && get_at && SUCCEEDED(get_sz( vec, &sz )))
+        {
+            for (i = 0; i < sz && count < max_items; i++)
+            {
+                void *it = NULL;
+                if (SUCCEEDED(get_at( vec, i, &it )) && it)
+                    out_items[count++] = (IInspectable *)it;
+            }
+        }
+        IUnknown_Release( (IUnknown *)vec );
+        return count;
+    }
+
+    for (qi = 0; qi < ARRAY_SIZE(iter_iids); qi++)
+    {
+        if (SUCCEEDED(IInspectable_QueryInterface( coll, iter_iids[qi], &vec )) && vec)
+            break;
+        vec = NULL;
+    }
+    if (vec)
+    {
+        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
+        void *iter = NULL;
+        if (first && SUCCEEDED(first( vec, &iter )) && iter)
+        {
+            HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
+            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
+            HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
+            boolean has = FALSE;
+            if (has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
+            {
+                while (has && count < max_items)
+                {
+                    void *it = NULL;
+                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
+                        out_items[count++] = (IInspectable *)it;
+                    has = FALSE;
+                    if (!move_next || FAILED(move_next( iter, &has )) || !has) break;
+                }
+            }
+            IUnknown_Release( (IUnknown *)iter );
+        }
+        IUnknown_Release( (IUnknown *)vec );
+    }
+    return count;
+}
+
+unsigned int uwp_winrt_vec_count( IInspectable *coll )
+{
+    static const GUID *const vec_iids[] =
+    {
+        &IID_IVectorView_Object_UWP,
+        &IID_IVector_IInspectable_UWP,
+        &IID_IVectorView_IInspectable_WinUI,
+        &IID_IBindableVector_UWP,
+    };
+    unsigned int sz = 0, qi;
+    void *vec = NULL;
+
+    if (!coll || (ULONG_PTR)coll < 0x10000) return 0;
+
+    if (coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_vtbl ||
+        coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_iterable_vtbl)
+    {
+        struct uwp_vec_view *v = (coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_vtbl)
+            ? CONTAINING_RECORD( coll, struct uwp_vec_view, IInspectable_iface )
+            : CONTAINING_RECORD( coll, struct uwp_vec_view, IIterable_iface );
+        return v->count;
+    }
+
+    for (qi = 0; qi < ARRAY_SIZE(vec_iids); qi++)
+    {
+        if (SUCCEEDED(IInspectable_QueryInterface( coll, vec_iids[qi], &vec )) && vec)
+            break;
+        vec = NULL;
+    }
+    if (vec)
+    {
+        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
+        if (get_sz && FAILED(get_sz( vec, &sz ))) sz = 0;
+        IUnknown_Release( (IUnknown *)vec );
+        return sz;
+    }
+
+    return 0;
+}
+

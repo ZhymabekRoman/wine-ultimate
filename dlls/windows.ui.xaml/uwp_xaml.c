@@ -2686,7 +2686,6 @@ HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val
             static const GUID IID_IReference_TypeName =
                 { 0x3830ad99, 0xd8da, 0x53f3, { 0x98, 0x9b, 0xfc, 0x92, 0xad, 0x22, 0x27, 0x78 } };
             void *iref = NULL;
-            void *istr = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_TypeName, &iref )) && iref)
             {
                 TypeName tn = { NULL, 0 };
@@ -2699,18 +2698,8 @@ HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val
                 }
                 IUnknown_Release( (IUnknown *)iref );
             }
-            else if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IStringable_UWP, &istr )) && istr)
-            {
-                HSTRING hs = NULL;
-                HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)istr)[6];
-                if (to_str && SUCCEEDED(to_str( istr, &hs )) && hs)
-                {
-                    const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
-                    if (s) lstrcpynW( impl->default_style_key_name, s, ARRAY_SIZE(impl->default_style_key_name) );
-                    WindowsDeleteString( hs );
-                }
-                IUnknown_Release( (IUnknown *)istr );
-            }
+            else
+                uwp_inspectable_to_string( val, impl->default_style_key_name, ARRAY_SIZE(impl->default_style_key_name) );
         }
         /* Strip assembly-qualified suffix (e.g. "Ns.Type, Assembly, Version=...") */
         {

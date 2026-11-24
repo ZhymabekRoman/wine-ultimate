@@ -224,14 +224,8 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
                             struct uwp_element *de = uwp_elem_from_any( el->dp_store[di].value );
                             if (el->dp_store[di].value)
                             {
-                                void *vv = NULL;
                                 IInspectable_GetRuntimeClassName( el->dp_store[di].value, &hc );
-                                if (SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Object_UWP, &vv )) && vv)
-                                {
-                                    HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vv)[7];
-                                    if (get_sz) get_sz( vv, &vsz );
-                                    IUnknown_Release( (IUnknown *)vv );
-                                }
+                                vsz = uwp_winrt_vec_count( el->dp_store[di].value );
                             }
                             WARN( "  dp[%d] val=%p cls=%s uwp=%s sz=%u\n", di,
                                   el->dp_store[di].value,
@@ -354,19 +348,8 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
         }
         for (di = 0; di < el->dp_cnt; di++)
         {
-            if (el->dp_store[di].value)
-            {
-                void *vv = NULL;
-                UINT32 sz = 0;
-                if ((SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Object_UWP, &vv )) ||
-                     SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVector_IInspectable_UWP, &vv ))) && vv)
-                {
-                    HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vv)[7];
-                    if (get_sz) get_sz( vv, &sz );
-                    IUnknown_Release( (IUnknown *)vv );
-                    if (sz > 0) return TRUE;
-                }
-            }
+            if (el->dp_store[di].value && uwp_winrt_vec_count( el->dp_store[di].value ) > 0)
+                return TRUE;
         }
         return FALSE;
     }

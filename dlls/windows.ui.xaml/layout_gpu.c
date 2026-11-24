@@ -845,188 +845,6 @@ static inline UINT32 cr_to_argb( COLORREF cr )
     return 0xff000000u | ((UINT32)GetRValue( cr ) << 16) | ((UINT32)GetGValue( cr ) << 8) | (UINT32)GetBValue( cr );
 }
 
-static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth );
-
-static void *uwp_qi_first( IInspectable *obj, const GUID *const *iids, unsigned int count )
-{
-    unsigned int i;
-    for (i = 0; i < count; i++)
-    {
-        void *iface = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( obj, iids[i], &iface )) && iface)
-            return iface;
-    }
-    return NULL;
-}
-
-static void uwp_vm_extract_val_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth )
-{
-    if (!uwp_unbox_string( pval, out, out_len ))
-        uwp_vm_extract_nested_url( pval, out, out_len, depth );
-}
-
-static void uwp_vm_probe_xaml_members( IInspectable *vm, const WCHAR *cls,
-                                       const WCHAR *const *props, unsigned int count,
-                                       WCHAR *out, size_t out_len, int depth )
-{
-    unsigned int pi;
-    if (!cls || !cls[0]) return;
-    for (pi = 0; pi < count && !out[0]; pi++)
-    {
-        IInspectable *pval = NULL;
-        if (uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, props[pi], vm, &pval ) && pval)
-        {
-            uwp_vm_extract_val_url( pval, out, out_len, depth );
-            IInspectable_Release( pval );
-        }
-    }
-}
-
-static const GUID IID_ICustomPropertyProvider_gpu =
-    { 0x7c925755, 0x3e48, 0x42b4, { 0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f } };
-
-static BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props, unsigned int count,
-                                            WCHAR *out, size_t out_len, int depth )
-{
-    HSTRING hcls = NULL;
-    void *cpp = NULL;
-    unsigned int pi;
-
-    if (!vm || !out || !out_len) return FALSE;
-    out[0] = 0;
-
-    if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
-    {
-        uwp_vm_probe_xaml_members( vm, WindowsGetStringRawBuffer( hcls, NULL ), props, count, out, out_len, depth );
-        WindowsDeleteString( hcls );
-    }
-    if (!out[0] && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICustomPropertyProvider_gpu, &cpp )) && cpp)
-    {
-        HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
-        HRESULT (WINAPI *get_type)(void *, TypeName *) = (void *)(*(void ***)cpp)[9];
-        if (get_type)
-        {
-            TypeName tn = {0};
-            if (SUCCEEDED(get_type( cpp, &tn )) && tn.Name)
-            {
-                WCHAR tcls[256] = {0};
-                WCHAR *comma;
-                const WCHAR *raw = WindowsGetStringRawBuffer( tn.Name, NULL );
-                if (raw) lstrcpynW( tcls, raw, ARRAY_SIZE(tcls) );
-                comma = wcschr( tcls, ',' );
-                if (comma) *comma = 0;
-                uwp_vm_probe_xaml_members( vm, tcls, props, count, out, out_len, depth );
-                WindowsDeleteString( tn.Name );
-            }
-        }
-        for (pi = 0; pi < count && !out[0]; pi++)
-        {
-            HSTRING hp = NULL;
-            void *cp = NULL;
-            if (get_prop && SUCCEEDED(WindowsCreateString( props[pi], wcslen(props[pi]), &hp )) && hp)
-            {
-                if (SUCCEEDED(get_prop( cpp, hp, &cp )) && cp)
-                {
-                    HRESULT (WINAPI *get_val)(void *, IInspectable *, IInspectable **) = (void *)(*(void ***)cp)[8];
-                    IInspectable *pval = NULL;
-                    if (get_val && SUCCEEDED(get_val( cp, vm, &pval )) && pval)
-                    {
-                        uwp_vm_extract_val_url( pval, out, out_len, depth );
-                        IInspectable_Release( pval );
-                    }
-                    IUnknown_Release( (IUnknown *)cp );
-                }
-                WindowsDeleteString( hp );
-            }
-        }
-        IUnknown_Release( (IUnknown *)cpp );
-    }
-    return out[0] != 0;
-}
-
-static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth )
-{
-    static const WCHAR *const nested_url_props[] =
-        { L"Url", L"Uri", L"ImageUrl", L"ImageUri", L"Source", L"AbsoluteUri", L"RawUri", L"Location", L"Path",
-          L"UriString", L"UrlString", L"ImageSource", L"BitmapImage", L"ImageLinkUri", L"PrimaryImageUrl",
-          L"TileImage", L"RequestedImage", L"CurrentImage", L"DefaultImage", L"BackgroundImage", L"ForegroundImage",
-          L"SmallLogoImage", L"Icon", L"Image", L"Images" };
-    static const GUID *const vec_iids[] = { &IID_IVector_IInspectable_UWP, &IID_IVectorView_IInspectable_WinUI, &IID_IBindableVector_UWP };
-    static const GUID *const iter_iids[] = { &IID_IIterable_IInspectable_UWP, &IID_IBindableIterable_UWP };
-    struct uwp_element *pel = uwp_elem_from_any( pval );
-    void *vec;
-
-    if (pel && pel->image_src[0])
-    {
-        lstrcpynW( out, pel->image_src, out_len );
-        return;
-    }
-    uwp_extract_uri_string( pval, out, out_len );
-    if (out[0] || depth <= 0) return;
-
-    if ((vec = uwp_qi_first( pval, vec_iids, ARRAY_SIZE(vec_iids) )))
-    {
-        HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
-        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
-        unsigned int sz = 0, i;
-        if (get_sz && SUCCEEDED(get_sz( vec, &sz )))
-        {
-            for (i = 0; i < sz && i < 6 && !out[0]; i++)
-            {
-                void *it = NULL;
-                if (get_at && SUCCEEDED(get_at( vec, i, &it )) && it)
-                {
-                    if (!uwp_unbox_string( (IInspectable *)it, out, out_len ))
-                        uwp_vm_query_string_prop_depth( (IInspectable *)it, nested_url_props, ARRAY_SIZE(nested_url_props),
-                                                        out, out_len, depth - 1 );
-                    IUnknown_Release( (IUnknown *)it );
-                }
-            }
-        }
-        IUnknown_Release( (IUnknown *)vec );
-    }
-    else if ((vec = uwp_qi_first( pval, iter_iids, ARRAY_SIZE(iter_iids) )))
-    {
-        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
-        void *iter = NULL;
-        if (first && SUCCEEDED(first( vec, &iter )) && iter)
-        {
-            HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
-            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
-            HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
-            boolean has = FALSE;
-            int cnt = 0;
-            if (has_cur && SUCCEEDED(has_cur( iter, &has )))
-            {
-                while (has && cnt < 6 && !out[0])
-                {
-                    void *it = NULL;
-                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
-                    {
-                        if (!uwp_unbox_string( (IInspectable *)it, out, out_len ))
-                            uwp_vm_query_string_prop_depth( (IInspectable *)it, nested_url_props, ARRAY_SIZE(nested_url_props),
-                                                            out, out_len, depth - 1 );
-                        IUnknown_Release( (IUnknown *)it );
-                    }
-                    has = FALSE;
-                    cnt++;
-                    if (move_next) move_next( iter, &has );
-                }
-            }
-            IUnknown_Release( (IUnknown *)iter );
-        }
-        IUnknown_Release( (IUnknown *)vec );
-    }
-    if (!out[0])
-        uwp_vm_query_string_prop_depth( pval, nested_url_props, ARRAY_SIZE(nested_url_props), out, out_len, depth - 1 );
-}
-
-BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
-                               WCHAR *out, size_t out_len )
-{
-    return uwp_vm_query_string_prop_depth( vm, props, count, out, out_len, 0 );
-}
-
 static struct uwp_element *g_paint_ancestors[48];
 static int g_paint_depth = 0;
 
@@ -2631,7 +2449,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 {
                     /* Try ICustomPropertyProvider ({7c925755-3e48-42b4-8677-76372267033f}) for managed ViewModels */
                     void *cpp = NULL;
-                    if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_ICustomPropertyProvider_gpu, &cpp )) && cpp)
+                    if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_ICustomPropertyProvider_UWP, &cpp )) && cpp)
                     {
                         static const WCHAR *const prop_names[] = { L"Title", L"Label", L"DisplayName", L"Header", L"Text", L"Content", L"Name" };
                         HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
@@ -2661,20 +2479,10 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 }
                 if (!label[0])
                 {
-                    void *strable = NULL;
-                    if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_IStringable_UWP, &strable )) && strable)
-                    {
-                        HSTRING hs = NULL;
-                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-                        if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
-                        {
-                            const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
-                            if (s && s[0] && wcsncmp( s, L"WinStore.", 9 ) && wcsncmp( s, L"Windows.", 8 ))
-                                lstrcpynW( label, s, ARRAY_SIZE(label) );
-                            WindowsDeleteString( hs );
-                        }
-                        IUnknown_Release( (IUnknown *)strable );
-                    }
+                    WCHAR str_buf[128] = {0};
+                    if (uwp_inspectable_to_string( el->content, str_buf, ARRAY_SIZE(str_buf) ) &&
+                        wcsncmp( str_buf, L"WinStore.", 9 ) && wcsncmp( str_buf, L"Windows.", 8 ))
+                        lstrcpynW( label, str_buf, ARRAY_SIZE(label) );
                 }
                 if (label[0])
                     lstrcpynW( el->text, label, ARRAY_SIZE(el->text) );

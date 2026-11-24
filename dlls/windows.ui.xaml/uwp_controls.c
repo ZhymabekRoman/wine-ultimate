@@ -1822,47 +1822,4 @@ HRESULT WINAPI dp_args_get_NewValue( void *iface, IInspectable **out )
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
-SRWLOCK xaml_meta_cache_lock = SRWLOCK_INIT;
-INIT_ONCE xaml_meta_cache_once = INIT_ONCE_STATIC_INIT;
-struct xaml_meta_cache_entry *xaml_meta_cache[XAML_META_CACHE_SIZE];
 struct uwp_calc_vm g_calc_vm;
-BOOL uwp_get_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
-                                        const WCHAR *prop_name, void *target_obj, IInspectable **out_val )
-{
-    void *provider = NULL, *xaml_type = NULL, *member = NULL;
-    HSTRING h_prop = NULL;
-    BOOL ok = FALSE;
-    if (!out_val) return FALSE;
-    *out_val = NULL;
-    if (!app_outer || !owner_type_name || !owner_type_name[0] || !prop_name || !target_obj) return FALSE;
-    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) || !provider)
-        return FALSE;
-    xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
-    if (xaml_type)
-    {
-        struct xaml_type *xt = (struct xaml_type *)xaml_type;
-        if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
-        {
-            if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, (struct xaml_member **)&member )) && member)
-            {
-                struct xaml_member *xm = (struct xaml_member *)member;
-                if (xm->lpVtbl->GetValue)
-                {
-                    HRESULT hr = E_FAIL;
-                    __TRY
-                    {
-                        hr = xm->lpVtbl->GetValue( xm, target_obj, out_val );
-                    }
-                    __EXCEPT_ALL { hr = E_FAIL; *out_val = NULL; }
-                    __ENDTRY;
-                    if (SUCCEEDED(hr) && *out_val) ok = TRUE;
-                }
-                IInspectable_Release( (IInspectable *)member );
-            }
-            WindowsDeleteString( h_prop );
-        }
-        IInspectable_Release( (IInspectable *)xaml_type );
-    }
-    IInspectable_Release( (IInspectable *)provider );
-    return ok;
-}
