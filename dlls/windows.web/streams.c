@@ -61,6 +61,12 @@ static const GUID IID_IRandomAccessStream_s =
     { 0x905a0fe1, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
 static const GUID IID_IInputStream_s =
     { 0x905a0fe2, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+static const GUID IID_IOutputStream_s =
+    { 0x905a0fe6, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+static const GUID IID_IAsyncOpWithProg_UINT32_UINT32_s =
+    { 0xeccb574a, 0xc684, 0x5572, { 0xa6, 0x79, 0x6b, 0x08, 0x42, 0xcf, 0xb5, 0x7f } };
+static const GUID IID_IAsyncOp_boolean_s =
+    { 0xcdb5efb3, 0x5788, 0x509d, { 0x9b, 0xe1, 0x71, 0xcc, 0xb8, 0xa3, 0x36, 0x2a } };
 static const GUID IID_IBufferByteAccess_s =
     { 0x905a0fef, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
 static const GUID IID_IBufferFactory_s =
@@ -666,6 +672,7 @@ struct ras_stream
 {
     const void *vtbl;
     const void *vtbl_input;
+    const void *vtbl_output;
     const void *vtbl_closable;
     LONG ref;
     struct mem_buffer *buf;
@@ -673,6 +680,7 @@ struct ras_stream
 };
 
 static const void *ras_input_vtbl[];
+static const void *ras_output_vtbl[];
 static const void *ras_closable_vtbl[];
 
 static HRESULT WINAPI ras_QI( void *iface, REFIID iid, void **out )
@@ -692,6 +700,12 @@ static HRESULT WINAPI ras_QI( void *iface, REFIID iid, void **out )
     if (IsEqualGUID( iid, &IID_IInputStream_s ))
     {
         *out = &impl->vtbl_input;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IOutputStream_s ))
+    {
+        *out = &impl->vtbl_output;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -746,7 +760,20 @@ static HRESULT WINAPI ras_get_Size( void *iface, UINT64 *value )
 }
 static HRESULT WINAPI ras_put_Size( void *iface, UINT64 value )
 {
-    (void)value;
+    struct ras_stream *impl = iface;
+    ULONG new_len;
+
+    if (!impl->buf) return E_UNEXPECTED;
+    if (value > 0xffffffffu) return E_OUTOFMEMORY;
+    new_len = (ULONG)value;
+    if (new_len > impl->buf->len)
+    {
+        BYTE *nd = realloc( impl->buf->data, new_len );
+        if (!nd) return E_OUTOFMEMORY;
+        memset( nd + impl->buf->len, 0, new_len - impl->buf->len );
+        impl->buf->data = nd;
+    }
+    impl->buf->len = new_len;
     return S_OK;
 }
 static HRESULT WINAPI ras_GetInputStreamAt( void *iface, UINT64 pos, void **out )
@@ -761,6 +788,7 @@ static HRESULT WINAPI ras_GetInputStreamAt( void *iface, UINT64 pos, void **out 
     if (!(clone = calloc( 1, sizeof(*clone) ))) return E_OUTOFMEMORY;
     clone->vtbl = impl->vtbl;
     clone->vtbl_input = ras_input_vtbl;
+    clone->vtbl_output = ras_output_vtbl;
     clone->vtbl_closable = ras_closable_vtbl;
     clone->ref = 1;
     clone->buf = impl->buf;
@@ -771,7 +799,22 @@ static HRESULT WINAPI ras_GetInputStreamAt( void *iface, UINT64 pos, void **out 
 }
 static HRESULT WINAPI ras_GetOutputStreamAt( void *iface, UINT64 pos, void **out )
 {
-    return ras_GetInputStreamAt( iface, pos, out );
+    struct ras_stream *impl = iface;
+    struct ras_stream *clone;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(clone = calloc( 1, sizeof(*clone) ))) return E_OUTOFMEMORY;
+    clone->vtbl = impl->vtbl;
+    clone->vtbl_input = ras_input_vtbl;
+    clone->vtbl_output = ras_output_vtbl;
+    clone->vtbl_closable = ras_closable_vtbl;
+    clone->ref = 1;
+    clone->buf = impl->buf;
+    clone->pos = (ULONG)pos;
+    buffer_AddRef( impl->buf );
+    *out = &clone->vtbl_output;
+    return S_OK;
 }
 static HRESULT WINAPI ras_get_Position( void *iface, UINT64 *value )
 {
@@ -794,6 +837,9 @@ static HRESULT WINAPI ras_CloneStream( void *iface, void **out )
     *out = NULL;
     if (!clone) return E_OUTOFMEMORY;
     clone->vtbl = impl->vtbl;
+    clone->vtbl_input = ras_input_vtbl;
+    clone->vtbl_output = ras_output_vtbl;
+    clone->vtbl_closable = ras_closable_vtbl;
     clone->ref = 1;
     clone->buf = impl->buf;
     buffer_AddRef( impl->buf );
@@ -811,7 +857,7 @@ static HRESULT WINAPI ras_get_CanWrite( void *iface, boolean *value )
 {
     (void)iface;
     if (!value) return E_POINTER;
-    *value = 0;
+    *value = 1;
     return S_OK;
 }
 /* Win11 projection slot 30: ReadAsync(IBuffer*, IAsyncOperationWithProgress**)
@@ -984,6 +1030,506 @@ static const void *ras_input_vtbl[] =
     ras_in_ReadAsync,
 };
 
+/* Completed IAsyncOperationWithProgress<UINT32, UINT32> for IOutputStream::WriteAsync */
+
+struct ras_write_op
+{
+    const void *vtbl;
+    const void *vtbl_info;
+    LONG ref;
+    UINT32 bytes_written;
+    void *progress_handler;
+    void *completed_handler;
+};
+
+static const void *ras_wop_vtbl[];
+static const void *ras_wop_info_vtbl[];
+
+static HRESULT WINAPI ras_wop_QI( void *iface, REFIID iid, void **out )
+{
+    struct ras_write_op *impl = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncOpWithProg_UINT32_UINT32_s ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &impl->vtbl_info;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ras_wop_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct ras_write_op *)iface)->ref );
+}
+static ULONG WINAPI ras_wop_Release( void *iface )
+{
+    struct ras_write_op *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->progress_handler) IUnknown_Release( (IUnknown *)impl->progress_handler );
+        if (impl->completed_handler) IUnknown_Release( (IUnknown *)impl->completed_handler );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI ras_wop_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI ras_wop_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR nm[] = L"Windows.Foundation.IAsyncOperationWithProgress`2<UInt32, UInt32>";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( nm, ARRAY_SIZE( nm ) - 1, name );
+}
+static HRESULT WINAPI ras_wop_GetTrustLevel( void *iface, int *level )
+{
+    if (level) *level = 0;
+    return S_OK;
+}
+static HRESULT WINAPI ras_wop_put_Progress( void *iface, void *handler )
+{
+    struct ras_write_op *impl = iface;
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    if (impl->progress_handler) IUnknown_Release( (IUnknown *)impl->progress_handler );
+    impl->progress_handler = handler;
+    return S_OK;
+}
+static HRESULT WINAPI ras_wop_get_Progress( void *iface, void **handler )
+{
+    struct ras_write_op *impl = iface;
+    if (!handler) return E_POINTER;
+    *handler = impl->progress_handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+static HRESULT WINAPI ras_wop_put_Completed( void *iface, void *handler )
+{
+    struct ras_write_op *impl = iface;
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    if (impl->completed_handler) IUnknown_Release( (IUnknown *)impl->completed_handler );
+    impl->completed_handler = handler;
+    if (handler)
+    {
+        HRESULT (WINAPI *invoke)( void *, void *, AsyncStatus ) =
+            (void *)((void *const *)(*(void *const **)handler))[3];
+        InterlockedIncrement( &impl->ref );
+        invoke( handler, &impl->vtbl, Completed );
+        ras_wop_Release( &impl->vtbl );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI ras_wop_get_Completed( void *iface, void **handler )
+{
+    struct ras_write_op *impl = iface;
+    if (!handler) return E_POINTER;
+    *handler = impl->completed_handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+static HRESULT WINAPI ras_wop_GetResults( void *iface, UINT32 *results )
+{
+    struct ras_write_op *impl = iface;
+    if (!results) return E_POINTER;
+    *results = impl->bytes_written;
+    return S_OK;
+}
+static const void *ras_wop_vtbl[] =
+{
+    ras_wop_QI, ras_wop_AddRef, ras_wop_Release,
+    ras_wop_GetIids, ras_wop_GetRuntimeClassName, ras_wop_GetTrustLevel,
+    ras_wop_put_Progress,   /* 6 */
+    ras_wop_get_Progress,   /* 7 */
+    ras_wop_put_Completed,  /* 8 */
+    ras_wop_get_Completed,  /* 9 */
+    ras_wop_GetResults,     /* 10 */
+};
+
+static HRESULT WINAPI ras_wop_info_QI( void *iface, REFIID iid, void **out )
+{
+    struct ras_write_op *impl = (struct ras_write_op *)((char *)iface - offsetof( struct ras_write_op, vtbl_info ));
+    return ras_wop_QI( impl, iid, out );
+}
+static ULONG WINAPI ras_wop_info_AddRef( void *iface )
+{
+    struct ras_write_op *impl = (struct ras_write_op *)((char *)iface - offsetof( struct ras_write_op, vtbl_info ));
+    return ras_wop_AddRef( impl );
+}
+static ULONG WINAPI ras_wop_info_Release( void *iface )
+{
+    struct ras_write_op *impl = (struct ras_write_op *)((char *)iface - offsetof( struct ras_write_op, vtbl_info ));
+    return ras_wop_Release( impl );
+}
+static HRESULT WINAPI ras_wop_info_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    struct ras_write_op *impl = (struct ras_write_op *)((char *)iface - offsetof( struct ras_write_op, vtbl_info ));
+    return ras_wop_GetIids( impl, count, iids );
+}
+static HRESULT WINAPI ras_wop_info_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    struct ras_write_op *impl = (struct ras_write_op *)((char *)iface - offsetof( struct ras_write_op, vtbl_info ));
+    return ras_wop_GetRuntimeClassName( impl, name );
+}
+static HRESULT WINAPI ras_wop_info_GetTrustLevel( void *iface, int *level )
+{
+    struct ras_write_op *impl = (struct ras_write_op *)((char *)iface - offsetof( struct ras_write_op, vtbl_info ));
+    return ras_wop_GetTrustLevel( impl, level );
+}
+static HRESULT WINAPI ras_async_info_get_Id( void *iface, UINT32 *id )
+{
+    if (!id) return E_POINTER;
+    *id = 1;
+    return S_OK;
+}
+static HRESULT WINAPI ras_async_info_get_Status( void *iface, AsyncStatus *status )
+{
+    if (!status) return E_POINTER;
+    *status = Completed;
+    return S_OK;
+}
+static HRESULT WINAPI ras_async_info_get_ErrorCode( void *iface, HRESULT *code )
+{
+    if (!code) return E_POINTER;
+    *code = S_OK;
+    return S_OK;
+}
+static HRESULT WINAPI ras_async_info_Cancel( void *iface )
+{
+    return S_OK;
+}
+static HRESULT WINAPI ras_async_info_Close( void *iface )
+{
+    return S_OK;
+}
+static const void *ras_wop_info_vtbl[] =
+{
+    ras_wop_info_QI, ras_wop_info_AddRef, ras_wop_info_Release,
+    ras_wop_info_GetIids, ras_wop_info_GetRuntimeClassName, ras_wop_info_GetTrustLevel,
+    ras_async_info_get_Id,        /* 6 */
+    ras_async_info_get_Status,    /* 7 */
+    ras_async_info_get_ErrorCode, /* 8 */
+    ras_async_info_Cancel,        /* 9 */
+    ras_async_info_Close,         /* 10 */
+};
+
+static HRESULT create_ras_write_op( UINT32 bytes_written, void **out )
+{
+    struct ras_write_op *impl;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = ras_wop_vtbl;
+    impl->vtbl_info = ras_wop_info_vtbl;
+    impl->ref = 1;
+    impl->bytes_written = bytes_written;
+    *out = &impl->vtbl;
+    return S_OK;
+}
+
+/* Completed IAsyncOperation<boolean> for IOutputStream::FlushAsync */
+
+struct ras_flush_op
+{
+    const void *vtbl;
+    const void *vtbl_info;
+    LONG ref;
+    boolean result;
+    void *completed_handler;
+};
+
+static const void *ras_fop_vtbl[];
+static const void *ras_fop_info_vtbl[];
+
+static HRESULT WINAPI ras_fop_QI( void *iface, REFIID iid, void **out )
+{
+    struct ras_flush_op *impl = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncOp_boolean_s ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &impl->vtbl_info;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ras_fop_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct ras_flush_op *)iface)->ref );
+}
+static ULONG WINAPI ras_fop_Release( void *iface )
+{
+    struct ras_flush_op *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->completed_handler) IUnknown_Release( (IUnknown *)impl->completed_handler );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI ras_fop_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI ras_fop_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR nm[] = L"Windows.Foundation.IAsyncOperation`1<Boolean>";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( nm, ARRAY_SIZE( nm ) - 1, name );
+}
+static HRESULT WINAPI ras_fop_GetTrustLevel( void *iface, int *level )
+{
+    if (level) *level = 0;
+    return S_OK;
+}
+static HRESULT WINAPI ras_fop_put_Completed( void *iface, void *handler )
+{
+    struct ras_flush_op *impl = iface;
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    if (impl->completed_handler) IUnknown_Release( (IUnknown *)impl->completed_handler );
+    impl->completed_handler = handler;
+    if (handler)
+    {
+        HRESULT (WINAPI *invoke)( void *, void *, AsyncStatus ) =
+            (void *)((void *const *)(*(void *const **)handler))[3];
+        InterlockedIncrement( &impl->ref );
+        invoke( handler, &impl->vtbl, Completed );
+        ras_fop_Release( &impl->vtbl );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI ras_fop_get_Completed( void *iface, void **handler )
+{
+    struct ras_flush_op *impl = iface;
+    if (!handler) return E_POINTER;
+    *handler = impl->completed_handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+static HRESULT WINAPI ras_fop_GetResults( void *iface, boolean *results )
+{
+    struct ras_flush_op *impl = iface;
+    if (!results) return E_POINTER;
+    *results = impl->result;
+    return S_OK;
+}
+static const void *ras_fop_vtbl[] =
+{
+    ras_fop_QI, ras_fop_AddRef, ras_fop_Release,
+    ras_fop_GetIids, ras_fop_GetRuntimeClassName, ras_fop_GetTrustLevel,
+    ras_fop_put_Completed,  /* 6 */
+    ras_fop_get_Completed,  /* 7 */
+    ras_fop_GetResults,     /* 8 */
+};
+
+static HRESULT WINAPI ras_fop_info_QI( void *iface, REFIID iid, void **out )
+{
+    struct ras_flush_op *impl = (struct ras_flush_op *)((char *)iface - offsetof( struct ras_flush_op, vtbl_info ));
+    return ras_fop_QI( impl, iid, out );
+}
+static ULONG WINAPI ras_fop_info_AddRef( void *iface )
+{
+    struct ras_flush_op *impl = (struct ras_flush_op *)((char *)iface - offsetof( struct ras_flush_op, vtbl_info ));
+    return ras_fop_AddRef( impl );
+}
+static ULONG WINAPI ras_fop_info_Release( void *iface )
+{
+    struct ras_flush_op *impl = (struct ras_flush_op *)((char *)iface - offsetof( struct ras_flush_op, vtbl_info ));
+    return ras_fop_Release( impl );
+}
+static HRESULT WINAPI ras_fop_info_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    struct ras_flush_op *impl = (struct ras_flush_op *)((char *)iface - offsetof( struct ras_flush_op, vtbl_info ));
+    return ras_fop_GetIids( impl, count, iids );
+}
+static HRESULT WINAPI ras_fop_info_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    struct ras_flush_op *impl = (struct ras_flush_op *)((char *)iface - offsetof( struct ras_flush_op, vtbl_info ));
+    return ras_fop_GetRuntimeClassName( impl, name );
+}
+static HRESULT WINAPI ras_fop_info_GetTrustLevel( void *iface, int *level )
+{
+    struct ras_flush_op *impl = (struct ras_flush_op *)((char *)iface - offsetof( struct ras_flush_op, vtbl_info ));
+    return ras_fop_GetTrustLevel( impl, level );
+}
+static const void *ras_fop_info_vtbl[] =
+{
+    ras_fop_info_QI, ras_fop_info_AddRef, ras_fop_info_Release,
+    ras_fop_info_GetIids, ras_fop_info_GetRuntimeClassName, ras_fop_info_GetTrustLevel,
+    ras_async_info_get_Id,        /* 6 */
+    ras_async_info_get_Status,    /* 7 */
+    ras_async_info_get_ErrorCode, /* 8 */
+    ras_async_info_Cancel,        /* 9 */
+    ras_async_info_Close,         /* 10 */
+};
+
+static HRESULT create_ras_flush_op( boolean result, void **out )
+{
+    struct ras_flush_op *impl;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = ras_fop_vtbl;
+    impl->vtbl_info = ras_fop_info_vtbl;
+    impl->ref = 1;
+    impl->result = result;
+    *out = &impl->vtbl;
+    return S_OK;
+}
+
+/* Windows.Storage.Streams.IOutputStream face on ras_stream */
+
+static HRESULT WINAPI ras_out_QI( void *iface, REFIID iid, void **out )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    return ras_QI( impl, iid, out );
+}
+static ULONG WINAPI ras_out_AddRef( void *iface )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    return ras_AddRef( impl );
+}
+static ULONG WINAPI ras_out_Release( void *iface )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    return ras_Release( impl );
+}
+static HRESULT WINAPI ras_out_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    return ras_GetIids( impl, count, iids );
+}
+static HRESULT WINAPI ras_out_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    return ras_GetRuntimeClassName( impl, name );
+}
+static HRESULT WINAPI ras_out_GetTrustLevel( void *iface, int *level )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    return ras_GetTrustLevel( impl, level );
+}
+static HRESULT WINAPI ras_out_WriteAsync( void *iface, void *buffer, void **op )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    void *ba = NULL;
+    BYTE *src_data = NULL;
+    UINT32 len = 0;
+    HRESULT hr;
+
+    if (!op) return E_POINTER;
+    *op = NULL;
+    if (!buffer) return E_INVALIDARG;
+
+    if (*(const void *const *)buffer == mem_buffer_vtbl)
+    {
+        struct mem_buffer *src_buf = buffer;
+        len = src_buf->len;
+        src_data = src_buf->data;
+        if (len && !src_data) return E_FAIL;
+    }
+    else
+    {
+        HRESULT (WINAPI *get_len)( void *, UINT32 * ) =
+            (void *)((void *const *)(*(void *const **)buffer))[7];
+        hr = get_len( buffer, &len );
+        if (FAILED( hr )) return hr;
+        if (len)
+        {
+            HRESULT (WINAPI *get_buf)( void *, BYTE ** );
+            hr = IUnknown_QueryInterface( (IUnknown *)buffer, &IID_IBufferByteAccess_s, &ba );
+            if (FAILED( hr ) || !ba) return FAILED( hr ) ? hr : E_NOINTERFACE;
+            get_buf = (void *)((void *const *)(*(void *const **)ba))[3];
+            hr = get_buf( ba, &src_data );
+            if (FAILED( hr ) || !src_data)
+            {
+                IUnknown_Release( (IUnknown *)ba );
+                return FAILED( hr ) ? hr : E_FAIL;
+            }
+        }
+    }
+
+    if (len)
+    {
+        ULONG end;
+        if (!impl->buf)
+        {
+            if (ba) IUnknown_Release( (IUnknown *)ba );
+            return E_UNEXPECTED;
+        }
+        if (len > ~0ul - impl->pos)
+        {
+            if (ba) IUnknown_Release( (IUnknown *)ba );
+            return E_OUTOFMEMORY;
+        }
+        end = impl->pos + len;
+        if (end > impl->buf->len || !impl->buf->data)
+        {
+            BYTE *nd = realloc( impl->buf->data, end );
+            if (!nd)
+            {
+                if (ba) IUnknown_Release( (IUnknown *)ba );
+                return E_OUTOFMEMORY;
+            }
+            impl->buf->data = nd;
+        }
+        if (impl->pos > impl->buf->len)
+            memset( impl->buf->data + impl->buf->len, 0, impl->pos - impl->buf->len );
+        memcpy( impl->buf->data + impl->pos, src_data, len );
+        impl->pos = end;
+        if (impl->pos > impl->buf->len) impl->buf->len = impl->pos;
+    }
+
+    if (ba) IUnknown_Release( (IUnknown *)ba );
+    SDBG( "ras_out_WriteAsync len %u pos %lu buf_len %lu\n", len, impl->pos,
+          impl->buf ? impl->buf->len : 0 );
+    return create_ras_write_op( len, op );
+}
+static HRESULT WINAPI ras_out_FlushAsync( void *iface, void **op )
+{
+    struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_output ));
+    (void)impl;
+    if (!op) return E_POINTER;
+    *op = NULL;
+    return create_ras_flush_op( TRUE, op );
+}
+static const void *ras_output_vtbl[] =
+{
+    ras_out_QI, ras_out_AddRef, ras_out_Release,
+    ras_out_GetIids, ras_out_GetRuntimeClassName, ras_out_GetTrustLevel,
+    ras_out_WriteAsync,     /* 6 */
+    ras_out_FlushAsync,     /* 7 */
+};
+
 static HRESULT WINAPI ras_cl_QI( void *iface, REFIID iid, void **out )
 {
     struct ras_stream *impl = (struct ras_stream *)((char *)iface - offsetof( struct ras_stream, vtbl_closable ));
@@ -1014,6 +1560,7 @@ HRESULT create_ras_stream_from_buffer( void *buffer, void **out )
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->vtbl = ras_stream_vtbl;
     impl->vtbl_input = ras_input_vtbl;
+    impl->vtbl_output = ras_output_vtbl;
     impl->vtbl_closable = ras_closable_vtbl;
     impl->ref = 1;
     impl->buf = (struct mem_buffer *)buffer;

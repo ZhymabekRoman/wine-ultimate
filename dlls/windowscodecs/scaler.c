@@ -18,6 +18,7 @@
  */
 
 #include <stdarg.h>
+#include <math.h>
 
 #define COBJMACROS
 
@@ -30,6 +31,8 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wincodecs);
+
+#define WIC_INTERPOLATION_HIGH_QUALITY_CUBIC 4
 
 typedef struct BitmapScaler {
     IWICBitmapScaler IWICBitmapScaler_iface;
@@ -203,6 +206,344 @@ static void NearestNeighbor_CopyScanline(BitmapScaler *This,
     }
 }
 
+static inline BYTE clamp_byte(float val)
+{
+    if (val <= 0.0f) return 0;
+    if (val >= 255.0f) return 255;
+    return (BYTE)(val + 0.5f);
+}
+
+static inline void linear_coords(UINT dst_pos, UINT src_len, UINT dst_len,
+    INT *p0, INT *p1, float *frac)
+{
+    double pos = ((double)dst_pos + 0.5) * (double)src_len / (double)dst_len - 0.5;
+    int i0 = (int)floor(pos);
+    int i1 = i0 + 1;
+    int max_idx = src_len > 0 ? (int)src_len - 1 : 0;
+
+    *frac = (float)(pos - (double)i0);
+    if (i0 < 0) i0 = 0;
+    else if (i0 > max_idx) i0 = max_idx;
+    if (i1 < 0) i1 = 0;
+    else if (i1 > max_idx) i1 = max_idx;
+
+    *p0 = i0;
+    *p1 = i1;
+}
+
+static void Linear_GetRequiredSourceRect(BitmapScaler *This,
+    UINT x, UINT y, WICRect *src_rect)
+{
+    INT x0, x1, y0, y1;
+    float fx, fy;
+
+    linear_coords(x, This->src_width, This->width, &x0, &x1, &fx);
+    linear_coords(y, This->src_height, This->height, &y0, &y1, &fy);
+
+    src_rect->X = x0;
+    src_rect->Y = y0;
+    src_rect->Width = x1 - x0 + 1;
+    src_rect->Height = y1 - y0 + 1;
+}
+
+static void Linear_CopyScanline(BitmapScaler *This,
+    UINT dst_x, UINT dst_y, UINT dst_width,
+    BYTE **src_data, UINT src_data_x, UINT src_data_y, BYTE *pbBuffer)
+{
+    UINT bpp_bytes = This->bpp / 8;
+    INT y0, y1;
+    float fy, wy0, wy1;
+    const BYTE *row0, *row1;
+    UINT i, c;
+
+    linear_coords(dst_y, This->src_height, This->height, &y0, &y1, &fy);
+    wy0 = 1.0f - fy;
+    wy1 = fy;
+    row0 = src_data[y0 - (INT)src_data_y];
+    row1 = src_data[y1 - (INT)src_data_y];
+
+    for (i = 0; i < dst_width; i++)
+    {
+        INT x0, x1;
+        float fx, wx0, wx1;
+        const BYTE *p00, *p01, *p10, *p11;
+        BYTE *dst = pbBuffer + i * bpp_bytes;
+
+        linear_coords(dst_x + i, This->src_width, This->width, &x0, &x1, &fx);
+        wx0 = 1.0f - fx;
+        wx1 = fx;
+
+        p00 = row0 + (UINT)(x0 - (INT)src_data_x) * bpp_bytes;
+        p01 = row0 + (UINT)(x1 - (INT)src_data_x) * bpp_bytes;
+        p10 = row1 + (UINT)(x0 - (INT)src_data_x) * bpp_bytes;
+        p11 = row1 + (UINT)(x1 - (INT)src_data_x) * bpp_bytes;
+
+        for (c = 0; c < bpp_bytes; c++)
+        {
+            float top = p00[c] * wx0 + p01[c] * wx1;
+            float bot = p10[c] * wx0 + p11[c] * wx1;
+            dst[c] = clamp_byte(top * wy0 + bot * wy1);
+        }
+    }
+}
+
+static inline void cubic_coords(UINT dst_pos, UINT src_len, UINT dst_len,
+    INT idx[4], float w[4])
+{
+    double pos = ((double)dst_pos + 0.5) * (double)src_len / (double)dst_len - 0.5;
+    int i0 = (int)floor(pos);
+    float f = (float)(pos - (double)i0);
+    float f2 = f * f;
+    float f3 = f2 * f;
+    int max_idx = src_len > 0 ? (int)src_len - 1 : 0;
+    int k;
+
+    /* Catmull-Rom / Keys cubic kernel (a = -0.5) */
+    w[0] = -0.5f * f3 + f2 - 0.5f * f;
+    w[1] =  1.5f * f3 - 2.5f * f2 + 1.0f;
+    w[2] = -1.5f * f3 + 2.0f * f2 + 0.5f * f;
+    w[3] =  0.5f * f3 - 0.5f * f2;
+
+    for (k = 0; k < 4; k++)
+    {
+        int s = i0 + k - 1;
+        if (s < 0) s = 0;
+        else if (s > max_idx) s = max_idx;
+        idx[k] = s;
+    }
+}
+
+static void Cubic_GetRequiredSourceRect(BitmapScaler *This,
+    UINT x, UINT y, WICRect *src_rect)
+{
+    INT x_idx[4], y_idx[4];
+    float wx[4], wy[4];
+
+    cubic_coords(x, This->src_width, This->width, x_idx, wx);
+    cubic_coords(y, This->src_height, This->height, y_idx, wy);
+
+    src_rect->X = x_idx[0];
+    src_rect->Y = y_idx[0];
+    src_rect->Width = x_idx[3] - x_idx[0] + 1;
+    src_rect->Height = y_idx[3] - y_idx[0] + 1;
+}
+
+static void Cubic_CopyScanline(BitmapScaler *This,
+    UINT dst_x, UINT dst_y, UINT dst_width,
+    BYTE **src_data, UINT src_data_x, UINT src_data_y, BYTE *pbBuffer)
+{
+    UINT bpp_bytes = This->bpp / 8;
+    INT y_idx[4];
+    float wy[4];
+    const BYTE *rows[4];
+    UINT i, c;
+    int ky;
+
+    cubic_coords(dst_y, This->src_height, This->height, y_idx, wy);
+    for (ky = 0; ky < 4; ky++)
+        rows[ky] = src_data[y_idx[ky] - (INT)src_data_y];
+
+    for (i = 0; i < dst_width; i++)
+    {
+        INT x_idx[4];
+        float wx[4];
+        UINT x_off[4];
+        BYTE *dst = pbBuffer + i * bpp_bytes;
+        int kx;
+
+        cubic_coords(dst_x + i, This->src_width, This->width, x_idx, wx);
+        for (kx = 0; kx < 4; kx++)
+            x_off[kx] = (UINT)(x_idx[kx] - (INT)src_data_x) * bpp_bytes;
+
+        for (c = 0; c < bpp_bytes; c++)
+        {
+            float val = 0.0f;
+            for (ky = 0; ky < 4; ky++)
+            {
+                const BYTE *row = rows[ky];
+                float row_val =
+                    row[x_off[0] + c] * wx[0] +
+                    row[x_off[1] + c] * wx[1] +
+                    row[x_off[2] + c] * wx[2] +
+                    row[x_off[3] + c] * wx[3];
+                val += row_val * wy[ky];
+            }
+            dst[c] = clamp_byte(val);
+        }
+    }
+}
+
+static inline void fant_axis_bounds(UINT dst_pos, UINT src_len, UINT dst_len,
+    INT *first, INT *last, float *w_first, float *w_last, float *w_total)
+{
+    int max_idx = src_len > 0 ? (int)src_len - 1 : 0;
+
+    if (src_len < dst_len)
+    {
+        float frac;
+        linear_coords(dst_pos, src_len, dst_len, first, last, &frac);
+        if (*first == *last)
+        {
+            *w_first = 1.0f;
+            *w_last = 0.0f;
+        }
+        else
+        {
+            *w_first = 1.0f - frac;
+            *w_last = frac;
+        }
+        *w_total = 1.0f;
+    }
+    else
+    {
+        double left = (double)dst_pos * (double)src_len / (double)dst_len;
+        double right = (double)(dst_pos + 1) * (double)src_len / (double)dst_len;
+        int f = (int)floor(left);
+        int l = (int)ceil(right) - 1;
+
+        if (f < 0) f = 0;
+        else if (f > max_idx) f = max_idx;
+        if (l < f) l = f;
+        else if (l > max_idx) l = max_idx;
+
+        *first = f;
+        *last = l;
+
+        if (f == l)
+        {
+            *w_first = 1.0f;
+            *w_last = 0.0f;
+            *w_total = 1.0f;
+        }
+        else
+        {
+            double wf = (double)(f + 1) - left;
+            double wl = right - (double)l;
+            float total;
+
+            if (wf < 0.0) wf = 0.0;
+            else if (wf > 1.0) wf = 1.0;
+            if (wl < 0.0) wl = 0.0;
+            else if (wl > 1.0) wl = 1.0;
+
+            total = (float)(wf + wl + (double)(l - f - 1));
+            *w_first = (float)wf;
+            *w_last = (float)wl;
+            *w_total = total > 0.0f ? total : 1.0f;
+        }
+    }
+}
+
+static void Fant_GetRequiredSourceRect(BitmapScaler *This,
+    UINT x, UINT y, WICRect *src_rect)
+{
+    INT x0, x1, y0, y1;
+    float wxf, wxl, wxt, wyf, wyl, wyt;
+
+    fant_axis_bounds(x, This->src_width, This->width, &x0, &x1, &wxf, &wxl, &wxt);
+    fant_axis_bounds(y, This->src_height, This->height, &y0, &y1, &wyf, &wyl, &wyt);
+
+    src_rect->X = x0;
+    src_rect->Y = y0;
+    src_rect->Width = x1 - x0 + 1;
+    src_rect->Height = y1 - y0 + 1;
+}
+
+static void Fant_CopyScanline(BitmapScaler *This,
+    UINT dst_x, UINT dst_y, UINT dst_width,
+    BYTE **src_data, UINT src_data_x, UINT src_data_y, BYTE *pbBuffer)
+{
+    UINT bpp_bytes = This->bpp / 8;
+    INT y0, y1, sy;
+    float wy_first, wy_last, wy_total;
+    UINT i, c;
+
+    fant_axis_bounds(dst_y, This->src_height, This->height, &y0, &y1, &wy_first, &wy_last, &wy_total);
+
+    for (i = 0; i < dst_width; i++)
+    {
+        INT x0, x1, sx;
+        float wx_first, wx_last, wx_total, inv_total;
+        float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        BYTE *dst = pbBuffer + i * bpp_bytes;
+
+        fant_axis_bounds(dst_x + i, This->src_width, This->width, &x0, &x1, &wx_first, &wx_last, &wx_total);
+        inv_total = 1.0f / (wx_total * wy_total);
+
+        for (sy = y0; sy <= y1; sy++)
+        {
+            const BYTE *row = src_data[sy - (INT)src_data_y];
+            const BYTE *p_first = row + (UINT)(x0 - (INT)src_data_x) * bpp_bytes;
+            float wy;
+            float row_acc[4];
+
+            if (sy == y0)
+                wy = wy_first;
+            else if (sy == y1)
+                wy = wy_last;
+            else
+                wy = 1.0f;
+
+            if (x0 == x1)
+            {
+                for (c = 0; c < bpp_bytes; c++)
+                    row_acc[c] = p_first[c] * wx_first;
+            }
+            else
+            {
+                const BYTE *p_last = row + (UINT)(x1 - (INT)src_data_x) * bpp_bytes;
+                for (c = 0; c < bpp_bytes; c++)
+                    row_acc[c] = p_first[c] * wx_first + p_last[c] * wx_last;
+                for (sx = x0 + 1; sx < x1; sx++)
+                {
+                    const BYTE *p = row + (UINT)(sx - (INT)src_data_x) * bpp_bytes;
+                    for (c = 0; c < bpp_bytes; c++)
+                        row_acc[c] += p[c];
+                }
+            }
+
+            for (c = 0; c < bpp_bytes; c++)
+                acc[c] += row_acc[c] * wy;
+        }
+
+        for (c = 0; c < bpp_bytes; c++)
+            dst[c] = clamp_byte(acc[c] * inv_total);
+    }
+}
+
+static BOOL is_native_8bit_format(const GUID *fmt)
+{
+    return IsEqualGUID(fmt, &GUID_WICPixelFormat32bppBGRA) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat32bppPBGRA) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat32bppBGR) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat32bppRGBA) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat32bppPRGBA) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat32bppRGB) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat32bppCMYK) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat24bppBGR) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat24bppRGB) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat8bppGray) ||
+           IsEqualGUID(fmt, &GUID_WICPixelFormat8bppAlpha);
+}
+
+static HRESULT scaler_set_interpolated_source(BitmapScaler *This,
+    IWICBitmapSource *pISource, const GUID *src_pixelformat)
+{
+    HRESULT hr;
+
+    if (is_native_8bit_format(src_pixelformat))
+    {
+        IWICBitmapSource_AddRef(pISource);
+        This->source = pISource;
+        return S_OK;
+    }
+
+    hr = WICConvertBitmapSource(&GUID_WICPixelFormat32bppBGRA, pISource, &This->source);
+    if (SUCCEEDED(hr))
+        This->bpp = 32;
+    return hr;
+}
+
 static HRESULT WINAPI BitmapScaler_CopyPixels(IWICBitmapScaler *iface,
     const WICRect *prc, UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer)
 {
@@ -349,11 +690,8 @@ static HRESULT WINAPI BitmapScaler_Initialize(IWICBitmapScaler *iface,
 
     if (SUCCEEDED(hr))
     {
-        switch (mode)
+        switch ((UINT)mode)
         {
-        default:
-            FIXME("unsupported mode %i\n", mode);
-            /* fall-through */
         case WICBitmapInterpolationModeNearestNeighbor:
             if ((This->bpp % 8) == 0)
             {
@@ -368,6 +706,30 @@ static HRESULT WINAPI BitmapScaler_Initialize(IWICBitmapScaler *iface,
             }
             This->fn_get_required_source_rect = NearestNeighbor_GetRequiredSourceRect;
             This->fn_copy_scanline = NearestNeighbor_CopyScanline;
+            break;
+
+        case WICBitmapInterpolationModeLinear:
+            hr = scaler_set_interpolated_source(This, pISource, &src_pixelformat);
+            This->fn_get_required_source_rect = Linear_GetRequiredSourceRect;
+            This->fn_copy_scanline = Linear_CopyScanline;
+            break;
+
+        case WICBitmapInterpolationModeCubic:
+        case WIC_INTERPOLATION_HIGH_QUALITY_CUBIC:
+            hr = scaler_set_interpolated_source(This, pISource, &src_pixelformat);
+            This->fn_get_required_source_rect = Cubic_GetRequiredSourceRect;
+            This->fn_copy_scanline = Cubic_CopyScanline;
+            break;
+
+        case WICBitmapInterpolationModeFant:
+            hr = scaler_set_interpolated_source(This, pISource, &src_pixelformat);
+            This->fn_get_required_source_rect = Fant_GetRequiredSourceRect;
+            This->fn_copy_scanline = Fant_CopyScanline;
+            break;
+
+        default:
+            FIXME("unsupported mode %i\n", mode);
+            hr = E_INVALIDARG;
             break;
         }
     }

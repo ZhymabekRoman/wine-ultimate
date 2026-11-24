@@ -274,6 +274,8 @@ struct core_window
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *pointer_released_handler;
     __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *custom_properties;
     ICoreCursor *pointer_cursor;
+    CoreWindowFlowDirection flow_direction;
+    boolean input_enabled;
 };
 
 static HRESULT WINAPI cursor_factory_CreateCursor( ICoreCursorFactory *iface, CoreCursorType type, UINT32 id, ICoreCursor **cursor );
@@ -1305,13 +1307,43 @@ static HRESULT WINAPI core_window_get_Dispatcher( ICoreWindow *iface, ICoreDispa
     return S_OK;
 }
 static HRESULT WINAPI core_window_get_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection *value )
-{ FIXME( "stub\n" ); if (value) *value = 0; return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = impl->flow_direction;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_put_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection value )
-{ FIXME( "stub\n" ); return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
+    TRACE( "iface %p, value %d.\n", iface, value );
+    if (value != CoreWindowFlowDirection_LeftToRight && value != CoreWindowFlowDirection_RightToLeft)
+        return E_INVALIDARG;
+    impl->flow_direction = value;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_get_IsInputEnabled( ICoreWindow *iface, boolean *value )
-{ FIXME( "stub\n" ); if (value) *value = TRUE; return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = impl->input_enabled;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_put_IsInputEnabled( ICoreWindow *iface, boolean value )
-{ FIXME( "stub\n" ); return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
+    TRACE( "iface %p, value %d.\n", iface, value );
+    impl->input_enabled = !!value;
+    if (impl->hwnd && IsWindow( impl->hwnd ) && !!IsWindowEnabled( impl->hwnd ) != impl->input_enabled)
+        EnableWindow( impl->hwnd, impl->input_enabled );
+    return S_OK;
+}
 static HRESULT WINAPI core_window_get_PointerCursor( ICoreWindow *iface, ICoreCursor **value )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
@@ -3723,6 +3755,8 @@ static struct core_window *create_core_window( const WCHAR *title, INT x, INT y,
     impl->IWeakReferenceSource_iface = cw_wrs_vtbl;
     impl->dummy_iface.lpVtbl = (void *)dummy_vtbl;
     impl->dispatcher = core_dispatcher_create( impl );
+    impl->flow_direction = CoreWindowFlowDirection_LeftToRight;
+    impl->input_enabled = TRUE;
     impl->ref = 1;
 
     wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;

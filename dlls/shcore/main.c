@@ -18,6 +18,7 @@
  */
 
 #include <stdarg.h>
+#include <stdio.h>
 
 #define COBJMACROS
 
@@ -40,11 +41,44 @@
 #include "roapi.h"
 
 #include "wine/debug.h"
+#include "wine/list.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(shcore);
 
+struct feature_subscription
+{
+    struct list entry;
+    FEATURE_STATE_CHANGE_CALLBACK *callback;
+    void *context;
+};
+
 static DWORD shcore_tls;
 static IUnknown *process_ref;
+
+static CRITICAL_SECTION feature_cs;
+static struct list feature_subscriptions = LIST_INIT(feature_subscriptions);
+static BOOL feature_overrides_checked;
+static HKEY feature_overrides_key;
+
+static void feature_state_cleanup(void)
+{
+    struct feature_subscription *sub, *next;
+
+    EnterCriticalSection(&feature_cs);
+    LIST_FOR_EACH_ENTRY_SAFE(sub, next, &feature_subscriptions, struct feature_subscription, entry)
+    {
+        list_remove(&sub->entry);
+        free(sub);
+    }
+    if (feature_overrides_key)
+    {
+        RegCloseKey(feature_overrides_key);
+        feature_overrides_key = NULL;
+    }
+    feature_overrides_checked = FALSE;
+    LeaveCriticalSection(&feature_cs);
+    DeleteCriticalSection(&feature_cs);
+}
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 {
@@ -54,12 +88,14 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
     {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(instance);
+            InitializeCriticalSection(&feature_cs);
             shcore_tls = TlsAlloc();
             break;
         case DLL_PROCESS_DETACH:
             if (reserved) break;
             if (shcore_tls != TLS_OUT_OF_INDEXES)
                 TlsFree(shcore_tls);
+            feature_state_cleanup();
             break;
     }
 
@@ -2548,7 +2584,30 @@ BOOL WINAPI IsOS(DWORD feature)
 void WINAPI SubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRIPTION *subscription,
                                                     FEATURE_STATE_CHANGE_CALLBACK *callback, void *context)
 {
-    FIXME("(%p, %p, %p) stub\n", subscription, callback, context);
+    struct feature_subscription *sub;
+
+    TRACE("(%p, %p, %p)\n", subscription, callback, context);
+
+    if (!subscription)
+        return;
+
+    *subscription = NULL;
+
+    if (!callback)
+        return;
+
+    sub = malloc(sizeof(*sub));
+    if (!sub)
+        return;
+
+    sub->callback = callback;
+    sub->context = context;
+
+    EnterCriticalSection(&feature_cs);
+    list_add_tail(&feature_subscriptions, &sub->entry);
+    LeaveCriticalSection(&feature_cs);
+
+    *subscription = (FEATURE_STATE_CHANGE_SUBSCRIPTION)sub;
 }
 
 /*************************************************************************
@@ -2556,8 +2615,37 @@ void WINAPI SubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRI
  */
 FEATURE_ENABLED_STATE WINAPI GetFeatureEnabledState(UINT32 feature, FEATURE_CHANGE_TIME change_time)
 {
-    FIXME("(%u, %u) stub\n", feature, change_time);
-    return FEATURE_ENABLED_STATE_DEFAULT;
+    static const WCHAR overrides_path[] = L"SYSTEM\\CurrentControlSet\\Policies\\Microsoft\\FeatureManagement\\Overrides";
+    FEATURE_ENABLED_STATE state = FEATURE_ENABLED_STATE_DEFAULT;
+    WCHAR name[16];
+    DWORD type, value, size;
+    HKEY key;
+
+    EnterCriticalSection(&feature_cs);
+    if (!feature_overrides_checked)
+    {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, overrides_path, 0, KEY_QUERY_VALUE, &feature_overrides_key) != ERROR_SUCCESS)
+            feature_overrides_key = NULL;
+        feature_overrides_checked = TRUE;
+    }
+    key = feature_overrides_key;
+    if (key)
+    {
+        swprintf(name, ARRAY_SIZE(name), L"%u", feature);
+        size = sizeof(value);
+        if (RegQueryValueExW(key, name, NULL, &type, (BYTE *)&value, &size) == ERROR_SUCCESS &&
+            type == REG_DWORD && size == sizeof(value))
+        {
+            if (value == 0)
+                state = FEATURE_ENABLED_STATE_DISABLED;
+            else if (value == 1)
+                state = FEATURE_ENABLED_STATE_ENABLED;
+        }
+    }
+    LeaveCriticalSection(&feature_cs);
+
+    TRACE("(%u, %u) -> %u\n", feature, change_time, state);
+    return state;
 }
 
 /*************************************************************************
@@ -2897,7 +2985,7 @@ static HRESULT WINAPI rasstream_CopyTo( IStream *iface, IStream *dest, ULARGE_IN
     struct ras_over_stream *impl = rasstream_from_IStream( iface );
     BYTE *tmp;
     ULONG got = 0, put = 0, total = 0;
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
     if (!dest) return E_POINTER;
     if (cb.QuadPart == ~0ull) cb.QuadPart = 1 << 20;
@@ -3011,22 +3099,48 @@ HRESULT WINAPI CreateStreamOverRandomAccessStream( void *random_access_stream, R
  */
 void WINAPI RecordFeatureUsage(UINT32 feature_id, UINT32 kind, UINT32 addend, const CHAR *origin_name)
 {
-    FIXME("(%u, %u, %u, %s) stub!\n", feature_id, kind, addend, wine_dbgstr_a(origin_name));
+    TRACE("(%u, %u, %u, %s)\n", feature_id, kind, addend, wine_dbgstr_a(origin_name));
 }
 
+/*************************************************************************
+ * RecordFeatureError        [SHCORE.@]
+ */
 void WINAPI RecordFeatureError(UINT32 feature_id, const void *error)
 {
-    FIXME("(%u, %p) stub!\n", feature_id, error);
+    TRACE("(%u, %p)\n", feature_id, error);
 }
 
+/*************************************************************************
+ * UnsubscribeFeatureStateChangeNotification        [SHCORE.@]
+ */
 void WINAPI UnsubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRIPTION subscription)
 {
-    FIXME("(%p) stub!\n", subscription);
+    struct feature_subscription *sub, *next;
+
+    TRACE("(%p)\n", subscription);
+
+    if (!subscription)
+        return;
+
+    EnterCriticalSection(&feature_cs);
+    LIST_FOR_EACH_ENTRY_SAFE(sub, next, &feature_subscriptions, struct feature_subscription, entry)
+    {
+        if ((FEATURE_STATE_CHANGE_SUBSCRIPTION)sub == subscription)
+        {
+            list_remove(&sub->entry);
+            free(sub);
+            break;
+        }
+    }
+    LeaveCriticalSection(&feature_cs);
 }
 
+/*************************************************************************
+ * GetFeatureVariant        [SHCORE.@]
+ */
 UINT32 WINAPI GetFeatureVariant(UINT32 feature_id, FEATURE_CHANGE_TIME change_time, UINT32 *payload_id)
 {
-    TRACE("(%u, %u, %p) stub!\n", feature_id, change_time, payload_id);
+    TRACE("(%u, %u, %p)\n", feature_id, change_time, payload_id);
     if (payload_id) *payload_id = 0;
     return 0;
 }

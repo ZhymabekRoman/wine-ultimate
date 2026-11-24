@@ -159,7 +159,6 @@ HRESULT WINAPI GetEffectivePackageStatusForUserSid(const void *sid, const WCHAR 
 LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *policy)
 {
     static int once;
-    const WCHAR *pkg = NULL;
     WCHAR buf[32];
 
     if(!once++)
@@ -176,8 +175,7 @@ LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *po
     else
         *policy = AppPolicyWindowingModel_ClassicDesktop;
 
-    FIXME("token %p, policy %p -> windowing model %d\n", token, policy, *policy);
-    (void)pkg;
+    TRACE("token %p, policy %p -> windowing model %d\n", token, policy, *policy);
     return ERROR_SUCCESS;
 }
 

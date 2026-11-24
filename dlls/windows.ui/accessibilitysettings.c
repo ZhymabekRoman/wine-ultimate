@@ -23,13 +23,23 @@
 #include "objbase.h"
 #include "weakref.h"
 #include "wine/debug.h"
+#include "wine/list.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
+
+struct accessibility_event_entry
+{
+    struct list entry;
+    INT64 token;
+    ITypedEventHandler_AccessibilitySettings_IInspectable *handler;
+};
 
 struct accessibilitysettings
 {
     IAccessibilitySettings IAccessibilitySettings_iface;
     struct weak_reference_source weak_reference_source;
+    SRWLOCK lock;
+    struct list high_contrast_changed;
 };
 
 static inline struct accessibilitysettings *impl_from_IAccessibilitySettings(IAccessibilitySettings *iface)
@@ -81,7 +91,17 @@ static ULONG WINAPI accessibilitysettings_Release(IAccessibilitySettings *iface)
     TRACE("iface %p, ref %lu.\n", iface, ref);
 
     if (!ref)
+    {
+        struct accessibility_event_entry *entry, *tmp;
+
+        LIST_FOR_EACH_ENTRY_SAFE(entry, tmp, &impl->high_contrast_changed, struct accessibility_event_entry, entry)
+        {
+            list_remove(&entry->entry);
+            ITypedEventHandler_AccessibilitySettings_IInspectable_Release(entry->handler);
+            free(entry);
+        }
         free(impl);
+    }
     return ref;
 }
 
@@ -140,15 +160,59 @@ static HRESULT WINAPI accessibilitysettings_add_HighContrastChanged(IAccessibili
                                                                     ITypedEventHandler_AccessibilitySettings_IInspectable *handler,
                                                                     EventRegistrationToken *cookie)
 {
-    FIXME("iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie);
-    if (cookie) cookie->value = 0xdeadbeef;
+    struct accessibilitysettings *impl = impl_from_IAccessibilitySettings(iface);
+    static LONG64 next_token;
+    struct accessibility_event_entry *entry;
+    INT64 token;
+
+    TRACE("iface %p, handler %p, cookie %p.\n", iface, handler, cookie);
+
+    if (!cookie) return E_POINTER;
+    cookie->value = 0;
+    if (!handler) return E_INVALIDARG;
+
+    if (!(entry = malloc(sizeof(*entry))))
+        return E_OUTOFMEMORY;
+
+    token = InterlockedIncrement64(&next_token);
+    ITypedEventHandler_AccessibilitySettings_IInspectable_AddRef(handler);
+    entry->token = token;
+    entry->handler = handler;
+
+    AcquireSRWLockExclusive(&impl->lock);
+    list_add_tail(&impl->high_contrast_changed, &entry->entry);
+    ReleaseSRWLockExclusive(&impl->lock);
+
+    cookie->value = token;
     return S_OK;
 }
 
 static HRESULT WINAPI accessibilitysettings_remove_HighContrastChanged(IAccessibilitySettings *iface,
                                                                        EventRegistrationToken cookie)
 {
-    FIXME("iface %p, cookie %I64x stub!\n", iface, cookie.value);
+    struct accessibilitysettings *impl = impl_from_IAccessibilitySettings(iface);
+    ITypedEventHandler_AccessibilitySettings_IInspectable *removed = NULL;
+    struct accessibility_event_entry *entry, *tmp;
+
+    TRACE("iface %p, cookie %#I64x.\n", iface, cookie.value);
+
+    if (!cookie.value) return S_OK;
+
+    AcquireSRWLockExclusive(&impl->lock);
+    LIST_FOR_EACH_ENTRY_SAFE(entry, tmp, &impl->high_contrast_changed, struct accessibility_event_entry, entry)
+    {
+        if (entry->token == cookie.value)
+        {
+            list_remove(&entry->entry);
+            removed = entry->handler;
+            free(entry);
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&impl->lock);
+
+    if (removed)
+        ITypedEventHandler_AccessibilitySettings_IInspectable_Release(removed);
     return S_OK;
 }
 
@@ -258,6 +322,8 @@ static HRESULT WINAPI factory_ActivateInstance(IActivationFactory *iface, IInspe
     }
 
     impl->IAccessibilitySettings_iface.lpVtbl = &accessibilitysettings_vtbl;
+    InitializeSRWLock(&impl->lock);
+    list_init(&impl->high_contrast_changed);
     if (FAILED(hr = weak_reference_source_init(&impl->weak_reference_source,
                                                (IUnknown *)&impl->IAccessibilitySettings_iface)))
     {

@@ -26,10 +26,18 @@
 #include "weakref.h"
 
 #include "wine/debug.h"
+#include "wine/list.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
 
 static EventRegistrationToken dummy_cookie = {.value = 0xdeadbeef};
+
+struct uisettings_event_entry
+{
+    struct list entry;
+    INT64 token;
+    IUnknown *handler;
+};
 
 struct uisettings
 {
@@ -40,7 +48,76 @@ struct uisettings
     IUISettings5 IUISettings5_iface;
     IUISettings6 IUISettings6_iface;
     struct weak_reference_source weak_reference_source;
+    SRWLOCK lock;
+    struct list color_values_changed;
+    struct list advanced_effects_changed;
+    struct list auto_hide_scrollbars_changed;
 };
+
+static HRESULT uisettings_event_add( struct uisettings *impl, struct list *events, IUnknown *handler,
+                                     EventRegistrationToken *cookie )
+{
+    static LONG64 next_token;
+    struct uisettings_event_entry *entry;
+    INT64 token;
+
+    if (!cookie) return E_POINTER;
+    cookie->value = 0;
+    if (!handler) return E_INVALIDARG;
+
+    if (!(entry = malloc( sizeof(*entry) )))
+        return E_OUTOFMEMORY;
+
+    token = InterlockedIncrement64( &next_token );
+    IUnknown_AddRef( handler );
+    entry->token = token;
+    entry->handler = handler;
+
+    AcquireSRWLockExclusive( &impl->lock );
+    list_add_tail( events, &entry->entry );
+    ReleaseSRWLockExclusive( &impl->lock );
+
+    cookie->value = token;
+    return S_OK;
+}
+
+static HRESULT uisettings_event_remove( struct uisettings *impl, struct list *events,
+                                        EventRegistrationToken cookie )
+{
+    struct uisettings_event_entry *entry, *tmp;
+    IUnknown *removed = NULL;
+
+    if (!cookie.value) return S_OK;
+
+    AcquireSRWLockExclusive( &impl->lock );
+    LIST_FOR_EACH_ENTRY_SAFE( entry, tmp, events, struct uisettings_event_entry, entry )
+    {
+        if (entry->token == cookie.value)
+        {
+            list_remove( &entry->entry );
+            removed = entry->handler;
+            free( entry );
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive( &impl->lock );
+
+    if (removed)
+        IUnknown_Release( removed );
+    return S_OK;
+}
+
+static void uisettings_event_list_free( struct list *events )
+{
+    struct uisettings_event_entry *entry, *tmp;
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, tmp, events, struct uisettings_event_entry, entry )
+    {
+        list_remove( &entry->entry );
+        IUnknown_Release( entry->handler );
+        free( entry );
+    }
+}
 
 static inline struct uisettings *impl_from_IUISettings( IUISettings *iface )
 {
@@ -112,7 +189,13 @@ static ULONG WINAPI uisettings_Release( IUISettings *iface )
 
     TRACE( "iface %p, ref %lu.\n", iface, ref );
 
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        uisettings_event_list_free( &impl->color_values_changed );
+        uisettings_event_list_free( &impl->advanced_effects_changed );
+        uisettings_event_list_free( &impl->auto_hide_scrollbars_changed );
+        free( impl );
+    }
     return ref;
 }
 
@@ -555,15 +638,18 @@ static HRESULT WINAPI uisettings3_GetColorValue( IUISettings3 *iface, UIColorTyp
 
 static HRESULT WINAPI uisettings3_add_ColorValuesChanged( IUISettings3 *iface, ITypedEventHandler_UISettings_IInspectable *handler, EventRegistrationToken *cookie )
 {
-    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
-    *cookie = dummy_cookie;
-    return S_OK;
+    struct uisettings *impl = impl_from_IUISettings3( iface );
+
+    TRACE( "iface %p, handler %p, cookie %p.\n", iface, handler, cookie );
+    return uisettings_event_add( impl, &impl->color_values_changed, (IUnknown *)handler, cookie );
 }
 
 static HRESULT WINAPI uisettings3_remove_ColorValuesChanged( IUISettings3 *iface, EventRegistrationToken cookie )
 {
-    FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
-    return S_OK;
+    struct uisettings *impl = impl_from_IUISettings3( iface );
+
+    TRACE( "iface %p, cookie %#I64x.\n", iface, cookie.value );
+    return uisettings_event_remove( impl, &impl->color_values_changed, cookie );
 }
 
 static const struct IUISettings3Vtbl uisettings3_vtbl =
@@ -585,22 +671,43 @@ DEFINE_IINSPECTABLE( uisettings4, IUISettings4, struct uisettings, IUISettings_i
 
 static HRESULT WINAPI uisettings4_get_AdvancedEffectsEnabled( IUISettings4 *iface, boolean *value )
 {
-    FIXME( "iface %p, value %p stub!.\n", iface, value );
+    static const WCHAR *subkey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    DWORD val = 0, len = sizeof(val), type;
+    HKEY hkey;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+
+    if (!RegOpenKeyExW( HKEY_CURRENT_USER, subkey, 0, KEY_QUERY_VALUE, &hkey ))
+    {
+        if (!RegQueryValueExW( hkey, L"EnableTransparency", NULL, &type, (BYTE *)&val, &len ) && type == REG_DWORD)
+        {
+            RegCloseKey( hkey );
+            *value = !!val;
+            return S_OK;
+        }
+        RegCloseKey( hkey );
+    }
+
     *value = FALSE;
     return S_OK;
 }
 
 static HRESULT WINAPI uisettings4_add_AdvancedEffectsEnabledChanged( IUISettings4 *iface, ITypedEventHandler_UISettings_IInspectable *handler, EventRegistrationToken *cookie )
 {
-    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
-    *cookie = dummy_cookie;
-    return S_OK;
+    struct uisettings *impl = impl_from_IUISettings4( iface );
+
+    TRACE( "iface %p, handler %p, cookie %p.\n", iface, handler, cookie );
+    return uisettings_event_add( impl, &impl->advanced_effects_changed, (IUnknown *)handler, cookie );
 }
 
 static HRESULT WINAPI uisettings4_remove_AdvancedEffectsEnabledChanged( IUISettings4 *iface, EventRegistrationToken cookie )
 {
-    FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
-    return S_OK;
+    struct uisettings *impl = impl_from_IUISettings4( iface );
+
+    TRACE( "iface %p, cookie %#I64x.\n", iface, cookie.value );
+    return uisettings_event_remove( impl, &impl->advanced_effects_changed, cookie );
 }
 
 static const struct IUISettings4Vtbl uisettings4_vtbl =
@@ -622,23 +729,40 @@ DEFINE_IINSPECTABLE( uisettings5, IUISettings5, struct uisettings, IUISettings_i
 
 static HRESULT WINAPI uisettings5_get_AutoHideScrollBars( IUISettings5 *iface, boolean *value )
 {
-    FIXME( "iface %p, value %p stub!.\n", iface, value );
-    *value = FALSE;
+    static const WCHAR *subkey = L"Control Panel\\Accessibility";
+    DWORD val = 1, len = sizeof(val), type;
+    HKEY hkey;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+
+    if (!RegOpenKeyExW( HKEY_CURRENT_USER, subkey, 0, KEY_QUERY_VALUE, &hkey ))
+    {
+        if (RegQueryValueExW( hkey, L"DynamicScrollbars", NULL, &type, (BYTE *)&val, &len ) || type != REG_DWORD)
+            val = 1;
+        RegCloseKey( hkey );
+    }
+
+    *value = !!val;
     return S_OK;
 }
 
 static HRESULT WINAPI uisettings5_add_AutoHideScrollBarsChanged( IUISettings5 *iface, ITypedEventHandler_UISettings_UISettingsAutoHideScrollBarsChangedEventArgs *handler,
                                                                  EventRegistrationToken *cookie )
 {
-    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
-    *cookie = dummy_cookie;
-    return S_OK;
+    struct uisettings *impl = impl_from_IUISettings5( iface );
+
+    TRACE( "iface %p, handler %p, cookie %p.\n", iface, handler, cookie );
+    return uisettings_event_add( impl, &impl->auto_hide_scrollbars_changed, (IUnknown *)handler, cookie );
 }
 
 static HRESULT WINAPI uisettings5_remove_AutoHideScrollBarsChanged( IUISettings5 *iface, EventRegistrationToken cookie )
 {
-    FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
-    return S_OK;
+    struct uisettings *impl = impl_from_IUISettings5( iface );
+
+    TRACE( "iface %p, cookie %#I64x.\n", iface, cookie.value );
+    return uisettings_event_remove( impl, &impl->auto_hide_scrollbars_changed, cookie );
 }
 
 static const struct IUISettings5Vtbl uisettings5_vtbl =
@@ -807,6 +931,10 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
     impl->IUISettings4_iface.lpVtbl = &uisettings4_vtbl;
     impl->IUISettings5_iface.lpVtbl = &uisettings5_vtbl;
     impl->IUISettings6_iface.lpVtbl = &uisettings6_vtbl;
+    InitializeSRWLock( &impl->lock );
+    list_init( &impl->color_values_changed );
+    list_init( &impl->advanced_effects_changed );
+    list_init( &impl->auto_hide_scrollbars_changed );
 
     if (FAILED(hr = weak_reference_source_init( &impl->weak_reference_source,
                                                 (IUnknown *)&impl->IUISettings_iface )))
