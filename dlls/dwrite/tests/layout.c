@@ -6946,6 +6946,78 @@ static void test_text_format_axes(void)
     count = IDWriteTextFormat3_GetFontAxisValueCount(format3);
     ok(!count, "Unexpected axis count %u.\n", count);
 
+    /* Test IDWriteTextLayout4 per-range font axis values. */
+    {
+        DWRITE_FONT_AXIS_VALUE got[3];
+        IDWriteTextLayout4 *layout4;
+        IDWriteTextLayout *layout;
+        DWRITE_TEXT_RANGE range;
+
+        axes[0].axisTag = DWRITE_FONT_AXIS_TAG_WEIGHT;
+        axes[0].value = 500.0f;
+        hr = IDWriteTextFormat3_SetFontAxisValues(format3, axes, 1);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IDWriteFactory6_CreateTextLayout(factory, L"abcdef", 6, format, 100.0f, 100.0f, &layout);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IDWriteTextLayout_QueryInterface(layout, &IID_IDWriteTextLayout4, (void **)&layout4);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        count = IDWriteTextLayout4_GetFontAxisValueCount(layout4, 0);
+        ok(count == 1, "Unexpected axis count %u.\n", count);
+
+        memset(got, 0, sizeof(got));
+        range.startPosition = 99;
+        range.length = 99;
+        hr = IDWriteTextLayout4_GetFontAxisValues(layout4, 0, got, 1, &range);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(got[0].axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT && got[0].value == 500.0f, "Unexpected axis value.\n");
+        ok(range.startPosition == 0 && range.length == ~0u, "Unexpected range (%u, %u).\n",
+                range.startPosition, range.length);
+
+        axes[0].axisTag = DWRITE_FONT_AXIS_TAG_WEIGHT;
+        axes[0].value = 700.0f;
+        axes[1].axisTag = DWRITE_FONT_AXIS_TAG_WIDTH;
+        axes[1].value = 125.0f;
+        range.startPosition = 2;
+        range.length = 2;
+        hr = IDWriteTextLayout4_SetFontAxisValues(layout4, axes, 2, range);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        ok(IDWriteTextLayout4_GetFontAxisValueCount(layout4, 0) == 1, "Unexpected count at 0.\n");
+        ok(IDWriteTextLayout4_GetFontAxisValueCount(layout4, 2) == 2, "Unexpected count at 2.\n");
+        ok(IDWriteTextLayout4_GetFontAxisValueCount(layout4, 4) == 1, "Unexpected count at 4.\n");
+
+        hr = IDWriteTextLayout4_GetFontAxisValues(layout4, 2, got, 1, &range);
+        ok(hr == E_NOT_SUFFICIENT_BUFFER, "Unexpected hr %#lx.\n", hr);
+
+        hr = IDWriteTextLayout4_GetFontAxisValues(layout4, 2, got, 2, &range);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(got[0].axisTag == DWRITE_FONT_AXIS_TAG_WEIGHT && got[0].value == 700.0f, "Unexpected axis 0.\n");
+        ok(got[1].axisTag == DWRITE_FONT_AXIS_TAG_WIDTH && got[1].value == 125.0f, "Unexpected axis 1.\n");
+        ok(range.startPosition == 2 && range.length == 2, "Unexpected range (%u, %u).\n",
+                range.startPosition, range.length);
+
+        range.startPosition = 0;
+        range.length = ~0u;
+        hr = IDWriteTextLayout4_SetFontAxisValues(layout4, NULL, 1, range);
+        ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+        hr = IDWriteTextLayout4_SetFontAxisValues(layout4, NULL, 0, range);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(IDWriteTextLayout4_GetFontAxisValueCount(layout4, 2) == 0, "Unexpected count after clear.\n");
+
+        hr = IDWriteTextLayout4_GetFontAxisValues(layout4, 0, got, 1, &range);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(got[0].axisTag == 0 && got[0].value == 0.0f, "Expected zeroed output.\n");
+        ok(range.startPosition == 0 && range.length == ~0u, "Unexpected merged range (%u, %u).\n",
+                range.startPosition, range.length);
+
+        IDWriteTextLayout4_Release(layout4);
+        IDWriteTextLayout_Release(layout);
+    }
+
     IDWriteTextFormat3_Release(format3);
     IDWriteTextFormat_Release(format);
 

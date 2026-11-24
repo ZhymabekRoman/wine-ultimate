@@ -210,6 +210,34 @@ static void test_dcomp_propagation( void )
         IDCompositionTarget_SetRoot( dcomp_target, NULL );
     }
 
+    /* 10. Verify CompositionPropertySet implements IAnimationObject */
+    {
+        static const GUID IID_IAnimationObject_test =
+            { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } };
+        struct ICompositionPropertySet *propset = NULL;
+        IInspectable *anim_obj = NULL;
+        HRESULT (WINAPI *populate)(void *, HSTRING, void *);
+        HSTRING prop_name = NULL;
+
+        hr = ICompositor_CreatePropertySet( compositor, &propset );
+        ok( hr == S_OK && propset, "CreatePropertySet failed, hr %#lx.\n", hr );
+        if (propset)
+        {
+            hr = ICompositionPropertySet_QueryInterface( propset, &IID_IAnimationObject_test, (void **)&anim_obj );
+            ok( hr == S_OK && anim_obj, "propset QI IAnimationObject failed, hr %#lx.\n", hr );
+            if (anim_obj)
+            {
+                WindowsCreateString( L"Scale", 5, &prop_name );
+                populate = (void *)((void **)anim_obj->lpVtbl)[6];
+                hr = populate( anim_obj, prop_name, NULL );
+                ok( hr == S_OK, "IAnimationObject::PopulatePropertyInfo failed, hr %#lx.\n", hr );
+                WindowsDeleteString( prop_name );
+                IInspectable_Release( anim_obj );
+            }
+            ICompositionPropertySet_Release( propset );
+        }
+    }
+
     /* Cleanup */
     IVisualCollection_Release( children );
     if (child_vis) IVisual_Release( child_vis );

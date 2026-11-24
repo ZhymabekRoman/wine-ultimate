@@ -46,7 +46,8 @@ enum layout_range_attr_kind {
     LAYOUT_RANGE_ATTR_LOCALE,
     LAYOUT_RANGE_ATTR_FONTFAMILY,
     LAYOUT_RANGE_ATTR_SPACING,
-    LAYOUT_RANGE_ATTR_TYPOGRAPHY
+    LAYOUT_RANGE_ATTR_TYPOGRAPHY,
+    LAYOUT_RANGE_ATTR_AXISVALUES
 };
 
 struct layout_range_attr_value {
@@ -70,6 +71,10 @@ struct layout_range_attr_value {
             FLOAT min_advance;
         } spacing;
         IDWriteTypography *typography;
+        struct {
+            DWRITE_FONT_AXIS_VALUE const *values;
+            UINT32 count;
+        } axis_values;
     } u;
 };
 
@@ -79,7 +84,8 @@ enum layout_range_kind {
     LAYOUT_RANGE_STRIKETHROUGH,
     LAYOUT_RANGE_EFFECT,
     LAYOUT_RANGE_SPACING,
-    LAYOUT_RANGE_TYPOGRAPHY
+    LAYOUT_RANGE_TYPOGRAPHY,
+    LAYOUT_RANGE_AXISVALUES
 };
 
 struct layout_range_header {
@@ -116,6 +122,12 @@ struct layout_range_spacing {
     FLOAT leading;
     FLOAT trailing;
     FLOAT min_advance;
+};
+
+struct layout_range_axisvalues {
+    struct layout_range_header h;
+    DWRITE_FONT_AXIS_VALUE *values;
+    UINT32 count;
 };
 
 enum layout_run_kind {
@@ -282,6 +294,7 @@ struct dwrite_textlayout
     struct list typographies;
     struct list effects;
     struct list spacing;
+    struct list axis_values;
     struct list ranges;
     struct list runs;
     /* Lists ready to use with text renderer callbacks. */
@@ -3459,9 +3472,27 @@ static HRESULT layout_compute_effective_runs(struct dwrite_textlayout *layout)
     return hr;
 }
 
+static BOOL is_same_axis_values(const DWRITE_FONT_AXIS_VALUE *left, UINT32 left_count,
+        const DWRITE_FONT_AXIS_VALUE *right, UINT32 right_count)
+{
+    UINT32 i;
+
+    if (left_count != right_count)
+        return FALSE;
+
+    for (i = 0; i < left_count; ++i)
+    {
+        if (left[i].axisTag != right[i].axisTag || left[i].value != right[i].value)
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
 static BOOL is_same_layout_attrvalue(struct layout_range_header const *h, enum layout_range_attr_kind attr,
         struct layout_range_attr_value *value)
 {
+    struct layout_range_axisvalues const *range_axes = (struct layout_range_axisvalues const *)h;
     struct layout_range_spacing const *range_spacing = (struct layout_range_spacing*)h;
     struct layout_range_iface const *range_iface = (struct layout_range_iface*)h;
     struct layout_range_bool const *range_bool = (struct layout_range_bool*)h;
@@ -3498,6 +3529,9 @@ static BOOL is_same_layout_attrvalue(struct layout_range_header const *h, enum l
                range_spacing->min_advance == value->u.spacing.min_advance;
     case LAYOUT_RANGE_ATTR_TYPOGRAPHY:
         return range_iface->iface == (IUnknown*)value->u.typography;
+    case LAYOUT_RANGE_ATTR_AXISVALUES:
+        return is_same_axis_values(range_axes->values, range_axes->count,
+                value->u.axis_values.values, value->u.axis_values.count);
     default:
         ;
     }
@@ -3544,6 +3578,12 @@ static inline BOOL is_same_layout_attributes(struct layout_range_header const *h
         return left->leading == right->leading &&
                left->trailing == right->trailing &&
                left->min_advance == right->min_advance;
+    }
+    case LAYOUT_RANGE_AXISVALUES:
+    {
+        struct layout_range_axisvalues const *left = (struct layout_range_axisvalues const *)hleft;
+        struct layout_range_axisvalues const *right = (struct layout_range_axisvalues const *)hright;
+        return is_same_axis_values(left->values, left->count, right->values, right->count);
     }
     default:
         FIXME("unknown range kind %d\n", hleft->kind);
@@ -3623,6 +3663,28 @@ static struct layout_range_header *alloc_layout_range(struct dwrite_textlayout *
         h = &range->h;
         break;
     }
+    case LAYOUT_RANGE_AXISVALUES:
+    {
+        struct layout_range_axisvalues *range;
+
+        if (!(range = calloc(1, sizeof(*range))))
+            return NULL;
+
+        if (layout->format.axis_values_count)
+        {
+            if (!(range->values = malloc(layout->format.axis_values_count * sizeof(*range->values))))
+            {
+                free(range);
+                return NULL;
+            }
+            memcpy(range->values, layout->format.axis_values,
+                    layout->format.axis_values_count * sizeof(*range->values));
+            range->count = layout->format.axis_values_count;
+        }
+
+        h = &range->h;
+        break;
+    }
     default:
         FIXME("unknown range kind %d\n", kind);
         return NULL;
@@ -3693,6 +3755,27 @@ static struct layout_range_header *alloc_layout_range_from(struct layout_range_h
         ret = &spacing->h;
         break;
     }
+    case LAYOUT_RANGE_AXISVALUES:
+    {
+        struct layout_range_axisvalues *from = (struct layout_range_axisvalues *)h, *range;
+
+        if (!(range = calloc(1, sizeof(*range))))
+            return NULL;
+
+        range->h = from->h;
+        if (from->count)
+        {
+            if (!(range->values = malloc(from->count * sizeof(*range->values))))
+            {
+                free(range);
+                return NULL;
+            }
+            memcpy(range->values, from->values, from->count * sizeof(*range->values));
+            range->count = from->count;
+        }
+        ret = &range->h;
+        break;
+    }
     default:
         FIXME("unknown range kind %d\n", h->kind);
         return NULL;
@@ -3726,6 +3809,12 @@ static void free_layout_range(struct layout_range_header *h)
         struct layout_range_iface *range = (struct layout_range_iface*)h;
         if (range->iface)
             IUnknown_Release(range->iface);
+        break;
+    }
+    case LAYOUT_RANGE_AXISVALUES:
+    {
+        struct layout_range_axisvalues *range = (struct layout_range_axisvalues *)h;
+        free(range->values);
         break;
     }
     default:
@@ -3765,6 +3854,11 @@ static void free_layout_ranges_list(struct dwrite_textlayout *layout)
     }
 
     LIST_FOR_EACH_ENTRY_SAFE(cur, cur2, &layout->typographies, struct layout_range_header, entry) {
+        list_remove(&cur->entry);
+        free_layout_range(cur);
+    }
+
+    LIST_FOR_EACH_ENTRY_SAFE(cur, cur2, &layout->axis_values, struct layout_range_header, entry) {
         list_remove(&cur->entry);
         free_layout_range(cur);
     }
@@ -3876,6 +3970,27 @@ static BOOL set_layout_range_attrval(struct layout_range_header *h, enum layout_
     case LAYOUT_RANGE_ATTR_TYPOGRAPHY:
         changed = set_layout_range_iface_attr(&dest_iface->iface, (IUnknown*)value->u.typography);
         break;
+    case LAYOUT_RANGE_ATTR_AXISVALUES:
+    {
+        struct layout_range_axisvalues *dest_axes = (struct layout_range_axisvalues *)h;
+        DWRITE_FONT_AXIS_VALUE *copy = NULL;
+
+        if (is_same_axis_values(dest_axes->values, dest_axes->count,
+                value->u.axis_values.values, value->u.axis_values.count))
+            break;
+
+        if (value->u.axis_values.count)
+        {
+            if (!(copy = malloc(value->u.axis_values.count * sizeof(*copy))))
+                break;
+            memcpy(copy, value->u.axis_values.values, value->u.axis_values.count * sizeof(*copy));
+        }
+        free(dest_axes->values);
+        dest_axes->values = copy;
+        dest_axes->count = value->u.axis_values.count;
+        changed = TRUE;
+        break;
+    }
     default:
         ;
     }
@@ -3938,6 +4053,9 @@ static HRESULT set_layout_range_attr(struct dwrite_textlayout *layout, enum layo
         break;
     case LAYOUT_RANGE_ATTR_TYPOGRAPHY:
         ranges = &layout->typographies;
+        break;
+    case LAYOUT_RANGE_ATTR_AXISVALUES:
+        ranges = &layout->axis_values;
         break;
     default:
         FIXME("unknown attr kind %d\n", attr);
@@ -5598,24 +5716,57 @@ static HRESULT WINAPI dwritetextlayout3_GetLineMetrics(IDWriteTextLayout4 *iface
 static HRESULT WINAPI dwritetextlayout4_SetFontAxisValues(IDWriteTextLayout4 *iface,
         DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 num_values, DWRITE_TEXT_RANGE range)
 {
-    FIXME("%p, %p, %u, %s stub.\n", iface, axis_values, num_values, debugstr_range(&range));
+    struct dwrite_textlayout *layout = impl_from_IDWriteTextLayout4(iface);
+    struct layout_range_attr_value value;
 
-    return S_OK;
+    TRACE("%p, %p, %u, %s.\n", iface, axis_values, num_values, debugstr_range(&range));
+
+    if (num_values && !axis_values)
+        return E_INVALIDARG;
+
+    value.range = range;
+    value.u.axis_values.values = axis_values;
+    value.u.axis_values.count = num_values;
+    return set_layout_range_attr(layout, LAYOUT_RANGE_ATTR_AXISVALUES, &value);
 }
 
 static UINT32 WINAPI dwritetextlayout4_GetFontAxisValueCount(IDWriteTextLayout4 *iface, UINT32 pos)
 {
-    FIXME("%p, %u.\n", iface, pos);
+    struct dwrite_textlayout *layout = impl_from_IDWriteTextLayout4(iface);
+    struct layout_range_axisvalues *range;
 
-    return 0;
+    TRACE("%p, %u.\n", iface, pos);
+
+    range = (struct layout_range_axisvalues *)get_layout_range_header_by_pos(&layout->axis_values, pos);
+    return range ? range->count : 0;
 }
 
 static HRESULT WINAPI dwritetextlayout4_GetFontAxisValues(IDWriteTextLayout4 *iface, UINT32 pos,
-        DWRITE_FONT_AXIS_VALUE *values, UINT32 num_values, DWRITE_TEXT_RANGE *range)
+        DWRITE_FONT_AXIS_VALUE *values, UINT32 num_values, DWRITE_TEXT_RANGE *r)
 {
-    FIXME("%p, %u, %p, %u, %p.\n", iface, pos, values, num_values, range);
+    struct dwrite_textlayout *layout = impl_from_IDWriteTextLayout4(iface);
+    struct layout_range_axisvalues *range;
 
-    return E_NOTIMPL;
+    TRACE("%p, %u, %p, %u, %p.\n", iface, pos, values, num_values, r);
+
+    if (num_values && !values)
+        return E_INVALIDARG;
+
+    range = (struct layout_range_axisvalues *)get_layout_range_header_by_pos(&layout->axis_values, pos);
+    if (!range)
+        return E_INVALIDARG;
+
+    if (!range->count)
+    {
+        if (num_values) memset(values, 0, num_values * sizeof(*values));
+        return return_range(&range->h, r);
+    }
+
+    if (num_values < range->count)
+        return E_NOT_SUFFICIENT_BUFFER;
+
+    memcpy(values, range->values, range->count * sizeof(*values));
+    return return_range(&range->h, r);
 }
 
 static DWRITE_AUTOMATIC_FONT_AXES WINAPI dwritetextlayout4_GetAutomaticFontAxes(IDWriteTextLayout4 *iface)
@@ -6624,7 +6775,26 @@ static HRESULT layout_format_from_textformat(struct dwrite_textlayout *layout, I
     hr = IDWriteTextFormat_QueryInterface(format, &IID_IDWriteTextFormat3, (void **)&format3);
     if (hr == S_OK)
     {
+        UINT32 count = IDWriteTextFormat3_GetFontAxisValueCount(format3);
+
         layout->format.automatic_axes = IDWriteTextFormat3_GetAutomaticFontAxes(format3);
+        if (count)
+        {
+            DWRITE_FONT_AXIS_VALUE *values = malloc(count * sizeof(*values));
+            if (!values)
+            {
+                IDWriteTextFormat3_Release(format3);
+                return E_OUTOFMEMORY;
+            }
+            if (SUCCEEDED(IDWriteTextFormat3_GetFontAxisValues(format3, values, count)))
+                hr = format_set_font_axisvalues(&layout->format, values, count);
+            free(values);
+            if (FAILED(hr))
+            {
+                IDWriteTextFormat3_Release(format3);
+                return hr;
+            }
+        }
         IDWriteTextFormat3_Release(format3);
     }
 
@@ -6633,7 +6803,7 @@ static HRESULT layout_format_from_textformat(struct dwrite_textlayout *layout, I
 
 static HRESULT init_textlayout(const struct textlayout_desc *desc, struct dwrite_textlayout *layout)
 {
-    struct layout_range_header *range, *strike, *underline, *effect, *spacing, *typography;
+    struct layout_range_header *range, *strike, *underline, *effect, *spacing, *typography, *axis_values;
     static const DWRITE_TEXT_RANGE r = { 0, ~0u };
     HRESULT hr;
 
@@ -6657,6 +6827,7 @@ static HRESULT init_textlayout(const struct textlayout_desc *desc, struct dwrite
     list_init(&layout->effects);
     list_init(&layout->spacing);
     list_init(&layout->typographies);
+    list_init(&layout->axis_values);
     layout->metrics.layoutWidth = desc->max_width;
     layout->metrics.layoutHeight = desc->max_height;
 
@@ -6677,13 +6848,15 @@ static HRESULT init_textlayout(const struct textlayout_desc *desc, struct dwrite
     effect = alloc_layout_range(layout, &r, LAYOUT_RANGE_EFFECT);
     spacing = alloc_layout_range(layout, &r, LAYOUT_RANGE_SPACING);
     typography = alloc_layout_range(layout, &r, LAYOUT_RANGE_TYPOGRAPHY);
-    if (!range || !strike || !effect || !spacing || !typography || !underline) {
+    axis_values = alloc_layout_range(layout, &r, LAYOUT_RANGE_AXISVALUES);
+    if (!range || !strike || !effect || !spacing || !typography || !underline || !axis_values) {
         free_layout_range(range);
         free_layout_range(strike);
         free_layout_range(underline);
         free_layout_range(effect);
         free_layout_range(spacing);
         free_layout_range(typography);
+        free_layout_range(axis_values);
         hr = E_OUTOFMEMORY;
         goto fail;
     }
@@ -6701,6 +6874,7 @@ static HRESULT init_textlayout(const struct textlayout_desc *desc, struct dwrite
     list_add_head(&layout->effects, &effect->entry);
     list_add_head(&layout->spacing, &spacing->entry);
     list_add_head(&layout->typographies, &typography->entry);
+    list_add_head(&layout->axis_values, &axis_values->entry);
 
     if (FAILED(hr = IDWriteFactory5_GetSystemFontCollection((IDWriteFactory5 *)layout->factory, FALSE,
             (IDWriteFontCollection1 **)&layout->system_collection, FALSE)))

@@ -58,6 +58,7 @@ struct prop_set
     struct ICompositionPropertySet ICompositionPropertySet_iface;
     struct ICompositionObject ICompositionObject_iface;
     struct IClosable IClosable_iface;
+    struct IInspectable IAnimationObject_iface;
     LONG ref;
     struct compositor *compositor;
     struct prop_set_entry entries[PROP_SET_MAX_ENTRIES];
@@ -131,6 +132,9 @@ static HRESULT prop_set_try_get( struct prop_set *impl, HSTRING name, enum prop_
     return S_OK;
 }
 
+static const GUID IID_IAnimationObject_local =
+    { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } };
+
 static HRESULT WINAPI propset_QueryInterface( struct ICompositionPropertySet *iface, REFIID iid, void **out )
 {
     struct prop_set *impl = impl_from_ICompositionPropertySet( iface );
@@ -155,6 +159,12 @@ static HRESULT WINAPI propset_QueryInterface( struct ICompositionPropertySet *if
     if (IsEqualGUID( iid, &IID_IClosable ))
     {
         *out = &impl->IClosable_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAnimationObject_local ))
+    {
+        *out = &impl->IAnimationObject_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -475,6 +485,65 @@ static const struct IClosableVtbl propset_closable_vtbl =
     propset_closable_Close,
 };
 
+static inline struct prop_set *impl_from_IAnimationObject( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct prop_set, IAnimationObject_iface );
+}
+
+static HRESULT WINAPI propset_anim_obj_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct prop_set *impl = impl_from_IAnimationObject( iface );
+    return propset_QueryInterface( &impl->ICompositionPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI propset_anim_obj_AddRef( void *iface )
+{
+    struct prop_set *impl = impl_from_IAnimationObject( iface );
+    return propset_AddRef( &impl->ICompositionPropertySet_iface );
+}
+
+static ULONG WINAPI propset_anim_obj_Release( void *iface )
+{
+    struct prop_set *impl = impl_from_IAnimationObject( iface );
+    return propset_Release( &impl->ICompositionPropertySet_iface );
+}
+
+static HRESULT WINAPI propset_anim_obj_GetIids( void *iface, ULONG *iid_count, IID **iids )
+{
+    struct prop_set *impl = impl_from_IAnimationObject( iface );
+    return propset_GetIids( &impl->ICompositionPropertySet_iface, iid_count, iids );
+}
+
+static HRESULT WINAPI propset_anim_obj_GetRuntimeClassName( void *iface, HSTRING *class_name )
+{
+    struct prop_set *impl = impl_from_IAnimationObject( iface );
+    return propset_GetRuntimeClassName( &impl->ICompositionPropertySet_iface, class_name );
+}
+
+static HRESULT WINAPI propset_anim_obj_GetTrustLevel( void *iface, TrustLevel *trust_level )
+{
+    struct prop_set *impl = impl_from_IAnimationObject( iface );
+    return propset_GetTrustLevel( &impl->ICompositionPropertySet_iface, trust_level );
+}
+
+static HRESULT WINAPI propset_anim_obj_PopulatePropertyInfo( void *iface, HSTRING property_name,
+        void *property_info )
+{
+    TRACE( "iface %p, property_name %s, property_info %p.\n", iface, debugstr_hstring( property_name ), property_info );
+    return S_OK;
+}
+
+static const void *propset_anim_obj_vtbl[] =
+{
+    propset_anim_obj_QueryInterface,
+    propset_anim_obj_AddRef,
+    propset_anim_obj_Release,
+    propset_anim_obj_GetIids,
+    propset_anim_obj_GetRuntimeClassName,
+    propset_anim_obj_GetTrustLevel,
+    propset_anim_obj_PopulatePropertyInfo,
+};
+
 struct prop_set *prop_set_create( struct compositor *compositor )
 {
     struct prop_set *impl;
@@ -483,6 +552,7 @@ struct prop_set *prop_set_create( struct compositor *compositor )
     impl->ICompositionPropertySet_iface.lpVtbl = &propset_vtbl;
     impl->ICompositionObject_iface.lpVtbl = &propset_object_vtbl;
     impl->IClosable_iface.lpVtbl = &propset_closable_vtbl;
+    impl->IAnimationObject_iface.lpVtbl = (const struct IInspectableVtbl *)propset_anim_obj_vtbl;
     impl->ref = 1;
     impl->compositor = compositor;
     if (compositor) IInspectable_AddRef( (IInspectable *)&compositor->ICompositor_iface );

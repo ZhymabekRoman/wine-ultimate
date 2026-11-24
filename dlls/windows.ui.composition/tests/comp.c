@@ -199,6 +199,23 @@ static void test_property_set( struct ICompositor *compositor )
     ok( hr == S_OK && status == CompositionGetValueStatus_Succeeded && scalar == 3.0f,
             "scalar roundtrip failed, hr %#lx, status %u, value %g.\n", hr, status, scalar );
 
+    {
+        static const GUID IID_IAnimationObject_test =
+            { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } };
+        IInspectable *anim_obj = NULL;
+        HRESULT (WINAPI *populate)(void *, HSTRING, void *);
+
+        hr = ICompositionPropertySet_QueryInterface( set, &IID_IAnimationObject_test, (void **)&anim_obj );
+        ok( hr == S_OK && anim_obj, "failed to QI propset for IAnimationObject, hr %#lx.\n", hr );
+        if (anim_obj)
+        {
+            populate = (void *)((void **)anim_obj->lpVtbl)[6];
+            hr = populate( anim_obj, name, NULL );
+            ok( hr == S_OK, "IAnimationObject::PopulatePropertyInfo failed, hr %#lx.\n", hr );
+            IInspectable_Release( anim_obj );
+        }
+    }
+
     WindowsDeleteString( name );
     ICompositionPropertySet_Release( set );
     ICompositionObject_Release( object );

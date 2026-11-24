@@ -65,6 +65,13 @@ static HRESULT STDMETHODCALLTYPE surface_QueryInterface(IDCompositionSurfaceUnkn
             return hr;
     }
 
+    if (IsEqualGUID(iid, &IID_IDCompositionVisual) || IsEqualGUID(iid, &IID_IDCompositionVisual2))
+    {
+        TRACE("Surface %p does not implement %s, returning E_NOINTERFACE.\n", iface, debugstr_guid(iid));
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
     *out = NULL;
     return E_NOINTERFACE;

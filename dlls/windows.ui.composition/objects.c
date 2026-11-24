@@ -1893,6 +1893,17 @@ struct geometric_clip *geometric_clip_create( struct compositor *compositor, voi
  * ColorBrush.
  */
 
+static const GUID IID_ICompositionMaskBrush_local =
+    { 0x522cf09e, 0xbe6b, 0x4f41, { 0xbe, 0x49, 0xf9, 0x22, 0x6d, 0x47, 0x1b, 0x4a } };
+
+static inline BOOL is_composition_brush_subclass_iid( REFIID iid )
+{
+    return IsEqualGUID( iid, &IID_ICompositionSurfaceBrush )
+        || IsEqualGUID( iid, &IID_ICompositionColorBrush )
+        || IsEqualGUID( iid, &IID_ICompositionEffectBrush )
+        || IsEqualGUID( iid, &IID_ICompositionMaskBrush_local );
+}
+
 static inline struct color_brush *impl_from_ICompositionBrush_color( struct ICompositionBrush *iface )
 {
     return CONTAINING_RECORD( iface, struct color_brush, ICompositionBrush_iface );
@@ -1932,8 +1943,8 @@ static HRESULT WINAPI color_brush_QueryInterface( struct ICompositionBrush *ifac
         return S_OK;
     }
 
-    if (is_reference_tracker_target( iid ))
-        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ) || is_composition_brush_subclass_iid( iid ))
+        TRACE( "%s not supported on CompositionColorBrush, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     else
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -2068,9 +2079,6 @@ struct color_brush *color_brush_create( struct compositor *compositor, Color col
  * CompositionMaskBrush.
  */
 
-static const GUID IID_ICompositionMaskBrush_local =
-    { 0x522cf09e, 0xbe6b, 0x4f41, { 0xbe, 0x49, 0xf9, 0x22, 0x6d, 0x47, 0x1b, 0x4a } };
-
 static inline struct mask_brush *impl_from_ICompositionBrush_mask( struct ICompositionBrush *iface )
 {
     return CONTAINING_RECORD( iface, struct mask_brush, ICompositionBrush_iface );
@@ -2112,8 +2120,8 @@ static HRESULT WINAPI mask_brush_QueryInterface( struct ICompositionBrush *iface
         return S_OK;
     }
 
-    if (is_reference_tracker_target( iid ))
-        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ) || is_composition_brush_subclass_iid( iid ))
+        TRACE( "%s not supported on CompositionMaskBrush, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     else
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -2365,8 +2373,8 @@ static HRESULT WINAPI effect_brush_QueryInterface( struct ICompositionBrush *ifa
         return S_OK;
     }
 
-    if (is_reference_tracker_target( iid ))
-        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ) || is_composition_brush_subclass_iid( iid ))
+        TRACE( "%s not supported on CompositionEffectBrush, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     else
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -2781,8 +2789,8 @@ static HRESULT WINAPI surface_brush_QueryInterface( struct ICompositionBrush *if
         return S_OK;
     }
 
-    if (is_reference_tracker_target( iid ))
-        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (is_reference_tracker_target( iid ) || is_composition_brush_subclass_iid( iid ))
+        TRACE( "%s not supported on CompositionSurfaceBrush, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     else
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;

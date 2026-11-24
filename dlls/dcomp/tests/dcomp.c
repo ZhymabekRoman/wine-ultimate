@@ -1817,6 +1817,7 @@ static void test_surface_interface(void)
 
     check_interface(surface, &IID_IDCompositionSurface, TRUE);
     check_interface(surface, &IID_IDCompositionSurfaceUnknown, TRUE);
+    check_interface(surface, &IID_IDCompositionVisual, FALSE);
     check_inherited_interface(surface, &IID_IDCompositionSurfaceUnknown, &IID_IDCompositionSurface);
 
     /* Test IDCompositionSurfaceUnknown */

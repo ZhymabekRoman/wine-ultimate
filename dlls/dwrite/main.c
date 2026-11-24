@@ -2244,7 +2244,7 @@ static HRESULT WINAPI dwritefontdownloadqueue_RemoveListener(IDWriteFontDownload
 
 static BOOL WINAPI dwritefontdownloadqueue_IsEmpty(IDWriteFontDownloadQueue *iface)
 {
-    FIXME("%p stub!\n", iface);
+    TRACE("%p.\n", iface);
     return TRUE;
 }
 
