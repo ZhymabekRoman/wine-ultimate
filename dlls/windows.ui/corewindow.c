@@ -2593,7 +2593,20 @@ struct csd_overlay_state
     BOOL has_sampled_bg;
     COLORREF sampled_bg;
     int sample_ticks;
+    int stable_ticks;
 };
+
+static DPI_AWARENESS_CONTEXT csd_enter_pm_dpi( void )
+{
+    DPI_AWARENESS_CONTEXT prev = SetThreadDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 );
+    if (!prev) prev = SetThreadDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE );
+    return prev;
+}
+
+static void csd_leave_pm_dpi( DPI_AWARENESS_CONTEXT prev )
+{
+    if (prev) SetThreadDpiAwarenessContext( prev );
+}
 
 static BOOL csd_get_color_prop( HWND parent, const WCHAR *prop, COLORREF *out, BOOL require_opaque )
 {
@@ -2605,27 +2618,66 @@ static BOOL csd_get_color_prop( HWND parent, const WCHAR *prop, COLORREF *out, B
     return TRUE;
 }
 
-static BOOL csd_try_sample_parent_bg( HWND overlay, struct csd_overlay_state *st )
+static BOOL csd_try_sample_parent_bg( HWND overlay, struct csd_overlay_state *st, BOOL allow_black )
 {
+    DPI_AWARENESS_CONTEXT prev_dpi;
     RECT prc, orc;
     HDC pdc;
     int sx, sy;
     COLORREF c;
+    BOOL content_painted = FALSE;
 
     if (!st || !st->parent || !IsWindow( st->parent )) return FALSE;
-    if (!GetClientRect( st->parent, &prc ) || !GetClientRect( overlay, &orc )) return FALSE;
+
+    prev_dpi = csd_enter_pm_dpi();
+    if (!GetClientRect( st->parent, &prc ) || !GetClientRect( overlay, &orc ) ||
+        prc.right <= 0 || prc.bottom <= 0 || orc.right <= 0 || orc.bottom <= 0)
+    {
+        csd_leave_pm_dpi( prev_dpi );
+        return FALSE;
+    }
+
     sx = (int)prc.right - (int)orc.right - 6;
     sy = (int)orc.bottom / 2;
     if (sx < 0) sx = 0;
     if (sy < 0) sy = 0;
 
     pdc = GetDC( st->parent );
-    if (!pdc) return FALSE;
+    if (!pdc)
+    {
+        csd_leave_pm_dpi( prev_dpi );
+        return FALSE;
+    }
     c = GetPixel( pdc, sx, sy );
+
+    /* If the titlebar pixel is pure black (#000000), check whether the parent
+     * window has already rendered content elsewhere (e.g. a black-titlebar dark
+     * app like Store vs an uninitialized X11 window before first present). */
+    if (c == RGB( 0, 0, 0 ) && !allow_black)
+    {
+        int probes[4][2] = {
+            { (int)prc.right / 2, (int)prc.bottom / 2 },
+            { (int)prc.right / 3, (int)prc.bottom / 3 },
+            { (int)prc.right / 2, sy },
+            { min( 24, (int)prc.right / 4 ), sy },
+        };
+        int i;
+        for (i = 0; i < 4; i++)
+        {
+            COLORREF pc = GetPixel( pdc, probes[i][0], probes[i][1] );
+            if (pc != CLR_INVALID && pc != RGB( 0, 0, 0 ))
+            {
+                content_painted = TRUE;
+                break;
+            }
+        }
+    }
     ReleaseDC( st->parent, pdc );
+    csd_leave_pm_dpi( prev_dpi );
 
     if (c == CLR_INVALID) return FALSE;
-    if (c == RGB( 0, 0, 0 ) && !st->has_sampled_bg) return FALSE;
+    if (c == RGB( 0, 0, 0 ) && !allow_black && !content_painted) return FALSE;
+
     st->sampled_bg = c;
     st->has_sampled_bg = TRUE;
     return TRUE;
@@ -2680,6 +2732,7 @@ static void csd_draw_rect_outline( HDC hdc, int left, int top, int right, int bo
 
 static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
 {
+    DPI_AWARENESS_CONTEXT prev_dpi;
     PAINTSTRUCT ps;
     HDC hdc, memdc;
     HBITMAP bmp, old_bmp;
@@ -2688,8 +2741,13 @@ static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
     BOOL dark, active, zoomed;
     COLORREF bg_norm, fg_norm, bg_hover, bg_press, fg_hover;
 
+    prev_dpi = csd_enter_pm_dpi();
     hdc = BeginPaint( hwnd, &ps );
-    if (!hdc) return;
+    if (!hdc)
+    {
+        csd_leave_pm_dpi( prev_dpi );
+        return;
+    }
 
     GetClientRect( hwnd, &rc );
     w = rc.right - rc.left;
@@ -2697,6 +2755,7 @@ static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
     if (w <= 0 || h <= 0)
     {
         EndPaint( hwnd, &ps );
+        csd_leave_pm_dpi( prev_dpi );
         return;
     }
 
@@ -2707,11 +2766,13 @@ static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
         if (bmp) DeleteObject( bmp );
         if (memdc) DeleteDC( memdc );
         EndPaint( hwnd, &ps );
+        csd_leave_pm_dpi( prev_dpi );
         return;
     }
     old_bmp = SelectObject( memdc, bmp );
 
-    dpi = GetDpiForWindow( st->parent );
+    dpi = GetDpiForWindow( hwnd );
+    if (!dpi) dpi = GetDpiForWindow( st->parent );
     if (!dpi) dpi = 96;
     s = MulDiv( 10, dpi, 96 );
     if (s < 8) s = 8;
@@ -2733,7 +2794,15 @@ static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
 
         if (use_sampled)
         {
-            csd_try_sample_parent_bg( hwnd, st );
+            csd_try_sample_parent_bg( hwnd, st, st->sample_ticks >= 10 );
+            if (st->sample_ticks == 0)
+            {
+                /* Re-sample briefly during startup so any early pre-present pixel
+                 * (unpainted black or COLOR_WINDOW white) updates once the first
+                 * Vulkan/D3D11 frame lands. */
+                st->sample_ticks = 1;
+                SetTimer( hwnd, CSD_BG_SAMPLE_TIMER_ID, 250, NULL );
+            }
             if (st->has_sampled_bg)
             {
                 bg_norm = st->sampled_bg;
@@ -2741,12 +2810,7 @@ static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
             }
             else
             {
-                bg_norm = dark ? RGB( 45, 45, 45 ) : RGB( 243, 243, 243 );
-                if (st->sample_ticks == 0)
-                {
-                    st->sample_ticks = 1;
-                    SetTimer( hwnd, CSD_BG_SAMPLE_TIMER_ID, 250, NULL );
-                }
+                bg_norm = dark ? RGB( 32, 32, 32 ) : RGB( 243, 243, 243 );
             }
         }
         else
@@ -2875,14 +2939,17 @@ static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
     DeleteObject( bmp );
     DeleteDC( memdc );
     EndPaint( hwnd, &ps );
+    csd_leave_pm_dpi( prev_dpi );
 }
 
 static int csd_overlay_hit_button( HWND hwnd, int x, int y )
 {
+    DPI_AWARENESS_CONTEXT prev_dpi = csd_enter_pm_dpi();
     RECT rc;
     int w, h, idx;
 
     GetClientRect( hwnd, &rc );
+    csd_leave_pm_dpi( prev_dpi );
     w = rc.right - rc.left;
     h = rc.bottom - rc.top;
     if (w <= 0 || h <= 0 || x < 0 || x >= w || y < 0 || y >= h) return -1;
@@ -2992,11 +3059,26 @@ static LRESULT CALLBACK csd_overlay_wndproc( HWND hwnd, UINT msg, WPARAM wparam,
     case WM_TIMER:
         if (wparam == CSD_BG_SAMPLE_TIMER_ID && st)
         {
-            if (csd_try_sample_parent_bg( hwnd, st ) || ++st->sample_ticks >= 16)
+            BOOL had_bg = st->has_sampled_bg;
+            COLORREF prev_bg = st->sampled_bg;
+            BOOL ok;
+
+            st->sample_ticks++;
+            ok = csd_try_sample_parent_bg( hwnd, st, st->sample_ticks >= 10 );
+            if (ok)
             {
-                KillTimer( hwnd, CSD_BG_SAMPLE_TIMER_ID );
-                InvalidateRect( hwnd, NULL, FALSE );
+                if (!had_bg || st->sampled_bg != prev_bg)
+                {
+                    st->stable_ticks = 0;
+                    InvalidateRect( hwnd, NULL, FALSE );
+                }
+                else
+                {
+                    st->stable_ticks++;
+                }
             }
+            if ((ok && st->sample_ticks >= 4 && st->stable_ticks >= 2) || st->sample_ticks >= 14)
+                KillTimer( hwnd, CSD_BG_SAMPLE_TIMER_ID );
             return 0;
         }
         return DefWindowProcW( hwnd, msg, wparam, lparam );
@@ -3024,13 +3106,14 @@ static void core_window_sync_csd_overlay( struct core_window *impl )
 {
     static const WCHAR overlay_class[] = L"__wine_csd_caption_overlay";
     static BOOL class_registered;
-    int extend_h, dpi, cluster_w, overlay_w, overlay_h;
+    DPI_AWARENESS_CONTEXT prev_dpi;
+    int extend_dip, dpi, cluster_w, titlebar_h, overlay_w, overlay_h;
     RECT rc;
 
     if (!impl || !impl->hwnd || !IsWindow( impl->hwnd )) return;
 
-    extend_h = (int)(INT_PTR)GetPropW( impl->hwnd, L"__wine_extend_titlebar" );
-    if (extend_h <= 0)
+    extend_dip = (int)(INT_PTR)GetPropW( impl->hwnd, L"__wine_extend_titlebar" );
+    if (extend_dip <= 0)
     {
         if (impl->csd_overlay_hwnd && IsWindow( impl->csd_overlay_hwnd ))
             ShowWindow( impl->csd_overlay_hwnd, SW_HIDE );
@@ -3049,31 +3132,44 @@ static void core_window_sync_csd_overlay( struct core_window *impl )
         class_registered = TRUE;
     }
 
-    GetClientRect( impl->hwnd, &rc );
-    if (rc.right <= 0 || rc.bottom <= 0) return;
+    /* Operate in per-monitor physical DPI so the overlay HWND and its direct X11
+     * subwindow always have identical 1:1 physical pixel geometry and never clip
+     * on scaled monitors or DPI-unaware/system-DPI-aware apps. */
+    prev_dpi = csd_enter_pm_dpi();
 
-    dpi = GetDpiForWindow( impl->hwnd );
-    if (!dpi) dpi = 96;
-    cluster_w = MulDiv( 138, dpi, 96 );
-    overlay_w = min( cluster_w, (int)rc.right );
-    overlay_h = min( extend_h, (int)rc.bottom );
+    if (!GetClientRect( impl->hwnd, &rc ) || rc.right <= 0 || rc.bottom <= 0)
+    {
+        csd_leave_pm_dpi( prev_dpi );
+        return;
+    }
 
     if (!impl->csd_overlay_hwnd || !IsWindow( impl->csd_overlay_hwnd ))
     {
         impl->csd_overlay_hwnd = CreateWindowExW(
             0, overlay_class, NULL,
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-            rc.right - overlay_w, 0, overlay_w, overlay_h,
+            0, 0, 1, 1,
             impl->hwnd, NULL, GetModuleHandleW( NULL ), NULL );
     }
 
     if (impl->csd_overlay_hwnd)
     {
+        dpi = GetDpiForWindow( impl->csd_overlay_hwnd );
+        if (!dpi) dpi = GetDpiForWindow( impl->hwnd );
+        if (!dpi) dpi = 96;
+        cluster_w = MulDiv( 138, dpi, 96 );
+        titlebar_h = MulDiv( extend_dip, dpi, 96 );
+        if (titlebar_h < 24) titlebar_h = 24;
+        overlay_w = min( cluster_w, (int)rc.right );
+        overlay_h = min( titlebar_h, (int)rc.bottom );
+
         SetWindowPos( impl->csd_overlay_hwnd, HWND_TOP,
                       rc.right - overlay_w, 0, overlay_w, overlay_h,
                       SWP_SHOWWINDOW | SWP_NOACTIVATE );
         InvalidateRect( impl->csd_overlay_hwnd, NULL, FALSE );
     }
+
+    csd_leave_pm_dpi( prev_dpi );
 }
 
 static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
@@ -3117,17 +3213,18 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
 
     case WM_NCHITTEST:
     {
-        int extend_h = (int)(INT_PTR)GetPropW( hwnd, L"__wine_extend_titlebar" );
-        if (extend_h > 0)
+        int extend_dip = (int)(INT_PTR)GetPropW( hwnd, L"__wine_extend_titlebar" );
+        if (extend_dip > 0)
         {
             POINT pt = { (short)LOWORD( lparam ), (short)HIWORD( lparam ) };
             RECT wr;
             UINT dpi = GetDpiForWindow( hwnd );
-            int border, cluster_w;
+            int border, cluster_w, extend_h;
 
             if (!dpi) dpi = 96;
             border = MulDiv( 6, dpi, 96 );
             cluster_w = MulDiv( 138, dpi, 96 );
+            extend_h = MulDiv( extend_dip, dpi, 96 );
 
             if (GetWindowRect( hwnd, &wr ))
             {
@@ -3315,7 +3412,12 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
             core_window_deliver_activation( impl, state );
         }
         if (impl && impl->csd_overlay_hwnd && IsWindow( impl->csd_overlay_hwnd ))
+        {
+            struct csd_overlay_state *st =
+                (struct csd_overlay_state *)GetWindowLongPtrW( impl->csd_overlay_hwnd, GWLP_USERDATA );
+            if (st) csd_try_sample_parent_bg( impl->csd_overlay_hwnd, st, st->has_sampled_bg );
             InvalidateRect( impl->csd_overlay_hwnd, NULL, FALSE );
+        }
         return DefWindowProcW( hwnd, msg, wparam, lparam );
     }
 

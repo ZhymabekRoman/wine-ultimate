@@ -3478,6 +3478,17 @@ static void sync_csd_overlay_window( struct x11drv_win_data *data, UINT style )
     y = data->rects.visible.top  + (parent_data->rects.client.top  - parent_data->rects.visible.top);
     w = max( 1, data->rects.visible.right  - data->rects.visible.left );
     h = max( 1, data->rects.visible.bottom - data->rects.visible.top );
+    {
+        int parent_w = parent_data->rects.visible.right - parent_data->rects.visible.left;
+        int parent_h = parent_data->rects.visible.bottom - parent_data->rects.visible.top;
+        if (parent_w > 0)
+        {
+            if (w > parent_w) w = parent_w;
+            if (x + w > parent_w) x = parent_w - w;
+            if (x < 0) x = 0;
+        }
+        if (parent_h > 0 && h > parent_h) h = parent_h;
+    }
 
     if (data->overlay_window && data->overlay_parent != parent_win)
     {

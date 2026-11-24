@@ -1368,10 +1368,10 @@ static void title_bar_apply_dwm( struct core_application_view_title_bar *impl )
 
     if (impl->extend_view_into_title_bar)
     {
-        dpi = GetDpiForWindow( hwnd );
-        if (!dpi) dpi = 96;
-        height_px = MulDiv( impl->height > 0.0 ? (int)(impl->height + 0.5) : 32, dpi, 96 );
+        height_px = impl->height > 0.0 ? (int)(impl->height + 0.5) : 32;
         if (height_px < 24) height_px = 24;
+        /* Store DIP height so CoreWindow scales it accurately in both window DPI
+         * (WM_NCHITTEST) and per-monitor physical DPI (CSD overlay child). */
         SetPropW( hwnd, L"__wine_extend_titlebar", (HANDLE)(INT_PTR)height_px );
     }
     else
@@ -1388,7 +1388,9 @@ static void title_bar_apply_dwm( struct core_application_view_title_bar *impl )
     }
     if (pDwmExtendFrameIntoClientArea)
     {
-        margins.cyTopHeight = height_px;
+        dpi = GetDpiForWindow( hwnd );
+        if (!dpi) dpi = 96;
+        margins.cyTopHeight = height_px ? MulDiv( height_px, dpi, 96 ) : 0;
         pDwmExtendFrameIntoClientArea( hwnd, &margins );
     }
 
