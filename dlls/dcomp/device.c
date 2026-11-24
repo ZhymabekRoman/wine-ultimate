@@ -1804,6 +1804,70 @@ static BOOL visual_tree_has_content(struct composition_visual *visual)
     return FALSE;
 }
 
+static struct composition_target *find_in_process_target_for_root(const struct composition_target *exclude,
+        HANDLE shared_handle, const struct composition_visual *child_root)
+{
+    struct composition_device *dev;
+    struct composition_target *t;
+
+    LIST_FOR_EACH_ENTRY(dev, &dcomp_devices, struct composition_device, dev_entry)
+    {
+        LIST_FOR_EACH_ENTRY(t, &dev->targets, struct composition_target, entry)
+        {
+            if (t == exclude || !t->root)
+                continue;
+            if (child_root && impl_from_IDCompositionVisual(t->root) == child_root)
+                return t;
+            if (shared_handle && t->shared_visual_handle
+                    && compare_handles(t->shared_visual_handle, shared_handle))
+                return t;
+        }
+    }
+    return NULL;
+}
+
+static BOOL visual_subtree_delegates_in_process(const struct composition_target *target,
+        const struct composition_visual *visual, unsigned int depth, BOOL *found_delegate)
+{
+    const struct composition_visual *child;
+
+    if (!visual || depth > 64)
+        return TRUE;
+    if (visual->content || visual->is_shared_proxy)
+        return FALSE;
+    if (visual->shared_visual_handle)
+    {
+        struct composition_visual *child_root = resolve_shared_visual_root(visual->shared_visual_handle);
+        if (!child_root || child_root->is_shared_proxy)
+            return FALSE;
+        if (!find_in_process_target_for_root(target, visual->shared_visual_handle, child_root))
+            return FALSE;
+        *found_delegate = TRUE;
+    }
+    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, const struct composition_visual, entry)
+    {
+        if (!visual_subtree_delegates_in_process(target, child, depth + 1, found_delegate))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* Returns TRUE when 'target' has no local content or cross-process proxies of its own
+ * and purely forwards through shared_visual_handle(s) to live in-process target(s)
+ * that already composite their own visual trees to the resolved HWND. Skipping these
+ * forwarding targets avoids creating competing swapchains and X11 client windows on
+ * the same HWND (which otherwise expose/flush stale GDI surfaces and cause full-window
+ * white flashes on popup/menu commits). */
+static BOOL target_delegates_to_in_process_target(const struct composition_target *target,
+        const struct composition_visual *root)
+{
+    BOOL found_delegate = FALSE;
+
+    if (!root)
+        return FALSE;
+    return visual_subtree_delegates_in_process(target, root, 0, &found_delegate) && found_delegate;
+}
+
 /*
  * Locking: dcomp_cs protects the composition object graph - the device list,
  * the target lists, the visual trees and the per-target bookkeeping. It may
@@ -2459,6 +2523,20 @@ static void find_target_containers(struct composition_device *device)
             continue;
 
         snap->container = find_root_visual_container(snap->target, &host_target);
+        if (host_target && !host_target->hwnd)
+        {
+            struct composition_target *cur = host_target, *up_host = NULL;
+            unsigned int hops = 0;
+
+            while (cur && !cur->hwnd && hops++ < 8)
+            {
+                if (!find_root_visual_container(cur, &up_host) || !up_host || up_host == cur)
+                    break;
+                cur = up_host;
+            }
+            if (cur && cur->hwnd)
+                host_target = cur;
+        }
         if (snap->container)
             IDCompositionVisual_AddRef((IDCompositionVisual *)&snap->container->IDCompositionVisualUnknown_iface);
         if ((snap->host_target = host_target))
@@ -2538,6 +2616,12 @@ static void collect_device_frames(struct composition_device *device, LONG *out_t
             {
                 target->hwnd = snap->resolved_hwnd;
             }
+        }
+
+        if (target_delegates_to_in_process_target(target, root))
+        {
+            target->needs_redraw = FALSE;
+            continue;
         }
 
         {
