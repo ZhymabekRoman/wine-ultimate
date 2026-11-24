@@ -739,6 +739,9 @@ void dxgi_vk_free_shared_image(UINT64 vk_image, UINT64 vk_memory, HANDLE nt_hand
 
 static void STDMETHODCALLTYPE shm_staging_destroyed(void *parent) {}
 static const struct wined3d_parent_ops shm_staging_parent_ops = { shm_staging_destroyed };
+static LONG g_zc_alloc_gen = 0;
+
+#define WINE_DCOMP_SHM_HEADER_SIZE 64
 
 static BOOL d3d11_swapchain_export_shm(struct d3d11_swapchain *swapchain)
 {
@@ -759,6 +762,8 @@ static BOOL d3d11_swapchain_export_shm(struct d3d11_swapchain *swapchain)
     if (FAILED(d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface, 0, &IID_IDXGIResource1, (void **)&res)) || !res)
         return FALSE;
     kmt = dxgi_resource_get_existing_kmt_handle(res);
+    if (!kmt && (swapchain->shm_kmt_handle || swapchain->is_composition_surface))
+        IDXGIResource1_GetSharedHandle(res, &kmt);
     IDXGIResource1_Release(res);
     if (!kmt)
         kmt = swapchain->shm_kmt_handle;
@@ -781,13 +786,13 @@ static BOOL d3d11_swapchain_export_shm(struct d3d11_swapchain *swapchain)
     }
 
     row_bytes = rdesc.width * 4;
-    needed = 32 + (SIZE_T)row_bytes * rdesc.height;
+    needed = WINE_DCOMP_SHM_HEADER_SIZE + (SIZE_T)row_bytes * rdesc.height;
     if (swapchain->shm_kmt_handle != kmt || swapchain->shm_size < needed)
     {
-        /* Reserve up to 4096x2160x4 + 32 (~35 MB virtual; only touched pages use RAM)
+        /* Reserve up to 4096x2160x4 + header (~35 MB virtual; only touched pages use RAM)
          * so ResizeBuffers (e.g. 1272x990 -> 2560x1440) never hits ERROR_ALREADY_EXISTS
          * with a smaller file mapping. */
-        SIZE_T map_size = 32 + (SIZE_T)4096 * 2160 * 4;
+        SIZE_T map_size = WINE_DCOMP_SHM_HEADER_SIZE + (SIZE_T)4096 * 2160 * 4;
         WCHAR name[64];
         if (needed > map_size) map_size = needed;
         if (swapchain->shm_ptr) { UnmapViewOfFile(swapchain->shm_ptr); swapchain->shm_ptr = NULL; }
@@ -850,8 +855,9 @@ static BOOL d3d11_swapchain_export_shm(struct d3d11_swapchain *swapchain)
                 swapchain->zc_alloc_size = alloc_sz;
                 swapchain->zc_width = rdesc.width;
                 swapchain->zc_height = rdesc.height;
-                TRACE("Zero-copy GPU surface allocated %ux%u (handle %p, size %s).\n",
-                        rdesc.width, rdesc.height, nt_h, wine_dbgstr_longlong(alloc_sz));
+                swapchain->zc_gen = (UINT)InterlockedIncrement(&g_zc_alloc_gen);
+                TRACE("Zero-copy GPU surface allocated %ux%u (handle %p, size %s, gen %u).\n",
+                        rdesc.width, rdesc.height, nt_h, wine_dbgstr_longlong(alloc_sz), swapchain->zc_gen);
             }
             else
             {
@@ -878,6 +884,7 @@ static BOOL d3d11_swapchain_export_shm(struct d3d11_swapchain *swapchain)
             hdr[5] = GetCurrentProcessId();
             hdr[6] = (UINT)(ULONG_PTR)swapchain->zc_nt_handle;
             hdr[7] = (UINT)swapchain->zc_alloc_size;
+            hdr[8] = swapchain->zc_gen;
             MemoryBarrier();
             InterlockedIncrement((LONG *)&hdr[3]);
 
@@ -915,7 +922,7 @@ static BOOL d3d11_swapchain_export_shm(struct d3d11_swapchain *swapchain)
     if (SUCCEEDED(hr) && map_desc.data)
     {
         hdr = (UINT *)swapchain->shm_ptr;
-        dst_px = (BYTE *)swapchain->shm_ptr + 32;
+        dst_px = (BYTE *)swapchain->shm_ptr + WINE_DCOMP_SHM_HEADER_SIZE;
         /* Seqlock: odd = write in progress, even = complete stable frame. */
         InterlockedIncrement((LONG *)&hdr[3]);
         MemoryBarrier();

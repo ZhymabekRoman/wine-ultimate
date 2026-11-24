@@ -2913,8 +2913,13 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
     if (impl->dcomp_root_visual)
     {
-        D2D_RECT_F clip = { 0.0f, 0.0f, (float)width, (float)height };
-        IDCompositionVisual_SetClip( (IDCompositionVisual *)impl->dcomp_root_visual, &clip );
+        RECT client_rc;
+        if (hwnd && IsWindow( hwnd ) && !IsIconic( hwnd ) &&
+            GetClientRect( hwnd, &client_rc ) && client_rc.right > 0 && client_rc.bottom > 0)
+        {
+            D2D_RECT_F clip = { 0.0f, 0.0f, (float)client_rc.right, (float)client_rc.bottom };
+            IDCompositionVisual_SetClip( (IDCompositionVisual *)impl->dcomp_root_visual, &clip );
+        }
     }
 
     /* 4. Connect Window.Current.Content visual to root visual */
@@ -3127,7 +3132,17 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u scale %.2f)\n", hwnd, width, height, scale );
     TRACE( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
     InterlockedExchange( &g_xaml_window_dirty, 0 );
-    xaml_wv2_on_window_ready( hwnd, width, height );
+    {
+        RECT client_rc;
+        UINT wv2_w = width, wv2_h = height;
+        if (hwnd && IsWindow( hwnd ) && !IsIconic( hwnd ) &&
+            GetClientRect( hwnd, &client_rc ) && client_rc.right > 0 && client_rc.bottom > 0)
+        {
+            wv2_w = (UINT)client_rc.right;
+            wv2_h = (UINT)client_rc.bottom;
+        }
+        xaml_wv2_on_window_ready( hwnd, wv2_w, wv2_h );
+    }
     g_in_xaml_present = FALSE;
     return S_OK;
 }

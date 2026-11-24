@@ -574,6 +574,15 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
 {
     if (msg == WM_ERASEBKGND && g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
         return 1;
+    if (msg == WM_SETCURSOR && LOWORD( lparam ) == HTCLIENT)
+    {
+        HWND target = (HWND)wparam;
+        if (target && target != hwnd && !GetClassLongPtrW( target, GCLP_HCURSOR ))
+        {
+            SetCursor( LoadCursorW( NULL, (LPCWSTR)IDC_ARROW ) );
+            return TRUE;
+        }
+    }
     if (msg == WM_SIZE)
     {
         if (g_active_wv2_impl && g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
@@ -717,8 +726,12 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
                 (cur_rc.bottom - cur_rc.top) != ctx->height)
             {
                 ShowWindowAsync( child, SW_SHOW );
-                SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
-                              SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
+                if (!g_active_wv2_impl)
+                    SetWindowPos( child, HWND_BOTTOM, 0, 0, ctx->width, ctx->height,
+                                  SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
+                else
+                    SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
+                                  SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
                 ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
                        child, debugstr_w( cls ), ctx->width, ctx->height );
             }

@@ -34,11 +34,53 @@ static INIT_ONCE composite_class_once = INIT_ONCE_STATIC_INIT;
 
 static LRESULT CALLBACK dcomp_composite_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
+    struct composition_target *target;
+
+    if (msg == WM_NCCREATE)
+    {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lparam;
+        if (cs)
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+
+    target = (struct composition_target *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
     switch (msg)
     {
     case WM_ERASEBKGND:
+        if (!target || !target->composite_swapchain)
+        {
+            HDC hdc = (HDC)wparam;
+            RECT rc;
+            HBRUSH brush;
+
+            GetClientRect(hwnd, &rc);
+            brush = CreateSolidBrush(apps_use_light_theme() ? RGB(243, 243, 243) : RGB(32, 32, 32));
+            if (brush)
+            {
+                FillRect(hdc, &rc, brush);
+                DeleteObject(brush);
+            }
+        }
         return 1;
     case WM_PAINT:
+        if (!target || !target->composite_swapchain)
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            if (hdc)
+            {
+                HBRUSH brush = CreateSolidBrush(apps_use_light_theme() ? RGB(243, 243, 243) : RGB(32, 32, 32));
+                if (brush)
+                {
+                    FillRect(hdc, &ps.rcPaint, brush);
+                    DeleteObject(brush);
+                }
+                EndPaint(hwnd, &ps);
+            }
+            return 0;
+        }
         ValidateRect(hwnd, NULL);
         return 0;
     case WM_NCHITTEST:
@@ -119,12 +161,21 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
             root_visual->is_root = FALSE;
             IDCompositionVisual_Release(target->root);
         }
+        if (target->composite_hwnd && IsWindow(target->composite_hwnd))
+            SetWindowLongPtrW(target->composite_hwnd, GWLP_USERDATA, 0);
         if (target->shared_visual_handle)
             CloseHandle(target->shared_visual_handle);
         if (target->composite_rtv)
             ID3D11RenderTargetView_Release(target->composite_rtv);
         if (target->composite_swapchain)
             IDXGISwapChain1_Release(target->composite_swapchain);
+        if (target->composite_hwnd)
+        {
+            HWND comp_hwnd = target->composite_hwnd;
+            target->composite_hwnd = NULL;
+            if (IsWindow(comp_hwnd))
+                DestroyWindow(comp_hwnd);
+        }
         if (target->composite_device)
             ID3D11Device_Release(target->composite_device);
         if (target->composite_sampler)
@@ -292,6 +343,7 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     dcomp_unlock();
     target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
     target->ref = 1;
+    target->topmost = topmost;
     target->hwnd = hwnd;
     {
         WCHAR cls[64];
@@ -302,13 +354,26 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
             target->composite_hwnd = NULL;
         else
         {
+            RECT rc = {0};
+            int cw = 1, ch = 1;
+            DWORD style = WS_CHILD | WS_CLIPSIBLINGS;
+
+            if (topmost)
+            {
+                style |= WS_VISIBLE;
+                if (GetClientRect(hwnd, &rc) && rc.right > 0 && rc.bottom > 0)
+                {
+                    cw = rc.right;
+                    ch = rc.bottom;
+                }
+            }
             InitOnceExecuteOnce(&composite_class_once, register_composite_class_cb, NULL, NULL);
             target->composite_hwnd = CreateWindowExW(WS_EX_TRANSPARENT, dcomp_composite_class, NULL,
-                    WS_CHILD | WS_CLIPSIBLINGS,
-                    0, 0, 1, 1, hwnd, NULL, NULL, NULL);
+                    style, 0, 0, cw, ch, hwnd, NULL, NULL, target);
+            if (target->composite_hwnd)
+                SetWindowLongPtrW(target->composite_hwnd, GWLP_USERDATA, (LONG_PTR)target);
         }
     }
-    target->topmost = topmost;
     target->device = &device->IDCompositionDevice_iface;
     *new_target = &target->IDCompositionTarget_iface;
 

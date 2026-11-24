@@ -749,7 +749,7 @@ static ID3D11ShaderResourceView *get_or_create_visual_srv(struct composition_vis
  * visual's rectangle clip. Falls back to a plain GPU CopySubresourceRegion
  * only when even a cached SRV copy texture cannot be created.
  */
-static BOOL apps_use_light_theme(void)
+BOOL apps_use_light_theme(void)
 {
     static LONG cached = -1;
     LONG val = InterlockedCompareExchange(&cached, -1, -1);
@@ -2924,6 +2924,9 @@ static void composite_wait_vblank(struct composition_device *device, unsigned in
     ULONGLONG start;
     LONGLONG elapsed_us;
 
+    if (!refresh_period)
+        return;
+
     if (!device->vblank_valid)
     {
         D3DKMT_OPENADAPTERFROMHDC open_desc;
@@ -2969,7 +2972,11 @@ static void composite_wait_vblank(struct composition_device *device, unsigned in
     elapsed_us = device->qpc_freq.QuadPart ? (LONGLONG)((qpc_now() - start) * 1000000ULL
             / (ULONGLONG)device->qpc_freq.QuadPart) : 0;
     if (elapsed_us < (LONGLONG)refresh_period * 500) /* stub: emulate the vblank interval */
-        Sleep(refresh_period - (unsigned int)(elapsed_us / 1000));
+    {
+        unsigned int spent_ms = (unsigned int)(elapsed_us / 1000);
+        if (refresh_period > spent_ms)
+            Sleep(refresh_period - spent_ms);
+    }
 }
 
 static BOOL visual_tree_check_swapchain(const struct composition_visual *visual, unsigned int depth,
@@ -3299,12 +3306,6 @@ static DWORD WINAPI composite_thread_proc(void *iface)
         else
         {
             idle_ticks = 0;
-            if (elapsed < refresh_period)
-            {
-                DWORD rem = refresh_period - elapsed;
-                Sleep(rem > 0 ? rem : 1);
-                continue;
-            }
         }
 
         /* Present/vblank cadence. Reset the manual-reset compositor clock, do the
@@ -3315,26 +3316,40 @@ static DWORD WINAPI composite_thread_proc(void *iface)
          * same tick: the CoreMessaging lifted-input workers that parked on the
          * commit-completion event then advance on the present cadence instead of
          * only when the app calls into device_Commit / WaitForCommitCompletion. */
-        if ((device->commit_pending || device->last_has_shared || sc_updated)
-                && TryEnterCriticalSection(&composite_render_cs))
+        if (device->commit_pending || device->last_has_shared || sc_updated)
         {
-            if (qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= refresh_period)
-            {
-                BOOL had_pending;
+            ULONGLONG prev_qpc = device->last_composite_qpc;
+            unsigned int cur_elapsed = qpc_elapsed_ms(prev_qpc, device->qpc_freq);
 
-                composite_wait_vblank(device, refresh_period);
-                had_pending = InterlockedExchange(&device->commit_pending, FALSE);
-                if (g_compositor_clock_event)
-                    ResetEvent(g_compositor_clock_event);
-                if (composite_device(device) || had_pending || device->last_has_shared)
+            if (cur_elapsed < refresh_period)
+                composite_wait_vblank(device, refresh_period - cur_elapsed);
+            if (device->exit_thread)
+                break;
+
+            if (TryEnterCriticalSection(&composite_render_cs))
+            {
+                if (device->last_composite_qpc == prev_qpc
+                        || qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= refresh_period)
                 {
-                    device->last_composite_qpc = qpc_now();
-                    idle_ticks = 0;
+                    BOOL had_pending;
+
+                    had_pending = InterlockedExchange(&device->commit_pending, FALSE);
+                    if (g_compositor_clock_event)
+                        ResetEvent(g_compositor_clock_event);
+                    if (composite_device(device) || had_pending || device->last_has_shared)
+                    {
+                        device->last_composite_qpc = qpc_now();
+                        idle_ticks = 0;
+                    }
+                    if (g_compositor_clock_event)
+                        SetEvent(g_compositor_clock_event);
                 }
-                if (g_compositor_clock_event)
-                    SetEvent(g_compositor_clock_event);
+                LeaveCriticalSection(&composite_render_cs);
             }
-            LeaveCriticalSection(&composite_render_cs);
+            else if (g_compositor_clock_event)
+            {
+                SetEvent(g_compositor_clock_event);
+            }
         }
         else if (g_compositor_clock_event)
         {
@@ -3342,13 +3357,13 @@ static DWORD WINAPI composite_thread_proc(void *iface)
         }
         if (device->self_release)
             break;
-        /* Throttle the completion-side pulses to ~30Hz (every 2nd present tick).
-         * A full-60Hz commit-completion pulse drives the composition churn so hard
+        /* Throttle the completion-side pulses to ~15Hz (every 4th 60Hz tick, ~64ms).
+         * A faster commit-completion pulse drives the composition churn so hard
          * the WebView2 browser tears down early (ShowWindow climbs, LRPC drain is
-         * truncated). Every 2nd tick keeps the lifted-input workers advancing on the
+         * truncated). Every 4th tick keeps the lifted-input workers advancing on the
          * present cadence while leaving the browser enough lifetime to issue further
          * LRPC requests on the composition plane. */
-        if (!(++tick % 2))
+        if (!(++tick % 4))
         {
             LONG k;
             struct composition_target *st;
@@ -3849,6 +3864,20 @@ IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, str
     if (visual->shm_kmt_handle != visual->shared_content_handle || !visual->shm_ptr)
     {
         WCHAR shm_name[64];
+        if (visual->shm_kmt_handle != visual->shared_content_handle)
+        {
+            if (visual->zc_tex)
+            {
+                ID3D11Texture2D_Release(visual->zc_tex);
+                visual->zc_tex = NULL;
+            }
+            visual->zc_pid = 0;
+            visual->zc_remote_handle = NULL;
+            visual->zc_w = 0;
+            visual->zc_h = 0;
+            visual->zc_alloc_size = 0;
+            visual->zc_gen = 0;
+        }
         if (visual->shm_ptr) { UnmapViewOfFile(visual->shm_ptr); visual->shm_ptr = NULL; }
         if (visual->shm_map) { CloseHandle(visual->shm_map); visual->shm_map = NULL; }
         visual->shm_kmt_handle = visual->shared_content_handle;
@@ -3873,11 +3902,13 @@ IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, str
                 DWORD pid = hdr[5];
                 HANDLE remote_h = (HANDLE)(ULONG_PTR)hdr[6];
                 UINT alloc_sz = hdr[7];
+                UINT gen = hdr[8];
 
                 if (pid && remote_h && alloc_sz)
                 {
                     if (!visual->zc_tex || visual->zc_pid != pid || visual->zc_remote_handle != remote_h
-                            || visual->zc_w != w || visual->zc_h != h || visual->zc_alloc_size != alloc_sz)
+                            || visual->zc_w != w || visual->zc_h != h || visual->zc_alloc_size != alloc_sz
+                            || visual->zc_gen != gen)
                     {
                         HANDLE src_proc = NULL, local_h = NULL;
                         ID3D11Texture2D *ztex = NULL;
@@ -3920,10 +3951,11 @@ IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, str
                                     visual->zc_w = w;
                                     visual->zc_h = h;
                                     visual->zc_alloc_size = alloc_sz;
+                                    visual->zc_gen = gen;
                                     visual->size.cx = (LONG)w;
                                     visual->size.cy = (LONG)h;
-                                    TRACE("DCOMP: Imported zero-copy GPU texture %ux%u (pid %lu, handle %p, size %u)\n",
-                                            w, h, pid, remote_h, alloc_sz);
+                                    TRACE("DCOMP: Imported zero-copy GPU texture %ux%u (pid %lu, handle %p, size %u, gen %u)\n",
+                                            w, h, pid, remote_h, alloc_sz, gen);
                                 }
                                 else
                                 {
@@ -3978,7 +4010,7 @@ IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, str
                     if (ctx)
                     {
                         ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)visual->shm_tex,
-                                0, NULL, (const BYTE *)hdr + 32, stride, 0);
+                                0, NULL, (const BYTE *)hdr + 64, stride, 0);
                         ID3D11DeviceContext_Release(ctx);
                     }
                     MemoryBarrier();

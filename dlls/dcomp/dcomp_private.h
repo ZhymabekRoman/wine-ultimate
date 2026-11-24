@@ -279,6 +279,7 @@ struct composition_visual
     UINT zc_w;
     UINT zc_h;
     UINT zc_alloc_size;
+    UINT zc_gen;
     HWND captured_hwnd;
     LONG ref;
 };
@@ -351,6 +352,7 @@ IDXGISurface *shared_proxy_open_surface(struct composition_device *comp_dev, str
 HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXGISurface *dxgi_surface, IUnknown **out_surface);
 void ensure_composite_thread(struct composition_device *device);
 BOOL dcomp_has_active_composite_thread(void);
+BOOL apps_use_light_theme(void);
 void visual_tree_mark_dirty(struct composition_visual *visual);
 void visual_get_local_transform_3d(const struct composition_visual *visual, D3DMATRIX *out);
 void visual_get_transform_3d(const struct composition_visual *visual, UINT width, UINT height,

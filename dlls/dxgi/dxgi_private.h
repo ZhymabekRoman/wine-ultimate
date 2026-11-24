@@ -244,6 +244,7 @@ struct d3d11_swapchain
     UINT64 zc_alloc_size;
     UINT zc_width;
     UINT zc_height;
+    UINT zc_gen;
     BOOL zc_failed;
     DXGI_MATRIX_3X2_F matrix_transform;
     SRWLOCK snap_lock;
