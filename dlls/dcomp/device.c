@@ -5098,91 +5098,91 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateFromSharedVisualHandle(IDC
     }
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown1(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot31(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown2(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot32(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown3(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot33(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown4(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot34(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown5(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot35(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown6(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot36(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown7(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot37(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown8(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot38(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown9(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot39(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown10(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot40(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown11(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot41(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown12(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot42(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown13(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot43(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown14(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot44(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown15(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot45(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
@@ -5190,7 +5190,7 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown15(IDCompositionDeviceUnk
 
 static LONG g_batch_id_counter = 10;
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown16(IDCompositionDeviceUnknown *iface, void **parameter1)
+static HRESULT STDMETHODCALLTYPE desktop_device_AcquireBatchId(IDCompositionDeviceUnknown *iface, void **parameter1)
 {
     TRACE("iface %p parameter1 %p.\n", iface, parameter1);
 
@@ -5201,10 +5201,10 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown16(IDCompositionDeviceUnk
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown17(IDCompositionDeviceUnknown *iface, void **parameter1)
+static HRESULT STDMETHODCALLTYPE desktop_device_AcquireCommitBatchId(IDCompositionDeviceUnknown *iface, void **parameter1)
 {
     void *ret = __builtin_return_address(0);
-    TRACE("DCOMP: desktop_device_Unknown17 iface %p parameter1 %p caller %p\n", iface, parameter1, ret);
+    TRACE("DCOMP: desktop_device_AcquireCommitBatchId iface %p parameter1 %p caller %p\n", iface, parameter1, ret);
 
     if (!parameter1)
         return E_INVALIDARG;
@@ -5213,493 +5213,493 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown17(IDCompositionDeviceUnk
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown18(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot48(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown19(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot49(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown20(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot50(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown21(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot51(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown22(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot52(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown23(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot53(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown24(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot54(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown25(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot55(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown26(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot56(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown27(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot57(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown28(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot58(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown29(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot59(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown30(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot60(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown31(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot61(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown32(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot62(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown33(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot63(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown34(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot64(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown35(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot65(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown36(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot66(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown37(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot67(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown38(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot68(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown39(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot69(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown40(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot70(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown41(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot71(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown42(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot72(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown43(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot73(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown44(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot74(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown45(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot75(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown46(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot76(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown47(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot77(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown48(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot78(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown49(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot79(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown50(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot80(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown51(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot81(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown52(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot82(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown53(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot83(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown54(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot84(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown55(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot85(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown56(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot86(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown57(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot87(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown58(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot88(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown59(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot89(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown60(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot90(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown61(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot91(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown62(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot92(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown63(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot93(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown64(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot94(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown65(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot95(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown66(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot96(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown67(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot97(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown68(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot98(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown69(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot99(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown70(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot100(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown71(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot101(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown72(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot102(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown73(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot103(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown74(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot104(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown75(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot105(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown76(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot106(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown77(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot107(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown78(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot108(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown79(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot109(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown80(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot110(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown81(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot111(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown82(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot112(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown83(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot113(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown84(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot114(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown85(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot115(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown86(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot116(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown87(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot117(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown88(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot118(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown89(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot119(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown90(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot120(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown91(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot121(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown92(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot122(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown93(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot123(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown94(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot124(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown95(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot125(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown96(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot126(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown97(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot127(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown98(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot128(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE desktop_device_Unknown99(IDCompositionDeviceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE desktop_device_reserved_slot129(IDCompositionDeviceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
@@ -5763,105 +5763,105 @@ static const struct IDCompositionDeviceUnknownVtbl desktop_device_vtbl =
     desktop_device_OpenSharedResourceHandle,
     desktop_device_CreateFromSharedVisualHandle,
     /* IDCompositionDeviceUnknown methods */
-    desktop_device_Unknown1,
-    desktop_device_Unknown2,
-    desktop_device_Unknown3,
-    desktop_device_Unknown4,
-    desktop_device_Unknown5,
-    desktop_device_Unknown6,
-    desktop_device_Unknown7,
-    desktop_device_Unknown8,
-    desktop_device_Unknown9,
-    desktop_device_Unknown10,
-    desktop_device_Unknown11,
-    desktop_device_Unknown12,
-    desktop_device_Unknown13,
-    desktop_device_Unknown14,
-    desktop_device_Unknown15,
-    desktop_device_Unknown16,
-    desktop_device_Unknown17,
-    desktop_device_Unknown18,
-    desktop_device_Unknown19,
-    desktop_device_Unknown20,
-    desktop_device_Unknown21,
-    desktop_device_Unknown22,
-    desktop_device_Unknown23,
-    desktop_device_Unknown24,
-    desktop_device_Unknown25,
-    desktop_device_Unknown26,
-    desktop_device_Unknown27,
-    desktop_device_Unknown28,
-    desktop_device_Unknown29,
-    desktop_device_Unknown30,
-    desktop_device_Unknown31,
-    desktop_device_Unknown32,
-    desktop_device_Unknown33,
-    desktop_device_Unknown34,
-    desktop_device_Unknown35,
-    desktop_device_Unknown36,
-    desktop_device_Unknown37,
-    desktop_device_Unknown38,
-    desktop_device_Unknown39,
-    desktop_device_Unknown40,
-    desktop_device_Unknown41,
-    desktop_device_Unknown42,
-    desktop_device_Unknown43,
-    desktop_device_Unknown44,
-    desktop_device_Unknown45,
-    desktop_device_Unknown46,
-    desktop_device_Unknown47,
-    desktop_device_Unknown48,
-    desktop_device_Unknown49,
-    desktop_device_Unknown50,
-    desktop_device_Unknown51,
-    desktop_device_Unknown52,
-    desktop_device_Unknown53,
-    desktop_device_Unknown54,
-    desktop_device_Unknown55,
-    desktop_device_Unknown56,
-    desktop_device_Unknown57,
-    desktop_device_Unknown58,
-    desktop_device_Unknown59,
-    desktop_device_Unknown60,
-    desktop_device_Unknown61,
-    desktop_device_Unknown62,
-    desktop_device_Unknown63,
-    desktop_device_Unknown64,
-    desktop_device_Unknown65,
-    desktop_device_Unknown66,
-    desktop_device_Unknown67,
-    desktop_device_Unknown68,
-    desktop_device_Unknown69,
-    desktop_device_Unknown70,
-    desktop_device_Unknown71,
-    desktop_device_Unknown72,
-    desktop_device_Unknown73,
-    desktop_device_Unknown74,
-    desktop_device_Unknown75,
-    desktop_device_Unknown76,
-    desktop_device_Unknown77,
-    desktop_device_Unknown78,
-    desktop_device_Unknown79,
-    desktop_device_Unknown80,
-    desktop_device_Unknown81,
-    desktop_device_Unknown82,
-    desktop_device_Unknown83,
-    desktop_device_Unknown84,
-    desktop_device_Unknown85,
-    desktop_device_Unknown86,
-    desktop_device_Unknown87,
-    desktop_device_Unknown88,
-    desktop_device_Unknown89,
-    desktop_device_Unknown90,
-    desktop_device_Unknown91,
-    desktop_device_Unknown92,
-    desktop_device_Unknown93,
-    desktop_device_Unknown94,
-    desktop_device_Unknown95,
-    desktop_device_Unknown96,
-    desktop_device_Unknown97,
-    desktop_device_Unknown98,
-    desktop_device_Unknown99,
+    desktop_device_reserved_slot31,
+    desktop_device_reserved_slot32,
+    desktop_device_reserved_slot33,
+    desktop_device_reserved_slot34,
+    desktop_device_reserved_slot35,
+    desktop_device_reserved_slot36,
+    desktop_device_reserved_slot37,
+    desktop_device_reserved_slot38,
+    desktop_device_reserved_slot39,
+    desktop_device_reserved_slot40,
+    desktop_device_reserved_slot41,
+    desktop_device_reserved_slot42,
+    desktop_device_reserved_slot43,
+    desktop_device_reserved_slot44,
+    desktop_device_reserved_slot45,
+    desktop_device_AcquireBatchId,
+    desktop_device_AcquireCommitBatchId,
+    desktop_device_reserved_slot48,
+    desktop_device_reserved_slot49,
+    desktop_device_reserved_slot50,
+    desktop_device_reserved_slot51,
+    desktop_device_reserved_slot52,
+    desktop_device_reserved_slot53,
+    desktop_device_reserved_slot54,
+    desktop_device_reserved_slot55,
+    desktop_device_reserved_slot56,
+    desktop_device_reserved_slot57,
+    desktop_device_reserved_slot58,
+    desktop_device_reserved_slot59,
+    desktop_device_reserved_slot60,
+    desktop_device_reserved_slot61,
+    desktop_device_reserved_slot62,
+    desktop_device_reserved_slot63,
+    desktop_device_reserved_slot64,
+    desktop_device_reserved_slot65,
+    desktop_device_reserved_slot66,
+    desktop_device_reserved_slot67,
+    desktop_device_reserved_slot68,
+    desktop_device_reserved_slot69,
+    desktop_device_reserved_slot70,
+    desktop_device_reserved_slot71,
+    desktop_device_reserved_slot72,
+    desktop_device_reserved_slot73,
+    desktop_device_reserved_slot74,
+    desktop_device_reserved_slot75,
+    desktop_device_reserved_slot76,
+    desktop_device_reserved_slot77,
+    desktop_device_reserved_slot78,
+    desktop_device_reserved_slot79,
+    desktop_device_reserved_slot80,
+    desktop_device_reserved_slot81,
+    desktop_device_reserved_slot82,
+    desktop_device_reserved_slot83,
+    desktop_device_reserved_slot84,
+    desktop_device_reserved_slot85,
+    desktop_device_reserved_slot86,
+    desktop_device_reserved_slot87,
+    desktop_device_reserved_slot88,
+    desktop_device_reserved_slot89,
+    desktop_device_reserved_slot90,
+    desktop_device_reserved_slot91,
+    desktop_device_reserved_slot92,
+    desktop_device_reserved_slot93,
+    desktop_device_reserved_slot94,
+    desktop_device_reserved_slot95,
+    desktop_device_reserved_slot96,
+    desktop_device_reserved_slot97,
+    desktop_device_reserved_slot98,
+    desktop_device_reserved_slot99,
+    desktop_device_reserved_slot100,
+    desktop_device_reserved_slot101,
+    desktop_device_reserved_slot102,
+    desktop_device_reserved_slot103,
+    desktop_device_reserved_slot104,
+    desktop_device_reserved_slot105,
+    desktop_device_reserved_slot106,
+    desktop_device_reserved_slot107,
+    desktop_device_reserved_slot108,
+    desktop_device_reserved_slot109,
+    desktop_device_reserved_slot110,
+    desktop_device_reserved_slot111,
+    desktop_device_reserved_slot112,
+    desktop_device_reserved_slot113,
+    desktop_device_reserved_slot114,
+    desktop_device_reserved_slot115,
+    desktop_device_reserved_slot116,
+    desktop_device_reserved_slot117,
+    desktop_device_reserved_slot118,
+    desktop_device_reserved_slot119,
+    desktop_device_reserved_slot120,
+    desktop_device_reserved_slot121,
+    desktop_device_reserved_slot122,
+    desktop_device_reserved_slot123,
+    desktop_device_reserved_slot124,
+    desktop_device_reserved_slot125,
+    desktop_device_reserved_slot126,
+    desktop_device_reserved_slot127,
+    desktop_device_reserved_slot128,
+    desktop_device_reserved_slot129,
 };
 
 static HRESULT create_device(int version, IUnknown *rendering_device, REFIID iid, void **out)

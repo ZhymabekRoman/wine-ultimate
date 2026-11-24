@@ -17,6 +17,7 @@
  */
 
 #include <assert.h>
+#include <math.h>
 #include <stdarg.h>
 
 #define COBJMACROS
@@ -793,62 +794,107 @@ static HRESULT STDMETHODCALLTYPE visual_SetBackFaceVisibility(IDCompositionVisua
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method1(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_EnableHeatMap(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p stub.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method2(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_DisableHeatMap(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p stub.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method3(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_EnableRedrawRegions(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p stub.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method4(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_DisableRedrawRegions(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p stub.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method5(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_SetDepthMode(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p stub.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method6(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_SetOffsetZAnimation(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p stub.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method7(IDCompositionVisualUnknown *iface)
+/* IDCompositionVisual3::SetOffsetZ(float) (vtbl slot 28) */
+static HRESULT WINAPI visual_SetOffsetZ(IDCompositionVisualUnknown *iface, float offset_z)
 {
-    TRACE("iface %p stub.\n", iface);
+    TRACE("iface %p, offset_z %f stub.\n", iface, offset_z);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method8(IDCompositionVisualUnknown *iface)
+/* IDCompositionVisual3::SetOpacity(IDCompositionAnimation *) (vtbl slot 29) */
+static HRESULT WINAPI visual_SetOpacityAnimation(IDCompositionVisualUnknown *iface, void *animation)
 {
-    TRACE("iface %p stub.\n", iface);
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, animation %p stub.\n", iface, animation);
+    dcomp_lock();
+    if (visual->opacity != 1.0f)
+    {
+        visual->opacity = 1.0f;
+        visual->transform_version++;
+        InterlockedIncrement(&dcomp_transform_version);
+    }
+    dcomp_unlock();
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method9(IDCompositionVisualUnknown *iface,
+/* IDCompositionVisual3::SetOpacity(float) (vtbl slot 30) */
+static HRESULT WINAPI visual_SetOpacity(IDCompositionVisualUnknown *iface, float opacity)
+{
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, opacity %f.\n", iface, opacity);
+    if (isnan(opacity))
+        return E_INVALIDARG;
+    if (opacity < 0.0f)
+        opacity = 0.0f;
+    else if (opacity > 1.0f)
+        opacity = 1.0f;
+
+    dcomp_lock();
+    if (visual->opacity != opacity)
+    {
+        visual->opacity = opacity;
+        visual->transform_version++;
+        InterlockedIncrement(&dcomp_transform_version);
+    }
+    dcomp_unlock();
+    return S_OK;
+}
+
+/* IDCompositionVisual3::SetTransform(IDCompositionTransform3D *) (vtbl slot 31) */
+static HRESULT WINAPI visual_SetTransform3DObject(IDCompositionVisualUnknown *iface,
+        void *transform)
+{
+    TRACE("iface %p, transform %p.\n", iface, transform);
+    return visual_SetTransformObject(iface, (IDCompositionTransform *)transform);
+}
+
+/* IDCompositionVisual3::SetTransform(const D2D_MATRIX_4X4_F &) (vtbl slot 32) */
+static HRESULT WINAPI visual_SetTransform3DMatrix(IDCompositionVisualUnknown *iface,
         const D2D_MATRIX_4X4_F *matrix)
 {
     D2D_MATRIX_3X2_F m;
 
     TRACE("iface %p, matrix %p.\n", iface, matrix);
     if (!matrix)
-        return S_OK;
+        return E_INVALIDARG;
 
     m._11 = matrix->_11;
     m._12 = matrix->_12;
@@ -859,33 +905,21 @@ static HRESULT WINAPI visual_unknown_method9(IDCompositionVisualUnknown *iface,
     return visual_SetTransform(iface, &m);
 }
 
-static HRESULT WINAPI visual_unknown_method10(IDCompositionVisualUnknown *iface,
-        void *transform)
+/* IDCompositionVisual3::SetVisible(BOOL) (vtbl slot 33) */
+static HRESULT WINAPI visual_SetVisible(IDCompositionVisualUnknown *iface, BOOL visible)
 {
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return visual_SetTransformObject(iface, (IDCompositionTransform *)transform);
+    TRACE("iface %p, visible %d stub.\n", iface, visible);
+    return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method11(IDCompositionVisualUnknown *iface)
-{
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI visual_unknown_method12(IDCompositionVisualUnknown *iface)
-{
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI visual_unknown_method13(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot34(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
 /* parameter1 is from the second parameter of NtCreateCompositionInputSink() */
-static HRESULT WINAPI visual_unknown_method14(IDCompositionVisualUnknown *iface, void *parameter1)
+static HRESULT WINAPI visual_SetInputSink(IDCompositionVisualUnknown *iface, void *parameter1)
 {
     FIXME("iface %p parameter1 %p stub!\n", iface, parameter1);
     return S_OK;
@@ -903,517 +937,517 @@ static HRESULT WINAPI visual_unknown_method14(IDCompositionVisualUnknown *iface,
  * these private slots, so a request on a live visual is accepted and reported
  * as satisfied; the value-carrying slots record the value on the trace channel.
  */
-static HRESULT WINAPI visual_unknown_method15(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_SetIslandStateSlot36(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method16(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_SetIslandStateSlot37(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method17(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_SetIslandStateSlot38(IDCompositionVisualUnknown *iface)
 {
     TRACE("iface %p.\n", iface);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method18(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot39(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method19(IDCompositionVisualUnknown *iface, float parameter1)
+static HRESULT WINAPI visual_SetIslandFloatSlot40(IDCompositionVisualUnknown *iface, float parameter1)
 {
     TRACE("iface %p, parameter1 %f.\n", iface, parameter1);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method20(IDCompositionVisualUnknown *iface, float parameter1)
+static HRESULT WINAPI visual_SetIslandFloatSlot41(IDCompositionVisualUnknown *iface, float parameter1)
 {
     TRACE("iface %p, parameter1 %f.\n", iface, parameter1);
     return S_OK;
 }
 
-static HRESULT WINAPI visual_unknown_method21(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot42(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method22(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot43(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method23(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot44(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method24(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot45(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method25(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot46(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method26(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot47(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method27(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot48(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method28(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot49(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method29(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot50(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method30(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot51(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method31(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot52(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method32(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot53(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method33(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot54(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method34(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot55(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method35(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot56(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method36(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot57(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method37(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot58(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method38(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot59(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method39(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot60(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method40(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot61(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method41(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot62(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method42(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot63(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method43(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot64(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method44(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot65(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method45(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot66(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method46(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot67(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method47(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot68(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method48(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot69(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method49(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot70(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method50(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot71(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method51(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot72(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method52(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot73(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method53(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot74(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method54(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot75(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method55(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot76(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method56(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot77(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method57(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot78(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method58(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot79(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method59(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot80(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method60(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot81(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method61(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot82(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method62(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot83(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method63(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot84(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method64(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot85(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method65(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot86(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method66(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot87(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method67(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot88(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method68(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot89(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method69(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot90(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method70(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot91(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method71(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot92(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method72(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot93(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method73(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot94(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method74(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot95(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method75(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot96(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method76(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot97(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method77(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot98(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method78(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot99(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method79(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot100(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method80(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot101(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method81(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot102(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method82(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot103(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method83(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot104(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method84(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot105(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method85(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot106(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method86(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot107(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method87(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot108(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method88(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot109(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method89(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot110(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method90(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot111(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method91(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot112(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method92(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot113(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method93(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot114(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method94(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot115(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method95(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot116(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method96(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot117(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method97(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot118(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method98(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot119(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI visual_unknown_method99(IDCompositionVisualUnknown *iface)
+static HRESULT WINAPI visual_reserved_slot120(IDCompositionVisualUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static const struct IDCompositionVisualUnknownVtbl visual_unknown_vtbl =
+static const struct IDCompositionVisualUnknownVtbl visual_vtbl =
 {
     /* IUnknown methods */
     visual_QueryInterface,
@@ -1441,105 +1475,105 @@ static const struct IDCompositionVisualUnknownVtbl visual_unknown_vtbl =
     visual_SetOpacityMode,
     visual_SetBackFaceVisibility,
     /* IDCompositionVisualUnknown methods */
-    visual_unknown_method1,
-    visual_unknown_method2,
-    visual_unknown_method3,
-    visual_unknown_method4,
-    visual_unknown_method5,
-    visual_unknown_method6,
-    visual_unknown_method7,
-    visual_unknown_method8,
-    visual_unknown_method9,
-    visual_unknown_method10,
-    visual_unknown_method11,
-    visual_unknown_method12,
-    visual_unknown_method13,
-    visual_unknown_method14,
-    visual_unknown_method15,
-    visual_unknown_method16,
-    visual_unknown_method17,
-    visual_unknown_method18,
-    visual_unknown_method19,
-    visual_unknown_method20,
-    visual_unknown_method21,
-    visual_unknown_method22,
-    visual_unknown_method23,
-    visual_unknown_method24,
-    visual_unknown_method25,
-    visual_unknown_method26,
-    visual_unknown_method27,
-    visual_unknown_method28,
-    visual_unknown_method29,
-    visual_unknown_method30,
-    visual_unknown_method31,
-    visual_unknown_method32,
-    visual_unknown_method33,
-    visual_unknown_method34,
-    visual_unknown_method35,
-    visual_unknown_method36,
-    visual_unknown_method37,
-    visual_unknown_method38,
-    visual_unknown_method39,
-    visual_unknown_method40,
-    visual_unknown_method41,
-    visual_unknown_method42,
-    visual_unknown_method43,
-    visual_unknown_method44,
-    visual_unknown_method45,
-    visual_unknown_method46,
-    visual_unknown_method47,
-    visual_unknown_method48,
-    visual_unknown_method49,
-    visual_unknown_method50,
-    visual_unknown_method51,
-    visual_unknown_method52,
-    visual_unknown_method53,
-    visual_unknown_method54,
-    visual_unknown_method55,
-    visual_unknown_method56,
-    visual_unknown_method57,
-    visual_unknown_method58,
-    visual_unknown_method59,
-    visual_unknown_method60,
-    visual_unknown_method61,
-    visual_unknown_method62,
-    visual_unknown_method63,
-    visual_unknown_method64,
-    visual_unknown_method65,
-    visual_unknown_method66,
-    visual_unknown_method67,
-    visual_unknown_method68,
-    visual_unknown_method69,
-    visual_unknown_method70,
-    visual_unknown_method71,
-    visual_unknown_method72,
-    visual_unknown_method73,
-    visual_unknown_method74,
-    visual_unknown_method75,
-    visual_unknown_method76,
-    visual_unknown_method77,
-    visual_unknown_method78,
-    visual_unknown_method79,
-    visual_unknown_method80,
-    visual_unknown_method81,
-    visual_unknown_method82,
-    visual_unknown_method83,
-    visual_unknown_method84,
-    visual_unknown_method85,
-    visual_unknown_method86,
-    visual_unknown_method87,
-    visual_unknown_method88,
-    visual_unknown_method89,
-    visual_unknown_method90,
-    visual_unknown_method91,
-    visual_unknown_method92,
-    visual_unknown_method93,
-    visual_unknown_method94,
-    visual_unknown_method95,
-    visual_unknown_method96,
-    visual_unknown_method97,
-    visual_unknown_method98,
-    visual_unknown_method99,
+    visual_EnableHeatMap,
+    visual_DisableHeatMap,
+    visual_EnableRedrawRegions,
+    visual_DisableRedrawRegions,
+    visual_SetDepthMode,
+    visual_SetOffsetZAnimation,
+    visual_SetOffsetZ,
+    visual_SetOpacityAnimation,
+    visual_SetOpacity,
+    visual_SetTransform3DObject,
+    visual_SetTransform3DMatrix,
+    visual_SetVisible,
+    visual_reserved_slot34,
+    visual_SetInputSink,
+    visual_SetIslandStateSlot36,
+    visual_SetIslandStateSlot37,
+    visual_SetIslandStateSlot38,
+    visual_reserved_slot39,
+    visual_SetIslandFloatSlot40,
+    visual_SetIslandFloatSlot41,
+    visual_reserved_slot42,
+    visual_reserved_slot43,
+    visual_reserved_slot44,
+    visual_reserved_slot45,
+    visual_reserved_slot46,
+    visual_reserved_slot47,
+    visual_reserved_slot48,
+    visual_reserved_slot49,
+    visual_reserved_slot50,
+    visual_reserved_slot51,
+    visual_reserved_slot52,
+    visual_reserved_slot53,
+    visual_reserved_slot54,
+    visual_reserved_slot55,
+    visual_reserved_slot56,
+    visual_reserved_slot57,
+    visual_reserved_slot58,
+    visual_reserved_slot59,
+    visual_reserved_slot60,
+    visual_reserved_slot61,
+    visual_reserved_slot62,
+    visual_reserved_slot63,
+    visual_reserved_slot64,
+    visual_reserved_slot65,
+    visual_reserved_slot66,
+    visual_reserved_slot67,
+    visual_reserved_slot68,
+    visual_reserved_slot69,
+    visual_reserved_slot70,
+    visual_reserved_slot71,
+    visual_reserved_slot72,
+    visual_reserved_slot73,
+    visual_reserved_slot74,
+    visual_reserved_slot75,
+    visual_reserved_slot76,
+    visual_reserved_slot77,
+    visual_reserved_slot78,
+    visual_reserved_slot79,
+    visual_reserved_slot80,
+    visual_reserved_slot81,
+    visual_reserved_slot82,
+    visual_reserved_slot83,
+    visual_reserved_slot84,
+    visual_reserved_slot85,
+    visual_reserved_slot86,
+    visual_reserved_slot87,
+    visual_reserved_slot88,
+    visual_reserved_slot89,
+    visual_reserved_slot90,
+    visual_reserved_slot91,
+    visual_reserved_slot92,
+    visual_reserved_slot93,
+    visual_reserved_slot94,
+    visual_reserved_slot95,
+    visual_reserved_slot96,
+    visual_reserved_slot97,
+    visual_reserved_slot98,
+    visual_reserved_slot99,
+    visual_reserved_slot100,
+    visual_reserved_slot101,
+    visual_reserved_slot102,
+    visual_reserved_slot103,
+    visual_reserved_slot104,
+    visual_reserved_slot105,
+    visual_reserved_slot106,
+    visual_reserved_slot107,
+    visual_reserved_slot108,
+    visual_reserved_slot109,
+    visual_reserved_slot110,
+    visual_reserved_slot111,
+    visual_reserved_slot112,
+    visual_reserved_slot113,
+    visual_reserved_slot114,
+    visual_reserved_slot115,
+    visual_reserved_slot116,
+    visual_reserved_slot117,
+    visual_reserved_slot118,
+    visual_reserved_slot119,
+    visual_reserved_slot120,
 };
 
 /* Shared-resource identity of a visual's content.
@@ -1777,8 +1811,9 @@ HRESULT create_visual(int version, REFIID iid, void **new_visual)
     if (!visual)
         return E_OUTOFMEMORY;
 
-    visual->IDCompositionVisualUnknown_iface.lpVtbl = &visual_unknown_vtbl;
+    visual->IDCompositionVisualUnknown_iface.lpVtbl = &visual_vtbl;
     visual->version = version;
+    visual->opacity = 1.0f;
     visual->ref = 1;
     list_init(&visual->child_visuals);
     hr = IUnknown_QueryInterface(&visual->IDCompositionVisualUnknown_iface, iid, new_visual);

@@ -237,6 +237,7 @@ struct composition_visual
     enum DCOMPOSITION_BACKFACE_VISIBILITY visibility;
     float offset_x;
     float offset_y;
+    float opacity;
     SIZE size;
     IDCompositionTransform *transform;
     D2D_MATRIX_3X2_F transform_matrix;

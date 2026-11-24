@@ -428,13 +428,13 @@ static HRESULT STDMETHODCALLTYPE surface_Scroll(IDCompositionSurfaceUnknown *ifa
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown1(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot8(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown2(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot9(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
@@ -523,7 +523,7 @@ static HRESULT composition_surface_resize(struct composition_surface *surface, U
 }
 
 /* Undocumented. Looks like a resize method. */
-static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
+static HRESULT STDMETHODCALLTYPE surface_ResizePrivate(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
 {
     struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
 
@@ -533,7 +533,7 @@ static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *i
 }
 
 /* Undocumented. Win11 FrameworkUdk ResizeDCompositionSurface calls slot 11 (+0x58). */
-static HRESULT STDMETHODCALLTYPE surface_Unknown4(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
+static HRESULT STDMETHODCALLTYPE surface_ResizeFrameworkUdk(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
 {
     struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
 
@@ -542,571 +542,571 @@ static HRESULT STDMETHODCALLTYPE surface_Unknown4(IDCompositionSurfaceUnknown *i
     return composition_surface_resize(surface, width, height);
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown5(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot12(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown6(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot13(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown7(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot14(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown8(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot15(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown9(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot16(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown10(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot17(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown11(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot18(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown12(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot19(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown13(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot20(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown14(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot21(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown15(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot22(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown16(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot23(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown17(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot24(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown18(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot25(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown19(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot26(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown20(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot27(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown21(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot28(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown22(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot29(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown23(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot30(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown24(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot31(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown25(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot32(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown26(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot33(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown27(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot34(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown28(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot35(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown29(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot36(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown30(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot37(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown31(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot38(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown32(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot39(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown33(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot40(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown34(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot41(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown35(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot42(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown36(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot43(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown37(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot44(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown38(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot45(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown39(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot46(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown40(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot47(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown41(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot48(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown42(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot49(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown43(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot50(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown44(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot51(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown45(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot52(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown46(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot53(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown47(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot54(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown48(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot55(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown49(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot56(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown50(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot57(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown51(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot58(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown52(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot59(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown53(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot60(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown54(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot61(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown55(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot62(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown56(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot63(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown57(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot64(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown58(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot65(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown59(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot66(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown60(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot67(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown61(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot68(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown62(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot69(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown63(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot70(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown64(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot71(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown65(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot72(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown66(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot73(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown67(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot74(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown68(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot75(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown69(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot76(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown70(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot77(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown71(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot78(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown72(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot79(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown73(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot80(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown74(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot81(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown75(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot82(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown76(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot83(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown77(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot84(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown78(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot85(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown79(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot86(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown80(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot87(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown81(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot88(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown82(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot89(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown83(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot90(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown84(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot91(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown85(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot92(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown86(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot93(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown87(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot94(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown88(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot95(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown89(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot96(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown90(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot97(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown91(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot98(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown92(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot99(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown93(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot100(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown94(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot101(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown95(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot102(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown96(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot103(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown97(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot104(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown98(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot105(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE surface_Unknown99(IDCompositionSurfaceUnknown *iface)
+static HRESULT STDMETHODCALLTYPE surface_reserved_slot106(IDCompositionSurfaceUnknown *iface)
 {
     FIXME("iface %p stub!\n", iface);
     return E_NOTIMPL;
@@ -1125,105 +1125,105 @@ static const struct IDCompositionSurfaceUnknownVtbl surface_vtbl =
     surface_ResumeDraw,
     surface_Scroll,
     /* IDCompositionSurfaceUnknown methods */
-    surface_Unknown1,
-    surface_Unknown2,
-    surface_Unknown3,
-    surface_Unknown4,
-    surface_Unknown5,
-    surface_Unknown6,
-    surface_Unknown7,
-    surface_Unknown8,
-    surface_Unknown9,
-    surface_Unknown10,
-    surface_Unknown11,
-    surface_Unknown12,
-    surface_Unknown13,
-    surface_Unknown14,
-    surface_Unknown15,
-    surface_Unknown16,
-    surface_Unknown17,
-    surface_Unknown18,
-    surface_Unknown19,
-    surface_Unknown20,
-    surface_Unknown21,
-    surface_Unknown22,
-    surface_Unknown23,
-    surface_Unknown24,
-    surface_Unknown25,
-    surface_Unknown26,
-    surface_Unknown27,
-    surface_Unknown28,
-    surface_Unknown29,
-    surface_Unknown30,
-    surface_Unknown31,
-    surface_Unknown32,
-    surface_Unknown33,
-    surface_Unknown34,
-    surface_Unknown35,
-    surface_Unknown36,
-    surface_Unknown37,
-    surface_Unknown38,
-    surface_Unknown39,
-    surface_Unknown40,
-    surface_Unknown41,
-    surface_Unknown42,
-    surface_Unknown43,
-    surface_Unknown44,
-    surface_Unknown45,
-    surface_Unknown46,
-    surface_Unknown47,
-    surface_Unknown48,
-    surface_Unknown49,
-    surface_Unknown50,
-    surface_Unknown51,
-    surface_Unknown52,
-    surface_Unknown53,
-    surface_Unknown54,
-    surface_Unknown55,
-    surface_Unknown56,
-    surface_Unknown57,
-    surface_Unknown58,
-    surface_Unknown59,
-    surface_Unknown60,
-    surface_Unknown61,
-    surface_Unknown62,
-    surface_Unknown63,
-    surface_Unknown64,
-    surface_Unknown65,
-    surface_Unknown66,
-    surface_Unknown67,
-    surface_Unknown68,
-    surface_Unknown69,
-    surface_Unknown70,
-    surface_Unknown71,
-    surface_Unknown72,
-    surface_Unknown73,
-    surface_Unknown74,
-    surface_Unknown75,
-    surface_Unknown76,
-    surface_Unknown77,
-    surface_Unknown78,
-    surface_Unknown79,
-    surface_Unknown80,
-    surface_Unknown81,
-    surface_Unknown82,
-    surface_Unknown83,
-    surface_Unknown84,
-    surface_Unknown85,
-    surface_Unknown86,
-    surface_Unknown87,
-    surface_Unknown88,
-    surface_Unknown89,
-    surface_Unknown90,
-    surface_Unknown91,
-    surface_Unknown92,
-    surface_Unknown93,
-    surface_Unknown94,
-    surface_Unknown95,
-    surface_Unknown96,
-    surface_Unknown97,
-    surface_Unknown98,
-    surface_Unknown99,
+    surface_reserved_slot8,
+    surface_reserved_slot9,
+    surface_ResizePrivate,
+    surface_ResizeFrameworkUdk,
+    surface_reserved_slot12,
+    surface_reserved_slot13,
+    surface_reserved_slot14,
+    surface_reserved_slot15,
+    surface_reserved_slot16,
+    surface_reserved_slot17,
+    surface_reserved_slot18,
+    surface_reserved_slot19,
+    surface_reserved_slot20,
+    surface_reserved_slot21,
+    surface_reserved_slot22,
+    surface_reserved_slot23,
+    surface_reserved_slot24,
+    surface_reserved_slot25,
+    surface_reserved_slot26,
+    surface_reserved_slot27,
+    surface_reserved_slot28,
+    surface_reserved_slot29,
+    surface_reserved_slot30,
+    surface_reserved_slot31,
+    surface_reserved_slot32,
+    surface_reserved_slot33,
+    surface_reserved_slot34,
+    surface_reserved_slot35,
+    surface_reserved_slot36,
+    surface_reserved_slot37,
+    surface_reserved_slot38,
+    surface_reserved_slot39,
+    surface_reserved_slot40,
+    surface_reserved_slot41,
+    surface_reserved_slot42,
+    surface_reserved_slot43,
+    surface_reserved_slot44,
+    surface_reserved_slot45,
+    surface_reserved_slot46,
+    surface_reserved_slot47,
+    surface_reserved_slot48,
+    surface_reserved_slot49,
+    surface_reserved_slot50,
+    surface_reserved_slot51,
+    surface_reserved_slot52,
+    surface_reserved_slot53,
+    surface_reserved_slot54,
+    surface_reserved_slot55,
+    surface_reserved_slot56,
+    surface_reserved_slot57,
+    surface_reserved_slot58,
+    surface_reserved_slot59,
+    surface_reserved_slot60,
+    surface_reserved_slot61,
+    surface_reserved_slot62,
+    surface_reserved_slot63,
+    surface_reserved_slot64,
+    surface_reserved_slot65,
+    surface_reserved_slot66,
+    surface_reserved_slot67,
+    surface_reserved_slot68,
+    surface_reserved_slot69,
+    surface_reserved_slot70,
+    surface_reserved_slot71,
+    surface_reserved_slot72,
+    surface_reserved_slot73,
+    surface_reserved_slot74,
+    surface_reserved_slot75,
+    surface_reserved_slot76,
+    surface_reserved_slot77,
+    surface_reserved_slot78,
+    surface_reserved_slot79,
+    surface_reserved_slot80,
+    surface_reserved_slot81,
+    surface_reserved_slot82,
+    surface_reserved_slot83,
+    surface_reserved_slot84,
+    surface_reserved_slot85,
+    surface_reserved_slot86,
+    surface_reserved_slot87,
+    surface_reserved_slot88,
+    surface_reserved_slot89,
+    surface_reserved_slot90,
+    surface_reserved_slot91,
+    surface_reserved_slot92,
+    surface_reserved_slot93,
+    surface_reserved_slot94,
+    surface_reserved_slot95,
+    surface_reserved_slot96,
+    surface_reserved_slot97,
+    surface_reserved_slot98,
+    surface_reserved_slot99,
+    surface_reserved_slot100,
+    surface_reserved_slot101,
+    surface_reserved_slot102,
+    surface_reserved_slot103,
+    surface_reserved_slot104,
+    surface_reserved_slot105,
+    surface_reserved_slot106,
 };
 
 /* IDCompositionVirtualSurface::Resize().  Same resize as the private slot 3 above;
