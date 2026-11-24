@@ -55,6 +55,7 @@ HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONF
 HRESULT WINAPI RoRevokeActivationFactories(RO_REGISTRATION_COOKIE cookie);
 HRESULT WINAPI RoInitialize(RO_INIT_TYPE type);
 void WINAPI RoUninitialize(void);
+HRESULT WINAPI RoGetApartmentIdentifier(UINT64 *identifier);
 
 #ifdef __cplusplus
 }

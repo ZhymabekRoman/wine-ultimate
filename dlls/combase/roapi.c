@@ -19,6 +19,8 @@
 #define COBJMACROS
 #include "ntstatus.h"
 #include "objbase.h"
+#include "ctxtcall.h"
+#include "comsvcs.h"
 #include "initguid.h"
 #include "roapi.h"
 #include "roparameterizediid.h"
@@ -2545,6 +2547,7 @@ struct agile_reference
     IUnknown *obj;
     OXID source_oxid;
     BOOLEAN is_agile;
+    IUnknown *ctx;
     LONG ref;
 };
 
@@ -2622,10 +2625,28 @@ static ULONG WINAPI agile_ref_Release(IAgileReference *iface)
     return ref;
 }
 
+struct marshal_context_params
+{
+    struct agile_reference *impl;
+    REFIID iid;
+};
+
+static HRESULT WINAPI marshal_object_in_context(ComCallData *arg)
+{
+    struct marshal_context_params *params = (struct marshal_context_params *)arg;
+    HRESULT hr;
+
+    hr = marshal_object_in_agile_reference(params->impl, params->iid, params->impl->obj);
+    IUnknown_Release(params->impl->obj);
+    params->impl->obj = NULL;
+    return hr;
+}
+
 static HRESULT WINAPI agile_ref_Resolve(IAgileReference *iface, REFIID riid, void **obj)
 {
     struct agile_reference *impl = impl_from_IAgileReference(iface);
     LARGE_INTEGER zero = {0};
+    void *cur_ctx;
     HRESULT hr;
 
     TRACE("(%p, %s, %p)\n", iface, debugstr_guid(riid), obj);
@@ -2633,13 +2654,28 @@ static HRESULT WINAPI agile_ref_Resolve(IAgileReference *iface, REFIID riid, voi
     if (impl->is_agile)
         return IUnknown_QueryInterface(impl->obj, riid, obj);
 
+    if (FAILED(hr = CoGetContextToken((ULONG_PTR *)&cur_ctx)))
+        return hr;
+
     if (impl->obj && impl->source_oxid && impl->source_oxid == com_get_current_oxid())
         return IUnknown_QueryInterface(impl->obj, riid, obj);
 
     RtlAcquireSRWLockExclusive(&impl->lock);
     if (impl->option == AGILEREFERENCE_DELAYEDMARSHAL && impl->marshal_stream == NULL)
     {
-        if (FAILED(hr = marshal_object_in_agile_reference(impl, riid, impl->obj)))
+        struct marshal_context_params params = { impl, riid };
+        IContextCallback *ctx;
+
+        if (FAILED(hr = IUnknown_QueryInterface(impl->ctx, &IID_IContextCallback, (void **)&ctx)))
+        {
+            RtlReleaseSRWLockExclusive(&impl->lock);
+            return hr;
+        }
+
+        hr = IContextCallback_ContextCallback(ctx, marshal_object_in_context, (ComCallData *)&params,
+                                              &IID_IContextCallback, 5, NULL);
+        IContextCallback_Release(ctx);
+        if (FAILED(hr))
         {
             RtlReleaseSRWLockExclusive(&impl->lock);
             return hr;
@@ -2678,6 +2714,7 @@ static BOOL object_has_interface(IUnknown *obj, REFIID iid)
 HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID riid, IUnknown *obj,
                                    IAgileReference **agile_reference)
 {
+    struct apartment *apt;
     struct agile_reference *impl;
     HRESULT hr;
 
@@ -2686,11 +2723,13 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
     if (option != AGILEREFERENCE_DEFAULT && option != AGILEREFERENCE_DELAYEDMARSHAL)
         return E_INVALIDARG;
 
-    if (!InternalIsProcessInitialized())
+    if (!(apt = apartment_get_current_or_mta()))
     {
         ERR("Apartment not initialized\n");
         return CO_E_NOTINITIALIZED;
     }
+    rpc_start_remoting(apt);
+    apartment_release(apt);
 
     if (!object_has_interface(obj, riid))
         return E_NOINTERFACE;
@@ -2705,6 +2744,11 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
     impl->option = option;
     impl->is_agile = object_has_interface(obj, &IID_IAgileObject);
     impl->ref = 1;
+    if (FAILED(hr = CoGetContextToken((ULONG_PTR *)&impl->ctx)))
+    {
+        free( impl );
+        return hr;
+    }
 
     if (impl->is_agile)
     {

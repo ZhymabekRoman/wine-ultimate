@@ -56,8 +56,6 @@ typedef struct tagWND
     HWND               owner;         /* Window owner */
     struct tagCLASS   *class;         /* Window class */
     struct dce        *dce;           /* DCE pointer */
-    WNDPROC            winproc;       /* Window procedure */
-    HINSTANCE          hInstance;     /* Window hInstance (from CreateWindow) */
     struct window_rects rects;        /* window rects in window DPI, relative to the parent client area */
     RECT               normal_rect;   /* Normal window rect saved when maximized/minimized */
     RECT               present_rect;  /* present rect for exclusive fullscreen mode */
@@ -67,7 +65,6 @@ typedef struct tagWND
     struct win_scroll_bar_info *pScroll; /* Scroll-bar info */
     UINT               dwStyle;       /* Window style (from CreateWindow) */
     UINT               dwExStyle;     /* Extended style (from CreateWindowEx) */
-    UINT_PTR           wIDmenu;       /* ID or hmenu (from CreateWindow) */
     UINT               helpContext;   /* Help context ID */
     UINT               flags;         /* Misc. flags (see below) */
     HMENU              hSysMenu;      /* window's copy of System Menu */
@@ -83,12 +80,9 @@ typedef struct tagWND
     int                swap_interval; /* OpenGL surface swap interval */
     int                pixel_format;  /* Pixel format set by the graphics driver */
     int                clip_clients;  /* Has client surfaces that needs to be clipped out */
-    unsigned int       cbWndExtra;    /* class cbWndExtra at window creation */
-    DWORD_PTR          userdata;      /* User private data */
     struct win_prop_entry *prop_cache; /* Cached window properties */
     unsigned int       prop_cache_count;
     unsigned int       prop_cache_cap;
-    DWORD              wExtra[1];     /* Window extra bytes */
 } WND;
 
 /* WND flags values */
@@ -96,7 +90,6 @@ typedef struct tagWND
 #define WIN_NEED_SIZE             0x0002 /* Internal WM_SIZE is needed */
 #define WIN_NCACTIVATED           0x0004 /* last WM_NCACTIVATE was positive */
 #define WIN_ISMDICLIENT           0x0008 /* Window is an MDIClient */
-#define WIN_ISUNICODE             0x0010 /* Window is Unicode */
 #define WIN_NEEDS_SHOW_OWNEDPOPUP 0x0020 /* WM_SHOWWINDOW:SC_SHOW must be sent in the next ShowOwnedPopup call */
 #define WIN_CHILDREN_MOVED        0x0040 /* children may have moved, ignore stored positions */
 #define WIN_HAS_IME_WIN           0x0080 /* the window has been registered with imm32 */
@@ -176,14 +169,8 @@ struct scroll_info
     BOOL  painted;  /* Whether the scroll bar is painted by DefWinProc() */
 };
 
-struct scroll_bar_win_data
-{
-    DWORD magic;
-    struct scroll_info info;
-};
-
-#define WINPROC_HANDLE (~0u >> 16)
-#define BUILTIN_WINPROC(index) ((WNDPROC)(ULONG_PTR)((index) | (WINPROC_HANDLE << 16)))
+/* also defined in server/class.c */
+#define MAKE_WNDPROC(index)     ((WNDPROC)(UINT_PTR)(UINT)MAKELONG(index, 0xffff))
 
 #define MAX_ATOM_LEN 255
 
@@ -203,9 +190,7 @@ extern void spy_exit_message( INT flag, HWND hwnd, UINT msg,
 /* class.c */
 extern HINSTANCE user32_module;
 WNDPROC alloc_winproc( WNDPROC func, BOOL ansi );
-BOOL is_winproc_unicode( WNDPROC proc, BOOL def_val );
 DWORD get_class_long( HWND hwnd, INT offset, BOOL ansi );
-WNDPROC get_class_winproc( struct tagCLASS *class );
 ULONG_PTR get_class_long_ptr( HWND hwnd, INT offset, BOOL ansi );
 WORD get_class_word( HWND hwnd, INT offset );
 DLGPROC get_dialog_proc( DLGPROC proc, BOOL ansi );
@@ -266,5 +251,6 @@ struct obj_locator get_window_class_locator( HWND hwnd );
 WND *get_win_ptr( HWND hwnd );
 BOOL is_child( HWND parent, HWND child );
 BOOL is_window( HWND hwnd );
+extern WNDPROC get_window_wndproc_handle( HWND hwnd, BOOL *ansi );
 
 #endif /* __WINE_NTUSER_PRIVATE_H */

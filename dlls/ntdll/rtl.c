@@ -31,7 +31,7 @@
 #include "winbase.h"
 #include "winternl.h"
 #include "ntuser.h"
-#include "tomcrypt.h"
+#include "zlib.h"
 #include "wine/debug.h"
 #include "wine/exception.h"
 #include "ntdll_misc.h"

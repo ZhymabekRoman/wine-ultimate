@@ -262,6 +262,7 @@ struct stub_manager
 
     ULONG             norm_refs;  /* refcount of normal marshals (CS lock) */
     BOOL              disconnected; /* CoDisconnectObject has been called (CS lock) */
+    BOOL              is_agile;   /* object implements IAgileObject (RO) */
     BOOL              remunk_pinned; /* stub manager pins the apartment IRundown/IRemUnknown
                                       * for the apartment lifetime (extra internal ref) */
 };

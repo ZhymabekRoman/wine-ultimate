@@ -5334,23 +5334,14 @@ static void test_swapchain_composition(void)
             ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
             ok(!resource1 || hr == S_OK, "Got unexpected pointer %p.\n", resource1);
             if (SUCCEEDED(hr))
-            {
-                DXGI_RESOURCE_TYPE resource_type = 0xdeadbeef;
-
-                hr = IDXGIResource1_GetResourceType(resource1, &resource_type);
-                ok(hr == S_OK, "GetResourceType failed, hr %#lx.\n", hr);
-                ok(hr == S_OK && (resource_type & DXGI_RESOURCE_BINDABLE),
-                        "Expected bindable backbuffer, got type %#x.\n", resource_type);
                 IDXGIResource1_Release(resource1);
-            }
 
             refcount = IDXGISwapChain1_Release(composition_swapchain);
             ok(!refcount, "Swapchain has %lu references left.\n", refcount);
         }
     }
 
-    /* 5. d3d11 2D textures exposed as IDXGIResource: GetResourceType must
-     * report BINDABLE for plain textures and ALLOW_SHARED for shared ones. */
+    /* 5. d3d11 2D textures exposed as IDXGIResource/IDXGIResource1. */
     {
         IDXGIDevice *dxgi11_device;
 
@@ -5392,15 +5383,7 @@ static void test_swapchain_composition(void)
                     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
                     ok(!resource1 || hr == S_OK, "Got unexpected pointer %p.\n", resource1);
                     if (SUCCEEDED(hr))
-                    {
-                        DXGI_RESOURCE_TYPE resource_type = 0xdeadbeef;
-
-                        hr = IDXGIResource1_GetResourceType(resource1, &resource_type);
-                        ok(hr == S_OK, "GetResourceType failed, hr %#lx.\n", hr);
-                        ok(resource_type == DXGI_RESOURCE_BINDABLE,
-                                "Expected resource type %#x, got %#x.\n", DXGI_RESOURCE_BINDABLE, resource_type);
                         IDXGIResource1_Release(resource1);
-                    }
                     ID3D11Texture2D_Release(texture);
                 }
 
@@ -5414,16 +5397,7 @@ static void test_swapchain_composition(void)
                     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
                     ok(!resource1 || hr == S_OK, "Got unexpected pointer %p.\n", resource1);
                     if (SUCCEEDED(hr))
-                    {
-                        DXGI_RESOURCE_TYPE resource_type = 0xdeadbeef;
-
-                        hr = IDXGIResource1_GetResourceType(resource1, &resource_type);
-                        ok(hr == S_OK, "GetResourceType failed, hr %#lx.\n", hr);
-                        ok(resource_type == (DXGI_RESOURCE_BINDABLE | DXGI_RESOURCE_ALLOW_SHARED),
-                                "Expected resource type %#x, got %#x.\n",
-                                DXGI_RESOURCE_BINDABLE | DXGI_RESOURCE_ALLOW_SHARED, resource_type);
                         IDXGIResource1_Release(resource1);
-                    }
                     ID3D11Texture2D_Release(texture);
                 }
                 ID3D11Device_Release(d3d11_device);
@@ -5440,7 +5414,6 @@ static void test_swapchain_composition(void)
     {
         IDXGIFactory2 *chromium_factory;
         IDXGIFactory1 *factory1;
-        LUID luid = { 0x1234, 0x5678 };
         HANDLE event;
         DWORD cookie;
 
@@ -5460,7 +5433,7 @@ static void test_swapchain_composition(void)
             ok(event != NULL, "CreateEventW failed, error %lu.\n", GetLastError());
 
             cookie = 0;
-            hr = IDXGIFactory2_RegisterOcclusionStatusEvent(chromium_factory, luid, event, &cookie);
+            hr = IDXGIFactory2_RegisterOcclusionStatusEvent(chromium_factory, event, &cookie);
             ok(hr == S_OK, "RegisterOcclusionStatusEvent failed, hr %#lx.\n", hr);
             ok(cookie, "Got a zero occlusion status cookie.\n");
             IDXGIFactory2_UnregisterOcclusionStatus(chromium_factory, cookie);

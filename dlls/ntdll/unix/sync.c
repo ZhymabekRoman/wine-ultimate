@@ -701,6 +701,7 @@ static NTSTATUS get_server_inproc_sync( HANDLE handle, struct inproc_sync *sync 
             sync->access = reply->access;
             sync->type = reply->type;
             sync->closed = 0;
+            sync->has_wait_packet = 0;
             sync->unsupported = 0;
             sync->non_waitable = 0;
         }

@@ -1477,7 +1477,8 @@ static HRESULT WINAPI ClientRpcChannelBuffer_GetBuffer(LPRPCCHANNELBUFFER iface,
          * via the RPC runtime */
         if (apt->multi_threaded)
         {
-            IRpcStubBuffer_Release(message_state->params.stub);
+            if (message_state->params.stub)
+                IRpcStubBuffer_Release(message_state->params.stub);
             message_state->params.stub = NULL;
             IRpcChannelBuffer_Release(message_state->params.chan);
             message_state->params.chan = NULL;

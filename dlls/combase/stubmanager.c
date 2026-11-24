@@ -237,6 +237,15 @@ static struct stub_manager *new_stub_manager(struct apartment *apt, IUnknown *ob
     if(FAILED(hres))
         sm->extern_conn = NULL;
 
+    {
+        IUnknown *agile_test = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface(object, &IID_IAgileObject, (void **)&agile_test)))
+        {
+            IUnknown_Release(agile_test);
+            sm->is_agile = TRUE;
+        }
+    }
+
     EnterCriticalSection(&apt->cs);
     sm->oid = apt->oidc++;
     list_add_head(&apt->stubmgrs, &sm->entry);
@@ -554,7 +563,7 @@ HRESULT ipid_get_dispatch_params(const IPID *ipid, struct apartment **stub_apt,
     TRACE( "DISPATCH-LOOKUP ipid %s stub %p iface %p iid %s\n",
            debugstr_guid( ipid ), ifstub->stubbuffer, ifstub->iface, debugstr_guid( &ifstub->iid ) );
     *stub = ifstub->stubbuffer;
-    IRpcStubBuffer_AddRef(*stub);
+    if (*stub) IRpcStubBuffer_AddRef(*stub);
     *chan = ifstub->chan;
     IRpcChannelBuffer_AddRef(*chan);
     *stub_apt = apt;

@@ -488,11 +488,3 @@ end:
     CloseHandle(file);
     return hr;
 }
-
-extern HRESULT d3d11_create_module_stub(ID3D11Module **module);
-
-HRESULT WINAPI D3DLoadModule(const void *data, SIZE_T size, ID3D11Module **module)
-{
-    FIXME("data %p, size %Iu, module %p semi-stub!\n", data, size, module);
-    return d3d11_create_module_stub(module);
-}

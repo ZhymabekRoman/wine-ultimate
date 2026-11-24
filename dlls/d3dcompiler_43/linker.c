@@ -687,3 +687,9 @@ HRESULT WINAPI D3DCreateLinker(ID3D11Linker **linker)
     *linker = &object->ID3D11Linker_iface;
     return S_OK;
 }
+
+HRESULT WINAPI D3DLoadModule(const void *data, SIZE_T size, ID3D11Module **module)
+{
+    FIXME("data %p, size %Iu, module %p semi-stub!\n", data, size, module);
+    return d3d11_create_module_stub(module);
+}

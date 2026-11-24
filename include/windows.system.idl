@@ -616,7 +616,9 @@ namespace Windows.System.Diagnostics.Telemetry
 {
     runtimeclass PlatformTelemetryClient;
 
-    [exclusiveto(Windows.System.Diagnostics.Telemetry.PlatformTelemetryClient)]
+    [contract(Windows.Foundation.UniversalApiContract, 3.0),
+     exclusiveto(Windows.System.Diagnostics.Telemetry.PlatformTelemetryClient),
+     uuid(9bf3f25d-d5c3-4eea-8dbe-9c8dbb0d9d8f)]
     interface IPlatformTelemetryClient : IInspectable
     {
         HRESULT Dummy();

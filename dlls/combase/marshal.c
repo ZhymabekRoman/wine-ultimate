@@ -749,14 +749,11 @@ static HRESULT std_unmarshal_interface(MSHCTX dest_context, void *dest_context_d
     {
         if ((stubmgr = get_stub_manager(stub_apt, obj.std.oid)))
         {
-            IUnknown *agile_test = NULL;
-
             /* In-process Agile COM Fast Thunk: if the object supports IAgileObject,
              * it is safe to access directly across apartments within the same process.
              * Return the direct interface pointer, bypassing proxy and RPC channel creation! */
-            if (SUCCEEDED(IUnknown_QueryInterface(stubmgr->object, &IID_IAgileObject, (void **)&agile_test)))
+            if (stubmgr->is_agile)
             {
-                IUnknown_Release(agile_test);
                 TRACE("In-process Agile object %p detected for iid %s, returning direct pointer\n",
                       stubmgr->object, debugstr_guid(riid));
                 hres = IUnknown_QueryInterface(stubmgr->object, riid, ppv);
@@ -870,10 +867,17 @@ HRESULT WINAPI CoUnmarshalInterface(IStream *stream, REFIID riid, void **ppv)
  * IPIDs identify an interface stub and are apartment scoped
  */
 
+HRESULT WINAPI COMBASE_DllGetClassObject(REFCLSID rclsid, REFIID riid, void **obj);
+
 static inline HRESULT get_facbuf_for_iid(REFIID riid, IPSFactoryBuffer **facbuf)
 {
+    static const CLSID clsid_psfactory =
+        { 0x00020424, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
     HRESULT       hr;
     CLSID         clsid;
+
+    if (IsEqualGUID(riid, &IID_IAgileObject))
+        return COMBASE_DllGetClassObject(&clsid_psfactory, &IID_IPSFactoryBuffer, (void **)facbuf);
 
     hr = CoGetPSClsid(riid, &clsid);
     if (hr != S_OK)
