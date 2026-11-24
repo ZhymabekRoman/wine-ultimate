@@ -208,7 +208,7 @@ static struct stub_manager *new_stub_manager(struct apartment *apt, IUnknown *ob
     sm->weakrefs = 0;
 
     sm->oxid_info.dwPid = GetCurrentProcessId();
-    sm->oxid_info.dwTid = GetCurrentThreadId();
+    sm->oxid_info.dwTid = apt->multi_threaded ? 0 : apt->tid;
     /*
      * FIXME: this is a hack for marshalling IRemUnknown. In real
      * DCOM, the IPID of the IRemUnknown interface is generated like

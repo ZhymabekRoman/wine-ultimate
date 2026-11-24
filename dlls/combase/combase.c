@@ -2974,6 +2974,16 @@ static HRESULT WINAPI thread_context_callback_ContextCallback(IContextCallback *
         return hr;
     }
 
+    {
+        struct apartment *target_apt = apartment_findfromoxid(context->oxid);
+        if (target_apt)
+        {
+            if (target_apt->multi_threaded || target_apt->win)
+                rpc_start_remoting(target_apt);
+            apartment_release(target_apt);
+        }
+    }
+
     hr = rpc_resolve_oxid(context->oxid, &oxid_info);
     if (SUCCEEDED(hr))
     {
@@ -3187,6 +3197,10 @@ HRESULT WINAPI CoGetContextToken(ULONG_PTR *token)
                 InterlockedIncrement(&context->ref);
             }
             LeaveCriticalSection(&context_cs);
+        }
+        else
+        {
+            apartment_createwindowifneeded(apt);
         }
 
         tlsdata->context_token = &context->IObjContext_iface;
