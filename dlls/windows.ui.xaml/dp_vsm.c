@@ -436,6 +436,38 @@ BOOL uwp_unbox_int32( void *obj, INT32 *out_val )
     return FALSE;
 }
 
+BOOL uwp_unbox_bool( void *obj, boolean *out_val )
+{
+    IPropertyValue *pv = NULL;
+    if (!obj || !out_val) return FALSE;
+    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)obj, &IID_IPropertyValue, (void **)&pv )) && pv)
+    {
+        HRESULT hr = IPropertyValue_GetBoolean( pv, out_val );
+        IPropertyValue_Release( pv );
+        return SUCCEEDED(hr);
+    }
+    return FALSE;
+}
+
+BOOL uwp_unbox_double( void *obj, double *out_val )
+{
+    IPropertyValue *pv = NULL;
+    if (!obj || !out_val) return FALSE;
+    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)obj, &IID_IPropertyValue, (void **)&pv )) && pv)
+    {
+        HRESULT hr = IPropertyValue_GetDouble( pv, out_val );
+        if (FAILED(hr))
+        {
+            float f = 0.0f;
+            hr = IPropertyValue_GetSingle( pv, &f );
+            if (SUCCEEDED(hr)) *out_val = (double)f;
+        }
+        IPropertyValue_Release( pv );
+        return SUCCEEDED(hr);
+    }
+    return FALSE;
+}
+
 /* ============================================================================
  * 3. ResourceDictionary Key-Value Store (Scoped Chain & XBF Resource Parsing)
  * ============================================================================ */
@@ -1873,6 +1905,105 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
         uwp_tabview_handle_dp( impl, dpname, val );
     }
+    else
+    {
+        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+        const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
+        if (dpname[0] && uwp_is_nav_view( impl ))
+        {
+            INT32 ev = 0;
+            boolean bv = FALSE;
+            double dv = 0.0;
+            if (!wcscmp( dpname, L"PaneDisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+            {
+                impl->nav_pane_display_mode = ev;
+                impl->nav_pane_display_mode_set = TRUE;
+                TRACE( "NavView(%s) SetValue PaneDisplayMode=%d\n", debugstr_w(impl->name), ev );
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"DisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+            {
+                impl->nav_display_mode = ev;
+                impl->nav_display_mode_set = TRUE;
+                TRACE( "NavView(%s) SetValue DisplayMode=%d\n", debugstr_w(impl->name), ev );
+            }
+            else if (!wcscmp( dpname, L"IsPaneOpen" ) && val && uwp_unbox_bool( val, &bv ))
+            {
+                impl->nav_is_pane_open = (bv != 0);
+                if (!impl->nav_is_pane_open) impl->nav_scroll_y = 0;
+                TRACE( "NavView(%s) SetValue IsPaneOpen=%d\n", debugstr_w(impl->name), (int)impl->nav_is_pane_open );
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"OpenPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+            {
+                impl->nav_open_pane_length = dv;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"CompactPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+            {
+                impl->nav_compact_pane_length = dv;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"CompactModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+            {
+                impl->nav_compact_threshold = dv;
+            }
+            else if (!wcscmp( dpname, L"ExpandedModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+            {
+                impl->nav_expanded_threshold = dv;
+            }
+            else if (!wcscmp( dpname, L"IsSettingsVisible" ) && val && uwp_unbox_bool( val, &bv ))
+            {
+                impl->nav_is_settings_visible = (bv != 0);
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"IsPaneToggleButtonVisible" ) && val && uwp_unbox_bool( val, &bv ))
+            {
+                impl->nav_is_pane_toggle_visible = (bv != 0);
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"SelectedItem" ))
+            {
+                if (uwp_replace_iface( &impl->selected_item, val ))
+                    uwp_invalidate_window();
+            }
+        }
+        else if (dpname[0] && (wcsstr( impl->class_name, L"NavigationViewItem" ) ||
+                               wcsstr( impl->default_style_key_name, L"NavigationViewItem" )))
+        {
+            boolean bv = FALSE;
+            if (!wcscmp( dpname, L"Icon" ))
+            {
+                if (uwp_replace_iface( &impl->nav_icon, val ))
+                    uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"IsSelected" ) && val && uwp_unbox_bool( val, &bv ))
+            {
+                impl->is_checked = bv ? 1 : 0;
+                uwp_invalidate_window();
+            }
+        }
+        else if (dpname[0] && uwp_is_combobox( impl ))
+        {
+            INT32 iv = -1;
+            boolean bv = FALSE;
+            WCHAR sbuf[64] = {0};
+            if (!wcscmp( dpname, L"SelectedIndex" ) && val && uwp_unbox_int32( val, &iv ))
+                uwp_selector_set_selection( impl, iv, NULL, TRUE, FALSE );
+            else if (!wcscmp( dpname, L"SelectedItem" ))
+                uwp_selector_set_selection( impl, -1, val, FALSE, FALSE );
+            else if (!wcscmp( dpname, L"IsDropDownOpen" ) && val && uwp_unbox_bool( val, &bv ))
+                uwp_combobox_set_open( impl, bv != 0 );
+            else if (!wcscmp( dpname, L"DisplayMemberPath" ) && val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+                lstrcpynW( impl->display_member_path, sbuf, ARRAY_SIZE(impl->display_member_path) );
+        }
+    }
 
     AcquireSRWLockExclusive( &impl->dp_lock );
     for (i = 0; i < impl->dp_cnt; i++)
@@ -2231,19 +2362,23 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
                         {
                             /* already boxed directly as primitive */
                         }
-                        else if (is_bool_type && is_attachable && (!wcsicmp( str_val, L"True" ) || !wcsicmp( str_val, L"False" )))
+                        else if (is_bool_type && (!wcsicmp( str_val, L"True" ) || !wcsicmp( str_val, L"False" )))
                         {
                             boxed_val = box_bool_value( !wcsicmp( str_val, L"True" ) ? TRUE : FALSE );
                             hr = boxed_val ? S_OK : E_FAIL;
                         }
                         else if (!is_bool_type)
                         {
-                            hr = mt->lpVtbl->CreateFromString( mt, h_val, &boxed_val );
+                            __TRY { hr = mt->lpVtbl->CreateFromString( mt, h_val, &boxed_val ); }
+                            __EXCEPT_ALL { hr = E_FAIL; boxed_val = NULL; }
+                            __ENDTRY;
                             if (FAILED(hr)) boxed_val = NULL;
                         }
                         if (SUCCEEDED(hr) && boxed_val && xm->lpVtbl->SetValue)
                         {
-                            hr = xm->lpVtbl->SetValue( xm, target_obj, boxed_val );
+                            __TRY { hr = xm->lpVtbl->SetValue( xm, target_obj, boxed_val ); }
+                            __EXCEPT_ALL { hr = E_FAIL; }
+                            __ENDTRY;
                             if (FAILED(hr))
                                 WARN( "IXamlMember::SetValue(%s.%s = %s) -> hr %#lx\n",
                                       debugstr_w(owner_type_name), debugstr_w(prop_name),
@@ -3483,6 +3618,7 @@ BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_i
     {
         IPropertyValue_get_Type( pv, &pt );
         IPropertyValue_Release( pv );
+        if (pt != PropertyType_OtherType)
             return FALSE;
     }
     else return FALSE;

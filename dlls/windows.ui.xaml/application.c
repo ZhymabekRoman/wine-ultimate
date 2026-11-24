@@ -2732,9 +2732,16 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
 
         if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
         {
-            tree_routed = uwp_route_pointer_event( top, kind, &info, rc.right, rc.bottom, global_xaml_window.content );
-            if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_MOUSEMOVE)
-                btn_handled = uwp_handle_mouse_input( top, msg, pt.x, pt.y, rc.right, rc.bottom, global_xaml_window.content );
+            if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_MOUSEMOVE || msg == WM_MOUSEWHEEL)
+                btn_handled = uwp_handle_overlay_mouse_input( top, msg, pt.x, pt.y,
+                                                              (msg == WM_MOUSEWHEEL) ? GET_WHEEL_DELTA_WPARAM( wparam ) : 0,
+                                                              rc.right, rc.bottom, global_xaml_window.content );
+            if (!btn_handled)
+            {
+                tree_routed = uwp_route_pointer_event( top, kind, &info, rc.right, rc.bottom, global_xaml_window.content );
+                if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_MOUSEMOVE)
+                    btn_handled = uwp_handle_mouse_input( top, msg, pt.x, pt.y, rc.right, rc.bottom, global_xaml_window.content );
+            }
         }
         if (!btn_handled && g_active_scp_swapchain)
             uwp_ciis_dispatch_pointer_event( kind, &info );

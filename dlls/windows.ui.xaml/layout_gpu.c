@@ -1028,8 +1028,8 @@ static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t ou
         uwp_vm_query_string_prop_depth( pval, nested_url_props, ARRAY_SIZE(nested_url_props), out, out_len, depth - 1 );
 }
 
-static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
-                                      WCHAR *out, size_t out_len )
+BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
+                               WCHAR *out, size_t out_len )
 {
     return uwp_vm_query_string_prop_depth( vm, props, count, out, out_len, 0 );
 }
@@ -1392,7 +1392,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
-    if (wcsstr( el->class_name, L"ComboBox" ) && !wcsstr( el->class_name, L"ComboBoxItem" ))
+    if (uwp_is_combobox( el ))
     {
         RECT rc = el->bounds, trc, chev_rc;
         UINT32 bg_argb = 0, bd_argb = 0, fg_argb = 0xffffffffu;
@@ -1410,7 +1410,9 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         else
             bg_argb = 0x33ffffffu;
 
-        if (el->has_border && el->border_alpha > 0)
+        if (el->is_dropdown_open)
+            bd_argb = uwp_is_light_theme( el ) ? 0xff0067c0u : 0xff60cdffu;
+        else if (el->has_border && el->border_alpha > 0)
             bd_argb = apply_opacity_to_argb( el->border_argb, el->opacity );
         else if (uwp_resolve_brush_or_color( NULL, el, L"ComboBoxBorderBrush", 0, &bd_argb ) && ((bd_argb >> 24) & 0xff))
             bd_argb = apply_opacity_to_argb( bd_argb, el->opacity );
@@ -1423,33 +1425,15 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             fg_argb = 0xffffffffu;
 
         if (el->selected_item)
+            uwp_combobox_get_item_label( el, el->selected_item, label, ARRAY_SIZE(label) );
+        if (!label[0] && el->selected_index >= 0)
         {
-            struct uwp_element *sel_el = uwp_elem_from_any( el->selected_item );
-            if (sel_el && sel_el->text[0])
-                lstrcpynW( label, sel_el->text, ARRAY_SIZE(label) );
-            else if (!uwp_unbox_string( el->selected_item, label, ARRAY_SIZE(label) ))
-            {
-                static const WCHAR *const cb_props[] = { L"DisplayName", L"Name", L"Title", L"Label", L"Text", L"Content" };
-                uwp_vm_query_string_prop( el->selected_item, cb_props, ARRAY_SIZE(cb_props), label, ARRAY_SIZE(label) );
-                if (!label[0])
-                {
-                    static const GUID IID_IStringable_cb =
-                        { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
-                    void *strable = NULL;
-                    if (SUCCEEDED(IInspectable_QueryInterface( el->selected_item, &IID_IStringable_cb, &strable )) && strable)
-                    {
-                        HSTRING hs = NULL;
-                        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-                        if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
-                        {
-                            const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
-                            if (s && s[0]) lstrcpynW( label, s, ARRAY_SIZE(label) );
-                            WindowsDeleteString( hs );
-                        }
-                        IUnknown_Release( (IUnknown *)strable );
-                    }
-                }
-            }
+            IInspectable *items[256];
+            int cnt = uwp_selector_get_items( el, items, ARRAY_SIZE(items) );
+            int i;
+            if (el->selected_index < cnt)
+                uwp_combobox_get_item_label( el, items[el->selected_index], label, ARRAY_SIZE(label) );
+            for (i = 0; i < cnt; i++) IInspectable_Release( items[i] );
         }
         if (!label[0] && el->text[0])
             lstrcpynW( label, el->text, ARRAY_SIZE(label) );
@@ -1474,7 +1458,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                                 &trc, &rc, blend_argb_over( fg_argb, surface_bg ), 1.0f );
         }
         SetRect( &chev_rc, max( rc.left, rc.right - 28 ), rc.top, rc.right - 6, rc.bottom );
-        xaml_gpu_push_text( ctx, L"\x25be", max( 11, fh - 1 ), FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        xaml_gpu_push_text( ctx, el->is_dropdown_open ? L"\x25b4" : L"\x25be", max( 11, fh - 1 ), FW_NORMAL,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                             &chev_rc, &rc, blend_argb_over( fg_argb, surface_bg ), 0.85f );
         return;
     }
@@ -2095,6 +2080,25 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             return;
         }
 
+        if (!wcscmp( el->name, L"TogglePaneButton" ))
+        {
+            BOOL light = uwp_is_light_theme( el );
+            RECT trc = el->bounds;
+            COLORREF fg = light ? RGB( 26, 26, 26 ) : RGB( 242, 242, 245 );
+            int fh = max( 14, (int)(16 * g_layout_scale + 0.5f) );
+            if (el->is_pressed || el->is_hovered)
+            {
+                COLORREF hbg = light
+                    ? (el->is_pressed ? RGB( 218, 218, 224 ) : RGB( 232, 232, 236 ))
+                    : (el->is_pressed ? RGB( 58, 58, 64 ) : RGB( 48, 48, 54 ));
+                xaml_gpu_push_rect( (float)trc.left, (float)trc.top, (float)trc.right, (float)trc.bottom, NULL,
+                                    4.0f, cr_to_argb( hbg ), 0, 0.0f, 1.0f );
+            }
+            xaml_gpu_push_text( ctx, L"\x2630", fh, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                &trc, NULL, fg, 1.0f );
+            return;
+        }
+
         InflateRect( &brc, -2, -2 );
         if (brc.right <= brc.left || brc.bottom <= brc.top) return;
 
@@ -2393,6 +2397,194 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         }
     }
 
+    if (el->parent &&
+        (!wcscmp( el->parent->name, L"MenuItemsHost" ) || !wcscmp( el->parent->name, L"FooterMenuItemsHost" )))
+    {
+        RECT brc = el->bounds;
+        BOOL light = uwp_is_light_theme( el );
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        BOOL is_expanded = (brc.right - brc.left) >= (int)(130 * sc);
+        struct uwp_element *nav = el->parent->parent;
+        WCHAR label[128] = {0};
+
+        if (uwp_is_nav_separator( el ))
+        {
+            int ym = (brc.top + brc.bottom) / 2;
+            COLORREF sep_cr = light ? RGB( 218, 218, 222 ) : RGB( 62, 62, 68 );
+            xaml_gpu_push_rect( (float)(brc.left + 8), (float)ym, (float)(brc.right - 8), (float)(ym + 1), NULL,
+                                0.0f, cr_to_argb( sep_cr ), 0, 0.0f, 1.0f );
+            return;
+        }
+
+        if (el->text[0])
+            lstrcpynW( label, el->text, ARRAY_SIZE(label) );
+        if (!label[0] && el->content)
+            uwp_combobox_get_item_label( NULL, el->content, label, ARRAY_SIZE(label) );
+        if (!label[0] && el->data_context)
+            uwp_combobox_get_item_label( NULL, el->data_context, label, ARRAY_SIZE(label) );
+        if (!wcscmp( label, L"SettingsButtonName" ) || (!label[0] && !wcscmp( el->name, L"SettingsItem" )))
+            lstrcpynW( label, L"Settings", ARRAY_SIZE(label) );
+        if (label[0] && !el->text[0])
+            lstrcpynW( el->text, label, ARRAY_SIZE(el->text) );
+
+        if (uwp_is_nav_header( el ))
+        {
+            if (is_expanded && label[0])
+            {
+                RECT hrc;
+                COLORREF hfg = light ? RGB( 96, 96, 102 ) : RGB( 168, 168, 176 );
+                SetRect( &hrc, brc.left + (int)(12 * sc), brc.top + (int)(4 * sc), brc.right - (int)(8 * sc), brc.bottom );
+                xaml_gpu_push_text( ctx, label, max( 11, (int)(12 * sc + 0.5f) ), FW_SEMIBOLD,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &hrc, &brc, hfg, 1.0f );
+            }
+            return;
+        }
+
+        if (!is_expanded && (!wcscmp( el->name, L"SettingsItem" ) || !wcscmp( label, L"SettingsButtonName" )))
+            return;
+
+        if (label[0])
+        {
+            WCHAR glyph[16] = {0};
+            WCHAR gfont[64] = {0};
+            BOOL is_sel = (el->is_checked == 1);
+            COLORREF accent_cr = light ? RGB( 0, 103, 192 ) : RGB( 96, 205, 255 );
+
+            if (!is_sel && nav && uwp_is_nav_view( nav ) && nav->selected_item)
+            {
+                if ((el->content && nav->selected_item == el->content) ||
+                    (el->data_context && nav->selected_item == el->data_context) ||
+                    (el->outer && nav->selected_item == el->outer) ||
+                    nav->selected_item == &el->IInspectable_iface)
+                    is_sel = TRUE;
+            }
+            if (!is_sel && !is_expanded && !wcscmp( label, L"Home" ) && !wcscmp( el->parent->name, L"MenuItemsHost" ) &&
+                (!nav || !nav->selected_item))
+                is_sel = TRUE;
+
+            if (el->nav_icon)
+            {
+                struct uwp_element *iel = uwp_elem_from_any( el->nav_icon );
+                if (iel && iel->text[0])
+                {
+                    lstrcpynW( glyph, iel->text, ARRAY_SIZE(glyph) );
+                    if (iel->font_family[0])
+                        uwp_resolve_elem_font_family( iel, gfont, ARRAY_SIZE(gfont) );
+                }
+            }
+            if (!glyph[0] && el->dp_cnt > 0 && el->dp_store)
+            {
+                int di;
+                for (di = 0; di < el->dp_cnt; di++)
+                {
+                    struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)el->dp_store[di].dp;
+                    if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Icon" ) && el->dp_store[di].value)
+                    {
+                        struct uwp_element *iel = uwp_elem_from_any( el->dp_store[di].value );
+                        if (iel && iel->text[0])
+                        {
+                            lstrcpynW( glyph, iel->text, ARRAY_SIZE(glyph) );
+                            if (iel->font_family[0])
+                                uwp_resolve_elem_font_family( iel, gfont, ARRAY_SIZE(gfont) );
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!glyph[0])
+            {
+                static const WCHAR *const glyph_props[] = { L"Glyph", L"IconGlyph", L"Icon" };
+                IInspectable *vm = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
+                if (vm)
+                    uwp_vm_query_string_prop( vm, glyph_props, ARRAY_SIZE(glyph_props), glyph, ARRAY_SIZE(glyph) );
+            }
+            if (!glyph[0])
+            {
+                if (!wcscmp( el->name, L"SettingsItem" ) || !wcscmp( label, L"Settings" ))
+                    lstrcpyW( glyph, L"\x2699" );
+                else if (!wcscmp( label, L"Home" )) lstrcpyW( glyph, L"\x2302" );
+                else if (!wcscmp( label, L"Apps" )) lstrcpyW( glyph, L"\x25A6" );
+                else if (!wcscmp( label, L"Gaming" )) lstrcpyW( glyph, L"\x2726" );
+                else if (!wcscmp( label, L"Themes" )) lstrcpyW( glyph, L"\x25C8" );
+                else if (!wcscmp( label, L"Library" )) lstrcpyW( glyph, L"\x25A4" );
+                else if (!wcscmp( label, L"Help" )) lstrcpyW( glyph, L"?" );
+                else lstrcpyW( glyph, L"\x2022" );
+            }
+            if (!gfont[0])
+            {
+                if (glyph[0] >= 0xE000 && glyph[0] <= 0xF8FF)
+                {
+                    WCHAR tmp_ff[64] = {0};
+                    uwp_resolve_font_family( L"Segoe MDL2 Assets", tmp_ff, ARRAY_SIZE(tmp_ff) );
+                    lstrcpynW( gfont, tmp_ff[0] ? tmp_ff : L"Segoe MDL2 Assets", ARRAY_SIZE(gfont) );
+                }
+                else
+                    lstrcpynW( gfont, L"Segoe UI", ARRAY_SIZE(gfont) );
+            }
+
+            if (is_expanded)
+            {
+                RECT irc, lrc;
+                COLORREF fg_cr = is_sel
+                    ? (light ? RGB( 16, 16, 16 ) : RGB( 255, 255, 255 ))
+                    : (light ? RGB( 38, 38, 42 ) : RGB( 228, 228, 232 ));
+                if (is_sel || el->is_hovered || el->is_pressed)
+                {
+                    COLORREF nbg = light
+                        ? (el->is_pressed ? RGB( 220, 220, 226 ) : RGB( 232, 232, 238 ))
+                        : (el->is_pressed ? RGB( 58, 58, 64 ) : RGB( 50, 50, 56 ));
+                    xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                        4.0f, cr_to_argb( nbg ), 0, 0.0f, 1.0f );
+                }
+                if (is_sel)
+                {
+                    int ym = (brc.top + brc.bottom) / 2;
+                    xaml_gpu_push_rect( (float)brc.left, (float)(ym - 8), (float)(brc.left + 3), (float)(ym + 8), NULL,
+                                        1.5f, cr_to_argb( accent_cr ), 0, 0.0f, 1.0f );
+                }
+                SetRect( &irc, brc.left + (int)(10 * sc), brc.top, brc.left + (int)(36 * sc), brc.bottom );
+                SetRect( &lrc, brc.left + (int)(42 * sc), brc.top, brc.right - (int)(10 * sc), brc.bottom );
+                xaml_gpu_push_text_font( ctx, glyph, gfont, max( 13, (int)(15 * sc + 0.5f) ), FW_NORMAL,
+                                         DT_CENTER | DT_VCENTER | DT_SINGLELINE, &irc, &brc, fg_cr, 1.0f );
+                xaml_gpu_push_text( ctx, label, max( 12, (int)(14 * sc + 0.5f) ),
+                                    is_sel ? FW_SEMIBOLD : FW_NORMAL,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &lrc, &brc, fg_cr, 1.0f );
+            }
+            else
+            {
+                RECT irc, lrc;
+                InflateRect( &brc, -2, -2 );
+                if (is_sel || el->is_hovered || el->is_pressed)
+                {
+                    COLORREF nbg = light
+                        ? (el->is_pressed ? RGB( 220, 220, 226 ) : RGB( 232, 232, 238 ))
+                        : (el->is_pressed ? RGB( 54, 54, 58 ) : RGB( 45, 45, 48 ));
+                    xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                        6.0f, cr_to_argb( nbg ), 0, 0.0f, 1.0f );
+                }
+                if (is_sel)
+                {
+                    int ym = (brc.top + brc.bottom) / 2;
+                    xaml_gpu_push_rect( (float)brc.left, (float)(ym - 10), (float)(brc.left + 3), (float)(ym + 10), NULL,
+                                        1.5f, cr_to_argb( accent_cr ), 0, 0.0f, 1.0f );
+                }
+                SetRect( &irc, brc.left, brc.top + 4, brc.right, brc.top + 28 );
+                SetRect( &lrc, brc.left, brc.top + 28, brc.right, brc.bottom - 3 );
+                xaml_gpu_push_text_font( ctx, glyph, gfont, 15, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                         &irc, &brc,
+                                         is_sel ? accent_cr : (light ? RGB( 60, 60, 66 ) : RGB( 200, 200, 205 )), 1.0f );
+                xaml_gpu_push_text( ctx, label, 10, is_sel ? FW_SEMIBOLD : FW_NORMAL,
+                                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &lrc, &brc,
+                                    is_sel ? (light ? RGB( 16, 16, 16 ) : RGB( 255, 255, 255 ))
+                                           : (light ? RGB( 82, 82, 88 ) : RGB( 185, 185, 190 )), 1.0f );
+            }
+        }
+        return;
+    }
+
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
@@ -2656,6 +2848,17 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             }
         }
     }
+    if (uwp_nav_is_overlay_open( el ) && el->nav_pane_bounds.right > el->nav_pane_bounds.left)
+    {
+        RECT prc = el->nav_pane_bounds;
+        BOOL light = uwp_is_light_theme( el );
+        UINT32 pane_bg = light ? 0xfff3f3f3u : 0xff27272bu;
+        UINT32 pane_bd = light ? 0xffd4d4d8u : 0xff44444cu;
+        xaml_gpu_push_rect( (float)prc.right, (float)prc.top, (float)(prc.right + 8), (float)prc.bottom, NULL,
+                            0.0f, 0x38000000u, 0, 0.0f, 1.0f );
+        xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom, NULL,
+                            0.0f, pane_bg, pane_bd, 1.0f, 1.0f );
+    }
     if (el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -2666,6 +2869,84 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             if (ch && ch != el) uwp_gpu_paint_element( ctx, ch );
         }
     }
+}
+
+static void uwp_gpu_paint_combobox_popup( ID3D11DeviceContext *ctx, int width, int height )
+{
+    struct uwp_element *cb = g_open_combobox;
+    IInspectable *items[256];
+    int count, i, item_h = 32, vis_cnt = 0, pad_y = 4;
+    RECT prc;
+    BOOL light;
+    UINT32 bg_argb, bd_argb, sel_argb, hov_argb;
+    COLORREF fg_cr, accent_cr;
+    int fh;
+
+    if (!cb || !cb->is_dropdown_open || !cb->has_bounds || cb->visibility != 0) return;
+    count = uwp_selector_get_items( cb, items, ARRAY_SIZE(items) );
+    if (count <= 0) return;
+    if (!uwp_combobox_compute_popup_rect( cb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ))
+    {
+        for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+        return;
+    }
+
+    light = uwp_is_light_theme( cb );
+    bg_argb = light ? 0xfff9f9f9u : 0xff2c2c30u;
+    bd_argb = light ? 0xffceced4u : 0xff52525au;
+    sel_argb = light ? 0xffe6e6ecu : 0xff3b3b42u;
+    hov_argb = light ? 0xffededf2u : 0xff35353cu;
+    fg_cr = light ? RGB( 24, 24, 28 ) : RGB( 245, 245, 248 );
+    accent_cr = light ? RGB( 0, 103, 192 ) : RGB( 96, 205, 255 );
+    fh = max( (int)(12 * g_layout_scale + 0.5f),
+              min( (int)(16 * g_layout_scale + 0.5f),
+                   (int)((cb->has_font_size ? cb->font_size : 14.0) * g_layout_scale + 0.5f) ) );
+
+    /* Subtle drop shadow + rounded themed popup surface */
+    xaml_gpu_push_rect( (float)(prc.left - 2), (float)(prc.top + 2), (float)(prc.right + 2), (float)(prc.bottom + 4),
+                        NULL, 8.0f, 0x48000000u, 0, 0.0f, 1.0f );
+    xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom,
+                        NULL, 6.0f, bg_argb, bd_argb, 1.0f, 1.0f );
+
+    for (i = 0; i < vis_cnt && (cb->dropdown_scroll_offset + i) < count; i++)
+    {
+        int idx = cb->dropdown_scroll_offset + i;
+        RECT rrc, trc;
+        WCHAR label[128] = {0};
+        BOOL is_sel = (idx == cb->selected_index) || (cb->selected_item && items[idx] == cb->selected_item);
+        BOOL is_hov = (idx == cb->hovered_dropdown_idx);
+
+        SetRect( &rrc, prc.left + 4, prc.top + pad_y + i * item_h, prc.right - 4, prc.top + pad_y + (i + 1) * item_h );
+        if (is_sel || is_hov)
+            xaml_gpu_push_rect( (float)rrc.left, (float)rrc.top, (float)rrc.right, (float)rrc.bottom,
+                                &prc, 4.0f, is_sel ? sel_argb : hov_argb, 0, 0.0f, 1.0f );
+        if (is_sel)
+        {
+            int ym = (rrc.top + rrc.bottom) / 2;
+            xaml_gpu_push_rect( (float)rrc.left, (float)(ym - 8), (float)(rrc.left + 3), (float)(ym + 8),
+                                &prc, 1.5f, cr_to_argb( accent_cr ), 0, 0.0f, 1.0f );
+        }
+        uwp_combobox_get_item_label( cb, items[idx], label, ARRAY_SIZE(label) );
+        if (label[0])
+        {
+            SetRect( &trc, rrc.left + 12, rrc.top, rrc.right - 10, rrc.bottom );
+            xaml_gpu_push_text( ctx, label, fh, is_sel ? FW_SEMIBOLD : FW_NORMAL,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                &trc, &prc, fg_cr, 1.0f );
+        }
+    }
+
+    if (count > vis_cnt)
+    {
+        int track_h = max( 16, (prc.bottom - prc.top) - pad_y * 2 );
+        int thumb_h = max( 18, (track_h * vis_cnt) / count );
+        int max_scroll = max( 1, count - vis_cnt );
+        int thumb_y = prc.top + pad_y + ((track_h - thumb_h) * cb->dropdown_scroll_offset) / max_scroll;
+        xaml_gpu_push_rect( (float)(prc.right - 5), (float)thumb_y, (float)(prc.right - 2), (float)(thumb_y + thumb_h),
+                            &prc, 1.5f, light ? 0x66000000u : 0x66ffffffu, 0, 0.0f, 1.0f );
+    }
+
+    for (i = 0; i < count; i++) IInspectable_Release( items[i] );
 }
 
 static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IInspectable *content,
@@ -2727,6 +3008,8 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
         uwp_arrange_element( root_el, rc );
         uwp_gpu_paint_element( ctx, root_el );
     }
+
+    uwp_gpu_paint_combobox_popup( ctx, width, height );
 
     if (rtv ? !xaml_gpu_end_frame_rtv( ctx, &inst_cnt, &hits, &misses )
             : !xaml_gpu_end_frame( ctx, swapchain, &inst_cnt, &hits, &misses ))
@@ -3648,6 +3931,17 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
                 UINT32 cpy = len < ARRAY_SIZE(pp_el->text) - 1 ? len : ARRAY_SIZE(pp_el->text) - 1;
                 memcpy( pp_el->text, raw, cpy * sizeof(WCHAR) );
                 pp_el->text[cpy] = 0;
+            }
+        }
+        if (SUCCEEDED(hr) && inner && *(void **)inner && !wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" ))
+        {
+            struct uwp_element *sym_el = uwp_elem_from_any( *(void **)inner );
+            UINT_PTR code = (UINT_PTR)outer;
+            if (sym_el && code >= 0xE000 && code <= 0xFFFF)
+            {
+                sym_el->text[0] = (WCHAR)code;
+                sym_el->text[1] = 0;
+                lstrcpynW( sym_el->font_family, L"Segoe MDL2 Assets", ARRAY_SIZE(sym_el->font_family) );
             }
         }
         return hr;

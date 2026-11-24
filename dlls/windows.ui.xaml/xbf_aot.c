@@ -902,6 +902,15 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         }
                         else if (uwp_set_custom_xaml_member_obj( app_outer, owner_cls, pi->name, target, child_raw ))
                         {
+                            if (parent_el && !wcscmp( pi->name, L"Icon" ))
+                            {
+                                if (parent_el->nav_icon != child_raw)
+                                {
+                                    if (parent_el->nav_icon) IInspectable_Release( parent_el->nav_icon );
+                                    parent_el->nav_icon = child_raw;
+                                    IInspectable_AddRef( child_raw );
+                                }
+                            }
                             if (wcscmp( pi->name, L"Content" ) && wcscmp( pi->name, L"Child" ))
                                 handled_custom_obj = TRUE;
                         }

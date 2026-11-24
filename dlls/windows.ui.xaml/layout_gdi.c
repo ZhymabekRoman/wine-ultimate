@@ -559,9 +559,83 @@ static BOOL uwp_apply_margins_clamped( const struct uwp_element *el, RECT *rc )
     return clamped;
 }
 
-static BOOL uwp_is_combobox( const struct uwp_element *el )
+BOOL uwp_is_combobox( const struct uwp_element *el )
 {
     return el && wcsstr( el->class_name, L"ComboBox" ) && !wcsstr( el->class_name, L"ComboBoxItem" );
+}
+
+BOOL uwp_is_nav_view( const struct uwp_element *el )
+{
+    return el && (!wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ) ||
+                  !wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.NavigationView" ) ||
+                  !wcscmp( el->default_style_key_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ) ||
+                  !wcscmp( el->default_style_key_name, L"Windows.UI.Xaml.Controls.NavigationView" ));
+}
+
+BOOL uwp_is_nav_header( const struct uwp_element *el )
+{
+    return el && (wcsstr( el->class_name, L"NavigationViewItemHeader" ) != NULL ||
+                  wcsstr( el->default_style_key_name, L"NavigationViewItemHeader" ) != NULL);
+}
+
+BOOL uwp_is_nav_separator( const struct uwp_element *el )
+{
+    return el && (wcsstr( el->class_name, L"NavigationViewItemSeparator" ) != NULL ||
+                  wcsstr( el->default_style_key_name, L"NavigationViewItemSeparator" ) != NULL);
+}
+
+int uwp_nav_effective_display_mode( const struct uwp_element *nav, int avail_w )
+{
+    double scale, w_dip;
+    if (!nav) return 1;
+    switch (nav->nav_pane_display_mode)
+    {
+    case 4: /* LeftMinimal */
+    case 2: /* Top */
+        return 0; /* Minimal (no left rail when closed) */
+    case 3: /* LeftCompact */
+        return 1; /* Compact */
+    case 1: /* Left */
+        scale = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        w_dip = (double)avail_w / scale;
+        return (w_dip >= nav->nav_expanded_threshold) ? 2 : 1;
+    default: /* 0 = Auto */
+        if (avail_w <= 0)
+            return nav->nav_display_mode_set ? nav->nav_display_mode : 1;
+        scale = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        w_dip = (double)avail_w / scale;
+        if (w_dip < nav->nav_compact_threshold) return 0;
+        if (w_dip < nav->nav_expanded_threshold) return 1;
+        return nav->nav_is_pane_open ? 2 : 1;
+    }
+}
+
+BOOL uwp_nav_is_overlay_open( const struct uwp_element *nav )
+{
+    if (!nav || !uwp_is_nav_view( nav ) || !nav->nav_is_pane_open) return FALSE;
+    return uwp_nav_effective_display_mode( nav, nav->bounds.right - nav->bounds.left ) != 2;
+}
+
+static void uwp_clear_bounds_tree( struct uwp_element *el )
+{
+    if (!el) return;
+    el->has_bounds = FALSE;
+    SetRectEmpty( &el->bounds );
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el) uwp_clear_bounds_tree( ch );
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el) uwp_clear_bounds_tree( ch );
+    }
 }
 
 static double uwp_measure_natural_width( const struct uwp_element *el, int depth )
@@ -1337,27 +1411,119 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         return;
     }
 
-    if (!wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ))
+    if (uwp_is_nav_view( el ))
     {
-        int rail_w = 68;
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        int avail_w = rc.right - rc.left;
+        int eff_mode = uwp_nav_effective_display_mode( el, avail_w );
+        int closed_rail_w = (eff_mode == 1) ? (int)(max( 48.0, el->nav_compact_pane_length ) * sc + 0.5) : 0;
+        int open_pane_w = (int)(max( 48.0, min( 340.0, el->nav_open_pane_length > 0.0 ? el->nav_open_pane_length : 280.0 ) ) * sc + 0.5);
+        BOOL pane_visible = el->nav_is_pane_open || (eff_mode != 0);
+        int pane_w = el->nav_is_pane_open ? open_pane_w : closed_rail_w;
+        int content_left = rc.left + ((eff_mode == 2 && el->nav_is_pane_open) ? open_pane_w : closed_rail_w);
+        BOOL show_toggle = el->nav_is_pane_toggle_visible && (eff_mode != 2);
+        int footer_vis_cnt = 0;
+        BOOL has_footer_host = FALSE;
+
+        if (pane_w > avail_w) pane_w = avail_w;
+        if (pane_visible && pane_w > 0)
+            SetRect( &el->nav_pane_bounds, rc.left, rc.top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom );
+        else
+            SetRectEmpty( &el->nav_pane_bounds );
+
         if (el->children_coll)
         {
             struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
             unsigned int k;
+            int menu_top = rc.top + (show_toggle ? (int)(48 * sc + 0.5f) : (int)(12 * sc + 0.5f));
+            int footer_h = 0, footer_top;
+
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                if (ch && !wcscmp( ch->name, L"FooterMenuItemsHost" ))
+                {
+                    has_footer_host = TRUE;
+                    if (ch->children_coll)
+                    {
+                        struct uwp_vec_view *fv = CONTAINING_RECORD( ch->children_coll, struct uwp_vec_view, IInspectable_iface );
+                        unsigned int fk;
+                        for (fk = 0; fk < fv->count; fk++)
+                        {
+                            struct uwp_element *fch = uwp_elem_from_any( fv->items[fk] );
+                            if (!fch) continue;
+                            if (!wcscmp( fch->name, L"SettingsItem" ))
+                            {
+                                if (el->nav_is_settings_visible && el->nav_is_pane_open)
+                                    footer_vis_cnt++;
+                            }
+                            else if (fch->visibility == 0)
+                            {
+                                footer_vis_cnt++;
+                            }
+                        }
+                    }
+                }
+            }
+            if (footer_vis_cnt > 0)
+            {
+                footer_h = el->nav_is_pane_open
+                    ? min( (int)(160 * sc), footer_vis_cnt * (int)(40 * sc) + (int)(12 * sc) )
+                    : min( (int)(140 * sc), footer_vis_cnt * (int)(58 * sc) + (int)(12 * sc) );
+            }
+            else if (has_footer_host && pane_visible && pane_w > 0)
+            {
+                /* Reserve initial footer strip so WinUI ItemsRepeater runs Measure/Arrange and materializes footer items */
+                footer_h = el->nav_is_pane_open
+                    ? (el->nav_is_settings_visible ? (int)(46 * sc) : (int)(40 * sc))
+                    : (int)(120 * sc);
+            }
+            footer_top = max( menu_top + (int)(60 * sc), (int)rc.bottom - footer_h - 4 );
+
             for (k = 0; k < children->count; k++)
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 RECT crc;
-                if (!ch || ch->visibility != 0) continue;
+                if (!ch) continue;
                 if (!wcscmp( ch->name, L"TogglePaneButton" ))
-                    SetRect( &crc, rc.left + 8, rc.top + 8, rc.left + 56, rc.top + 48 );
-                else if (!wcscmp( ch->name, L"MenuItemsHost" ))
-                    SetRect( &crc, rc.left, rc.top + 12, rc.left + rail_w, max( rc.top + 120, rc.bottom - 140 ) );
-                else if (!wcscmp( ch->name, L"FooterMenuItemsHost" ))
-                    SetRect( &crc, rc.left, max( rc.top + 120, rc.bottom - 132 ), rc.left + rail_w, rc.bottom - 8 );
-                else
-                    crc = rc;
-                uwp_arrange_element( ch, crc );
+                {
+                    if (!show_toggle || ch->visibility != 0)
+                    {
+                        uwp_clear_bounds_tree( ch );
+                        continue;
+                    }
+                    SetRect( &crc, rc.left + (int)(6 * sc + 0.5f), rc.top + (int)(6 * sc + 0.5f),
+                             rc.left + (int)(44 * sc + 0.5f), rc.top + (int)(42 * sc + 0.5f) );
+                    ch->bounds = crc;
+                    ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
+                    ch->actual_w = (double)(crc.right - crc.left);
+                    ch->actual_h = (double)(crc.bottom - crc.top);
+                    continue;
+                }
+                if (!wcscmp( ch->name, L"MenuItemsHost" ))
+                {
+                    if (!pane_visible || pane_w <= 0 || ch->visibility != 0)
+                    {
+                        uwp_clear_bounds_tree( ch );
+                        continue;
+                    }
+                    SetRect( &crc, rc.left, menu_top, min( (int)rc.right, (int)rc.left + pane_w ), footer_top );
+                    uwp_arrange_element( ch, crc );
+                    continue;
+                }
+                if (!wcscmp( ch->name, L"FooterMenuItemsHost" ))
+                {
+                    if (!pane_visible || pane_w <= 0 || footer_h <= 0 || ch->visibility != 0)
+                    {
+                        uwp_clear_bounds_tree( ch );
+                        continue;
+                    }
+                    SetRect( &crc, rc.left, footer_top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom - 4 );
+                    uwp_arrange_element( ch, crc );
+                    continue;
+                }
+                if (ch->visibility != 0) continue;
+                uwp_arrange_element( ch, rc );
             }
         }
         if (el->content)
@@ -1366,7 +1532,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             if (ch && ch != el)
             {
                 RECT content_rc;
-                SetRect( &content_rc, rc.left + rail_w, rc.top, rc.right, rc.bottom );
+                SetRect( &content_rc, content_left, rc.top, rc.right, rc.bottom );
                 uwp_arrange_element( ch, content_rc );
             }
         }
@@ -1409,6 +1575,82 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             }
             return;
         }
+        if (is_nav_rail && avail_w >= (int)(130 * ((g_layout_scale > 0.25f) ? g_layout_scale : 1.0f)))
+        {
+            float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+            struct uwp_element *nav = el->parent;
+            BOOL is_footer = !wcscmp( el->name, L"FooterMenuItemsHost" );
+            int scroll_y = (!is_footer && nav && uwp_is_nav_view( nav )) ? nav->nav_scroll_y : 0;
+            int cur_y = rc.top - scroll_y;
+            BOOL rev = FALSE;
+            if (!is_footer && children->count > 1)
+            {
+                struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
+                if (last_ch && !wcscmp( last_ch->text, L"Home" ))
+                    rev = TRUE;
+            }
+            for (k = 0; k < children->count; k++)
+            {
+                unsigned int idx = rev ? (children->count - 1 - k) : k;
+                struct uwp_element *ch = uwp_elem_from_any( children->items[idx] );
+                BOOL is_settings_item;
+                int row_h;
+                RECT crc;
+                if (!ch) continue;
+                is_settings_item = (!wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( ch->text, L"SettingsButtonName" ));
+                if (is_settings_item)
+                {
+                    if (!nav || !nav->nav_is_settings_visible)
+                    {
+                        uwp_clear_bounds_tree( ch );
+                        continue;
+                    }
+                    if (!ch->text[0] || !wcscmp( ch->text, L"SettingsButtonName" ))
+                        lstrcpynW( ch->text, L"Settings", ARRAY_SIZE(ch->text) );
+                    ch->visibility = 0;
+                }
+                else if (ch->visibility != 0)
+                {
+                    uwp_clear_bounds_tree( ch );
+                    continue;
+                }
+                if (uwp_is_nav_header( ch ))
+                {
+                    if (k > 0) cur_y += (int)(6 * sc + 0.5f);
+                    row_h = (int)(30 * sc + 0.5f);
+                }
+                else if (uwp_is_nav_separator( ch ))
+                {
+                    row_h = (int)(11 * sc + 0.5f);
+                }
+                else
+                {
+                    row_h = (int)(36 * sc + 0.5f);
+                }
+                if (cur_y + row_h <= rc.top || cur_y >= rc.bottom)
+                {
+                    uwp_clear_bounds_tree( ch );
+                }
+                else
+                {
+                    SetRect( &crc, rc.left + (int)(6 * sc + 0.5f), max( (int)rc.top, cur_y ),
+                             rc.right - (int)(6 * sc + 0.5f), min( (int)rc.bottom, cur_y + row_h ) );
+                    if (is_settings_item && ch->visibility != 0)
+                    {
+                        ch->bounds = crc;
+                        ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
+                        ch->actual_w = (double)(crc.right - crc.left);
+                        ch->actual_h = (double)(crc.bottom - crc.top);
+                    }
+                    else
+                    {
+                        uwp_arrange_element( ch, crc );
+                    }
+                }
+                cur_y += row_h + 2;
+            }
+            return;
+        }
         {
             int cur_y = rc.top;
             int item_h = is_nav_rail ? 54 : 80;
@@ -1425,9 +1667,10 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 struct uwp_element *ch = uwp_elem_from_any( children->items[idx] );
                 RECT crc;
                 if (!ch || ch->visibility != 0) continue;
-                if (is_nav_rail && (!wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( ch->text, L"SettingsButtonName" )))
+                if (is_nav_rail && (uwp_is_nav_header( ch ) || uwp_is_nav_separator( ch ) ||
+                                    !wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( ch->text, L"SettingsButtonName" )))
                 {
-                    ch->has_bounds = FALSE;
+                    uwp_clear_bounds_tree( ch );
                     continue;
                 }
                 SetRect( &crc, rc.left + 4, cur_y, rc.right - 4, min( (int)rc.bottom, cur_y + item_h ) );
@@ -2364,6 +2607,19 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el) uwp_paint_element( hdc, ch );
     }
+    if (uwp_nav_is_overlay_open( el ) && el->nav_pane_bounds.right > el->nav_pane_bounds.left)
+    {
+        BOOL light = uwp_is_light_theme( el );
+        HBRUSH pbr = CreateSolidBrush( light ? RGB( 243, 243, 243 ) : RGB( 39, 39, 43 ) );
+        HPEN ppen = CreatePen( PS_SOLID, 1, light ? RGB( 212, 212, 212 ) : RGB( 68, 68, 74 ) );
+        HPEN op = SelectObject( hdc, ppen );
+        FillRect( hdc, &el->nav_pane_bounds, pbr );
+        MoveToEx( hdc, el->nav_pane_bounds.right - 1, el->nav_pane_bounds.top, NULL );
+        LineTo( hdc, el->nav_pane_bounds.right - 1, el->nav_pane_bounds.bottom );
+        SelectObject( hdc, op );
+        DeleteObject( ppen );
+        DeleteObject( pbr );
+    }
     if (el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -2374,6 +2630,61 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             if (ch && ch != el) uwp_paint_element( hdc, ch );
         }
     }
+}
+
+static void uwp_gdi_paint_combobox_popup( HDC hdc, int width, int height )
+{
+    struct uwp_element *cb = g_open_combobox;
+    IInspectable *items[256];
+    int count, i, item_h = 32, vis_cnt = 0, pad_y = 4;
+    RECT prc;
+    BOOL light;
+    HBRUSH bg_br, sel_br, hov_br;
+    HPEN bd_pen;
+
+    if (!cb || !cb->is_dropdown_open || !cb->has_bounds || cb->visibility != 0) return;
+    count = uwp_selector_get_items( cb, items, ARRAY_SIZE(items) );
+    if (count <= 0) return;
+    if (!uwp_combobox_compute_popup_rect( cb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ))
+    {
+        for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+        return;
+    }
+
+    light = uwp_is_light_theme( cb );
+    bg_br = CreateSolidBrush( light ? RGB( 249, 249, 249 ) : RGB( 44, 44, 48 ) );
+    sel_br = CreateSolidBrush( light ? RGB( 232, 232, 236 ) : RGB( 58, 58, 64 ) );
+    hov_br = CreateSolidBrush( light ? RGB( 238, 238, 242 ) : RGB( 54, 54, 60 ) );
+    bd_pen = CreatePen( PS_SOLID, 1, light ? RGB( 205, 205, 210 ) : RGB( 82, 82, 88 ) );
+    {
+        HBRUSH ob = SelectObject( hdc, bg_br );
+        HPEN op = SelectObject( hdc, bd_pen );
+        RoundRect( hdc, prc.left, prc.top, prc.right, prc.bottom, 8, 8 );
+        SelectObject( hdc, ob );
+        SelectObject( hdc, op );
+    }
+    for (i = 0; i < vis_cnt && (cb->dropdown_scroll_offset + i) < count; i++)
+    {
+        int idx = cb->dropdown_scroll_offset + i;
+        RECT rrc, trc;
+        WCHAR label[128] = {0};
+        BOOL is_sel = (idx == cb->selected_index) || (cb->selected_item && items[idx] == cb->selected_item);
+        BOOL is_hov = (idx == cb->hovered_dropdown_idx);
+        SetRect( &rrc, prc.left + 4, prc.top + pad_y + i * item_h, prc.right - 4, prc.top + pad_y + (i + 1) * item_h );
+        if (is_sel || is_hov)
+            FillRect( hdc, &rrc, is_sel ? sel_br : hov_br );
+        uwp_combobox_get_item_label( cb, items[idx], label, ARRAY_SIZE(label) );
+        SetRect( &trc, rrc.left + 12, rrc.top, rrc.right - 8, rrc.bottom );
+        uwp_paint_text( hdc, &trc, label, max( 12, (int)(13 * g_layout_scale) ),
+                        is_sel ? FW_SEMIBOLD : FW_NORMAL,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                        light ? RGB( 26, 26, 26 ) : RGB( 245, 245, 245 ) );
+    }
+    DeleteObject( bg_br );
+    DeleteObject( sel_br );
+    DeleteObject( hov_br );
+    DeleteObject( bd_pen );
+    for (i = 0; i < count; i++) IInspectable_Release( items[i] );
 }
 
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content )
@@ -2427,6 +2738,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
         uwp_vsm_evaluate_tree( g_navigated_page_el, eval_w, eval_h );
         uwp_arrange_element( g_navigated_page_el, rc );
         uwp_paint_element( hdc, g_navigated_page_el );
+        uwp_gdi_paint_combobox_popup( hdc, width, height );
         return;
     }
     if (root_el && (root_el->content || root_el->children_coll || root_el->xbf_parsed))
@@ -2453,6 +2765,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
             }
         }
         uwp_paint_element( hdc, root_el );
+        uwp_gdi_paint_combobox_popup( hdc, width, height );
     }
     else TRACE( "xaml_layout_render: root_el NULL (content %p)\n", (void *)content );
 }

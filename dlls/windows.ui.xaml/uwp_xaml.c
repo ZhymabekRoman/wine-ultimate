@@ -625,6 +625,53 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
         lstrcpynW( out_type_name, xaml_get_app_caps()->vm_type, (int)max_chars );
 }
 
+BOOL uwp_vm_supports_display_or_cmd( IInspectable *vm )
+{
+    void *app_outer = uwp_get_app_outer();
+    void *provider = NULL;
+    HSTRING hcls = NULL;
+    const WCHAR *cls = NULL;
+    BOOL ok = FALSE;
+
+    if (!vm || !app_outer) return FALSE;
+    if (FAILED(IInspectable_GetRuntimeClassName( vm, &hcls )) || !hcls) return FALSE;
+    cls = WindowsGetStringRawBuffer( hcls, NULL );
+    if (cls && cls[0] &&
+        SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider)
+    {
+        struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
+        HSTRING htype = NULL;
+        struct xaml_type *xt = NULL;
+        if (mp->lpVtbl->GetXamlTypeByFullName && SUCCEEDED(WindowsCreateString( cls, wcslen(cls), &htype )))
+        {
+            if (SUCCEEDED(mp->lpVtbl->GetXamlTypeByFullName( mp, htype, &xt )) && xt)
+            {
+                static const WCHAR *const wanted[] = { L"DisplayValue", L"ButtonPressed" };
+                size_t i;
+                for (i = 0; i < ARRAY_SIZE(wanted) && !ok; i++)
+                {
+                    HSTRING hm = NULL;
+                    struct xaml_member *xm = NULL;
+                    if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( wanted[i], wcslen(wanted[i]), &hm )))
+                    {
+                        if (SUCCEEDED(xt->lpVtbl->GetMember( xt, hm, &xm )) && xm)
+                        {
+                            ok = TRUE;
+                            IUnknown_Release( (IUnknown *)xm );
+                        }
+                        WindowsDeleteString( hm );
+                    }
+                }
+                IUnknown_Release( (IUnknown *)xt );
+            }
+            WindowsDeleteString( htype );
+        }
+        IUnknown_Release( (IUnknown *)provider );
+    }
+    WindowsDeleteString( hcls );
+    return ok;
+}
+
 static IInspectable *uwp_make_button_pressed_args( int code );
 
 void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name )
@@ -1334,7 +1381,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     }
     else if (IsEqualGUID( iid, &IID_IRadioButtons_WinUI ))
         *out = &impl->IStyle_iface;
-    else if (IsEqualGUID( iid, &IID_IDataTemplate_UWP ))
+    else if (IsEqualGUID( iid, &IID_IDataTemplate_UWP ) &&
+             !wcsstr( impl->class_name, L"TemplateSelector" ))
         *out = &impl->IDataTemplate_iface;
     else if (IsEqualGUID( iid, &IID_IDataTemplateSelector_UWP ))
         *out = &impl->IDataTemplateSelector_iface;
@@ -1589,6 +1637,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             { 0xf6ce8c6d, 0xfe96, 0x41ad, { 0xa6, 0x4a, 0xc2, 0xb8, 0x1c, 0x4a, 0xf7, 0xf8 } };
         static const GUID IID_ISelector_UWP =
             { 0xe30eb3a5, 0xb36b, 0x42dc, { 0x85, 0x27, 0xcd, 0x25, 0x13, 0x6c, 0x08, 0x3c } };
+        static const GUID IID_IComboBox_UWP =
+            { 0xb9a8d05c, 0xac97, 0x47f1, { 0xa5, 0xf4, 0x3f, 0x9f, 0x4d, 0x4b, 0x11, 0x6c } };
         static const GUID IID_IItemsControl_UWP =
             { 0x3d0813ba, 0x6890, 0x4537, { 0xbf, 0xe5, 0x79, 0x6d, 0x94, 0x58, 0xed, 0xd6 } };
         static const GUID IID_IItemsControl_UWP2 =
@@ -1635,6 +1685,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             *out = &impl->IStyle_iface;
         else if (IsEqualGUID( iid, &IID_ISelector_UWP ))
             *out = &impl->ISelector_iface;
+        else if (IsEqualGUID( iid, &IID_IComboBox_UWP ))
+            *out = &impl->IComboBox_iface;
         else if (IsEqualGUID( iid, &IID_IItemsControl_UWP ) ||
                  IsEqualGUID( iid, &IID_IItemsControl_UWP2 ))
             *out = &impl->IItemsControl_iface;
@@ -1647,10 +1699,12 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                  IsEqualGUID( iid, &IID_IMarkupExtension_UWP ) ||
                  IsEqualGUID( iid, &IID_IMarkupExtensionOverrides_UWP ))
             *out = &impl->IStyle_iface;
-        else if (IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ) ||
-                 IsEqualGUID( iid, &IID_IUIElement10_UWP ) ||
-                 IsEqualGUID( iid, &IID_IXamlRoot_UWP ))
+        else if (IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ))
             *out = &impl->IStateTrigger_iface;
+        else if (IsEqualGUID( iid, &IID_IUIElement10_UWP ))
+            *out = &impl->IUIElement10_iface;
+        else if (IsEqualGUID( iid, &IID_IXamlRoot_UWP ))
+            *out = &impl->IXamlRoot_iface;
         else
     {
         static const GUID IID_IObservableVector_DO =
@@ -3049,25 +3103,37 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                 child->parent = impl;
                 child->visibility = uwp_tpl_part_collapsed( nm ) ? 1 : 0;
                 lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-                if (!wcscmp( nm, L"MenuItemsHost" ) || !wcscmp( nm, L"FooterMenuItemsHost" ) ||
-                    !wcscmp( nm, L"PaneContentGrid" ))
-                    child->width = 68.0;
-                if (wcsstr( impl->class_name, L"NavigationView" ) &&
-                    (!wcscmp( nm, L"TogglePaneButton" ) || !wcscmp( nm, L"MenuItemsHost" ) ||
-                     !wcscmp( nm, L"FooterMenuItemsHost" )))
-                {
-                    if (!wcscmp( nm, L"TogglePaneButton" ))
-                    {
-                        child->width = 48.0;
-                        child->height = 40.0;
-                        if (!child->text[0])
-                            lstrcpynW( child->text, L"\x2630", ARRAY_SIZE(child->text) );
-                    }
-                    if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
-                    if (impl->children_coll)
-                        uwp_vec_Append( impl->children_coll, child->outer ? child->outer : &child->IInspectable_iface );
-                }
                 uwp_element_add_named( impl, child );
+            }
+        }
+        if (child && wcsstr( impl->class_name, L"NavigationView" ) &&
+            (!wcscmp( nm, L"TogglePaneButton" ) || !wcscmp( nm, L"MenuItemsHost" ) ||
+             !wcscmp( nm, L"FooterMenuItemsHost" )))
+        {
+            BOOL already_attached = FALSE;
+            child->parent = impl;
+            if (!wcscmp( nm, L"TogglePaneButton" ))
+            {
+                child->width = 40.0;
+                child->height = 36.0;
+                if (!child->text[0])
+                    lstrcpynW( child->text, L"\x2630", ARRAY_SIZE(child->text) );
+            }
+            if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+            if (impl->children_coll)
+            {
+                struct uwp_vec_view *v = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+                unsigned int vi;
+                for (vi = 0; vi < v->count; vi++)
+                {
+                    if (uwp_elem_from_any( v->items[vi] ) == child)
+                    {
+                        already_attached = TRUE;
+                        break;
+                    }
+                }
+                if (!already_attached)
+                    uwp_vec_Append( impl->children_coll, child->outer ? child->outer : &child->IInspectable_iface );
             }
         }
     }
@@ -3688,7 +3754,6 @@ static const void *uwp_fe_vtbl[112] =
     [53] = uwp_fe_probe53,
     [54] = uwp_fe_probe54,
     [55] = uwp_fe_probe55,
-    [57] = uwp_fe_probe57,
     [58] = uwp_fe_probe58,
     [59] = uwp_fe_probe59,
     [60] = uwp_fe_probe60,
@@ -3736,6 +3801,7 @@ static const void *uwp_fe_vtbl[112] =
      * own[6]=FooterMenuItems(62), own[46]=SelectionChanged(102),
      * own[48]=ItemInvoked(104) — Time.dll calls *0x1c0,*0x1f0,*0x340,*0x348. */
     [56] = uwp_nav_get_IsPaneOpen,
+    [57] = uwp_nav_put_IsPaneOpen,
     [62] = uwp_nav_get_FooterMenuItems,
     [102] = uwp_ui_add_SelectionChanged,
     [103] = uwp_ui_remove_SelectionChanged,
@@ -4478,6 +4544,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->ISolidColorBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_scb_vtbl;
     impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_flyout_vtbl;
     impl->ISelector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_selector_vtbl;
+    impl->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_combobox_vtbl;
     impl->IItemsControl_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_items_ctrl_vtbl;
     impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_vtbl;
     impl->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_pub_vtbl;
@@ -4498,6 +4565,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IMenuFlyout2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mf2_vtbl;
     impl->IUIElement4_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ui4_vtbl;
     impl->IUIElement5_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ui5_vtbl;
+    impl->IUIElement10_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_uie10_vtbl;
+    impl->IXamlRoot_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xaml_root_vtbl;
     impl->IButtonWithFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_button_flyout_vtbl;
     impl->IContentDialog_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cd_vtbl;
     impl->IContentDialog2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cd2_vtbl;
@@ -4556,6 +4625,15 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->font_size = 16.0;
     impl->text_align = 1; /* Left */
     impl->text_wrapping = 1; /* NoWrap */
+    impl->selected_index = -1;
+    impl->hovered_dropdown_idx = -1;
+    impl->nav_open_pane_length = 280.0;
+    impl->nav_compact_pane_length = 68.0;
+    impl->nav_compact_threshold = 641.0;
+    impl->nav_expanded_threshold = 1008.0;
+    impl->nav_is_settings_visible = TRUE;
+    impl->nav_is_pane_toggle_visible = TRUE;
+    impl->nav_is_pane_open = FALSE;
     InitializeSRWLock( &impl->video_lock );
     g_layout_dirty = TRUE;
     if (impl->kind != UWP_KIND_BRUSH && impl->kind != UWP_KIND_STYLE &&

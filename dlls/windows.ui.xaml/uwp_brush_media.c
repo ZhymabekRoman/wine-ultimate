@@ -474,6 +474,177 @@ const struct uwp_state_trigger_pub_vtbl uwp_state_trigger_pub_vtbl =
     uwp_st_put_IsActive,
     { [0 ... 7] = uwp_generic_noop },
 };
+
+static struct uwp_element *uwp_elem_find_top_root( struct uwp_element *el )
+{
+    int guard = 0;
+    while (el && el->parent && guard++ < 64)
+        el = el->parent;
+    return el;
+}
+
+static HRESULT WINAPI uwp_uie10_get_Shadow( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->xaml_root_shadow : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_uie10_put_Shadow( void *iface, void *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->xaml_root_shadow == (IInspectable *)val) return S_OK;
+    if (impl->xaml_root_shadow) IInspectable_Release( impl->xaml_root_shadow );
+    impl->xaml_root_shadow = (IInspectable *)val;
+    if (impl->xaml_root_shadow) IInspectable_AddRef( impl->xaml_root_shadow );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_uie10_get_XamlRoot( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_element *root;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return S_OK;
+    if (impl->xaml_root_override)
+    {
+        *out = impl->xaml_root_override;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    root = uwp_elem_find_top_root( impl );
+    if (!root) root = impl;
+    *out = &root->IXamlRoot_iface;
+    uwp_sub_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_uie10_put_XamlRoot( void *iface, void *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->xaml_root_override == (IInspectable *)val) return S_OK;
+    if (impl->xaml_root_override) IInspectable_Release( impl->xaml_root_override );
+    impl->xaml_root_override = (IInspectable *)val;
+    if (impl->xaml_root_override) IInspectable_AddRef( impl->xaml_root_override );
+    return S_OK;
+}
+
+const void *uwp_uie10_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_uie10_get_Shadow,
+    [7] = uwp_uie10_put_Shadow,
+    [8] = uwp_uie10_get_XamlRoot,
+    [9] = uwp_uie10_put_XamlRoot,
+    [10 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_xr_get_Content( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_element *root, *target = NULL;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return S_OK;
+    root = uwp_elem_find_top_root( impl );
+    if (!root) root = impl;
+    if (wcsstr( root->class_name, L"DesktopWindowXamlSource" ) && root->content)
+    {
+        struct uwp_element *ce = uwp_elem_from_any( root->content );
+        if (ce) target = ce;
+        else
+        {
+            if (FAILED(IInspectable_QueryInterface( root->content, &IID_IUIElement_UWP, out )))
+            {
+                *out = root->content;
+                IInspectable_AddRef( (IInspectable *)*out );
+            }
+            return S_OK;
+        }
+    }
+    else if (root->kind == UWP_KIND_FRAME && g_navigated_page_el)
+        target = g_navigated_page_el;
+    else
+        target = root;
+    if (target)
+    {
+        if (target->outer && SUCCEEDED(IInspectable_QueryInterface( target->outer, &IID_IUIElement_UWP, out )) && *out)
+            return S_OK;
+        *out = &target->IUIElement_iface;
+        uwp_sub_AddRef( (IInspectable *)*out );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_xr_get_Size( void *iface, Size *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    SIZE sz = { 1280, 800 };
+    if (!out) return E_POINTER;
+    if (impl && impl->actual_w > 0.0 && impl->actual_h > 0.0)
+    {
+        out->Width = (float)impl->actual_w;
+        out->Height = (float)impl->actual_h;
+        return S_OK;
+    }
+    xaml_get_layout_metrics( (impl && impl->island_hwnd) ? impl->island_hwnd : xaml_get_window_hwnd(), &sz, NULL );
+    out->Width = (float)(sz.cx > 0 ? sz.cx : 1280);
+    out->Height = (float)(sz.cy > 0 ? sz.cy : 800);
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_xr_get_RasterizationScale( void *iface, double *out )
+{
+    if (out) *out = (double)(g_layout_scale > 0.25f ? g_layout_scale : 1.0f);
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_xr_get_IsHostVisible( void *iface, boolean *out )
+{
+    if (out) *out = TRUE;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_xr_add_Changed( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    return xaml_event_registry_add( &impl->xaml_root_changed_reg, handler, tok );
+}
+
+static HRESULT WINAPI uwp_xr_remove_Changed( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    return xaml_event_registry_remove( &impl->xaml_root_changed_reg, tok );
+}
+
+const void *uwp_xaml_root_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_xr_get_Content,
+    [7] = uwp_xr_get_Size,
+    [8] = uwp_xr_get_RasterizationScale,
+    [9] = uwp_xr_get_IsHostVisible,
+    [10] = uwp_xr_add_Changed,
+    [11] = uwp_xr_remove_Changed,
+    [12 ... 15] = uwp_generic_noop,
+};
 const void *uwp_img_vtbl[24] =
 {
     [0] = uwp_sub_QueryInterface,

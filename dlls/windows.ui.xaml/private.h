@@ -164,6 +164,8 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val );
 void uwp_fire_composition_target_rendering( void );
 BOOL uwp_rd_haskey( void *rd_key, void *key_obj );
 BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *app_outer );
+BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int wheel_delta,
+                                     int width, int height, IInspectable *root_content );
 BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content );
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory );
 ICoreWindow *get_current_core_window( void );

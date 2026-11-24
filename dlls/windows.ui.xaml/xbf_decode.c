@@ -1301,6 +1301,107 @@ static int uwp_parse_font_weight( const WCHAR *s, double num, int vt )
     return 0;
 }
 
+static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *el,
+                                      const WCHAR *owner_cls, const WCHAR *prop_name,
+                                      int vt, double num, const WCHAR *sval, BOOL is_res_ref )
+{
+    if (!el || !prop_name || !prop_name[0]) return;
+    if (!wcscmp( prop_name, L"DisplayMemberPath" ) && sval && sval[0])
+    {
+        lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
+    }
+    else if (!wcscmp( prop_name, L"PaneDisplayMode" ) && uwp_is_nav_view( el ))
+    {
+        int mode = -1;
+        if (vt == 0x04 || vt == 0x0b) mode = (int)num;
+        else if (sval && sval[0])
+        {
+            if (!wcscmp( sval, L"Auto" )) mode = 0;
+            else if (!wcscmp( sval, L"Left" )) mode = 1;
+            else if (!wcscmp( sval, L"Top" )) mode = 2;
+            else if (!wcscmp( sval, L"LeftCompact" )) mode = 3;
+            else if (!wcscmp( sval, L"LeftMinimal" )) mode = 4;
+        }
+        if (mode >= 0 && mode <= 4)
+        {
+            el->nav_pane_display_mode = mode;
+            el->nav_pane_display_mode_set = TRUE;
+            TRACE( "xbf_apply_named_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
+                   debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
+        }
+    }
+    else if (!wcscmp( prop_name, L"IsPaneOpen" ) && uwp_is_nav_view( el ))
+    {
+        if (vt == 0x01 || vt == 0x02) el->nav_is_pane_open = (vt == 0x02);
+        else if (sval && sval[0]) el->nav_is_pane_open = !wcsicmp( sval, L"True" );
+    }
+    else if (!wcscmp( prop_name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
+    {
+        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+        if (d > 0.0) el->nav_open_pane_length = d;
+    }
+    else if (!wcscmp( prop_name, L"CompactPaneLength" ) && uwp_is_nav_view( el ))
+    {
+        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+        if (d > 0.0) el->nav_compact_pane_length = d;
+    }
+    else if (!wcscmp( prop_name, L"CompactModeThresholdWidth" ) && uwp_is_nav_view( el ))
+    {
+        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+        if (d > 0.0) el->nav_compact_threshold = d;
+    }
+    else if (!wcscmp( prop_name, L"ExpandedModeThresholdWidth" ) && uwp_is_nav_view( el ))
+    {
+        double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+        if (d > 0.0) el->nav_expanded_threshold = d;
+    }
+    else if (!wcscmp( prop_name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
+    {
+        if (vt == 0x01 || vt == 0x02) el->nav_is_settings_visible = (vt == 0x02);
+        else if (sval && sval[0]) el->nav_is_settings_visible = !wcsicmp( sval, L"True" );
+    }
+    else if (!wcscmp( prop_name, L"IsPaneToggleButtonVisible" ) && uwp_is_nav_view( el ))
+    {
+        if (vt == 0x01 || vt == 0x02) el->nav_is_pane_toggle_visible = (vt == 0x02);
+        else if (sval && sval[0]) el->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
+    }
+
+    if (owner_cls && owner_cls[0] &&
+        !wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
+        (!wcscmp( prop_name, L"PaneDisplayMode" ) || !wcscmp( prop_name, L"IsPaneOpen" ) ||
+         !wcscmp( prop_name, L"OpenPaneLength" ) || !wcscmp( prop_name, L"CompactPaneLength" ) ||
+         !wcscmp( prop_name, L"IsSettingsVisible" ) || !wcscmp( prop_name, L"IsPaneToggleButtonVisible" ) ||
+         !wcscmp( prop_name, L"CompactModeThresholdWidth" ) || !wcscmp( prop_name, L"ExpandedModeThresholdWidth" )))
+    {
+        void *ao = (ctx && ctx->app_outer) ? ctx->app_outer : uwp_get_app_outer();
+        if (ao)
+        {
+            IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+            if (vt == 0x01 || vt == 0x02)
+                uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, (vt == 0x02) ? L"True" : L"False" );
+            else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+                uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, sval );
+            else if (vt == 0x03 || vt == 0x04 || vt == 0x0b)
+            {
+                if (!wcscmp( prop_name, L"PaneDisplayMode" ))
+                {
+                    static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
+                    int m = (int)num;
+                    uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target,
+                                                (m >= 0 && m < 5) ? modes[m] : L"Auto" );
+                }
+                else
+                {
+                    WCHAR nbuf[64];
+                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
+                    uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, nbuf );
+                }
+            }
+        }
+    }
+    (void)is_res_ref;
+}
+
 void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
                                    struct uwp_rd_bucket *b, struct uwp_rd_entry *se, int depth )
 {
@@ -1334,7 +1435,10 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
     for (i = 0; i < se->setter_cnt; i++)
     {
         const struct uwp_style_setter *st = &se->setters[i];
-        xbf_apply_property( ctx, el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+        if (!(st->pid & 0x8000) && st->prop_name[0])
+            xbf_apply_named_property( ctx, el, st->owner_cls, st->prop_name, st->vt, st->num, st->str, st->is_res_ref );
+        else
+            xbf_apply_property( ctx, el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
     }
     /* Local typography values take precedence over Style setters regardless of XBF attribute order */
     if (saved_has_fs)
@@ -1820,11 +1924,83 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             el->accel_enabled = (num != 0.0);
             uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
             break;
+        case 0x8373: /* ItemsControl.DisplayMemberPath */
+            if (sval && sval[0])
+                lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
+            break;
+        case 0x83ce: /* SymbolIcon.Symbol */
+            if ((vt == 0x04 || vt == 0x0b) && (int)num >= 0xE000 && (int)num <= 0xFFFF)
+            {
+                el->text[0] = (WCHAR)(int)num;
+                el->text[1] = 0;
+                if (!el->font_family[0])
+                    lstrcpynW( el->font_family, L"Segoe MDL2 Assets", ARRAY_SIZE(el->font_family) );
+            }
+            break;
         }
     }
     else if (ctx && pid < ctx->prop_cnt)
     {
         const struct xbf_prop_info *pi = &ctx->props[pid];
+        if (!wcscmp( pi->name, L"DisplayMemberPath" ) && sval && sval[0])
+        {
+            lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
+        }
+        else if (!wcscmp( pi->name, L"PaneDisplayMode" ) && uwp_is_nav_view( el ))
+        {
+            int mode = -1;
+            if (vt == 0x04 || vt == 0x0b) mode = (int)num;
+            else if (sval && sval[0])
+            {
+                if (!wcscmp( sval, L"Auto" )) mode = 0;
+                else if (!wcscmp( sval, L"Left" )) mode = 1;
+                else if (!wcscmp( sval, L"Top" )) mode = 2;
+                else if (!wcscmp( sval, L"LeftCompact" )) mode = 3;
+                else if (!wcscmp( sval, L"LeftMinimal" )) mode = 4;
+            }
+            if (mode >= 0 && mode <= 4)
+            {
+                el->nav_pane_display_mode = mode;
+                el->nav_pane_display_mode_set = TRUE;
+                TRACE( "xbf_apply_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
+                       debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
+            }
+        }
+        else if (!wcscmp( pi->name, L"IsPaneOpen" ) && uwp_is_nav_view( el ))
+        {
+            if (vt == 0x01 || vt == 0x02) el->nav_is_pane_open = (vt == 0x02);
+            else if (sval && sval[0]) el->nav_is_pane_open = !wcsicmp( sval, L"True" );
+        }
+        else if (!wcscmp( pi->name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
+        {
+            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+            if (d > 0.0) el->nav_open_pane_length = d;
+        }
+        else if (!wcscmp( pi->name, L"CompactPaneLength" ) && uwp_is_nav_view( el ))
+        {
+            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+            if (d > 0.0) el->nav_compact_pane_length = d;
+        }
+        else if (!wcscmp( pi->name, L"CompactModeThresholdWidth" ) && uwp_is_nav_view( el ))
+        {
+            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+            if (d > 0.0) el->nav_compact_threshold = d;
+        }
+        else if (!wcscmp( pi->name, L"ExpandedModeThresholdWidth" ) && uwp_is_nav_view( el ))
+        {
+            double d = (vt == 0x03 || vt == 0x04) ? num : (sval && sval[0] ? wcstod( sval, NULL ) : 0.0);
+            if (d > 0.0) el->nav_expanded_threshold = d;
+        }
+        else if (!wcscmp( pi->name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
+        {
+            if (vt == 0x01 || vt == 0x02) el->nav_is_settings_visible = (vt == 0x02);
+            else if (sval && sval[0]) el->nav_is_settings_visible = !wcsicmp( sval, L"True" );
+        }
+        else if (!wcscmp( pi->name, L"IsPaneToggleButtonVisible" ) && uwp_is_nav_view( el ))
+        {
+            if (vt == 0x01 || vt == 0x02) el->nav_is_pane_toggle_visible = (vt == 0x02);
+            else if (sval && sval[0]) el->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
+        }
         if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
                  (el->kind == UWP_KIND_TEXT_BLOCK || wcsstr( el->class_name, L"Run" ) || wcsstr( el->class_name, L"Inline" )))
         {
@@ -1912,22 +2088,37 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         else if (pi->name[0] && pi->owner_tid < ctx->type_cnt &&
                  ctx->types[pi->owner_tid].full_name[0] &&
                  wcsncmp( ctx->types[pi->owner_tid].full_name, L"Windows.UI.Xaml.", 16 ) != 0 &&
-                 (vt == 0x01 || vt == 0x02 || vt == 0x09 || vt == 0x0b || vt == 0x0c || (vt == 0x05 && sval && sval[0])))
+                 (vt == 0x01 || vt == 0x02 || vt == 0x03 || vt == 0x04 || vt == 0x09 || vt == 0x0b || vt == 0x0c || (vt == 0x05 && sval && sval[0])))
         {
             void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
             if (ao)
             {
                 const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
                 IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+                BOOL is_nav_prop = (!wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
+                    (!wcscmp( pi->name, L"PaneDisplayMode" ) || !wcscmp( pi->name, L"IsPaneOpen" ) ||
+                     !wcscmp( pi->name, L"OpenPaneLength" ) || !wcscmp( pi->name, L"CompactPaneLength" ) ||
+                     !wcscmp( pi->name, L"IsSettingsVisible" ) || !wcscmp( pi->name, L"IsPaneToggleButtonVisible" ) ||
+                     !wcscmp( pi->name, L"CompactModeThresholdWidth" ) || !wcscmp( pi->name, L"ExpandedModeThresholdWidth" )));
                 if (vt == 0x01 || vt == 0x02)
                     uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, (vt == 0x02) ? L"True" : L"False" );
-                else if (vt == 0x05 && wcsstr( owner_cls, L"Breakpoint" ))
+                else if (vt == 0x05 && (wcsstr( owner_cls, L"Breakpoint" ) || is_nav_prop))
                     uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, sval );
-                else if (wcsstr( owner_cls, L"Breakpoint" ))
+                else if (wcsstr( owner_cls, L"Breakpoint" ) || is_nav_prop)
                 {
                     WCHAR nbuf[64];
-                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
+                    if (is_nav_prop && !wcscmp( pi->name, L"PaneDisplayMode" ))
+                    {
+                        static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
+                        int m = (int)num;
+                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target,
+                                                    (m >= 0 && m < 5) ? modes[m] : L"Auto" );
+                    }
+                    else
+                    {
+                        swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
+                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
+                    }
                 }
             }
         }

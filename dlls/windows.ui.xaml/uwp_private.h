@@ -299,6 +299,7 @@ struct uwp_element
     IInspectable ISolidColorBrush_iface;
     IInspectable IFlyout_iface;
     IInspectable ISelector_iface;
+    IInspectable IComboBox_iface;
     IInspectable IItemsControl_iface;
     IInspectable IStateTrigger_iface;
     IInspectable IStateTriggerPub_iface;
@@ -320,6 +321,11 @@ struct uwp_element
     IInspectable IMenuFlyout2_iface;
     IInspectable IUIElement4_iface;
     IInspectable IUIElement5_iface;
+    IInspectable IUIElement10_iface;
+    IInspectable IXamlRoot_iface;
+    IInspectable *xaml_root_shadow;
+    IInspectable *xaml_root_override;
+    struct xaml_event_registry xaml_root_changed_reg;
     IInspectable IButtonWithFlyout_iface;
     IInspectable IContentDialog_iface;
     IInspectable IContentDialog2_iface;
@@ -511,6 +517,17 @@ struct uwp_element
     void *binding_connector;
     void *dt_binding_connector;
     IInspectable *selected_item;
+    INT32 selected_index;
+    BOOL is_dropdown_open;
+    int hovered_dropdown_idx;
+    int dropdown_scroll_offset;
+    RECT dropdown_bounds;
+    int dropdown_item_h;
+    int dropdown_visible_cnt;
+    WCHAR display_member_path[64];
+    struct xaml_event_registry sel_changed_reg;
+    struct xaml_event_registry cb_opened_reg;
+    struct xaml_event_registry cb_closed_reg;
     IInspectable *items_source;
     IInspectable *item_template;
     IInspectable *item_template_selector;
@@ -541,6 +558,23 @@ struct uwp_element
     IInspectable *nav_args_item;
     BOOL nav_fired;
     boolean nav_stack_enabled;
+    /* NavigationView / NavigationViewItem state */
+    int nav_pane_display_mode;       /* 0=Auto, 1=Left, 2=Top, 3=LeftCompact, 4=LeftMinimal */
+    BOOL nav_pane_display_mode_set;
+    int nav_display_mode;            /* 0=Minimal, 1=Compact, 2=Expanded */
+    BOOL nav_display_mode_set;
+    BOOL nav_is_pane_open;
+    double nav_open_pane_length;
+    double nav_compact_pane_length;
+    double nav_compact_threshold;
+    double nav_expanded_threshold;
+    BOOL nav_is_settings_visible;
+    BOOL nav_is_pane_toggle_visible;
+    int nav_scroll_y;
+    RECT nav_pane_bounds;
+    IInspectable *nav_icon;
+    WCHAR nav_icon_glyph[16];
+    WCHAR nav_icon_font[64];
     SRWLOCK dp_lock;
     struct uwp_dp_entry *dp_store;
     int dp_cnt;
@@ -1386,7 +1420,28 @@ struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth );
 void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
                           IInspectable *item );
 HRESULT WINAPI uwp_nav_get_FooterMenuItems( void *iface, void **out );
-HRESULT WINAPI uwp_nav_get_IsPaneOpen( void *iface, BOOL *open );
+HRESULT WINAPI uwp_nav_get_IsPaneOpen( void *iface, boolean *open );
+HRESULT WINAPI uwp_nav_put_IsPaneOpen( void *iface, boolean open );
+void uwp_nav_set_pane_open( struct uwp_element *nav, BOOL open );
+BOOL uwp_is_combobox( const struct uwp_element *el );
+BOOL uwp_is_nav_view( const struct uwp_element *el );
+BOOL uwp_is_nav_header( const struct uwp_element *el );
+BOOL uwp_is_nav_separator( const struct uwp_element *el );
+int uwp_nav_effective_display_mode( const struct uwp_element *nav, int avail_w );
+BOOL uwp_nav_is_overlay_open( const struct uwp_element *nav );
+int uwp_selector_get_items( struct uwp_element *el, IInspectable **out_items, int max_items );
+void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspectable *new_item, BOOL by_index, BOOL fire_event );
+void uwp_combobox_set_open( struct uwp_element *cb, BOOL open );
+void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WCHAR *buf, int buf_len );
+BOOL uwp_combobox_compute_popup_rect( struct uwp_element *cb, int item_cnt, int win_w, int win_h,
+                                      RECT *out_rc, int *out_item_h, int *out_vis_cnt, int *out_pad_y );
+BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int wheel_delta, int width, int height, IInspectable *root_content );
+BOOL uwp_unbox_bool( void *obj, boolean *out_val );
+BOOL uwp_unbox_double( void *obj, double *out_val );
+BOOL uwp_vm_supports_display_or_cmd( IInspectable *vm );
+BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
+                               WCHAR *out, size_t out_len );
+extern struct uwp_element *g_open_combobox;
 COLORREF uwp_paint_resolve_color( struct uwp_element *el, const WCHAR *key,
                                          COLORREF fallback, COLORREF surface_bg );
 HRESULT WINAPI uwp_panel_get_Children( void *iface, void **out );
@@ -2358,6 +2413,9 @@ extern const void *uwp_navview_vtbl[112];
 extern const void *uwp_rowcol_vtbl[32];
 
 extern const void *uwp_selector_vtbl[20];
+extern const void *uwp_combobox_vtbl[24];
+extern const void *uwp_uie10_vtbl[16];
+extern const void *uwp_xaml_root_vtbl[16];
 
 ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
 

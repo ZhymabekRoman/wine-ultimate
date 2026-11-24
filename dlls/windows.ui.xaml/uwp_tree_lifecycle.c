@@ -66,15 +66,19 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
 
     if (dc)
     {
-        void *npc = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( dc, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
+        if (uwp_is_display_result_element( impl ))
         {
-            IUnknown_Release( (IUnknown *)npc );
             uwp_calc_vm_set_instance( dc, NULL );
         }
-        else if (uwp_is_display_result_element( impl ))
+        else
         {
-            uwp_calc_vm_set_instance( dc, NULL );
+            void *npc = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( dc, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
+            {
+                IUnknown_Release( (IUnknown *)npc );
+                if (!uwp_get_app_outer() || uwp_vm_supports_display_or_cmd( dc ))
+                    uwp_calc_vm_set_instance( dc, NULL );
+            }
         }
     }
     else if (!xaml_get_app_caps()->teardown_vm && g_calc_vm.vm)

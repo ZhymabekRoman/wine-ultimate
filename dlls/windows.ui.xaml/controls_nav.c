@@ -102,9 +102,55 @@ void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
     g_nav_args_item = NULL;
 }
 
-HRESULT WINAPI uwp_nav_get_IsPaneOpen( void *iface, BOOL *open )
+struct uwp_element *g_open_combobox = NULL;
+
+void uwp_nav_set_pane_open( struct uwp_element *nav, BOOL open )
 {
-    if (open) *open = TRUE;
+    void *is_open_dp = NULL;
+    int i;
+    if (!nav) return;
+    if (nav->nav_is_pane_open == open) return;
+    nav->nav_is_pane_open = open;
+    if (!open) nav->nav_scroll_y = 0;
+    TRACE( "uwp_nav_set_pane_open(%s) -> %d\n", debugstr_w(nav->name), (int)open );
+
+    /* Sync IsPaneOpen DP if registered on this NavigationView so WinUI stays aligned */
+    AcquireSRWLockShared( &nav->dp_lock );
+    for (i = 0; i < nav->dp_cnt; i++)
+    {
+        struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)nav->dp_store[i].dp;
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"IsPaneOpen" ))
+        {
+            is_open_dp = nav->dp_store[i].dp;
+            IUnknown_AddRef( (IUnknown *)is_open_dp );
+            break;
+        }
+    }
+    ReleaseSRWLockShared( &nav->dp_lock );
+    if (is_open_dp)
+    {
+        IInspectable *boxed = box_bool_value( open ? TRUE : FALSE );
+        if (boxed)
+        {
+            uwp_do_SetValue( &nav->IDependencyObject_iface, is_open_dp, boxed );
+            IInspectable_Release( boxed );
+        }
+        IUnknown_Release( (IUnknown *)is_open_dp );
+    }
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+}
+
+HRESULT WINAPI uwp_nav_get_IsPaneOpen( void *iface, boolean *open )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (open) *open = impl ? (boolean)impl->nav_is_pane_open : FALSE;
+    return S_OK;
+}
+HRESULT WINAPI uwp_nav_put_IsPaneOpen( void *iface, boolean open )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) uwp_nav_set_pane_open( impl, open != 0 );
     return S_OK;
 }
 HRESULT WINAPI uwp_nav_get_FooterMenuItems( void *iface, void **out )
@@ -186,7 +232,7 @@ const void *uwp_navview_vtbl[112] =
      * own[0]=IsPaneOpen(56), own[6]=FooterMenuItems(62),
      * own[46]=SelectionChanged(102), own[48]=ItemInvoked(104). */
     [56] = uwp_nav_get_IsPaneOpen,
-    [57] = uwp_generic_noop,
+    [57] = uwp_nav_put_IsPaneOpen,
     [62] = uwp_nav_get_FooterMenuItems,
     [63 ... 101] = uwp_generic_noop,
     [102] = uwp_ui_add_SelectionChanged,
@@ -758,6 +804,14 @@ void uwp_tabview_select_item( struct uwp_element *tv, IInspectable *item )
     uwp_tabview_put_SelectedItem( &tv->IFlyout_iface, item );
 }
 
+struct uwp_sel_changed_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    IInspectable *removed_items;
+    IInspectable *added_items;
+};
+
 static HRESULT WINAPI uwp_sel_args_QI( void *iface, REFIID iid, void **out )
 {
     static const GUID IID_IRoutedEventArgs_local =
@@ -771,21 +825,57 @@ static HRESULT WINAPI uwp_sel_args_QI( void *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IRoutedEventArgs_local ) ||
         IsEqualGUID( iid, &IID_ISelectionChangedEventArgs_local ))
     {
+        struct uwp_sel_changed_args *a = iface;
         *out = iface;
+        InterlockedIncrement( &a->ref );
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI uwp_sel_args_AddRef( void *iface ) { return 2; }
-static ULONG WINAPI uwp_sel_args_Release( void *iface ) { return 1; }
+static ULONG WINAPI uwp_sel_args_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_sel_changed_args *)iface)->ref );
+}
+static ULONG WINAPI uwp_sel_args_Release( void *iface )
+{
+    struct uwp_sel_changed_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r)
+    {
+        if (a->removed_items) IInspectable_Release( a->removed_items );
+        if (a->added_items) IInspectable_Release( a->added_items );
+        free( a );
+    }
+    return r;
+}
 static HRESULT WINAPI uwp_sel_args_GetRuntimeClassName( void *iface, HSTRING *name )
 {
     static const WCHAR cls[] = L"Windows.UI.Xaml.Controls.SelectionChangedEventArgs";
     return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
 }
-static HRESULT WINAPI uwp_sel_args_get_Items( void *iface, void **out )
+static HRESULT WINAPI uwp_sel_args_get_RemovedItems( void *iface, void **out )
 {
+    struct uwp_sel_changed_args *a = iface;
+    if (!out) return E_POINTER;
+    if (a && a->removed_items)
+    {
+        *out = a->removed_items;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    return uwp_vec_create( NULL, (IInspectable **)out );
+}
+static HRESULT WINAPI uwp_sel_args_get_AddedItems( void *iface, void **out )
+{
+    struct uwp_sel_changed_args *a = iface;
+    if (!out) return E_POINTER;
+    if (a && a->added_items)
+    {
+        *out = a->added_items;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
     return uwp_vec_create( NULL, (IInspectable **)out );
 }
 static const void *uwp_sel_args_vtbl[16] =
@@ -796,11 +886,23 @@ static const void *uwp_sel_args_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sel_args_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_sel_args_get_Items,
-    [7] = uwp_sel_args_get_Items,
+    [6] = uwp_sel_args_get_RemovedItems,
+    [7] = uwp_sel_args_get_AddedItems,
     [8 ... 15] = uwp_generic_noop,
 };
-static struct { const void *vtbl; } g_sel_changed_args = { uwp_sel_args_vtbl };
+
+static struct uwp_sel_changed_args *uwp_sel_args_create( IInspectable *old_item, IInspectable *new_item )
+{
+    struct uwp_sel_changed_args *a = calloc( 1, sizeof(*a) );
+    if (!a) return NULL;
+    a->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_sel_args_vtbl;
+    a->ref = 1;
+    uwp_vec_create( NULL, &a->removed_items );
+    uwp_vec_create( NULL, &a->added_items );
+    if (old_item && a->removed_items) uwp_vec_Append( a->removed_items, old_item );
+    if (new_item && a->added_items) uwp_vec_Append( a->added_items, new_item );
+    return a;
+}
 
 static HRESULT WINAPI uwp_tabview_get_SelectedItem( void *iface, void **out )
 {
@@ -822,9 +924,16 @@ static HRESULT WINAPI uwp_tabview_put_SelectedItem( void *iface, void *item )
            debugstr_w(impl->class_name), debugstr_w(impl->name), item, impl->sel_changed_handler );
     if (impl->sel_changed_handler)
     {
+        struct uwp_sel_changed_args *args = uwp_sel_args_create( NULL, impl->selected_item );
         IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
         struct xaml_event_handler *h = (struct xaml_event_handler *)impl->sel_changed_handler;
-        h->lpVtbl->Invoke( h, sender, &g_sel_changed_args );
+        if (args)
+        {
+            __TRY { h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface ); }
+            __EXCEPT_ALL {}
+            __ENDTRY;
+            uwp_sel_args_Release( &args->IInspectable_iface );
+        }
     }
     uwp_invalidate_window();
     return S_OK;
@@ -924,28 +1033,406 @@ const void *uwp_flyout_vtbl[128] =
     [53 ... 127] = uwp_generic_noop,
 };
 
+int uwp_selector_get_items( struct uwp_element *el, IInspectable **out_items, int max_items )
+{
+    static const GUID IID_IVectorView_Obj =
+        { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
+    static const GUID IID_IVectorView_Insp =
+        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
+    static const GUID IID_IVector_Obj =
+        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
+    static const GUID IID_IBindableVector_sel =
+        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
+    static const GUID IID_IBindableIterable_sel =
+        { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
+    static const GUID IID_IIterable_Insp_sel =
+        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
+    int count = 0;
+
+    if (!el || !out_items || max_items <= 0) return 0;
+
+    if (el->items_source && (ULONG_PTR)el->items_source >= 0x10000)
+    {
+        void *vec = NULL;
+        if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVector_Obj, &vec )) ||
+             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_Insp, &vec )) ||
+             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableVector_sel, &vec )) ||
+             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_Obj, &vec ))) && vec)
+        {
+            HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
+            HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
+            UINT32 sz = 0, i;
+            if (get_sz && get_at && SUCCEEDED(get_sz( vec, &sz )))
+            {
+                for (i = 0; i < sz && count < max_items; i++)
+                {
+                    void *it = NULL;
+                    if (SUCCEEDED(get_at( vec, i, &it )) && it)
+                        out_items[count++] = (IInspectable *)it;
+                }
+            }
+            IUnknown_Release( (IUnknown *)vec );
+        }
+        else if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IIterable_Insp_sel, &vec )) ||
+                  SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableIterable_sel, &vec ))) && vec)
+        {
+            HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
+            void *iter = NULL;
+            if (first && SUCCEEDED(first( vec, &iter )) && iter)
+            {
+                HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
+                HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
+                HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
+                boolean has = FALSE;
+                while (count < max_items && has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
+                {
+                    void *it = NULL;
+                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
+                        out_items[count++] = (IInspectable *)it;
+                    has = FALSE;
+                    if (!move_next || FAILED(move_next( iter, &has )) || !has) break;
+                }
+                IUnknown_Release( (IUnknown *)iter );
+            }
+            IUnknown_Release( (IUnknown *)vec );
+        }
+    }
+
+    if (count == 0 && el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count && count < max_items; i++)
+        {
+            if (v->items[i])
+            {
+                out_items[count] = v->items[i];
+                IInspectable_AddRef( out_items[count] );
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+static BOOL uwp_items_equal( IInspectable *a, IInspectable *b )
+{
+    WCHAR sa[128] = {0}, sb[128] = {0};
+    if (a == b) return TRUE;
+    if (!a || !b) return FALSE;
+    {
+        struct uwp_element *ea = uwp_elem_from_any( a );
+        struct uwp_element *eb = uwp_elem_from_any( b );
+        if (ea && eb && ea == eb) return TRUE;
+    }
+    if (uwp_unbox_string( a, sa, ARRAY_SIZE(sa) ) && uwp_unbox_string( b, sb, ARRAY_SIZE(sb) ))
+        return !wcscmp( sa, sb );
+    return FALSE;
+}
+
+void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WCHAR *buf, int buf_len )
+{
+    if (!buf || buf_len <= 0) return;
+    buf[0] = 0;
+    if (!item || (ULONG_PTR)item < 0x10000) return;
+
+    if (cb && cb->display_member_path[0])
+    {
+        const WCHAR *dmp = cb->display_member_path;
+        if (uwp_vm_query_string_prop( item, &dmp, 1, buf, buf_len ) && buf[0])
+            return;
+    }
+    {
+        struct uwp_element *iel = uwp_elem_from_any( item );
+        if (iel)
+        {
+            if (iel->text[0])
+            {
+                lstrcpynW( buf, iel->text, buf_len );
+                return;
+            }
+            if (iel->content)
+            {
+                struct uwp_element *cel = uwp_elem_from_any( iel->content );
+                if (cel && cel->text[0])
+                {
+                    lstrcpynW( buf, cel->text, buf_len );
+                    return;
+                }
+                if (uwp_unbox_string( iel->content, buf, buf_len ) && buf[0])
+                    return;
+            }
+        }
+    }
+    if (uwp_unbox_string( item, buf, buf_len ) && buf[0])
+        return;
+    {
+        static const WCHAR *const cb_props[] = { L"DisplayName", L"Name", L"Title", L"Label", L"Text", L"Content" };
+        if (uwp_vm_query_string_prop( item, cb_props, ARRAY_SIZE(cb_props), buf, buf_len ) && buf[0])
+            return;
+    }
+    {
+        static const GUID IID_IStringable_cb =
+            { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+        void *strable = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_IStringable_cb, &strable )) && strable)
+        {
+            HSTRING hs = NULL;
+            HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
+            if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
+            {
+                const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
+                if (s && s[0]) lstrcpynW( buf, s, buf_len );
+                WindowsDeleteString( hs );
+            }
+            IUnknown_Release( (IUnknown *)strable );
+        }
+    }
+}
+
+BOOL uwp_combobox_compute_popup_rect( struct uwp_element *cb, int item_cnt, int win_w, int win_h,
+                                      RECT *out_rc, int *out_item_h, int *out_vis_cnt, int *out_pad_y )
+{
+    int item_h, pad_y, max_vis, popup_h, popup_w;
+    int space_below, space_above, left, top, right, bottom;
+    if (!cb || !cb->has_bounds || item_cnt <= 0 || win_w <= 0 || win_h <= 0) return FALSE;
+
+    item_h = max( 28, (int)(32 * g_layout_scale + 0.5f) );
+    pad_y = max( 4, (int)(4 * g_layout_scale + 0.5f) );
+    max_vis = min( item_cnt, 9 );
+    popup_h = max_vis * item_h + pad_y * 2;
+    popup_w = max( (int)(cb->bounds.right - cb->bounds.left), (int)(160 * g_layout_scale + 0.5f) );
+    if (popup_w > win_w - 8) popup_w = max( 80, win_w - 8 );
+
+    space_below = win_h - cb->bounds.bottom - 6;
+    space_above = cb->bounds.top - 6;
+    if (space_below >= popup_h || space_below >= space_above)
+    {
+        top = cb->bounds.bottom + 2;
+        if (space_below < popup_h)
+        {
+            max_vis = max( 1, (space_below - pad_y * 2) / item_h );
+            popup_h = max_vis * item_h + pad_y * 2;
+        }
+        bottom = min( win_h - 4, top + popup_h );
+    }
+    else
+    {
+        bottom = cb->bounds.top - 2;
+        if (space_above < popup_h)
+        {
+            max_vis = max( 1, (space_above - pad_y * 2) / item_h );
+            popup_h = max_vis * item_h + pad_y * 2;
+        }
+        top = max( 4, bottom - popup_h );
+    }
+    left = max( 4, min( (int)cb->bounds.left, win_w - popup_w - 4 ) );
+    right = min( win_w - 4, left + popup_w );
+
+    if (cb->dropdown_scroll_offset > max( 0, item_cnt - max_vis ))
+        cb->dropdown_scroll_offset = max( 0, item_cnt - max_vis );
+    if (cb->dropdown_scroll_offset < 0)
+        cb->dropdown_scroll_offset = 0;
+
+    SetRect( &cb->dropdown_bounds, left, top, right, bottom );
+    cb->dropdown_item_h = item_h;
+    cb->dropdown_visible_cnt = max_vis;
+
+    if (out_rc) *out_rc = cb->dropdown_bounds;
+    if (out_item_h) *out_item_h = item_h;
+    if (out_vis_cnt) *out_vis_cnt = max_vis;
+    if (out_pad_y) *out_pad_y = pad_y;
+    return TRUE;
+}
+
+static void uwp_fire_cb_event( struct uwp_element *cb, struct xaml_event_registry *reg )
+{
+    void **handlers = NULL;
+    unsigned int n, i;
+    IInspectable *sender;
+    if (!cb || !reg) return;
+    n = xaml_event_registry_snapshot_alloc( reg, &handlers );
+    if (!n) return;
+    sender = cb->outer ? cb->outer : &cb->IInspectable_iface;
+    for (i = 0; i < n; i++)
+    {
+        struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+        __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
+        __EXCEPT_ALL {}
+        __ENDTRY;
+        IUnknown_Release( (IUnknown *)handlers[i] );
+    }
+    free( handlers );
+}
+
+void uwp_combobox_set_open( struct uwp_element *cb, BOOL open )
+{
+    if (!cb) return;
+    if (open && g_open_combobox && g_open_combobox != cb)
+    {
+        struct uwp_element *prev = g_open_combobox;
+        prev->is_dropdown_open = FALSE;
+        prev->hovered_dropdown_idx = -1;
+        g_open_combobox = NULL;
+        uwp_fire_cb_event( prev, &prev->cb_closed_reg );
+    }
+    if (cb->is_dropdown_open == open) return;
+    cb->is_dropdown_open = open;
+    cb->hovered_dropdown_idx = -1;
+    if (open)
+    {
+        g_open_combobox = cb;
+        cb->dropdown_scroll_offset = 0;
+        uwp_fire_cb_event( cb, &cb->cb_opened_reg );
+    }
+    else
+    {
+        if (g_open_combobox == cb) g_open_combobox = NULL;
+        uwp_fire_cb_event( cb, &cb->cb_closed_reg );
+    }
+    TRACE( "uwp_combobox_set_open(%s) -> %d\n", debugstr_w(cb->name), (int)open );
+    uwp_invalidate_window();
+}
+
+void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspectable *new_item, BOOL by_index, BOOL fire_event )
+{
+    IInspectable *items[256];
+    int count, i;
+    INT32 resolved_idx = -1;
+    IInspectable *resolved_item = NULL;
+    IInspectable *old_item = NULL;
+    BOOL changed;
+
+    if (!impl) return;
+    count = uwp_selector_get_items( impl, items, ARRAY_SIZE(items) );
+
+    if (by_index)
+    {
+        if (new_idx >= 0 && new_idx < count)
+        {
+            resolved_idx = new_idx;
+            resolved_item = items[new_idx];
+        }
+        else
+        {
+            resolved_idx = -1;
+            resolved_item = NULL;
+        }
+    }
+    else
+    {
+        resolved_item = new_item;
+        if (new_item)
+        {
+            for (i = 0; i < count; i++)
+            {
+                if (uwp_items_equal( items[i], new_item ))
+                {
+                    resolved_idx = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    changed = (resolved_idx != impl->selected_index) || !uwp_items_equal( resolved_item, impl->selected_item );
+    old_item = impl->selected_item;
+    if (old_item) IInspectable_AddRef( old_item );
+
+    impl->selected_index = resolved_idx;
+    if (impl->selected_item != resolved_item)
+    {
+        if (impl->selected_item) IInspectable_Release( impl->selected_item );
+        impl->selected_item = resolved_item;
+        if (impl->selected_item) IInspectable_AddRef( impl->selected_item );
+    }
+
+    /* Keep any stored SelectedIndex / SelectedItem DP entries synchronized */
+    if (impl->dp_cnt > 0 && impl->dp_store)
+    {
+        AcquireSRWLockExclusive( &impl->dp_lock );
+        for (i = 0; i < impl->dp_cnt; i++)
+        {
+            struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)impl->dp_store[i].dp;
+            if (!dpl || (ULONG_PTR)dpl < 0x10000) continue;
+            if (!wcscmp( dpl->name, L"SelectedItem" ))
+            {
+                if (impl->dp_store[i].value != impl->selected_item)
+                {
+                    if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
+                    impl->dp_store[i].value = impl->selected_item;
+                    if (impl->dp_store[i].value) IInspectable_AddRef( impl->dp_store[i].value );
+                }
+            }
+            else if (!wcscmp( dpl->name, L"SelectedIndex" ))
+            {
+                IInspectable *bi = box_int32_value( impl->selected_index );
+                if (bi)
+                {
+                    if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
+                    impl->dp_store[i].value = bi;
+                }
+            }
+        }
+        ReleaseSRWLockExclusive( &impl->dp_lock );
+    }
+
+    TRACE( "uwp_selector_set_selection(%s): idx=%d item=%p changed=%d fire=%d count=%d\n",
+           debugstr_w(impl->name), resolved_idx, resolved_item, (int)changed, (int)fire_event, count );
+
+    if (fire_event && changed)
+    {
+        void **handlers = NULL;
+        unsigned int n = xaml_event_registry_snapshot_alloc( &impl->sel_changed_reg, &handlers );
+        if (n > 0)
+        {
+            struct uwp_sel_changed_args *args = uwp_sel_args_create( old_item, impl->selected_item );
+            IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+            unsigned int hi;
+            for (hi = 0; hi < n; hi++)
+            {
+                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
+                if (h && args)
+                {
+                    __TRY { h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface ); }
+                    __EXCEPT_ALL { WARN( "SelectionChanged handler[%u] on %s threw\n", hi, debugstr_w(impl->name) ); }
+                    __ENDTRY;
+                }
+                IUnknown_Release( (IUnknown *)handlers[hi] );
+            }
+            if (args) uwp_sel_args_Release( &args->IInspectable_iface );
+            free( handlers );
+        }
+    }
+
+    if (old_item) IInspectable_Release( old_item );
+    for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+    uwp_invalidate_window();
+}
+
 static HRESULT WINAPI uwp_selector_get_SelectedIndex( void *iface, INT32 *out )
 {
-    if (out) *out = 0;
-    TRACE( "ISelector::get_SelectedIndex -> 0\n" );
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISelector_iface );
+    if (!out) return E_POINTER;
+    if (impl && impl->selected_index < 0 && impl->selected_item)
+        uwp_selector_set_selection( impl, -1, impl->selected_item, FALSE, FALSE );
+    *out = impl ? impl->selected_index : -1;
+    TRACE( "ISelector::get_SelectedIndex -> %d\n", *out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_selector_put_SelectedIndex( void *iface, INT32 idx )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISelector_iface );
-    TRACE( "ISelector::put_SelectedIndex(%d) handler=%p\n", idx, impl ? impl->sel_changed_handler : NULL );
-    if (impl && impl->sel_changed_handler)
-    {
-        IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-        struct xaml_event_handler *h = (struct xaml_event_handler *)impl->sel_changed_handler;
-        h->lpVtbl->Invoke( h, sender, &g_sel_changed_args );
-    }
+    TRACE( "ISelector::put_SelectedIndex(%d)\n", idx );
+    if (impl) uwp_selector_set_selection( impl, idx, NULL, TRUE, TRUE );
     return S_OK;
 }
 static HRESULT WINAPI uwp_selector_get_SelectedItem( void *iface, void **out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISelector_iface );
     if (!out) return E_POINTER;
+    if (impl && !impl->selected_item && impl->selected_index >= 0)
+        uwp_selector_set_selection( impl, impl->selected_index, NULL, TRUE, FALSE );
     *out = impl ? impl->selected_item : NULL;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     TRACE( "ISelector::get_SelectedItem -> %p\n", *out );
@@ -954,30 +1441,22 @@ static HRESULT WINAPI uwp_selector_get_SelectedItem( void *iface, void **out )
 static HRESULT WINAPI uwp_selector_put_SelectedItem( void *iface, void *item )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISelector_iface );
-    if (!impl) return S_OK;
-    if (impl->selected_item == (IInspectable *)item) return S_OK;
-    if (impl->selected_item) IInspectable_Release( impl->selected_item );
-    impl->selected_item = (IInspectable *)item;
-    if (impl->selected_item) IInspectable_AddRef( impl->selected_item );
-    TRACE( "ISelector::put_SelectedItem(%p) handler=%p\n", item, impl->sel_changed_handler );
-    if (impl->sel_changed_handler)
-    {
-        IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-        struct xaml_event_handler *h = (struct xaml_event_handler *)impl->sel_changed_handler;
-        h->lpVtbl->Invoke( h, sender, &g_sel_changed_args );
-    }
+    TRACE( "ISelector::put_SelectedItem(%p)\n", item );
+    if (impl) uwp_selector_set_selection( impl, -1, (IInspectable *)item, FALSE, TRUE );
     return S_OK;
 }
 static HRESULT WINAPI uwp_selector_add_SelectionChanged( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISelector_iface );
-    if (tok) tok->value = 1;
-    if (!impl || !handler) return S_OK;
-    if (impl->sel_changed_handler) IInspectable_Release( impl->sel_changed_handler );
-    impl->sel_changed_handler = (IInspectable *)handler;
-    IInspectable_AddRef( impl->sel_changed_handler );
-    TRACE( "ISelector::add_SelectionChanged(%p)\n", handler );
-    return S_OK;
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    TRACE( "ISelector::add_SelectionChanged(%p) on %s\n", handler, debugstr_w(impl->name) );
+    return xaml_event_registry_add( &impl->sel_changed_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_selector_remove_SelectionChanged( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISelector_iface );
+    if (!impl) return S_OK;
+    return xaml_event_registry_remove( &impl->sel_changed_reg, tok );
 }
 const void *uwp_selector_vtbl[20] =
 {
@@ -993,7 +1472,84 @@ const void *uwp_selector_vtbl[20] =
     [9] = uwp_selector_put_SelectedItem,
     [10 ... 15] = uwp_generic_noop,
     [16] = uwp_selector_add_SelectionChanged,
-    [17 ... 19] = uwp_generic_noop,
+    [17] = uwp_selector_remove_SelectionChanged,
+    [18 ... 19] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_cb_get_IsDropDownOpen( void *iface, boolean *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (val) *val = impl ? (boolean)impl->is_dropdown_open : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb_put_IsDropDownOpen( void *iface, boolean val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (impl) uwp_combobox_set_open( impl, val != 0 );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb_get_IsSelectionBoxHighlighted( void *iface, boolean *val )
+{
+    if (val) *val = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb_get_MaxDropDownHeight( void *iface, double *val )
+{
+    if (val) *val = 300.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb_get_SelectionBoxItem( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->selected_item : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb_add_DropDownClosed( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    return xaml_event_registry_add( &impl->cb_closed_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_cb_remove_DropDownClosed( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl) return S_OK;
+    return xaml_event_registry_remove( &impl->cb_closed_reg, tok );
+}
+static HRESULT WINAPI uwp_cb_add_DropDownOpened( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    return xaml_event_registry_add( &impl->cb_opened_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_cb_remove_DropDownOpened( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl) return S_OK;
+    return xaml_event_registry_remove( &impl->cb_opened_reg, tok );
+}
+const void *uwp_combobox_vtbl[24] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_cb_get_IsDropDownOpen,
+    [7] = uwp_cb_put_IsDropDownOpen,
+    [8] = uwp_cb_get_IsSelectionBoxHighlighted,
+    [9] = uwp_cb_get_MaxDropDownHeight,
+    [10] = uwp_generic_noop,
+    [11] = uwp_cb_get_SelectionBoxItem,
+    [12 ... 13] = uwp_generic_noop,
+    [14] = uwp_cb_add_DropDownClosed,
+    [15] = uwp_cb_remove_DropDownClosed,
+    [16] = uwp_cb_add_DropDownOpened,
+    [17] = uwp_cb_remove_DropDownOpened,
+    [18 ... 23] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_items_ctrl_get_ItemsSource( void *iface, void **out )
@@ -1197,8 +1753,10 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemsSource( void *iface, void *src )
     if (impl->items_source) IInspectable_AddRef( impl->items_source );
     TRACE( "IItemsControl::put_ItemsSource on %s (%s) -> %p\n",
            debugstr_w(impl->class_name), debugstr_w(impl->name), src );
-    if (impl->items_source)
+    if (impl->items_source && !uwp_is_combobox( impl ))
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
+    if (uwp_is_combobox( impl ) && impl->selected_item)
+        uwp_selector_set_selection( impl, -1, impl->selected_item, FALSE, FALSE );
     g_layout_dirty = TRUE;
     uwp_invalidate_window();
     return S_OK;
@@ -1264,6 +1822,25 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemTemplateSelector( void *iface, void
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_items_ctrl_get_DisplayMemberPath( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    if (!out) return E_POINTER;
+    if (impl && impl->display_member_path[0])
+        return WindowsCreateString( impl->display_member_path, wcslen( impl->display_member_path ), out );
+    *out = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_items_ctrl_put_DisplayMemberPath( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : NULL;
+    if (impl)
+        lstrcpynW( impl->display_member_path, raw ? raw : L"", ARRAY_SIZE(impl->display_member_path) );
+    return S_OK;
+}
+
 const void *uwp_items_ctrl_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -1279,7 +1856,10 @@ const void *uwp_items_ctrl_vtbl[32] =
     [10] = uwp_items_ctrl_put_ItemTemplate,
     [11] = uwp_items_ctrl_get_ItemTemplateSelector,
     [12] = uwp_items_ctrl_put_ItemTemplateSelector,
-    [13 ... 31] = uwp_generic_noop,
+    [13 ... 14] = uwp_generic_noop,
+    [15] = uwp_items_ctrl_get_DisplayMemberPath,
+    [16] = uwp_items_ctrl_put_DisplayMemberPath,
+    [17 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_key_args_QI( void *iface, REFIID iid, void **out )
@@ -2845,22 +3425,27 @@ static HRESULT WINAPI uwp_tt_put_IsOpen( void *iface, boolean val )
     if (prev && !impl->is_open)
     {
         IInspectable *sender = impl->outer ? impl->outer : &impl->ITeachingTip_iface;
+        struct uwp_sel_changed_args *args = uwp_sel_args_create( NULL, NULL );
         int i;
-        for (i = 0; i < impl->tip_closing_cnt; i++)
+        if (args)
         {
-            if (impl->tip_closing_handlers[i])
+            for (i = 0; i < impl->tip_closing_cnt; i++)
             {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closing_handlers[i];
-                h->lpVtbl->Invoke( h, sender, &g_sel_changed_args );
+                if (impl->tip_closing_handlers[i])
+                {
+                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closing_handlers[i];
+                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
+                }
             }
-        }
-        for (i = 0; i < impl->tip_closed_cnt; i++)
-        {
-            if (impl->tip_closed_handlers[i])
+            for (i = 0; i < impl->tip_closed_cnt; i++)
             {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closed_handlers[i];
-                h->lpVtbl->Invoke( h, sender, &g_sel_changed_args );
+                if (impl->tip_closed_handlers[i])
+                {
+                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closed_handlers[i];
+                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
+                }
             }
+            uwp_sel_args_Release( &args->IInspectable_iface );
         }
     }
     uwp_invalidate_window();
