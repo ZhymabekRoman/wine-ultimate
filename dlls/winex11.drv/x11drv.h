@@ -673,6 +673,8 @@ struct x11drv_win_data
     HWND        hwnd;           /* hwnd that this private data belongs to */
     Window      whole_window;   /* X window for the complete window */
     Window      client_window;  /* X window for the client area */
+    Window      overlay_window; /* X subwindow for CSD overlay child windows */
+    Window      overlay_parent; /* parent X window of overlay_window */
     struct window_rects rects;  /* window rects in monitor DPI, relative to parent client area */
     struct host_window *parent; /* the host window parent, frame or embedder, NULL if root_window */
     XIC         xic;            /* X input context */
@@ -712,6 +714,7 @@ extern void release_win_data( struct x11drv_win_data *data );
 extern void set_window_parent( struct x11drv_win_data *data, Window parent );
 extern Window X11DRV_get_whole_window( HWND hwnd );
 extern Window get_dummy_parent(void);
+extern BOOL is_window_extend_titlebar( HWND hwnd );
 
 extern BOOL window_is_reparenting( HWND hwnd );
 extern BOOL window_should_take_focus( HWND hwnd, Time time );

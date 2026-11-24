@@ -143,28 +143,86 @@ static void title_bar_store_color(__FIReference_1_Color **field, __FIReference_1
     *field = value;
 }
 
+#define WM_COREWINDOW_EXTEND_TITLEBAR (WM_APP + 0x42)
+
+static BOOL CALLBACK appview_tb_enum_thread_wnd(HWND hwnd, LPARAM lparam)
+{
+    HWND *out = (HWND *)lparam;
+    DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
+
+    if (style & WS_CHILD) return TRUE;
+    if (!*out || IsWindowVisible(hwnd))
+    {
+        *out = hwnd;
+        if (IsWindowVisible(hwnd)) return FALSE;
+    }
+    return TRUE;
+}
+
 /* Resolve the window whose Win32 caption the title bar colors map onto. The
  * title bar is not explicitly bound to an HWND, so fall back to the thread
- * active window and then the process foreground window. Cached, validated
- * with IsWindow() on every access in case the window was destroyed. */
+ * active window, top-level thread window, and then the process foreground window. */
 static HWND title_bar_get_hwnd(struct application_view_title_bar *impl)
 {
     HWND hwnd;
+    DWORD pid = 0;
 
     if (impl->hwnd && IsWindow(impl->hwnd)) return impl->hwnd;
 
     if ((hwnd = GetActiveWindow()) && IsWindow(hwnd))
     {
-        impl->hwnd = hwnd;
-        return hwnd;
+        HWND root = GetAncestor(hwnd, GA_ROOT);
+        impl->hwnd = root ? root : hwnd;
+        return impl->hwnd;
     }
-    if ((hwnd = GetForegroundWindow()) && IsWindow(hwnd))
+    hwnd = NULL;
+    EnumThreadWindows(GetCurrentThreadId(), appview_tb_enum_thread_wnd, (LPARAM)&hwnd);
+    if (hwnd && IsWindow(hwnd))
     {
         impl->hwnd = hwnd;
-        return hwnd;
+        return impl->hwnd;
+    }
+    if ((hwnd = GetForegroundWindow()) && IsWindow(hwnd) &&
+        GetWindowThreadProcessId(hwnd, &pid) && pid == GetCurrentProcessId())
+    {
+        HWND root = GetAncestor(hwnd, GA_ROOT);
+        impl->hwnd = root ? root : hwnd;
+        return impl->hwnd;
     }
     impl->hwnd = NULL;
     return NULL;
+}
+
+static void title_bar_set_color_prop(HWND hwnd, const WCHAR *prop, __FIReference_1_Color *value, BOOL track_alpha)
+{
+    if (!hwnd) return;
+    if (!value)
+    {
+        RemovePropW(hwnd, prop);
+    }
+    else
+    {
+        struct __x_ABI_CWindows_CUI_CColor color = {0xff, 0, 0, 0};
+        UINT_PTR packed;
+        HRESULT hr = __FIReference_1_Color_get_Value(value, &color);
+        TRACE("hwnd %p prop %s hr %#lx argb=(%u,%u,%u,%u)\n",
+              hwnd, debugstr_w(prop), hr, color.A, color.R, color.G, color.B);
+        if (FAILED(hr))
+        {
+            RemovePropW(hwnd, prop);
+        }
+        else
+        {
+            packed = (UINT_PTR)RGB(color.R, color.G, color.B);
+            if (color.A < 128)
+                packed |= 0x02000000u; /* transparent */
+            else
+                packed |= 0x01000000u; /* opaque/visible */
+            SetPropW(hwnd, prop, (HANDLE)packed);
+        }
+    }
+    if (GetPropW(hwnd, L"__wine_extend_titlebar"))
+        SendNotifyMessageW(hwnd, WM_COREWINDOW_EXTEND_TITLEBAR, (WPARAM)-1, 0);
 }
 
 static void set_window_dwm_attr(HWND hwnd, DWORD attr, const void *value, DWORD size)
@@ -204,8 +262,15 @@ static void title_bar_apply_background(struct application_view_title_bar *impl)
         caption = RGB(color.R, color.G, color.B);
         luminance = (299 * color.R + 587 * color.G + 114 * color.B) / 1000;
         dark = luminance < 128;
+        if (hwnd)
+            SetPropW(hwnd, L"__wine_tb_dark", (HANDLE)(UINT_PTR)(dark ? 2 : 1));
         set_window_dwm_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     }
+    else if (hwnd)
+    {
+        RemovePropW(hwnd, L"__wine_tb_dark");
+    }
+    title_bar_set_color_prop(hwnd, L"__wine_tb_bg", value, TRUE);
     set_window_dwm_attr(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
 }
 
@@ -257,12 +322,13 @@ static HRESULT WINAPI title_bar_get_ForegroundColor(IApplicationViewTitleBar *if
     return S_OK;
 }
 
-#define DEFINE_TITLE_BAR_COLOR_PROP(prop, field) \
+#define DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(prop, field, wprop, track_alpha) \
 static HRESULT WINAPI title_bar_put_##prop(IApplicationViewTitleBar *iface, __FIReference_1_Color *value) \
 { \
     struct application_view_title_bar *impl = impl_from_IApplicationViewTitleBar(iface); \
     TRACE("iface %p, value %p\n", iface, value); \
     title_bar_store_color(&impl->field, value); \
+    if (wprop) title_bar_set_color_prop(title_bar_get_hwnd(impl), wprop, value, track_alpha); \
     return S_OK; \
 } \
 static HRESULT WINAPI title_bar_get_##prop(IApplicationViewTitleBar *iface, __FIReference_1_Color **value) \
@@ -275,16 +341,16 @@ static HRESULT WINAPI title_bar_get_##prop(IApplicationViewTitleBar *iface, __FI
     return S_OK; \
 }
 
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonForegroundColor, button_foreground_color)
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonBackgroundColor, button_background_color)
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonHoverForegroundColor, button_hover_foreground_color)
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonHoverBackgroundColor, button_hover_background_color)
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonPressedForegroundColor, button_pressed_foreground_color)
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonPressedBackgroundColor, button_pressed_background_color)
-DEFINE_TITLE_BAR_COLOR_PROP(InactiveForegroundColor, inactive_foreground_color)
-DEFINE_TITLE_BAR_COLOR_PROP(InactiveBackgroundColor, inactive_background_color)
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonInactiveForegroundColor, button_inactive_foreground_color)
-DEFINE_TITLE_BAR_COLOR_PROP(ButtonInactiveBackgroundColor, button_inactive_background_color)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonForegroundColor, button_foreground_color, L"__wine_tb_btn_fg", FALSE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonBackgroundColor, button_background_color, L"__wine_tb_btn_bg", TRUE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonHoverForegroundColor, button_hover_foreground_color, L"__wine_tb_btn_hover_fg", FALSE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonHoverBackgroundColor, button_hover_background_color, L"__wine_tb_btn_hover_bg", TRUE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonPressedForegroundColor, button_pressed_foreground_color, NULL, FALSE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonPressedBackgroundColor, button_pressed_background_color, NULL, FALSE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(InactiveForegroundColor, inactive_foreground_color, NULL, FALSE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(InactiveBackgroundColor, inactive_background_color, NULL, FALSE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonInactiveForegroundColor, button_inactive_foreground_color, L"__wine_tb_btn_inact_fg", FALSE)
+DEFINE_TITLE_BAR_COLOR_PROP_NOTIFY(ButtonInactiveBackgroundColor, button_inactive_background_color, NULL, FALSE)
 
 static const struct IApplicationViewTitleBarVtbl title_bar_vtbl =
 {

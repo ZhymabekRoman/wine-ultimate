@@ -234,6 +234,7 @@ struct core_application_view_title_bar
 };
 
 static HRESULT core_application_view_title_bar_create( ICoreApplicationViewTitleBar **value );
+static void title_bar_apply_dwm( struct core_application_view_title_bar *impl );
 
 static const GUID IID_ICoreApplicationView6_custom =
     { 0x2bc095a8, 0x8ef0, 0x446d, { 0x9e, 0x60, 0x3a, 0x3e, 0x04, 0x28, 0xc6, 0x71 } };
@@ -353,6 +354,7 @@ static __x_ABI_CWindows_CUI_CCore_CICoreWindow *cached_main_core_window;
 
 static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView *iface, __x_ABI_CWindows_CUI_CCore_CICoreWindow **value )
 {
+    struct core_application_view *impl = impl_from_ICoreApplicationView( iface );
     IActivationFactory *cwf = NULL;
     __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic *cws = NULL;
     HSTRING class_id = NULL;
@@ -389,6 +391,13 @@ static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView
         *value = cached_main_core_window;
         __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( *value );
         hr = S_OK;
+    }
+    if (*value && impl->title_bar)
+    {
+        struct core_application_view_title_bar *tb =
+            CONTAINING_RECORD( impl->title_bar, struct core_application_view_title_bar, ICoreApplicationViewTitleBar_iface );
+        if (tb->extend_view_into_title_bar && (!tb->hwnd || !IsWindow( tb->hwnd )))
+            title_bar_apply_dwm( tb );
     }
     return hr;
 }
@@ -1256,31 +1265,95 @@ static void tb_event_list_raise( struct tb_event_list *list, void *sender )
     free( snapshot );
 }
 
-/* Cache the view's top-level window, mirroring application_view.c: prefer the
- * thread's active window, fall back to the foreground window. */
+#define WM_COREWINDOW_EXTEND_TITLEBAR (WM_APP + 0x42)
+
+static const GUID IID_ICoreWindowInterop_tb =
+    {0x45d64a29, 0xa63e, 0x4cb6, {0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f}};
+
+typedef struct tb_core_window_interop tb_core_window_interop;
+typedef struct tb_core_window_interop_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( tb_core_window_interop *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( tb_core_window_interop *This );
+    ULONG (WINAPI *Release)( tb_core_window_interop *This );
+    HRESULT (WINAPI *GetWindowHandle)( tb_core_window_interop *This, HWND *hwnd );
+    HRESULT (WINAPI *SetMessageHandled)( tb_core_window_interop *This, boolean value );
+} tb_core_window_interop_vtbl;
+
+struct tb_core_window_interop
+{
+    const tb_core_window_interop_vtbl *lpVtbl;
+};
+
+static BOOL CALLBACK title_bar_enum_thread_wnd( HWND hwnd, LPARAM lparam )
+{
+    HWND *out = (HWND *)lparam;
+    DWORD style = GetWindowLongW( hwnd, GWL_STYLE );
+
+    if (style & WS_CHILD) return TRUE;
+    if (!*out || IsWindowVisible( hwnd ))
+    {
+        *out = hwnd;
+        if (IsWindowVisible( hwnd )) return FALSE;
+    }
+    return TRUE;
+}
+
+/* Cache the view's top-level window: prefer the cached main CoreWindow's HWND,
+ * then the thread's active window, then a top-level window on the current
+ * thread, and finally the foreground window if owned by this process. */
 static HWND title_bar_get_hwnd( struct core_application_view_title_bar *impl )
 {
-    HWND hwnd;
+    HWND hwnd = NULL;
+    DWORD pid = 0;
 
     if (impl->hwnd && IsWindow( impl->hwnd )) return impl->hwnd;
 
+    if (cached_main_core_window)
+    {
+        tb_core_window_interop *interop = NULL;
+        if (SUCCEEDED( __x_ABI_CWindows_CUI_CCore_CICoreWindow_QueryInterface(
+                cached_main_core_window, &IID_ICoreWindowInterop_tb, (void **)&interop )) && interop)
+        {
+            interop->lpVtbl->GetWindowHandle( interop, &hwnd );
+            interop->lpVtbl->Release( interop );
+            if (hwnd && IsWindow( hwnd ))
+            {
+                HWND root = GetAncestor( hwnd, GA_ROOT );
+                impl->hwnd = root ? root : hwnd;
+                return impl->hwnd;
+            }
+        }
+    }
     if ((hwnd = GetActiveWindow()) && IsWindow( hwnd ))
     {
-        impl->hwnd = hwnd;
-        return hwnd;
+        HWND root = GetAncestor( hwnd, GA_ROOT );
+        impl->hwnd = root ? root : hwnd;
+        return impl->hwnd;
     }
-    if ((hwnd = GetForegroundWindow()) && IsWindow( hwnd ))
+    hwnd = NULL;
+    EnumThreadWindows( GetCurrentThreadId(), title_bar_enum_thread_wnd, (LPARAM)&hwnd );
+    if (hwnd && IsWindow( hwnd ))
     {
         impl->hwnd = hwnd;
-        return hwnd;
+        return impl->hwnd;
+    }
+    if ((hwnd = GetForegroundWindow()) && IsWindow( hwnd ) &&
+        GetWindowThreadProcessId( hwnd, &pid ) && pid == GetCurrentProcessId())
+    {
+        HWND root = GetAncestor( hwnd, GA_ROOT );
+        impl->hwnd = root ? root : hwnd;
+        return impl->hwnd;
     }
     impl->hwnd = NULL;
     return NULL;
 }
 
-/* ExtendViewIntoTitleBar maps to a DWM top-frame margin sized to the titlebar
- * height so the client area covers the caption. Resolved at runtime: dwmapi is
- * not in the module import list. */
+/* ExtendViewIntoTitleBar activates Wine CSD on the CoreWindow HWND: sets the
+ * __wine_extend_titlebar window property with the DPI-scaled titlebar height,
+ * notifies DWM, triggers SWP_FRAMECHANGED so winex11.drv drops server-side
+ * MWM decorations and win32u recalculates the client area, and notifies
+ * CoreWindow to manage the caption button overlay. */
 static void title_bar_apply_dwm( struct core_application_view_title_bar *impl )
 {
     static HMODULE hmodule;
@@ -1288,8 +1361,23 @@ static void title_bar_apply_dwm( struct core_application_view_title_bar *impl )
     static HRESULT (WINAPI *pDwmExtendFrameIntoClientArea)( HWND, const struct tb_margins * );
     struct tb_margins margins = {0, 0, 0, 0};
     HWND hwnd;
+    UINT dpi;
+    int height_px = 0;
 
     if (!(hwnd = title_bar_get_hwnd( impl ))) return;
+
+    if (impl->extend_view_into_title_bar)
+    {
+        dpi = GetDpiForWindow( hwnd );
+        if (!dpi) dpi = 96;
+        height_px = MulDiv( impl->height > 0.0 ? (int)(impl->height + 0.5) : 32, dpi, 96 );
+        if (height_px < 24) height_px = 24;
+        SetPropW( hwnd, L"__wine_extend_titlebar", (HANDLE)(INT_PTR)height_px );
+    }
+    else
+    {
+        RemovePropW( hwnd, L"__wine_extend_titlebar" );
+    }
 
     if (!hmodule)
     {
@@ -1298,10 +1386,15 @@ static void title_bar_apply_dwm( struct core_application_view_title_bar *impl )
         if (hmodule)
             pDwmExtendFrameIntoClientArea = (void *)GetProcAddress( hmodule, "DwmExtendFrameIntoClientArea" );
     }
-    if (!pDwmExtendFrameIntoClientArea) return;
+    if (pDwmExtendFrameIntoClientArea)
+    {
+        margins.cyTopHeight = height_px;
+        pDwmExtendFrameIntoClientArea( hwnd, &margins );
+    }
 
-    margins.cyTopHeight = impl->extend_view_into_title_bar ? (int)impl->height : 0;
-    pDwmExtendFrameIntoClientArea( hwnd, &margins );
+    SetWindowPos( hwnd, 0, 0, 0, 0, 0,
+                  SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE );
+    SendNotifyMessageW( hwnd, WM_COREWINDOW_EXTEND_TITLEBAR, (WPARAM)height_px, 0 );
 }
 
 static const GUID IID_IWeakReference_tb = {0x00000037, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
@@ -1480,7 +1573,12 @@ static HRESULT WINAPI core_application_view_title_bar_put_ExtendViewIntoTitleBar
 {
     struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
     TRACE( "iface %p, value %d\n", iface, value );
-    if (impl->extend_view_into_title_bar == value) return S_OK;
+    if (impl->extend_view_into_title_bar == value)
+    {
+        if (value && (!impl->hwnd || !IsWindow( impl->hwnd )))
+            title_bar_apply_dwm( impl );
+        return S_OK;
+    }
     impl->extend_view_into_title_bar = value;
     title_bar_apply_dwm( impl );
     tb_event_list_raise( &impl->layout_metrics_changed, (IInspectable *)iface );

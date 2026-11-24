@@ -441,6 +441,15 @@ static const WCHAR dcomp_captured_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','u','r','e','d','_','h','w','n','d',0};
 static const WCHAR dwm_cloaked_prop[] =
     {'_','_','w','i','n','e','_','d','w','m','_','c','l','o','a','k','e','d',0};
+static const WCHAR extend_titlebar_prop[] =
+    {'_','_','w','i','n','e','_','e','x','t','e','n','d','_','t','i','t','l','e','b','a','r',0};
+static const WCHAR csd_overlay_prop[] =
+    {'_','_','w','i','n','e','_','c','s','d','_','o','v','e','r','l','a','y',0};
+
+BOOL is_window_extend_titlebar( HWND hwnd )
+{
+    return NtUserGetProp( hwnd, extend_titlebar_prop ) != NULL;
+}
 
 static BOOL is_window_cloaked( HWND hwnd )
 {
@@ -519,6 +528,7 @@ static unsigned long get_mwm_decorations_for_style( DWORD style, DWORD ex_style 
  */
 static unsigned long get_mwm_decorations( struct x11drv_win_data *data, DWORD style, DWORD ex_style )
 {
+    if (is_window_extend_titlebar( data->hwnd )) return 0;
     if (EqualRect( &data->rects.window, &data->rects.visible )) return 0;
     return get_mwm_decorations_for_style( style, ex_style );
 }
@@ -2417,6 +2427,7 @@ void attach_client_window( struct x11drv_win_data *data, Window client_window )
         client_window_events_enable( data, client_window );
         XReparentWindow( gdi_display, client_window, data->whole_window, data->rects.client.left - data->rects.visible.left,
                          data->rects.client.top - data->rects.visible.top );
+        XLowerWindow( gdi_display, client_window );
     }
 
     data->client_window = client_window;
@@ -2489,6 +2500,7 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
                                                CWBackingStore | CWColormap | CWBorderPixel, &attr );
     if (data->client_window)
     {
+        XLowerWindow( gdi_display, data->client_window );
         XMapWindow( gdi_display, data->client_window );
         fprintf(stderr, "XWID create hwnd=%p whole=%08lx client=%08lx\n",
                 hwnd, parent_win, data->client_window );
@@ -2788,6 +2800,14 @@ void X11DRV_DestroyWindow( HWND hwnd )
 
     if (!(data = get_win_data( hwnd ))) return;
 
+    if (data->overlay_window)
+    {
+        XDeleteContext( data->display, data->overlay_window, winContext );
+        XDestroyWindow( data->display, data->overlay_window );
+        data->overlay_window = 0;
+        data->overlay_parent = 0;
+        XFlush( data->display );
+    }
     destroy_whole_window( data, FALSE );
     if (thread_data->last_focus == hwnd) thread_data->last_focus = 0;
     if (thread_data->last_xic_hwnd == hwnd) thread_data->last_xic_hwnd = 0;
@@ -3197,12 +3217,31 @@ void X11DRV_GetDC( HDC hdc, HWND hwnd, HWND top, const RECT *win_rect,
     escape.dc_rect.right        = win_rect->right - top_rect->left;
     escape.dc_rect.bottom       = win_rect->bottom - top_rect->top;
 
+    if (hwnd != top && (data = get_win_data( hwnd )))
+    {
+        Window overlay = data->overlay_window;
+        XVisualInfo vis = data->vis;
+        release_win_data( data );
+        if (overlay)
+        {
+            escape.drawable = overlay;
+            escape.visual = vis;
+            escape.dc_rect.left   = 0;
+            escape.dc_rect.top    = 0;
+            escape.dc_rect.right  = win_rect->right - win_rect->left;
+            escape.dc_rect.bottom = win_rect->bottom - win_rect->top;
+            NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+            return;
+        }
+    }
+
     if ((data = get_win_data( top )))
     {
         escape.drawable = data->whole_window;
         escape.visual = data->vis;
-        /* special case: when repainting the root window, clip out top-level windows */
-        if (top == hwnd && data->whole_window == root_window) escape.mode = ClipByChildren;
+        /* special case: when repainting the root window or an extended-titlebar toplevel, clip out X11 children */
+        if (top == hwnd && (data->whole_window == root_window || is_window_extend_titlebar( top )))
+            escape.mode = ClipByChildren;
         release_win_data( data );
     }
     else
@@ -3379,8 +3418,16 @@ void X11DRV_MoveWindowBits( HWND hwnd, const struct window_rects *old_rects,
  */
 BOOL X11DRV_GetWindowStyleMasks( HWND hwnd, UINT style, UINT ex_style, UINT *style_mask, UINT *ex_style_mask )
 {
-    unsigned long decor = get_mwm_decorations_for_style( style, ex_style );
+    unsigned long decor;
     struct x11drv_win_data *data;
+
+    if (is_window_extend_titlebar( hwnd ))
+    {
+        *style_mask = *ex_style_mask = 0;
+        return TRUE;
+    }
+
+    decor = get_mwm_decorations_for_style( style, ex_style );
 
     if ((data = get_win_data( hwnd )))
     {
@@ -3410,6 +3457,71 @@ static BOOL get_desired_wm_state( HWND hwnd, DWORD style, const struct window_re
     return WithdrawnState;
 }
 
+
+/* Keep a CSD caption overlay child HWND backed by a real X11 subwindow stacked
+ * above the parent's Vulkan/D3D11 client_window so GPU presents never overwrite it.
+ * Caller holds win_data_mutex. */
+static void sync_csd_overlay_window( struct x11drv_win_data *data, UINT style )
+{
+    HWND parent = NtUserGetAncestor( data->hwnd, GA_ROOT );
+    struct x11drv_win_data *parent_data = NULL;
+    Window parent_win;
+    int x, y, w, h;
+
+    if (!parent || parent == data->hwnd) return;
+    if (XFindContext( gdi_display, (XID)parent, win_data_context, (char **)&parent_data ) || !parent_data)
+        return;
+    parent_win = parent_data->whole_window;
+    if (!parent_win) return;
+
+    x = data->rects.visible.left + (parent_data->rects.client.left - parent_data->rects.visible.left);
+    y = data->rects.visible.top  + (parent_data->rects.client.top  - parent_data->rects.visible.top);
+    w = max( 1, data->rects.visible.right  - data->rects.visible.left );
+    h = max( 1, data->rects.visible.bottom - data->rects.visible.top );
+
+    if (data->overlay_window && data->overlay_parent != parent_win)
+    {
+        XDeleteContext( data->display, data->overlay_window, winContext );
+        XDestroyWindow( data->display, data->overlay_window );
+        data->overlay_window = 0;
+        data->overlay_parent = 0;
+    }
+
+    if (!data->overlay_window)
+    {
+        XSetWindowAttributes attr;
+        attr.colormap = default_colormap;
+        attr.bit_gravity = NorthWestGravity;
+        attr.win_gravity = NorthWestGravity;
+        attr.backing_store = NotUseful;
+        attr.border_pixel = 0;
+        attr.background_pixel = 0;
+        /* Only select ExposureMask so pointer/button events bubble up to parent_win
+         * and enter normal Win32 hit-testing to reach this child HWND. */
+        attr.event_mask = ExposureMask;
+        data->overlay_window = XCreateWindow( data->display, parent_win, x, y, w, h, 0,
+                                              default_visual.depth, InputOutput, default_visual.visual,
+                                              CWBitGravity | CWWinGravity | CWBackingStore |
+                                              CWColormap | CWBorderPixel | CWBackPixel | CWEventMask, &attr );
+        if (!data->overlay_window) return;
+        data->overlay_parent = parent_win;
+        XSaveContext( data->display, data->overlay_window, winContext, (char *)data->hwnd );
+        XSync( data->display, False );
+        TRACE( "created CSD overlay xwin %lx for hwnd %p inside parent %lx (%d,%d %dx%d)\n",
+               data->overlay_window, data->hwnd, parent_win, x, y, w, h );
+    }
+
+    if (style & WS_VISIBLE)
+    {
+        XMoveResizeWindow( data->display, data->overlay_window, x, y, w, h );
+        XMapRaised( data->display, data->overlay_window );
+    }
+    else
+    {
+        XUnmapWindow( data->display, data->overlay_window );
+    }
+    XFlush( data->display );
+}
 
 /***********************************************************************
  *		WindowPosChanged   (X11DRV.@)
@@ -3456,6 +3568,8 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 
     if (!data->whole_window)
     {
+        if (NtUserGetProp( hwnd, csd_overlay_prop ))
+            sync_csd_overlay_window( data, new_style );
         release_win_data( data );
         return;
     }
@@ -3482,10 +3596,10 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 
     window_set_wm_state( data, get_desired_wm_state( hwnd, new_style, new_rects ), activate );
     apply_window_cloak( data );
-    if (!data->wm_state_serial && data->pending_state.wm_state != WithdrawnState)
+    if (data->pending_state.wm_state != WithdrawnState)
     {
         if (swp_flags & (SWP_FRAMECHANGED | SWP_STATECHANGED)) set_wm_hints( data );
-        update_net_wm_states( data );
+        if (!data->wm_state_serial) update_net_wm_states( data );
     }
 
     /* if window was fullscreen and is being hidden, release cursor clipping */

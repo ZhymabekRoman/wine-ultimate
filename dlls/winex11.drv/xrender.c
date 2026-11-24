@@ -2287,6 +2287,7 @@ BOOL x11drv_xrender_present_pixmap( Pixmap src, int src_depth, int src_w, int sr
 
     pa.subwindow_mode = IncludeInferiors;
     src_pict = pXRenderCreatePicture( gdi_display, src, src_fmt, CPSubwindowMode, &pa );
+    pa.subwindow_mode = ClipByChildren;
     dst_pict = pXRenderCreatePicture( gdi_display, dst, dst_fmt, CPSubwindowMode, &pa );
     if (!src_pict || !dst_pict)
     {

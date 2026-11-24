@@ -258,6 +258,7 @@ struct core_window
     IUnknown *navigation_client;
     IUnknown *window_client_adapter;
     HWND hwnd;
+    HWND csd_overlay_hwnd;
     LONG ref;
     float width;
     float height;
@@ -2580,6 +2581,501 @@ static void core_window_deliver_pointer_released( struct core_window *impl, int 
 #define WM_POINTERUP 0x0247
 #endif
 
+#define WM_COREWINDOW_EXTEND_TITLEBAR (WM_APP + 0x42)
+#define CSD_BG_SAMPLE_TIMER_ID 1
+
+struct csd_overlay_state
+{
+    HWND parent;
+    int hover_btn;
+    int pressed_btn;
+    BOOL tracking;
+    BOOL has_sampled_bg;
+    COLORREF sampled_bg;
+    int sample_ticks;
+};
+
+static BOOL csd_get_color_prop( HWND parent, const WCHAR *prop, COLORREF *out, BOOL require_opaque )
+{
+    UINT_PTR val = (UINT_PTR)GetPropW( parent, prop );
+    if (!val) return FALSE;
+    if (require_opaque && !(val & 0x01000000u)) return FALSE;
+    if (!require_opaque && !(val & 0x03000000u)) return FALSE;
+    *out = (COLORREF)(val & 0x00ffffffu);
+    return TRUE;
+}
+
+static BOOL csd_try_sample_parent_bg( HWND overlay, struct csd_overlay_state *st )
+{
+    RECT prc, orc;
+    HDC pdc;
+    int sx, sy;
+    COLORREF c;
+
+    if (!st || !st->parent || !IsWindow( st->parent )) return FALSE;
+    if (!GetClientRect( st->parent, &prc ) || !GetClientRect( overlay, &orc )) return FALSE;
+    sx = (int)prc.right - (int)orc.right - 6;
+    sy = (int)orc.bottom / 2;
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+
+    pdc = GetDC( st->parent );
+    if (!pdc) return FALSE;
+    c = GetPixel( pdc, sx, sy );
+    ReleaseDC( st->parent, pdc );
+
+    if (c == CLR_INVALID) return FALSE;
+    if (c == RGB( 0, 0, 0 ) && !st->has_sampled_bg) return FALSE;
+    st->sampled_bg = c;
+    st->has_sampled_bg = TRUE;
+    return TRUE;
+}
+
+static COLORREF csd_blend_color( COLORREF bg, COLORREF fg, int alpha )
+{
+    int r = (GetRValue( fg ) * alpha + GetRValue( bg ) * (255 - alpha)) / 255;
+    int g = (GetGValue( fg ) * alpha + GetGValue( bg ) * (255 - alpha)) / 255;
+    int b = (GetBValue( fg ) * alpha + GetBValue( bg ) * (255 - alpha)) / 255;
+    return RGB( r, g, b );
+}
+
+static BOOL csd_is_dark_theme( HWND parent )
+{
+    static const WCHAR subkey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    COLORREF c;
+    UINT_PTR dark_prop;
+    DWORD val = 1, len = sizeof(val), type = 0;
+    HKEY hkey;
+
+    if (csd_get_color_prop( parent, L"__wine_tb_btn_fg", &c, TRUE ))
+    {
+        unsigned int lum = (299 * GetRValue( c ) + 587 * GetGValue( c ) + 114 * GetBValue( c )) / 1000;
+        return lum >= 128;
+    }
+    if (csd_get_color_prop( parent, L"__wine_tb_bg", &c, TRUE ))
+    {
+        unsigned int lum = (299 * GetRValue( c ) + 587 * GetGValue( c ) + 114 * GetBValue( c )) / 1000;
+        return lum < 128;
+    }
+    if ((dark_prop = (UINT_PTR)GetPropW( parent, L"__wine_tb_dark" )))
+        return dark_prop == 2;
+
+    if (!RegOpenKeyExW( HKEY_CURRENT_USER, subkey, 0, KEY_QUERY_VALUE, &hkey ))
+    {
+        if (RegQueryValueExW( hkey, L"AppsUseLightTheme", NULL, &type, (BYTE *)&val, &len ) || type != REG_DWORD)
+            val = 1;
+        RegCloseKey( hkey );
+    }
+    return val == 0;
+}
+
+static void csd_draw_rect_outline( HDC hdc, int left, int top, int right, int bottom )
+{
+    MoveToEx( hdc, left, top, NULL );
+    LineTo( hdc, right, top );
+    LineTo( hdc, right, bottom );
+    LineTo( hdc, left, bottom );
+    LineTo( hdc, left, top );
+}
+
+static void csd_overlay_paint( HWND hwnd, struct csd_overlay_state *st )
+{
+    PAINTSTRUCT ps;
+    HDC hdc, memdc;
+    HBITMAP bmp, old_bmp;
+    RECT rc;
+    int w, h, i, dpi, s, pen_w;
+    BOOL dark, active, zoomed;
+    COLORREF bg_norm, fg_norm, bg_hover, bg_press, fg_hover;
+
+    hdc = BeginPaint( hwnd, &ps );
+    if (!hdc) return;
+
+    GetClientRect( hwnd, &rc );
+    w = rc.right - rc.left;
+    h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0)
+    {
+        EndPaint( hwnd, &ps );
+        return;
+    }
+
+    memdc = CreateCompatibleDC( hdc );
+    bmp = CreateCompatibleBitmap( hdc, w, h );
+    if (!memdc || !bmp)
+    {
+        if (bmp) DeleteObject( bmp );
+        if (memdc) DeleteDC( memdc );
+        EndPaint( hwnd, &ps );
+        return;
+    }
+    old_bmp = SelectObject( memdc, bmp );
+
+    dpi = GetDpiForWindow( st->parent );
+    if (!dpi) dpi = 96;
+    s = MulDiv( 10, dpi, 96 );
+    if (s < 8) s = 8;
+    pen_w = max( 1, MulDiv( 1, dpi, 96 ) );
+
+    dark = csd_is_dark_theme( st->parent );
+    active = (GetActiveWindow() == st->parent || GetForegroundWindow() == st->parent);
+    zoomed = IsZoomed( st->parent );
+
+    {
+        COLORREF app_bg = 0, app_fg = 0;
+        BOOL has_app_bg = csd_get_color_prop( st->parent, L"__wine_tb_btn_bg", &app_bg, TRUE ) ||
+                          csd_get_color_prop( st->parent, L"__wine_tb_bg", &app_bg, TRUE );
+        BOOL has_app_fg = csd_get_color_prop( st->parent, L"__wine_tb_btn_fg", &app_fg, TRUE );
+        /* If the app requested transparent button background, or left bg and fg
+         * identical (e.g. both 0x000000 from unresolved defaults), sample the
+         * adjacent rendered titlebar pixel so the overlay blends seamlessly. */
+        BOOL use_sampled = !has_app_bg || (has_app_fg && app_bg == app_fg);
+
+        if (use_sampled)
+        {
+            csd_try_sample_parent_bg( hwnd, st );
+            if (st->has_sampled_bg)
+            {
+                bg_norm = st->sampled_bg;
+                dark = ((299 * GetRValue( bg_norm ) + 587 * GetGValue( bg_norm ) + 114 * GetBValue( bg_norm )) / 1000) < 128;
+            }
+            else
+            {
+                bg_norm = dark ? RGB( 45, 45, 45 ) : RGB( 243, 243, 243 );
+                if (st->sample_ticks == 0)
+                {
+                    st->sample_ticks = 1;
+                    SetTimer( hwnd, CSD_BG_SAMPLE_TIMER_ID, 250, NULL );
+                }
+            }
+        }
+        else
+        {
+            bg_norm = app_bg;
+            dark = ((299 * GetRValue( bg_norm ) + 587 * GetGValue( bg_norm ) + 114 * GetBValue( bg_norm )) / 1000) < 128;
+        }
+
+        if (!active)
+        {
+            if (use_sampled || !csd_get_color_prop( st->parent, L"__wine_tb_btn_inact_fg", &fg_norm, TRUE ))
+                fg_norm = dark ? RGB( 175, 175, 175 ) : RGB( 120, 120, 120 );
+        }
+        else
+        {
+            if (use_sampled || !has_app_fg)
+                fg_norm = dark ? RGB( 242, 242, 242 ) : RGB( 26, 26, 26 );
+            else
+                fg_norm = app_fg;
+        }
+    }
+
+    /* Guarantee visible glyph contrast against background (reject same-polarity or low contrast). */
+    {
+        int bg_lum = (299 * GetRValue( bg_norm ) + 587 * GetGValue( bg_norm ) + 114 * GetBValue( bg_norm )) / 1000;
+        int fg_lum = (299 * GetRValue( fg_norm ) + 587 * GetGValue( fg_norm ) + 114 * GetBValue( fg_norm )) / 1000;
+        if (((bg_lum < 128) == (fg_lum < 128)) || abs( bg_lum - fg_lum ) < 100)
+            fg_norm = (bg_lum < 128) ? RGB( 242, 242, 242 ) : RGB( 26, 26, 26 );
+    }
+
+    if (!csd_get_color_prop( st->parent, L"__wine_tb_btn_hover_bg", &bg_hover, TRUE ))
+        bg_hover = dark ? csd_blend_color( bg_norm, RGB( 255, 255, 255 ), 28 )
+                        : csd_blend_color( bg_norm, RGB( 0, 0, 0 ), 22 );
+    bg_press = dark ? csd_blend_color( bg_norm, RGB( 255, 255, 255 ), 18 )
+                    : csd_blend_color( bg_norm, RGB( 0, 0, 0 ), 38 );
+    if (!csd_get_color_prop( st->parent, L"__wine_tb_btn_hover_fg", &fg_hover, TRUE ) || fg_hover == bg_norm)
+        fg_hover = dark ? RGB( 255, 255, 255 ) : RGB( 0, 0, 0 );
+    {
+        int hbg_lum = (299 * GetRValue( bg_hover ) + 587 * GetGValue( bg_hover ) + 114 * GetBValue( bg_hover )) / 1000;
+        int hfg_lum = (299 * GetRValue( fg_hover ) + 587 * GetGValue( fg_hover ) + 114 * GetBValue( fg_hover )) / 1000;
+        if (((hbg_lum < 128) == (hfg_lum < 128)) || abs( hbg_lum - hfg_lum ) < 100)
+            fg_hover = (hbg_lum < 128) ? RGB( 255, 255, 255 ) : RGB( 0, 0, 0 );
+    }
+
+    TRACE( "csd_overlay_paint hwnd %p (%dx%d) dark=%d active=%d zoomed=%d bg=%06lx fg=%06lx hover=%d\n",
+           hwnd, w, h, dark, active, zoomed, (unsigned long)bg_norm, (unsigned long)fg_norm, st->hover_btn );
+
+    for (i = 0; i < 3; i++)
+    {
+        RECT brc;
+        COLORREF bg = bg_norm;
+        COLORREF fg = fg_norm;
+        HBRUSH brush;
+        HPEN pen, old_pen;
+        int cx, cy, x0, y0;
+
+        brc.left = (i * w) / 3;
+        brc.top = 0;
+        brc.right = ((i + 1) * w) / 3;
+        brc.bottom = h;
+
+        if (st->pressed_btn == i && st->hover_btn == i)
+        {
+            bg = (i == 2) ? RGB( 178, 43, 30 ) : bg_press;
+            fg = (i == 2) ? RGB( 255, 255, 255 ) : fg_hover;
+        }
+        else if (st->hover_btn == i)
+        {
+            bg = (i == 2) ? RGB( 196, 43, 28 ) : bg_hover;
+            fg = (i == 2) ? RGB( 255, 255, 255 ) : fg_hover;
+        }
+
+        brush = CreateSolidBrush( bg );
+        FillRect( memdc, &brc, brush );
+        DeleteObject( brush );
+
+        pen = CreatePen( PS_SOLID, pen_w, fg );
+        old_pen = SelectObject( memdc, pen );
+        cx = (brc.left + brc.right) / 2;
+        cy = (brc.top + brc.bottom) / 2;
+        x0 = cx - s / 2;
+        y0 = cy - s / 2;
+
+        if (i == 0)
+        {
+            /* Minimize */
+            MoveToEx( memdc, x0, cy, NULL );
+            LineTo( memdc, x0 + s, cy );
+        }
+        else if (i == 1)
+        {
+            /* Maximize / Restore */
+            if (!zoomed)
+            {
+                csd_draw_rect_outline( memdc, x0, y0, x0 + s - 1, y0 + s - 1 );
+            }
+            else
+            {
+                int off = max( 2, MulDiv( 2, dpi, 96 ) );
+                int rs = s - off;
+                int fx = x0;
+                int fy = y0 + off;
+                csd_draw_rect_outline( memdc, fx, fy, fx + rs - 1, fy + rs - 1 );
+                MoveToEx( memdc, fx + off, fy - 1, NULL );
+                LineTo( memdc, fx + off, fy - off );
+                LineTo( memdc, fx + off + rs - 1, fy - off );
+                LineTo( memdc, fx + off + rs - 1, fy - off + rs - 1 );
+                LineTo( memdc, fx + rs - 1, fy - off + rs - 1 );
+            }
+        }
+        else
+        {
+            /* Close */
+            MoveToEx( memdc, x0, y0, NULL );
+            LineTo( memdc, x0 + s, y0 + s );
+            MoveToEx( memdc, x0 + s - 1, y0, NULL );
+            LineTo( memdc, x0 - 1, y0 + s );
+        }
+
+        SelectObject( memdc, old_pen );
+        DeleteObject( pen );
+    }
+
+    BitBlt( hdc, 0, 0, w, h, memdc, 0, 0, SRCCOPY );
+    SelectObject( memdc, old_bmp );
+    DeleteObject( bmp );
+    DeleteDC( memdc );
+    EndPaint( hwnd, &ps );
+}
+
+static int csd_overlay_hit_button( HWND hwnd, int x, int y )
+{
+    RECT rc;
+    int w, h, idx;
+
+    GetClientRect( hwnd, &rc );
+    w = rc.right - rc.left;
+    h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0 || x < 0 || x >= w || y < 0 || y >= h) return -1;
+    idx = (x * 3) / w;
+    if (idx < 0) idx = 0;
+    if (idx > 2) idx = 2;
+    return idx;
+}
+
+static LRESULT CALLBACK csd_overlay_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    struct csd_overlay_state *st = (struct csd_overlay_state *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
+
+    switch (msg)
+    {
+    case WM_NCCREATE:
+    {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lparam;
+        st = calloc( 1, sizeof(*st) );
+        if (!st) return FALSE;
+        st->parent = cs->hwndParent;
+        st->hover_btn = -1;
+        st->pressed_btn = -1;
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, (LONG_PTR)st );
+        SetPropW( hwnd, L"__wine_csd_overlay", (HANDLE)1 );
+        return TRUE;
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
+        if (st) csd_overlay_paint( hwnd, st );
+        return 0;
+
+    case WM_NCHITTEST:
+        return HTCLIENT;
+
+    case WM_MOUSEMOVE:
+        if (st)
+        {
+            int btn = csd_overlay_hit_button( hwnd, (short)LOWORD( lparam ), (short)HIWORD( lparam ) );
+            if (!st->tracking)
+            {
+                TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+                TrackMouseEvent( &tme );
+                st->tracking = TRUE;
+            }
+            if (st->hover_btn != btn)
+            {
+                st->hover_btn = btn;
+                InvalidateRect( hwnd, NULL, FALSE );
+            }
+        }
+        return 0;
+
+    case WM_MOUSELEAVE:
+        if (st)
+        {
+            st->tracking = FALSE;
+            if (st->hover_btn != -1)
+            {
+                st->hover_btn = -1;
+                InvalidateRect( hwnd, NULL, FALSE );
+            }
+        }
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        if (st)
+        {
+            int btn = csd_overlay_hit_button( hwnd, (short)LOWORD( lparam ), (short)HIWORD( lparam ) );
+            st->hover_btn = btn;
+            st->pressed_btn = btn;
+            SetCapture( hwnd );
+            InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (st)
+        {
+            int btn = csd_overlay_hit_button( hwnd, (short)LOWORD( lparam ), (short)HIWORD( lparam ) );
+            int action = (st->pressed_btn != -1 && st->pressed_btn == btn) ? btn : -1;
+            st->pressed_btn = -1;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect( hwnd, NULL, FALSE );
+            if (action == 0)
+            {
+                TRACE( "csd_overlay SC_MINIMIZE parent %p\n", st->parent );
+                PostMessageW( st->parent, WM_SYSCOMMAND, SC_MINIMIZE, 0 );
+            }
+            else if (action == 1)
+            {
+                WPARAM cmd = IsZoomed( st->parent ) ? SC_RESTORE : SC_MAXIMIZE;
+                TRACE( "csd_overlay %s parent %p\n", cmd == SC_MAXIMIZE ? "SC_MAXIMIZE" : "SC_RESTORE", st->parent );
+                PostMessageW( st->parent, WM_SYSCOMMAND, cmd, 0 );
+            }
+            else if (action == 2)
+            {
+                TRACE( "csd_overlay SC_CLOSE parent %p\n", st->parent );
+                PostMessageW( st->parent, WM_SYSCOMMAND, SC_CLOSE, 0 );
+            }
+        }
+        return 0;
+
+    case WM_TIMER:
+        if (wparam == CSD_BG_SAMPLE_TIMER_ID && st)
+        {
+            if (csd_try_sample_parent_bg( hwnd, st ) || ++st->sample_ticks >= 16)
+            {
+                KillTimer( hwnd, CSD_BG_SAMPLE_TIMER_ID );
+                InvalidateRect( hwnd, NULL, FALSE );
+            }
+            return 0;
+        }
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+
+    case WM_CAPTURECHANGED:
+        if (st && st->pressed_btn != -1)
+        {
+            st->pressed_btn = -1;
+            InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return 0;
+
+    case WM_NCDESTROY:
+        RemovePropW( hwnd, L"__wine_csd_overlay" );
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, 0 );
+        free( st );
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+
+    default:
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+    }
+}
+
+static void core_window_sync_csd_overlay( struct core_window *impl )
+{
+    static const WCHAR overlay_class[] = L"__wine_csd_caption_overlay";
+    static BOOL class_registered;
+    int extend_h, dpi, cluster_w, overlay_w, overlay_h;
+    RECT rc;
+
+    if (!impl || !impl->hwnd || !IsWindow( impl->hwnd )) return;
+
+    extend_h = (int)(INT_PTR)GetPropW( impl->hwnd, L"__wine_extend_titlebar" );
+    if (extend_h <= 0)
+    {
+        if (impl->csd_overlay_hwnd && IsWindow( impl->csd_overlay_hwnd ))
+            ShowWindow( impl->csd_overlay_hwnd, SW_HIDE );
+        return;
+    }
+
+    if (!class_registered)
+    {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = csd_overlay_wndproc;
+        wc.hInstance = GetModuleHandleW( NULL );
+        wc.lpszClassName = overlay_class;
+        wc.hCursor = LoadCursorW( NULL, (const WCHAR *)IDC_ARROW );
+        RegisterClassExW( &wc );
+        class_registered = TRUE;
+    }
+
+    GetClientRect( impl->hwnd, &rc );
+    if (rc.right <= 0 || rc.bottom <= 0) return;
+
+    dpi = GetDpiForWindow( impl->hwnd );
+    if (!dpi) dpi = 96;
+    cluster_w = MulDiv( 138, dpi, 96 );
+    overlay_w = min( cluster_w, (int)rc.right );
+    overlay_h = min( extend_h, (int)rc.bottom );
+
+    if (!impl->csd_overlay_hwnd || !IsWindow( impl->csd_overlay_hwnd ))
+    {
+        impl->csd_overlay_hwnd = CreateWindowExW(
+            0, overlay_class, NULL,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            rc.right - overlay_w, 0, overlay_w, overlay_h,
+            impl->hwnd, NULL, GetModuleHandleW( NULL ), NULL );
+    }
+
+    if (impl->csd_overlay_hwnd)
+    {
+        SetWindowPos( impl->csd_overlay_hwnd, HWND_TOP,
+                      rc.right - overlay_w, 0, overlay_w, overlay_h,
+                      SWP_SHOWWINDOW | SWP_NOACTIVATE );
+        InvalidateRect( impl->csd_overlay_hwnd, NULL, FALSE );
+    }
+}
+
 static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
     struct core_window *impl = (struct core_window *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
@@ -2600,6 +3096,85 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
     }
     switch (msg)
     {
+    case WM_NCCALCSIZE:
+        if (GetPropW( hwnd, L"__wine_extend_titlebar" ))
+            return 0;
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+
+    case WM_NCPAINT:
+        if (GetPropW( hwnd, L"__wine_extend_titlebar" ))
+            return 0;
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+
+    case WM_NCACTIVATE:
+        if (GetPropW( hwnd, L"__wine_extend_titlebar" ))
+        {
+            if (impl && impl->csd_overlay_hwnd && IsWindow( impl->csd_overlay_hwnd ))
+                InvalidateRect( impl->csd_overlay_hwnd, NULL, FALSE );
+            return TRUE;
+        }
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+
+    case WM_NCHITTEST:
+    {
+        int extend_h = (int)(INT_PTR)GetPropW( hwnd, L"__wine_extend_titlebar" );
+        if (extend_h > 0)
+        {
+            POINT pt = { (short)LOWORD( lparam ), (short)HIWORD( lparam ) };
+            RECT wr;
+            UINT dpi = GetDpiForWindow( hwnd );
+            int border, cluster_w;
+
+            if (!dpi) dpi = 96;
+            border = MulDiv( 6, dpi, 96 );
+            cluster_w = MulDiv( 138, dpi, 96 );
+
+            if (GetWindowRect( hwnd, &wr ))
+            {
+                if (!IsZoomed( hwnd ))
+                {
+                    BOOL on_left   = pt.x >= wr.left && pt.x < wr.left + border;
+                    BOOL on_right  = pt.x < wr.right && pt.x >= wr.right - border;
+                    BOOL on_top    = pt.y >= wr.top && pt.y < wr.top + border;
+                    BOOL on_bottom = pt.y < wr.bottom && pt.y >= wr.bottom - border;
+
+                    if (on_top && on_left) return HTTOPLEFT;
+                    if (on_top && on_right) return HTTOPRIGHT;
+                    if (on_bottom && on_left) return HTBOTTOMLEFT;
+                    if (on_bottom && on_right) return HTBOTTOMRIGHT;
+                    if (on_left) return HTLEFT;
+                    if (on_right) return HTRIGHT;
+                    if (on_top) return HTTOP;
+                    if (on_bottom) return HTBOTTOM;
+                }
+                if (pt.y >= wr.top && pt.y < wr.top + extend_h &&
+                    pt.x >= wr.left && pt.x < wr.right - cluster_w)
+                    return HTCAPTION;
+            }
+            return HTCLIENT;
+        }
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+    }
+
+    case WM_COREWINDOW_EXTEND_TITLEBAR:
+        if (wparam == (WPARAM)-1)
+        {
+            if (impl && impl->csd_overlay_hwnd && IsWindow( impl->csd_overlay_hwnd ))
+                InvalidateRect( impl->csd_overlay_hwnd, NULL, FALSE );
+        }
+        else if (impl)
+        {
+            core_window_sync_csd_overlay( impl );
+        }
+        return 0;
+
+    case WM_WINDOWPOSCHANGED:
+    {
+        LRESULT ret = DefWindowProcW( hwnd, msg, wparam, lparam );
+        if (impl) core_window_sync_csd_overlay( impl );
+        return ret;
+    }
+
     case WM_WINDOWPOSCHANGING:
     {
         /* The WinUI3 Window defaults Width/Height to NaN; when the app activates before the
@@ -2710,6 +3285,7 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
             if (args)
                 __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs_Release( args );
         }
+        if (impl) core_window_sync_csd_overlay( impl );
         return DefWindowProcW( hwnd, msg, wparam, lparam );
     }
 
@@ -2738,10 +3314,13 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
                 CoreWindowActivationState_PointerActivated : CoreWindowActivationState_CodeActivated;
             core_window_deliver_activation( impl, state );
         }
+        if (impl && impl->csd_overlay_hwnd && IsWindow( impl->csd_overlay_hwnd ))
+            InvalidateRect( impl->csd_overlay_hwnd, NULL, FALSE );
         return DefWindowProcW( hwnd, msg, wparam, lparam );
     }
 
     case WM_CLOSE:
+        DestroyWindow( hwnd );
         PostQuitMessage( 0 );
         return 0;
 
@@ -2766,6 +3345,7 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
     }
 
     case WM_NCDESTROY:
+        if (impl) impl->csd_overlay_hwnd = NULL;
         SetWindowLongPtrW( hwnd, GWLP_USERDATA, 0 );
         return DefWindowProcW( hwnd, msg, wparam, lparam );
 

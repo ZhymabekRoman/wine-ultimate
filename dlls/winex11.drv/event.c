@@ -984,6 +984,13 @@ static BOOL X11DRV_Expose( HWND hwnd, XEvent *xev )
     rect.right  = pos.x + event->width;
     rect.bottom = pos.y + event->height;
 
+    if (event->window == data->overlay_window)
+    {
+        release_win_data( data );
+        NtUserRedrawWindow( hwnd, &rect, 0, RDW_INVALIDATE | RDW_ERASE );
+        return TRUE;
+    }
+
     if (event->window != data->client_window)
         OffsetRect( &rect, data->rects.visible.left - data->rects.client.left,
                     data->rects.visible.top - data->rects.client.top );

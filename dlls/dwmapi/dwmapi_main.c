@@ -68,7 +68,7 @@ HRESULT WINAPI DwmEnableComposition(UINT uCompositionAction)
  */
 HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 {
-    FIXME("(%p, %p) stub\n", hwnd, margins);
+    TRACE("(%p, %p)\n", hwnd, margins);
 
     return S_OK;
 }
@@ -111,6 +111,28 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
             RemovePropW(hwnd, L"__wine_dwm_cloaked");
         SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS);
+        return S_OK;
+    }
+
+    if ((attributenum == DWMWA_USE_IMMERSIVE_DARK_MODE || attributenum == 19) &&
+        hwnd && attribute && size >= sizeof(BOOL))
+    {
+        BOOL dark = *(const BOOL *)attribute;
+        SetPropW(hwnd, L"__wine_tb_dark", (HANDLE)(UINT_PTR)(dark ? 2 : 1));
+        if (GetPropW(hwnd, L"__wine_extend_titlebar"))
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        return S_OK;
+    }
+
+    if (attributenum == DWMWA_CAPTION_COLOR && hwnd && attribute && size >= sizeof(COLORREF))
+    {
+        COLORREF color = *(const COLORREF *)attribute;
+        if (color == 0xffffffff)
+            RemovePropW(hwnd, L"__wine_tb_bg");
+        else
+            SetPropW(hwnd, L"__wine_tb_bg", (HANDLE)(UINT_PTR)((color & 0x00ffffffu) | 0x01000000u));
+        if (GetPropW(hwnd, L"__wine_extend_titlebar"))
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN);
         return S_OK;
     }
 

@@ -1276,6 +1276,7 @@ DWORD X11DRV_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
             XPutImage( gdi_display, physdev->drawable, physdev->gc, image, src->visrect.left, 0,
                        physdev->dc_rect.left + dst->visrect.left,
                        physdev->dc_rect.top + dst->visrect.top, width, height );
+            XFlush( gdi_display );
         }
         else
         {
@@ -1957,6 +1958,7 @@ static BOOL enable_direct_drawing( struct x11drv_win_data *data, BOOL layered )
     if (data->embedded) return TRUE; /* draw directly to the window */
     if (data->whole_window == root_window) return TRUE; /* draw directly to the window */
     if (data->client_window) return TRUE; /* draw directly to the window */
+    if (is_window_extend_titlebar( data->hwnd )) return TRUE; /* draw directly so CSD child overlay uses its own X11 subwindow */
     if (!client_side_graphics) return TRUE; /* draw directly to the window */
     return FALSE;
 }
