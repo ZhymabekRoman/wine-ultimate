@@ -29,6 +29,44 @@ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
 static const WCHAR *wine_window_topmost_composed = L"wine_window_topmost_composed";
 static const WCHAR *wine_window_non_topmost_composed = L"wine_window_non_topmost_composed";
+static const WCHAR dcomp_composite_class[] = L"WineDCompComposite";
+static INIT_ONCE composite_class_once = INIT_ONCE_STATIC_INIT;
+
+static LRESULT CALLBACK dcomp_composite_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    switch (msg)
+    {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        ValidateRect(hwnd, NULL);
+        return 0;
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+    case WM_SETCURSOR:
+        if (LOWORD(lparam) == HTCLIENT)
+        {
+            SetCursor(LoadCursorW(NULL, (LPCWSTR)IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static BOOL CALLBACK register_composite_class_cb(INIT_ONCE *once, void *param, void **ctx)
+{
+    WNDCLASSEXW wc = { sizeof(wc) };
+
+    wc.lpfnWndProc = dcomp_composite_wndproc;
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.hbrBackground = NULL;
+    wc.lpszClassName = dcomp_composite_class;
+
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        WARN("Failed to register %s class, err %lu.\n", debugstr_w(dcomp_composite_class), GetLastError());
+    return TRUE;
+}
 
 static HRESULT STDMETHODCALLTYPE target_QueryInterface(IDCompositionTarget *iface, REFIID iid, void **out)
 {
@@ -263,9 +301,12 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
                  !wcscmp(cls, L"Microsoft.UI.Content.PopupWindowSiteBridge")))
             target->composite_hwnd = NULL;
         else
-            target->composite_hwnd = CreateWindowExW(WS_EX_TRANSPARENT, L"static", NULL,
+        {
+            InitOnceExecuteOnce(&composite_class_once, register_composite_class_cb, NULL, NULL);
+            target->composite_hwnd = CreateWindowExW(WS_EX_TRANSPARENT, dcomp_composite_class, NULL,
                     WS_CHILD | WS_CLIPSIBLINGS,
                     0, 0, 1, 1, hwnd, NULL, NULL, NULL);
+        }
     }
     target->topmost = topmost;
     target->device = &device->IDCompositionDevice_iface;
