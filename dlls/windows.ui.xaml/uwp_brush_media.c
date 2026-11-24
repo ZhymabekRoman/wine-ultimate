@@ -893,6 +893,544 @@ const void *uwp_scb_vtbl[16] =
 };
 
 /* ============================================================================
+ * Bundled XAML FontFamily parser & AddFontResourceExW cache + IFontFamily/IFontIcon
+ * ============================================================================ */
+
+static SRWLOCK g_bundled_fonts_lock = SRWLOCK_INIT;
+static struct
+{
+    WCHAR path[MAX_PATH];
+    WCHAR face[64];
+} g_bundled_fonts[64];
+static int g_bundled_font_cnt = 0;
+
+static void uwp_register_bundled_font_file( const WCHAR *rel_or_uri, const WCHAR *face )
+{
+    WCHAR rel[MAX_PATH] = {0}, full[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0};
+    const WCHAR *p = rel_or_uri;
+    WCHAR *slash;
+    size_t i;
+    int k;
+
+    if (!p || !p[0]) return;
+    while (*p == L' ' || *p == L'\t') p++;
+    if (!wcsnicmp( p, L"ms-appx:///", 11 )) p += 11;
+    else if (!wcsnicmp( p, L"ms-appx://", 10 )) p += 10;
+    while (*p == L'/' || *p == L'\\') p++;
+    if (!*p) return;
+
+    lstrcpynW( rel, p, ARRAY_SIZE(rel) );
+    for (i = 0; rel[i]; i++) if (rel[i] == L'/') rel[i] = L'\\';
+    /* Trim trailing whitespace */
+    i = wcslen( rel );
+    while (i > 0 && (rel[i - 1] == L' ' || rel[i - 1] == L'\t')) rel[--i] = 0;
+    if (!rel[0]) return;
+
+    if (GetModuleFileNameW( NULL, base_dir, ARRAY_SIZE(base_dir) ) && (slash = wcsrchr( base_dir, L'\\' )))
+    {
+        *(slash + 1) = 0;
+        swprintf( full, ARRAY_SIZE(full), L"%s%s", base_dir, rel );
+    }
+    else
+    {
+        lstrcpynW( full, rel, ARRAY_SIZE(full) );
+    }
+
+    AcquireSRWLockShared( &g_bundled_fonts_lock );
+    for (k = 0; k < g_bundled_font_cnt; k++)
+    {
+        if (!wcsicmp( g_bundled_fonts[k].path, full ))
+        {
+            ReleaseSRWLockShared( &g_bundled_fonts_lock );
+            return;
+        }
+    }
+    ReleaseSRWLockShared( &g_bundled_fonts_lock );
+
+    if (GetFileAttributesW( full ) == INVALID_FILE_ATTRIBUTES)
+    {
+        WARN( "uwp_register_bundled_font_file: font file not found: %s\n", debugstr_w(full) );
+        return;
+    }
+
+    AcquireSRWLockExclusive( &g_bundled_fonts_lock );
+    for (k = 0; k < g_bundled_font_cnt; k++)
+    {
+        if (!wcsicmp( g_bundled_fonts[k].path, full ))
+        {
+            ReleaseSRWLockExclusive( &g_bundled_fonts_lock );
+            return;
+        }
+    }
+    if (g_bundled_font_cnt < (int)ARRAY_SIZE(g_bundled_fonts))
+    {
+        int added = AddFontResourceExW( full, FR_PRIVATE, 0 );
+        TRACE( "uwp_register_bundled_font_file: AddFontResourceExW(%s) face=%s -> %d\n",
+               debugstr_w(full), debugstr_w(face ? face : L""), added );
+        lstrcpynW( g_bundled_fonts[g_bundled_font_cnt].path, full, ARRAY_SIZE(g_bundled_fonts[0].path) );
+        if (face && face[0])
+            lstrcpynW( g_bundled_fonts[g_bundled_font_cnt].face, face, ARRAY_SIZE(g_bundled_fonts[0].face) );
+        g_bundled_font_cnt++;
+    }
+    ReleaseSRWLockExclusive( &g_bundled_fonts_lock );
+}
+
+BOOL uwp_is_bundled_font_face( const WCHAR *face )
+{
+    int k;
+    BOOL found = FALSE;
+    if (!face || !face[0]) return FALSE;
+    AcquireSRWLockShared( &g_bundled_fonts_lock );
+    for (k = 0; k < g_bundled_font_cnt; k++)
+    {
+        if (g_bundled_fonts[k].face[0] && !wcsicmp( g_bundled_fonts[k].face, face ))
+        {
+            found = TRUE;
+            break;
+        }
+    }
+    ReleaseSRWLockShared( &g_bundled_fonts_lock );
+    return found;
+}
+
+void uwp_resolve_font_family( const WCHAR *raw_spec, WCHAR *out_face, size_t cap )
+{
+    WCHAR seg[256] = {0};
+    const WCHAR *p, *comma, *hash;
+    size_t len;
+
+    if (!out_face || !cap) return;
+    lstrcpynW( out_face, L"Segoe UI", cap );
+    if (!raw_spec || !raw_spec[0]) return;
+
+    p = raw_spec;
+    while (*p == L' ' || *p == L'\t') p++;
+    if (!*p || !wcsicmp( p, L"XamlAutoFontFamily" )) return;
+
+    /* Take first family in comma-separated list; also register any bundled font in it */
+    comma = wcschr( p, L',' );
+    len = comma ? (size_t)(comma - p) : wcslen( p );
+    if (len >= ARRAY_SIZE(seg)) len = ARRAY_SIZE(seg) - 1;
+    memcpy( seg, p, len * sizeof(WCHAR) );
+    seg[len] = 0;
+    while (len > 0 && (seg[len - 1] == L' ' || seg[len - 1] == L'\t')) seg[--len] = 0;
+    if (!seg[0] || !wcsicmp( seg, L"XamlAutoFontFamily" )) return;
+
+    hash = wcschr( seg, L'#' );
+    if (hash)
+    {
+        WCHAR font_path[256] = {0};
+        const WCHAR *fam = hash + 1;
+        size_t plen = (size_t)(hash - seg);
+        while (*fam == L' ' || *fam == L'\t') fam++;
+        if (plen >= ARRAY_SIZE(font_path)) plen = ARRAY_SIZE(font_path) - 1;
+        memcpy( font_path, seg, plen * sizeof(WCHAR) );
+        font_path[plen] = 0;
+        if (fam[0]) lstrcpynW( out_face, fam, cap );
+        if (font_path[0]) uwp_register_bundled_font_file( font_path, fam );
+        return;
+    }
+
+    lstrcpynW( out_face, seg, cap );
+}
+
+const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *buf, size_t cap )
+{
+    const struct uwp_element *cur;
+    int hops = 0;
+
+    if (!buf || !cap) return L"Segoe UI";
+    lstrcpynW( buf, L"Segoe UI", cap );
+    for (cur = el; cur && hops < 6; cur = cur->parent, hops++)
+    {
+        if (cur->font_family[0] && wcsicmp( cur->font_family, L"XamlAutoFontFamily" ))
+        {
+            uwp_resolve_font_family( cur->font_family, buf, cap );
+            return buf;
+        }
+        if (cur->kind == UWP_KIND_PAGE || cur->kind == UWP_KIND_FRAME) break;
+    }
+    return buf;
+}
+
+static HRESULT WINAPI uwp_ff_get_Source( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *src = (impl && impl->font_family[0]) ? impl->font_family : L"Segoe UI";
+    if (!out) return E_POINTER;
+    return WindowsCreateString( src, wcslen(src), out );
+}
+
+const void *uwp_font_family_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_ff_get_Source,
+    [7 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_ff_factory_CreateInstanceWithName( void *iface, HSTRING family_name,
+                                                             IInspectable *outer, IInspectable **inner, void **instance )
+{
+    HRESULT hr;
+    if (!instance) return E_POINTER;
+    *instance = NULL;
+    hr = uwp_element_create( L"Windows.UI.Xaml.Media.FontFamily", outer, inner, instance );
+    if (SUCCEEDED(hr) && *instance && family_name)
+    {
+        struct uwp_element *ff_el = uwp_elem_from_any( *instance );
+        const WCHAR *raw = WindowsGetStringRawBuffer( family_name, NULL );
+        if (ff_el && raw && raw[0])
+        {
+            WCHAR face[64] = {0};
+            lstrcpynW( ff_el->font_family, raw, ARRAY_SIZE(ff_el->font_family) );
+            uwp_resolve_font_family( raw, face, ARRAY_SIZE(face) );
+            TRACE( "FontFamily::CreateInstanceWithName(%s) -> face=%s\n", debugstr_w(raw), debugstr_w(face) );
+        }
+    }
+    return hr;
+}
+
+const void *uwp_font_family_factory_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = uwp_ff_factory_CreateInstanceWithName,
+    [7 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_fi_get_FontWeight( void *iface, WORD *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->font_weight > 0) ? (WORD)impl->font_weight : 400;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fi_put_FontWeight( void *iface, WORD val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->font_weight = val;
+    return S_OK;
+}
+const void *uwp_font_icon_vtbl[24] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_tb_get_Text,           /* get_Glyph */
+    [7] = uwp_tb_put_Text,           /* put_Glyph */
+    [8] = uwp_ctrl_get_FontSize,     /* get_FontSize */
+    [9] = uwp_ctrl_put_FontSize,     /* put_FontSize */
+    [10] = uwp_ctrl_get_FontFamily,  /* get_FontFamily */
+    [11] = uwp_ctrl_put_FontFamily,  /* put_FontFamily */
+    [12] = uwp_fi_get_FontWeight,    /* get_FontWeight */
+    [13] = uwp_fi_put_FontWeight,    /* put_FontWeight */
+    [14 ... 23] = uwp_generic_noop,
+};
+
+/* ============================================================================
+ * IImageBrush, ITileBrush, IGradientBrush, ILinearGradientBrush, IGradientStop,
+ * and IPathGeometry implementations
+ * ============================================================================ */
+
+const void *uwp_image_brush_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_img_get_Source,        /* get_ImageSource */
+    [7] = uwp_img_put_Source,        /* put_ImageSource */
+    [8] = uwp_ui_event_add,          /* add_ImageFailed */
+    [9] = uwp_generic_noop,          /* remove_ImageFailed */
+    [10] = uwp_ui_event_add,         /* add_ImageOpened */
+    [11] = uwp_generic_noop,         /* remove_ImageOpened */
+    [12 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_tile_get_AlignmentX( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->tile_align_x : 1; /* Center */
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tile_put_AlignmentX( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->tile_align_x = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tile_get_AlignmentY( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->tile_align_y : 1; /* Center */
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tile_put_AlignmentY( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->tile_align_y = val;
+    return S_OK;
+}
+const void *uwp_tile_brush_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_tile_get_AlignmentX,
+    [7] = uwp_tile_put_AlignmentX,
+    [8] = uwp_tile_get_AlignmentY,
+    [9] = uwp_tile_put_AlignmentY,
+    [10] = uwp_img_get_Stretch,
+    [11] = uwp_img_put_Stretch,
+    [12 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_gb_get_SpreadMethod( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->grad_spread_method : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gb_put_SpreadMethod( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->grad_spread_method = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gb_get_MappingMode( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->grad_mapping_mode : 1; /* RelativeToBoundingBox */
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gb_put_MappingMode( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->grad_mapping_mode = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gb_get_ColorInterpolationMode( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->grad_color_interp : 1; /* SRgbLinearInterpolation */
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gb_put_ColorInterpolationMode( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->grad_color_interp = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gb_get_GradientStops( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return S_OK;
+    if (!impl->gradient_stops_coll)
+    {
+        uwp_vec_create( impl, &impl->gradient_stops_coll );
+        if (impl->gradient_stops_coll)
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( impl->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
+            v->runtime_class = L"Windows.UI.Xaml.Media.GradientStopCollection";
+        }
+    }
+    *out = impl->gradient_stops_coll;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gb_put_GradientStops( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->gradient_stops_coll != val)
+    {
+        if (impl->gradient_stops_coll) IInspectable_Release( impl->gradient_stops_coll );
+        impl->gradient_stops_coll = val;
+        if (val) IInspectable_AddRef( val );
+    }
+    uwp_invalidate_window();
+    return S_OK;
+}
+const void *uwp_grad_brush_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_gb_get_SpreadMethod,
+    [7] = uwp_gb_put_SpreadMethod,
+    [8] = uwp_gb_get_MappingMode,
+    [9] = uwp_gb_put_MappingMode,
+    [10] = uwp_gb_get_ColorInterpolationMode,
+    [11] = uwp_gb_put_ColorInterpolationMode,
+    [12] = uwp_gb_get_GradientStops,
+    [13] = uwp_gb_put_GradientStops,
+    [14 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_lgb_get_StartPoint( void *iface, struct __x_ABI_CWindows_CFoundation_CPoint *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    out->X = impl ? impl->grad_start_x : 0.0f;
+    out->Y = impl ? impl->grad_start_y : 0.0f;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_lgb_put_StartPoint( void *iface, struct __x_ABI_CWindows_CFoundation_CPoint val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->grad_start_x = val.X; impl->grad_start_y = val.Y; uwp_invalidate_window(); }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_lgb_get_EndPoint( void *iface, struct __x_ABI_CWindows_CFoundation_CPoint *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    out->X = impl ? impl->grad_end_x : 1.0f;
+    out->Y = impl ? impl->grad_end_y : 1.0f;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_lgb_put_EndPoint( void *iface, struct __x_ABI_CWindows_CFoundation_CPoint val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->grad_end_x = val.X; impl->grad_end_y = val.Y; uwp_invalidate_window(); }
+    return S_OK;
+}
+const void *uwp_lgb_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_lgb_get_StartPoint,
+    [7] = uwp_lgb_put_StartPoint,
+    [8] = uwp_lgb_get_EndPoint,
+    [9] = uwp_lgb_put_EndPoint,
+    [10 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_gs_get_Offset( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->grad_stop_offset : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_gs_put_Offset( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->grad_stop_offset = val; uwp_invalidate_window(); }
+    return S_OK;
+}
+const void *uwp_grad_stop_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_scb_get_Color,
+    [7] = uwp_scb_put_Color,
+    [8] = uwp_gs_get_Offset,
+    [9] = uwp_gs_put_Offset,
+    [10 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_pg_get_FillRule( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->fill_rule : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pg_put_FillRule( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->fill_rule = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pg_get_Figures( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return S_OK;
+    if (!impl->figures_coll)
+    {
+        uwp_vec_create( impl, &impl->figures_coll );
+        if (impl->figures_coll)
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( impl->figures_coll, struct uwp_vec_view, IInspectable_iface );
+            v->runtime_class = L"Windows.UI.Xaml.Media.PathFigureCollection";
+        }
+    }
+    *out = impl->figures_coll;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pg_put_Figures( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->figures_coll != val)
+    {
+        if (impl->figures_coll) IInspectable_Release( impl->figures_coll );
+        impl->figures_coll = val;
+        if (val) IInspectable_AddRef( val );
+    }
+    return S_OK;
+}
+const void *uwp_path_geom_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_pg_get_FillRule,
+    [7] = uwp_pg_put_FillRule,
+    [8] = uwp_pg_get_Figures,
+    [9] = uwp_pg_put_Figures,
+    [10 ... 15] = uwp_generic_noop,
+};
+const void *uwp_path_geom_f2_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_pg_get_Figures,
+    [7] = uwp_pg_put_Figures,
+    [8] = uwp_pg_get_FillRule,
+    [9] = uwp_pg_put_FillRule,
+    [10 ... 15] = uwp_generic_noop,
+};
+
+/* ============================================================================
  * MediaPlayerElement video decoding via Media Foundation (IMFSourceReader)
  * ============================================================================ */
 

@@ -176,7 +176,9 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
     if (!el || el->template_applied || !el->outer) return;
     if (el->parent && !wcsncmp( el->parent->class_name, L"Microsoft.UI.Xaml.", 18 ))
         return;
-    if (el->named_cnt > 0 || el->size_changed_cnt > 0)
+    if (!el->template_inflated)
+        uwp_inflate_control_template( el );
+    if (el->named_cnt > 0 || el->size_changed_cnt > 0 || el->template_root != NULL)
         has_children = TRUE;
     /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
      * has actually been inflated into the control's visual tree (except WinUI

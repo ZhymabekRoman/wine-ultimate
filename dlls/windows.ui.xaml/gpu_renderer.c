@@ -28,7 +28,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 #define MAX_GPU_INSTANCES 4096
 #define ATLAS_SIZE        2048
 #define ATLAS_HASH_SIZE   2048
-#define FONT_CACHE_SIZE   24
+#define FONT_CACHE_SIZE   64
 #define SCRATCH_MAX_W     1920
 #define SCRATCH_MAX_H     512
 
@@ -57,6 +57,7 @@ struct atlas_entry
     UINT64 img_key;
     int font_height;
     int font_weight;
+    WCHAR font_face[64];
     UINT dt_flags;
     UINT box_x;
     UINT box_y;
@@ -71,6 +72,7 @@ struct cached_font
 {
     int height;
     int weight;
+    WCHAR face[64];
     HFONT hfont;
 };
 
@@ -165,7 +167,7 @@ static const char xaml_uber_hlsl[] =
     "    o.radii = inp.radii;\n"
     "    o.fill_color = inp.fill_color;\n"
     "    o.border_color = inp.border_color;\n"
-    "    o.uv_coord = float4(lerp(inp.uv.xy, inp.uv.zw, corner), 0.0, 0.0);\n"
+    "    o.uv_coord = (inp.params.y > 2.5) ? inp.uv : float4(lerp(inp.uv.xy, inp.uv.zw, corner), 0.0, 0.0);\n"
     "    o.params = inp.params;\n"
     "    return o;\n"
     "}\n"
@@ -216,7 +218,7 @@ static const char xaml_uber_hlsl[] =
     "        if (a <= 0.001) discard;\n"
     "        return float4(tex.rgb * inp.fill_color.rgb * a, a);\n"
     "    }\n"
-    "    else\n"
+    "    else if (mode < 2.5)\n"
     "    {\n"
     "        float2 center = 0.5 * (inp.rect.xy + inp.rect.zw);\n"
     "        float2 half_ext = 0.5 * (inp.rect.zw - inp.rect.xy);\n"
@@ -234,6 +236,30 @@ static const char xaml_uber_hlsl[] =
     "        }\n"
     "        float a = inp.fill_color.a * ring_a * opacity;\n"
     "        return float4(inp.fill_color.rgb * a, a);\n"
+    "    }\n"
+    "    else\n"
+    "    {\n"
+    "        float2 center = 0.5 * (inp.rect.xy + inp.rect.zw);\n"
+    "        float2 half_ext = 0.5 * (inp.rect.zw - inp.rect.xy);\n"
+    "        float2 p = inp.p_pos - center;\n"
+    "        float d = sdRoundBox(p, half_ext, inp.radii);\n"
+    "        float outer_alpha = saturate(0.5 - d);\n"
+    "        if (outer_alpha <= 0.0) discard;\n"
+    "        float2 sz = max(inp.rect.zw - inp.rect.xy, float2(1.0, 1.0));\n"
+    "        float2 npos = (inp.p_pos - inp.rect.xy) / sz;\n"
+    "        float2 p0 = inp.uv_coord.xy;\n"
+    "        float2 p1 = inp.uv_coord.zw;\n"
+    "        float2 dir = p1 - p0;\n"
+    "        float len2 = max(dot(dir, dir), 1e-5);\n"
+    "        float t = saturate(dot(npos - p0, dir) / len2);\n"
+    "        float s0 = inp.params.x;\n"
+    "        float s1 = inp.params.w;\n"
+    "        float s = saturate((t - s0) / max(s1 - s0, 1e-4));\n"
+    "        float4 c0 = float4(inp.fill_color.rgb * inp.fill_color.a, inp.fill_color.a);\n"
+    "        float4 c1 = float4(inp.border_color.rgb * inp.border_color.a, inp.border_color.a);\n"
+    "        float4 grad = lerp(c0, c1, s);\n"
+    "        float scale = outer_alpha * opacity;\n"
+    "        return float4(grad.rgb * scale, grad.a * scale);\n"
     "    }\n"
     "}\n";
 
@@ -498,12 +524,14 @@ static BOOL xaml_gpu_init( ID3D11Device *dev )
     return TRUE;
 }
 
-static HFONT xaml_gpu_get_font( int height, int weight )
+static HFONT xaml_gpu_get_font( const WCHAR *face, int height, int weight )
 {
     int i, slot;
+    const WCHAR *use_face = (face && face[0]) ? face : L"Segoe UI";
     for (i = 0; i < FONT_CACHE_SIZE; i++)
     {
-        if (g_gpu.fonts[i].hfont && g_gpu.fonts[i].height == height && g_gpu.fonts[i].weight == weight)
+        if (g_gpu.fonts[i].hfont && g_gpu.fonts[i].height == height &&
+            g_gpu.fonts[i].weight == weight && !wcsicmp( g_gpu.fonts[i].face, use_face ))
             return g_gpu.fonts[i].hfont;
     }
     slot = g_gpu.font_cursor % FONT_CACHE_SIZE;
@@ -512,10 +540,59 @@ static HFONT xaml_gpu_get_font( int height, int weight )
         DeleteObject( g_gpu.fonts[slot].hfont );
     g_gpu.fonts[slot].height = height;
     g_gpu.fonts[slot].weight = weight;
+    lstrcpynW( g_gpu.fonts[slot].face, use_face, ARRAY_SIZE(g_gpu.fonts[slot].face) );
     g_gpu.fonts[slot].hfont = CreateFontW( -height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
                                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                           ANTIALIASED_QUALITY, FF_SWISS, L"Segoe UI" );
+                                           ANTIALIASED_QUALITY, FF_SWISS, use_face );
     return g_gpu.fonts[slot].hfont;
+}
+
+BOOL xaml_gpu_font_has_glyphs( const WCHAR *font_family, const WCHAR *text )
+{
+    WCHAR face[64] = {0};
+    WORD glyphs[64];
+    size_t i, len;
+    HDC dc;
+    BOOL own_dc = FALSE, ok = TRUE;
+    HFONT hf;
+    HGDIOBJ old_f;
+
+    if (!font_family || !font_family[0] || !text || !text[0]) return FALSE;
+    uwp_resolve_font_family( font_family, face, ARRAY_SIZE(face) );
+    if (!face[0]) return FALSE;
+    len = wcslen( text );
+    if (len > ARRAY_SIZE(glyphs)) len = ARRAY_SIZE(glyphs);
+
+    dc = g_gpu.scratch_dc;
+    if (!dc)
+    {
+        HDC screen_dc = GetDC( NULL );
+        dc = CreateCompatibleDC( screen_dc );
+        if (screen_dc) ReleaseDC( NULL, screen_dc );
+        own_dc = TRUE;
+    }
+    if (!dc) return FALSE;
+
+    hf = xaml_gpu_get_font( face, 16, FW_NORMAL );
+    old_f = SelectObject( dc, hf );
+    if (GetGlyphIndicesW( dc, text, (int)len, glyphs, GGI_MARK_NONEXISTING_GLYPHS ) == GDI_ERROR)
+    {
+        ok = FALSE;
+    }
+    else
+    {
+        for (i = 0; i < len; i++)
+        {
+            if (text[i] > 0x20 && glyphs[i] == 0xffff)
+            {
+                ok = FALSE;
+                break;
+            }
+        }
+    }
+    SelectObject( dc, old_f );
+    if (own_dc) DeleteDC( dc );
+    return ok;
 }
 
 static BOOL xaml_gpu_draw_batch( ID3D11DeviceContext *ctx );
@@ -695,6 +772,50 @@ void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *cli
     inst->params[3] = 0.0f;
 }
 
+void xaml_gpu_push_gradient_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
+                                  float radius, UINT32 color0_argb, UINT32 color1_argb,
+                                  float start_x, float start_y, float end_x, float end_y,
+                                  float stop0, float stop1, float opacity )
+{
+    struct xaml_gpu_instance *inst;
+    if (!g_gpu.initialized || g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
+    if (x1 <= x0 || y1 <= y0) return;
+
+    inst = &g_gpu.instances[g_gpu.instance_count++];
+    inst->rect[0] = x0;
+    inst->rect[1] = y0;
+    inst->rect[2] = x1;
+    inst->rect[3] = y1;
+    if (clip_rc)
+    {
+        inst->clip[0] = (float)clip_rc->left;
+        inst->clip[1] = (float)clip_rc->top;
+        inst->clip[2] = (float)clip_rc->right;
+        inst->clip[3] = (float)clip_rc->bottom;
+    }
+    else
+    {
+        inst->clip[0] = 0.0f;
+        inst->clip[1] = 0.0f;
+        inst->clip[2] = (float)g_gpu.frame_width;
+        inst->clip[3] = (float)g_gpu.frame_height;
+    }
+    inst->radii[0] = radius;
+    inst->radii[1] = radius;
+    inst->radii[2] = radius;
+    inst->radii[3] = radius;
+    rgba_to_float4( color0_argb, inst->fill_color );
+    rgba_to_float4( color1_argb, inst->border_color );
+    inst->uv[0] = start_x;
+    inst->uv[1] = start_y;
+    inst->uv[2] = end_x;
+    inst->uv[3] = end_y;
+    inst->params[0] = stop0;
+    inst->params[1] = 3.0f; /* SDF linear gradient rect */
+    inst->params[2] = opacity;
+    inst->params[3] = stop1;
+}
+
 void xaml_gpu_push_ring( float x0, float y0, float x1, float y1, const RECT *clip_rc,
                          UINT32 color_argb, float thickness, BOOL arc_quadrant )
 {
@@ -731,8 +852,9 @@ void xaml_gpu_push_ring( float x0, float y0, float x1, float y1, const RECT *cli
     inst->params[3] = arc_quadrant ? 1.0f : 0.0f;
 }
 
-void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_height, int font_weight,
-                         UINT dt_flags, const RECT *rc, const RECT *clip_rc, COLORREF color, float opacity )
+void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const WCHAR *font_family,
+                              int font_height, int font_weight, UINT dt_flags, const RECT *rc,
+                              const RECT *clip_rc, COLORREF color, float opacity )
 {
     UINT bw, bh, idx, probe;
     UINT64 h;
@@ -741,6 +863,7 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     struct xaml_gpu_instance *inst;
     UINT align_flags;
     WCHAR clean_buf[512];
+    WCHAR face[64];
 
     if (!g_gpu.initialized || !text || !text[0] || !rc) return;
     if (g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
@@ -779,9 +902,14 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
         if (!tlen) return;
     }
 
-    align_flags = dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_WORDBREAK);
+    uwp_resolve_font_family( font_family, face, ARRAY_SIZE(face) );
+    if (wcsicmp( face, L"Segoe UI" ) != 0 && !xaml_gpu_font_has_glyphs( face, text ))
+        lstrcpynW( face, L"Segoe UI", ARRAY_SIZE(face) );
+
+    align_flags = (dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_WORDBREAK)) | DT_NOPREFIX;
     h = fnv1a_bytes( &font_height, sizeof(font_height), 0 );
     h = fnv1a_bytes( &font_weight, sizeof(font_weight), h );
+    h = fnv1a_bytes( face, wcslen(face) * sizeof(WCHAR), h );
     h = fnv1a_bytes( &align_flags, sizeof(align_flags), h );
     h = fnv1a_bytes( &bw, sizeof(bw), h );
     h = fnv1a_bytes( &bh, sizeof(bh), h );
@@ -798,6 +926,7 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
         }
         if (!e->is_image && e->hash == h &&
             e->font_height == font_height && e->font_weight == font_weight &&
+            !wcsicmp( e->font_face, face ) &&
             e->dt_flags == align_flags && e->box_w == bw && e->box_h == bh &&
             !wcsncmp( e->text, text, tlen ) && e->text[tlen] == 0)
         {
@@ -814,7 +943,7 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     {
         UINT ax = 0, ay = 0, y, x;
         RECT local_rc = { 0, 0, (LONG)bw, (LONG)bh };
-        HFONT hf = xaml_gpu_get_font( font_height, font_weight );
+        HFONT hf = xaml_gpu_get_font( face, font_height, font_weight );
         HGDIOBJ old_font;
         D3D11_BOX dst_box;
 
@@ -861,6 +990,7 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
         entry->hash = h;
         entry->font_height = font_height;
         entry->font_weight = font_weight;
+        lstrcpynW( entry->font_face, face, ARRAY_SIZE(entry->font_face) );
         entry->dt_flags = align_flags;
         entry->box_w = bw;
         entry->box_h = bh;
@@ -922,6 +1052,12 @@ void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_h
     inst->params[1] = 1.0f; /* Atlas quad */
     inst->params[2] = opacity;
     inst->params[3] = 0.0f;
+}
+
+void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_height, int font_weight,
+                         UINT dt_flags, const RECT *rc, const RECT *clip_rc, COLORREF color, float opacity )
+{
+    xaml_gpu_push_text_font( ctx, text, NULL, font_height, font_weight, dt_flags, rc, clip_rc, color, opacity );
 }
 
 void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,

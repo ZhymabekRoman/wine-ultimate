@@ -178,6 +178,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
                 cf->IStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_statics_vtbl;
                 cf->IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
                 cf->IBitmapImageFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bitmap_image_factory_vtbl;
+                cf->IFontFamilyFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_family_factory_vtbl;
                 cf->class_name = name_copy;
                 g_dyn_factories[idx] = cf;
                 g_dyn_factory_names[idx] = name_copy;

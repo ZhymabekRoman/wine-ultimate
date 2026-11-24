@@ -1425,7 +1425,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->ITextBlock_iface;
     else if ((iid->Data1 == 0xe5fff9e2 && iid->Data2 == 0xb968 && iid->Data3 == 0x49e7) || /* IRichTextBlock */
              (iid->Data1 == 0xf83ef59a && iid->Data2 == 0xfa61 && iid->Data3 == 0x4bef) || /* IParagraph */
-             (iid->Data1 == 0x54f03373 && iid->Data2 == 0xc273 && iid->Data3 == 0x4f3b))   /* ISpan */
+             (iid->Data1 == 0x54f03373 && iid->Data2 == 0xc273 && iid->Data3 == 0x4f3b) || /* ISpan */
+             (iid->Data1 == 0x9839d4a9 && iid->Data2 == 0x02af && iid->Data3 == 0x4811))   /* ISpan (UWP) */
         *out = &impl->IParagraph_iface;
     else if (iid->Data1 == 0x59553c83 && iid->Data2 == 0x0e14 && iid->Data3 == 0x49bd)     /* IRun */
         *out = &impl->IRun_iface;
@@ -1487,6 +1488,25 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IBrush_iface;
     else if (IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ))
         *out = &impl->ISolidColorBrush_iface;
+    else if (IsEqualGUID( iid, &IID_IFontFamily_UWP ))
+        *out = &impl->IFontFamily_iface;
+    else if (IsEqualGUID( iid, &IID_IFontIcon_UWP ))
+        *out = &impl->IFontIcon_iface;
+    else if (IsEqualGUID( iid, &IID_IImageBrush_UWP ))
+        *out = &impl->IImageBrush_iface;
+    else if (IsEqualGUID( iid, &IID_ITileBrush_UWP ) ||
+             IsEqualGUID( iid, &IID_ITileBrush_UWP_Alt ))
+        *out = &impl->ITileBrush_iface;
+    else if (IsEqualGUID( iid, &IID_IGradientBrush_UWP ))
+        *out = &impl->IGradientBrush_iface;
+    else if (IsEqualGUID( iid, &IID_ILinearGradientBrush_UWP ))
+        *out = &impl->ILinearGradientBrush_iface;
+    else if (IsEqualGUID( iid, &IID_IGradientStop_UWP ))
+        *out = &impl->IGradientStop_iface;
+    else if (IsEqualGUID( iid, &IID_IPathGeometry_UWP ))
+        *out = &impl->IPathGeometry_iface;
+    else if (IsEqualGUID( iid, &IID_IPathGeometry_UWP_Alt ))
+        *out = &impl->IPathFigure_iface;
     else
     {
         static const GUID IID_IXamlCompositionBrushBaseProtected_UWP =
@@ -1655,11 +1675,14 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         else if (IsEqualGUID( iid, &IID_IVector_DO ) ||
                  IsEqualGUID( iid, &IID_IVector_Insp ) ||
                  IsEqualGUID( iid, &IID_IVector_MBI ) ||
-                 IsEqualGUID( iid, &IID_IVector_MFIB ))
+                 IsEqualGUID( iid, &IID_IVector_MFIB ) ||
+                 IsEqualGUID( iid, &IID_IVector_GradientStop_UWP ))
             *out = &impl->IVector_iface;
-        else if (IsEqualGUID( iid, &IID_IIterable_DO ))
+        else if (IsEqualGUID( iid, &IID_IIterable_DO ) ||
+                 IsEqualGUID( iid, &IID_IIterable_GradientStop_UWP ))
             *out = &impl->IIterable_iface;
-        else if (IsEqualGUID( iid, &IID_IVectorView_DO ))
+        else if (IsEqualGUID( iid, &IID_IVectorView_DO ) ||
+                 IsEqualGUID( iid, &IID_IVectorView_GradientStop_UWP ))
             *out = &impl->IVectorView_iface;
         else
         {
@@ -2036,6 +2059,12 @@ HRESULT WINAPI uwp_fe_put_Style( void *iface, IInspectable *val )
             impl->is_accent_style = TRUE;
         if (st_el->style_based_on[0])
             uwp_apply_runtime_style_by_name( impl, st_el->style_based_on, 0 );
+        if (st_el->template_xbf_data && st_el->template_xbf_size)
+        {
+            impl->template_xbf_data = st_el->template_xbf_data;
+            impl->template_xbf_size = st_el->template_xbf_size;
+            impl->template_sub_idx = st_el->template_sub_idx;
+        }
         if (st_el->style_setter_cnt > 0 && st_el->style_setters)
             uwp_apply_runtime_style_setters( impl, st_el->style_setters, st_el->style_setter_cnt );
     }
@@ -2455,7 +2484,77 @@ HRESULT WINAPI uwp_fe3_add_Loading( void *iface, void *handler, EventRegistratio
     return S_OK;
 }
 
-/* --- IControl & IControlProtected --- */
+/* --- IFrameworkElement2 RequestedTheme, IControl & IControlProtected --- */
+HRESULT WINAPI uwp_fe2_get_RequestedTheme( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->requested_theme : 0;
+    return S_OK;
+}
+HRESULT WINAPI uwp_fe2_put_RequestedTheme( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl && impl->requested_theme != val)
+    {
+        impl->requested_theme = val;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+HRESULT WINAPI uwp_ctrl_get_FontFamily( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    hr = uwp_element_create( L"Windows.UI.Xaml.Media.FontFamily", NULL, NULL, out );
+    if (SUCCEEDED(hr) && *out)
+    {
+        struct uwp_element *ff = uwp_elem_from_any( *out );
+        if (ff)
+            lstrcpynW( ff->font_family, (impl && impl->font_family[0]) ? impl->font_family : L"Segoe UI",
+                       ARRAY_SIZE(ff->font_family) );
+    }
+    return hr;
+}
+HRESULT WINAPI uwp_ctrl_put_FontFamily( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    WCHAR raw[128] = {0}, face[64] = {0};
+    if (!impl) return S_OK;
+    if (val)
+    {
+        struct uwp_element *ff = uwp_elem_from_any( val );
+        if (ff && ff->font_family[0])
+        {
+            lstrcpynW( raw, ff->font_family, ARRAY_SIZE(raw) );
+        }
+        else
+        {
+            void *iff = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IFontFamily_UWP, &iff )) && iff)
+            {
+                HSTRING hs = NULL;
+                HRESULT (WINAPI *get_src)(void *, HSTRING *) = (void *)(*(void ***)iff)[6];
+                if (get_src && SUCCEEDED(get_src( iff, &hs )) && hs)
+                {
+                    const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
+                    if (s) lstrcpynW( raw, s, ARRAY_SIZE(raw) );
+                    WindowsDeleteString( hs );
+                }
+                IUnknown_Release( (IUnknown *)iff );
+            }
+            else
+            {
+                uwp_unbox_string( val, raw, ARRAY_SIZE(raw) );
+            }
+        }
+    }
+    lstrcpynW( impl->font_family, raw, ARRAY_SIZE(impl->font_family) );
+    if (raw[0]) uwp_resolve_font_family( raw, face, ARRAY_SIZE(face) );
+    uwp_invalidate_window();
+    return S_OK;
+}
 HRESULT WINAPI uwp_ctrl_get_FontSize( void *iface, double *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -2465,7 +2564,7 @@ HRESULT WINAPI uwp_ctrl_get_FontSize( void *iface, double *val )
 HRESULT WINAPI uwp_ctrl_put_FontSize( void *iface, double val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl && val > 0) impl->font_size = val;
+    if (impl && val > 0) { impl->font_size = val; impl->has_font_size = TRUE; }
     return S_OK;
 }
 HRESULT WINAPI uwp_ctrl_get_IsEnabled( void *iface, boolean *val )
@@ -2484,9 +2583,232 @@ HRESULT WINAPI uwp_ctrl_put_IsEnabled( void *iface, boolean val )
     }
     return S_OK;
 }
+HRESULT WINAPI uwp_ctrl_prot_get_DefaultStyleKey( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->default_style_key : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (impl->default_style_key != val)
+    {
+        if (impl->default_style_key) IInspectable_Release( impl->default_style_key );
+        impl->default_style_key = val;
+        if (val) IInspectable_AddRef( val );
+    }
+    impl->default_style_key_name[0] = 0;
+    if (val)
+    {
+        if (!uwp_unbox_string( val, impl->default_style_key_name, ARRAY_SIZE(impl->default_style_key_name) ))
+        {
+            static const GUID IID_IReference_TypeName =
+                { 0x3830ad99, 0xd8da, 0x53f3, { 0x98, 0x9b, 0xfc, 0x92, 0xad, 0x22, 0x27, 0x78 } };
+            static const GUID IID_IStringable_dsk =
+                { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+            void *iref = NULL;
+            void *istr = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_TypeName, &iref )) && iref)
+            {
+                TypeName tn = { NULL, 0 };
+                HRESULT (WINAPI *get_val)(void *, TypeName *) = (void *)(*(void ***)iref)[6];
+                if (get_val && SUCCEEDED(get_val( iref, &tn )) && tn.Name)
+                {
+                    const WCHAR *s = WindowsGetStringRawBuffer( tn.Name, NULL );
+                    if (s) lstrcpynW( impl->default_style_key_name, s, ARRAY_SIZE(impl->default_style_key_name) );
+                    WindowsDeleteString( tn.Name );
+                }
+                IUnknown_Release( (IUnknown *)iref );
+            }
+            else if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IStringable_dsk, &istr )) && istr)
+            {
+                HSTRING hs = NULL;
+                HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)istr)[6];
+                if (to_str && SUCCEEDED(to_str( istr, &hs )) && hs)
+                {
+                    const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
+                    if (s) lstrcpynW( impl->default_style_key_name, s, ARRAY_SIZE(impl->default_style_key_name) );
+                    WindowsDeleteString( hs );
+                }
+                IUnknown_Release( (IUnknown *)istr );
+            }
+        }
+        /* Strip assembly-qualified suffix (e.g. "Ns.Type, Assembly, Version=...") */
+        {
+            WCHAR *comma = wcschr( impl->default_style_key_name, L',' );
+            if (comma) *comma = 0;
+        }
+    }
+    TRACE( "IControlProtected::put_DefaultStyleKey on %s -> %s\n",
+           debugstr_w(impl->class_name), debugstr_w(impl->default_style_key_name) );
+    return S_OK;
+}
+
+static void uwp_collect_template_names( struct uwp_element *owner, struct uwp_element *node, int depth )
+{
+    if (!owner || !node || depth > 24) return;
+    if (node->name[0])
+    {
+        int i;
+        BOOL exists = FALSE;
+        for (i = 0; i < owner->named_cnt; i++)
+            if (owner->named_elems[i] && !wcscmp( owner->named_elems[i]->name, node->name )) { exists = TRUE; break; }
+        if (!exists && xaml_vec_grow( (void **)&owner->named_elems, &owner->named_cap,
+                                      owner->named_cnt + 1, sizeof(*owner->named_elems), 16 ))
+            owner->named_elems[owner->named_cnt++] = node;
+    }
+    if (node->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( node->content );
+        if (ch && ch != node) uwp_collect_template_names( owner, ch, depth + 1 );
+    }
+    if (node->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( node->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != node) uwp_collect_template_names( owner, ch, depth + 1 );
+        }
+    }
+}
+
+static struct uwp_element *uwp_find_content_presenter( struct uwp_element *node, int depth )
+{
+    if (!node || depth > 16) return NULL;
+    if (wcsstr( node->class_name, L"ContentPresenter" )) return node;
+    if (node->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( node->content );
+        struct uwp_element *hit = (ch && ch != node) ? uwp_find_content_presenter( ch, depth + 1 ) : NULL;
+        if (hit) return hit;
+    }
+    if (node->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( node->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            struct uwp_element *hit = (ch && ch != node) ? uwp_find_content_presenter( ch, depth + 1 ) : NULL;
+            if (hit) return hit;
+        }
+    }
+    return NULL;
+}
+
+BOOL uwp_inflate_control_template( struct uwp_element *el )
+{
+    static volatile LONG inflate_depth = 0;
+    struct uwp_rd_entry *se = NULL;
+    struct uwp_rd_bucket *sb = NULL;
+    const WCHAR *key = NULL;
+
+    if (!el || el->template_inflated) return el && el->template_root != NULL;
+    if (InterlockedIncrement( &inflate_depth ) > 8)
+    {
+        InterlockedDecrement( &inflate_depth );
+        return FALSE;
+    }
+
+    if (!el->template_xbf_data || !el->template_xbf_size)
+    {
+        uwp_ensure_app_resources_loaded();
+        if (el->default_style_key_name[0])
+            key = el->default_style_key_name;
+        else if (el->class_name[0] &&
+                 wcsncmp( el->class_name, L"Windows.UI.Xaml.", 16 ) != 0 &&
+                 wcsncmp( el->class_name, L"Microsoft.UI.Xaml.", 18 ) != 0)
+            key = el->class_name;
+
+        if (key && key[0])
+        {
+            if (!uwp_rd_find_entry( NULL, el, key, 0, &se, &sb ) || !se || se->kind != UWP_RD_STYLE)
+            {
+                const WCHAR *dot = wcsrchr( key, L'.' );
+                se = NULL; sb = NULL;
+                if (dot && dot[1])
+                    uwp_rd_find_entry( NULL, el, dot + 1, 0, &se, &sb );
+            }
+            if ((!se || se->kind != UWP_RD_STYLE) && el->class_name[0] && wcscmp( key, el->class_name ) != 0)
+            {
+                se = NULL; sb = NULL;
+                if (!uwp_rd_find_entry( NULL, el, el->class_name, 0, &se, &sb ) || !se || se->kind != UWP_RD_STYLE)
+                {
+                    const WCHAR *dot = wcsrchr( el->class_name, L'.' );
+                    se = NULL; sb = NULL;
+                    if (dot && dot[1])
+                        uwp_rd_find_entry( NULL, el, dot + 1, 0, &se, &sb );
+                }
+            }
+            if (se && se->kind == UWP_RD_STYLE)
+            {
+                uwp_apply_style_entry( NULL, el, sb, se, 0 );
+                if (se->template_xbf_data && se->template_xbf_size)
+                {
+                    el->template_xbf_data = se->template_xbf_data;
+                    el->template_xbf_size = se->template_xbf_size;
+                    el->template_sub_idx = se->template_sub_idx;
+                }
+            }
+        }
+    }
+
+    if (el->template_xbf_data && el->template_xbf_size)
+    {
+        IInspectable *tpl_obj;
+        el->template_inflated = TRUE;
+        tpl_obj = uwp_instantiate_xbf_substream( el->template_xbf_data, el->template_xbf_size,
+                                                 el->template_sub_idx, NULL );
+        if (tpl_obj)
+        {
+            struct uwp_element *tpl_root = uwp_elem_from_any( tpl_obj );
+            if (tpl_root)
+            {
+                el->template_root = tpl_root;
+                tpl_root->parent = el;
+                uwp_collect_template_names( el, tpl_root, 0 );
+                if (el->content)
+                {
+                    struct uwp_element *cp = uwp_find_content_presenter( tpl_root, 0 );
+                    if (cp && !cp->content)
+                    {
+                        cp->content = el->content;
+                        IInspectable_AddRef( el->content );
+                        {
+                            struct uwp_element *ce = uwp_elem_from_any( el->content );
+                            if (ce) ce->parent = cp;
+                        }
+                    }
+                }
+                else if (!el->children_coll && !el->text[0] &&
+                         el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON)
+                {
+                    el->content = tpl_obj;
+                    IInspectable_AddRef( tpl_obj );
+                }
+                TRACE( "uwp_inflate_control_template(%s %s): inflated sub=%u -> %s named_cnt=%d\n",
+                       debugstr_w(el->class_name), debugstr_w(el->name),
+                       (unsigned)el->template_sub_idx, debugstr_w(tpl_root->class_name), el->named_cnt );
+            }
+            IInspectable_Release( tpl_obj );
+        }
+    }
+
+    InterlockedDecrement( &inflate_depth );
+    return el->template_root != NULL;
+}
+
 HRESULT WINAPI uwp_ctrl_ApplyTemplate( void *iface, boolean *ret )
 {
-    if (ret) *ret = TRUE;
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    BOOL inflated = impl ? uwp_inflate_control_template( impl ) : FALSE;
+    if (ret) *ret = inflated || (impl && impl->template_applied) ? TRUE : FALSE;
     return S_OK;
 }
 HRESULT WINAPI uwp_ctrl_Focus( void *iface, int state, boolean *ret )
@@ -4194,7 +4516,22 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IShape_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_shape_vtbl;
     impl->IXamlCompositionBrushBaseProtected_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xcbb_prot_vtbl;
     impl->ILoadedImageSurface_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_lis_vtbl;
+    impl->IFontFamily_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_family_vtbl;
+    impl->IFontIcon_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_icon_vtbl;
+    impl->IImageBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_image_brush_vtbl;
+    impl->ITileBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tile_brush_vtbl;
+    impl->IGradientBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grad_brush_vtbl;
+    impl->ILinearGradientBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_lgb_vtbl;
+    impl->IGradientStop_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grad_stop_vtbl;
+    impl->IPathGeometry_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_path_geom_vtbl;
+    impl->IPathFigure_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_path_geom_f2_vtbl;
     impl->media_stretch = 2; /* Uniform */
+    impl->tile_align_x = 1; /* Center */
+    impl->tile_align_y = 1; /* Center */
+    impl->grad_end_x = 1.0f;
+    impl->grad_end_y = 1.0f;
+    impl->grad_mapping_mode = 1; /* RelativeToBoundingBox */
+    impl->grad_color_interp = 1; /* SRgbLinearInterpolation */
     impl->IWeakReferenceSource_iface.lpVtbl = &uwp_wrs_vtbl;
     impl->IDispatch_iface.lpVtbl = &uwp_disp_vtbl;
     impl->IReferenceTrackerTarget_iface.lpVtbl = (const IInspectableVtbl *)&uwp_rtt_vtbl;

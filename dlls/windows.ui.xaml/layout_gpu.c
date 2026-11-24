@@ -1037,6 +1037,211 @@ static BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *prop
 static struct uwp_element *g_paint_ancestors[48];
 static int g_paint_depth = 0;
 
+static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_element *el,
+                                      IInspectable *brush, const RECT *rc, float rad, float opacity )
+{
+    struct uwp_element *b_el;
+    int bw, bh;
+
+    if (!brush || !rc) return FALSE;
+    bw = rc->right - rc->left;
+    bh = rc->bottom - rc->top;
+    if (bw <= 0 || bh <= 0) return FALSE;
+
+    uwp_xcbb_ensure_connected( brush );
+    b_el = uwp_elem_from_any( brush );
+    if (!b_el) return FALSE;
+
+    /* 1. LinearGradientBrush */
+    if (b_el->gradient_stops_coll || wcsstr( b_el->class_name, L"LinearGradientBrush" ))
+    {
+        struct uwp_vec_view *gv = NULL;
+        struct { double off; UINT32 argb; } stops[16];
+        int scnt = 0, i, j;
+        float eff_op = (float)(opacity * b_el->brush_opacity);
+
+        if (b_el->gradient_stops_coll)
+        {
+            struct uwp_element *gsc_el = uwp_elem_from_any( b_el->gradient_stops_coll );
+            if (gsc_el)
+            {
+                if (gsc_el->children_coll)
+                    gv = CONTAINING_RECORD( gsc_el->children_coll, struct uwp_vec_view, IInspectable_iface );
+            }
+            else
+            {
+                gv = CONTAINING_RECORD( b_el->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
+            }
+        }
+        else if (b_el->children_coll)
+        {
+            gv = CONTAINING_RECORD( b_el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        }
+
+        if (gv)
+        {
+            unsigned int k;
+            for (k = 0; k < gv->count && scnt < (int)ARRAY_SIZE(stops); k++)
+            {
+                struct uwp_element *gs = uwp_elem_from_any( gv->items[k] );
+                if (!gs) continue;
+                stops[scnt].off = gs->grad_stop_offset;
+                stops[scnt].argb = gs->has_brush_argb ? gs->brush_argb : 0;
+                scnt++;
+            }
+        }
+        if (scnt <= 0) return FALSE;
+        /* Sort stops by offset */
+        for (i = 0; i < scnt - 1; i++)
+        {
+            for (j = i + 1; j < scnt; j++)
+            {
+                if (stops[j].off < stops[i].off)
+                {
+                    double to = stops[i].off; UINT32 tc = stops[i].argb;
+                    stops[i].off = stops[j].off; stops[i].argb = stops[j].argb;
+                    stops[j].off = to; stops[j].argb = tc;
+                }
+            }
+        }
+        if (scnt == 1)
+        {
+            xaml_gpu_push_rect( (float)rc->left, (float)rc->top, (float)rc->right, (float)rc->bottom, NULL,
+                                rad, apply_opacity_to_argb( stops[0].argb, eff_op ), 0, 0.0f, 1.0f );
+            return TRUE;
+        }
+        if (scnt == 2)
+        {
+            xaml_gpu_push_gradient_rect( (float)rc->left, (float)rc->top, (float)rc->right, (float)rc->bottom, NULL,
+                                         rad, stops[0].argb, stops[1].argb,
+                                         b_el->grad_start_x, b_el->grad_start_y,
+                                         b_el->grad_end_x, b_el->grad_end_y,
+                                         (float)stops[0].off, (float)stops[1].off, eff_op );
+            return TRUE;
+        }
+        /* Multi-stop vertical or horizontal gradient bands */
+        {
+            float dx = b_el->grad_end_x - b_el->grad_start_x;
+            float dy = b_el->grad_end_y - b_el->grad_start_y;
+            if (dx > -0.05f && dx < 0.05f && (dy > 0.05f || dy < -0.05f))
+            {
+                float y_start = (float)rc->top + b_el->grad_start_y * (float)bh;
+                float y_span = dy * (float)bh;
+                for (i = 0; i < scnt - 1; i++)
+                {
+                    float y0 = y_start + (float)stops[i].off * y_span;
+                    float y1 = y_start + (float)stops[i + 1].off * y_span;
+                    if (i == 0 && y0 > (float)rc->top)
+                        xaml_gpu_push_rect( (float)rc->left, (float)rc->top, (float)rc->right, y0, rc,
+                                            0.0f, apply_opacity_to_argb( stops[0].argb, eff_op ), 0, 0.0f, 1.0f );
+                    if (y1 > y0)
+                        xaml_gpu_push_gradient_rect( (float)rc->left, y0, (float)rc->right, y1, rc,
+                                                     0.0f, stops[i].argb, stops[i + 1].argb,
+                                                     0.5f, 0.0f, 0.5f, 1.0f, 0.0f, 1.0f, eff_op );
+                    else if (y0 > y1)
+                        xaml_gpu_push_gradient_rect( (float)rc->left, y1, (float)rc->right, y0, rc,
+                                                     0.0f, stops[i + 1].argb, stops[i].argb,
+                                                     0.5f, 0.0f, 0.5f, 1.0f, 0.0f, 1.0f, eff_op );
+                    if (i == scnt - 2 && y1 < (float)rc->bottom)
+                        xaml_gpu_push_rect( (float)rc->left, y1, (float)rc->right, (float)rc->bottom, rc,
+                                            0.0f, apply_opacity_to_argb( stops[scnt - 1].argb, eff_op ), 0, 0.0f, 1.0f );
+                }
+                return TRUE;
+            }
+            if (dy > -0.05f && dy < 0.05f && (dx > 0.05f || dx < -0.05f))
+            {
+                float x_start = (float)rc->left + b_el->grad_start_x * (float)bw;
+                float x_span = dx * (float)bw;
+                for (i = 0; i < scnt - 1; i++)
+                {
+                    float x0 = x_start + (float)stops[i].off * x_span;
+                    float x1 = x_start + (float)stops[i + 1].off * x_span;
+                    if (i == 0 && x0 > (float)rc->left)
+                        xaml_gpu_push_rect( (float)rc->left, (float)rc->top, x0, (float)rc->bottom, rc,
+                                            0.0f, apply_opacity_to_argb( stops[0].argb, eff_op ), 0, 0.0f, 1.0f );
+                    if (x1 > x0)
+                        xaml_gpu_push_gradient_rect( x0, (float)rc->top, x1, (float)rc->bottom, rc,
+                                                     0.0f, stops[i].argb, stops[i + 1].argb,
+                                                     0.0f, 0.5f, 1.0f, 0.5f, 0.0f, 1.0f, eff_op );
+                    if (i == scnt - 2 && x1 < (float)rc->right)
+                        xaml_gpu_push_rect( x1, (float)rc->top, (float)rc->right, (float)rc->bottom, rc,
+                                            0.0f, apply_opacity_to_argb( stops[scnt - 1].argb, eff_op ), 0, 0.0f, 1.0f );
+                }
+                return TRUE;
+            }
+            xaml_gpu_push_gradient_rect( (float)rc->left, (float)rc->top, (float)rc->right, (float)rc->bottom, NULL,
+                                         rad, stops[0].argb, stops[scnt - 1].argb,
+                                         b_el->grad_start_x, b_el->grad_start_y,
+                                         b_el->grad_end_x, b_el->grad_end_y,
+                                         (float)stops[0].off, (float)stops[scnt - 1].off, eff_op );
+            return TRUE;
+        }
+    }
+
+    /* 2. ImageBrush (or CompositionSurfaceBrush) */
+    {
+        WCHAR uri[512] = {0};
+        if (b_el->img_source)
+        {
+            struct uwp_element *src_el = uwp_elem_from_any( b_el->img_source );
+            if (src_el && src_el->image_src[0])
+                lstrcpynW( uri, src_el->image_src, ARRAY_SIZE(uri) );
+            else
+                uwp_extract_uri_string( b_el->img_source, uri, ARRAY_SIZE(uri) );
+        }
+        if (!uri[0] && b_el->image_src[0])
+            lstrcpynW( uri, b_el->image_src, ARRAY_SIZE(uri) );
+        if (!uri[0] && b_el->comp_brush)
+            uwp_extract_comp_brush_image_src( b_el->comp_brush, uri, ARRAY_SIZE(uri) );
+
+        if (uri[0])
+        {
+            if (wcscmp( b_el->image_src, uri ))
+            {
+                lstrcpynW( b_el->image_src, uri, ARRAY_SIZE(b_el->image_src) );
+                b_el->img_loaded = FALSE;
+                InterlockedExchange( &b_el->img_loading, 0 );
+            }
+            uwp_load_image_asset( b_el );
+            if (b_el->img_pixels && b_el->img_w > 0 && b_el->img_h > 0)
+            {
+                RECT dst = *rc;
+                float uv_crop[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+                if (b_el->media_stretch == 3) /* UniformToFill */
+                {
+                    double dst_ar = (double)bw / (double)bh;
+                    double src_ar = (double)b_el->img_w / (double)b_el->img_h;
+                    if (src_ar > dst_ar)
+                    {
+                        float keep = (float)(dst_ar / src_ar);
+                        uv_crop[0] = 0.5f * (1.0f - keep);
+                        uv_crop[2] = 1.0f - uv_crop[0];
+                    }
+                    else if (src_ar < dst_ar)
+                    {
+                        float keep = (float)(src_ar / dst_ar);
+                        uv_crop[1] = 0.5f * (1.0f - keep);
+                        uv_crop[3] = 1.0f - uv_crop[1];
+                    }
+                }
+                else if (b_el->media_stretch == 2) /* Uniform */
+                {
+                    int dw = (int)b_el->img_w, dh = (int)b_el->img_h, dx, dy;
+                    if (dw * bh > dh * bw) { dh = MulDiv( dh, bw, dw ); dw = bw; }
+                    else { dw = MulDiv( dw, bh, dh ); dh = bh; }
+                    dx = rc->left + (bw - dw) / 2;
+                    dy = rc->top + (bh - dh) / 2;
+                    SetRect( &dst, dx, dy, dx + dw, dy + dh );
+                }
+                xaml_gpu_push_image_uv( ctx, (UINT64)(ULONG_PTR)b_el, b_el->img_pixels,
+                                        b_el->img_w, b_el->img_h, 0, &dst, uv_crop, rc );
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
 static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el );
 
 static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
@@ -1277,7 +1482,11 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
     if (el->fill_brush || el->ecp_visual || wcsstr( el->class_name, L"Rectangle" ))
     {
         WCHAR resolved_uri[512] = {0};
+        BOOL brush_painted = FALSE;
         if (el->fill_brush)
+            brush_painted = uwp_gpu_paint_brush_fill( ctx, el, el->fill_brush, &el->bounds,
+                                                      (float)el->corner_radius, (float)el->opacity );
+        if (!brush_painted && el->fill_brush)
         {
             struct uwp_element *b_el;
             uwp_xcbb_ensure_connected( el->fill_brush );
@@ -1290,7 +1499,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     uwp_extract_comp_brush_image_src( b_el->comp_brush, resolved_uri, ARRAY_SIZE(resolved_uri) );
             }
         }
-        if (!resolved_uri[0] && el->dp_cnt > 0 && el->dp_store)
+        if (!brush_painted && !resolved_uri[0] && el->dp_cnt > 0 && el->dp_store)
         {
             int di;
             for (di = 0; di < el->dp_cnt; di++)
@@ -1298,7 +1507,14 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 struct uwp_element *b_el = el->dp_store[di].value ? uwp_elem_from_any( el->dp_store[di].value ) : NULL;
                 if (!b_el) continue;
                 if (wcsstr( b_el->class_name, L"Brush" ))
-                    uwp_xcbb_ensure_connected( el->dp_store[di].value );
+                {
+                    if (uwp_gpu_paint_brush_fill( ctx, el, el->dp_store[di].value, &el->bounds,
+                                                  (float)el->corner_radius, (float)el->opacity ))
+                    {
+                        brush_painted = TRUE;
+                        break;
+                    }
+                }
                 if (b_el->image_src[0])
                 {
                     lstrcpynW( resolved_uri, b_el->image_src, ARRAY_SIZE(resolved_uri) );
@@ -1308,15 +1524,15 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     break;
             }
         }
-        if (!resolved_uri[0] && el->ecp_visual)
+        if (!brush_painted && !resolved_uri[0] && el->ecp_visual)
             uwp_extract_visual_image_src( el->ecp_visual, resolved_uri, ARRAY_SIZE(resolved_uri) );
-        if (resolved_uri[0] && wcscmp( el->image_src, resolved_uri ))
+        if (!brush_painted && resolved_uri[0] && wcscmp( el->image_src, resolved_uri ))
         {
             lstrcpynW( el->image_src, resolved_uri, ARRAY_SIZE(el->image_src) );
             el->img_loaded = FALSE;
             InterlockedExchange( &el->img_loading, 0 );
         }
-        if (el->image_src[0])
+        if (!brush_painted && el->image_src[0])
         {
             uwp_load_image_asset( el );
             if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
@@ -1325,6 +1541,23 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &rc, NULL );
             }
         }
+    }
+
+    if (wcsstr( el->class_name, L"FontIcon" ) && el->text[0])
+    {
+        WCHAR ff_buf[64];
+        BOOL light = uwp_is_light_theme( el );
+        int fh = max( (int)(12 * g_layout_scale + 0.5f),
+                      min( (int)(64 * g_layout_scale + 0.5f),
+                           (int)((el->has_font_size ? el->font_size : 16.0) * g_layout_scale + 0.5f) ) );
+        COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
+            ? blend_argb_over( el->fg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                       light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
+        xaml_gpu_push_text_font( ctx, el->text, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
+                                 fh, (el->font_weight > 0) ? el->font_weight : FW_NORMAL,
+                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE, &el->bounds, NULL, tfg, (float)el->opacity );
+        return;
     }
 
     if (el->kind == UWP_KIND_PROGRESS_RING)
@@ -1601,14 +1834,46 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         BOOL skip_fullscreen_bg = xaml_has_active_swapchain_panel() &&
             (el->bounds.right - el->bounds.left) >= 1000 &&
             (el->bounds.bottom - el->bounds.top) >= 600;
-        if ((!skip_fullscreen_bg && el->has_bg && el->bg_alpha > 0) || (el->has_border && el->border_alpha > 0))
+        float rad = (el->corner_radius > 0.0) ? (float)el->corner_radius : 0.0f;
+        BOOL painted_bg_brush = FALSE;
+        if (!skip_fullscreen_bg && el->bg_brush)
+            painted_bg_brush = uwp_gpu_paint_brush_fill( ctx, el, el->bg_brush, &el->bounds, rad, (float)el->opacity );
+        if ((!skip_fullscreen_bg && !painted_bg_brush && el->has_bg && el->bg_alpha > 0) ||
+            (el->has_border && el->border_alpha > 0))
         {
-            UINT32 fill_c = (!skip_fullscreen_bg && el->has_bg && el->bg_alpha > 0) ? apply_opacity_to_argb( el->bg_argb, el->opacity ) : 0;
-            UINT32 bord_c = (el->has_border && el->border_alpha > 0) ? apply_opacity_to_argb( el->border_argb, el->opacity ) : 0;
-            float bw = (el->has_border && el->border_alpha > 0) ? max( 1.0f, (float)el->border_thick_l ) : 0.0f;
-            float rad = (el->corner_radius > 0.0) ? (float)el->corner_radius : 0.0f;
-            xaml_gpu_push_rect( (float)el->bounds.left, (float)el->bounds.top, (float)el->bounds.right, (float)el->bounds.bottom,
-                                NULL, rad, fill_c, bord_c, bw, 1.0f );
+            UINT32 fill_c = (!skip_fullscreen_bg && !painted_bg_brush && el->has_bg && el->bg_alpha > 0)
+                ? apply_opacity_to_argb( el->bg_argb, el->opacity ) : 0;
+            UINT32 bord_c = (el->has_border && el->border_alpha > 0)
+                ? apply_opacity_to_argb( el->border_argb, el->opacity ) : 0;
+            float tl = (float)max( 0.0, el->border_thick_l );
+            float tt = (float)max( 0.0, el->border_thick_t );
+            float tr = (float)max( 0.0, el->border_thick_r );
+            float tb = (float)max( 0.0, el->border_thick_b );
+            BOOL has_thick = (tl > 0.0f || tt > 0.0f || tr > 0.0f || tb > 0.0f);
+            BOOL uniform_thick = has_thick && (tl == tt && tt == tr && tr == tb);
+
+            if (uniform_thick && bord_c != 0)
+            {
+                xaml_gpu_push_rect( (float)el->bounds.left, (float)el->bounds.top,
+                                    (float)el->bounds.right, (float)el->bounds.bottom,
+                                    NULL, rad, fill_c, bord_c, tl, 1.0f );
+            }
+            else
+            {
+                if (fill_c != 0)
+                    xaml_gpu_push_rect( (float)el->bounds.left, (float)el->bounds.top,
+                                        (float)el->bounds.right, (float)el->bounds.bottom,
+                                        NULL, rad, fill_c, 0, 0.0f, 1.0f );
+                if (has_thick && bord_c != 0)
+                {
+                    float x0 = (float)el->bounds.left, y0 = (float)el->bounds.top;
+                    float x1 = (float)el->bounds.right, y1 = (float)el->bounds.bottom;
+                    if (tl > 0.0f) xaml_gpu_push_rect( x0, y0, min( x1, x0 + tl ), y1, NULL, 0.0f, bord_c, 0, 0.0f, 1.0f );
+                    if (tt > 0.0f) xaml_gpu_push_rect( x0, y0, x1, min( y1, y0 + tt ), NULL, 0.0f, bord_c, 0, 0.0f, 1.0f );
+                    if (tr > 0.0f) xaml_gpu_push_rect( max( x0, x1 - tr ), y0, x1, y1, NULL, 0.0f, bord_c, 0, 0.0f, 1.0f );
+                    if (tb > 0.0f) xaml_gpu_push_rect( x0, max( y0, y1 - tb ), x1, y1, NULL, 0.0f, bord_c, 0, 0.0f, 1.0f );
+                }
+            }
         }
         if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
         {
@@ -1728,28 +1993,43 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             }
         }
 
-        if (el->data_context && el->parent &&
-            (wcsstr( el->parent->class_name, L"ListView" ) || wcsstr( el->parent->class_name, L"GridView" )) &&
-            (brc.right - brc.left) >= 120 && (brc.bottom - brc.top) >= 48)
+        if (el->data_context && (brc.right - brc.left) >= 60 && (brc.bottom - brc.top) >= 28)
         {
-            if (!el->image_src[0])
+            BOOL in_items_host = FALSE;
+            struct uwp_element *anc = el->parent;
+            int hop;
+            for (hop = 0; anc && hop < 5; anc = anc->parent, hop++)
             {
-                static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"Image", L"Images", L"Source", L"IconUrl", L"BoxArtUrl", L"PosterUrl" };
-                WCHAR img_buf[512] = {0};
-                if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
-                    img_buf[0])
-                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                if (wcsstr( anc->class_name, L"ListView" ) || wcsstr( anc->class_name, L"GridView" ) ||
+                    wcsstr( anc->class_name, L"ItemsRepeater" ) || wcsstr( anc->class_name, L"FlipView" ))
+                {
+                    in_items_host = TRUE;
+                    break;
+                }
             }
-            if (el->image_src[0])
-                uwp_load_image_asset( el );
-            if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+            if (in_items_host && (!el->content || !uwp_elem_from_any( el->content )))
             {
-                RECT irc = brc;
-                InflateRect( &irc, -2, -2 );
-                xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
-                                    6.0f, cr_to_argb( RGB( 32, 32, 32 ) ), cr_to_argb( RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
-                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
-                return;
+                if (!el->image_src[0])
+                {
+                    static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"ScreenshotUrl", L"Image", L"Images", L"Source", L"IconUrl", L"BoxArtUrl", L"PosterUrl" };
+                    WCHAR img_buf[512] = {0};
+                    if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
+                        img_buf[0])
+                        lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                }
+                if (el->image_src[0])
+                    uwp_load_image_asset( el );
+                if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+                {
+                    BOOL light = uwp_is_light_theme( el );
+                    RECT irc = brc;
+                    InflateRect( &irc, -2, -2 );
+                    xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                        6.0f, cr_to_argb( light ? RGB( 240, 240, 240 ) : RGB( 32, 32, 32 ) ),
+                                        cr_to_argb( light ? RGB( 218, 218, 218 ) : RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
+                    xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                    return;
+                }
             }
         }
 
@@ -1764,17 +2044,24 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             memcpy( tline, label, tlen * sizeof(WCHAR) );
             tline[tlen] = 0;
             InflateRect( &brc, -2, -2 );
-            xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
-                                6.0f, cr_to_argb( el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ) ),
-                                cr_to_argb( RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
-            SetRect( &trc, brc.left + 14, brc.top + 14, brc.right - 14, brc.top + 48 );
-            xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                &trc, NULL, RGB( 255, 255, 255 ), 1.0f );
-            if (nl)
             {
-                SetRect( &src, brc.left + 14, brc.top + 52, brc.right - 14, brc.bottom - 12 );
-                xaml_gpu_push_text( ctx, nl + 1, 12, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                    &src, NULL, RGB( 180, 180, 180 ), 1.0f );
+                BOOL light = uwp_is_light_theme( el );
+                COLORREF cbg = light ? (el->is_hovered ? RGB( 242, 242, 242 ) : RGB( 255, 255, 255 ))
+                                     : (el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ));
+                COLORREF cbd = light ? RGB( 224, 224, 224 ) : RGB( 68, 68, 68 );
+                COLORREF cfg = light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 );
+                COLORREF csfg = light ? RGB( 92, 92, 92 ) : RGB( 180, 180, 180 );
+                xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                    6.0f, cr_to_argb( cbg ), cr_to_argb( cbd ), 1.0f, 1.0f );
+                SetRect( &trc, brc.left + 14, brc.top + 14, brc.right - 14, brc.top + 48 );
+                xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &trc, NULL, cfg, 1.0f );
+                if (nl)
+                {
+                    SetRect( &src, brc.left + 14, brc.top + 52, brc.right - 14, brc.bottom - 12 );
+                    xaml_gpu_push_text( ctx, nl + 1, 12, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                        &src, NULL, csfg, 1.0f );
+                }
             }
             return;
         }
@@ -1865,7 +2152,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 else if (uwp_resolve_brush_or_color( NULL, el, L"ControlFillColorDefaultBrush", 0, &res_argb ) && ((res_argb >> 24) & 0xff))
                     bg_argb = apply_opacity_to_argb( res_argb, el->opacity );
                 else
-                    bg_argb = 0xff323232u;
+                    bg_argb = uwp_is_light_theme( el ) ? 0xffffffffu : 0xff323232u;
                 bg = blend_argb_over( bg_argb, surface_bg );
                 if (el->is_pressed)
                 {
@@ -1895,13 +2182,15 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             }
 
             if (!el->is_enabled)
-                fg = uwp_paint_resolve_color( el, L"TextFillColorDisabledBrush", RGB( 120, 120, 120 ), bg );
+                fg = uwp_paint_resolve_color( el, L"TextFillColorDisabledBrush",
+                                              uwp_is_light_theme( el ) ? RGB( 150, 150, 150 ) : RGB( 120, 120, 120 ), bg );
             else if (el->has_fg && el->fg_alpha > 0)
                 fg = blend_argb_over( el->fg_argb, bg );
             else if (el->is_accent_style)
                 fg = uwp_paint_resolve_color( el, L"AccentButtonForeground", RGB( 255, 255, 255 ), bg );
             else
-                fg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), bg );
+                fg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush",
+                                              uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), bg );
 
             {
                 int bh = brc.bottom - brc.top;
@@ -1922,7 +2211,9 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             }
             else if (label[0])
             {
-                xaml_gpu_push_text( ctx, label, fh, fw, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &brc, NULL, fg, 1.0f );
+                WCHAR ff_buf[64];
+                xaml_gpu_push_text_font( ctx, label, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
+                                         fh, fw, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &brc, NULL, fg, 1.0f );
             }
             (void)bd;
         }
@@ -2053,7 +2344,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     : max( (int)(11 * g_layout_scale + 0.5f), min( (int)(96 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
                 tfg = (el->has_fg && el->fg_alpha > 0)
                     ? blend_argb_over( el->fg_argb, surface_bg )
-                    : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
+                    : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                               uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
                 if (wcsstr( el->class_name, L"MenuBarItem" ) &&
                     (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
                 {
@@ -2084,9 +2376,18 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     else if (el->text_wrapping >= 2 && (trc.bottom - trc.top) > (int)(fh * 1.8))
                         dt = hflag | DT_TOP | DT_WORDBREAK;
                     else
+                    {
+                        int box_h = trc.bottom - trc.top;
+                        if (box_h > 8 && fh > box_h)
+                            fh = max( 10, box_h - 1 );
                         dt = hflag | DT_VCENTER | DT_SINGLELINE;
+                    }
 
-                    xaml_gpu_push_text( ctx, draw_txt, fh, fw, dt, &trc, NULL, tfg, 1.0f );
+                    {
+                        WCHAR ff_buf[64];
+                        xaml_gpu_push_text_font( ctx, draw_txt, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
+                                                 fh, fw, dt, &trc, NULL, tfg, 1.0f );
+                    }
                 }
             }
         }
@@ -2309,9 +2610,14 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                     lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
             }
             InflateRect( &brc, -2, -2 );
-            xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
-                                6.0f, cr_to_argb( el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ) ),
-                                cr_to_argb( RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
+            {
+                BOOL light = uwp_is_light_theme( el );
+                COLORREF cbg = light ? (el->is_hovered ? RGB( 242, 242, 242 ) : RGB( 255, 255, 255 ))
+                                     : (el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ));
+                COLORREF cbd = light ? RGB( 224, 224, 224 ) : RGB( 68, 68, 68 );
+                xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                    6.0f, cr_to_argb( cbg ), cr_to_argb( cbd ), 1.0f, 1.0f );
+            }
             text_left = brc.left + 14;
             if (el->image_src[0])
                 uwp_load_image_asset( el );
@@ -2336,15 +2642,17 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             }
             if (tline[0])
             {
+                BOOL light = uwp_is_light_theme( el );
                 SetRect( &trc, text_left, brc.top + 14, brc.right - 14, brc.top + 48 );
                 xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                    &trc, NULL, RGB( 255, 255, 255 ), 1.0f );
+                                    &trc, NULL, light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), 1.0f );
             }
             if (nl)
             {
+                BOOL light = uwp_is_light_theme( el );
                 SetRect( &src, text_left, brc.top + 52, brc.right - 14, brc.bottom - 12 );
                 xaml_gpu_push_text( ctx, nl + 1, 12, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                    &src, NULL, RGB( 180, 180, 180 ), 1.0f );
+                                    &src, NULL, light ? RGB( 92, 92, 92 ) : RGB( 180, 180, 180 ), 1.0f );
             }
         }
     }
@@ -2392,11 +2700,14 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
                 !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
         ? g_navigated_page_el : root_el;
 
-    if (bg_scope && bg_scope->has_bg && bg_scope->bg_alpha > 0)
-        page_bg = blend_argb_over( bg_scope->bg_argb, RGB( 31, 31, 31 ) );
-    else
-        page_bg = uwp_paint_resolve_color( bg_scope, L"ApplicationPageBackgroundThemeBrush",
-                                           RGB( 31, 31, 31 ), RGB( 31, 31, 31 ) );
+    {
+        COLORREF def_bg = uwp_is_light_theme( bg_scope ) ? RGB( 243, 243, 243 ) : RGB( 31, 31, 31 );
+        if (bg_scope && bg_scope->has_bg && bg_scope->bg_alpha > 0)
+            page_bg = blend_argb_over( bg_scope->bg_argb, def_bg );
+        else
+            page_bg = uwp_paint_resolve_color( bg_scope, L"ApplicationPageBackgroundThemeBrush",
+                                               def_bg, def_bg );
+    }
     g_paint_page_bg = page_bg;
 
     if (rtv ? !xaml_gpu_begin_frame_rtv( dev, ctx, rtv, (UINT)width, (UINT)height, page_bg )
@@ -3180,6 +3491,11 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         if (IsEqualGUID( iid, &IID_IBitmapImageFactory_UWP ) && f && f->IBitmapImageFactory_iface.lpVtbl)
         {
             *out = (void *)&f->IBitmapImageFactory_iface;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IFontFamilyFactory_UWP ) && f && f->IFontFamilyFactory_iface.lpVtbl)
+        {
+            *out = (void *)&f->IFontFamilyFactory_iface;
             return S_OK;
         }
     }

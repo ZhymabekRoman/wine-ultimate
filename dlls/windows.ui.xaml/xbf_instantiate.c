@@ -179,14 +179,53 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                 sv.kind = UWP_RD_THICKNESS;
                 memcpy( sv.vec4, vec4_init, sizeof(sv.vec4) );
             }
+            else if (tid == XBF_TYPE_CORNER_RADIUS)
+            {
+                sv.kind = UWP_RD_THICKNESS;
+                if (vt_init == 0x06)
+                {
+                    memcpy( sv.vec4, vec4_init, sizeof(sv.vec4) );
+                }
+                else if (vt_init == 0x03 || vt_init == 0x04)
+                {
+                    sv.vec4[0] = sv.vec4[1] = sv.vec4[2] = sv.vec4[3] = num_init;
+                }
+                else if (sbuf_init[0])
+                {
+                    WCHAR *ep = sbuf_init;
+                    double v0 = wcstod( ep, &ep );
+                    sv.vec4[0] = sv.vec4[1] = sv.vec4[2] = sv.vec4[3] = v0;
+                    if (ep && (*ep == L',' || *ep == L' '))
+                    {
+                        int ci;
+                        for (ci = 1; ci < 4 && *ep; ci++)
+                        {
+                            while (*ep == L',' || *ep == L' ') ep++;
+                            if (!*ep) break;
+                            sv.vec4[ci] = wcstod( ep, &ep );
+                        }
+                    }
+                }
+            }
+            else if (tid == XBF_TYPE_FONT_FAMILY)
+            {
+                sv.kind = UWP_RD_FONT_FAMILY;
+                if (sbuf_init[0])
+                {
+                    WCHAR face[64] = {0};
+                    lstrcpynW( sv.str_val, sbuf_init, ARRAY_SIZE(sv.str_val) );
+                    uwp_resolve_font_family( sbuf_init, face, ARRAY_SIZE(face) );
+                }
+            }
             else if (tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_BRUSH_B ||
+                     tid == XBF_TYPE_IMAGE_BRUSH || tid == XBF_TYPE_LINEAR_GRADIENT_BRUSH ||
                      (!(tid & 0x8000) && tid < ctx->type_cnt && wcsstr( ctx->types[tid].short_name, L"Brush" )))
             {
                 sv.kind = UWP_RD_BRUSH;
                 if (op == 0x16 && sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb ))
                     sv.has_argb = TRUE;
             }
-            else if (tid == XBF_TYPE_DATA_TEMPLATE)
+            else if (tid == XBF_TYPE_DATA_TEMPLATE || tid == XBF_TYPE_CONTROL_TEMPLATE)
             {
                 sv.kind = UWP_RD_DATA_TEMPLATE;
             }
@@ -234,7 +273,8 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                                                      wcsstr( ctx->types[tid].full_name, L"Converter" )))) ||
                           tid == XBF_TYPE_STYLE || tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
                           tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_STRING ||
-                          tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))
+                          tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_CORNER_RADIUS || tid == XBF_TYPE_FONT_FAMILY ||
+                          tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))
                 {
                     nflags |= XBF_AOT_NODE_LIGHTWEIGHT;
                     cur_node_idx = xbf_aot_add_node( ctx->aot, L"", L"", tid, nflags, FALSE, 0 );
@@ -392,14 +432,15 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
             (void)def_sz;
             if (c1 > (end_p - p) / 2 || c2 > (end_p - p) / 2 - c1) break;
             p += (c1 + c2) * 2;
-            if (obj_sp > 0 && val_stack[obj_sp - 1].tid == XBF_TYPE_DATA_TEMPLATE)
+            if (obj_sp > 0 && (val_stack[obj_sp - 1].tid == XBF_TYPE_DATA_TEMPLATE ||
+                               val_stack[obj_sp - 1].tid == XBF_TYPE_CONTROL_TEMPLATE))
             {
                 val_stack[obj_sp - 1].template_xbf_data = ctx->xbf;
                 val_stack[obj_sp - 1].template_xbf_size = ctx->xbf_sz;
                 val_stack[obj_sp - 1].template_sub_idx = sub_i;
                 if (node_idx_stack[obj_sp - 1] < ctx->aot->node_cnt)
                     ctx->aot->nodes[node_idx_stack[obj_sp - 1]].template_sub_idx = sub_i;
-                TRACE( "XBF DataTemplate SetDeferredProperty captured substream %u\n", (unsigned)sub_i );
+                TRACE( "XBF Template SetDeferredProperty captured substream %u\n", (unsigned)sub_i );
             }
         }
         else if (op == 0x02) /* PopProperty */
@@ -408,10 +449,26 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
         }
         else if (op == 0x1d) /* SetValueWithType: <pid:u16> <tid:u16> */
         {
+            WORD pid, t_tid;
+            if (p + 4 > end_p) break;
+            pid = *(const WORD *)(ctx->nodes + p);
+            t_tid = *(const WORD *)(ctx->nodes + p + 2);
+            p += 4;
+            if (obj_sp > 0 && val_stack[obj_sp - 1].kind == UWP_RD_STYLE && pid == XBF_PROP_STYLE_TARGET_TYPE)
+            {
+                const WCHAR *tname = (t_tid & 0x8000)
+                    ? uwp_btype_to_class_name( t_tid )
+                    : ((t_tid < ctx->type_cnt) ? ctx->types[t_tid].full_name : L"");
+                if (tname && tname[0])
+                    lstrcpynW( val_stack[obj_sp - 1].target_type, tname, ARRAY_SIZE(val_stack[obj_sp - 1].target_type) );
+            }
+        }
+        else if (op == 0x1f) /* SetValueFromTemplateBinding: <pid:u16> <src_pid:u16> (no vt byte) */
+        {
             if (p + 4 > end_p) break;
             p += 4;
         }
-        else if ((op >= 0x1a && op <= 0x1f) || op == 0x24) /* SetValue / SetStaticResource / SetThemeResource */
+        else if ((op >= 0x1a && op <= 0x1e) || op == 0x24) /* SetValue / SetStaticResource / SetThemeResource */
         {
             WORD pid;
             int vt = 0;
@@ -545,6 +602,20 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                                                   val_stack[obj_sp - 1].vsm_prop,
                                                   last_popped.vsm_val_str, last_popped.vsm_vt,
                                                   last_popped.vsm_num, last_popped.vsm_is_res_ref );
+                    }
+                }
+
+                /* Implicit Style (TargetType without explicit x:Key) inside a ResourceDictionary */
+                if (last_popped.kind == UWP_RD_STYLE && last_popped.target_type[0] &&
+                    (ctx->rd_only || (obj_sp > 0 && is_rd_stack[obj_sp - 1])))
+                {
+                    BYTE next_op = (p < end_p) ? ctx->nodes[p] : 0xff;
+                    if (next_op != 0x0a && next_op != 0x07 && next_op != 0x08 && next_op != 0x09 && next_op != 0x20)
+                    {
+                        UINT32 rd_parent_idx = (obj_sp > 0 && is_rd_stack[obj_sp - 1])
+                            ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
+                        xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, last_popped_node_idx,
+                                                   last_popped.target_type, &last_popped );
                     }
                 }
 

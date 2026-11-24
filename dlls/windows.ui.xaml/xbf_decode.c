@@ -511,11 +511,26 @@ static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_
     return FALSE;
 }
 
+void uwp_pri_ensure_xbf_cat( void )
+{
+    InitOnceExecuteOnce( &g_pri_xbf_cat_once, init_pri_xbf_cat_once, NULL, NULL );
+}
+
+BOOL uwp_pri_get_cat_entry( DWORD idx, const char **out_path, const BYTE **out_data, DWORD *out_sz )
+{
+    uwp_pri_ensure_xbf_cat();
+    if (idx >= g_pri_cat.cnt) return FALSE;
+    if (out_path) *out_path = g_pri_cat.entries[idx].path;
+    if (out_data) *out_data = g_pri_cat.entries[idx].data;
+    if (out_sz) *out_sz = g_pri_cat.entries[idx].size;
+    return TRUE;
+}
+
 BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
                                   const BYTE **out_ptr, DWORD *out_sz,
                                   char *out_resolved, size_t out_resolved_sz )
 {
-    InitOnceExecuteOnce( &g_pri_xbf_cat_once, init_pri_xbf_cat_once, NULL, NULL );
+    uwp_pri_ensure_xbf_cat();
     if (pri_cat_find_xbf( &g_pri_cat, base_xbf_dir, uri_or_name, out_ptr, out_sz, out_resolved, out_resolved_sz ))
         return TRUE;
     ensure_winui_pri_cat();
@@ -1144,13 +1159,19 @@ void uwp_rd_store_stack_val( struct uwp_rd_bucket *b, const WCHAR *key, struct x
         e->value = sv->raw;
         IInspectable_AddRef( sv->raw );
     }
-    /* If it's a brush referencing a color key, try eager resolve if already in scope */
+    if (e->kind == UWP_RD_FONT_FAMILY && e->str_val[0])
+    {
+        WCHAR face[64] = {0};
+        uwp_resolve_font_family( e->str_val, face, ARRAY_SIZE(face) );
+    }
+    /* Defer ThemeResource/StaticResource brush color resolution to lookup time so
+     * theme dictionaries and Light/Dark polarity resolve accurately after full RD load. */
     if (e->kind == UWP_RD_BRUSH && !e->has_argb && e->str_val[0])
     {
-        UINT32 resolved = 0;
-        if (uwp_resolve_brush_or_color( b, b->owner_el, e->str_val, 0, &resolved ))
+        UINT32 parsed = 0;
+        if (uwp_parse_color_string( e->str_val, &parsed ))
         {
-            e->argb = resolved;
+            e->argb = parsed;
             e->has_argb = TRUE;
         }
     }
@@ -1287,10 +1308,12 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
     double saved_fs;
     BOOL saved_has_fs;
     int saved_fw;
+    WCHAR saved_ff[128];
     if (!el || !se || se->kind != UWP_RD_STYLE || depth > 8) return;
     saved_fs = el->font_size;
     saved_has_fs = el->has_font_size;
     saved_fw = el->font_weight;
+    lstrcpynW( saved_ff, el->font_family, ARRAY_SIZE(saved_ff) );
     if (uwp_style_is_accent_name( se->key ))
         el->is_accent_style = TRUE;
     if (se->str_val[0])
@@ -1301,6 +1324,12 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
             el->is_accent_style = TRUE;
         if (uwp_rd_find_entry( b, el, se->str_val, 0, &base_se, &base_b ) && base_se)
             uwp_apply_style_entry( ctx, el, base_b, base_se, depth + 1 );
+    }
+    if (se->template_xbf_data && se->template_xbf_size)
+    {
+        el->template_xbf_data = se->template_xbf_data;
+        el->template_xbf_size = se->template_xbf_size;
+        el->template_sub_idx = se->template_sub_idx;
     }
     for (i = 0; i < se->setter_cnt; i++)
     {
@@ -1315,6 +1344,8 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
     }
     if (saved_fw > 0)
         el->font_weight = saved_fw;
+    if (saved_ff[0])
+        lstrcpynW( el->font_family, saved_ff, ARRAY_SIZE(el->font_family) );
 }
 
 void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
@@ -1458,6 +1489,39 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (vt == 0x03 || vt == 0x04) el->brush_opacity = num;
             return;
         }
+        if ((pid == XBF_PROP_LGB_START_POINT || pid == XBF_PROP_LGB_END_POINT) && sval && sval[0])
+        {
+            WCHAR *endp = NULL;
+            float px = (float)wcstod( sval, &endp );
+            float py = 0.0f;
+            if (endp)
+            {
+                while (*endp == L' ' || *endp == L',' || *endp == L';') endp++;
+                py = (float)wcstod( endp, NULL );
+            }
+            if (pid == XBF_PROP_LGB_START_POINT) { el->grad_start_x = px; el->grad_start_y = py; }
+            else { el->grad_end_x = px; el->grad_end_y = py; }
+            return;
+        }
+        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_X) { el->tile_align_x = (int)num; return; }
+        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_Y) { el->tile_align_y = (int)num; return; }
+        if (pid == XBF_PROP_TILEBRUSH_STRETCH) { el->media_stretch = (int)num; return; }
+    }
+
+    if (pid == XBF_PROP_GRADIENTSTOP_COLOR)
+    {
+        if (vt == 0x08) { el->brush_argb = (UINT32)num; el->has_brush_argb = TRUE; }
+        else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+        {
+            el->brush_argb = argb;
+            el->has_brush_argb = TRUE;
+        }
+        return;
+    }
+    if (pid == XBF_PROP_GRADIENTSTOP_OFFSET)
+    {
+        if (vt == 0x03 || vt == 0x04) el->grad_stop_offset = num;
+        return;
     }
 
     if (el->kind == UWP_KIND_RESOURCE_DICT && pid == XBF_PROP_RESOURCE_DICTIONARY_SOURCE && sval && sval[0]) /* Source */
@@ -1574,6 +1638,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_CONTENT: /* ContentControl.Content */
         case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV: /* TextBlock.Text */
         case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE: /* FontIcon.Glyph */
+        case XBF_PROP_FONTICON_GLYPH: /* FontIcon.Glyph */
         case 0x80fa: /* Run.Text */
             if (sval && sval[0])
                 lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
@@ -1582,11 +1647,15 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (sval && sval[0])
                 lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
             break;
-        case XBF_PROP_AUTOMATION_ID: /* x:Uid or Name */
+        case XBF_PROP_AUTOMATION_NAME: /* AutomationProperties.Name - never leak into visible text */
+            if (sval && sval[0])
+                lstrcpynW( el->automation_name, sval, ARRAY_SIZE(el->automation_name) );
+            break;
+        case XBF_PROP_AUTOMATION_ID: /* x:Uid or AutomationId */
             if (sval && sval[0])
             {
                 lstrcpynW( el->uid, sval, ARRAY_SIZE(el->uid) );
-                if (!el->text[0])
+                if (!el->text[0] && !el->content)
                 {
                     WCHAR res_key[256], res_val[128];
                     static const WCHAR *std_props[] = { L"Content", L"Text" };
@@ -1599,7 +1668,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                         if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
                             lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
                     }
-                    for (k = 0; k < ctx->prop_cnt && !el->text[0]; k++)
+                    for (k = 0; ctx && k < ctx->prop_cnt && !el->text[0]; k++)
                     {
                         const struct xbf_prop_info *kpi = &ctx->props[k];
                         if (kpi->owner_tid < ctx->type_cnt &&
@@ -1618,9 +1687,31 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                 }
             }
             break;
+        case XBF_PROP_TEXTELEMENT_FONT_FAMILY:
+        case XBF_PROP_CONTENTPRESENTER_FONT_FAMILY:
+        case XBF_PROP_CONTROL_FONT_FAMILY:
+        case XBF_PROP_TEXTBLOCK_FONT_FAMILY:
+        case XBF_PROP_FONTICON_FONT_FAMILY:
+            if (sval && sval[0])
+            {
+                WCHAR face[64] = {0};
+                const WCHAR *ff_spec = sval;
+                if (is_res_ref || !wcschr( sval, L'#' ))
+                {
+                    struct uwp_rd_entry *fe = NULL;
+                    if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &fe, NULL ) &&
+                        fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
+                        ff_spec = fe->str_val;
+                }
+                lstrcpynW( el->font_family, ff_spec, ARRAY_SIZE(el->font_family) );
+                uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
+            }
+            break;
         case XBF_PROP_POPUP_HORIZONTAL_OFFSET: /* FontSize */
         case XBF_PROP_CONTROL_FONTSIZE: /* Control.FontSize */
         case XBF_PROP_TEXTBLOCK_FONTSIZE: /* TextBlock.FontSize */
+        case XBF_PROP_TEXTELEMENT_FONTSIZE: /* TextElement.FontSize */
+        case XBF_PROP_FONTICON_FONTSIZE: /* FontIcon.FontSize */
             if (vt == 0x03 || vt == 0x04)
             {
                 if (num > 0) { el->font_size = num; el->has_font_size = TRUE; }
@@ -1738,6 +1829,18 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                  (el->kind == UWP_KIND_TEXT_BLOCK || wcsstr( el->class_name, L"Run" ) || wcsstr( el->class_name, L"Inline" )))
         {
             lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
+        }
+        else if (!wcscmp( pi->name, L"FontFamily" ) && sval && sval[0])
+        {
+            WCHAR face[64] = {0};
+            const WCHAR *ff_spec = sval;
+            struct uwp_rd_entry *fe = NULL;
+            if ((is_res_ref || !wcschr( sval, L'#' )) &&
+                uwp_rd_find_entry( ctx->target_rd, el, sval, 0, &fe, NULL ) &&
+                fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
+                ff_spec = fe->str_val;
+            lstrcpynW( el->font_family, ff_spec, ARRAY_SIZE(el->font_family) );
+            uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
         }
         else if ((!wcscmp( pi->name, L"VirtualKeyControlChord" ) ||
                   !wcscmp( pi->name, L"VirtualKeyAltChord" ) ||
@@ -1869,7 +1972,7 @@ void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WO
     if (p < end_p)
     {
         BYTE op = ctx->nodes[p++];
-        if ((op == 0x24 || op == 0x1e || op == 0x1a) && p + 2 <= end_p)
+        if ((op == 0x24 || op == 0x1e || op == 0x1a || op == 0x1b) && p + 2 <= end_p)
         {
             WORD vpid = *(const WORD *)(ctx->nodes + p);
             int vt = 0;
@@ -1884,11 +1987,59 @@ void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WO
                     xbf_setter_fill_prop_meta( ctx, &style_sv->setters[style_sv->setter_cnt - 1], target_pid );
             }
         }
+        else if ((op == 0x15 || op == 0x16) && p + 2 <= end_p)
+        {
+            WORD tid = *(const WORD *)(ctx->nodes + p);
+            int vt = 0;
+            double num = 0, vec4[4] = {0};
+            WCHAR sbuf[256] = {0};
+            (void)tid;
+            p += 2;
+            if (xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ))
+            {
+                xbf_stack_val_add_setter( style_sv, target_pid, vt, FALSE, num, sbuf, vec4 );
+                if (style_sv->setter_cnt > 0)
+                    xbf_setter_fill_prop_meta( ctx, &style_sv->setters[style_sv->setter_cnt - 1], target_pid );
+            }
+        }
         else if (op == 0x14 && p + 2 <= end_p)
         {
             WORD tid = *(const WORD *)(ctx->nodes + p);
             p += 2;
-            if (tid == XBF_TYPE_BRUSH_C) /* inline SolidColorBrush */
+            if (tid == XBF_TYPE_CONTROL_TEMPLATE)
+            {
+                while (p < end_p)
+                {
+                    BYTE sop = ctx->nodes[p++];
+                    if (sop == 0x21 || sop == 0x02) break;
+                    if (sop == 0x1d && p + 4 <= end_p)
+                    {
+                        p += 4;
+                    }
+                    else if (sop == 0x11 && p + 2 <= end_p)
+                    {
+                        DWORD sub_i = 0, c1 = 0, c2 = 0;
+                        p += 2; /* pid (0x8075 FrameworkTemplate.Template) */
+                        if (!xbf_read_uleb( ctx->nodes, &p, end_p, &sub_i )) break;
+                        if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c1 )) break;
+                        if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c2 )) break;
+                        if (c1 <= (end_p - p) / 2 && c2 <= (end_p - p) / 2 - c1)
+                            p += (c1 + c2) * 2;
+                        style_sv->template_xbf_data = ctx->xbf;
+                        style_sv->template_xbf_size = ctx->xbf_sz;
+                        style_sv->template_sub_idx = sub_i;
+                        TRACE( "xbf_parse_style_setter_sub: captured ControlTemplate sub=%u\n", (unsigned)sub_i );
+                    }
+                    else if ((sop == 0x1a || sop == 0x1b || sop == 0x1e || sop == 0x24) && p + 2 <= end_p)
+                    {
+                        int vt = 0; double num = 0;
+                        p += 2;
+                        if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, NULL, 0, NULL )) break;
+                    }
+                    else break;
+                }
+            }
+            else if (tid == XBF_TYPE_BRUSH_C) /* inline SolidColorBrush */
             {
                 UINT32 argb = 0;
                 BOOL has_c = FALSE;
@@ -2007,10 +2158,32 @@ BOOL xbf_read_style_defer_table( struct xbf_ctx *ctx, DWORD *io_p, DWORD end_p,
             p += 3;
             if (!xbf_read_uleb( ctx->nodes, &p, end_p, &soff ) || soff > def_sub_sz)
                 return FALSE;
-            if ((sop == 0x11 || sop == 0x12) && soff < def_sub_sz)
+            if ((sop == 0x11 || sop == 0x12 || sop == 0x18) && soff < def_sub_sz)
                 xbf_parse_style_setter_sub( ctx, (int)def_sub, soff, spid, style_sv );
         }
-        else if (sop == 0x01 || sop == 0x02 || sop == 0x20)
+        else if (sop == 0x20)
+        {
+            WORD stid, spid;
+            int vt = 0;
+            double num = 0, vec4[4] = {0};
+            WCHAR sbuf[256] = {0};
+            if (end_p - p < 5) return FALSE;
+            stid = *(const WORD *)(ctx->nodes + p + 1);
+            spid = *(const WORD *)(ctx->nodes + p + 3);
+            p += 5;
+            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ))
+                return FALSE;
+            xbf_stack_val_add_setter( style_sv, 0, vt, FALSE, num, sbuf, vec4 );
+            if (style_sv && style_sv->setter_cnt > 0)
+            {
+                struct uwp_style_setter *st = &style_sv->setters[style_sv->setter_cnt - 1];
+                if (stid < ctx->str_cnt && ctx->strs[stid] && ctx->strs[stid][0])
+                    lstrcpynW( st->prop_name, ctx->strs[stid], ARRAY_SIZE(st->prop_name) );
+                if (spid < ctx->type_cnt && ctx->types[spid].full_name[0])
+                    lstrcpynW( st->owner_cls, ctx->types[spid].full_name, ARRAY_SIZE(st->owner_cls) );
+            }
+        }
+        else if (sop == 0x01 || sop == 0x02)
         {
             WORD stid, spid;
             DWORD soff = 0;

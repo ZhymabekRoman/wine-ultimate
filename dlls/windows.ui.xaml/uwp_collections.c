@@ -83,7 +83,8 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IBindableIterable_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_RowDef_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_ColDef_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterable_DO_UWP ))
+        IsEqualGUID( iid, &IID_IIterable_DO_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_GradientStop_UWP ))
     {
         *out = &v->IIterable_iface;
         IInspectable_AddRef( iface );
@@ -305,7 +306,8 @@ static HRESULT WINAPI uwp_viter_QI( IInspectable *iface, REFIID iid, void **out 
         IsEqualGUID( iid, &IID_IIterator_Block_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_Inline_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_RowDef_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterator_ColDef_UWP ))
+        IsEqualGUID( iid, &IID_IIterator_ColDef_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_GradientStop_UWP ))
     {
         *out = iface;
         IInspectable_AddRef( iface );
@@ -722,7 +724,10 @@ static HRESULT WINAPI uwp_el_iter_QI( void *iface, REFIID iid, void **out )
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IIterator_DO ))
+        IsEqualGUID( iid, &IID_IIterator_DO ) ||
+        IsEqualGUID( iid, &IID_IIterator_GradientStop_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_IInspectable_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_UIElement_UWP ))
     {
         *out = iface;
         InterlockedIncrement( &((struct uwp_el_iter *)iface)->ref );

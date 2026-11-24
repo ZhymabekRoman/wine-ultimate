@@ -103,6 +103,7 @@ enum uwp_rd_kind
     UWP_RD_ALIAS,
     UWP_RD_STYLE,
     UWP_RD_DATA_TEMPLATE,
+    UWP_RD_FONT_FAMILY,
 };
 
 struct uwp_style_setter
@@ -337,6 +338,15 @@ struct uwp_element
     IInspectable IShape_iface;
     IInspectable IXamlCompositionBrushBaseProtected_iface;
     IInspectable ILoadedImageSurface_iface;
+    IInspectable IFontFamily_iface;
+    IInspectable IFontIcon_iface;
+    IInspectable IImageBrush_iface;
+    IInspectable ITileBrush_iface;
+    IInspectable IGradientBrush_iface;
+    IInspectable ILinearGradientBrush_iface;
+    IInspectable IGradientStop_iface;
+    IInspectable IPathGeometry_iface;
+    IInspectable IPathFigure_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
     IDispatch IDispatch_iface;
     IInspectable IReferenceTrackerTarget_iface;
@@ -430,6 +440,11 @@ struct uwp_element
     double font_size;
     BOOL has_font_size;
     int font_weight;   /* 0=default, else Win32 FW_* (100..900) */
+    WCHAR font_family[128];
+    WCHAR automation_name[128];
+    int requested_theme; /* 0=Default, 1=Light, 2=Dark */
+    IInspectable *default_style_key;
+    WCHAR default_style_key_name[128];
     int text_align;    /* 0=Center, 1=Left, 2=Right, 3=Justify */
     BOOL has_text_align;
     int text_wrapping; /* 1=NoWrap, 2=Wrap, 3=WrapWholeWords */
@@ -564,9 +579,20 @@ struct uwp_element
     BOOL vsm_eval_valid;
     WCHAR image_src[512];
     IInspectable *img_source;
+    IInspectable *bg_brush;
     IInspectable *fill_brush;
     IInspectable *comp_brush;
     IInspectable *ecp_visual;
+    IInspectable *gradient_stops_coll;
+    IInspectable *figures_coll;
+    float grad_start_x, grad_start_y;
+    float grad_end_x, grad_end_y;
+    int grad_spread_method;
+    int grad_mapping_mode;
+    int grad_color_interp;
+    double grad_stop_offset;
+    int tile_align_x, tile_align_y;
+    int fill_rule;
     BOOL xcbb_connected;
     BYTE *img_pixels;
     UINT img_w, img_h;
@@ -615,6 +641,8 @@ struct uwp_element
     DWORD template_xbf_size;
     DWORD template_sub_idx;
     IInspectable *template_owner_comp;
+    struct uwp_element *template_root;
+    BOOL template_inflated;
     struct xaml_event_registry asb_text_changed_reg;
     struct xaml_event_registry asb_query_submitted_reg;
     struct xaml_event_registry asb_suggestion_chosen_reg;
@@ -755,6 +783,7 @@ struct xbf_stack_val
     double vec4[4];
     WCHAR str_val[128];
     WCHAR based_on[96];
+    WCHAR target_type[128];
     struct uwp_style_setter *setters;
     int setter_cnt;
     int setter_cap;
@@ -792,6 +821,7 @@ struct uwp_class_factory
     const WCHAR *class_name;
     IInspectable IDpStatics_iface;
     IInspectable IBitmapImageFactory_iface;
+    IInspectable IFontFamilyFactory_iface;
 };
 
 struct uwp_key_routed_args
@@ -1246,15 +1276,37 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out );
 ULONG WINAPI uwp_cf_Release( IActivationFactory *iface );
 extern const void *uwp_cf_comp_vtbl[64];
 extern const void *uwp_bitmap_image_factory_vtbl[16];
+extern const void *uwp_font_family_factory_vtbl[16];
+extern const void *uwp_font_family_vtbl[16];
+extern const void *uwp_font_icon_vtbl[24];
+extern const void *uwp_image_brush_vtbl[16];
+extern const void *uwp_tile_brush_vtbl[16];
+extern const void *uwp_grad_brush_vtbl[16];
+extern const void *uwp_lgb_vtbl[16];
+extern const void *uwp_grad_stop_vtbl[16];
+extern const void *uwp_path_geom_vtbl[16];
+extern const void *uwp_path_geom_f2_vtbl[16];
+void uwp_resolve_font_family( const WCHAR *raw_spec, WCHAR *out_face, size_t cap );
+BOOL uwp_is_bundled_font_face( const WCHAR *face );
+const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *buf, size_t cap );
+BOOL uwp_is_light_theme( struct uwp_element *scope_el );
+extern int g_app_requested_theme;
 void uwp_extract_uri_string( IInspectable *uri_obj, WCHAR *out, size_t cap );
 void uwp_media_ensure_started( struct uwp_element *el );
 void uwp_media_stop( struct uwp_element *el );
 void uwp_close_flyout_popup( BOOL fire_closed );
 HRESULT WINAPI uwp_ctrl_ApplyTemplate( void *iface, boolean *ret );
 HRESULT WINAPI uwp_ctrl_Focus( void *iface, int state, boolean *ret );
+HRESULT WINAPI uwp_ctrl_get_FontFamily( void *iface, void **out );
+HRESULT WINAPI uwp_ctrl_put_FontFamily( void *iface, IInspectable *val );
 HRESULT WINAPI uwp_ctrl_get_FontSize( void *iface, double *val );
 HRESULT WINAPI uwp_ctrl_get_IsEnabled( void *iface, boolean *val );
+HRESULT WINAPI uwp_ctrl_prot_get_DefaultStyleKey( void *iface, IInspectable **out );
+HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val );
 HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, void **out );
+BOOL uwp_inflate_control_template( struct uwp_element *el );
+HRESULT WINAPI uwp_fe2_get_RequestedTheme( void *iface, int *out );
+HRESULT WINAPI uwp_fe2_put_RequestedTheme( void *iface, int val );
 HRESULT WINAPI uwp_ctrl_put_FontSize( void *iface, double val );
 HRESULT WINAPI uwp_ctrl_put_IsEnabled( void *iface, boolean val );
 ULONG WINAPI uwp_disp_AddRef( IDispatch *iface );
@@ -1361,6 +1413,8 @@ void uwp_pri_enum_xbfs_in_blob( const BYTE *pri, DWORD pri_sz,
 BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
                                   const BYTE **out_ptr, DWORD *out_sz,
                                   char *out_resolved, size_t out_resolved_sz );
+void uwp_pri_ensure_xbf_cat( void );
+BOOL uwp_pri_get_cat_entry( DWORD idx, const char **out_path, const BYTE **out_data, DWORD *out_sz );
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc );
 void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel );
 void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls, const WCHAR *prop_name, struct uwp_element *bel );
@@ -2937,7 +2991,22 @@ extern const GUID IID_ITextBlock_UWP;
 extern const GUID IID_IToggleButtonOverrides_UWP;
 extern const GUID IID_IToggleButton_UWP;
 extern const GUID IID_IToggleMenuFlyoutItem_UWP;
-extern const GUID IID_IUIE_Extra[111];
+extern const GUID IID_IFontFamily_UWP;
+extern const GUID IID_IFontFamilyFactory_UWP;
+extern const GUID IID_IFontIcon_UWP;
+extern const GUID IID_IImageBrush_UWP;
+extern const GUID IID_ITileBrush_UWP;
+extern const GUID IID_ITileBrush_UWP_Alt;
+extern const GUID IID_IGradientBrush_UWP;
+extern const GUID IID_ILinearGradientBrush_UWP;
+extern const GUID IID_IGradientStop_UWP;
+extern const GUID IID_IPathGeometry_UWP;
+extern const GUID IID_IPathGeometry_UWP_Alt;
+extern const GUID IID_IVector_GradientStop_UWP;
+extern const GUID IID_IIterable_GradientStop_UWP;
+extern const GUID IID_IVectorView_GradientStop_UWP;
+extern const GUID IID_IIterator_GradientStop_UWP;
+extern const GUID IID_IUIE_Extra[107];
 extern const GUID IID_IUIElement10_UWP;
 extern const GUID IID_IUIElement2_UWP;
 extern const GUID IID_IUIElement3_UWP;

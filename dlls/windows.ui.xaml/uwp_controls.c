@@ -336,6 +336,86 @@ const void *uwp_cc_vtbl[128] =
     [8 ... 127] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_bg_get_Background( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = impl ? impl->bg_brush : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_bg_put_Background( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (val && (ULONG_PTR)val < 0x10000) return S_OK;
+    if (impl->bg_brush != val)
+    {
+        if (impl->bg_brush) IInspectable_Release( impl->bg_brush );
+        impl->bg_brush = val;
+        if (val) IInspectable_AddRef( val );
+    }
+    if (val)
+    {
+        struct uwp_element *b_el = uwp_elem_from_any( val );
+        if (b_el)
+        {
+            if (b_el->has_brush_argb)
+                uwp_el_set_bg_argb( impl, apply_opacity_to_argb( b_el->brush_argb, b_el->brush_opacity ) );
+            if (b_el->image_src[0])
+            {
+                lstrcpynW( impl->image_src, b_el->image_src, ARRAY_SIZE(impl->image_src) );
+                impl->img_loaded = FALSE;
+                InterlockedExchange( &impl->img_loading, 0 );
+            }
+        }
+    }
+    else
+    {
+        impl->has_bg = FALSE;
+    }
+    uwp_invalidate_window();
+    return S_OK;
+}
+static HRESULT WINAPI uwp_border_put_BorderBrush( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    if (val)
+    {
+        struct uwp_element *b_el = uwp_elem_from_any( val );
+        if (b_el && b_el->has_brush_argb)
+            uwp_el_set_border_argb( impl, apply_opacity_to_argb( b_el->brush_argb, b_el->brush_opacity ) );
+    }
+    else
+    {
+        impl->has_border = FALSE;
+    }
+    uwp_invalidate_window();
+    return S_OK;
+}
+static HRESULT WINAPI uwp_border_get_BorderThickness( void *iface, struct uwp_thickness *t )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (t && impl)
+    {
+        t->Left = impl->border_thick_l; t->Top = impl->border_thick_t;
+        t->Right = impl->border_thick_r; t->Bottom = impl->border_thick_b;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_border_put_BorderThickness( void *iface, struct uwp_thickness *t )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl && t)
+    {
+        impl->border_thick_l = t->Left; impl->border_thick_t = t->Top;
+        impl->border_thick_r = t->Right; impl->border_thick_b = t->Bottom;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+
 const void *uwp_border_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -344,7 +424,13 @@ const void *uwp_border_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 15] = uwp_generic_noop,
+    [6] = uwp_generic_noop,
+    [7] = uwp_border_put_BorderBrush,
+    [8] = uwp_border_get_BorderThickness,
+    [9] = uwp_border_put_BorderThickness,
+    [10] = uwp_bg_get_Background,
+    [11] = uwp_bg_put_Background,
+    [12 ... 15] = uwp_generic_noop,
     [16] = uwp_cc_get_Content,
     [17] = uwp_cc_put_Content,
     [18 ... 31] = uwp_generic_noop,
@@ -1072,8 +1158,25 @@ static BOOL uwp_tree_has_class( struct uwp_element *el, const WCHAR *full_name )
 {
     struct uwp_vec_view *v;
     unsigned int k;
+    const WCHAR *dot;
     if (!el || !full_name) return FALSE;
     if (el->class_name[0] && !wcscmp( el->class_name, full_name )) return TRUE;
+    if (el->default_style_key_name[0] && !wcscmp( el->default_style_key_name, full_name )) return TRUE;
+    dot = wcsrchr( full_name, L'.' );
+    if ((el->kind == UWP_KIND_USER_CONTROL || el->kind == UWP_KIND_PAGE) &&
+        el->name[0] && !wcscmp( el->name, dot ? dot + 1 : full_name ))
+        return TRUE;
+    if (el->outer && (el->kind == UWP_KIND_USER_CONTROL || el->kind == UWP_KIND_PAGE))
+    {
+        HSTRING hcls = NULL;
+        if (SUCCEEDED(IInspectable_GetRuntimeClassName( el->outer, &hcls )) && hcls)
+        {
+            const WCHAR *rcls = WindowsGetStringRawBuffer( hcls, NULL );
+            BOOL match = (rcls && !wcscmp( rcls, full_name ));
+            WindowsDeleteString( hcls );
+            if (match) return TRUE;
+        }
+    }
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );

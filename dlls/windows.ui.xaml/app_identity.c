@@ -133,16 +133,17 @@ static BOOL xaml_read_reg_str( HKEY root, const WCHAR *subkey, const WCHAR *valu
     return buf[0] != 0;
 }
 
-/* InstalledLocation: WINE_PACKAGE_PATH env, then Packages\<FullName>\PackagePath
+/* InstalledLocation: GetCurrentPackagePath, then Packages\<FullName>\PackagePath
  * (PackageRootPath accepted as a synonym), HKCU before HKLM. May stay empty;
  * callers fall back to the exe directory, which is the package dir for UWP. */
 static void xaml_package_resolve_location( struct xaml_package *pkg )
 {
     WCHAR subkey[600];
+    UINT32 path_len = ARRAY_SIZE( pkg->installed_location );
     SIZE_T i;
 
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", pkg->installed_location,
-                                 ARRAY_SIZE( pkg->installed_location ) ) && pkg->installed_location[0])
+    pkg->installed_location[0] = 0;
+    if (GetCurrentPackagePath( &path_len, pkg->installed_location ) == ERROR_SUCCESS && pkg->installed_location[0])
         return;
     pkg->installed_location[0] = 0;
     if (!pkg->full_name[0]) return;
@@ -387,24 +388,21 @@ void xaml_package_warm( void )
 {
     const WCHAR *short_name = xaml_package_short_name();
     TRACE( "package warm: short name %s\n", debugstr_w( short_name ) );
-    if (short_name && short_name[0])
-        SetEnvironmentVariableW( L"WINE_PACKAGE_CLASS", short_name );
 }
 
 /* Short app identity for window lookups: the package DisplayName, else the
- * WINE_PACKAGE_AUMID app id (the part after '!'), else nothing. Matches what
+ * current AUMID app id (the part after '!'), else nothing. Matches what
  * windows.ui/corewindow.c picks as the CoreWindow class name. */
 static const WCHAR *xaml_package_short_name( void )
 {
     static WCHAR aumid_app[128];
     const WCHAR *name = xaml_package_display_name();
     WCHAR buf[256];
-    DWORD len;
+    UINT32 len = ARRAY_SIZE(buf);
 
     if (name) return name;
     if (aumid_app[0]) return aumid_app;
-    len = GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", buf, ARRAY_SIZE(buf) );
-    if (len && len < ARRAY_SIZE(buf))
+    if (GetCurrentApplicationUserModelId( &len, buf ) == ERROR_SUCCESS && buf[0])
     {
         WCHAR *p = wcschr( buf, L'!' );
         lstrcpynW( aumid_app, p ? p + 1 : buf, ARRAY_SIZE(aumid_app) );

@@ -906,6 +906,21 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     uwp_vec_Append( parent_el->col_defs_coll, child_raw );
                     handled_custom = TRUE;
                 }
+                else if (parent_el && (op->pid == XBF_PROP_GRADIENTBRUSH_STOPS ||
+                                       (child_el && wcsstr( child_el->class_name, L"GradientStop" ))))
+                {
+                    if (!parent_el->gradient_stops_coll)
+                    {
+                        uwp_vec_create( parent_el, &parent_el->gradient_stops_coll );
+                        if (parent_el->gradient_stops_coll)
+                        {
+                            struct uwp_vec_view *gv = CONTAINING_RECORD( parent_el->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
+                            gv->runtime_class = L"Windows.UI.Xaml.Media.GradientStopCollection";
+                        }
+                    }
+                    uwp_vec_Append( parent_el->gradient_stops_coll, child_raw );
+                    handled_custom = TRUE;
+                }
                 else if (parent_raw && ao &&
                          op->node_idx < hdr->node_cnt &&
                          nodes[op->node_idx].tid < hdr->type_cnt &&
@@ -1030,6 +1045,24 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     UINT32 argb = 0;
                     BOOL got = FALSE;
                     const WCHAR *sval = xbf_aot_str( hdr, op->str_off );
+                    if (child_raw && uwp_is_bg_pid( op->pid ))
+                    {
+                        if (op->pid == XBF_PROP_SHAPE_FILL)
+                        {
+                            if (parent_el->fill_brush != child_raw)
+                            {
+                                if (parent_el->fill_brush) IInspectable_Release( parent_el->fill_brush );
+                                parent_el->fill_brush = child_raw;
+                                IInspectable_AddRef( child_raw );
+                            }
+                        }
+                        else if (parent_el->bg_brush != child_raw)
+                        {
+                            if (parent_el->bg_brush) IInspectable_Release( parent_el->bg_brush );
+                            parent_el->bg_brush = child_raw;
+                            IInspectable_AddRef( child_raw );
+                        }
+                    }
                     if (op->has_argb)
                     {
                         argb = apply_opacity_to_argb( op->argb, op->num );
@@ -1137,9 +1170,12 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                                      (!wcscmp( pname, L"VirtualKeyShiftChord" ) ? 4 : 5));
                         if (vk) uwp_accel_register( NULL, target_el, vk, mods, TRUE );
                     }
-                    if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
+                    if (op->pid == XBF_PROP_AUTOMATION_NAME)
+                        lstrcpynW( target_el->automation_name, resolved, ARRAY_SIZE(target_el->automation_name) );
+                    else if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
                         op->pid == XBF_PROP_TEXTBLOCK_TEXT || op->pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
-                        op->pid == 0x80fa || (!is_vk && is_text_prop && !target_el->text[0]))
+                        op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == 0x80fa ||
+                        (op->pid != XBF_PROP_AUTOMATION_ID && !is_vk && is_text_prop && !target_el->text[0]))
                         lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
                 }
             }

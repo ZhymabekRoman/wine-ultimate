@@ -448,6 +448,12 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
         return el->height + max( 0.0, el->margin_t ) + max( 0.0, el->margin_b );
     if (el->min_height > 0.0 && !isnan( el->min_height ))
         best = el->min_height;
+    if (el->kind == UWP_KIND_TEXT_BLOCK)
+    {
+        double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
+        double th = max( 18.0 * g_layout_scale, fs * 1.38 + 4.0 );
+        if (th > best) best = th;
+    }
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
@@ -571,15 +577,33 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
     else if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
         double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
+        double cw_factor = (el->font_weight >= FW_SEMIBOLD) ? 0.66 : 0.60;
         size_t len = wcslen( el->text );
         if (len > 0)
-            best = (double)len * fs * 0.56 + 16.0;
+            best = (double)len * fs * cw_factor + 20.0;
     }
     else if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
-        double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
-        size_t len = wcslen( el->text );
-        best = max( 80.0 * g_layout_scale, (double)len * fs * 0.58 + 32.0 + el->padding_l + el->padding_r );
+        if (el->content)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( el->content );
+            if (ch && ch != el)
+            {
+                double cw = uwp_measure_natural_width( ch, depth + 1 );
+                if (cw > 0.0) best = cw + el->padding_l + el->padding_r + 16.0;
+            }
+        }
+        if (best <= 0.0 && el->img_w > 0 && el->img_h > 0)
+        {
+            double th = (el->height > 0.0 && !isnan( el->height )) ? el->height : min( 160.0 * g_layout_scale, (double)el->img_h );
+            best = max( 120.0 * g_layout_scale, min( 320.0 * g_layout_scale, th * (double)el->img_w / (double)el->img_h ) );
+        }
+        if (best <= 0.0)
+        {
+            double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
+            size_t len = wcslen( el->text );
+            best = max( 80.0 * g_layout_scale, (double)len * fs * 0.64 + 32.0 + el->padding_l + el->padding_r );
+        }
     }
     else if (uwp_is_combobox( el ))
     {
@@ -612,13 +636,21 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
             acc += (double)(vis - 1) * el->spacing;
         best = acc;
     }
-    else if (el->kind == UWP_KIND_BORDER && el->content)
+    else if (el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL || el->kind == UWP_KIND_USER_CONTROL)
     {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el)
+        if (el->content)
         {
-            double cw = uwp_measure_natural_width( ch, depth + 1 );
-            if (cw > 0.0) best = cw + el->padding_l + el->padding_r;
+            struct uwp_element *ch = uwp_elem_from_any( el->content );
+            if (ch && ch != el)
+            {
+                double cw = uwp_measure_natural_width( ch, depth + 1 );
+                if (cw > 0.0) best = cw + el->padding_l + el->padding_r;
+            }
+        }
+        else if (el->text[0])
+        {
+            double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
+            best = (double)wcslen( el->text ) * fs * 0.56 + 24.0 + el->padding_l + el->padding_r;
         }
     }
     else if (el->kind == UWP_KIND_GRID && el->children_coll)
@@ -635,6 +667,17 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
                 if (cw > best) best = cw;
             }
         }
+    }
+    else if (wcsstr( el->class_name, L"FontIcon" ))
+    {
+        double fs = (el->has_font_size ? el->font_size : 16.0) * g_layout_scale;
+        best = max( 20.0 * g_layout_scale, fs + 8.0 );
+    }
+    else if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el)
+            best = uwp_measure_natural_width( ch, depth + 1 );
     }
     if (el->min_width > 0.0 && !isnan( el->min_width ) && best < el->min_width)
         best = el->min_width;
@@ -656,23 +699,55 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
     if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
         double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
-        double line_h = max( 18.0 * g_layout_scale, fs * 1.4 );
+        double line_h = max( 18.0 * g_layout_scale, fs * 1.38 );
         int lines = 1;
-        if (el->text_wrapping >= 2 && el->text[0] && avail_w > 32)
+        if (el->text[0])
         {
-            double est_w = (double)wcslen( el->text ) * fs * 0.56;
-            double max_w = (double)avail_w - 16.0;
-            if (el->max_width > 0.0 && el->max_width < max_w) max_w = el->max_width;
-            if (max_w > 32.0 && est_w > max_w)
-                lines = min( 8, (int)ceil( est_w / max_w ) );
+            const WCHAR *p;
+            int nl_lines = 1;
+            for (p = el->text; *p; p++) if (*p == L'\n') nl_lines++;
+            lines = nl_lines;
+            if (el->text_wrapping >= 2 && avail_w > 32)
+            {
+                double est_w = (double)wcslen( el->text ) * fs * 0.56;
+                double max_w = (double)avail_w - 16.0;
+                int wrap_lines;
+                if (el->max_width > 0.0 && el->max_width < max_w) max_w = el->max_width;
+                if (max_w > 32.0 && est_w > max_w)
+                {
+                    wrap_lines = min( 16, (int)ceil( est_w / max_w ) );
+                    if (wrap_lines > lines) lines = wrap_lines;
+                }
+            }
         }
-        best = line_h * lines;
+        best = line_h * lines + 4.0;
     }
     else if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
-        double pad_v = max( 0.0, el->padding_t ) + max( 0.0, el->padding_b );
-        double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
-        best = max( 38.0 * g_layout_scale, fs * 1.4 + pad_v + 12.0 * g_layout_scale );
+        if (el->img_w > 0 && el->img_h > 0)
+        {
+            double aw = (avail_w > 0) ? (double)avail_w : 240.0 * g_layout_scale;
+            best = min( 180.0 * g_layout_scale, max( 96.0 * g_layout_scale, aw * (double)el->img_h / (double)el->img_w ) );
+        }
+        else if (el->image_src[0])
+        {
+            best = 140.0 * g_layout_scale;
+        }
+        else if (el->content)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( el->content );
+            if (ch && ch != el)
+            {
+                double ch_h = uwp_measure_natural_height( ch, avail_w, depth + 1 );
+                if (ch_h > 0.0) best = ch_h + max( 0.0, el->padding_t ) + max( 0.0, el->padding_b );
+            }
+        }
+        if (best <= 0.0)
+        {
+            double pad_v = max( 0.0, el->padding_t ) + max( 0.0, el->padding_b );
+            double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
+            best = max( 38.0 * g_layout_scale, fs * 1.4 + pad_v + 12.0 * g_layout_scale );
+        }
     }
     else if (uwp_is_combobox( el ))
     {
@@ -715,7 +790,7 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
             acc += (double)(vis - 1) * el->spacing;
         best = acc;
     }
-    else if (el->kind == UWP_KIND_BORDER && el->content)
+    else if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL || el->kind == UWP_KIND_USER_CONTROL) && el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el)
@@ -1005,6 +1080,8 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         int fixed_h = 0, auto_cnt = 0;
         int spacing_px = (el->spacing > 0.0 && !isnan( el->spacing )) ? (int)(el->spacing + 0.5) : 0;
         BOOL use_horiz_flow = FALSE;
+        double horiz_total_nw = 0.0;
+        int horiz_unmeasured_cnt = 0;
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
@@ -1016,9 +1093,17 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 vis_cnt++;
                 if (el->orientation == 1)
                 {
-                    if ((ch->width > 0.0 && !isnan( ch->width )) || ch->kind == UWP_KIND_IMAGE ||
-                        ch->kind == UWP_KIND_TEXT_BLOCK || uwp_is_combobox( ch ))
+                    double nw = uwp_measure_natural_width( ch, 0 );
+                    if (nw > 0.0 || (ch->width > 0.0 && !isnan( ch->width )) ||
+                        ch->kind == UWP_KIND_IMAGE || ch->kind == UWP_KIND_TEXT_BLOCK ||
+                        ch->kind == UWP_KIND_BUTTON || ch->kind == UWP_KIND_TOGGLE_BUTTON ||
+                        ch->kind == UWP_KIND_CONTENT_CONTROL || ch->kind == UWP_KIND_BORDER ||
+                        ch->kind == UWP_KIND_USER_CONTROL || uwp_is_combobox( ch ))
                         use_horiz_flow = TRUE;
+                    if (nw > 0.0)
+                        horiz_total_nw += nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
+                    else
+                        horiz_unmeasured_cnt++;
                 }
                 else
                 {
@@ -1034,10 +1119,14 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         }
         if (vis_cnt > 1 && el->orientation == 0)
             fixed_h += (int)(vis_cnt - 1) * spacing_px;
+        if (vis_cnt > 1 && el->orientation == 1)
+            horiz_total_nw += (double)(vis_cnt - 1) * spacing_px;
         if (vis_cnt > 0)
         {
             int idx = 0, auto_idx = 0, cur_y = rc.top, cur_x = rc.left;
             int auto_total_h = max( 0, h - fixed_h );
+            double horiz_scale = (el->orientation == 1 && horiz_unmeasured_cnt == 0 && horiz_total_nw > (double)w && w > 0)
+                ? ((double)w / horiz_total_nw) : 1.0;
             BOOL in_scroll = FALSE;
             if (el->orientation == 0 && auto_cnt > 1 && auto_total_h / auto_cnt < 140)
             {
@@ -1066,11 +1155,11 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                     {
                         double nw = uwp_measure_natural_width( ch, 0 );
                         int slot_w = (nw > 0.0)
-                            ? (int)(nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r ) + 0.5)
+                            ? max( 16, (int)((nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r )) * horiz_scale + 0.5) )
                             : max( 32, (rc.right - cur_x) / max( 1, (int)vis_cnt - idx ) );
                         crc.left = cur_x;
                         crc.right = min( (int)rc.right, cur_x + slot_w );
-                        cur_x = crc.right + spacing_px;
+                        cur_x = crc.right + (int)(spacing_px * horiz_scale + 0.5);
                     }
                     else
                     {
@@ -1102,7 +1191,10 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                             continue;
                         }
                         if (ch->kind == UWP_KIND_TEXT_BLOCK)
-                            nat_h = 44;
+                        {
+                            double measured_h = uwp_measure_natural_height( ch, w, 0 );
+                            nat_h = max( 24, (int)(measured_h + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
+                        }
                         else if (uwp_has_spotlight_descendant( ch, 0 ))
                             nat_h = 330;
                         else if (!uwp_scroll_child_has_content( ch, 0 ))
@@ -1409,6 +1501,11 @@ const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp,
     if (!wcscmp( s, L"SettingsButtonName" ) || !wcscmp( el->name, L"SettingsItem" )) return L"";
     if (s[1] == 0)
     {
+        WCHAR ff_buf[64];
+        const WCHAR *face = uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) );
+        if (face && wcsicmp( face, L"Segoe UI" ) != 0 && uwp_is_bundled_font_face( face ) &&
+            xaml_gpu_font_has_glyphs( face, s ))
+            return s;
         switch (s[0])
         {
         case 0xe94c: return L"%";
@@ -2309,11 +2406,14 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
                 !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
         ? g_navigated_page_el : root_el;
 
-    if (bg_scope && bg_scope->has_bg && bg_scope->bg_alpha > 0)
-        page_bg = blend_argb_over( bg_scope->bg_argb, RGB( 31, 31, 31 ) );
-    else
-        page_bg = uwp_paint_resolve_color( bg_scope, L"ApplicationPageBackgroundThemeBrush",
-                                           RGB( 31, 31, 31 ), RGB( 31, 31, 31 ) );
+    {
+        COLORREF def_bg = uwp_is_light_theme( bg_scope ) ? RGB( 243, 243, 243 ) : RGB( 31, 31, 31 );
+        if (bg_scope && bg_scope->has_bg && bg_scope->bg_alpha > 0)
+            page_bg = blend_argb_over( bg_scope->bg_argb, def_bg );
+        else
+            page_bg = uwp_paint_resolve_color( bg_scope, L"ApplicationPageBackgroundThemeBrush",
+                                               def_bg, def_bg );
+    }
     g_paint_page_bg = page_bg;
 
     bg_brush = CreateSolidBrush( page_bg );

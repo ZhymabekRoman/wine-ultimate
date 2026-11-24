@@ -98,10 +98,18 @@ BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwa
 void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
                          float radius, UINT32 fill_argb, UINT32 border_argb,
                          float border_thickness, float opacity );
+void xaml_gpu_push_gradient_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
+                                  float radius, UINT32 color0_argb, UINT32 color1_argb,
+                                  float start_x, float start_y, float end_x, float end_y,
+                                  float stop0, float stop1, float opacity );
 void xaml_gpu_push_ring( float x0, float y0, float x1, float y1, const RECT *clip_rc,
                          UINT32 color_argb, float thickness, BOOL arc_quadrant );
 void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_height, int font_weight,
                          UINT dt_flags, const RECT *rc, const RECT *clip_rc, COLORREF color, float opacity );
+void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const WCHAR *font_family,
+                              int font_height, int font_weight, UINT dt_flags, const RECT *rc,
+                              const RECT *clip_rc, COLORREF color, float opacity );
+BOOL xaml_gpu_font_has_glyphs( const WCHAR *font_family, const WCHAR *text );
 void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
                           UINT img_w, UINT img_h, const RECT *dst_rc, const RECT *clip_rc );
 void xaml_gpu_push_image_uv( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,

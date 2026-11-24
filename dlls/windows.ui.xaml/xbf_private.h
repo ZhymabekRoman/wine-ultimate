@@ -27,7 +27,7 @@
  * ============================================================================ */
 
 #define XBF_AOT_MAGIC       0x58424641u /* 'XBFA' */
-#define XBF_AOT_VERSION     11u
+#define XBF_AOT_VERSION     12u
 #define XBF_AOT_CACHE_SLOTS 64
 
 enum xbf_aot_node_flags

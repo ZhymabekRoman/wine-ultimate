@@ -1534,6 +1534,27 @@ static HRESULT WINAPI ms_application_GetRuntimeClassName( void *iface, HSTRING *
                                 class_name );
 }
 
+extern BOOL uwp_is_light_theme( void *scope_el );
+extern void uwp_invalidate_window( void );
+int g_app_requested_theme = -1; /* -1 = system default, 0 = Light, 1 = Dark */
+
+static HRESULT WINAPI application_get_RequestedTheme( void *iface, int *theme )
+{
+    if (!theme) return E_POINTER;
+    if (g_app_requested_theme >= 0)
+        *theme = g_app_requested_theme;
+    else
+        *theme = uwp_is_light_theme( NULL ) ? 0 : 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_put_RequestedTheme( void *iface, int theme )
+{
+    g_app_requested_theme = (theme == 0) ? 0 : 1;
+    uwp_invalidate_window();
+    return S_OK;
+}
+
 static const void *ms_application_vtbl[] =
 {
     application_ms_QueryInterface,        /* 0: QI */
@@ -1548,8 +1569,8 @@ static const void *ms_application_vtbl[] =
     application_remove_UnhandledException,/* 9: remove_UnhandledException */
     application_stub_zero,                /* 10: get_HighContrastAdjustment */
     application_stub_ok,                  /* 11: set_HighContrastAdjustment */
-    application_stub_zero,                /* 12: get_RequestedTheme */
-    application_stub_ok,                  /* 13: set_RequestedTheme */
+    application_get_RequestedTheme,       /* 12: get_RequestedTheme */
+    application_put_RequestedTheme,       /* 13: set_RequestedTheme */
     application_get_Resources,            /* 14: get_Resources */
     application_put_Resources,            /* 15: set_Resources */
     application_Exit,                     /* 16: Exit */
