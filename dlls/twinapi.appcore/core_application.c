@@ -363,34 +363,42 @@ static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView
     if (!value) return E_POINTER;
     *value = NULL;
 
-    WindowsCreateString( RuntimeClass_Windows_UI_Core_CoreWindow,
-                         wcslen( RuntimeClass_Windows_UI_Core_CoreWindow ), &class_id );
-    if (SUCCEEDED(RoGetActivationFactory( class_id, &IID_IActivationFactory, (void **)&cwf )) && cwf)
-    {
-        IActivationFactory_QueryInterface( cwf, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowStatic,
-                                           (void **)&cws );
-        if (cws)
-        {
-            hr = __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_GetForCurrentThread( cws, value );
-            __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_Release( cws );
-        }
-        IActivationFactory_Release( cwf );
-    }
-    WindowsDeleteString( class_id );
-    if (*value)
-    {
-        if (!cached_main_core_window)
-        {
-            __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( *value );
-            if (InterlockedCompareExchangePointer( (void *volatile *)&cached_main_core_window, *value, NULL ))
-                __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( *value );
-        }
-    }
-    else if (cached_main_core_window)
+    if (cached_main_core_window)
     {
         *value = cached_main_core_window;
         __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( *value );
-        hr = S_OK;
+    }
+    else
+    {
+        WindowsCreateString( RuntimeClass_Windows_UI_Core_CoreWindow,
+                             wcslen( RuntimeClass_Windows_UI_Core_CoreWindow ), &class_id );
+        if (SUCCEEDED(RoGetActivationFactory( class_id, &IID_IActivationFactory, (void **)&cwf )) && cwf)
+        {
+            IActivationFactory_QueryInterface( cwf, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowStatic,
+                                               (void **)&cws );
+            if (cws)
+            {
+                hr = __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_GetForCurrentThread( cws, value );
+                __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_Release( cws );
+            }
+            IActivationFactory_Release( cwf );
+        }
+        WindowsDeleteString( class_id );
+        if (*value)
+        {
+            if (!cached_main_core_window)
+            {
+                __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( *value );
+                if (InterlockedCompareExchangePointer( (void *volatile *)&cached_main_core_window, *value, NULL ))
+                    __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( *value );
+            }
+        }
+        else if (cached_main_core_window)
+        {
+            *value = cached_main_core_window;
+            __x_ABI_CWindows_CUI_CCore_CICoreWindow_AddRef( *value );
+            hr = S_OK;
+        }
     }
     if (*value && impl->title_bar)
     {

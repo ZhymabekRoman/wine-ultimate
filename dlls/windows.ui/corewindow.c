@@ -279,6 +279,7 @@ struct core_window
 static HRESULT WINAPI cursor_factory_CreateCursor( ICoreCursorFactory *iface, CoreCursorType type, UINT32 id, ICoreCursor **cursor );
 
 static __thread struct core_window *thread_core_window;
+static LONG process_core_window_count;
 
 static struct core_window *create_core_window( const WCHAR *title, INT x, INT y, UINT width, UINT height,
                                                BOOL set_geometry );
@@ -316,7 +317,8 @@ static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWin
      * WINE_COREWINDOW_ONDEMAND=0 restores the Windows NULL-when-unowned contract. */
     if (!thread_core_window)
     {
-        if (!ondemand_corewindow_enabled())
+        if (!ondemand_corewindow_enabled() ||
+            InterlockedCompareExchange( &process_core_window_count, 0, 0 ) > 0)
         {
             *windows = NULL;
             return S_OK;
@@ -3732,6 +3734,7 @@ static struct core_window *create_core_window( const WCHAR *title, INT x, INT y,
     RegisterClassExW( &wc );
 
     thread_core_window = impl;
+    InterlockedIncrement( &process_core_window_count );
 
     impl->hwnd = CreateWindowExW( 0, class_name, title,
                                   WS_OVERLAPPEDWINDOW | WS_VISIBLE,
