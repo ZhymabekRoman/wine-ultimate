@@ -2609,7 +2609,7 @@ HRESULT get_fontsig_from_fontface(IDWriteFontFace *iface, FONTSIGNATURE *fontsig
     return S_OK;
 }
 
-static HRESULT create_font(struct dwrite_fontfamily *family, UINT32 index, IDWriteFont3 **font)
+static HRESULT create_font_from_data(struct dwrite_fontfamily *family, struct dwrite_font_data *data, IDWriteFont3 **font)
 {
     struct dwrite_font *object;
 
@@ -2622,13 +2622,18 @@ static HRESULT create_font(struct dwrite_fontfamily *family, UINT32 index, IDWri
     object->refcount = 1;
     object->family = family;
     IDWriteFontFamily2_AddRef(&family->IDWriteFontFamily2_iface);
-    object->data = family->data->fonts[index];
+    object->data = data;
     object->style = object->data->style;
     addref_font_data(object->data);
 
     *font = &object->IDWriteFont3_iface;
 
     return S_OK;
+}
+
+static HRESULT create_font(struct dwrite_fontfamily *family, UINT32 index, IDWriteFont3 **font)
+{
+    return create_font_from_data(family, family->data->fonts[index], font);
 }
 
 IDWriteFontFile *get_fontfile_from_font(IDWriteFont *font_iface)
@@ -2726,7 +2731,7 @@ static HRESULT WINAPI dwritefontlist_GetFont(IDWriteFontList2 *iface, UINT32 ind
     if (index >= fontlist->font_count)
         return E_INVALIDARG;
 
-    return create_font(fontlist->family, index, (IDWriteFont3 **)font);
+    return create_font_from_data(fontlist->family, fontlist->fonts[index], (IDWriteFont3 **)font);
 }
 
 static DWRITE_LOCALITY WINAPI dwritefontlist1_GetFontLocality(IDWriteFontList2 *iface, UINT32 index)
@@ -2747,7 +2752,7 @@ static HRESULT fontlist_get_font(const struct dwrite_fontlist *fontlist, unsigne
     if (index >= fontlist->font_count)
         return E_FAIL;
 
-    return create_font(fontlist->family, index, font);
+    return create_font_from_data(fontlist->family, fontlist->fonts[index], font);
 }
 
 static HRESULT WINAPI dwritefontlist1_GetFont(IDWriteFontList2 *iface, UINT32 index, IDWriteFont3 **font)
@@ -3105,12 +3110,70 @@ static HRESULT WINAPI dwritefontfamily1_GetFontFaceReference(IDWriteFontFamily2 
             font->file, font->face_index, font->simulations, reference);
 }
 
+static DWRITE_FONT_STRETCH font_stretch_from_width_axis(float width)
+{
+    static const float thresholds[] = { 56.25f, 68.75f, 81.25f, 93.75f, 106.25f, 118.75f, 137.5f, 175.0f };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(thresholds); ++i)
+    {
+        if (width < thresholds[i])
+            return (DWRITE_FONT_STRETCH)(DWRITE_FONT_STRETCH_ULTRA_CONDENSED + i);
+    }
+
+    return DWRITE_FONT_STRETCH_ULTRA_EXPANDED;
+}
+
 static HRESULT WINAPI dwritefontfamily2_GetMatchingFonts(IDWriteFontFamily2 *iface,
         DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 num_values, IDWriteFontList2 **fontlist)
 {
-    FIXME("%p, %p, %u, %p.\n", iface, axis_values, num_values, fontlist);
+    DWRITE_FONT_STRETCH stretch = DWRITE_FONT_STRETCH_NORMAL;
+    DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL;
+    DWRITE_FONT_STYLE style = DWRITE_FONT_STYLE_NORMAL;
+    BOOL has_italic = FALSE;
+    UINT32 i;
 
-    return E_NOTIMPL;
+    TRACE("%p, %p, %u, %p.\n", iface, axis_values, num_values, fontlist);
+
+    if (!fontlist)
+        return E_INVALIDARG;
+
+    *fontlist = NULL;
+
+    if (num_values && !axis_values)
+        return E_INVALIDARG;
+
+    for (i = 0; i < num_values; ++i)
+    {
+        float value = axis_values[i].value;
+
+        if (value != value) /* NaN */
+            continue;
+
+        switch (axis_values[i].axisTag)
+        {
+            case DWRITE_FONT_AXIS_TAG_WEIGHT:
+                if (value < 1.0f) value = 1.0f;
+                if (value > 999.0f) value = 999.0f;
+                weight = (DWRITE_FONT_WEIGHT)(int)floorf(value + 0.5f);
+                break;
+            case DWRITE_FONT_AXIS_TAG_WIDTH:
+                stretch = font_stretch_from_width_axis(value);
+                break;
+            case DWRITE_FONT_AXIS_TAG_ITALIC:
+                has_italic = TRUE;
+                style = value >= 0.5f ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
+                break;
+            case DWRITE_FONT_AXIS_TAG_SLANT:
+                if (!has_italic && value != 0.0f)
+                    style = DWRITE_FONT_STYLE_OBLIQUE;
+                break;
+            default:
+                break;
+        }
+    }
+
+    return dwritefontfamily_GetMatchingFonts(iface, weight, stretch, style, (IDWriteFontList **)fontlist);
 }
 
 static HRESULT WINAPI dwritefontfamily2_GetFontSet(IDWriteFontFamily2 *iface, IDWriteFontSet1 **fontset)
@@ -5843,25 +5906,8 @@ static ULONG WINAPI glyphrunanalysis_Release(IDWriteGlyphRunAnalysis *iface)
     return refcount;
 }
 
-static int glyphrunanalysis_adjust_origin_y(const struct dwrite_glyphrunanalysis *analysis,
-        const struct dwrite_fontface *fontface, const RECT *bbox, float emsize, int orig_y)
-{
-    if ((analysis->flags & RUNANALYSIS_USE_TRANSFORM) && orig_y > 0 && bbox->bottom == 0)
-    {
-        float scaled_emsize = emsize * (analysis->m.m22 != 0.0f ? fabsf(analysis->m.m22) : 1.0f);
-        int emsize_px = (int)floorf(scaled_emsize + 0.5f);
-
-        if (fontface && fontface->metrics.descent == 0 && -bbox->top >= emsize_px)
-            return orig_y + (-bbox->top - emsize_px) + 1;
-        if (bbox->top + orig_y == -1)
-            return orig_y + 1;
-    }
-    return orig_y;
-}
-
 static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *analysis, RECT *bounds)
 {
-    struct dwrite_fontface *fontface = unsafe_impl_from_IDWriteFontFace(analysis->run.fontFace);
     struct dwrite_glyphbitmap glyph_bitmap;
     UINT32 i;
 
@@ -5882,7 +5928,6 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
     for (i = 0; i < analysis->run.glyphCount; i++) {
         RECT *bbox = &glyph_bitmap.bbox;
         UINT32 bitmap_size;
-        int orig_x, orig_y;
 
         glyph_bitmap.glyph = analysis->run.glyphIndices[i];
         dwrite_fontface_get_glyph_bbox(analysis->run.fontFace, &glyph_bitmap);
@@ -5892,9 +5937,7 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
         if (bitmap_size > analysis->max_glyph_bitmap_size)
             analysis->max_glyph_bitmap_size = bitmap_size;
 
-        orig_x = analysis->origins[i].x;
-        orig_y = glyphrunanalysis_adjust_origin_y(analysis, fontface, bbox, glyph_bitmap.emsize, analysis->origins[i].y);
-        OffsetRect(bbox, orig_x, orig_y);
+        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
         UnionRect(&analysis->bounds, &analysis->bounds, bbox);
     }
 
@@ -5990,11 +6033,7 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
             continue;
         }
 
-        {
-            int orig_x = analysis->origins[i].x;
-            int orig_y = glyphrunanalysis_adjust_origin_y(analysis, fontface, bbox, glyph_bitmap.emsize, analysis->origins[i].y);
-            OffsetRect(bbox, orig_x, orig_y);
-        }
+        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
 
         /* blit to analysis bitmap */
         dst = get_pixel_ptr(analysis->bitmap, analysis->texture_type, bbox, &analysis->bounds);
