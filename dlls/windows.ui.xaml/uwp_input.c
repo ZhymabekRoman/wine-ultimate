@@ -769,6 +769,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
                 {
                     IInspectable *item_obj = nav_item->content ? nav_item->content
                         : (nav_item->outer ? nav_item->outer : &nav_item->IInspectable_iface);
+                    uwp_nav_select_item( nav, nav_item );
                     if (nav->nav_sel_changed_reg.next_token > 0)
                         uwp_nav_fire( nav, &nav->nav_sel_changed_reg, item_obj );
                     if (nav->nav_item_invoked_reg.next_token > 0)

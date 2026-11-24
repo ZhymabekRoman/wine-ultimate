@@ -583,9 +583,32 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         WCHAR rich_buf[2048];
         const WCHAR *txt = el->text;
         double raw_fs = (el->font_size > 0.0 ? el->font_size : 14.0);
+        int eff_fw = el->font_weight;
+        BOOL is_sec_hdr = (!wcscmp( el->name, L"SectionTitle" ));
+        const struct uwp_element *anc;
+        int hop;
         double fs;
-        double cw_factor = (el->font_weight >= FW_SEMIBOLD) ? 0.66 : 0.60;
+        double cw_factor;
         size_t len;
+        for (anc = el->parent, hop = 0; anc && hop < 3; anc = anc->parent, hop++)
+        {
+            if (anc->kind == UWP_KIND_BUTTON || anc->kind == UWP_KIND_TOGGLE_BUTTON || anc->kind == UWP_KIND_CONTENT_CONTROL)
+            {
+                if (!el->has_font_size && anc->has_font_size && anc->font_size > 0.0)
+                    raw_fs = anc->font_size;
+                if (eff_fw <= 0 && anc->font_weight > 0)
+                    eff_fw = anc->font_weight;
+                if (!wcscmp( anc->name, L"ShowAllButton" ) || !wcscmp( anc->name, L"SectionViewAllButton" ))
+                    is_sec_hdr = TRUE;
+                break;
+            }
+        }
+        if (is_sec_hdr)
+        {
+            if (raw_fs < 18.0) raw_fs = 18.0;
+            if (eff_fw < FW_SEMIBOLD) eff_fw = FW_SEMIBOLD;
+        }
+        cw_factor = (eff_fw >= FW_SEMIBOLD) ? 0.66 : 0.60;
         if (!txt[0] && el->inlines_coll && uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
         {
             struct uwp_vec_view *iv = CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
@@ -601,7 +624,7 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         fs = raw_fs * g_layout_scale;
         len = wcslen( txt );
         if (len > 0)
-            best = (double)len * fs * cw_factor + 20.0;
+            best = (double)len * fs * cw_factor + (is_sec_hdr ? 44.0 : 20.0);
     }
     else if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
@@ -1538,7 +1561,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                         {
                             struct uwp_element *fch = uwp_elem_from_any( fv->items[fk] );
                             if (!fch) continue;
-                            if (!wcscmp( fch->name, L"SettingsItem" ))
+                            if (!wcscmp( fch->name, L"SettingsItem" ) || !wcscmp( fch->text, L"SettingsButtonName" ))
                             {
                                 if (el->nav_is_settings_visible && wide_pane)
                                     footer_vis_cnt++;
@@ -1643,6 +1666,150 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             int card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
             int card_h = 96;
             int idx = 0;
+
+            if (children->count >= 2)
+            {
+                static const WCHAR *const title_props[] =
+                    { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header",
+                      L"Content", L"CardModel", L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item" };
+                unsigned int k_cnt = children->count, full_cnt = 0;
+                IInspectable *full_src = NULL;
+                struct uwp_element *anc, *slot_el = NULL, *stack_el = NULL, *prev_rep = NULL;
+                struct uwp_element *ch0 = uwp_elem_from_any( children->items[0] );
+                int hop, di;
+
+                if (ch0 && (ch0->data_context || ch0->content))
+                {
+                    for (anc = el->parent, hop = 0; anc && hop < 5 && !full_src; anc = anc->parent, hop++)
+                    {
+                        for (di = 0; di < anc->dp_cnt; di++)
+                        {
+                            if (anc->dp_store[di].value)
+                            {
+                                unsigned int vc = uwp_winrt_vec_count( anc->dp_store[di].value );
+                                if (vc >= k_cnt * 2)
+                                {
+                                    full_src = anc->dp_store[di].value;
+                                    full_cnt = vc;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    for (anc = el->parent, hop = 0; full_src && anc && anc->parent && hop < 8; anc = anc->parent, hop++)
+                    {
+                        if (anc->parent->kind == UWP_KIND_STACK_PANEL && anc->parent->children_coll)
+                        {
+                            slot_el = anc;
+                            stack_el = anc->parent;
+                            break;
+                        }
+                    }
+                    if (full_src && full_cnt >= k_cnt * 2 && slot_el && stack_el)
+                    {
+                        struct uwp_vec_view *stack_kids = CONTAINING_RECORD( stack_el->children_coll, struct uwp_vec_view, IInspectable_iface );
+                        int slot_idx = -1, s;
+                        for (s = 0; s < (int)stack_kids->count; s++)
+                        {
+                            if (uwp_elem_from_any( stack_kids->items[s] ) == slot_el)
+                            {
+                                slot_idx = s;
+                                break;
+                            }
+                        }
+                        for (s = slot_idx - 1; s >= 0 && !prev_rep; s--)
+                        {
+                            struct uwp_element *ps = uwp_elem_from_any( stack_kids->items[s] );
+                            struct uwp_element *stack_q[32];
+                            int qh = 0, qt = 0;
+                            if (!ps || ps->visibility != 0) continue;
+                            stack_q[qt++] = ps;
+                            while (qh < qt && !prev_rep)
+                            {
+                                struct uwp_element *cur = stack_q[qh++];
+                                if (!cur || cur->visibility != 0 || wcsstr( cur->class_name, L"Shimmer" )) continue;
+                                if (wcsstr( cur->class_name, L"ItemsRepeater" ) &&
+                                    !wcsstr( cur->class_name, L"ResponsiveItemsRepeaterList" ))
+                                {
+                                    if (cur->children_coll &&
+                                        CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface )->count >= k_cnt)
+                                        prev_rep = cur;
+                                    continue;
+                                }
+                                if (cur->content && qt < (int)ARRAY_SIZE(stack_q))
+                                {
+                                    struct uwp_element *cch = uwp_elem_from_any( cur->content );
+                                    if (cch && cch != cur) stack_q[qt++] = cch;
+                                }
+                                if (cur->children_coll)
+                                {
+                                    struct uwp_vec_view *cv = CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface );
+                                    unsigned int ci;
+                                    for (ci = 0; ci < cv->count && qt < (int)ARRAY_SIZE(stack_q); ci++)
+                                    {
+                                        struct uwp_element *cch = uwp_elem_from_any( cv->items[ci] );
+                                        if (cch && cch != cur) stack_q[qt++] = cch;
+                                    }
+                                }
+                            }
+                        }
+                        if (prev_rep && prev_rep != el && prev_rep->children_coll)
+                        {
+                            struct uwp_element *prev_ch0 = uwp_elem_from_any(
+                                CONTAINING_RECORD( prev_rep->children_coll, struct uwp_vec_view, IInspectable_iface )->items[0] );
+                            WCHAR cur_title[128] = {0}, prev_title[128] = {0};
+                            IInspectable *vm_cur = (ch0->content && !uwp_elem_from_any( ch0->content )) ? ch0->content : ch0->data_context;
+                            IInspectable *vm_prev = prev_ch0
+                                ? ((prev_ch0->content && !uwp_elem_from_any( prev_ch0->content )) ? prev_ch0->content : prev_ch0->data_context)
+                                : NULL;
+                            if (vm_cur)
+                                uwp_vm_query_string_prop_depth( vm_cur, title_props, ARRAY_SIZE(title_props), cur_title, ARRAY_SIZE(cur_title), 2 );
+                            if (vm_prev)
+                                uwp_vm_query_string_prop_depth( vm_prev, title_props, ARRAY_SIZE(title_props), prev_title, ARRAY_SIZE(prev_title), 2 );
+                            if (cur_title[0] && prev_title[0] && !wcscmp( cur_title, prev_title ))
+                            {
+                                IInspectable *full_items[32];
+                                unsigned int snap_cnt = uwp_winrt_vec_snapshot( full_src, full_items, ARRAY_SIZE(full_items) );
+                                unsigned int si;
+                                if (snap_cnt >= k_cnt * 2)
+                                {
+                                    for (si = 0; si < k_cnt; si++)
+                                    {
+                                        struct uwp_element *ch = uwp_elem_from_any( children->items[si] );
+                                        IInspectable *new_item = full_items[k_cnt + si];
+                                        if (ch && new_item)
+                                        {
+                                            if (ch->data_context) IInspectable_Release( ch->data_context );
+                                            ch->data_context = new_item;
+                                            IInspectable_AddRef( new_item );
+                                            if (ch->content && !uwp_elem_from_any( ch->content ))
+                                            {
+                                                IInspectable_Release( ch->content );
+                                                ch->content = new_item;
+                                                IInspectable_AddRef( new_item );
+                                            }
+                                            ch->text[0] = 0;
+                                            ch->image_src[0] = 0;
+                                            ch->img_loaded = FALSE;
+                                            InterlockedExchange( &ch->img_loading, 0 );
+                                            if (ch->img_pixels)
+                                            {
+                                                free( ch->img_pixels );
+                                                ch->img_pixels = NULL;
+                                                ch->img_w = 0;
+                                                ch->img_h = 0;
+                                            }
+                                        }
+                                    }
+                                }
+                                for (si = 0; si < snap_cnt; si++)
+                                    IInspectable_Release( full_items[si] );
+                            }
+                        }
+                    }
+                }
+            }
+
             for (k = 0; k < children->count; k++)
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );

@@ -475,13 +475,83 @@ void uwp_sync_all_template_presenters( struct uwp_element *impl )
 
 static SRWLOCK g_setval_lock = SRWLOCK_INIT;
 
+static BOOL uwp_dp_values_equal( IInspectable *a, IInspectable *b )
+{
+    boolean ba = FALSE, bb = FALSE;
+    INT32 ia = 0, ib = 0;
+    if (a == b) return TRUE;
+    if (!a || !b) return FALSE;
+    if (uwp_unbox_bool( a, &ba ) && uwp_unbox_bool( b, &bb ))
+        return (ba != 0) == (bb != 0);
+    if (uwp_unbox_int32( a, &ia ) && uwp_unbox_int32( b, &ib ))
+        return ia == ib;
+    return FALSE;
+}
+
+static void uwp_nav_sync_selection_tree( struct uwp_element *el, struct uwp_element *selected_nvi,
+                                         IInspectable *selected_val, int depth )
+{
+    if (!el || depth > 6) return;
+    if (wcsstr( el->class_name, L"NavigationViewItem" ) ||
+        wcsstr( el->default_style_key_name, L"NavigationViewItem" ))
+    {
+        if (selected_nvi)
+        {
+            el->is_checked = (el == selected_nvi) ? 1 : 0;
+        }
+        else if (selected_val)
+        {
+            BOOL match = ((el->content && el->content == selected_val) ||
+                          (el->data_context && el->data_context == selected_val) ||
+                          (el->outer && el->outer == selected_val) ||
+                          &el->IInspectable_iface == selected_val);
+            el->is_checked = match ? 1 : 0;
+        }
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != el && !uwp_is_nav_view( ch ))
+                uwp_nav_sync_selection_tree( ch, selected_nvi, selected_val, depth + 1 );
+        }
+    }
+}
+
+void uwp_nav_select_item( struct uwp_element *nav, struct uwp_element *nvi )
+{
+    IInspectable *item_val;
+    if (!nvi) return;
+    if (!nav)
+    {
+        struct uwp_element *cur;
+        for (cur = nvi->parent; cur; cur = cur->parent)
+        {
+            if (uwp_is_nav_view( cur )) { nav = cur; break; }
+        }
+    }
+    nvi->is_checked = 1;
+    item_val = nvi->data_context ? nvi->data_context
+             : ((nvi->content && !uwp_elem_from_any( nvi->content )) ? nvi->content
+             : (nvi->outer ? nvi->outer : &nvi->IInspectable_iface));
+    if (nav)
+    {
+        uwp_replace_iface( &nav->selected_item, item_val );
+        uwp_nav_sync_selection_tree( nav, nvi, NULL, 0 );
+    }
+    uwp_invalidate_window();
+}
+
 HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     IInspectable *old_val = NULL;
     WCHAR str_val[256] = {0};
     int i;
-    static struct { DWORD tid; struct uwp_element *el; void *dp; } setval_stack[64];
+    static struct { DWORD tid; struct uwp_element *el; void *dp; IInspectable *val; } setval_stack[64];
     static int setval_depth = 0;
     DWORD cur_tid = GetCurrentThreadId();
     BOOL found_existing = FALSE;
@@ -493,7 +563,8 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     AcquireSRWLockExclusive( &g_setval_lock );
     for (si = 0; si < setval_depth; si++)
     {
-        if (setval_stack[si].tid == cur_tid && setval_stack[si].el == impl && setval_stack[si].dp == dp)
+        if (setval_stack[si].tid == cur_tid && setval_stack[si].el == impl &&
+            setval_stack[si].dp == dp && uwp_dp_values_equal( setval_stack[si].val, val ))
         {
             ReleaseSRWLockExclusive( &g_setval_lock );
             return S_OK;
@@ -599,8 +670,10 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             }
             else if (!wcscmp( dpname, L"SelectedItem" ))
             {
-                if (uwp_replace_iface( &impl->selected_item, val ))
-                    uwp_invalidate_window();
+                uwp_replace_iface( &impl->selected_item, val );
+                if (val)
+                    uwp_nav_sync_selection_tree( impl, NULL, val, 0 );
+                uwp_invalidate_window();
             }
         }
         else if (dpname[0] && (wcsstr( impl->class_name, L"NavigationViewItem" ) ||
@@ -614,8 +687,13 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             }
             else if (!wcscmp( dpname, L"IsSelected" ) && val && uwp_unbox_bool( val, &bv ))
             {
-                impl->is_checked = bv ? 1 : 0;
-                uwp_invalidate_window();
+                if (bv)
+                    uwp_nav_select_item( NULL, impl );
+                else
+                {
+                    impl->is_checked = 0;
+                    uwp_invalidate_window();
+                }
             }
         }
         else if (dpname[0] && uwp_is_combobox( impl ))
@@ -679,6 +757,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         setval_stack[setval_depth].tid = cur_tid;
         setval_stack[setval_depth].el = impl;
         setval_stack[setval_depth].dp = dp;
+        setval_stack[setval_depth].val = val;
         setval_depth++;
         pushed_setval = TRUE;
     }
@@ -864,10 +943,24 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
     IInspectable *old_val = NULL;
     void *old_dp = NULL;
     int i;
     if (!impl || !dp) return S_OK;
+    if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0])
+    {
+        if (!wcscmp( dpl->name, L"IsSelected" ))
+        {
+            impl->is_checked = 0;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpl->name, L"SelectedItem" ) && uwp_is_nav_view( impl ))
+        {
+            uwp_replace_iface( &impl->selected_item, NULL );
+            uwp_invalidate_window();
+        }
+    }
     AcquireSRWLockExclusive( &impl->dp_lock );
     for (i = 0; i < impl->dp_cnt; i++)
     {

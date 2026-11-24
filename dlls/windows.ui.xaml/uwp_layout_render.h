@@ -301,6 +301,7 @@ HRESULT WINAPI uwp_nav_get_FooterMenuItems( void *iface, void **out );
 HRESULT WINAPI uwp_nav_get_IsPaneOpen( void *iface, boolean *open );
 HRESULT WINAPI uwp_nav_put_IsPaneOpen( void *iface, boolean open );
 void uwp_nav_set_pane_open( struct uwp_element *nav, BOOL open );
+void uwp_nav_select_item( struct uwp_element *nav, struct uwp_element *nvi );
 BOOL uwp_is_combobox( const struct uwp_element *el );
 BOOL uwp_is_nav_view( const struct uwp_element *el );
 BOOL uwp_is_nav_header( const struct uwp_element *el );

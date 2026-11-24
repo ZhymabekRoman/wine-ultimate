@@ -678,11 +678,22 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
                     if (!wcscmp( entries[d].title, tbuf )) { dup = 1; break; }
                 if (!dup && tbuf[0])
                 {
+                    static const WCHAR *const spot_desc_props[] =
+                        { L"Description", L"ShortDescription", L"Subtitle", L"Content", L"CardModel", L"Product", L"Data" };
+                    IInspectable *svm = (cur->content && !uwp_elem_from_any( cur->content )) ? cur->content : cur->data_context;
                     lstrcpynW( entries[entry_cnt].title, tbuf, ARRAY_SIZE(entries[0].title) );
-                    if (nl && nl[1])
-                        lstrcpynW( entries[entry_cnt].sub, nl + 1, ARRAY_SIZE(entries[0].sub) );
-                    else
-                        entries[entry_cnt].sub[0] = 0;
+                    entries[entry_cnt].sub[0] = 0;
+                    if (svm)
+                        uwp_vm_query_string_prop_depth( svm, spot_desc_props, ARRAY_SIZE(spot_desc_props),
+                                                        entries[entry_cnt].sub, ARRAY_SIZE(entries[0].sub), 2 );
+                    if (!entries[entry_cnt].sub[0] && nl && nl[1])
+                    {
+                        const WCHAR *tab = wcschr( nl + 1, '\t' );
+                        size_t slen = tab ? (size_t)(tab - (nl + 1)) : wcslen( nl + 1 );
+                        if (slen >= ARRAY_SIZE(entries[0].sub)) slen = ARRAY_SIZE(entries[0].sub) - 1;
+                        memcpy( entries[entry_cnt].sub, nl + 1, slen * sizeof(WCHAR) );
+                        entries[entry_cnt].sub[slen] = 0;
+                    }
                     lstrcpynW( entries[entry_cnt].badge, entry_cnt == 0 ? L"FEATURED" : L"TRENDING", ARRAY_SIZE(entries[0].badge) );
                     if (cur->image_src[0]) uwp_load_image_asset( cur );
                     entries[entry_cnt].img_el = cur;
@@ -1307,10 +1318,43 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
         RECT trc = el->bounds;
         BOOL is_result;
         double eff_fs = el->font_size;
+        int eff_fw = el->font_weight;
+        BOOL has_anc_fg = FALSE;
+        COLORREF anc_fg = 0;
+        BOOL is_sec_hdr = (!wcscmp( el->name, L"SectionTitle" ));
+        struct uwp_element *anc_btn = NULL;
+        struct uwp_element *anc;
+        int hop;
         int fh;
         COLORREF tfg;
         if (!wcscmp( draw_txt, L"Home" ) && trc.left >= 48 && trc.top < 450)
             return TRUE;
+        for (anc = el->parent, hop = 0; anc && hop < 3; anc = anc->parent, hop++)
+        {
+            if (anc->kind == UWP_KIND_BUTTON || anc->kind == UWP_KIND_TOGGLE_BUTTON || anc->kind == UWP_KIND_CONTENT_CONTROL)
+            {
+                if (!el->has_font_size && anc->has_font_size && anc->font_size > 0.0)
+                    eff_fs = anc->font_size;
+                if (eff_fw <= 0 && anc->font_weight > 0)
+                    eff_fw = anc->font_weight;
+                if (!el->has_fg && anc->has_fg && anc->fg_alpha > 0)
+                {
+                    anc_fg = blend_argb_over( anc->fg_argb, surface_bg );
+                    has_anc_fg = TRUE;
+                }
+                if (!wcscmp( anc->name, L"ShowAllButton" ) || !wcscmp( anc->name, L"SectionViewAllButton" ))
+                {
+                    is_sec_hdr = TRUE;
+                    anc_btn = anc;
+                }
+                break;
+            }
+        }
+        if (is_sec_hdr)
+        {
+            if (eff_fs < 18.0) eff_fs = 18.0;
+            if (eff_fw < FW_SEMIBOLD) eff_fw = FW_SEMIBOLD;
+        }
         if (is_rich && el->inlines_coll)
         {
             struct uwp_vec_view *iv = CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
@@ -1326,10 +1370,15 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
         fh = is_result
             ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
             : max( (int)(11 * g_layout_scale + 0.5f), min( (int)(96 * g_layout_scale + 0.5f), (int)(eff_fs * g_layout_scale + 0.5f) ) );
-        tfg = (el->has_fg && el->fg_alpha > 0)
-            ? blend_argb_over( el->fg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
-                                       uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
+        if (is_sec_hdr)
+            tfg = uwp_is_light_theme( el ) ? RGB( 22, 22, 26 ) : RGB( 250, 250, 252 );
+        else if (el->has_fg && el->fg_alpha > 0)
+            tfg = blend_argb_over( el->fg_argb, surface_bg );
+        else if (has_anc_fg)
+            tfg = anc_fg;
+        else
+            tfg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                           uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
         if (wcsstr( el->class_name, L"MenuBarItem" ) &&
             (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
         {
@@ -1341,7 +1390,7 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
         if (trc.right - trc.left > 20)
             InflateRect( &trc, -4, 0 );
         {
-            int fw = (el->font_weight > 0) ? el->font_weight : (is_result ? FW_SEMIBOLD : FW_NORMAL);
+            int fw = (eff_fw > 0) ? eff_fw : (is_result ? FW_SEMIBOLD : FW_NORMAL);
             BOOL in_horiz_stack = (el->parent && el->parent->kind == UWP_KIND_STACK_PANEL && el->parent->orientation == 1);
             UINT hflag;
             UINT dt;
@@ -1368,12 +1417,65 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                 dt = hflag | DT_VCENTER | DT_SINGLELINE;
             }
 
+            if (is_sec_hdr && anc_btn && anc_btn->is_enabled && (trc.right - trc.left) > 40)
+            {
+                int chev_x = min( (int)trc.right - 20, (int)trc.left + (int)(wcslen( draw_txt ) * fh * 0.50f) + 6 );
+                RECT crc = { chev_x, trc.top + 2, chev_x + 18, trc.bottom };
+                RECT lrc = { trc.left, trc.top, trc.right - 18, trc.bottom };
+                COLORREF cfg = anc_btn->is_hovered ? tfg : (uwp_is_light_theme( el ) ? RGB( 96, 96, 106 ) : RGB( 185, 185, 198 ));
+                WCHAR ff_buf[64], cff_buf[64];
+                xaml_gpu_push_text_font( ctx, draw_txt, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
+                                         fh, fw, dt, &lrc, NULL, tfg, 1.0f );
+                uwp_resolve_font_family( L"Segoe MDL2 Assets", cff_buf, ARRAY_SIZE(cff_buf) );
+                xaml_gpu_push_text_font( ctx, L"\xE76C", cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                         max( 11, (int)(11 * g_layout_scale + 0.5f) ), FW_NORMAL,
+                                         DT_CENTER | DT_VCENTER | DT_SINGLELINE, &crc, NULL, cfg, 1.0f );
+            }
+            else
             {
                 WCHAR ff_buf[64];
                 xaml_gpu_push_text_font( ctx, draw_txt, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
                                          fh, fw, dt, &trc, NULL, tfg, 1.0f );
             }
         }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_nav_tree_has_checked_item( const struct uwp_element *el, int depth )
+{
+    if (!el || depth > 5) return FALSE;
+    if ((wcsstr( el->class_name, L"NavigationViewItem" ) ||
+         wcsstr( el->default_style_key_name, L"NavigationViewItem" )) &&
+        el->is_checked == 1)
+        return TRUE;
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != el && !uwp_is_nav_view( ch ) && uwp_nav_tree_has_checked_item( ch, depth + 1 ))
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_nav_is_first_selectable_item( const struct uwp_element *el )
+{
+    struct uwp_vec_view *v;
+    unsigned int k;
+    if (!el || !el->parent || wcscmp( el->parent->name, L"MenuItemsHost" ) || !el->parent->children_coll)
+        return FALSE;
+    v = CONTAINING_RECORD( el->parent->children_coll, struct uwp_vec_view, IInspectable_iface );
+    for (k = 0; k < v->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+        if (!ch || ch->visibility != 0 || uwp_is_nav_header( ch ) || uwp_is_nav_separator( ch ))
+            continue;
+        return ch == el;
     }
     return FALSE;
 }
@@ -1428,10 +1530,11 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
     {
         WCHAR glyph[16] = {0};
         WCHAR gfont[64] = {0};
+        BOOL any_checked = (nav && uwp_is_nav_view( nav )) ? uwp_nav_tree_has_checked_item( nav, 0 ) : FALSE;
         BOOL is_sel = (el->is_checked == 1);
         COLORREF accent_cr = light ? RGB( 0, 103, 192 ) : RGB( 96, 205, 255 );
 
-        if (!is_sel && nav && uwp_is_nav_view( nav ) && nav->selected_item)
+        if (!is_sel && !any_checked && nav && uwp_is_nav_view( nav ) && nav->selected_item)
         {
             if ((el->content && nav->selected_item == el->content) ||
                 (el->data_context && nav->selected_item == el->data_context) ||
@@ -1439,8 +1542,7 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
                 nav->selected_item == &el->IInspectable_iface)
                 is_sel = TRUE;
         }
-        if (!is_sel && !is_expanded && !wcscmp( label, L"Home" ) && !wcscmp( el->parent->name, L"MenuItemsHost" ) &&
-            (!nav || !nav->selected_item))
+        if (!is_sel && !any_checked && (!nav || !nav->selected_item) && uwp_nav_is_first_selectable_item( el ))
             is_sel = TRUE;
 
         if (el->nav_icon)
@@ -1677,36 +1779,8 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
             (!wcscmp( el->parent->name, L"MenuItemsHost" ) || !wcscmp( el->parent->name, L"FooterMenuItemsHost" ));
         if (is_nav_rail)
         {
-            BOOL is_sel = (el->is_checked == 1) ||
-                (!wcscmp( label, L"Home" ) && !wcscmp( el->parent->name, L"MenuItemsHost" ));
-            const WCHAR *glyph = L"\x25A6";
-            RECT irc, lrc;
-            if (!wcscmp( label, L"Home" )) glyph = L"\x2302";
-            else if (!wcscmp( label, L"Apps" )) glyph = L"\x25A6";
-            else if (!wcscmp( label, L"Gaming" )) glyph = L"\x2726";
-            else if (!wcscmp( label, L"Themes" )) glyph = L"\x25C8";
-            else if (!wcscmp( label, L"Library" )) glyph = L"\x25A4";
-            else if (!wcscmp( label, L"Help" )) glyph = L"?";
-
-            InflateRect( &brc, -2, -2 );
-            if (is_sel || el->is_hovered || el->is_pressed)
-            {
-                COLORREF nbg = el->is_pressed ? RGB( 54, 54, 58 ) : RGB( 45, 45, 48 );
-                xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
-                                    6.0f, cr_to_argb( nbg ), 0, 0.0f, 1.0f );
-            }
-            if (is_sel)
-            {
-                int ym = (brc.top + brc.bottom) / 2;
-                xaml_gpu_push_rect( (float)brc.left, (float)(ym - 10), (float)(brc.left + 3), (float)(ym + 10), NULL,
-                                    1.5f, cr_to_argb( RGB( 96, 205, 255 ) ), 0, 0.0f, 1.0f );
-            }
-            SetRect( &irc, brc.left, brc.top + 4, brc.right, brc.top + 28 );
-            SetRect( &lrc, brc.left, brc.top + 28, brc.right, brc.bottom - 3 );
-            xaml_gpu_push_text( ctx, glyph, 15, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                                &irc, NULL, is_sel ? RGB( 96, 205, 255 ) : RGB( 200, 200, 205 ), 1.0f );
-            xaml_gpu_push_text( ctx, label, 10, is_sel ? FW_SEMIBOLD : FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                                &lrc, NULL, is_sel ? RGB( 255, 255, 255 ) : RGB( 185, 185, 190 ), 1.0f );
+            paint_gpu_nav_item( ctx, el );
+            return;
         }
         else
         {
@@ -1721,67 +1795,177 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
     }
 }
 
+static IInspectable *uwp_vm_unwrap_one( IInspectable *vm, const WCHAR *const *props, unsigned int count )
+{
+    HSTRING hcls = NULL;
+    void *cpp = NULL;
+    IInspectable *nv = NULL;
+    unsigned int ni;
+
+    if (!vm) return NULL;
+    if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
+    {
+        const WCHAR *cls = WindowsGetStringRawBuffer( hcls, NULL );
+        for (ni = 0; ni < count && !nv; ni++)
+        {
+            if (cls && cls[0] && uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, props[ni], vm, &nv ) && nv)
+                break;
+        }
+        WindowsDeleteString( hcls );
+    }
+    if (!nv && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICustomPropertyProvider_UWP, &cpp )) && cpp)
+    {
+        HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
+        HRESULT (WINAPI *get_type)(void *, TypeName *) = (void *)(*(void ***)cpp)[9];
+        if (get_type)
+        {
+            TypeName tn = {0};
+            if (SUCCEEDED(get_type( cpp, &tn )) && tn.Name)
+            {
+                WCHAR tcls[256] = {0}, *comma;
+                const WCHAR *raw = WindowsGetStringRawBuffer( tn.Name, NULL );
+                if (raw) lstrcpynW( tcls, raw, ARRAY_SIZE(tcls) );
+                comma = wcschr( tcls, ',' );
+                if (comma) *comma = 0;
+                for (ni = 0; ni < count && !nv; ni++)
+                {
+                    if (tcls[0] && uwp_get_custom_xaml_member( uwp_get_app_outer(), tcls, props[ni], vm, &nv ) && nv)
+                        break;
+                }
+                WindowsDeleteString( tn.Name );
+            }
+        }
+        for (ni = 0; ni < count && !nv; ni++)
+        {
+            HSTRING hp = NULL;
+            void *cp = NULL;
+            if (get_prop && SUCCEEDED(WindowsCreateString( props[ni], wcslen(props[ni]), &hp )) && hp)
+            {
+                if (SUCCEEDED(get_prop( cpp, hp, &cp )) && cp)
+                {
+                    HRESULT (WINAPI *get_val)(void *, IInspectable *, IInspectable **) = (void *)(*(void ***)cp)[8];
+                    if (get_val) get_val( cp, vm, &nv );
+                    IUnknown_Release( (IUnknown *)cp );
+                }
+                WindowsDeleteString( hp );
+            }
+        }
+        IUnknown_Release( (IUnknown *)cpp );
+    }
+    return nv;
+}
+
 static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     if (!el->text[0])
     {
-        static const WCHAR *const title_props[] = { L"Title", L"ProductTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
-        static const WCHAR *const sub_props[] = { L"DisplayPrice", L"PriceText", L"FormattedPrice", L"Price", L"Category", L"PublisherName", L"Publisher", L"Subtitle", L"Description" };
-        static const WCHAR *const img_props[] = { L"Images", L"TileImages", L"ProductImages", L"Icons", L"ImageUrl", L"IconUrl", L"IconUri", L"ImageUri", L"ProductImageUrl", L"HeroImageUrl", L"TileImageUrl", L"LogoUrl", L"ThumbnailUrl", L"BoxArtUrl", L"PosterUrl", L"ImageLinkUri", L"TileImage", L"ProductImage", L"IconImage", L"LogoImage", L"BackgroundImage", L"Icon", L"Image", L"ImageSource", L"Uri" };
-        static const WCHAR *const nested_props[] = { L"Content", L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
-        WCHAR title_buf[128] = {0}, sub_buf[128] = {0}, img_buf[512] = {0};
-        IInspectable *vm = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
-        IInspectable *target_vm = vm;
-        IInspectable *nested_vm = NULL;
-        HSTRING hcls = NULL;
+        static const WCHAR *const title_props[] =
+            { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
+        static const WCHAR *const cat_props[] =
+            { L"FirstCategoryText", L"SubTitle", L"Category", L"SubcategoryName", L"Categories", L"AppExtCategoryNames", L"Subtitle", L"ProductFamilyName", L"ProductType" };
+        static const WCHAR *const rating_props[] =
+            { L"AverageRating", L"StarRating", L"AverageRatingText", L"FormattedAverage", L"AverageRatingScore", L"Rating" };
+        static const WCHAR *const price_props[] =
+            { L"DisplayPrice", L"PriceOrStatus", L"ProductStatusOrPriceDisplayString", L"PreTaxDisplayPrice",
+              L"BadgeText", L"DisplayMSRP", L"FormattedPrice", L"PriceText", L"SalePrice", L"NarratorPrice",
+              L"PriceInfo", L"SkuSummaryList", L"SkuSummaries" };
+        static const WCHAR *const fallback_sub_props[] =
+            { L"PublisherName", L"Publisher", L"Description" };
+        static const WCHAR *const img_props[] =
+            { L"Images", L"TileImages", L"ProductImages", L"Icons", L"ImageUrl", L"IconUrl", L"IconUri", L"ImageUri",
+              L"ProductImageUrl", L"HeroImageUrl", L"TileImageUrl", L"LogoUrl", L"ThumbnailUrl", L"BoxArtUrl",
+              L"PosterUrl", L"ImageLinkUri", L"TileImage", L"ProductImage", L"IconImage", L"LogoImage",
+              L"BackgroundImage", L"Icon", L"Image", L"ImageSource", L"Uri" };
+        static const WCHAR *const nested_props[] =
+            { L"Content", L"CardModel", L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
+        WCHAR title_buf[128] = {0}, cat_buf[80] = {0}, rating_buf[24] = {0}, price_buf[48] = {0}, img_buf[512] = {0};
+        IInspectable *vm0 = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
+        IInspectable *vm1 = uwp_vm_unwrap_one( vm0, nested_props, ARRAY_SIZE(nested_props) );
+        IInspectable *vm2 = (vm1 && vm1 != vm0) ? uwp_vm_unwrap_one( vm1, nested_props, ARRAY_SIZE(nested_props) ) : NULL;
+        IInspectable *vms[3] = { vm1 ? vm1 : vm0, vm2, vm0 };
+        unsigned int vi;
 
-        if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
-        {
-            const WCHAR *cls = WindowsGetStringRawBuffer( hcls, NULL );
-            unsigned int ni;
-            for (ni = 0; ni < ARRAY_SIZE(nested_props) && !nested_vm; ni++)
-            {
-                IInspectable *nv = NULL;
-                if (cls && cls[0] && uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, nested_props[ni], vm, &nv ) && nv)
-                    nested_vm = nv;
-            }
-            WindowsDeleteString( hcls );
-        }
-        if (!uwp_vm_query_string_prop( vm, title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf) ) && nested_vm)
-        {
-            target_vm = nested_vm;
-            uwp_vm_query_string_prop( target_vm, title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf) );
-        }
+        for (vi = 0; vi < ARRAY_SIZE(vms) && !title_buf[0]; vi++)
+            if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf), 2 );
+
         if (title_buf[0])
         {
-            if (!uwp_vm_query_string_prop( target_vm, sub_props, ARRAY_SIZE(sub_props), sub_buf, ARRAY_SIZE(sub_buf) ) &&
-                nested_vm && target_vm != nested_vm)
-                uwp_vm_query_string_prop( nested_vm, sub_props, ARRAY_SIZE(sub_props), sub_buf, ARRAY_SIZE(sub_buf) );
-            if (sub_buf[0])
-                swprintf( el->text, ARRAY_SIZE(el->text), L"%.120s\n%.120s", title_buf, sub_buf );
+            for (vi = 0; vi < ARRAY_SIZE(vms) && !cat_buf[0]; vi++)
+                if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], cat_props, ARRAY_SIZE(cat_props), cat_buf, ARRAY_SIZE(cat_buf), 2 );
+            for (vi = 0; vi < ARRAY_SIZE(vms) && !rating_buf[0]; vi++)
+                if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], rating_props, ARRAY_SIZE(rating_props), rating_buf, ARRAY_SIZE(rating_buf), 2 );
+            if (rating_buf[0])
+            {
+                double rv = wcstod( rating_buf, NULL );
+                if (rv >= 1.0 && rv <= 5.0)
+                    swprintf( rating_buf, ARRAY_SIZE(rating_buf), L"%.1f", rv );
+                else
+                    rating_buf[0] = 0;
+            }
+            for (vi = 0; vi < ARRAY_SIZE(vms) && !price_buf[0]; vi++)
+                if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], price_props, ARRAY_SIZE(price_props), price_buf, ARRAY_SIZE(price_buf), 3 );
+            if (!price_buf[0] && (rating_buf[0] || cat_buf[0]))
+                lstrcpyW( price_buf, L"Free" );
+            if (!cat_buf[0] && !rating_buf[0] && !price_buf[0])
+            {
+                for (vi = 0; vi < ARRAY_SIZE(vms) && !cat_buf[0]; vi++)
+                    if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], fallback_sub_props, ARRAY_SIZE(fallback_sub_props), cat_buf, ARRAY_SIZE(cat_buf), 1 );
+            }
+            if (cat_buf[0] || rating_buf[0] || price_buf[0])
+                swprintf( el->text, ARRAY_SIZE(el->text), L"%.110s\n%.60s\t%.16s\t%.32s", title_buf, cat_buf, rating_buf, price_buf );
             else
                 lstrcpynW( el->text, title_buf, ARRAY_SIZE(el->text) );
+
             if (!el->image_src[0])
             {
-                if (!uwp_vm_query_string_prop_depth( target_vm, img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
-                    nested_vm && target_vm != nested_vm)
-                    uwp_vm_query_string_prop_depth( nested_vm, img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 );
+                for (vi = 0; vi < ARRAY_SIZE(vms) && !img_buf[0]; vi++)
+                    if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 );
                 if (img_buf[0])
                     lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
             }
         }
-        if (nested_vm) IInspectable_Release( nested_vm );
+        if (vm2) IInspectable_Release( vm2 );
+        if (vm1) IInspectable_Release( vm1 );
     }
     if (el->text[0])
     {
-        RECT brc = el->bounds, trc, src;
+        RECT brc = el->bounds, trc;
         int text_left;
+        BOOL light = uwp_is_light_theme( el );
         const WCHAR *nl = wcschr( el->text, '\n' );
-        WCHAR tline[128] = {0};
+        WCHAR tline[128] = {0}, cat_str[80] = {0}, rating_str[24] = {0}, price_str[48] = {0};
         size_t tlen = nl ? (size_t)(nl - el->text) : wcslen( el->text );
         if (tlen >= ARRAY_SIZE(tline)) tlen = ARRAY_SIZE(tline) - 1;
         memcpy( tline, el->text, tlen * sizeof(WCHAR) );
         tline[tlen] = 0;
+        if (nl)
+        {
+            const WCHAR *s1 = nl + 1;
+            const WCHAR *tab1 = wcschr( s1, '\t' );
+            if (tab1)
+            {
+                const WCHAR *s2 = tab1 + 1;
+                const WCHAR *tab2 = wcschr( s2, '\t' );
+                size_t l1 = min( (size_t)(tab1 - s1), ARRAY_SIZE(cat_str) - 1 );
+                memcpy( cat_str, s1, l1 * sizeof(WCHAR) );
+                cat_str[l1] = 0;
+                if (tab2)
+                {
+                    size_t l2 = min( (size_t)(tab2 - s2), ARRAY_SIZE(rating_str) - 1 );
+                    memcpy( rating_str, s2, l2 * sizeof(WCHAR) );
+                    rating_str[l2] = 0;
+                    lstrcpynW( price_str, tab2 + 1, ARRAY_SIZE(price_str) );
+                }
+                else
+                {
+                    lstrcpynW( rating_str, s2, ARRAY_SIZE(rating_str) );
+                }
+            }
+            else
+            {
+                lstrcpynW( cat_str, s1, ARRAY_SIZE(cat_str) );
+            }
+        }
         if (!el->image_src[0] && el->data_context)
         {
             static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"Image", L"Images", L"Source" };
@@ -1792,12 +1976,11 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
         }
         InflateRect( &brc, -2, -2 );
         {
-            BOOL light = uwp_is_light_theme( el );
-            COLORREF cbg = light ? (el->is_hovered ? RGB( 242, 242, 242 ) : RGB( 255, 255, 255 ))
-                                 : (el->is_hovered ? RGB( 52, 52, 52 ) : RGB( 42, 42, 42 ));
-            COLORREF cbd = light ? RGB( 224, 224, 224 ) : RGB( 68, 68, 68 );
+            COLORREF cbg = light ? (el->is_hovered ? RGB( 246, 246, 248 ) : RGB( 255, 255, 255 ))
+                                 : (el->is_hovered ? RGB( 50, 50, 55 ) : RGB( 39, 39, 43 ));
+            COLORREF cbd = light ? RGB( 224, 224, 228 ) : RGB( 60, 60, 66 );
             xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
-                                6.0f, cr_to_argb( cbg ), cr_to_argb( cbd ), 1.0f, 1.0f );
+                                8.0f, cr_to_argb( cbg ), cr_to_argb( cbd ), 1.0f, 1.0f );
         }
         text_left = brc.left + 14;
         if (el->image_src[0])
@@ -1808,32 +1991,82 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
             {
                 RECT irc = brc;
                 InflateRect( &irc, -2, -2 );
-                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h,
+                                                0, &irc, NULL, &brc, 8.0f, 1.0f );
                 tline[0] = 0;
             }
             else
             {
                 int bh = brc.bottom - brc.top;
-                int isz = min( 56, max( 32, bh - 20 ) );
+                int isz = min( 64, max( 36, bh - 24 ) );
                 int iy = brc.top + (bh - isz) / 2;
                 RECT irc = { brc.left + 12, iy, brc.left + 12 + isz, iy + isz };
-                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h,
+                                                0, &irc, NULL, &brc, 8.0f, 1.0f );
                 text_left = irc.right + 12;
             }
         }
         if (tline[0])
         {
-            BOOL light = uwp_is_light_theme( el );
-            SetRect( &trc, text_left, brc.top + 14, brc.right - 14, brc.top + 48 );
-            xaml_gpu_push_text( ctx, tline, 14, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                &trc, NULL, light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), 1.0f );
+            COLORREF tfg = light ? RGB( 22, 22, 26 ) : RGB( 250, 250, 252 );
+            if (wcslen( tline ) > 22)
+            {
+                SetRect( &trc, text_left, brc.top + 10, brc.right - 12, brc.top + 48 );
+                xaml_gpu_push_text( ctx, tline, 13, FW_SEMIBOLD, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS,
+                                    &trc, &brc, tfg, 1.0f );
+            }
+            else
+            {
+                SetRect( &trc, text_left, brc.top + 12, brc.right - 12, brc.top + 40 );
+                xaml_gpu_push_text( ctx, tline, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &trc, &brc, tfg, 1.0f );
+            }
         }
         if (nl)
         {
-            BOOL light = uwp_is_light_theme( el );
-            SetRect( &src, text_left, brc.top + 52, brc.right - 14, brc.bottom - 12 );
-            xaml_gpu_push_text( ctx, nl + 1, 12, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                &src, NULL, light ? RGB( 92, 92, 92 ) : RGB( 180, 180, 180 ), 1.0f );
+            int meta_right = brc.right - 12;
+            int cur_mx = text_left;
+            COLORREF sfg = light ? RGB( 92, 92, 100 ) : RGB( 176, 176, 184 );
+
+            if (price_str[0])
+            {
+                int pw = max( 42, min( 84, (int)wcslen( price_str ) * 7 + 16 ) );
+                RECT prc = { brc.right - 10 - pw, brc.bottom - 30, brc.right - 10, brc.bottom - 10 };
+                COLORREF pbg = light ? RGB( 236, 236, 240 ) : RGB( 54, 54, 60 );
+                COLORREF pbd = light ? RGB( 216, 216, 222 ) : RGB( 72, 72, 80 );
+                COLORREF pfg = light ? RGB( 32, 32, 36 ) : RGB( 238, 238, 242 );
+                xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom, &brc,
+                                    4.0f, cr_to_argb( pbg ), cr_to_argb( pbd ), 1.0f, 1.0f );
+                xaml_gpu_push_text( ctx, price_str, 11, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &prc, &brc, pfg, 1.0f );
+                meta_right = prc.left - 6;
+            }
+            if (rating_str[0] && cur_mx + 34 <= meta_right)
+            {
+                RECT rrc = { cur_mx, brc.bottom - 31, cur_mx + 22, brc.bottom - 9 };
+                RECT strc = { cur_mx + 20, brc.bottom - 31, cur_mx + 34, brc.bottom - 9 };
+                COLORREF rfg = light ? RGB( 72, 72, 80 ) : RGB( 205, 205, 212 );
+                COLORREF star_cr = light ? RGB( 196, 132, 0 ) : RGB( 255, 200, 61 );
+                WCHAR sff[64] = {0};
+                xaml_gpu_push_text( ctx, rating_str, 11, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                                    &rrc, &brc, rfg, 1.0f );
+                uwp_resolve_font_family( L"Segoe MDL2 Assets", sff, ARRAY_SIZE(sff) );
+                xaml_gpu_push_text_font( ctx, L"\xE735", sff[0] ? sff : L"Segoe MDL2 Assets",
+                                         10, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                         &strc, &brc, star_cr, 1.0f );
+                cur_mx += 36;
+            }
+            if (cat_str[0] && cur_mx + 20 < meta_right)
+            {
+                WCHAR cat_disp[96] = {0};
+                RECT src = { cur_mx, brc.bottom - 31, meta_right, brc.bottom - 9 };
+                if (rating_str[0])
+                    swprintf( cat_disp, ARRAY_SIZE(cat_disp), L"\x00B7 %.80s", cat_str );
+                else
+                    lstrcpynW( cat_disp, cat_str, ARRAY_SIZE(cat_disp) );
+                xaml_gpu_push_text( ctx, cat_disp, 11, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &src, &brc, sfg, 1.0f );
+            }
         }
     }
 }

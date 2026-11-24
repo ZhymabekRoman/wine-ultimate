@@ -25,6 +25,7 @@
 #include "wine/exception.h"
 #include "private.h"
 #include "uwp_private.h"
+#include "dp_vsm_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -350,12 +351,75 @@ BOOL uwp_inspectable_to_string( IInspectable *obj, WCHAR *buf, int buf_cch )
     return buf[0] != 0;
 }
 
-static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth );
+static void uwp_vm_extract_nested_url( IInspectable *pval, const WCHAR *const *props, unsigned int count,
+                                       WCHAR *out, size_t out_len, int depth );
 
-static void uwp_vm_extract_val_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth )
+static BOOL uwp_vm_extract_hstring_vec_first( IInspectable *pval, WCHAR *out, size_t out_len )
 {
-    if (!uwp_unbox_string( pval, out, out_len ))
-        uwp_vm_extract_nested_url( pval, out, out_len, depth );
+    static const GUID IID_IVector_HSTRING_UWP =
+        { 0x98b9acc1, 0x4b56, 0x532e, { 0xac, 0x73, 0x03, 0xd5, 0x29, 0x1c, 0xca, 0x90 } };
+    static const GUID IID_IVectorView_HSTRING_UWP =
+        { 0x2f13c006, 0xa03a, 0x5f69, { 0xb0, 0x90, 0x75, 0xa4, 0x3e, 0x33, 0x42, 0x3e } };
+    static const GUID IID_IIterable_HSTRING_UWP =
+        { 0xe2fcc7c1, 0x3bfc, 0x5a0b, { 0xb2, 0xb0, 0x72, 0xe7, 0x69, 0xd1, 0xcb, 0x7e } };
+    void *svec = NULL;
+    if (!pval || !out || !out_len) return FALSE;
+    if (SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVector_HSTRING_UWP, &svec )) ||
+        SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVectorView_HSTRING_UWP, &svec )))
+    {
+        HRESULT (WINAPI *get_at)(void *, unsigned int, HSTRING *) = (void *)(*(void ***)svec)[6];
+        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)svec)[7];
+        unsigned int sz = 0;
+        HSTRING hs = NULL;
+        if (get_sz && get_at && SUCCEEDED(get_sz( svec, &sz )) && sz > 0 &&
+            SUCCEEDED(get_at( svec, 0, &hs )) && hs)
+        {
+            const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
+            if (raw && raw[0]) lstrcpynW( out, raw, (int)out_len );
+            WindowsDeleteString( hs );
+        }
+        IUnknown_Release( (IUnknown *)svec );
+        if (out[0]) return TRUE;
+    }
+    if (SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IIterable_HSTRING_UWP, &svec )) && svec)
+    {
+        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)svec)[6];
+        void *iter = NULL;
+        if (first && SUCCEEDED(first( svec, &iter )) && iter)
+        {
+            HRESULT (WINAPI *get_cur)(void *, HSTRING *) = (void *)(*(void ***)iter)[6];
+            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
+            boolean has = FALSE;
+            HSTRING hs = NULL;
+            if (has_cur && SUCCEEDED(has_cur( iter, &has )) && has &&
+                get_cur && SUCCEEDED(get_cur( iter, &hs )) && hs)
+            {
+                const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
+                if (raw && raw[0]) lstrcpynW( out, raw, (int)out_len );
+                WindowsDeleteString( hs );
+            }
+            IUnknown_Release( (IUnknown *)iter );
+        }
+        IUnknown_Release( (IUnknown *)svec );
+        if (out[0]) return TRUE;
+    }
+    return FALSE;
+}
+
+static void uwp_vm_extract_val_url( IInspectable *pval, const WCHAR *const *props, unsigned int count,
+                                    WCHAR *out, size_t out_len, int depth )
+{
+    double dv = 0.0;
+    if (uwp_unbox_string( pval, out, out_len ))
+        return;
+    if (uwp_unbox_double( pval, &dv ) && dv > 0.0 && dv < 100000.0)
+    {
+        swprintf( out, out_len, L"%.1f", dv );
+        return;
+    }
+    if (uwp_vm_extract_hstring_vec_first( pval, out, out_len ))
+        return;
+    uwp_vm_extract_nested_url( pval, props, count, out, out_len, depth );
 }
 
 static void uwp_vm_probe_xaml_members( IInspectable *vm, const WCHAR *cls,
@@ -369,7 +433,7 @@ static void uwp_vm_probe_xaml_members( IInspectable *vm, const WCHAR *cls,
         IInspectable *pval = NULL;
         if (uwp_get_custom_xaml_member( uwp_get_app_outer(), cls, props[pi], vm, &pval ) && pval)
         {
-            uwp_vm_extract_val_url( pval, out, out_len, depth );
+            uwp_vm_extract_val_url( pval, props, count, out, out_len, depth );
             IInspectable_Release( pval );
         }
     }
@@ -421,7 +485,7 @@ BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props
                     IInspectable *pval = NULL;
                     if (get_val && SUCCEEDED(get_val( cp, vm, &pval )) && pval)
                     {
-                        uwp_vm_extract_val_url( pval, out, out_len, depth );
+                        uwp_vm_extract_val_url( pval, props, count, out, out_len, depth );
                         IInspectable_Release( pval );
                     }
                     IUnknown_Release( (IUnknown *)cp );
@@ -434,7 +498,8 @@ BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props
     return out[0] != 0;
 }
 
-static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t out_len, int depth )
+static void uwp_vm_extract_nested_url( IInspectable *pval, const WCHAR *const *props, unsigned int count,
+                                       WCHAR *out, size_t out_len, int depth )
 {
     static const WCHAR *const nested_url_props[] =
         { L"Url", L"Uri", L"ImageUrl", L"ImageUri", L"Source", L"AbsoluteUri", L"RawUri", L"Location", L"Path",
@@ -457,12 +522,22 @@ static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t ou
     for (i = 0; i < cnt; i++)
     {
         if (!out[0] && !uwp_unbox_string( items[i], out, out_len ))
-            uwp_vm_query_string_prop_depth( items[i], nested_url_props, ARRAY_SIZE(nested_url_props),
-                                            out, out_len, depth - 1 );
+        {
+            if (props && count > 0)
+                uwp_vm_query_string_prop_depth( items[i], props, count, out, out_len, depth - 1 );
+            if (!out[0] && props != nested_url_props)
+                uwp_vm_query_string_prop_depth( items[i], nested_url_props, ARRAY_SIZE(nested_url_props),
+                                                out, out_len, depth - 1 );
+        }
         IInspectable_Release( items[i] );
     }
-    if (!out[0])
-        uwp_vm_query_string_prop_depth( pval, nested_url_props, ARRAY_SIZE(nested_url_props), out, out_len, depth - 1 );
+    if (!out[0] && cnt == 0)
+    {
+        if (props && count > 0)
+            uwp_vm_query_string_prop_depth( pval, props, count, out, out_len, depth - 1 );
+        if (!out[0] && props != nested_url_props)
+            uwp_vm_query_string_prop_depth( pval, nested_url_props, ARRAY_SIZE(nested_url_props), out, out_len, depth - 1 );
+    }
 }
 
 BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
