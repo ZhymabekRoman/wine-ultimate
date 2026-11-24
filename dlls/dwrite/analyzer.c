@@ -310,11 +310,18 @@ dwrite_fallback_map[] =
     { NULL, "1C00-1C4F",              NULL, { L"Noto Sans Lepcha", NULL } },
     { NULL, "1C50-1C7F",              NULL, { L"Noto Sans Ol Chiki", NULL } },
 
+    /* Arrows - 2190-21FF */
+    { NULL, "2190-21FF",              NULL, { L"Noto Sans Symbols", NULL } },
+
     /* Miscellaneous Symbols - 2600-26FF */
-    { NULL, "2600-26FF",              NULL, { L"Noto Sans Symbols2", L"Noto Sans Symbols", NULL } },
+    { NULL, "2600-26FF",              NULL, { L"Noto Sans Symbols2", L"Noto Sans Symbols 2", L"Noto Sans Symbols", NULL } },
 
     /* Dingbats - 2700-27BF */
     { NULL, "2700-27BF",              NULL, { L"Noto Sans Symbols2", L"Noto Sans Symbols 2", NULL } },
+
+    /* Misc Symbols and Arrows - 2B00-2BFF
+       Supplemental Arrows-C   - 1F800-1F8FF */
+    { NULL, "2B00-2BFF, 1F800-1F8FF", NULL, { L"Noto Sans Symbols2", L"Noto Sans Symbols 2", NULL } },
 
     { NULL, "2C80-2CFF",              NULL, { L"Noto Sans Coptic", NULL } },
     { NULL, "2D30-2D7F",              NULL, { L"Noto Sans Tifinagh", NULL } },

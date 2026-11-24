@@ -212,7 +212,7 @@ enum glx_swap_control_method
 };
 
 static struct glx_pixel_format *pixel_formats;
-static int nb_pixel_formats, nb_onscreen_formats;
+static int nb_pixel_formats;
 static GLXFBConfig argb_fbconfig;
 static const struct egl_platform *egl;
 static BOOL (*p_egl_describe_pixel_format)( int format, struct wgl_pixel_format *pf );
@@ -275,7 +275,6 @@ static const char *(*pglXQueryServerString)( Display *dpy, int screen, int name 
 static const char *(*pglXGetClientString)( Display *dpy, int name );
 
 /* GLX 1.3 */
-static GLXFBConfig *(*pglXChooseFBConfig)( Display *dpy, int screen, const int *attribList, int *nitems );
 static int (*pglXGetFBConfigAttrib)( Display *dpy, GLXFBConfig config, int attribute, int *value );
 static GLXFBConfig *(*pglXGetFBConfigs)( Display *dpy, int screen, int *nelements );
 static XVisualInfo *(*pglXGetVisualFromFBConfig)( Display *dpy, GLXFBConfig config );
@@ -300,7 +299,6 @@ static void* (*pglXAllocateMemoryNV)(GLsizei size, GLfloat readfreq, GLfloat wri
 static void  (*pglXFreeMemoryNV)(GLvoid *pointer);
 
 /* MESA GLX Extensions */
-static void (*pglXCopySubBufferMESA)(Display *dpy, GLXDrawable drawable, int x, int y, int width, int height);
 static int (*pglXSwapIntervalMESA)(unsigned int interval);
 static Bool (*pglXQueryCurrentRendererIntegerMESA)(int attribute, unsigned int *value);
 static const char *(*pglXQueryCurrentRendererStringMESA)(int attribute);
@@ -520,13 +518,6 @@ static BOOL x11drv_egl_describe_pixel_format( int format, struct wgl_pixel_forma
     return TRUE;
 }
 
-static BOOL hwnd_wants_argb_surface( HWND hwnd )
-{
-    if (!argb_visual.visual || !hwnd) return FALSE;
-    return (NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ) & WS_EX_NOREDIRECTIONBITMAP)
-            && (NtUserGetWindowLongW( hwnd, GWL_STYLE ) & WS_POPUP);
-}
-
 static int find_argb_egl_format( int format )
 {
     EGLConfig orig_cfg = egl_config_for_format( format );
@@ -535,6 +526,33 @@ static int find_argb_egl_format( int format )
     funcs->p_eglGetConfigAttrib( egl->display, orig_cfg, EGL_DEPTH_SIZE, &orig_depth );
     funcs->p_eglGetConfigAttrib( egl->display, orig_cfg, EGL_STENCIL_SIZE, &orig_stencil );
 
+    if (argb_visual.visual)
+    {
+        for (i = 1; i <= egl->config_count; i++)
+        {
+            EGLint alpha = 0, surf_type = 0, depth = 0, stencil = 0;
+            EGLConfig cfg = egl_config_for_format( i );
+            XVisualInfo vis;
+            funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_SURFACE_TYPE, &surf_type );
+            funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_ALPHA_SIZE, &alpha );
+            funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_DEPTH_SIZE, &depth );
+            funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_STENCIL_SIZE, &stencil );
+            if ((surf_type & EGL_WINDOW_BIT) && alpha >= 8 && depth == orig_depth && stencil == orig_stencil
+                    && visual_from_pixel_format( i, &vis ) && vis.visualid == argb_visual.visualid)
+                return i;
+        }
+        for (i = 1; i <= egl->config_count; i++)
+        {
+            EGLint alpha = 0, surf_type = 0;
+            EGLConfig cfg = egl_config_for_format( i );
+            XVisualInfo vis;
+            funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_SURFACE_TYPE, &surf_type );
+            funcs->p_eglGetConfigAttrib( egl->display, cfg, EGL_ALPHA_SIZE, &alpha );
+            if ((surf_type & EGL_WINDOW_BIT) && alpha >= 8
+                    && visual_from_pixel_format( i, &vis ) && vis.visualid == argb_visual.visualid)
+                return i;
+        }
+    }
     for (i = 1; i <= egl->config_count; i++)
     {
         EGLint alpha = 0, surf_type = 0, depth = 0, stencil = 0;
@@ -562,19 +580,14 @@ static int find_argb_egl_format( int format )
     return format;
 }
 
-static BOOL x11drv_egl_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
+static BOOL x11drv_egl_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
-    struct opengl_drawable *previous;
-    struct client_surface *client;
+    struct x11drv_client_surface *surface = impl_from_client_surface( client );
     struct gl_drawable *gl;
-    Window window;
-    int surface_format = hwnd_wants_argb_surface( hwnd ) ? find_argb_egl_format( format ) : format;
+    int surface_format = (surface->depth == 32 && hwnd_wants_argb_surface( client->hwnd ))
+                         ? find_argb_egl_format( format ) : format;
 
-    if ((previous = *drawable) && previous->format == format) return TRUE;
-    if (!(window = x11drv_client_surface_create( hwnd, surface_format, &client ))) return FALSE;
-    gl = opengl_drawable_create( sizeof(*gl), &x11drv_egl_surface_funcs, format, client );
-    client_surface_release( client );
-    if (!gl) return FALSE;
+    if (!(gl = opengl_drawable_create( sizeof(*gl), &x11drv_egl_surface_funcs, format, client ))) return FALSE;
 
     opengl_drawable_map_buffer( &gl->base, GL_FRONT_LEFT, GL_BACK_LEFT );
     opengl_drawable_map_buffer( &gl->base, GL_FRONT, GL_BACK );
@@ -582,16 +595,15 @@ static BOOL x11drv_egl_surface_create( HWND hwnd, int format, struct opengl_draw
     if (gl->base.stereo) opengl_drawable_map_buffer( &gl->base, GL_FRONT_RIGHT, GL_BACK_RIGHT );
 
     if (!(gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, egl_config_for_format( surface_format ),
-                                                              (void *)window, NULL )))
+                                                              (void *)surface->window, NULL )))
     {
         opengl_drawable_release( &gl->base );
         return FALSE;
     }
 
-    TRACE( "Created drawable %s with client window %lx\n", debugstr_opengl_drawable( &gl->base ), window );
+    TRACE( "Created drawable %s with client window %lx\n", debugstr_opengl_drawable( &gl->base ), surface->window );
     XFlush( gdi_display );
 
-    if (previous) opengl_drawable_release( previous );
     *drawable = &gl->base;
     return TRUE;
 }
@@ -738,12 +750,10 @@ UINT X11DRV_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, c
      */
 
     if(glxRequireVersion(3)) {
-        pglXChooseFBConfig = pglXGetProcAddressARB((const GLubyte *) "glXChooseFBConfig");
         pglXGetFBConfigAttrib = pglXGetProcAddressARB((const GLubyte *) "glXGetFBConfigAttrib");
         pglXGetVisualFromFBConfig = pglXGetProcAddressARB((const GLubyte *) "glXGetVisualFromFBConfig");
         pglXQueryDrawable = pglXGetProcAddressARB((const GLubyte *) "glXQueryDrawable");
     } else if (has_extension( glxExtensions, "GLX_SGIX_fbconfig")) {
-        pglXChooseFBConfig = pglXGetProcAddressARB((const GLubyte *) "glXChooseFBConfigSGIX");
         pglXGetFBConfigAttrib = pglXGetProcAddressARB((const GLubyte *) "glXGetFBConfigAttribSGIX");
         pglXGetVisualFromFBConfig = pglXGetProcAddressARB((const GLubyte *) "glXGetVisualFromFBConfigSGIX");
 
@@ -753,7 +763,6 @@ UINT X11DRV_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, c
         pglXQueryDrawable = NULL;
     } else if(strcmp("ATI", pglXGetClientString(gdi_display, GLX_VENDOR)) == 0) {
         TRACE("Overriding ATI GLX capabilities!\n");
-        pglXChooseFBConfig = pglXGetProcAddressARB((const GLubyte *) "glXChooseFBConfig");
         pglXGetFBConfigAttrib = pglXGetProcAddressARB((const GLubyte *) "glXGetFBConfigAttrib");
         pglXGetVisualFromFBConfig = pglXGetProcAddressARB((const GLubyte *) "glXGetVisualFromFBConfig");
         pglXQueryDrawable = pglXGetProcAddressARB((const GLubyte *) "glXQueryDrawable");
@@ -766,10 +775,6 @@ UINT X11DRV_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, c
     } else {
         ERR(" glx_version is %s and GLX_SGIX_fbconfig extension is unsupported. Expect problems.\n",
             pglXQueryServerString(gdi_display, DefaultScreen(gdi_display), GLX_VERSION));
-    }
-
-    if (has_extension( glxExtensions, "GLX_MESA_copy_sub_buffer")) {
-        pglXCopySubBufferMESA = pglXGetProcAddressARB((const GLubyte *) "glXCopySubBufferMESA");
     }
 
     if (has_extension( glxExtensions, "GLX_MESA_query_renderer" ))
@@ -942,7 +947,6 @@ static UINT x11drv_init_pixel_formats( UINT *onscreen_count )
 
     pixel_formats = list;
     nb_pixel_formats = size;
-    nb_onscreen_formats = onscreen_size;
 
     *onscreen_count = onscreen_size;
     return size;
@@ -1023,32 +1027,24 @@ static GLXContext create_glxcontext( int format, GLXContext share, const int *at
     return ctx;
 }
 
-static BOOL x11drv_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
+static BOOL x11drv_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
-    BOOL use_argb = hwnd_wants_argb_surface( hwnd ) && argb_fbconfig;
+    struct x11drv_client_surface *surface = impl_from_client_surface( client );
     struct glx_pixel_format *fmt = glx_pixel_format_from_format( format );
+    BOOL use_argb = (surface->depth == 32 && hwnd_wants_argb_surface( client->hwnd ) && argb_fbconfig);
     GLXFBConfig fbconfig = use_argb ? argb_fbconfig : fmt->fbconfig;
-    struct opengl_drawable *previous;
-    struct client_surface *client;
     struct gl_drawable *gl;
-    Window window;
 
-    if ((previous = *drawable) && previous->format == format) return TRUE;
-    if (!(window = x11drv_client_surface_create( hwnd, use_argb ? -1 : format, &client ))) return FALSE;
-    gl = opengl_drawable_create( sizeof(*gl), &x11drv_surface_funcs, format, client );
-    client_surface_release( client );
-    if (!gl) return FALSE;
-
-    if (!(gl->drawable = pglXCreateWindow( gdi_display, fbconfig, window, NULL )))
+    if (!(gl = opengl_drawable_create( sizeof(*gl), &x11drv_surface_funcs, format, client ))) return FALSE;
+    if (!(gl->drawable = pglXCreateWindow( gdi_display, fbconfig, surface->window, NULL )))
     {
         opengl_drawable_release( &gl->base );
         return FALSE;
     }
 
-    TRACE( "Created drawable %s with client window %lx\n", debugstr_opengl_drawable( &gl->base ), window );
+    TRACE( "Created drawable %s with client window %lx\n", debugstr_opengl_drawable( &gl->base ), surface->window );
     XFlush( gdi_display );
 
-    if (previous) opengl_drawable_release( previous );
     *drawable = &gl->base;
     return TRUE;
 }
@@ -1445,6 +1441,29 @@ static UINT x11drv_pbuffer_bind( HDC hdc, struct opengl_drawable *base, GLenum b
     return -1; /* use default implementation */
 }
 
+static BOOL x11drv_null_surface_create( int format, struct opengl_drawable **drawable )
+{
+    const struct glx_pixel_format *fmt = glx_pixel_format_from_format( format );
+    int glx_attribs[7], count = 0;
+    struct gl_drawable *gl;
+
+    glx_attribs[count++] = GLX_PBUFFER_WIDTH;
+    glx_attribs[count++] = 1;
+    glx_attribs[count++] = GLX_PBUFFER_HEIGHT;
+    glx_attribs[count++] = 1;
+    glx_attribs[count++] = 0;
+
+    if (!(gl = opengl_drawable_create( sizeof(*gl), &x11drv_pbuffer_funcs, format, NULL ))) return FALSE;
+    if (!(gl->drawable = pglXCreatePbuffer( gdi_display, fmt->fbconfig, glx_attribs )))
+    {
+        opengl_drawable_release( &gl->base );
+        return FALSE;
+    }
+
+    *drawable = &gl->base;
+    return TRUE;
+}
+
 static BOOL X11DRV_wglQueryCurrentRendererIntegerWINE( GLenum attribute, GLuint *value )
 {
     return pglXQueryCurrentRendererIntegerMESA( attribute, value );
@@ -1625,6 +1644,7 @@ static struct opengl_driver_funcs x11drv_driver_funcs =
     .p_pbuffer_create = x11drv_pbuffer_create,
     .p_pbuffer_updated = x11drv_pbuffer_updated,
     .p_pbuffer_bind = x11drv_pbuffer_bind,
+    .p_null_surface_create = x11drv_null_surface_create,
 };
 
 static const struct opengl_drawable_funcs x11drv_surface_funcs =

@@ -1167,10 +1167,11 @@ struct get_startup_info_reply
 {
     struct reply_header __header;
     data_size_t  info_size;
+    int          debugged;
     unsigned short machine;
     /* VARARG(info,startup_info,info_size); */
     /* VARARG(env,unicode_str); */
-    char __pad_14[2];
+    char __pad_18[6];
 };
 
 
@@ -7610,6 +7611,6 @@ union generic_reply
     struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 976
+#define SERVER_PROTOCOL_VERSION 977
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

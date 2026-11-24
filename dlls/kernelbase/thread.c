@@ -1158,12 +1158,15 @@ BOOL WINAPI DECLSPEC_HOTPATCH ConvertFiberToThread(void)
 {
     struct fiber_data *fiber = NtCurrentTeb()->Tib.FiberData;
 
-    if (fiber)
+    if (!NtCurrentTeb()->HasFiberData)
     {
-        relocate_thread_actctx_stack( &NtCurrentTeb()->ActivationContextStack );
-        NtCurrentTeb()->Tib.FiberData = NULL;
-        HeapFree( GetProcessHeap(), 0, fiber );
+        SetLastError( ERROR_ALREADY_THREAD );
+        return FALSE;
     }
+    relocate_thread_actctx_stack( &NtCurrentTeb()->ActivationContextStack );
+    NtCurrentTeb()->Tib.FiberData = NULL;
+    NtCurrentTeb()->HasFiberData = FALSE;
+    HeapFree( GetProcessHeap(), 0, fiber );
     return TRUE;
 }
 
@@ -1184,7 +1187,7 @@ LPVOID WINAPI DECLSPEC_HOTPATCH ConvertThreadToFiberEx( LPVOID param, DWORD flag
 {
     struct fiber_data *fiber;
 
-    if (NtCurrentTeb()->Tib.FiberData)
+    if (NtCurrentTeb()->HasFiberData)
     {
         SetLastError( ERROR_ALREADY_FIBER );
         return NULL;
@@ -1205,6 +1208,7 @@ LPVOID WINAPI DECLSPEC_HOTPATCH ConvertThreadToFiberEx( LPVOID param, DWORD flag
     fiber->fls_slots        = NtCurrentTeb()->FlsSlots;
     relocate_thread_actctx_stack( &fiber->actctx.stack_space );
     NtCurrentTeb()->Tib.FiberData = fiber;
+    NtCurrentTeb()->HasFiberData = TRUE;
     return fiber;
 }
 
@@ -1235,7 +1239,7 @@ void WINAPI DECLSPEC_HOTPATCH DeleteFiber( LPVOID fiber_ptr )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH IsThreadAFiber(void)
 {
-    return NtCurrentTeb()->Tib.FiberData != NULL;
+    return NtCurrentTeb()->HasFiberData;
 }
 
 

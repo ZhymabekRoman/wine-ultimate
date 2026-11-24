@@ -750,17 +750,6 @@ BOOL WINAPI GetPointerDeviceProperties( HANDLE device, UINT32 *count,
     return FALSE;
 }
 
-BOOL WINAPI GetPointerDeviceRects( HANDLE device, RECT *device_rect, RECT *display_rect )
-{
-    RECT r;
-    TRACE( "device %p, device_rect %p, display_rect %p\n", device, device_rect, display_rect );
-
-    SetRect( &r, 0, 0, GetSystemMetrics( SM_CXSCREEN ), GetSystemMetrics( SM_CYSCREEN ) );
-    if (device_rect) *device_rect = r;
-    if (display_rect) *display_rect = r;
-    return TRUE;
-}
-
 BOOL WINAPI GetPointerPenInfo( UINT32 id, POINTER_PEN_INFO *info )
 {
     FIXME( "id %u, info %p stub!\n", id, info );

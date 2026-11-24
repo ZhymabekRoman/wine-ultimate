@@ -142,6 +142,7 @@ struct user_thread_info
     POINTER_INFO                  last_pointer_info;      /* synthesized pointer info for WM_POINTER* */
     BOOL                          has_pointer_info;
     UINT32                        pointer_frame_id;
+    struct opengl_thread_data    *opengl_data;            /* OpenGL private thread data */
 };
 
 extern struct user_thread_info *get_user_thread_info(void);
