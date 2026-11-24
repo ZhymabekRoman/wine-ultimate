@@ -28,7 +28,7 @@
 
 #define XBF_AOT_MAGIC       0x58424641u /* 'XBFA' */
 #define XBF_AOT_VERSION     12u
-#define XBF_AOT_CACHE_SLOTS 64
+#define XBF_AOT_CACHE_SLOTS 512
 
 enum xbf_aot_node_flags
 {
@@ -259,8 +259,7 @@ UINT32 xbf_aot_append_setters( struct xbf_aot_builder *b, const struct uwp_style
 void xbf_aot_snapshot_vsm( struct xbf_aot_builder *b, struct uwp_element *root_el, int start_group_idx );
 void xbf_aot_builder_free( struct xbf_aot_builder *b );
 struct xbf_aot_header *xbf_aot_finalize( struct xbf_aot_builder *b, const struct xbf_ctx *ctx );
-void xbf_aot_save_to_disk( const struct xbf_aot_header *hdr );
-struct xbf_aot_cache_slot *xbf_aot_cache_acquire( UINT64 hash, DWORD xbf_sz, int only_sub_idx, BOOL *from_disk );
+struct xbf_aot_cache_slot *xbf_aot_cache_acquire( UINT64 hash, DWORD xbf_sz, int only_sub_idx );
 void xbf_aot_cache_insert( struct xbf_aot_header *tpl );
 void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWORD xbf_sz,
                           IInspectable *component, void *connector, BOOL is_uwp_conn, void *app_outer,

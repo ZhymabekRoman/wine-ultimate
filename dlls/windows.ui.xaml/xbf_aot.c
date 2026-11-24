@@ -342,28 +342,6 @@ struct xbf_aot_header *xbf_aot_finalize( struct xbf_aot_builder *b, const struct
     return (struct xbf_aot_header *)buf;
 }
 
-static BOOL xbf_aot_validate_tpl( const struct xbf_aot_header *hdr, DWORD buf_sz,
-                                  UINT64 hash, DWORD xbf_sz, int only_sub_idx )
-{
-    if (!hdr || buf_sz < sizeof(*hdr)) return FALSE;
-    if (hdr->magic != XBF_AOT_MAGIC || hdr->version != XBF_AOT_VERSION) return FALSE;
-    if (hdr->hash != hash || hdr->xbf_sz != xbf_sz || hdr->only_sub_idx != only_sub_idx) return FALSE;
-    if (hdr->total_bytes != buf_sz) return FALSE;
-    if (hdr->off_types > buf_sz || hdr->type_cnt > (buf_sz - hdr->off_types) / sizeof(struct xbf_type_info)) return FALSE;
-    if (hdr->off_props > buf_sz || hdr->prop_cnt > (buf_sz - hdr->off_props) / sizeof(struct xbf_prop_info)) return FALSE;
-    if (hdr->off_refs > buf_sz || hdr->ref_cnt > (buf_sz - hdr->off_refs) / sizeof(struct xbf_aot_ref)) return FALSE;
-    if (hdr->off_res_uris > buf_sz || hdr->res_uri_cnt > (buf_sz - hdr->off_res_uris) / sizeof(UINT32)) return FALSE;
-    if (hdr->off_nodes > buf_sz || hdr->node_cnt > (buf_sz - hdr->off_nodes) / sizeof(struct xbf_aot_node)) return FALSE;
-    if (hdr->off_ops > buf_sz || hdr->op_cnt > (buf_sz - hdr->off_ops) / sizeof(struct xbf_aot_op)) return FALSE;
-    if (hdr->off_style_setters > buf_sz || hdr->style_setter_cnt > (buf_sz - hdr->off_style_setters) / sizeof(struct uwp_style_setter)) return FALSE;
-    if (hdr->off_vsm_groups > buf_sz || hdr->vsm_group_cnt > (buf_sz - hdr->off_vsm_groups) / sizeof(struct xbf_aot_vsm_group)) return FALSE;
-    if (hdr->off_vsm_states > buf_sz || hdr->vsm_state_cnt > (buf_sz - hdr->off_vsm_states) / sizeof(struct xbf_aot_vsm_state)) return FALSE;
-    if (hdr->off_vsm_setters > buf_sz || hdr->vsm_setter_cnt > (buf_sz - hdr->off_vsm_setters) / sizeof(struct xbf_aot_vsm_setter)) return FALSE;
-    if (hdr->off_defers > buf_sz || hdr->defer_cnt > (buf_sz - hdr->off_defers) / sizeof(struct xbf_aot_defer)) return FALSE;
-    if (hdr->off_str_pool > buf_sz || hdr->str_pool_bytes > buf_sz - hdr->off_str_pool || hdr->str_pool_bytes < 2) return FALSE;
-    return TRUE;
-}
-
 static const WCHAR *xbf_aot_str( const struct xbf_aot_header *hdr, UINT32 off )
 {
     const BYTE *pool;
@@ -372,75 +350,10 @@ static const WCHAR *xbf_aot_str( const struct xbf_aot_header *hdr, UINT32 off )
     return (const WCHAR *)(pool + off);
 }
 
-static struct xbf_aot_header *xbf_aot_load_from_disk( UINT64 hash, DWORD xbf_sz, int only_sub_idx )
-{
-    WCHAR path[MAX_PATH];
-    HANDLE hf;
-    LARGE_INTEGER fsz;
-    BYTE *buf;
-    DWORD rd = 0;
-
-    swprintf( path, ARRAY_SIZE(path), L"C:\\windows\\temp\\xaml_aot_%016I64x.bin", hash );
-    hf = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
-    if (hf == INVALID_HANDLE_VALUE) return NULL;
-    if (!GetFileSizeEx( hf, &fsz ) || fsz.QuadPart < (LONGLONG)sizeof(struct xbf_aot_header) || fsz.QuadPart > 16 * 1024 * 1024)
-    {
-        CloseHandle( hf );
-        return NULL;
-    }
-    buf = malloc( (size_t)fsz.QuadPart );
-    if (!buf)
-    {
-        CloseHandle( hf );
-        return NULL;
-    }
-    if (!ReadFile( hf, buf, (DWORD)fsz.QuadPart, &rd, NULL ) || rd != (DWORD)fsz.QuadPart)
-    {
-        free( buf );
-        CloseHandle( hf );
-        return NULL;
-    }
-    CloseHandle( hf );
-    if (!xbf_aot_validate_tpl( (const struct xbf_aot_header *)buf, rd, hash, xbf_sz, only_sub_idx ))
-    {
-        free( buf );
-        return NULL;
-    }
-    return (struct xbf_aot_header *)buf;
-}
-
-void xbf_aot_save_to_disk( const struct xbf_aot_header *hdr )
-{
-    WCHAR path[MAX_PATH], tmp_path[MAX_PATH];
-    HANDLE hf;
-    DWORD wr = 0;
-
-    if (!hdr) return;
-    CreateDirectoryW( L"C:\\windows\\temp", NULL );
-    swprintf( path, ARRAY_SIZE(path), L"C:\\windows\\temp\\xaml_aot_%016I64x.bin", hdr->hash );
-    swprintf( tmp_path, ARRAY_SIZE(tmp_path), L"C:\\windows\\temp\\xaml_aot_%016I64x.%lu.tmp",
-              hdr->hash, (unsigned long)GetCurrentProcessId() );
-    hf = CreateFileW( tmp_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
-    if (hf == INVALID_HANDLE_VALUE) return;
-    if (WriteFile( hf, hdr, hdr->total_bytes, &wr, NULL ) && wr == hdr->total_bytes)
-    {
-        CloseHandle( hf );
-        if (!MoveFileExW( tmp_path, path, MOVEFILE_REPLACE_EXISTING ))
-            DeleteFileW( tmp_path );
-    }
-    else
-    {
-        CloseHandle( hf );
-        DeleteFileW( tmp_path );
-    }
-}
-
-struct xbf_aot_cache_slot *xbf_aot_cache_acquire( UINT64 hash, DWORD xbf_sz, int only_sub_idx, BOOL *from_disk )
+struct xbf_aot_cache_slot *xbf_aot_cache_acquire( UINT64 hash, DWORD xbf_sz, int only_sub_idx )
 {
     int i;
-    struct xbf_aot_header *disk_tpl;
 
-    *from_disk = FALSE;
     AcquireSRWLockShared( &g_xbf_aot_lock );
     for (i = 0; i < XBF_AOT_CACHE_SLOTS; i++)
     {
@@ -455,48 +368,6 @@ struct xbf_aot_cache_slot *xbf_aot_cache_acquire( UINT64 hash, DWORD xbf_sz, int
         }
     }
     ReleaseSRWLockShared( &g_xbf_aot_lock );
-
-    disk_tpl = xbf_aot_load_from_disk( hash, xbf_sz, only_sub_idx );
-    if (!disk_tpl) return NULL;
-
-    *from_disk = TRUE;
-    AcquireSRWLockExclusive( &g_xbf_aot_lock );
-    for (i = 0; i < XBF_AOT_CACHE_SLOTS; i++)
-    {
-        if (g_xbf_aot_cache[i].tpl && g_xbf_aot_cache[i].hash == hash)
-        {
-            InterlockedIncrement( &g_xbf_aot_cache[i].ref );
-            g_xbf_aot_cache[i].last_used = ++g_xbf_aot_lru;
-            ReleaseSRWLockExclusive( &g_xbf_aot_lock );
-            free( disk_tpl );
-            return &g_xbf_aot_cache[i];
-        }
-    }
-    {
-        int victim = -1;
-        UINT64 best_lru = (~0ULL);
-        for (i = 0; i < XBF_AOT_CACHE_SLOTS; i++)
-        {
-            if (!g_xbf_aot_cache[i].tpl) { victim = i; break; }
-            if (g_xbf_aot_cache[i].ref == 0 && g_xbf_aot_cache[i].last_used < best_lru)
-            {
-                best_lru = g_xbf_aot_cache[i].last_used;
-                victim = i;
-            }
-        }
-        if (victim >= 0)
-        {
-            free( g_xbf_aot_cache[victim].tpl );
-            g_xbf_aot_cache[victim].hash = hash;
-            g_xbf_aot_cache[victim].tpl = disk_tpl;
-            g_xbf_aot_cache[victim].last_used = ++g_xbf_aot_lru;
-            g_xbf_aot_cache[victim].ref = 1;
-            ReleaseSRWLockExclusive( &g_xbf_aot_lock );
-            return &g_xbf_aot_cache[victim];
-        }
-    }
-    ReleaseSRWLockExclusive( &g_xbf_aot_lock );
-    free( disk_tpl );
     return NULL;
 }
 

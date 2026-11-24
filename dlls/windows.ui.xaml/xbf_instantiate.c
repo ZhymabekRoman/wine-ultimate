@@ -963,13 +963,12 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
     {
         UINT64 aot_hash = xbf_aot_compute_hash( xbf, xbf_sz,
             (root_el_pre && root_el_pre->class_name[0]) ? root_el_pre->class_name : L"", only_sub_idx );
-        BOOL from_disk = FALSE;
         struct xbf_aot_cache_slot *slot;
 
         QueryPerformanceFrequency( &freq );
         QueryPerformanceCounter( &t0 );
 
-        slot = xbf_aot_cache_acquire( aot_hash, xbf_sz, only_sub_idx, &from_disk );
+        slot = xbf_aot_cache_acquire( aot_hash, xbf_sz, only_sub_idx );
         if (slot)
         {
             const struct xbf_aot_header *cached_tpl = slot->tpl;
@@ -979,8 +978,7 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
                                  target_rd, is_template );
             QueryPerformanceCounter( &t1 );
             us = freq.QuadPart ? ((double)(t1.QuadPart - t0.QuadPart) * 1000000.0 / (double)freq.QuadPart) : 0.0;
-            TRACE( "XBF AOT %s hit (%s, sub=%d, %lu xbf -> %lu aot bytes, %u nodes, %u ops) in %.1f us\n",
-                   from_disk ? "DISK" : "MEM",
+            TRACE( "XBF AOT MEM hit (%s, sub=%d, %lu xbf -> %lu aot bytes, %u nodes, %u ops) in %.1f us\n",
                    debugstr_w(root_el_pre ? root_el_pre->class_name : L""),
                    only_sub_idx, (unsigned long)xbf_sz, (unsigned long)cached_tpl->total_bytes,
                    cached_tpl->node_cnt, cached_tpl->op_cnt, us );
@@ -1233,7 +1231,6 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
             if (!rd_only)
             {
                 double us;
-                xbf_aot_save_to_disk( tpl );
                 QueryPerformanceCounter( &t1 );
                 us = freq.QuadPart ? ((double)(t1.QuadPart - t0.QuadPart) * 1000000.0 / (double)freq.QuadPart) : 0.0;
                 TRACE( "XBF AOT COMPILE+EXEC (%s, sub=%d, %lu xbf -> %lu aot bytes, %u nodes, %u ops) in %.1f us\n",
