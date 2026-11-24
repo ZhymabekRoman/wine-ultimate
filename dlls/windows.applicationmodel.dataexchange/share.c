@@ -55,23 +55,42 @@ static HRESULT share_add_event( EventRegistrationToken *token )
 
 /* ------------------------------------------------ DataTransferManager -- */
 
+static const GUID IID_IWeakReference_local =
+    { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+static const GUID IID_IWeakReferenceSource_local =
+    { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+
+struct dt_manager;
+
+struct dt_manager_weak
+{
+    const void *vtbl;
+    SRWLOCK lock;
+    LONG weak_ref;
+    struct dt_manager *target;
+};
+
 struct dt_manager
 {
-    const void *manager_vtbl;   /* IDataTransferManager at offset 0 */
-    const void *manager2_vtbl;  /* IDataTransferManager2 at offset 1 pointer */
+    const void *manager_vtbl;     /* IDataTransferManager at offset 0 */
+    const void *manager2_vtbl;    /* IDataTransferManager2 at offset 1 pointer */
+    const void *weak_source_vtbl; /* IWeakReferenceSource at offset 2 pointers */
     LONG ref;
+    struct dt_manager_weak *weak;
 };
 
 static const void *dt_manager_vtbl[];
 static const void *dt_manager2_vtbl[];
+static const void *dt_manager_weak_source_vtbl[];
+static const void *dt_manager_weak_vtbl[];
 
 /* Every interface group of the object shares the IUnknown/entry-point
  * implementations; resolve the object from the group's vtable pointer so one
  * set of method bodies serves every group at its own field offset. */
 static struct dt_manager *impl_from_manager_any( const void *iface )
 {
-    static const void *groups[] = { dt_manager_vtbl, dt_manager2_vtbl };
-    static const int offsets[] = { 0, 1 };
+    static const void *groups[] = { dt_manager_vtbl, dt_manager2_vtbl, dt_manager_weak_source_vtbl };
+    static const int offsets[] = { 0, 1, 2 };
     const void *vtbl = *(const void *const *)iface;
     int i;
 
@@ -109,6 +128,13 @@ static HRESULT WINAPI manager_QueryInterface( const void *iface, REFIID iid, voi
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
+    {
+        *out = (void *)&impl->weak_source_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     return E_NOINTERFACE;
 }
@@ -124,9 +150,128 @@ static ULONG WINAPI manager_Release( const void *iface )
     struct dt_manager *impl = impl_from_manager_any( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
 
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        struct dt_manager_weak *weak = impl->weak;
+        if (weak)
+        {
+            AcquireSRWLockExclusive( &weak->lock );
+            weak->target = NULL;
+            ReleaseSRWLockExclusive( &weak->lock );
+            if (!InterlockedDecrement( &weak->weak_ref ))
+                free( weak );
+        }
+        free( impl );
+    }
     return ref;
 }
+
+static HRESULT WINAPI dt_weak_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct dt_manager_weak *weak = iface;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IWeakReference_local ))
+    {
+        *out = weak;
+        InterlockedIncrement( &weak->weak_ref );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI dt_weak_AddRef( void *iface )
+{
+    struct dt_manager_weak *weak = iface;
+    return InterlockedIncrement( &weak->weak_ref );
+}
+
+static ULONG WINAPI dt_weak_Release( void *iface )
+{
+    struct dt_manager_weak *weak = iface;
+    ULONG ref = InterlockedDecrement( &weak->weak_ref );
+    if (!ref) free( weak );
+    return ref;
+}
+
+static HRESULT WINAPI dt_weak_Resolve( void *iface, REFIID iid, void **out )
+{
+    struct dt_manager_weak *weak = iface;
+    struct dt_manager *target = NULL;
+    HRESULT hr = S_OK;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    AcquireSRWLockShared( &weak->lock );
+    if (weak->target)
+    {
+        LONG cur = weak->target->ref;
+        while (cur > 0)
+        {
+            LONG prev = InterlockedCompareExchange( &weak->target->ref, cur + 1, cur );
+            if (prev == cur)
+            {
+                target = weak->target;
+                break;
+            }
+            cur = prev;
+        }
+    }
+    ReleaseSRWLockShared( &weak->lock );
+
+    if (target)
+    {
+        hr = manager_QueryInterface( target, iid, out );
+        manager_Release( target );
+    }
+    return hr;
+}
+
+static const void *dt_manager_weak_vtbl[] =
+{
+    dt_weak_QueryInterface,
+    dt_weak_AddRef,
+    dt_weak_Release,
+    dt_weak_Resolve,
+};
+
+static HRESULT WINAPI manager_GetWeakReference( const void *iface, void **weak_ref )
+{
+    struct dt_manager *impl = impl_from_manager_any( iface );
+    struct dt_manager_weak *weak;
+
+    if (!weak_ref) return E_POINTER;
+    *weak_ref = NULL;
+
+    weak = impl->weak;
+    if (!weak)
+    {
+        struct dt_manager_weak *created = calloc( 1, sizeof(*created) );
+        if (!created) return E_OUTOFMEMORY;
+        created->vtbl = dt_manager_weak_vtbl;
+        InitializeSRWLock( &created->lock );
+        created->weak_ref = 1; /* held by impl */
+        created->target = impl;
+        weak = InterlockedCompareExchangePointer( (void *volatile *)&impl->weak, created, NULL );
+        if (weak) free( created );
+        else weak = created;
+    }
+
+    InterlockedIncrement( &weak->weak_ref );
+    *weak_ref = weak;
+    return S_OK;
+}
+
+static const void *dt_manager_weak_source_vtbl[] =
+{
+    manager_QueryInterface,
+    manager_AddRef,
+    manager_Release,
+    manager_GetWeakReference,
+};
 
 static HRESULT WINAPI manager_GetIids( const void *iface, ULONG *iid_count, IID **iids )
 {
@@ -210,6 +355,7 @@ static struct dt_manager *create_dt_manager( void )
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->manager_vtbl = dt_manager_vtbl;
     impl->manager2_vtbl = dt_manager2_vtbl;
+    impl->weak_source_vtbl = dt_manager_weak_source_vtbl;
     impl->ref = 1;
     return impl;
 }
