@@ -1582,6 +1582,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                     WORD str_id = *(const WORD*)(n_cur + 8);
                                                     const WCHAR *elem_name = (str_id < str_cnt && strings[str_id]) ? strings[str_id] : L"";
                                                     const WCHAR *class_name = L"Microsoft.UI.Xaml.Controls.Grid";
+                                                    WCHAR dyn_class_buf[160] = {0};
                                                     void *target = NULL;
                                                     /* Map the XBF connection-id node to a stock control by the
                                                      * element's x:Name. Names carry the control kind by convention
@@ -1597,8 +1598,11 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                         class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Image" : L"Windows.UI.Xaml.Controls.Image";
                                                     else if (wcsstr(elem_name, L"Canvas") || wcsstr(elem_name, L"canvas"))
                                                         class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Canvas" : L"Windows.UI.Xaml.Controls.Canvas";
-                                                    else if (wcsstr(elem_name, L"BrowserNavigationErrorScreen"))
-                                                        class_name = L"WhatsApp.BrowserNavigationErrorScreenView";
+                                                    else if (wcsstr(elem_name, L"BrowserNavigationErrorScreen") && xaml_get_app_caps()->app_ns[0])
+                                                    {
+                                                        swprintf(dyn_class_buf, ARRAY_SIZE(dyn_class_buf), L"%s.BrowserNavigationErrorScreenView", xaml_get_app_caps()->app_ns);
+                                                        class_name = dyn_class_buf;
+                                                    }
                                                     else if (wcsstr(elem_name, L"ErrorScreen"))
                                                         class_name = is_winui_conn ? L"Microsoft.UI.Xaml.Controls.Grid" : L"Windows.UI.Xaml.Controls.Grid";
                                                     else if (wcsstr(elem_name, L"Backdrop") || wcsstr(elem_name, L"Rectangle"))

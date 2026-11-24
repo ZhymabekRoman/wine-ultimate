@@ -641,10 +641,10 @@ static void caps_app_namespace( IInspectable *outer, WCHAR *ns, DWORD size )
     if (h) WindowsDeleteString( h );
 }
 
-/* Probe ns + each suffix (and the bare fallback full name) against the app's
- * provider; on a hit store the full registered type name in out. */
+/* Probe ns + each suffix against the app's provider; on a hit store the full
+ * registered type name in out. */
 static BOOL caps_find_type( void *provider, const WCHAR *ns, const WCHAR *const *suffixes,
-                            SIZE_T count, const WCHAR *fallback_full, WCHAR *out, DWORD out_chars )
+                            SIZE_T count, WCHAR *out, DWORD out_chars )
 {
     SIZE_T i;
     WCHAR full[160];
@@ -659,11 +659,6 @@ static BOOL caps_find_type( void *provider, const WCHAR *ns, const WCHAR *const 
             lstrcpynW( out, full, (int)out_chars );
             return TRUE;
         }
-    }
-    if (fallback_full && caps_provider_has( provider, fallback_full ))
-    {
-        lstrcpynW( out, fallback_full, (int)out_chars );
-        return TRUE;
     }
     return FALSE;
 }
@@ -689,12 +684,13 @@ static BOOL caps_probe( IInspectable *outer )
         return FALSE; /* app object not metadata-ready yet: probe again later */
 
     caps_app_namespace( outer, ns, ARRAY_SIZE( ns ) );
+    lstrcpynW( g_caps.app_ns, ns, ARRAY_SIZE( g_caps.app_ns ) );
 
     if (!g_caps.winui3)
     {
         /* CoreApplication-driven UWP app: a registered root page enables the seed tree. */
         WCHAR full[160] = {0};
-        if (caps_find_type( provider, ns, page_suffixes, ARRAY_SIZE( page_suffixes ), NULL,
+        if (caps_find_type( provider, ns, page_suffixes, ARRAY_SIZE( page_suffixes ),
                             full, ARRAY_SIZE( full ) ))
         {
             const WCHAR *dot = wcsrchr( full, L'.' );
@@ -706,7 +702,6 @@ static BOOL caps_probe( IInspectable *outer )
     /* A StandardCalculatorViewModel-style VM registered in the app's provider
      * drives the display sync/teardown behaviour for any app exposing one. */
     if (caps_find_type( provider, ns, vm_suffixes, ARRAY_SIZE( vm_suffixes ),
-                        L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
                         g_caps.vm_type, ARRAY_SIZE( g_caps.vm_type ) ))
     {
         g_caps.teardown_vm = TRUE;
@@ -715,7 +710,6 @@ static BOOL caps_probe( IInspectable *outer )
 
     /* Design-time panel (e.g. FontScaleControlPanel) registered in the provider. */
     caps_find_type( provider, ns, design_suffixes, ARRAY_SIZE( design_suffixes ),
-                    L"WhatsApp.Design.FontScaleControlPanel",
                     g_caps.design_component, ARRAY_SIZE( g_caps.design_component ) );
 
     IInspectable_Release( (IInspectable *)provider );

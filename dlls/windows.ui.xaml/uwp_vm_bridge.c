@@ -779,12 +779,27 @@ void uwp_calc_vm_ensure( void )
 
 static IInspectable *uwp_make_button_pressed_args( int code )
 {
-    static const WCHAR args_cls[] = L"CalculatorApp.ViewModel.Common.CalculatorButtonPressedEventArgs";
+    WCHAR args_cls[160] = {0};
+    WCHAR ns[80] = {0};
+    const WCHAR *src = g_calc_vm.vm_class_name[0] ? g_calc_vm.vm_class_name : xaml_get_app_caps()->vm_type;
+    const WCHAR *dot;
     HSTRING h_cls = NULL;
     IInspectable *args = NULL;
     HRESULT hr;
 
-    if (SUCCEEDED(WindowsCreateString( args_cls, ARRAY_SIZE(args_cls) - 1, &h_cls )) && h_cls)
+    if (src && src[0] && (dot = wcschr( src, L'.' )) && (size_t)(dot - src) < ARRAY_SIZE( ns ))
+    {
+        memcpy( ns, src, (dot - src) * sizeof(WCHAR) );
+        ns[dot - src] = 0;
+    }
+    else if (xaml_get_app_caps()->app_ns[0])
+    {
+        lstrcpynW( ns, xaml_get_app_caps()->app_ns, ARRAY_SIZE( ns ) );
+    }
+    if (!ns[0]) return NULL;
+    swprintf( args_cls, ARRAY_SIZE( args_cls ), L"%s.ViewModel.Common.CalculatorButtonPressedEventArgs", ns );
+
+    if (SUCCEEDED(WindowsCreateString( args_cls, wcslen( args_cls ), &h_cls )) && h_cls)
     {
         IActivationFactory *af = NULL;
         hr = RoGetActivationFactory( h_cls, &IID_IActivationFactory, (void **)&af );
