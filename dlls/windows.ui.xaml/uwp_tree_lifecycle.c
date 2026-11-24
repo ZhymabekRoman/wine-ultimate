@@ -17,16 +17,13 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
-#include "xbf_known_types.h"
 #include "weakreference.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -39,6 +36,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 
 /* Split from uwp_xaml.c: data-context propagation, template apply, Size/Layout/Loaded tree fires, PRI/XBF realize. */
+
+static const GUID IID_IDTE = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
 
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
 {
@@ -55,7 +54,6 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
     }
     if (wcsstr( impl->class_name, L"Card" ))
     {
-        static const GUID IID_IDTE = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
         void *dte = NULL;
         if (impl->binding_connector &&
             SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)impl->binding_connector, &IID_IDTE, &dte )) && dte)
@@ -88,10 +86,9 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
 
     if (dc && dc != old_dc && impl->dt_binding_connector)
     {
-        static const GUID IID_IDTE_g = { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } };
         void *bc_src = impl->dt_binding_connector;
         void *dte = NULL;
-        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)bc_src, &IID_IDTE_g, &dte )) && dte)
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)bc_src, &IID_IDTE, &dte )) && dte)
         {
             struct uwp_ccc_args *ccc = calloc( 1, sizeof(*ccc) );
             if (ccc)

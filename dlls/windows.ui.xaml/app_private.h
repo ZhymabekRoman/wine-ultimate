@@ -22,6 +22,7 @@
 #define __WINE_WINDOWS_UI_XAML_APP_PRIVATE_H
 
 #include "private.h"
+#include "uwp_guids.h"
 
 /* ---- Application object (application.c) ---- */
 struct application
@@ -90,8 +91,6 @@ extern const GUID IID_ICoreWindowInterop;
 /* ---- Package identity (app_identity.c) ---- */
 void xaml_apply_window_icon( HWND top );
 const WCHAR *xaml_package_display_name( void );
-extern const GUID IID_IXamlMetadataProvider_WinUI;
-extern const GUID IID_IXamlMetadataProvider_UWP;
 extern const void *app_meta_provider_vtbl[];
 
 #endif /* __WINE_WINDOWS_UI_XAML_APP_PRIVATE_H */

@@ -2,11 +2,9 @@
 #define UWP_PRIVATE_H
 #include "private.h"
 #include "weakreference.h"
-extern const GUID IID_IPropertyValue_g;
+#include "uwp_guids.h"
 typedef struct IWeakReference IWeakReference;
 typedef struct IWeakReferenceVtbl IWeakReferenceVtbl;
-extern const GUID IID_IDependencyPropertyChangedEventArgs_UWP;
-extern const GUID IID_IXamlMetadataProvider_UWP_g;
 struct uwp_thickness { double Left, Top, Right, Bottom; };
 struct uwp_grid_length { double Value; int GridUnitType; };
 
@@ -1073,17 +1071,6 @@ struct uwp_ka_invoked_args
     IInspectable *element;
 };
 
-struct store_catalog_item
-{
-    WCHAR full_name[256];
-    WCHAR name[128];
-    WCHAR cat[64];
-    WCHAR icon[8];
-    WCHAR rating[32];
-    WCHAR btn[16];
-    BOOL is_framework;
-};
-
 struct xaml_async_action
 {
     IAsyncAction IAsyncAction_iface;
@@ -1291,7 +1278,6 @@ void uwp_asb_fire_query_submitted( struct uwp_element *el );
 void uwp_keyboard_press_char( WCHAR ch );
 void scan_disk_xbfs_in_dir( const WCHAR *dir_path, const char *rel_prefix, struct pri_xbf_catalog *cat );
 extern struct uwp_class_factory scb_factory_obj;
-void store_make_icon_monogram( const WCHAR *title, WCHAR *icon, size_t icon_len );
 void uwp_accel_register( struct uwp_element *accel_el, struct uwp_element *target_el,
                                 UINT vk, UINT mods, BOOL enabled );
 void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *style_key );
@@ -1342,11 +1328,9 @@ extern const void *uwp_path_geom_f2_vtbl[16];
 void uwp_resolve_font_family( const WCHAR *raw_spec, WCHAR *out_face, size_t cap );
 BOOL uwp_is_bundled_font_face( const WCHAR *face );
 const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *buf, size_t cap );
-BOOL uwp_is_light_theme( struct uwp_element *scope_el );
 extern int g_app_requested_theme;
 void uwp_extract_uri_string( IInspectable *uri_obj, WCHAR *out, size_t cap );
 void uwp_media_ensure_started( struct uwp_element *el );
-void uwp_media_stop( struct uwp_element *el );
 void uwp_close_flyout_popup( BOOL fire_closed );
 HRESULT WINAPI uwp_ctrl_ApplyTemplate( void *iface, boolean *ret );
 HRESULT WINAPI uwp_ctrl_Focus( void *iface, int state, boolean *ret );
@@ -1371,7 +1355,6 @@ HRESULT WINAPI uwp_disp_Invoke( IDispatch *iface, DISPID id, REFIID riid, LCID l
         WORD flags, DISPPARAMS *params, VARIANT *result, EXCEPINFO *excep, UINT *argerr );
 HRESULT WINAPI uwp_disp_QueryInterface( IDispatch *iface, REFIID iid, void **out );
 ULONG WINAPI uwp_disp_Release( IDispatch *iface );
-HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token );
 HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp );
 HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out );
 HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val );
@@ -1412,14 +1395,12 @@ void uwp_fire_evc_if_needed( struct uwp_element *el );
 void uwp_fire_size_and_layout_changed( struct uwp_element *el );
 BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_routed_args *args );
 const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp, size_t tmp_len );
-HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result );
 HRESULT WINAPI uwp_generic_noop( void *iface, ... );
 BOOL uwp_get_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
                                         const WCHAR *prop_name, void *target_obj, IInspectable **out_val );
 HRESULT WINAPI uwp_grid_get_ColumnDefinitions( void *iface, void **out );
 HRESULT WINAPI uwp_grid_get_RowDefinitions( void *iface, void **out );
 BOOL uwp_has_open_teachingtip( struct uwp_element *el );
-void uwp_invalidate_window( void );
 BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e );
 BOOL uwp_is_bg_pid( WORD pid );
 BOOL uwp_is_border_pid( WORD pid );
@@ -1455,8 +1436,6 @@ void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WC
 BOOL uwp_combobox_compute_popup_rect( struct uwp_element *cb, int item_cnt, int win_w, int win_h,
                                       RECT *out_rc, int *out_item_h, int *out_vis_cnt, int *out_pad_y );
 BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int wheel_delta, int width, int height, IInspectable *root_content );
-BOOL uwp_unbox_bool( void *obj, boolean *out_val );
-BOOL uwp_unbox_double( void *obj, double *out_val );
 BOOL uwp_vm_supports_display_or_cmd( IInspectable *vm );
 BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
                                WCHAR *out, size_t out_len );
@@ -1487,7 +1466,6 @@ void uwp_pri_enum_xbfs_in_blob( const BYTE *pri, DWORD pri_sz,
 BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
                                   const BYTE **out_ptr, DWORD *out_sz,
                                   char *out_resolved, size_t out_resolved_sz );
-void uwp_pri_ensure_xbf_cat( void );
 BOOL uwp_pri_get_cat_entry( DWORD idx, const char **out_path, const BYTE **out_data, DWORD *out_sz );
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc );
 void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel );
@@ -1515,12 +1493,10 @@ BOOL uwp_set_custom_xaml_member_obj( void *app_outer, const WCHAR *owner_type_na
 BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_type_name,
                                           const WCHAR *prop_name, void *target_obj, void *item_obj );
 void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int screen_x, int screen_y );
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
 HRESULT WINAPI uwp_sub_GetIids( IInspectable *iface, ULONG *count, IID **iids );
 HRESULT WINAPI uwp_sub_GetRuntimeClassName( IInspectable *iface, HSTRING *name );
 HRESULT WINAPI uwp_sub_GetTrustLevel( IInspectable *iface, TrustLevel *level );
 HRESULT WINAPI uwp_sub_QueryInterface( IInspectable *iface, REFIID iid, void **out );
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
 HRESULT WINAPI uwp_tb_get_Text( void *iface, HSTRING *out );
 HRESULT WINAPI uwp_tb_get_Inlines( void *iface, void **out );
 HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val );
@@ -1534,7 +1510,6 @@ BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_i
  * write on miss).  Pre-seeds all xbf_known_types[] entries on first use and
  * caches IXamlType instances (both builtin XAML types and app-provider RCWs).
  * ============================================================================ */
-extern const GUID IID_IXamlType_WinUI3_g;
 extern SRWLOCK xaml_meta_cache_lock;
 extern INIT_ONCE xaml_meta_cache_once;
 extern struct xaml_meta_cache_entry *xaml_meta_cache[XAML_META_CACHE_SIZE];
@@ -1549,126 +1524,6 @@ HRESULT WINAPI dp_args_get_Property( void *iface, void **out );
 HRESULT WINAPI dp_args_get_OldValue( void *iface, IInspectable **out );
 HRESULT WINAPI dp_args_get_NewValue( void *iface, IInspectable **out );
 extern const void *dp_changed_args_vtbl[];
-extern const GUID IID_IReference_NumbersAndOperatorsEnum;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 extern struct xbh_factory_obj_s xbh_factory_obj;
 
@@ -1687,18 +1542,11 @@ BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_
 
 void uwp_invoke_button( struct uwp_element *btn );
 
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
 BOOL uwp_unbox_string( void *obj, WCHAR *buf, int buf_chars );
 
 HRESULT WINAPI uwp_vec_Append( void *iface, void *item );
 
 HRESULT WINAPI uwp_vec_GetAt( void *iface, unsigned int idx, void **item );
-
-HRESULT uwp_vec_create( struct uwp_element *owner, IInspectable **out );
-
 HRESULT WINAPI uwp_vec_get_Size( void *iface, unsigned int *sz );
 
 struct uwp_vsm_group *uwp_vsm_add_group( struct uwp_element *el, const WCHAR *name );
@@ -1746,632 +1594,6 @@ BOOL WINAPI init_pri_xbf_cat_once( INIT_ONCE *once, void *param, void **ctx );
 BOOL WINAPI init_xaml_meta_cache( INIT_ONCE *once, void *param, void **ctx );
 
 BOOL pri_xbf_collect_cb( const char *path, const BYTE *xbf, DWORD sz, void *ctx );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-extern const GUID CLSID_WICImagingFactory_local;
-
-extern const GUID GUID_WICPixelFormat32bppBGRA_local;
-
-extern const GUID IID_IBindingFactory_UWP;
-
-extern const GUID IID_IButtonBaseFactory_UWP;
-
-extern const GUID IID_IButtonBaseStatics_UWP;
-
-extern const GUID IID_IButtonFactory_UWP;
-
-extern const GUID IID_ICommand_UWP;
-
-extern const GUID IID_ICommand_UWP2;
-
-extern const GUID IID_IComponentConnector2_UWP_g;
-
-extern const GUID IID_IComponentConnector_UWP_g;
-
-extern const GUID IID_IContentControlFactory_UWP;
-
-extern const GUID IID_IContentControlFactory_UWP2;
-
-extern const GUID IID_IContentDialogClosedEventArgs_UWP;
-
-extern const GUID IID_IContentDialogFactory_UWP;
-
-extern const GUID IID_IContentPresenterFactory_UWP;
-
-extern const GUID IID_IControlFactory_UWP;
-
-extern const GUID IID_IDataTemplateSelectorFactory_UWP;
-
-extern const GUID IID_IDependencyObjectCollectionFactory_UWP;
-
-extern const GUID IID_IDependencyObjectFactory_UWP;
-
-extern const GUID IID_IDependencyPropertyChangedCallback_UWP;
-
-
-extern const GUID IID_IDesktopWindowXamlSourceFactory_UWP;
-
-extern const GUID IID_IDispatcherTimerFactory_UWP;
-
-extern const GUID IID_IExecuteRequestedEventArgs_UWP;
-
-extern const GUID IID_IFlyoutBaseFactory_UWP;
-
-extern const GUID IID_IFrameFactory_UWP;
-
-extern const GUID IID_IFrameworkElementFactory_UWP;
-
-extern const GUID IID_IFrameworkElementStatics_UWP;
-
-extern const GUID IID_IGridFactory_UWP;
-
-extern const GUID IID_IGridStatics_UWP;
-
-extern const GUID IID_IGridStatics_UWP2;
-
-extern const GUID IID_IKeyRoutedEventArgs_UWP;
-
-extern const GUID IID_IKeyboardAcceleratorFactory_UWP;
-
-extern const GUID IID_IKeyboardAcceleratorInvokedEventArgs_UWP;
-
-extern const GUID IID_IListViewFactory_UWP;
-
-extern const GUID IID_IMarkupExtensionFactory_UWP;
-
-extern const GUID IID_IMenuBarItem_WinUI;
-
-extern const GUID IID_IMenuBar_WinUI;
-
-extern const GUID IID_IMenuFlyoutItemBaseFactory_UWP;
-
-extern const GUID IID_IMenuFlyoutItemFactory_UWP;
-
-extern const GUID IID_IMenuFlyoutSeparatorFactory_UWP;
-
-extern const GUID IID_INotifyPropertyChanged_UWP;
-
-extern const GUID IID_IPageFactory_UWP;
-
-extern const GUID IID_IPanelFactory_UWP;
-
-extern const GUID IID_IPanelFactory_UWP2;
-
-extern const GUID IID_IPropertyChangedEventArgs_UWP;
-
-extern const GUID IID_IPropertyChangedEventHandler_UWP;
-
-extern const GUID IID_IPropertyPathFactory_UWP;
-
-extern const GUID IID_IRadioButtonFactory_UWP;
-
-extern const GUID IID_IReferenceTracker;
-
-extern const GUID IID_IReferenceTrackerTarget;
-
-extern const GUID IID_IReferenceTrackerTarget_UWP;
-
-extern const GUID IID_IReferenceTrackerTarget_UWP2;
-
-extern const GUID IID_IReferenceTrackerTarget_WinUI;
-
-extern const GUID IID_IReferenceTracker_UWP;
-
-extern const GUID IID_IRelativeSourceFactory_UWP;
-
-extern const GUID IID_IRoutedEventArgsFactory_UWP;
-
-extern const GUID IID_IStateTriggerBaseFactory2_UWP;
-
-extern const GUID IID_IStateTriggerBaseFactory_UWP;
-
-extern const GUID IID_IStyleSelectorFactory_UWP;
-
-extern const GUID IID_IStyleSelectorFactory_UWP2;
-
-extern const GUID IID_IToggleButtonFactory2_UWP;
-
-extern const GUID IID_IToggleButtonFactory_UWP;
-
-extern const GUID IID_IToggleButtonStatics_UWP;
-
-extern const GUID IID_IUIElementFactory_UWP;
-
-extern const GUID IID_IUIElementStatics_UWP;
-
-extern const GUID IID_IUriRuntimeClass_g;
-
-extern const GUID IID_IUserControlFactory_UWP;
-
-extern const GUID IID_IVisualStateManagerFactory_UWP;
-
-extern const GUID IID_IVisualTreeHelperStatics_UWP;
-
-extern const GUID IID_IWICImagingFactory_local;
-
-extern const GUID IID_IXamlCompositionBrushBaseFactory_UWP;
-
-extern const GUID IID_IXamlLightFactory_UWP;
-
-
-extern const GUID IID_IXamlReaderStatics_UWP;
-
-extern const GUID IID_IXamlType_UWP_g;
 
 extern const void *uwp_asb_vtbl[32];
 extern const void *uwp_asb2_vtbl[16];
@@ -2436,10 +1658,6 @@ extern const void *uwp_combobox_vtbl[24];
 extern const void *uwp_uie10_vtbl[16];
 extern const void *uwp_xaml_root_vtbl[16];
 
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
 extern const void *uwp_tb_vtbl[64];
 extern const void *uwp_paragraph_vtbl[64];
 extern const void *uwp_run_vtbl[16];
@@ -2487,162 +1705,6 @@ extern const void *wv22_vtbl[256];
 extern const void *wv2_do_vtbl[64];
 
 extern const void *wv2_vtbl[256];
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
 
 HRESULT WINAPI wv2_probe0( void *iface, ... );
 HRESULT WINAPI wv2_probe1( void *iface, ... );
@@ -2730,8 +1792,6 @@ extern BOOL g_island_d3d11_failed;
 BOOL xaml_gpu_begin_frame_rtv( ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv,
                                UINT width, UINT height, COLORREF clear_color );
 BOOL xaml_gpu_end_frame_rtv( ID3D11DeviceContext *ctx, UINT *out_instances, UINT *out_hits, UINT *out_misses );
-BOOL xaml_layout_render_gpu_rtv( HWND hwnd, int width, int height, IInspectable *content,
-                                 ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv );
 extern int g_island_hwnd_cnt;
 extern HWND g_island_hwnds[16];
 extern struct uwp_element *g_last_closed_flyout;
@@ -2764,166 +1824,6 @@ extern DWORD g_winui_pri_size;
 extern HWND g_wv2_core_hwnd;
 extern HWND g_wv2_host_hwnd;
 
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface );
-
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface );
-
 extern const size_t xaml_static_factories_count;
 extern const struct xaml_static_factory *xaml_factory_hash[32];
 extern INIT_ONCE xaml_factory_hash_once;
@@ -2943,169 +1843,6 @@ HRESULT WINAPI uwp_ui_remove_ItemInvoked( void *iface, EventRegistrationToken to
 extern const ITypeInfoVtbl uwp_disp_ti_vtbl;
 extern const struct xaml_static_factory xaml_static_factories[];
 
-
-/* GUIDs, shared vectors and dynamic factory table, split out of uwp_xaml.c */
-extern const GUID IID_IAutoSuggestBox2_Real_UWP;
-extern const GUID IID_IAutoSuggestBox_Real_UWP;
-extern const GUID IID_IBorder2_Calc;
-extern const GUID IID_IBorder_UWP;
-extern const GUID IID_IBrush_UWP;
-extern const GUID IID_IButtonBase_UWP;
-extern const GUID IID_IButton_UWP;
-extern const GUID IID_IButtonWithFlyout_Real_UWP;
-extern const GUID IID_IButtonWithFlyout_UWP;
-extern const GUID IID_IColumnDefinition_UWP;
-extern const GUID IID_IContentControl2_UWP;
-extern const GUID IID_IContentControlOverrides_UWP;
-extern const GUID IID_IContentControlOvr_Calc;
-extern const GUID IID_IContentControl_UWP;
-extern const GUID IID_IContentDialog2_UWP;
-extern const GUID IID_IContentDialog_UWP;
-extern const GUID IID_IContentDialog_UWP_Alt;
-extern const GUID IID_IContentPresenter_UWP;
-extern const GUID IID_IControl2_UWP;
-extern const GUID IID_IControl3_UWP;
-extern const GUID IID_IControl4_UWP;
-extern const GUID IID_IControl5_UWP;
-extern const GUID IID_IControlOverrides_UWP;
-extern const GUID IID_IControlProtected_UWP;
-extern const GUID IID_IControl_UWP;
-extern const GUID IID_IDataContextChangedEventArgs_UWP;
-extern const GUID IID_IDataTemplateSelector2_UWP;
-extern const GUID IID_IDataTemplateSelectorOverrides2_UWP;
-extern const GUID IID_IDataTemplateSelectorOverrides_UWP;
-extern const GUID IID_IDataTemplateSelector_UWP;
-extern const GUID IID_IDataTemplate_UWP;
-extern const GUID IID_IDependencyObject2_UWP;
-extern const GUID IID_IDependencyObject_UWP;
-extern const GUID IID_IDesktopWindowXamlSourceNative2_UWP;
-extern const GUID IID_IDesktopWindowXamlSourceNative_UWP;
-extern const GUID IID_IDesktopWindowXamlSource_UWP;
-extern const GUID IID_IDispatcherTimer_UWP;
-extern const GUID IID_IEasingFunctionBase_UWP;
-extern const GUID IID_IEffectiveViewportChangedEventArgs_UWP;
-extern const GUID IID_IEntranceNavigationTransitionInfo_UWP;
-extern const GUID IID_IFlyoutBase3_UWP;
-extern const GUID IID_IFlyoutBase5_UWP;
-extern const GUID IID_IFlyoutBase_UWP;
-extern const GUID IID_IFrame3_UWP;
-extern const GUID IID_IFrame5_UWP;
-extern const GUID IID_IFrameProj_UWP;
-extern const GUID IID_IFrame_UWP;
-extern const GUID IID_IFrameworkElement2_UWP;
-extern const GUID IID_IFrameworkElement3_UWP;
-extern const GUID IID_IFrameworkElement4_UWP;
-extern const GUID IID_IFrameworkElement6_UWP;
-extern const GUID IID_IFrameworkElement7_Proj;
-extern const GUID IID_IFrameworkElement7_UWP;
-extern const GUID IID_IFrameworkElementOverrides2_UWP;
-extern const GUID IID_IFrameworkElementOverrides_UWP;
-extern const GUID IID_IFrameworkElement_UWP;
-extern const GUID IID_IGrid3_Calc;
-extern const GUID IID_IGrid3_UWP;
-extern const GUID IID_IGrid_UWP;
-extern const GUID IID_IGrid_UWP2;
-extern const GUID IID_IHyperlinkButton_UWP;
-extern const GUID IID_IImage2_UWP;
-extern const GUID IID_IItemsRepeaterSizingTarget_UWP;
-extern const GUID IID_IItemsRepeater_UWP;
-extern const GUID IID_IKeyboardAccelerator_UWP;
-extern const GUID IID_IMarkupExtensionOverrides_UWP;
-extern const GUID IID_IMarkupExtension_UWP;
-extern const GUID IID_IMediaPlayerElement_UWP;
-extern const GUID IID_IMenuFlyout2_Real_UWP;
-extern const GUID IID_IMenuFlyoutItem3_UWP;
-extern const GUID IID_IMenuFlyoutItemBase_UWP;
-extern const GUID IID_IMenuFlyoutItemBase_UWP2;
-extern const GUID IID_IMenuFlyoutItem_UWP;
-extern const GUID IID_IMenuFlyoutSubItem_UWP;
-extern const GUID IID_IMenuFlyout_UWP;
-extern const GUID IID_IMenuFlyout_UWP2;
-extern const GUID IID_INavigate_UWP;
-extern const GUID IID_INavigationTransitionInfo_UWP;
-extern const GUID IID_INavigationView2_UWP;
-extern const GUID IID_INavigationViewItem_UWP;
-extern const GUID IID_INavigationView_UWP;
-extern const GUID IID_IPageOverrides_UWP;
-extern const GUID IID_IPage_UWP;
-extern const GUID IID_IPanel_UWP;
-extern const GUID IID_IPopup2_UWP;
-extern const GUID IID_IPopup3_UWP;
-extern const GUID IID_IPopup_UWP;
-extern const GUID IID_IPopup_WinUI;
-extern const GUID IID_IPopup2_WinUI;
-extern const GUID IID_IPopup3_WinUI;
-extern const GUID IID_IRadioButtons_WinUI;
-extern const GUID IID_IRadioButton_UWP;
-extern const GUID IID_IRoutedEventArgs2_UWP;
-extern const GUID IID_IRoutedEventArgs_Clone_UWP;
-extern const GUID IID_IRoutedEventArgs_QI_UWP;
-extern const GUID IID_IRoutedEventArgs_WinUI3;
-extern const GUID IID_IRowDefinition_UWP;
-extern const GUID IID_IScrollViewer2_UWP;
-extern const GUID IID_IScrollViewer3_UWP;
-extern const GUID IID_IScrollViewer_UWP;
-extern const GUID IID_ISetterBase_UWP;
-extern const GUID IID_ISetter_UWP;
-extern const GUID IID_ISolidColorBrush_UWP;
-extern const GUID IID_ISplitView2_UWP;
-extern const GUID IID_ISplitView_UWP;
-extern const GUID IID_IStackPanel_UWP;
-extern const GUID IID_IStackPanel_UWP2;
-extern const GUID IID_IStackPanel2_Real_UWP;
-extern const GUID IID_IStateTriggerBaseProtected_UWP;
-extern const GUID IID_IStateTriggerBase_UWP;
-extern const GUID IID_IStyle_UWP;
-extern const GUID IID_ISwapChainPanelNative2_UWP;
-extern const GUID IID_ISwapChainPanelNative_UWP;
-extern const GUID IID_ISwapChainPanel_UWP;
-extern const GUID IID_ITabView_WinUI;
-extern const GUID IID_ITeachingTip_WinUI;
-extern const GUID IID_ITextBlock2_UWP;
-extern const GUID IID_ITextBlock3_UWP;
-extern const GUID IID_ITextBlock6_UWP;
-extern const GUID IID_ITextBlock_Calc2;
-extern const GUID IID_ITextBlock_Calc3;
-extern const GUID IID_ITextBlock_Calc4;
-extern const GUID IID_ITextBlock_UWP;
-extern const GUID IID_IToggleButtonOverrides_UWP;
-extern const GUID IID_IToggleButton_UWP;
-extern const GUID IID_IToggleMenuFlyoutItem_UWP;
-extern const GUID IID_IFontFamily_UWP;
-extern const GUID IID_IFontFamilyFactory_UWP;
-extern const GUID IID_IFontIcon_UWP;
-extern const GUID IID_IImageBrush_UWP;
-extern const GUID IID_ITileBrush_UWP;
-extern const GUID IID_ITileBrush_UWP_Alt;
-extern const GUID IID_IGradientBrush_UWP;
-extern const GUID IID_ILinearGradientBrush_UWP;
-extern const GUID IID_IGradientStop_UWP;
-extern const GUID IID_IPathGeometry_UWP;
-extern const GUID IID_IPathGeometry_UWP_Alt;
-extern const GUID IID_IVector_GradientStop_UWP;
-extern const GUID IID_IIterable_GradientStop_UWP;
-extern const GUID IID_IVectorView_GradientStop_UWP;
-extern const GUID IID_IIterator_GradientStop_UWP;
-extern const GUID IID_IUIE_Extra[107];
-extern const GUID IID_IUIElement10_UWP;
-extern const GUID IID_IUIElement2_UWP;
-extern const GUID IID_IUIElement3_UWP;
-extern const GUID IID_IUIElement4_Real_UWP;
-extern const GUID IID_IUIElement4_UWP;
-extern const GUID IID_IUIElement5_Real_UWP;
-extern const GUID IID_IUIElement5_UWP;
-extern const GUID IID_IUIElement7_UWP;
-extern const GUID IID_IUIElement_Calc2;
-extern const GUID IID_IUIElementOverrides_UWP;
-extern const GUID IID_IUIElement_UWP;
-extern const GUID IID_IUserControl_UWP;
-extern const GUID IID_IVisualStateGroup_UWP;
-extern const GUID IID_IVisualState_UWP;
-extern const GUID IID_IWeakReference_local;
-extern const GUID IID_IWeakReferenceSource_local;
-extern const GUID IID_IXamlBindingHelperStatics_UWP;
-extern const GUID IID_IXamlRoot_UWP;
-extern const GUID IID_IXamlUICommand_UWP;
 extern const void *uwp_el_obsvec_vtbl[16];
 extern const void *uwp_el_vec_vtbl[24];
 extern const void *uwp_el_vecview_vtbl[16];

@@ -18,11 +18,8 @@
  */
 
 #include <stdarg.h>
-#include <stdio.h>
 
 #include "private.h"
-#include "winreg.h"
-#include "oleauto.h"
 #include "weakreference.h"
 
 #include "wine/exception.h"
@@ -37,28 +34,12 @@ const GUID IID_IReferenceTracker =
     { 0xae927363, 0x74e4, 0x47e7, { 0xab, 0x5e, 0x6e, 0x97, 0xd6, 0xc2, 0x88, 0x5b } };
 
 /* Windows.UI.Xaml.Controls.Frame interface GUIDs */
-static const GUID IID_IFrameFactory =
-    { 0x02ee93d4, 0x448e, 0x469e, { 0x97, 0x99, 0x0a, 0x8a, 0x1f, 0x70, 0xf1, 0x71 } };
-static const GUID IID_IPageFactory =
-    { 0xdfa149ac, 0x1849, 0x445e, { 0x93, 0x7c, 0x40, 0xa9, 0x59, 0x0c, 0xc0, 0x76 } };
-static const GUID IID_IFrame =
-    { 0x68ea500b, 0x3fe9, 0x4735, { 0xb6, 0xa0, 0xe7, 0x60, 0x19, 0x33, 0xb0, 0x89 } };
 static const GUID IID_IGridFactory =
     { 0xb16bf561, 0xfc6c, 0x57c6, { 0x8e, 0xbc, 0x0b, 0x06, 0xce, 0x45, 0x13, 0xaa } };
 static const GUID IID_IContentControlFactory =
     { 0x3dea958e, 0x5acd, 0x5f80, { 0x89, 0x38, 0x38, 0x63, 0x4f, 0x51, 0x49, 0x3a } };
 static const GUID IID_IGridStatics =
     { 0xef9cf81d, 0xa431, 0x50f4, { 0xab, 0xf5, 0x30, 0x23, 0xfe, 0x44, 0x77, 0x04 } };
-static const GUID IID_INavigate =
-    { 0xe7337f7a, 0x5e13, 0x4d32, { 0xb5, 0x72, 0x89, 0x35, 0x6e, 0x98, 0x1d, 0x96 } };
-static const GUID IID_IDependencyObject_g =
-    { 0x5c526665, 0xf60e, 0x4912, { 0xaf, 0x59, 0x5f, 0xe0, 0x68, 0x0f, 0x08, 0x9d } };
-static const GUID IID_IUIElement_g =
-    { 0x676d0be9, 0xb65c, 0x41c6, { 0xba, 0x40, 0x58, 0xcf, 0x87, 0xf2, 0x01, 0xc1 } };
-static const GUID IID_IFrameworkElement =
-    { 0xa391d09b, 0x4a99, 0x4b7c, { 0x9d, 0x8d, 0x6f, 0xa5, 0xd0, 0x1f, 0x6f, 0xbf } };
-static const GUID IID_IContentControl =
-    { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } };
 static const GUID IID_IControl_g =
     { 0xedf04eb1, 0x37d1, 0x471f, { 0x85, 0x70, 0x38, 0x29, 0xee, 0x5b, 0x2b, 0xc6 } };
 static const GUID IID_IGrid =
@@ -97,8 +78,6 @@ static const GUID IID_IControl_WinUI =
     { 0x857d6e8a, 0xd45a, 0x5c69, { 0xa9, 0x9c, 0xbf, 0x6a, 0x5c, 0x54, 0xfb, 0x38 } };
 static const GUID IID_IContentControl_WinUI =
     { 0x07e81761, 0x11b2, 0x52ae, { 0x8f, 0x8b, 0x4d, 0x53, 0xd2, 0xb5, 0x90, 0x0a } };
-static const GUID IID_IDependencyObject_WinUI =
-    { 0xe7beaee7, 0x160e, 0x50f7, { 0x87, 0x89, 0xd6, 0x34, 0x63, 0xf9, 0x79, 0xfa } };
 static const GUID IID_IImage =
     { 0x220d3d8d, 0x66de, 0x53a1, { 0xa2, 0x15, 0xba, 0x9c, 0x16, 0x55, 0x65, 0xab } };
 static const GUID IID_IUIElementOverrides =
@@ -193,32 +172,16 @@ static const GUID IID_IButtonBase =
     { 0x65714269, 0x2473, 0x5327, { 0xa6, 0x52, 0x0e, 0xa6, 0xbc, 0xe7, 0xf4, 0x03 } };
 static const GUID IID_IStyle =
     { 0x65e1d164, 0x572f, 0x5b0e, { 0xa8, 0x0f, 0x9c, 0x02, 0x44, 0x1f, 0xac, 0x49 } };
-static const GUID IID_ICanvasStatics =
-    { 0x40ce5c46, 0x2962, 0x446f, { 0xaa, 0xfb, 0x4c, 0xdc, 0x48, 0x69, 0x39, 0xc9 } };
 static const GUID IID_ICanvasFactory =
     { 0x005ac3d1, 0xb031, 0x58ab, { 0x91, 0x8d, 0x03, 0x0f, 0xab, 0xae, 0xaf, 0x87 } };
 static const GUID IID_ICanvas =
     { 0x70e05ac4, 0xd38d, 0x4bab, { 0x83, 0x1f, 0x4a, 0x22, 0xef, 0x52, 0xac, 0x86 } };
-static const GUID IID_IComponentConnector_UWP =
-    { 0xf6790987, 0xe6e5, 0x47f2, { 0x92, 0xc6, 0xec, 0xcc, 0xe4, 0xba, 0x15, 0x9a } };
-static const GUID IID_IComponentConnector_x =
-    { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
-static const GUID IID_IDataTemplate =
-    { 0x9910aec7, 0x8ab5, 0x4118, { 0x9b, 0xc6, 0x09, 0xf4, 0x5a, 0x35, 0x07, 0x3d } };
 static const GUID IID_IProgressRing =
     { 0x2670d03f, 0xe28c, 0x5652, { 0xbe, 0xe2, 0xb5, 0x21, 0x2e, 0xbd, 0xf7, 0xff } };
 static const GUID IID_IImage_WinUI =
     { 0x495b7402, 0x9af3, 0x4e50, { 0xaa, 0x90, 0x03, 0x38, 0x8f, 0x30, 0x86, 0xd2 } };
-static const GUID IID_IBrush_local =
-    { 0x8806a321, 0x1e06, 0x422c, { 0xa1, 0xcc, 0x01, 0x69, 0x65, 0x59, 0xe0, 0x21 } };
-static const GUID IID_ISolidColorBrush_local =
-    { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
 static const GUID IID_ISolidColorBrush_WinUI3 =
     { 0xb3865c31, 0x37c8, 0x55c1, { 0x8a, 0x72, 0xd4, 0x1c, 0x67, 0x64, 0x2e, 0x2a } };
-static const GUID IID_IRoutedEventArgsFactory_WinUI3 =
-    { 0x914b02c7, 0x076b, 0x5b89, { 0x98, 0xe7, 0x6c, 0x37, 0x33, 0x79, 0xe9, 0xaf } };
-static const GUID IID_IStyle_local =
-    { 0xc4a9f225, 0x9db7, 0x4a7d, { 0xb6, 0xd1, 0xf7, 0x4e, 0xdb, 0x92, 0x93, 0xc2 } };
 
 
 
@@ -243,7 +206,7 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         return E_NOINTERFACE;
     }
 
-    if (IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+    if (IsEqualGUID( iid, &IID_IDependencyObject_UWP ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
     {
         *out = &impl->IDependencyObject_iface;
@@ -254,13 +217,13 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IFrame ) ||
-        IsEqualGUID( iid, &IID_INavigate ) ||
-        IsEqualGUID( iid, &IID_IUIElement_g ) ||
+        IsEqualGUID( iid, &IID_IFrame_UWP ) ||
+        IsEqualGUID( iid, &IID_INavigate_UWP ) ||
+        IsEqualGUID( iid, &IID_IUIElement_UWP ) ||
         IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
-        IsEqualGUID( iid, &IID_IFrameworkElement ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElement_UWP ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ) ||
-        IsEqualGUID( iid, &IID_IContentControl ) ||
+        IsEqualGUID( iid, &IID_IContentControl_UWP ) ||
         IsEqualGUID( iid, &IID_IContentControl_WinUI ) ||
         IsEqualGUID( iid, &IID_IUserControl ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
@@ -274,7 +237,7 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         IsEqualGUID( iid, &IID_IButtonBase ) ||
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
-        IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate_UWP ) ||
         IsEqualGUID( iid, &IID_IProgressRing ) ||
         IsEqualGUID( iid, &IID_IImage_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
@@ -772,8 +735,8 @@ static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, R
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IFrameFactory ) ||
-        IsEqualGUID( iid, &IID_IPageFactory ) ||
+    if (IsEqualGUID( iid, &IID_IFrameFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IPageFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IGridFactory ) ||
         IsEqualGUID( iid, &IID_IPanelFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IPanelFactory_UWP2 ) ||
@@ -925,15 +888,15 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IFrame ) ||
-        IsEqualGUID( iid, &IID_INavigate ) ||
-        IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+        IsEqualGUID( iid, &IID_IFrame_UWP ) ||
+        IsEqualGUID( iid, &IID_INavigate_UWP ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_UWP ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_WinUI ) ||
-        IsEqualGUID( iid, &IID_IUIElement_g ) ||
+        IsEqualGUID( iid, &IID_IUIElement_UWP ) ||
         IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
-        IsEqualGUID( iid, &IID_IFrameworkElement ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElement_UWP ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ) ||
-        IsEqualGUID( iid, &IID_IContentControl ) ||
+        IsEqualGUID( iid, &IID_IContentControl_UWP ) ||
         IsEqualGUID( iid, &IID_IContentControl_WinUI ) ||
         IsEqualGUID( iid, &IID_IUserControl ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
@@ -947,7 +910,7 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
         IsEqualGUID( iid, &IID_IButtonBase ) ||
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
-        IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate_UWP ) ||
         IsEqualGUID( iid, &IID_IProgressRing ) ||
         IsEqualGUID( iid, &IID_IImage_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
@@ -1099,7 +1062,7 @@ static HRESULT WINAPI page_factory_QueryInterface( IActivationFactory *iface, RE
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IPageFactory ))
+        IsEqualGUID( iid, &IID_IPageFactory_UWP ))
     {
         *out = &impl->IActivationFactory_iface;
         IActivationFactory_AddRef( iface );
@@ -1191,9 +1154,9 @@ IActivationFactory *page_factory = &page_factory_obj.IActivationFactory_iface;
 
 
 /* Generic XAML control / element (Grid, RowDefinition, ColumnDefinition, ContentControl, Image, WebView2) */
-HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source );
-HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface );
-HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface );
+static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source );
+static HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface );
+static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface );
 
 static const GUID IID_IWebView2_g =
     { 0x2b2c76c2, 0x997c, 0x5069, { 0xa8, 0xf0, 0x9b, 0x84, 0xcd, 0x7e, 0x62, 0x4b } };
@@ -1405,7 +1368,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+    if (IsEqualGUID( iid, &IID_IDependencyObject_UWP ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
     {
         *out = &impl->IDependencyObject_iface;
@@ -1440,7 +1403,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
             element_AddRef( iface );
             return S_OK;
         }
-        if (IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+        if (IsEqualGUID( iid, &IID_IDependencyObject_UWP ) ||
             IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
         {
             *out = &impl->IDependencyObject_iface;
@@ -1449,7 +1412,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         }
     }
 
-    if (IsEqualGUID( iid, &IID_IUIElement_g ) ||
+    if (IsEqualGUID( iid, &IID_IUIElement_UWP ) ||
         IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IUIElementProtected_WinUI3 ))
     {
@@ -1471,7 +1434,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IView_IV2 ) ||
         IsEqualGUID( iid, &IID_ICanvas ) ||
         IsEqualGUID( iid, &IID_IStackPanel ) ||
-        IsEqualGUID( iid, &IID_IContentControl ) ||
+        IsEqualGUID( iid, &IID_IContentControl_UWP ) ||
         IsEqualGUID( iid, &IID_IContentControl_WinUI ) ||
         IsEqualGUID( iid, &IID_IUserControl ) ||
         IsEqualGUID( iid, &IID_IBorder ) ||
@@ -1484,7 +1447,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
         IsEqualGUID( iid, &IID_IControl_WinUI ) ||
-        IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_UWP ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_WinUI ) ||
         IsEqualGUID( iid, &IID_IUIElementOverrides ) ||
         IsEqualGUID( iid, &IID_IFrameworkElementOverrides ) ||
@@ -1492,15 +1455,15 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IRectangle ) ||
         IsEqualGUID( iid, &IID_IShape ) ||
         IsEqualGUID( iid, &IID_IViewbox ) ||
-        IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate_UWP ) ||
         IsEqualGUID( iid, &IID_IProgressRing ) ||
         IsEqualGUID( iid, &IID_IImage_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ) ||
-        IsEqualGUID( iid, &IID_IBrush_local ) ||
-        IsEqualGUID( iid, &IID_ISolidColorBrush_local ) ||
+        IsEqualGUID( iid, &IID_IBrush_UWP ) ||
+        IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ) ||
         IsEqualGUID( iid, &IID_ISolidColorBrush_WinUI3 ) ||
         IsEqualGUID( iid, &IID_IRoutedEventArgs_WinUI3 ) ||
-        IsEqualGUID( iid, &IID_IStyle_local ))
+        IsEqualGUID( iid, &IID_IStyle_UWP ))
     {
         *out = &impl->IInspectable_iface;
         element_AddRef( &impl->IInspectable_iface );
@@ -1518,7 +1481,7 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         }
     }
 
-    if (IsEqualGUID( iid, &IID_IFrameworkElement ) ||
+    if (IsEqualGUID( iid, &IID_IFrameworkElement_UWP ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ))
     {
         *out = &impl->IFrameworkElement_iface;
@@ -1544,8 +1507,8 @@ HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **o
         }
     }
 
-    if (IsEqualGUID( iid, &IID_IComponentConnector_x ) ||
-        IsEqualGUID( iid, &IID_IComponentConnector_UWP ))
+    if (IsEqualGUID( iid, &IID_IComponentConnector_WinUI ) ||
+        IsEqualGUID( iid, &IID_IComponentConnector_UWP_g ))
     {
         *out = NULL;
         return E_NOINTERFACE;
@@ -1674,7 +1637,7 @@ static struct tracker_entry *tracker_lookup( void *iface, int create )
     return &tracker_map[free_idx];
 }
 
-HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
+static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
 {
     struct tracker_entry *e = tracker_lookup( iface, 1 );
     ERR( "xaml_ConnectFromTrackerSource iface %p source %p\n", iface, source );
@@ -1686,14 +1649,14 @@ HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
     }
     return S_OK;
 }
-HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface )
+static HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface )
 {
     struct tracker_entry *e = tracker_lookup( iface, 0 );
     ERR( "xaml_AddRefFromTrackerSource iface %p source %p\n", iface, e ? e->source : NULL );
     return S_OK;
 }
 
-HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
+static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
 {
     struct tracker_entry *e = tracker_lookup( iface, 0 );
     if (e && e->idx < ARRAY_SIZE( tracker_map ))
@@ -2414,12 +2377,8 @@ static HRESULT WINAPI xaml_root_QueryInterface( void *iface, REFIID iid, void **
         { 0x60cb215a, 0xad15, 0x520a, { 0x8b, 0x01, 0x44, 0x16, 0x82, 0x4f, 0x04, 0x41 } };
     static const GUID IID_IXamlRoot2_WinUI3 =
         { 0xbdee0f42, 0x71cb, 0x50c5, { 0x82, 0x9b, 0x46, 0x14, 0xd9, 0x8c, 0x57, 0x94 } };
-    static const GUID IID_IXamlRoot_UWP =
-        { 0x34b50756, 0x1696, 0x5b6d, { 0x8e, 0x9b, 0xc7, 0x14, 0x64, 0xcc, 0xad, 0x5a } };
     static const GUID IID_IXamlRootNative =
         { 0xf88a52af, 0x87d6, 0x4f58, { 0x87, 0x58, 0x55, 0xed, 0x42, 0xbd, 0xcc, 0xf3 } };
-    static const GUID IID_IWeakReferenceSource_local =
-        { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -2453,8 +2412,6 @@ static ULONG WINAPI xaml_root_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI xaml_root_Release( void *iface ) { return 1; }
 static HRESULT WINAPI xaml_root_weak_ref_QI( void *iface, REFIID iid, void **out )
 {
-    static const GUID IID_IWeakReference_local =
-        { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -2887,7 +2844,7 @@ static const void *textblock_vtbl[64] =
     [6 ... 63] = element_generic_slot,
 };
 
-HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
+static HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
 {
     struct xaml_element *impl;
     if (!instance) return E_POINTER;
@@ -2942,18 +2899,6 @@ HRESULT element_create_typed( const WCHAR *class_name, void **instance )
             impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)element_vtbl;
 
         *instance = &impl->IInspectable_iface;
-    }
-    return hr;
-}
-
-HRESULT xaml_create_webview2( void **out )
-{
-    struct xaml_element *impl = NULL;
-    HRESULT hr = element_create( NULL, NULL, (void **)&impl );
-    if (SUCCEEDED(hr) && impl)
-    {
-        impl->is_webview = TRUE;
-        *out = &impl->IInspectable_iface;
     }
     return hr;
 }
@@ -3197,7 +3142,7 @@ static HRESULT WINAPI canvas_factory_QueryInterface( void *iface, REFIID iid, vo
         *out = &canvas_factory_obj.IActivationFactory_iface;
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_ICanvasStatics ))
+    if (IsEqualGUID( iid, &IID_ICanvasStatics_UWP ))
     {
         *out = &canvas_factory_obj.ICanvasStatics_iface;
         return S_OK;
@@ -3218,7 +3163,7 @@ static HRESULT WINAPI canvas_factory_GetIids( void *iface, ULONG *count, IID **i
     if (!count || !iids) return E_POINTER;
     array = CoTaskMemAlloc( sizeof(IID) );
     if (!array) return E_OUTOFMEMORY;
-    array[0] = IID_ICanvasStatics;
+    array[0] = IID_ICanvasStatics_UWP;
     *count = 1;
     *iids = array;
     return S_OK;

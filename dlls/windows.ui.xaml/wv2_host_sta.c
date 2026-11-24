@@ -21,8 +21,6 @@
 #include <stdio.h>
 
 #include "private.h"
-#include "winreg.h"
-#include "oleauto.h"
 #include "weakreference.h"
 
 #include "wine/exception.h"
@@ -673,12 +671,6 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
     if (g_wv2_prev_wndproc && g_wv2_prev_wndproc != wv2_host_wndproc)
         return CallWindowProcW( g_wv2_prev_wndproc, hwnd, msg, wparam, lparam );
     return DefWindowProcW( hwnd, msg, wparam, lparam );
-}
-
-void xaml_wv2_post_resize( UINT width, UINT height )
-{
-    if (g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ) && width > 0 && height > 0)
-        PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_RESIZE, 0, MAKELPARAM( width, height ) );
 }
 
 void wv2_ensure_host_subclass( HWND parent )

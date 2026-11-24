@@ -19,6 +19,7 @@
 
 #include "initguid.h"
 #include "private.h"
+#include "uwp_guids.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -717,8 +718,6 @@ static const GUID IID_ICollectionViewSource =
     { 0xa45e3b3a, 0xf31e, 0x5bbb, { 0x8a, 0x7c, 0x70, 0xcf, 0x5c, 0x64, 0xbc, 0x3f } };
 static const GUID IID_ICollectionViewSourceStatics =
     { 0xe282f10f, 0xd4b1, 0x5769, { 0x8a, 0x11, 0x30, 0xf7, 0x39, 0xe6, 0x11, 0x3b } };
-static const GUID IID_IDependencyObject_WinUI =
-    { 0xe7beaee7, 0x160e, 0x50f7, { 0x87, 0x89, 0xd6, 0x34, 0x63, 0xf9, 0x79, 0xfa } };
 
 struct collection_view_source
 {
@@ -894,17 +893,12 @@ static struct cvs_factory_s cvs_factory_obj =
 IActivationFactory *collection_view_source_factory = &cvs_factory_obj.factory_iface;
 
 /* Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider */
-static const GUID IID_IXamlMetadataProvider_WinUI2 =
-    { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
-static const GUID IID_IXamlMetadataProvider_UWP =
-    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
-
 static HRESULT WINAPI meta_provider_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI2 ) ||
+        IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
         IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ))
     {
         *out = iface;
@@ -957,7 +951,7 @@ static HRESULT WINAPI meta_provider_factory_QueryInterface( IActivationFactory *
         *out = iface;
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI2 ) ||
+    if (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
         IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ))
     {
         *out = &meta_provider_obj;
@@ -990,12 +984,8 @@ static IActivationFactory *meta_provider_factory = (IActivationFactory *)&meta_p
 /* Microsoft.UI.Xaml.PropertyPath / Windows.UI.Xaml.PropertyPath */
 static const GUID IID_IPropertyPath =
     { 0x8b0712f6, 0x9e57, 0x53b0, { 0x80, 0xb1, 0x96, 0x6a, 0x79, 0xf6, 0x0b, 0x96 } };
-static const GUID IID_IPropertyPath_UWP =
-    { 0x300e5d8a, 0x1ff3, 0x4d2c, { 0x95, 0xec, 0x27, 0xf8, 0x1d, 0xeb, 0xac, 0xb8 } };
 static const GUID IID_IPropertyPathFactory =
     { 0x08a8ccab, 0x7ff8, 0x5cec, { 0xbd, 0x3c, 0x72, 0xc9, 0x88, 0x04, 0xd9, 0x89 } };
-static const GUID IID_IPropertyPathFactory_UWP =
-    { 0x4e4cdf99, 0x9826, 0x4e56, { 0x84, 0x7c, 0xca, 0x05, 0x5f, 0x16, 0x29, 0x05 } };
 
 struct property_path
 {
@@ -1123,12 +1113,8 @@ IActivationFactory *property_path_factory = &pp_factory_obj.iface;
 /* Windows.UI.Xaml.Data.PropertyChangedEventArgs */
 static const GUID IID_IPropertyChangedEventArgsFactory =
     { 0x6dcc9c03, 0xe0c7, 0x4eee, { 0x8e, 0xa9, 0x37, 0xe3, 0x40, 0x6e, 0xeb, 0x1c } };
-static const GUID IID_IPropertyChangedEventArgs =
-    { 0x4f33a9a0, 0x5cf4, 0x47a4, { 0xb1, 0x6f, 0xd7, 0xfa, 0xaf, 0x17, 0x45, 0x7e } };
 static const GUID IID_IReferenceTracker_d =
     { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
-static const GUID IID_IReferenceTrackerTarget_d =
-    { 0x64e71ddf, 0x2424, 0x4ec5, { 0x86, 0x27, 0x15, 0x05, 0x08, 0x96, 0xd9, 0xb6 } };
 
 struct property_changed_event_args
 {
@@ -1146,7 +1132,7 @@ static HRESULT WINAPI pcea_QueryInterface( void *iface, REFIID iid, void **out )
     struct property_changed_event_args *impl = impl_from_property_changed_args( iface );
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker_d ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_d ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP2 ))
     {
         *out = NULL;
         return E_NOINTERFACE;
@@ -1154,7 +1140,7 @@ static HRESULT WINAPI pcea_QueryInterface( void *iface, REFIID iid, void **out )
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IPropertyChangedEventArgs ))
+        IsEqualGUID( iid, &IID_IPropertyChangedEventArgs_UWP ))
     {
         *out = iface;
         InterlockedIncrement( &impl->ref );

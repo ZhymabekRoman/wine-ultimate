@@ -17,16 +17,13 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
-#include "xbf_known_types.h"
 #include "weakreference.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"

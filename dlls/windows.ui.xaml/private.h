@@ -84,9 +84,7 @@ extern IActivationFactory *canvas_factory;
 HRESULT dependency_property_create( IPropertyMetadata *metadata, IDependencyProperty **out );
 HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out );
 HRESULT xaml_create_dcomp_visual( IDCompositionVisual **out_visual );
-HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance );
 HRESULT element_create_typed( const WCHAR *class_name, void **instance );
-HRESULT xaml_create_webview2( void **out );
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content );
 BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *content,
                              ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain );
@@ -132,7 +130,6 @@ void xaml_dcomp_commit( void );
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_handle_start_msg( LPARAM lparam );
-void xaml_wv2_post_resize( UINT width, UINT height );
 IActivationFactory *xaml_get_ecp_factory( void );
 IActivationFactory *xaml_get_comp_target_factory( void );
 IActivationFactory *xaml_get_ceol_factory( void );
@@ -153,9 +150,12 @@ struct xaml_app_caps
 };
 
 const struct xaml_app_caps *xaml_get_app_caps( void );
-HRESULT xaml_metadata_cache_get_type( const WCHAR *full_name, void **out );
 HRESULT xaml_metadata_cache_get_type_hstring( HSTRING full_name, void **out );
-WORD xaml_metadata_cache_find_xbf_id( const WCHAR *full_name );
+struct uwp_element;
+HRESULT uwp_vec_create( struct uwp_element *owner, IInspectable **out );
+BOOL uwp_is_light_theme( struct uwp_element *scope_el );
+void uwp_invalidate_window( void );
+void uwp_debug_dump_root( IInspectable *root );
 void *uwp_get_app_outer( void );
 HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );

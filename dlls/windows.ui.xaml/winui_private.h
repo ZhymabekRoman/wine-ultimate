@@ -20,6 +20,8 @@
 #ifndef __WINE_WINUI_PRIVATE_H
 #define __WINE_WINUI_PRIVATE_H
 
+#include "uwp_guids.h"
+
 struct xaml_element;
 
 /* WinUI 3 UIElement / FrameworkElement event kinds (registry lives in winui_events.c) */
@@ -72,10 +74,5 @@ extern float g_winui_actual_h;
 HRESULT WINAPI xaml_root_GetIids( void *iface, ULONG *c, IID **i );
 HRESULT WINAPI xaml_root_GetRuntimeClassName( void *iface, HSTRING *name );
 HRESULT WINAPI xaml_root_GetTrustLevel( void *iface, TrustLevel *level );
-
-/* Reference-tracker GUIDs (defined in frame.c, shared by collections) */
-extern const GUID IID_IReferenceTracker;
-extern const GUID IID_IReferenceTrackerTarget;
-extern const GUID IID_IReferenceTrackerTarget_WinUI;
 
 #endif /* __WINE_WINUI_PRIVATE_H */

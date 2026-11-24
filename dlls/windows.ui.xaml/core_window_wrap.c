@@ -19,16 +19,12 @@
  */
 
 #include <stdlib.h>
-#include <string.h>
 
 #include "private.h"
 #include "app_private.h"
 #include "weakreference.h"
 #include "wine/exception.h"
 #include "windows.applicationmodel.activation.h"
-#include "appmodel.h"
-#include "pri.h"
-#include "wincodec.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 

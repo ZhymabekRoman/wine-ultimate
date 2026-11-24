@@ -27,7 +27,6 @@
 #include "appmodel.h"
 #include "weakreference.h"
 #include "winreg.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -423,7 +422,7 @@ BOOL uwp_unbox_string( void *obj, WCHAR *buf, int buf_chars )
     return FALSE;
 }
 
-BOOL uwp_unbox_int32( void *obj, INT32 *out_val )
+static BOOL uwp_unbox_int32( void *obj, INT32 *out_val )
 {
     IPropertyValue *pv = NULL;
     if (!obj || !out_val) return FALSE;
@@ -436,7 +435,7 @@ BOOL uwp_unbox_int32( void *obj, INT32 *out_val )
     return FALSE;
 }
 
-BOOL uwp_unbox_bool( void *obj, boolean *out_val )
+static BOOL uwp_unbox_bool( void *obj, boolean *out_val )
 {
     IPropertyValue *pv = NULL;
     if (!obj || !out_val) return FALSE;
@@ -449,7 +448,7 @@ BOOL uwp_unbox_bool( void *obj, boolean *out_val )
     return FALSE;
 }
 
-BOOL uwp_unbox_double( void *obj, double *out_val )
+static BOOL uwp_unbox_double( void *obj, double *out_val )
 {
     IPropertyValue *pv = NULL;
     if (!obj || !out_val) return FALSE;
@@ -577,7 +576,7 @@ void uwp_rd_link_theme( struct uwp_rd_bucket *parent, const WCHAR *theme_name, s
     else if (!wcsicmp( theme_name, L"HighContrast" )) parent->theme_hc = child;
 }
 
-void uwp_rd_insert( void *rd_key, const WCHAR *key, IInspectable *val )
+static void uwp_rd_insert( void *rd_key, const WCHAR *key, IInspectable *val )
 {
     struct uwp_rd_bucket *b;
     struct uwp_rd_entry *e;
@@ -1314,15 +1313,6 @@ struct uwp_element *g_last_created_page = NULL;
  * Frame.content often holds an unresolvable MCG RCW pointer. */
 struct uwp_element *g_navigated_page_el = NULL;
 
-void uwp_invalidate_window( void );
-struct uwp_element *uwp_elem_from_any( void *ptr );
-BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *node );
-void uwp_invoke_button( struct uwp_element *btn );
-BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr );
-void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int screen_x, int screen_y );
-void uwp_close_flyout_popup( BOOL fire_closed );
-BOOL uwp_popup_is_open_for( struct uwp_element *flyout );
-BOOL uwp_popup_handle_escape( void );
 HWND g_popup_hwnd = NULL;
 HWND g_sub_popup_hwnd = NULL;
 struct uwp_element *g_popup_owner_el = NULL;
@@ -1578,18 +1568,11 @@ found:
     if (out_bucket) *out_bucket = found_b;
     return TRUE;
 }
-HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out );
-HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val );
-HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token );
-HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val );
-void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
-                                        const WCHAR *prop_name, void *target_obj, const WCHAR *str_val );
 
 /* --- Live engine: StandardCalculatorViewModel (CalcViewModel.dll) ---
  * Slot 7 = get_DisplayValue(HSTRING*), slot 79 = SendCommandToCalcManager(int).
  * Init is async (Concurrency task): m_calculatorManager lands at this+392
  * ~100ms after activation, so pump messages before the first SendCommand. */
-extern HRESULT WINAPI RoActivateInstance( HSTRING activatableClassId, IInspectable **instance );
 
 const GUID IID_INotifyPropertyChanged_UWP =
     { 0xcf75d69c, 0xf2f4, 0x486b, { 0xb3, 0x02, 0xbb, 0x4c, 0x09, 0xba, 0xeb, 0xfa } };
@@ -1637,11 +1620,8 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
     if (!out) return E_POINTER;
     *out = NULL;
     if (!impl || !dp) return S_OK;
-    {
-        extern BOOL g_in_tap_diag;
-        if (g_in_tap_diag)
-            WARN( "TAP GetValue on %s (%s) dp=%p\n", debugstr_w(impl->class_name), debugstr_w(impl->name), dp );
-    }
+    if (g_in_tap_diag)
+        WARN( "TAP GetValue on %s (%s) dp=%p\n", debugstr_w(impl->class_name), debugstr_w(impl->name), dp );
 
     {
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
@@ -1838,10 +1818,8 @@ static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname
     }
     if (val && (ULONG_PTR)val >= 0x10000)
     {
-        static const GUID IID_ITabItemViewModel_dp =
-            { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
         void *vm = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel_dp, &vm )) && vm)
+        if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel, &vm )) && vm)
         {
             IUnknown_Release( (IUnknown *)vm );
             if (uwp_replace_iface( &impl->selected_item, val ))
@@ -2222,7 +2200,6 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             (!wcscmp( dpl->name, L"ItemsSource" ) || !wcscmp( dpl->name, L"Content" ) ||
              !wcscmp( dpl->name, L"Text" ) || !wcscmp( dpl->name, L"Visibility" )))
         {
-            extern void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src );
             if (!wcscmp( dpl->name, L"ItemsSource" ) && val)
                 uwp_items_ctrl_materialize_source( impl, val );
             uwp_invalidate_window();
@@ -2332,7 +2309,7 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
     HRESULT hr = E_FAIL;
 
     if (!app_outer || !owner_type_name || !prop_name || !target_obj || !str_val) return;
-    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) || !provider)
         return;
 
     xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
@@ -2429,7 +2406,7 @@ BOOL uwp_set_custom_xaml_member_obj( void *app_outer, const WCHAR *owner_type_na
     BOOL ok = FALSE;
 
     if (!app_outer || !owner_type_name || !prop_name || !target_obj || !val_obj) return FALSE;
-    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) || !provider)
         return FALSE;
 
     xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
@@ -2496,7 +2473,7 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
     BOOL ok = FALSE;
 
     if (!app_outer || !owner_type_name || !prop_name || !target_obj || !item_obj) return FALSE;
-    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) || !provider)
         return FALSE;
 
     xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );

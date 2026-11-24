@@ -24,7 +24,6 @@
 #include "wine/exception.h"
 #include "private.h"
 #include "weakreference.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -33,7 +32,10 @@
 #include "uwp_private.h"
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-HRESULT WINAPI uwp_brush_get_Opacity( void *iface, double *val )
+static BOOL xaml_layout_render_gpu_rtv( HWND hwnd, int width, int height, IInspectable *content,
+                                        ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv );
+
+static HRESULT WINAPI uwp_brush_get_Opacity( void *iface, double *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (val) *val = impl ? impl->brush_opacity : 1.0;
@@ -770,8 +772,8 @@ static HRESULT WINAPI uwp_disp_ti_QI( ITypeInfo *iface, REFIID iid, void **out )
 {
     return uwp_sub_QueryInterface( (IInspectable *)iface, iid, out );
 }
-ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface ) { return uwp_sub_AddRef( (IInspectable *)iface ); }
-ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface ) { return uwp_sub_Release( (IInspectable *)iface ); }
+static ULONG WINAPI uwp_disp_ti_AddRef( ITypeInfo *iface ) { return uwp_sub_AddRef( (IInspectable *)iface ); }
+static ULONG WINAPI uwp_disp_ti_Release( ITypeInfo *iface ) { return uwp_sub_Release( (IInspectable *)iface ); }
 #define TI_NOOP(...) ((HRESULT (WINAPI *)(ITypeInfo *, __VA_ARGS__))uwp_disp_ti_Noop)
 const ITypeInfoVtbl uwp_disp_ti_vtbl =
 {
@@ -880,11 +882,12 @@ static void uwp_vm_probe_xaml_members( IInspectable *vm, const WCHAR *cls,
     }
 }
 
+static const GUID IID_ICustomPropertyProvider_gpu =
+    { 0x7c925755, 0x3e48, 0x42b4, { 0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f } };
+
 static BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props, unsigned int count,
                                             WCHAR *out, size_t out_len, int depth )
 {
-    static const GUID IID_ICustomPropertyProvider_gpu =
-        { 0x7c925755, 0x3e48, 0x42b4, { 0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f } };
     HSTRING hcls = NULL;
     void *cpp = NULL;
     unsigned int pi;
@@ -948,18 +951,8 @@ static void uwp_vm_extract_nested_url( IInspectable *pval, WCHAR *out, size_t ou
           L"UriString", L"UrlString", L"ImageSource", L"BitmapImage", L"ImageLinkUri", L"PrimaryImageUrl",
           L"TileImage", L"RequestedImage", L"CurrentImage", L"DefaultImage", L"BackgroundImage", L"ForegroundImage",
           L"SmallLogoImage", L"Icon", L"Image", L"Images" };
-    static const GUID IID_IVector_Insp_g =
-        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
-    static const GUID IID_IVectorView_Insp_g =
-        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
-    static const GUID IID_IBindableVector_g =
-        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
-    static const GUID IID_IBindableIterable_g =
-        { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
-    static const GUID IID_IIterable_Insp_g =
-        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
-    static const GUID *const vec_iids[] = { &IID_IVector_Insp_g, &IID_IVectorView_Insp_g, &IID_IBindableVector_g };
-    static const GUID *const iter_iids[] = { &IID_IIterable_Insp_g, &IID_IBindableIterable_g };
+    static const GUID *const vec_iids[] = { &IID_IVector_IInspectable_UWP, &IID_IVectorView_IInspectable_WinUI, &IID_IBindableVector_UWP };
+    static const GUID *const iter_iids[] = { &IID_IIterable_IInspectable_UWP, &IID_IBindableIterable_UWP };
     struct uwp_element *pel = uwp_elem_from_any( pval );
     void *vec;
 
@@ -2637,8 +2630,6 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 if (!label[0])
                 {
                     /* Try ICustomPropertyProvider ({7c925755-3e48-42b4-8677-76372267033f}) for managed ViewModels */
-                    static const GUID IID_ICustomPropertyProvider_gpu =
-                        { 0x7c925755, 0x3e48, 0x42b4, { 0x86, 0x77, 0x76, 0x37, 0x22, 0x67, 0x03, 0x3f } };
                     void *cpp = NULL;
                     if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_ICustomPropertyProvider_gpu, &cpp )) && cpp)
                     {
@@ -2670,10 +2661,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 }
                 if (!label[0])
                 {
-                    static const GUID IID_IStringable_gpu =
-                        { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
                     void *strable = NULL;
-                    if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_IStringable_gpu, &strable )) && strable)
+                    if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_IStringable_UWP, &strable )) && strable)
                     {
                         HSTRING hs = NULL;
                         HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
@@ -3048,8 +3037,8 @@ BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *con
     return xaml_layout_render_gpu_target( hwnd, width, height, content, dev, ctx, swapchain, NULL );
 }
 
-BOOL xaml_layout_render_gpu_rtv( HWND hwnd, int width, int height, IInspectable *content,
-                                 ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv )
+static BOOL xaml_layout_render_gpu_rtv( HWND hwnd, int width, int height, IInspectable *content,
+                                        ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv )
 {
     return xaml_layout_render_gpu_target( hwnd, width, height, content, dev, ctx, NULL, rtv );
 }
@@ -3172,8 +3161,6 @@ static inline struct uwp_class_factory *uwp_cf_from_any( void *iface )
     return NULL;
 }
 
-static const GUID IID_ICanvasStatics_local =
-    { 0x40ce5c46, 0x2962, 0x446f, { 0xaa, 0xfb, 0x4c, 0xdc, 0x48, 0x69, 0x39, 0xc9 } };
 static const GUID IID_IScrollViewerStatics_local =
     { 0x33d1299d, 0x8d6e, 0x4290, { 0xbf, 0x22, 0x90, 0x5c, 0xcc, 0xd0, 0x4d, 0x31 } };
 static const GUID IID_IComboBoxFactory_local =
@@ -3525,8 +3512,6 @@ static const void *cas_statics_obj = cas_statics_vtbl;
 
 static HRESULT WINAPI uwp_lis_statics_QI( void *iface, REFIID iid, void **out )
 {
-    static const GUID IID_ILoadedImageSurfaceStatics_UWP =
-        { 0x22b8edf6, 0x84ad, 0x40ab, { 0x93, 0x7d, 0x48, 0x71, 0x61, 0x3e, 0x76, 0x5d } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ILoadedImageSurfaceStatics_UWP ))
@@ -3607,8 +3592,7 @@ static const GUID IID_IUIElementStatics4_UWP;
 static const GUID IID_IUIElementStatics6_UWP;
 static const GUID IID_IUIElementStatics7_UWP;
 static const GUID IID_IUIElementStatics8_UWP;
-static const GUID IID_IRoutedEventArgsFactory_WinUI3 =
-    { 0x914b02c7, 0x076b, 0x5b89, { 0x98, 0xe7, 0x6c, 0x37, 0x33, 0x79, 0xe9, 0xaf } };
+static const void *xaml_markup_helper_statics_obj;
 
 HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
@@ -3665,8 +3649,6 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             { 0xe155ef73, 0x95a0, 0x4aab, { 0x8c, 0x7d, 0x2a, 0x47, 0xda, 0x07, 0x3c, 0x79 } };
         static const GUID IID_IThicknessHelperStatics_UWP =
             { 0xc0991a7c, 0x070c, 0x4da6, { 0x87, 0x84, 0x01, 0xca, 0x80, 0x0e, 0xb7, 0x3a } };
-        static const GUID IID_IXamlBindingHelperStatics_UWP =
-            { 0xf65cfb71, 0xc80c, 0x4ffa, { 0x86, 0xee, 0x55, 0x87, 0x54, 0xee, 0x33, 0x6d } };
         static const GUID IID_ILayoutInformationStatics_UWP =
             { 0xcf06cf99, 0x58e9, 0x4682, { 0x83, 0x26, 0x50, 0xca, 0xab, 0x65, 0xed, 0x7c } };
         static const GUID IID_IStoryboardStatics_UWP =
@@ -3757,7 +3739,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
     }
     if (f == &auto_props_factory_obj ||
         f == &feap_factory_obj ||
-        IsEqualGUID( iid, &IID_ICanvasStatics_local ) ||
+        IsEqualGUID( iid, &IID_ICanvasStatics_UWP ) ||
         IsEqualGUID( iid, &IID_IScrollViewerStatics_local ) ||
         IsEqualGUID( iid, &IID_IVisualTreeHelperStatics_UWP ) ||
         IsEqualGUID( iid, &IID_IFrameworkElementStatics_UWP ))
@@ -3871,9 +3853,6 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
     {
         static const GUID IID_IXamlMarkupHelperStatics_UWP =
             { 0xc9bc3725, 0xf34f, 0x445c, { 0x81, 0xa2, 0x6b, 0x72, 0xa5, 0xe8, 0xf0, 0x72 } };
-        static const GUID IID_ILoadedImageSurfaceStatics_UWP =
-            { 0x22b8edf6, 0x84ad, 0x40ab, { 0x93, 0x7d, 0x48, 0x71, 0x61, 0x3e, 0x76, 0x5d } };
-        extern const void *xaml_markup_helper_statics_obj;
         if (IsEqualGUID( iid, &IID_IXamlMarkupHelperStatics_UWP ))
         {
             *out = (void *)&xaml_markup_helper_statics_obj;
@@ -4324,12 +4303,13 @@ static inline struct xaml_ceol *ceol_from_target( void *iface )
     return CONTAINING_RECORD( iface, struct xaml_ceol, target_vtbl );
 }
 
+static const GUID IID_IDCompositionVisual_local =
+    { 0x4d93059d, 0x097b, 0x4651, { 0x9a, 0x60, 0xf0, 0xf2, 0x51, 0x16, 0xe2, 0xf3 } };
+
 static HRESULT WINAPI ceol_QueryInterface( void *iface, REFIID iid, void **out )
 {
     static const GUID IID_IDCompositionTarget_local =
         { 0xeacdd04c, 0x117e, 0x4e17, { 0x88, 0xf4, 0xd1, 0xb1, 0x2b, 0x0e, 0x3d, 0x89 } };
-    static const GUID IID_IDCompositionVisual_local =
-        { 0x4d93059d, 0x097b, 0x4651, { 0x9a, 0x60, 0xf0, 0xf2, 0x51, 0x16, 0xe2, 0xf3 } };
     static const GUID IID_IDCompositionVisual2_local =
         { 0xe8de1639, 0x4331, 0x4b26, { 0xbc, 0x5f, 0x6a, 0x32, 0x1d, 0x34, 0x7a, 0x85 } };
     static const GUID IID_IContentExternalOutputLink_WinUI3 =
@@ -4440,8 +4420,6 @@ static const void *ceol_target_vtbl[4] =
 
 static HRESULT WINAPI ceol_statics_Create( void *iface, void *compositor_arg, void **out )
 {
-    static const GUID IID_IDCompositionVisual_local =
-        { 0x4d93059d, 0x097b, 0x4651, { 0x9a, 0x60, 0xf0, 0xf2, 0x51, 0x16, 0xe2, 0xf3 } };
     __x_ABI_CWindows_CUI_CComposition_CICompositor *comp = ecp_get_compositor();
     struct xaml_ceol *impl;
     HRESULT hr;
@@ -4565,7 +4543,7 @@ static const void *xaml_markup_helper_statics_vtbl[16] =
     [6] = xaml_markup_helper_UnloadObject,
     [7 ... 15] = uwp_generic_noop,
 };
-const void *xaml_markup_helper_statics_obj = xaml_markup_helper_statics_vtbl;
+static const void *xaml_markup_helper_statics_obj = xaml_markup_helper_statics_vtbl;
 
 const void *uwp_cf_statics_vtbl[64] =
 {

@@ -1005,15 +1005,11 @@ static HRESULT WINAPI wv2_remove_CoreWebView2Initialized( void *iface, EventRegi
 
 static HSTRING wv2_extract_uri_string( IInspectable *obj )
 {
-    static const GUID IID_IUriRuntimeClass_local =
-        { 0x9e365e57, 0x48b2, 0x4160, { 0x95, 0x6f, 0xc7, 0x38, 0x51, 0x20, 0xbb, 0xfc } };
-    static const GUID IID_IPropertyValue_local =
-        { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
     void *uri_rt = NULL, *pv = NULL;
     HSTRING hstr = NULL;
 
     if (!obj) return NULL;
-    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IUriRuntimeClass_local, &uri_rt )) && uri_rt)
+    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IUriRuntimeClass_g, &uri_rt )) && uri_rt)
     {
         if (FAILED(IUriRuntimeClass_get_AbsoluteUri( (IUriRuntimeClass *)uri_rt, &hstr )) || !hstr)
         {
@@ -1022,7 +1018,7 @@ static HSTRING wv2_extract_uri_string( IInspectable *obj )
         IInspectable_Release( (IInspectable *)uri_rt );
         if (hstr) return hstr;
     }
-    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IPropertyValue_local, &pv )) && pv)
+    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IPropertyValue_g, &pv )) && pv)
     {
         IPropertyValue_GetString( (IPropertyValue *)pv, &hstr );
         IInspectable_Release( (IInspectable *)pv );

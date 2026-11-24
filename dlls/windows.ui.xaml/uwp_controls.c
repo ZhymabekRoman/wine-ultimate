@@ -17,16 +17,14 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
 #include "xbf_known_types.h"
 #include "weakreference.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -260,8 +258,6 @@ HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val )
 }
 
 /* --- IPanel / IGrid / IRowDefinition / IColumnDefinition --- */
-
-HRESULT uwp_vec_create( struct uwp_element *owner, IInspectable **out );
 
 HRESULT WINAPI uwp_panel_get_Children( void *iface, void **out )
 {
@@ -1755,14 +1751,12 @@ BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_eve
 
 HRESULT WINAPI dp_args_QI( void *iface, REFIID iid, void **out )
 {
-    static const GUID IID_IRoutedEventArgs_UWP =
-        { 0x443ecc75, 0x7e5d, 0x48a5, { 0x93, 0x1a, 0x30, 0x0e, 0x46, 0xa4, 0x91, 0x6a } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IDependencyPropertyChangedEventArgs_UWP ) ||
-        IsEqualGUID( iid, &IID_IRoutedEventArgs_UWP ))
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_Clone_UWP ))
     {
         *out = iface;
         InterlockedIncrement( &((struct uwp_dp_changed_args *)iface)->ref );
@@ -1841,7 +1835,7 @@ BOOL uwp_get_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
     if (!out_val) return FALSE;
     *out_val = NULL;
     if (!app_outer || !owner_type_name || !owner_type_name[0] || !prop_name || !target_obj) return FALSE;
-    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) || !provider)
         return FALSE;
     xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
     if (xaml_type)

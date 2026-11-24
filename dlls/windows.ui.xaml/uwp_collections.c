@@ -17,10 +17,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "uwp_private.h"
@@ -32,8 +31,6 @@ static const GUID IID_IIterable_PageStackEntry_UWP =
     { 0xdd2278a5, 0x4c14, 0x5967, { 0x8a, 0x41, 0x9a, 0x47, 0xc3, 0xc5, 0xc4, 0xa7 } };
 static const GUID IID_IIterator_PageStackEntry_UWP =
     { 0xb89ca96c, 0xded1, 0x53bd, { 0x87, 0x44, 0xca, 0xa8, 0x4e, 0x87, 0xba, 0x87 } };
-static const GUID IID_IIterable_IInspectable_UWP =
-    { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
 static const GUID IID_IIterator_IInspectable_UWP =
     { 0x44a94f2d, 0x04f8, 0x5091, { 0xb3, 0x36, 0xbe, 0x78, 0x92, 0xdd, 0x10, 0xbe } };
 static const GUID IID_IIterable_UIElement_UWP =
@@ -48,8 +45,6 @@ static const GUID IID_IIterable_Inline_UWP =
     { 0x3017abfa, 0xa321, 0x5045, { 0x97, 0x44, 0x60, 0xaf, 0x42, 0xed, 0x71, 0x59 } };
 static const GUID IID_IIterator_Inline_UWP =
     { 0x18bb3ba7, 0x67d6, 0x5d0d, { 0x90, 0x97, 0x24, 0xfc, 0x66, 0xbf, 0xb9, 0x01 } };
-static const GUID IID_IBindableIterable_UWP =
-    { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
 static const GUID IID_IIterable_RowDef_UWP =
     { 0x11fdab6b, 0x6769, 0x5c78, { 0x93, 0x21, 0x1c, 0x29, 0x30, 0x25, 0x38, 0x7d } };
 static const GUID IID_IIterator_RowDef_UWP =
@@ -64,16 +59,8 @@ static const GUID IID_IIterable_DO_UWP =
 static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 {
     struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
-    static const GUID IID_IPropertyValue_vec =
-        { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
     static const GUID IID_IReferenceTracker_vec =
         { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
-    static const GUID IID_IReferenceTrackerTarget_vec =
-        { 0x5c13e51c, 0x4f32, 0x4726, { 0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0 } };
-    static const GUID IID_IReferenceTrackerTarget_vec2 =
-        { 0x64e71ddf, 0x2424, 0x4ec5, { 0x86, 0x27, 0x15, 0x05, 0x08, 0x96, 0xd9, 0xb6 } };
-    static const GUID IID_IWeakReferenceSource_vec =
-        { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IIterable_PageStackEntry_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_IInspectable_UWP ) ||
@@ -91,11 +78,11 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IMarshal ) ||
-        IsEqualGUID( iid, &IID_IPropertyValue_vec ) ||
+        IsEqualGUID( iid, &IID_IPropertyValue_g ) ||
         IsEqualGUID( iid, &IID_IReferenceTracker_vec ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_vec ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_vec2 ) ||
-        IsEqualGUID( iid, &IID_IWeakReferenceSource_vec ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP2 ) ||
+        IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
     {
         *out = NULL;
         return E_NOINTERFACE;

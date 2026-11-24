@@ -17,19 +17,15 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <wctype.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
 #include "xbf_known_types.h"
-#include "appmodel.h"
 #include "weakreference.h"
-#include "winreg.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -843,7 +839,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 {
                     void *provider = NULL;
                     const WCHAR *coll_cls = fake_ctx.types[nodes[op->node_idx].tid].full_name;
-                    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)ao, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider)
+                    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)ao, &IID_IXamlMetadataProvider_UWP, &provider )) && provider)
                     {
                         struct xaml_type *ct = (struct xaml_type *)uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, coll_cls );
                         if (ct && ct->lpVtbl->AddToVector)

@@ -123,36 +123,6 @@ BOOL uwp_parse_color_string( const WCHAR *s, UINT32 *out_argb )
     return FALSE;
 }
 
-void store_make_icon_monogram( const WCHAR *title, WCHAR *icon, size_t icon_len )
-{
-    size_t n = 0;
-    const WCHAR *p = title;
-    BOOL take_next = TRUE;
-
-    while (*p && n + 1 < icon_len && n < 3)
-    {
-        WCHAR ch = *p++;
-        if (ch == L'.' || ch == L' ' || ch == L'-' || ch == L'_')
-        {
-            take_next = TRUE;
-            continue;
-        }
-        if (take_next)
-        {
-            if (ch >= L'a' && ch <= L'z') ch -= (L'a' - L'A');
-            icon[n++] = ch;
-            take_next = FALSE;
-        }
-    }
-    if (!n && title[0])
-    {
-        WCHAR ch = title[0];
-        if (ch >= L'a' && ch <= L'z') ch -= (L'a' - L'A');
-        icon[n++] = ch;
-    }
-    icon[n] = 0;
-}
-
 void uwp_el_set_bg_argb( struct uwp_element *el, UINT32 argb )
 {
     if (!el) return;
@@ -203,9 +173,6 @@ struct uwp_size_f
     float height;
 };
 
-static const GUID IID_IFrameworkElementOverrides_layout =
-    { 0xda007e54, 0xb3c2, 0x4b9a, { 0xaa, 0x8e, 0xd3, 0xf0, 0x71, 0x26, 0x2b, 0x97 } };
-
 static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int h )
 {
     void *fe_ovr = NULL;
@@ -225,7 +192,7 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
     avail.width = (float)w;
     avail.height = (float)h;
 
-    if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_layout, &fe_ovr )) && fe_ovr)
+    if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_UWP, &fe_ovr )) && fe_ovr)
     {
         HRESULT (WINAPI *measure_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = (void *)(*(void ***)fe_ovr)[6];
         HRESULT (WINAPI *arrange_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = (void *)(*(void ***)fe_ovr)[7];
@@ -257,11 +224,9 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
                             struct uwp_element *de = uwp_elem_from_any( el->dp_store[di].value );
                             if (el->dp_store[di].value)
                             {
-                                static const GUID IID_IVectorView_Obj =
-                                    { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
                                 void *vv = NULL;
                                 IInspectable_GetRuntimeClassName( el->dp_store[di].value, &hc );
-                                if (SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Obj, &vv )) && vv)
+                                if (SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Object_UWP, &vv )) && vv)
                                 {
                                     HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vv)[7];
                                     if (get_sz) get_sz( vv, &vsz );
@@ -391,14 +356,10 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
         {
             if (el->dp_store[di].value)
             {
-                static const GUID IID_IVectorView_Obj_sz =
-                    { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
-                static const GUID IID_IVector_Obj_sz =
-                    { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
                 void *vv = NULL;
                 UINT32 sz = 0;
-                if ((SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Obj_sz, &vv )) ||
-                     SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVector_Obj_sz, &vv ))) && vv)
+                if ((SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVectorView_Object_UWP, &vv )) ||
+                     SUCCEEDED(IInspectable_QueryInterface( el->dp_store[di].value, &IID_IVector_IInspectable_UWP, &vv ))) && vv)
                 {
                     HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vv)[7];
                     if (get_sz) get_sz( vv, &sz );

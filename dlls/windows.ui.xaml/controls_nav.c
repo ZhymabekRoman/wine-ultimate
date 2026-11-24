@@ -24,7 +24,6 @@
 #include "wine/exception.h"
 #include "private.h"
 #include "weakreference.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -592,14 +591,6 @@ static const void *uwp_tab_close_args_vtbl[12] =
 
 int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int max_items )
 {
-    static const GUID IID_IVector_Insp_local =
-        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
-    static const GUID IID_IVectorView_Insp_local =
-        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
-    static const GUID IID_IBindableVector_local =
-        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
-    static const GUID IID_IIterable_Insp_local =
-        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
     int count = 0;
 
     if (!tv || !out_items || max_items <= 0) return 0;
@@ -607,9 +598,9 @@ int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int
     if (tv->tab_items_source && (ULONG_PTR)tv->tab_items_source >= 0x10000)
     {
         void *vec = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVector_Insp_local, &vec )) ||
-            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVectorView_Insp_local, &vec )) ||
-            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IBindableVector_local, &vec )))
+        if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVector_IInspectable_UWP, &vec )) ||
+            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IVectorView_IInspectable_WinUI, &vec )) ||
+            SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IBindableVector_UWP, &vec )))
         {
             HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
             HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
@@ -625,7 +616,7 @@ int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int
             }
             IUnknown_Release( (IUnknown *)vec );
         }
-        else if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IIterable_Insp_local, &vec )) && vec)
+        else if (SUCCEEDED(IInspectable_QueryInterface( tv->tab_items_source, &IID_IIterable_IInspectable_UWP, &vec )) && vec)
         {
             HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
             void *iter = NULL;
@@ -676,14 +667,12 @@ int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int
 
 void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len )
 {
-    static const GUID IID_ITabItemViewModel_local =
-        { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
     if (!buf || buf_len <= 0) return;
     buf[0] = 0;
     if (item && (ULONG_PTR)item >= 0x10000)
     {
         void *vm = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_ITabItemViewModel_local, &vm )) && vm)
+        if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_ITabItemViewModel, &vm )) && vm)
         {
             HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)vm)[6];
             HSTRING hname = NULL;
@@ -814,15 +803,13 @@ struct uwp_sel_changed_args
 
 static HRESULT WINAPI uwp_sel_args_QI( void *iface, REFIID iid, void **out )
 {
-    static const GUID IID_IRoutedEventArgs_local =
-        { 0x5c985ac6, 0xd802, 0x4b38, { 0xa2, 0x23, 0xbf, 0x07, 0x0c, 0x43, 0xfe, 0xdf } };
     static const GUID IID_ISelectionChangedEventArgs_local =
         { 0xc972d2dc, 0xb609, 0x4758, { 0x85, 0x1e, 0xa7, 0x99, 0xc2, 0x1d, 0xe9, 0x7d } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IRoutedEventArgs_local ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_QI_UWP ) ||
         IsEqualGUID( iid, &IID_ISelectionChangedEventArgs_local ))
     {
         struct uwp_sel_changed_args *a = iface;
@@ -1035,18 +1022,6 @@ const void *uwp_flyout_vtbl[128] =
 
 int uwp_selector_get_items( struct uwp_element *el, IInspectable **out_items, int max_items )
 {
-    static const GUID IID_IVectorView_Obj =
-        { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
-    static const GUID IID_IVectorView_Insp =
-        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
-    static const GUID IID_IVector_Obj =
-        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
-    static const GUID IID_IBindableVector_sel =
-        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
-    static const GUID IID_IBindableIterable_sel =
-        { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
-    static const GUID IID_IIterable_Insp_sel =
-        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
     int count = 0;
 
     if (!el || !out_items || max_items <= 0) return 0;
@@ -1054,10 +1029,10 @@ int uwp_selector_get_items( struct uwp_element *el, IInspectable **out_items, in
     if (el->items_source && (ULONG_PTR)el->items_source >= 0x10000)
     {
         void *vec = NULL;
-        if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVector_Obj, &vec )) ||
-             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_Insp, &vec )) ||
-             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableVector_sel, &vec )) ||
-             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_Obj, &vec ))) && vec)
+        if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVector_IInspectable_UWP, &vec )) ||
+             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_IInspectable_WinUI, &vec )) ||
+             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableVector_UWP, &vec )) ||
+             SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IVectorView_Object_UWP, &vec ))) && vec)
         {
             HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
             HRESULT (WINAPI *get_sz)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
@@ -1073,8 +1048,8 @@ int uwp_selector_get_items( struct uwp_element *el, IInspectable **out_items, in
             }
             IUnknown_Release( (IUnknown *)vec );
         }
-        else if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IIterable_Insp_sel, &vec )) ||
-                  SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableIterable_sel, &vec ))) && vec)
+        else if ((SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IIterable_IInspectable_UWP, &vec )) ||
+                  SUCCEEDED(IInspectable_QueryInterface( el->items_source, &IID_IBindableIterable_UWP, &vec ))) && vec)
         {
             HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
             void *iter = NULL;
@@ -1172,10 +1147,8 @@ void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WC
             return;
     }
     {
-        static const GUID IID_IStringable_cb =
-            { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
         void *strable = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_IStringable_cb, &strable )) && strable)
+        if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_IStringable_UWP, &strable )) && strable)
         {
             HSTRING hs = NULL;
             HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
@@ -1563,14 +1536,6 @@ static HRESULT WINAPI uwp_items_ctrl_get_ItemsSource( void *iface, void **out )
 
 static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
 {
-    static const GUID IID_IStringable_ic =
-        { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
-    static const GUID IID_IDataTemplateSelector_ic =
-        { 0xa907d496, 0x46a0, 0x4cd7, { 0x8d, 0xbe, 0xf9, 0xa5, 0x81, 0xdf, 0x60, 0xb1 } };
-    static const GUID IID_IDataTemplateSelector2_ic =
-        { 0x3792bc47, 0x8c4b, 0x4257, { 0xa5, 0xae, 0xcc, 0x3f, 0x8e, 0xd7, 0x86, 0xeb } };
-    static const GUID IID_IDataTemplate_ic =
-        { 0x9910aec7, 0x8ab5, 0x4118, { 0x9b, 0xc6, 0x09, 0xf4, 0x5a, 0x35, 0x07, 0x3d } };
     struct uwp_element *item_el = uwp_elem_from_any( item );
     if (item_el)
     {
@@ -1585,13 +1550,13 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
         if (sel)
         {
             void *dts = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector_ic, &dts )) && dts)
+            if (SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector_UWP, &dts )) && dts)
             {
                 HRESULT (WINAPI *sel_fn)(void *, void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
                 if (sel_fn) sel_fn( dts, item, &impl->IDependencyObject_iface, &tmpl );
                 IUnknown_Release( (IUnknown *)dts );
             }
-            if (!tmpl && SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector2_ic, &dts )) && dts)
+            if (!tmpl && SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector2_UWP, &dts )) && dts)
             {
                 HRESULT (WINAPI *sel2_fn)(void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
                 if (sel2_fn) sel2_fn( dts, item, &tmpl );
@@ -1606,7 +1571,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
         if (tmpl)
         {
             void *dt = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( tmpl, &IID_IDataTemplate_ic, &dt )) && dt)
+            if (SUCCEEDED(IInspectable_QueryInterface( tmpl, &IID_IDataTemplate_UWP, &dt )) && dt)
             {
                 HRESULT (WINAPI *load_fn)(void *, void **) = (void *)(*(void ***)dt)[6];
                 void *content = NULL;
@@ -1647,7 +1612,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                 if (!bel->text[0])
                 {
                     void *strable = NULL;
-                    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)item, &IID_IStringable_ic, &strable )) && strable)
+                    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)item, &IID_IStringable_UWP, &strable )) && strable)
                     {
                         HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
                         HSTRING hs = NULL;
@@ -1670,26 +1635,14 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
 
 void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src )
 {
-    static const GUID IID_IVectorView_Obj =
-        { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
-    static const GUID IID_IVectorView_Insp =
-        { 0xe6f2fef0, 0x0712, 0x587f, { 0x8b, 0x13, 0x48, 0x21, 0x24, 0x9a, 0x20, 0xb5 } };
-    static const GUID IID_IVector_Obj =
-        { 0xb32bdca4, 0x5e52, 0x5b27, { 0xbc, 0x5d, 0xd6, 0x6a, 0x1a, 0x26, 0x8c, 0x2a } };
-    static const GUID IID_IBindableVector_ic =
-        { 0x393de7de, 0x6fd0, 0x4c0d, { 0xbb, 0x71, 0x47, 0x24, 0x4a, 0x11, 0x38, 0x43 } };
-    static const GUID IID_IBindableIterable_ic =
-        { 0x036d2c08, 0xdf29, 0x41af, { 0x8a, 0xa2, 0xd7, 0x74, 0xbe, 0x62, 0xba, 0x6f } };
-    static const GUID IID_IIterable_Insp_ic =
-        { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
     void *vec = NULL;
     UINT32 count = 0, i;
 
     if (!impl || !src) return;
-    if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVector_Obj, &vec )) ||
-         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Insp, &vec )) ||
-         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableVector_ic, &vec )) ||
-         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Obj, &vec ))) && vec)
+    if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVector_IInspectable_UWP, &vec )) ||
+         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_IInspectable_WinUI, &vec )) ||
+         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableVector_UWP, &vec )) ||
+         SUCCEEDED(IInspectable_QueryInterface( src, &IID_IVectorView_Object_UWP, &vec ))) && vec)
     {
         HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
         HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
@@ -1709,8 +1662,8 @@ void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *
         }
         IUnknown_Release( (IUnknown *)vec );
     }
-    else if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IIterable_Insp_ic, &vec )) ||
-              SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableIterable_ic, &vec ))) && vec)
+    else if ((SUCCEEDED(IInspectable_QueryInterface( src, &IID_IIterable_IInspectable_UWP, &vec )) ||
+              SUCCEEDED(IInspectable_QueryInterface( src, &IID_IBindableIterable_UWP, &vec ))) && vec)
     {
         HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
         void *iter = NULL;
@@ -3799,7 +3752,6 @@ const void *uwp_rowcol_vtbl[32] =
     [8 ... 31] = uwp_generic_noop,
 };
 
-HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result );
 struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth )
 {
     if (!el || depth > 6) return NULL;

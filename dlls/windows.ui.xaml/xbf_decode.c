@@ -26,7 +26,6 @@
 #include "xbf_known_types.h"
 #include "weakreference.h"
 #include "winreg.h"
-#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
@@ -511,7 +510,7 @@ static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_
     return FALSE;
 }
 
-void uwp_pri_ensure_xbf_cat( void )
+static void uwp_pri_ensure_xbf_cat( void )
 {
     InitOnceExecuteOnce( &g_pri_xbf_cat_once, init_pri_xbf_cat_once, NULL, NULL );
 }
@@ -883,28 +882,7 @@ struct xaml_meta_cache_entry *xaml_meta_insert_locked( const WCHAR *full_name, W
     return e;
 }
 
-WORD xaml_metadata_cache_find_xbf_id( const WCHAR *full_name )
-{
-    struct xaml_meta_cache_entry *e;
-    WORD id = 0;
-
-    if (!full_name || !full_name[0]) return 0;
-    InitOnceExecuteOnce( &xaml_meta_cache_once, init_xaml_meta_cache, NULL, NULL );
-
-    AcquireSRWLockShared( &xaml_meta_cache_lock );
-    for (e = xaml_meta_cache[xaml_meta_hash( full_name ) & (XAML_META_CACHE_SIZE - 1)]; e; e = e->next)
-    {
-        if (!wcscmp( e->full_name, full_name ))
-        {
-            id = e->xbf_type_id;
-            break;
-        }
-    }
-    ReleaseSRWLockShared( &xaml_meta_cache_lock );
-    return id;
-}
-
-HRESULT xaml_metadata_cache_get_type( const WCHAR *full_name, void **out )
+static HRESULT xaml_metadata_cache_get_type( const WCHAR *full_name, void **out )
 {
     struct xaml_meta_cache_entry *e;
     struct xaml_cached_type *ct = NULL;
@@ -1084,7 +1062,7 @@ static void xbf_setter_fill_prop_meta( struct xbf_ctx *ctx, struct uwp_style_set
         lstrcpynW( st->owner_cls, ctx->types[ctx->props[pid].owner_tid].full_name, ARRAY_SIZE(st->owner_cls) );
 }
 
-void xbf_stack_val_add_setter( struct xbf_stack_val *sv, WORD pid, int vt, BOOL is_res_ref,
+static void xbf_stack_val_add_setter( struct xbf_stack_val *sv, WORD pid, int vt, BOOL is_res_ref,
                                       double num, const WCHAR *sval, const double vec4[4] )
 {
     struct uwp_style_setter *st;
@@ -2302,7 +2280,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
     }
 }
 
-void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WORD target_pid,
+static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WORD target_pid,
                                         struct xbf_stack_val *style_sv )
 {
     DWORD sub_start = 0, end_p = 0, sub_sz = 0, p;

@@ -20,13 +20,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
-#include "xbf_known_types.h"
 #include "weakreference.h"
-#include "wincodec.h"
 #include "mfapi.h"
 #include "mfidl.h"
 #include "mfreadwrite.h"
@@ -2028,22 +2025,6 @@ done:
     if (h_mfplat) FreeLibrary( h_mfplat );
     CoUninitialize();
     return 0;
-}
-
-void uwp_media_stop( struct uwp_element *el )
-{
-    HANDLE th;
-    if (!el) return;
-    InterlockedExchange( &el->video_stop, 1 );
-    th = el->video_thread;
-    el->video_thread = NULL;
-    if (th)
-    {
-        WaitForSingleObject( th, 1000 );
-        CloseHandle( th );
-    }
-    InterlockedExchange( &el->video_started, 0 );
-    InterlockedExchange( &el->video_stop, 0 );
 }
 
 void uwp_media_ensure_started( struct uwp_element *el )

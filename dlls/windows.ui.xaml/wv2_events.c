@@ -18,11 +18,8 @@
  */
 
 #include <stdarg.h>
-#include <stdio.h>
 
 #include "private.h"
-#include "winreg.h"
-#include "oleauto.h"
 #include "weakreference.h"
 
 #include "wine/exception.h"

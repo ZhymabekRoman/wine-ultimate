@@ -25,9 +25,6 @@
 #include "weakreference.h"
 #include "wine/exception.h"
 #include "windows.applicationmodel.activation.h"
-#include "appmodel.h"
-#include "pri.h"
-#include "wincodec.h"
 
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
@@ -239,12 +236,6 @@ static const GUID IID_IFrameworkElement2_Mcg =
     { 0x019104be, 0x522a, 0x5904, { 0xf5, 0x2f, 0xde, 0x72, 0x01, 0x04, 0x29, 0xe0 } };
 static const GUID IID_IWindow_Mcg =
     { 0xb775ad7c, 0x18b8, 0x45ca, { 0xa1, 0xb0, 0xdc, 0x48, 0x3e, 0x4b, 0x10, 0x28 } };
-static const GUID IID_IComponentConnector_x =
-    { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
-static const GUID IID_IComponentConnector_UWP =
-    { 0xf6790987, 0xe6e5, 0x47f2, { 0x92, 0xc6, 0xec, 0xcc, 0xe4, 0xba, 0x15, 0x9a } };
-static const GUID IID_IUriRuntimeClass_x =
-    { 0x9e365e57, 0x48b2, 0x4160, { 0x95, 0x6f, 0xc7, 0x38, 0x51, 0x20, 0xbb, 0xfc } };
 
 /* CoreApplicationViewSource and View implementation
  *
@@ -711,10 +702,6 @@ static const IID IID_pinterface_IMap_HSTRING_IInspectable =
 static const IID IID_pinterface_IMapView_HSTRING_IInspectable =
     { 0x2f13c006, 0xa03a, 0x5f69, {0xb0, 0x90, 0x75, 0xa4, 0x3e, 0x33, 0x42, 0x3e} };
 
-static const GUID IID_IResourceDictionary_WinUI =
-    { 0x1b690975, 0xa710, 0x5783, { 0xa6, 0xe1, 0x15, 0x83, 0x6f, 0x61, 0x86, 0xc2 } };
-static const GUID IID_IResourceDictionary_UWP =
-    { 0x44a9796f, 0x723e, 0x4fdf, { 0xa2, 0x18, 0x03, 0x3e, 0x75, 0xb0, 0xc0, 0x84 } };
 static const GUID IID_IResourceDictionary_Mcg =
     { 0xc1ea4f24, 0xd6de, 0x4191, { 0x8e, 0x3a, 0xf4, 0x86, 0x01, 0xf7, 0x48, 0x9c } };
 static const GUID IID_IResourceDictionaryFactory_UWP =
@@ -870,8 +857,6 @@ static ULONG WINAPI rd_Release( IInspectable *iface )
     }
     return ref;
 }
-
-extern HRESULT uwp_vec_create( void *owner, IInspectable **out );
 
 static HRESULT WINAPI rd_get_MergedDictionaries( void *iface, void **value )
 {
@@ -1534,8 +1519,6 @@ static HRESULT WINAPI ms_application_GetRuntimeClassName( void *iface, HSTRING *
                                 class_name );
 }
 
-extern BOOL uwp_is_light_theme( void *scope_el );
-extern void uwp_invalidate_window( void );
 int g_app_requested_theme = -1; /* -1 = system default, 0 = Light, 1 = Dark */
 
 static HRESULT WINAPI application_get_RequestedTheme( void *iface, int *theme )
@@ -1791,15 +1774,11 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         }
     }
 
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
     {
-        static const GUID IID_IWeakReferenceSource_w =
-            { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
-        if (IsEqualGUID( iid, &IID_IWeakReferenceSource_w ))
-        {
-            *out = &impl->IWeakReferenceSource_iface;
-            IInspectable_AddRef( &impl->IInspectable_iface );
-            return S_OK;
-        }
+        *out = &impl->IWeakReferenceSource_iface;
+        IInspectable_AddRef( &impl->IInspectable_iface );
+        return S_OK;
     }
 
     if (IsEqualGUID( iid, &IID_IWindow_WinUI ))
@@ -2394,25 +2373,6 @@ static void xaml_window_refresh_present( HWND hwnd )
     in_refresh = FALSE;
 }
 
-void xaml_mark_dirty_rect( const RECT *rc )
-{
-    struct xaml_window *impl = &global_xaml_window;
-    if (rc && !IsRectEmpty( rc ))
-    {
-        if (impl->has_dirty_rect && !IsRectEmpty( &impl->dirty_rect ))
-            UnionRect( &impl->dirty_rect, &impl->dirty_rect, rc );
-        else
-            impl->dirty_rect = *rc;
-        impl->has_dirty_rect = TRUE;
-    }
-    else
-    {
-        SetRect( &impl->dirty_rect, 0, 0, (int)impl->width, (int)impl->height );
-        impl->has_dirty_rect = TRUE;
-    }
-    xaml_mark_window_dirty();
-}
-
 void xaml_mark_window_dirty( void )
 {
     InterlockedExchange( &g_xaml_window_dirty, 1 );
@@ -2560,7 +2520,6 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             scp_ticks++;
             if (scp_ticks == 15 && global_xaml_window.content)
             {
-                extern void uwp_debug_dump_root( IInspectable *root );
                 ERR( "=== EDITORPAGE TREE DUMP ===\n" );
                 uwp_debug_dump_root( global_xaml_window.content );
                 ERR( "=== END EDITORPAGE TREE DUMP ===\n" );
@@ -2607,7 +2566,6 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         BOOL accel_handled = FALSE;
         if (msg == WM_KEYDOWN && wparam == VK_F12)
         {
-            extern void uwp_debug_dump_root( IInspectable *root );
             uwp_debug_dump_root( global_xaml_window.content );
             return 0;
         }
@@ -4249,15 +4207,12 @@ static const struct IWindowNativeVtbl xaml_window_native_vtbl =
     xaml_window_native_GetWindowHandle,
 };
 
-static const GUID IID_IWeakReference_w =
-    { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
-
 static HRESULT WINAPI xaml_window_wr_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IWeakReference_w ))
+        IsEqualGUID( iid, &IID_IWeakReference_local ))
     {
         *out = iface;
         return S_OK;
@@ -4711,15 +4666,13 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
 
     if (!xaml_get_app_caps()->winui3)
     {
-        static const GUID IID_IControl_uwp =
-            { 0xa8912263, 0x2951, 0x4f58, { 0xa9, 0xc5, 0x5a, 0x13, 0x4e, 0xaa, 0x7f, 0x07 } };
         static void *uwp_xbf_controls[64];
         static unsigned int uwp_xbf_control_cnt;
         void *ctrl = NULL;
         unsigned int i;
 
         if (target_conn && uwp_xbf_control_cnt < ARRAY_SIZE( uwp_xbf_controls ) &&
-            SUCCEEDED( IInspectable_QueryInterface( target_conn, &IID_IControl_uwp, &ctrl ) ) && ctrl)
+            SUCCEEDED( IInspectable_QueryInterface( target_conn, &IID_IControl_UWP, &ctrl ) ) && ctrl)
             uwp_xbf_controls[uwp_xbf_control_cnt++] = ctrl;
 
         if (uwp_try_load_xbf_component( component, resourceLocator, uwp_get_app_outer() ))
@@ -4748,10 +4701,10 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
         load_depth--;
         return;
     }
-    if (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_x, (void **)&connector)))
+    if (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_WinUI, (void **)&connector)))
     {
         is_winui_conn = FALSE;
-        if (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_UWP, (void **)&connector)))
+        if (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_UWP_g, (void **)&connector)))
         {
             TRACE( "failed to QI target_conn for IComponentConnector\n" );
             load_depth--;
@@ -4761,7 +4714,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
 
     TRACE( "got connector %p\n", connector );
 
-    if (uri_insp && SUCCEEDED(IInspectable_QueryInterface(uri_insp, &IID_IUriRuntimeClass_x, &uri_rt)))
+    if (uri_insp && SUCCEEDED(IInspectable_QueryInterface(uri_insp, &IID_IUriRuntimeClass_g, &uri_rt)))
     {
         typedef HRESULT (WINAPI *p_get_RawUri)(void *, HSTRING *);
         p_get_RawUri get_raw_uri = (p_get_RawUri)(*(void ***)uri_rt)[6]; /* slot 6: get_AbsoluteUri */
@@ -5453,8 +5406,6 @@ IActivationFactory *application_factory = &application_factory_obj.IActivationFa
 
 HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
 {
-    static const GUID IID_IXamlMetadataProvider =
-        { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
     TypeName *type = (TypeName *)type_name_ptr;
     void *provider = NULL;
     void *xaml_type = NULL;
@@ -5466,7 +5417,7 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
     if (current_application && current_application->outer)
     {
         hr = IInspectable_QueryInterface( current_application->outer,
-                                          &IID_IXamlMetadataProvider, &provider );
+                                          &IID_IXamlMetadataProvider_UWP, &provider );
         TRACE( "QI IXamlMetadataProvider on outer %p returned hr %#lx, provider %p\n",
                current_application->outer, hr, provider );
         if (SUCCEEDED(hr) && provider)
@@ -5504,13 +5455,11 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
                 /* Dispatch on the IXamlType face the returned type itself answers:
                  * UWP IXamlType has ActivateInstance at slot 18; WinUI 3 IXamlType
                  * merged get_BoxedType at slot 17, so ActivateInstance is at slot 19. */
-                static const GUID IID_IXamlType_winui =
-                    { 0xd24219df, 0x7ec9, 0x57f1, { 0xa2, 0x7b, 0x6a, 0xf2, 0x51, 0xd9, 0xc5, 0xbc } };
                 int act_slot = 18;
                 void *type2 = NULL;
                 HRESULT (WINAPI *activate)(void *, void **);
                 if (SUCCEEDED( IInspectable_QueryInterface( (IInspectable *)xaml_type,
-                                                            &IID_IXamlType_winui, &type2 ) ) && type2)
+                                                            &IID_IXamlType_WinUI3_g, &type2 ) ) && type2)
                 {
                     act_slot = 19;
                     IInspectable_Release( (IInspectable *)type2 );

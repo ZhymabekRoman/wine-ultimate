@@ -33,18 +33,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-static const GUID CLSID_WICImagingFactory_xaml =
-    { 0xcacaf262, 0x9370, 0x4615, { 0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a } };
-static const GUID IID_IWICImagingFactory_xaml =
-    { 0xec5ec8a9, 0xc395, 0x4314, { 0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70 } };
-static const GUID GUID_WICPixelFormat32bppBGRA_xaml =
-    { 0x6fddc324, 0x4e03, 0x4bfe, { 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f } };
-
-const GUID IID_IXamlMetadataProvider_WinUI =
-    { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
-const GUID IID_IXamlMetadataProvider_UWP =
-    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
-
 static HRESULT WINAPI app_meta_GetXamlType( void *iface, TypeName type_name, void **out )
 {
     return xaml_metadata_cache_get_type_hstring( type_name.Name, out );
@@ -483,7 +471,7 @@ static HICON xaml_wic_create_icon_from_frame( IWICImagingFactory *wic, IWICBitma
     if (SUCCEEDED( hr ))
         hr = IWICImagingFactory_CreateFormatConverter( wic, &conv );
     if (SUCCEEDED( hr ))
-        hr = IWICFormatConverter_Initialize( conv, (IWICBitmapSource *)scaler, &GUID_WICPixelFormat32bppBGRA_xaml,
+        hr = IWICFormatConverter_Initialize( conv, (IWICBitmapSource *)scaler, &GUID_WICPixelFormat32bppBGRA_local,
                                              WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom );
     if (SUCCEEDED( hr ))
     {
@@ -533,13 +521,13 @@ static void xaml_load_package_icons( HICON *out_big, HICON *out_small )
     *out_small = NULL;
     if (!xaml_package_logo_path( logo_path, ARRAY_SIZE( logo_path ) )) return;
 
-    hr = CoCreateInstance( &CLSID_WICImagingFactory_xaml, NULL, CLSCTX_INPROC_SERVER,
-                           &IID_IWICImagingFactory_xaml, (void **)&wic );
+    hr = CoCreateInstance( &CLSID_WICImagingFactory_local, NULL, CLSCTX_INPROC_SERVER,
+                           &IID_IWICImagingFactory_local, (void **)&wic );
     if (hr == CO_E_NOTINITIALIZED && SUCCEEDED( CoInitializeEx( NULL, COINIT_APARTMENTTHREADED ) ))
     {
         com_init = TRUE;
-        hr = CoCreateInstance( &CLSID_WICImagingFactory_xaml, NULL, CLSCTX_INPROC_SERVER,
-                               &IID_IWICImagingFactory_xaml, (void **)&wic );
+        hr = CoCreateInstance( &CLSID_WICImagingFactory_local, NULL, CLSCTX_INPROC_SERVER,
+                               &IID_IWICImagingFactory_local, (void **)&wic );
     }
     if (SUCCEEDED( hr ) && wic)
     {
@@ -684,10 +672,6 @@ static BOOL caps_find_type( void *provider, const WCHAR *ns, const WCHAR *const 
  * it answers (UWP vs WinUI 3), and which XAML types it has registered. */
 static BOOL caps_probe( IInspectable *outer )
 {
-    static const GUID IID_IXamlMetadataProvider_uwp =
-        { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
-    static const GUID IID_IXamlMetadataProvider_winui =
-        { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
     static const WCHAR *page_suffixes[] =
         { L".Controls.Calculator", L".Calculator", L".StoreManifestPage" };
     static const WCHAR *vm_suffixes[] =
@@ -697,9 +681,9 @@ static BOOL caps_probe( IInspectable *outer )
     WCHAR ns[80] = {0};
     void *provider = NULL;
 
-    if (SUCCEEDED( IInspectable_QueryInterface( outer, &IID_IXamlMetadataProvider_winui, &provider ) ) && provider)
+    if (SUCCEEDED( IInspectable_QueryInterface( outer, &IID_IXamlMetadataProvider_WinUI, &provider ) ) && provider)
         g_caps.winui3 = TRUE;
-    else if (SUCCEEDED( IInspectable_QueryInterface( outer, &IID_IXamlMetadataProvider_uwp, &provider ) ) && provider)
+    else if (SUCCEEDED( IInspectable_QueryInterface( outer, &IID_IXamlMetadataProvider_UWP, &provider ) ) && provider)
         g_caps.winui3 = FALSE;
     else
         return FALSE; /* app object not metadata-ready yet: probe again later */

@@ -18,11 +18,8 @@
  */
 
 #include <stdarg.h>
-#include <stdio.h>
 
 #include "private.h"
-#include "winreg.h"
-#include "oleauto.h"
 #include "weakreference.h"
 
 #include "wine/exception.h"
@@ -277,14 +274,11 @@ const void *cwv2_settings_stub_vtbl[256] =
 
 static HRESULT WINAPI cwv2_env_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
-    static const GUID IID_ICoreWebView2Environment_rt =
-        { 0xd8cc7831, 0xb783, 0x556b, { 0xb9, 0xce, 0x89, 0x9c, 0x1e, 0x95, 0xd5, 0x85 } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_ICoreWebView2Environment ) ||
-        IsEqualGUID( iid, &IID_ICoreWebView2Environment_rt ))
+        IsEqualGUID( iid, &IID_ICoreWebView2Environment ))
     {
         *out = iface;
         IInspectable_AddRef( iface );
