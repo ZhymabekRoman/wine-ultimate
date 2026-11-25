@@ -230,7 +230,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
     if (!el || depth > 48 || *rem <= 0) return;
     if (wcsstr( el->class_name, L"HomepageSkeleton" ))
     {
-        WARN( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
+        ERR( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
         return;
     }
     if (el->children_coll)
@@ -238,7 +238,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
     else if (el->inlines_coll)
         kids = (int)CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface )->count;
     (*rem)--;
-    WARN( "%*s%s (%s) rc=(%ld,%ld,%ld,%ld) hb=%d vis=%d op=%.2f kids=%d w=%.0f h=%.0f txt=%s img=%s\n",
+    ERR( "%*s%s (%s) rc=(%ld,%ld,%ld,%ld) hb=%d vis=%d op=%.2f kids=%d w=%.0f h=%.0f txt=%s img=%s\n",
          depth * 2, "", debugstr_w(el->class_name), debugstr_w(el->name),
          el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom,
          el->has_bounds, el->visibility, el->opacity, kids,

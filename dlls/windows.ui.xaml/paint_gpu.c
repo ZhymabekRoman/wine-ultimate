@@ -664,27 +664,55 @@ static void paint_gpu_progress_bar( struct uwp_element *el, COLORREF surface_bg 
     }
 }
 
+static struct uwp_element *uwp_find_inner_search_textbox( struct uwp_element *el, int depth )
+{
+    if (!el || depth > 6 || el->visibility != 0) return NULL;
+    if (el->content)
+    {
+        struct uwp_element *hit = uwp_find_inner_search_textbox( uwp_elem_from_any( el->content ), depth + 1 );
+        if (hit) return hit;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; v && i < v->count; i++)
+        {
+            struct uwp_element *hit = uwp_find_inner_search_textbox( uwp_elem_from_any( v->items[i] ), depth + 1 );
+            if (hit) return hit;
+        }
+    }
+    if (depth > 0 && (!wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.AutoSuggestBox" ) ||
+                      !wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.AutoSuggestBox" ) ||
+                      wcsstr( el->class_name, L"TextBox" )))
+        return el;
+    return NULL;
+}
+
 static void paint_gpu_searchbox( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     RECT rc = el->bounds, pill_rc, txt_rc;
     int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
     int pill_w, pill_h, px0, py0;
-    BOOL focused = (g_focused_textbox == el);
+    struct uwp_element *inner_tb = uwp_find_inner_search_textbox( el, 0 );
+    const WCHAR *cur_txt = el->text[0] ? el->text : (inner_tb ? inner_tb->text : L"");
+    BOOL focused = (g_focused_textbox == el) || (inner_tb && g_focused_textbox == inner_tb) ||
+                   uwp_elem_is_descendant( el, g_focused_textbox );
     COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
         ? blend_argb_over( el->bg_argb, surface_bg )
         : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 45, 45, 48 ), surface_bg );
     COLORREF sbd = focused
         ? uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg )
         : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 78, 78, 84 ), surface_bg );
-    COLORREF sfg = el->text[0]
+    COLORREF sfg = cur_txt[0]
         ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), sbg )
         : ((el->has_fg && el->fg_alpha > 0)
             ? blend_argb_over( el->fg_argb, sbg )
             : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 190, 190, 195 ), sbg ));
     WCHAR disp[264];
     const WCHAR *fallback = L"\x26b2   Search";
-    if (el->text[0])
-        swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2   %s|" : L"\x26b2   %s", el->text );
+    if (cur_txt[0])
+        swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2   %s|" : L"\x26b2   %s", cur_txt );
     else if (focused)
         lstrcpynW( disp, L"\x26b2   |", ARRAY_SIZE(disp) );
     else
@@ -1059,6 +1087,28 @@ static BOOL paint_gpu_container( ID3D11DeviceContext *ctx, struct uwp_element *e
     return FALSE;
 }
 
+static BOOL uwp_btn_child_has_text( const struct uwp_element *el, int depth )
+{
+    if (!el || depth > 8 || el->visibility != 0) return FALSE;
+    if (el->text[0] || el->inlines_coll) return TRUE;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_btn_child_has_text( ch, depth + 1 )) return TRUE;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; v && i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el && uwp_btn_child_has_text( ch, depth + 1 )) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     RECT brc = el->bounds;
@@ -1354,6 +1404,13 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         {
             struct uwp_element *ce = uwp_elem_from_any( el->content );
             if (ce && ce != el) uwp_gpu_paint_element( ctx, ce );
+            if (label[0] && (!ce || !uwp_btn_child_has_text( ce, 0 )))
+            {
+                WCHAR ff_buf[64];
+                RECT trc = brc;
+                xaml_gpu_push_text_font( ctx, label, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
+                                         fh, fw, DT_SINGLELINE | DT_CENTER | DT_VCENTER, &trc, NULL, fg, 1.0f );
+            }
         }
         else if (label[0])
         {
@@ -2225,6 +2282,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
            el ? el->visibility : 0xffff,
            (void *)(el ? el->children_coll : NULL), (void *)(el ? el->content : NULL) );
     if (!el || !el->has_bounds || el->visibility != 0 || el->opacity <= 0.005) return;
+    if (wcsstr( el->class_name, L"InfoBadge" ) && !el->text[0]) return;
     if (el->evc_cnt > 0 && !el->evc_fired)
         uwp_fire_evc_if_needed( el );
     if (el->items_source && !uwp_panel_has_concrete_child( el ))
@@ -2501,6 +2559,88 @@ static void uwp_gpu_paint_combobox_popup( ID3D11DeviceContext *ctx, int width, i
     for (i = 0; i < count; i++) IInspectable_Release( items[i] );
 }
 
+static void uwp_gpu_paint_asb_popup( ID3D11DeviceContext *ctx, int width, int height )
+{
+    struct uwp_element *asb = g_focused_textbox;
+    IInspectable *items[32];
+    int count, i, item_h = 38, vis_cnt = 0, pad_y = 6;
+    RECT prc;
+    BOOL light;
+    UINT32 bg_argb, bd_argb, hov_argb;
+    COLORREF fg_cr, sub_cr;
+    int fh, sfh, icon_fh;
+
+    if (!asb || !wcsstr( asb->class_name, L"AutoSuggestBox" )) return;
+    if (!asb->has_bounds || asb->visibility != 0) return;
+    if (!asb->is_open) return;
+    if (asb->items_source && !uwp_panel_has_concrete_child( asb ))
+        uwp_items_ctrl_materialize_source( asb, asb->items_source );
+    count = uwp_asb_get_suggestions( asb, items, ARRAY_SIZE(items) );
+    if (count <= 0) return;
+    if (!uwp_asb_compute_popup_rect( asb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ))
+    {
+        for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+        return;
+    }
+
+    light = uwp_is_light_theme( asb );
+    bg_argb = light ? 0xfffcfcfcu : 0xff2c2c30u;
+    bd_argb = light ? 0xffceced4u : 0xff52525au;
+    hov_argb = light ? 0xffededf2u : 0xff383840u;
+    fg_cr = light ? RGB( 24, 24, 28 ) : RGB( 245, 245, 248 );
+    sub_cr = light ? RGB( 96, 96, 104 ) : RGB( 172, 172, 180 );
+    fh = max( 12, (int)(14.0f * g_layout_scale + 0.5f) );
+    sfh = max( 11, (int)(12.0f * g_layout_scale + 0.5f) );
+    icon_fh = max( 12, (int)(14.0f * g_layout_scale + 0.5f) );
+
+    xaml_gpu_push_rect( (float)(prc.left - 2), (float)(prc.top + 2), (float)(prc.right + 2), (float)(prc.bottom + 4),
+                        NULL, 8.0f, 0x48000000u, 0, 0.0f, 1.0f );
+    xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom,
+                        NULL, 6.0f, bg_argb, bd_argb, 1.0f, 1.0f );
+
+    for (i = 0; i < vis_cnt && (asb->dropdown_scroll_offset + i) < count; i++)
+    {
+        int idx = asb->dropdown_scroll_offset + i;
+        RECT rrc, irc, trc;
+        WCHAR prim[128] = {0}, sec[128] = {0};
+        BOOL is_hov = (idx == asb->hovered_dropdown_idx);
+
+        SetRect( &rrc, prc.left + 4, prc.top + pad_y + i * item_h, prc.right - 4, prc.top + pad_y + (i + 1) * item_h );
+        if (is_hov)
+            xaml_gpu_push_rect( (float)rrc.left, (float)rrc.top, (float)rrc.right, (float)rrc.bottom,
+                                &prc, 4.0f, hov_argb, 0, 0.0f, 1.0f );
+        uwp_asb_get_item_label( asb, idx, items[idx], prim, ARRAY_SIZE(prim), sec, ARRAY_SIZE(sec) );
+        SetRect( &irc, rrc.left + 8, rrc.top, rrc.left + 32, rrc.bottom );
+        xaml_gpu_push_text_font( ctx, L"\xE721", L"Segoe MDL2 Assets", icon_fh, FW_NORMAL,
+                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE, &irc, &prc, sub_cr, 1.0f );
+        if (prim[0])
+        {
+            if (sec[0])
+            {
+                RECT src_rc;
+                int mid_y = (rrc.top + rrc.bottom) / 2;
+                SetRect( &trc, rrc.left + 36, rrc.top + 2, rrc.right - 10, mid_y + 2 );
+                SetRect( &src_rc, rrc.left + 36, mid_y, rrc.right - 10, rrc.bottom - 2 );
+                xaml_gpu_push_text( ctx, prim, fh, FW_SEMIBOLD,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &trc, &prc, fg_cr, 1.0f );
+                xaml_gpu_push_text( ctx, sec, sfh, FW_NORMAL,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &src_rc, &prc, sub_cr, 1.0f );
+            }
+            else
+            {
+                SetRect( &trc, rrc.left + 36, rrc.top, rrc.right - 10, rrc.bottom );
+                xaml_gpu_push_text( ctx, prim, fh, FW_NORMAL,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &trc, &prc, fg_cr, 1.0f );
+            }
+        }
+    }
+
+    for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+}
+
 static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IInspectable *content,
                                            ID3D11Device *dev, ID3D11DeviceContext *ctx,
                                            IDXGISwapChain1 *swapchain, ID3D11RenderTargetView *rtv )
@@ -2564,6 +2704,7 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
     }
 
     uwp_gpu_paint_combobox_popup( ctx, width, height );
+    uwp_gpu_paint_asb_popup( ctx, width, height );
 
     if (rtv ? !xaml_gpu_end_frame_rtv( ctx, &inst_cnt, &hits, &misses )
             : !xaml_gpu_end_frame( ctx, swapchain, &inst_cnt, &hits, &misses ))

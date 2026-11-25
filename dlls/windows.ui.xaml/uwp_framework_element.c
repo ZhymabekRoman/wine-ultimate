@@ -1014,6 +1014,9 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
     const WCHAR *key = NULL;
 
     if (!el || el->template_inflated) return el && el->template_root != NULL;
+    if (!wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.AutoSuggestBox" ) ||
+        !wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.AutoSuggestBox" ))
+        return FALSE;
     if (InterlockedIncrement( &inflate_depth ) > 8)
     {
         InterlockedDecrement( &inflate_depth );
@@ -1704,6 +1707,75 @@ static HRESULT WINAPI uwp_ui_put_Opacity( void *iface, double val )
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_ui_add_GotFocus( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_add( &impl->got_focus_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_ui_remove_GotFocus( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_remove( &impl->got_focus_reg, tok );
+}
+static HRESULT WINAPI uwp_ui_add_LostFocus( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_add( &impl->lost_focus_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_ui_remove_LostFocus( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_remove( &impl->lost_focus_reg, tok );
+}
+
+void uwp_ui_fire_got_focus( struct uwp_element *el )
+{
+    struct uwp_element *cur;
+    for (cur = el; cur; cur = cur->parent)
+    {
+        void **handlers = NULL;
+        unsigned int cnt = xaml_event_registry_snapshot_alloc( &cur->got_focus_reg, &handlers );
+        unsigned int i;
+        if (!cnt) continue;
+        for (i = 0; i < cnt; i++)
+        {
+            struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+            IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
+            __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+            __EXCEPT_ALL { }
+            __ENDTRY;
+            IUnknown_Release( (IUnknown *)h );
+        }
+        free( handlers );
+    }
+}
+
+void uwp_ui_fire_lost_focus( struct uwp_element *el )
+{
+    struct uwp_element *cur;
+    for (cur = el; cur; cur = cur->parent)
+    {
+        void **handlers = NULL;
+        unsigned int cnt = xaml_event_registry_snapshot_alloc( &cur->lost_focus_reg, &handlers );
+        unsigned int i;
+        if (!cnt) continue;
+        for (i = 0; i < cnt; i++)
+        {
+            struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+            IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
+            __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+            __EXCEPT_ALL { }
+            __ENDTRY;
+            IUnknown_Release( (IUnknown *)h );
+        }
+        free( handlers );
+    }
+}
+
 const void *uwp_ui_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -1723,7 +1795,12 @@ const void *uwp_ui_vtbl[128] =
     [22] = uwp_ui_put_Visibility,
     [23] = uwp_ui_get_RenderSize,
     [24 ... 40] = uwp_generic_noop,
-    [41 ... 56] = uwp_ui_event_add,
+    [41 ... 44] = uwp_ui_event_add,
+    [45] = uwp_ui_add_GotFocus,
+    [46] = uwp_ui_remove_GotFocus,
+    [47] = uwp_ui_add_LostFocus,
+    [48] = uwp_ui_remove_LostFocus,
+    [49 ... 56] = uwp_ui_event_add,
     [57] = uwp_ui_add_PointerPressed,
     [58] = uwp_ui_remove_PointerPressed,
     [59] = uwp_ui_add_PointerMoved,

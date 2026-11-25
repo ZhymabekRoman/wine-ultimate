@@ -255,6 +255,14 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
 const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp, size_t tmp_len );
 void uwp_asb_fire_text_changed( struct uwp_element *el );
 void uwp_asb_fire_query_submitted( struct uwp_element *el );
+void uwp_asb_fire_query_submitted_ex( struct uwp_element *el, IInspectable *chosen );
+void uwp_asb_fire_suggestion_chosen( struct uwp_element *el, IInspectable *chosen );
+int  uwp_asb_get_suggestions( struct uwp_element *asb, IInspectable **out_items, int max_items );
+BOOL uwp_asb_compute_popup_rect( const struct uwp_element *asb, int count, int win_w, int win_h,
+                                 RECT *out_rc, int *out_item_h, int *out_vis_cnt, int *out_pad_y );
+void uwp_asb_get_item_label( struct uwp_element *asb, int idx, IInspectable *item,
+                             WCHAR *out_primary, size_t max_primary,
+                             WCHAR *out_secondary, size_t max_secondary );
 void uwp_fire_asb_recursive( struct uwp_element *el, const WCHAR *text, BOOL is_submit );
 int uwp_tabview_get_items( struct uwp_element *tv, IInspectable **out_items, int max_items );
 void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len );
@@ -334,6 +342,7 @@ void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int scr
 
 /* Vector / collection helpers */
 HRESULT WINAPI uwp_vec_Append( void *iface, void *item );
+HRESULT WINAPI uwp_vec_Clear( void *iface );
 HRESULT WINAPI uwp_vec_GetAt( void *iface, unsigned int idx, void **item );
 HRESULT WINAPI uwp_vec_get_Size( void *iface, unsigned int *sz );
 unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_items, unsigned int max_items );

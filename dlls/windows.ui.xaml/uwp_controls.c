@@ -138,6 +138,19 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
                 uwp_fire_loaded_tree( child_el );
         }
     }
+    else
+    {
+        static const WCHAR *const cc_props[] =
+            { L"DisplayName", L"Label", L"Title", L"Text", L"Content", L"Header", L"Name" };
+        if (uwp_vm_query_string_prop_depth( (IInspectable *)val, cc_props, ARRAY_SIZE(cc_props),
+                                            str_buf, ARRAY_SIZE(str_buf), 2 ) && str_buf[0])
+        {
+            impl->content_kind = UWP_CONTENT_TEXT;
+            lstrcpynW( impl->text, str_buf, ARRAY_SIZE(impl->text) );
+            TRACE( "uwp_cc_put_Content vm-string on %s (%s) -> %s\n",
+                   debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_buf) );
+        }
+    }
     if (impl->island_hwnd) InvalidateRect( impl->island_hwnd, NULL, FALSE );
     uwp_invalidate_window();
     return S_OK;
@@ -1701,7 +1714,9 @@ struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
     if (el->has_bounds &&
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
-        uwp_is_textbox( el ))
+        (!wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.AutoSuggestBox" ) ||
+         !wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.AutoSuggestBox" )) &&
+        el->is_enabled)
         return el;
 
     if (el->children_coll)
@@ -1721,6 +1736,13 @@ struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
         struct uwp_element *hit = uwp_hit_test_textbox( ch, x, y );
         if (hit) return hit;
     }
+
+    if (el->has_bounds &&
+        x >= el->bounds.left && x < el->bounds.right &&
+        y >= el->bounds.top && y < el->bounds.bottom &&
+        uwp_is_textbox( el ))
+        return el;
+
     return NULL;
 }
 

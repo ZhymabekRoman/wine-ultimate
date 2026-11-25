@@ -398,12 +398,23 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                 }
             }
         }
-        else if (op == 0x0e) /* x:Key */
+        else if (op == 0x0e) /* x:Uid */
         {
             int vt = 0;
             double num = 0;
             WCHAR sbuf[128] = {0};
             if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
+            if (sbuf[0] && (obj_sp == 0 || node_idx_stack[obj_sp - 1] != (~0u)))
+            {
+                struct xbf_aot_op aop = {0};
+                aop.kind = XBF_AOT_OP_SET_PROP;
+                aop.vt = (UINT8)vt;
+                aop.pid = XBF_PROP_AUTOMATION_ID;
+                aop.node_idx = (obj_sp > 0) ? node_idx_stack[obj_sp - 1] : 0u;
+                aop.child_idx = (~0u);
+                aop.str_off = xbf_aot_intern_str( ctx->aot, sbuf );
+                xbf_aot_emit_op( ctx->aot, &aop );
+            }
         }
         else if (op == 0x13) /* PushProperty */
         {

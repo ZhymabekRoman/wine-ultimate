@@ -170,11 +170,20 @@ void uwp_keyboard_press_char( WCHAR ch )
         }
         else if (ch == 27)
         {
+            g_focused_textbox->is_open = FALSE;
+            g_focused_textbox->is_dropdown_open = FALSE;
             if (len > 0) { g_focused_textbox->text[0] = 0; changed = TRUE; }
-            else g_focused_textbox = NULL;
+            else
+            {
+                struct uwp_element *prev = g_focused_textbox;
+                g_focused_textbox = NULL;
+                uwp_ui_fire_lost_focus( prev );
+            }
         }
         else if (ch == L'\r')
         {
+            g_focused_textbox->is_open = FALSE;
+            g_focused_textbox->is_dropdown_open = FALSE;
             uwp_fire_asb_recursive( g_focused_textbox, g_focused_textbox->text, FALSE );
             uwp_fire_asb_recursive( g_focused_textbox, g_focused_textbox->text, TRUE );
         }
@@ -184,7 +193,15 @@ void uwp_keyboard_press_char( WCHAR ch )
             g_focused_textbox->text[len + 1] = 0;
             changed = TRUE;
         }
-        (void)changed;
+        if (changed && g_focused_textbox)
+        {
+            if (!g_focused_textbox->text[0])
+            {
+                g_focused_textbox->is_open = FALSE;
+                g_focused_textbox->is_dropdown_open = FALSE;
+            }
+            uwp_fire_asb_recursive( g_focused_textbox, g_focused_textbox->text, FALSE );
+        }
         uwp_invalidate_window();
         return;
     }
@@ -642,6 +659,73 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
         return handled;
     }
 
+    if (g_focused_textbox && wcsstr( g_focused_textbox->class_name, L"AutoSuggestBox" ) &&
+        g_focused_textbox->is_open)
+    {
+        static BOOL g_asb_popup_down = FALSE;
+        struct uwp_element *asb = g_focused_textbox;
+        IInspectable *items[32];
+        int count = uwp_asb_get_suggestions( asb, items, ARRAY_SIZE(items) );
+        RECT prc;
+        int item_h = 38, vis_cnt = 0, pad_y = 6, i;
+        BOOL has_rect = (count > 0 && uwp_asb_compute_popup_rect( asb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ));
+        BOOL in_popup = has_rect && x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom;
+        BOOL handled = FALSE;
+
+        if (has_rect)
+        {
+            if (msg == WM_MOUSEMOVE)
+            {
+                int new_hov = -1;
+                if (in_popup)
+                {
+                    int row = (y - (prc.top + pad_y)) / max( 1, item_h );
+                    if (row >= 0 && row < vis_cnt && (asb->dropdown_scroll_offset + row) < count)
+                        new_hov = asb->dropdown_scroll_offset + row;
+                }
+                if (new_hov != asb->hovered_dropdown_idx)
+                {
+                    asb->hovered_dropdown_idx = new_hov;
+                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                    uwp_invalidate_window();
+                    handled = TRUE;
+                }
+            }
+            else if (msg == WM_LBUTTONDOWN && in_popup)
+            {
+                g_asb_popup_down = TRUE;
+                handled = TRUE;
+            }
+            else if (msg == WM_LBUTTONUP && g_asb_popup_down)
+            {
+                g_asb_popup_down = FALSE;
+                if (in_popup)
+                {
+                    int row = (y - (prc.top + pad_y)) / max( 1, item_h );
+                    int idx = asb->dropdown_scroll_offset + row;
+                    if (row >= 0 && row < vis_cnt && idx >= 0 && idx < count)
+                    {
+                        WCHAR prim[128] = {0};
+                        uwp_asb_get_item_label( asb, idx, items[idx], prim, ARRAY_SIZE(prim), NULL, 0 );
+                        if (prim[0])
+                            lstrcpynW( asb->text, prim, ARRAY_SIZE(asb->text) );
+                        asb->is_open = FALSE;
+                        asb->is_dropdown_open = FALSE;
+                        uwp_asb_fire_suggestion_chosen( asb, items[idx] );
+                        uwp_asb_fire_query_submitted_ex( asb, items[idx] );
+                    }
+                }
+                asb->is_open = FALSE;
+                asb->is_dropdown_open = FALSE;
+                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                uwp_invalidate_window();
+                handled = TRUE;
+            }
+        }
+        for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+        if (handled) return TRUE;
+    }
+
     if (root_el)
     {
         struct uwp_element *nav = uwp_find_open_overlay_nav( root_el, 0 );
@@ -728,7 +812,16 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
         }
         if (tb)
         {
+            struct uwp_element *prev = g_focused_textbox;
             g_focused_textbox = tb;
+            if (prev && prev != tb)
+            {
+                prev->is_open = FALSE;
+                prev->is_dropdown_open = FALSE;
+                uwp_ui_fire_lost_focus( prev );
+            }
+            if (prev != tb)
+                uwp_ui_fire_got_focus( tb );
             TRACE( "uwp_handle_mouse_input: FOCUS TextBox (%d,%d) -> %s\n", x, y, debugstr_w(tb->name) );
             if (hwnd)
                 InvalidateRect( hwnd, NULL, FALSE );
@@ -737,7 +830,11 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
         }
         if (g_focused_textbox)
         {
+            struct uwp_element *prev = g_focused_textbox;
+            prev->is_open = FALSE;
+            prev->is_dropdown_open = FALSE;
             g_focused_textbox = NULL;
+            uwp_ui_fire_lost_focus( prev );
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
         }

@@ -1009,6 +1009,8 @@ static const GUID IID_IAutoSuggestBoxQuerySubmittedEventArgs_UWP =
     { 0x78dcb116, 0x818a, 0x4cb5, { 0xbc, 0xa7, 0x38, 0x2c, 0xe6, 0xdd, 0xc9, 0x0d } };
 static const GUID IID_IAutoSuggestBoxQuerySubmittedEventArgs_Alt_UWP =
     { 0xd5f5b0d0, 0x7d72, 0x4c76, { 0x9e, 0x77, 0x28, 0xa3, 0xd5, 0xa2, 0xe7, 0x11 } };
+static const GUID IID_IAutoSuggestBoxSuggestionChosenEventArgs_UWP =
+    { 0x396f7254, 0x1ed5, 0x4bc5, { 0xa0, 0x60, 0x65, 0x55, 0x30, 0xbc, 0xa6, 0xba } };
 
 struct asb_tc_args
 {
@@ -1031,7 +1033,8 @@ static HRESULT WINAPI asb_tc_QI( void *iface, REFIID iid, void **out )
         *out = iface;
         return S_OK;
     }
-    FIXME( "asb_tc_args unsupported iid %s\n", debugstr_guid( iid ) );
+    if (!IsEqualGUID( iid, &IID_IReferenceTracker ))
+        FIXME( "asb_tc_args unsupported iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1093,6 +1096,7 @@ struct asb_qs_args
     const void **lpVtbl;
     LONG ref;
     HSTRING query_text;
+    IInspectable *chosen_suggestion;
 };
 
 static HRESULT WINAPI asb_qs_QI( void *iface, REFIID iid, void **out )
@@ -1109,7 +1113,8 @@ static HRESULT WINAPI asb_qs_QI( void *iface, REFIID iid, void **out )
         *out = iface;
         return S_OK;
     }
-    FIXME( "asb_qs_args unsupported iid %s\n", debugstr_guid( iid ) );
+    if (!IsEqualGUID( iid, &IID_IReferenceTracker ))
+        FIXME( "asb_qs_args unsupported iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1121,6 +1126,7 @@ static ULONG WINAPI asb_qs_Release( void *iface )
     if (!r)
     {
         if (a->query_text) WindowsDeleteString( a->query_text );
+        if (a->chosen_suggestion) IInspectable_Release( a->chosen_suggestion );
         free( a );
     }
     return r;
@@ -1154,7 +1160,10 @@ static HRESULT WINAPI asb_qs_get_QueryText( void *iface, HSTRING *val )
 }
 static HRESULT WINAPI asb_qs_get_ChosenSuggestion( void *iface, IInspectable **val )
 {
-    if (val) *val = NULL;
+    struct asb_qs_args *a = iface;
+    if (!val) return E_POINTER;
+    *val = a->chosen_suggestion;
+    if (*val) IInspectable_AddRef( *val );
     return S_OK;
 }
 static const void *asb_qs_vtbl[] =
@@ -1162,6 +1171,72 @@ static const void *asb_qs_vtbl[] =
     asb_qs_QI, asb_qs_AddRef, asb_qs_Release,
     asb_qs_GetIids, asb_qs_GetRuntimeClassName, asb_qs_GetTrustLevel,
     asb_qs_get_QueryText, asb_qs_get_ChosenSuggestion,
+};
+
+struct asb_sc_args
+{
+    const void **lpVtbl;
+    LONG ref;
+    IInspectable *selected_item;
+};
+
+static HRESULT WINAPI asb_sc_QI( void *iface, REFIID iid, void **out )
+{
+    struct asb_sc_args *a = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAutoSuggestBoxSuggestionChosenEventArgs_UWP ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI asb_sc_AddRef( void *iface ) { return InterlockedIncrement( &((struct asb_sc_args *)iface)->ref ); }
+static ULONG WINAPI asb_sc_Release( void *iface )
+{
+    struct asb_sc_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r)
+    {
+        if (a->selected_item) IInspectable_Release( a->selected_item );
+        free( a );
+    }
+    return r;
+}
+static HRESULT WINAPI asb_sc_GetIids( void *iface, ULONG *cnt, IID **iids )
+{
+    IID *out;
+    if (!cnt || !iids) return E_POINTER;
+    out = CoTaskMemAlloc( sizeof(IID) );
+    if (!out) return E_OUTOFMEMORY;
+    out[0] = IID_IAutoSuggestBoxSuggestionChosenEventArgs_UWP;
+    *cnt = 1;
+    *iids = out;
+    return S_OK;
+}
+static HRESULT WINAPI asb_sc_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.UI.Xaml.Controls.AutoSuggestBoxSuggestionChosenEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+static HRESULT WINAPI asb_sc_get_SelectedItem( void *iface, IInspectable **val )
+{
+    struct asb_sc_args *a = iface;
+    if (!val) return E_POINTER;
+    *val = a->selected_item;
+    if (*val) IInspectable_AddRef( *val );
+    return S_OK;
+}
+static const void *asb_sc_vtbl[] =
+{
+    asb_sc_QI, asb_sc_AddRef, asb_sc_Release,
+    asb_sc_GetIids, asb_sc_GetRuntimeClassName, asb_qs_GetTrustLevel,
+    asb_sc_get_SelectedItem,
 };
 
 static HRESULT WINAPI uwp_asb_add_SuggestionChosen( void *iface, void *handler, EventRegistrationToken *tok )
@@ -1211,6 +1286,35 @@ void uwp_asb_fire_text_changed( struct uwp_element *el )
     IInspectable *sender;
 
     if (!el) return;
+    if (el->dp_cb_cnt > 0)
+    {
+        struct xaml_event_handler *cbs_snap[32];
+        void *dps_snap[32];
+        int snap_cnt = 0, ci;
+
+        AcquireSRWLockShared( &el->dp_lock );
+        for (ci = 0; ci < el->dp_cb_cnt && snap_cnt < (int)ARRAY_SIZE(cbs_snap); ci++)
+        {
+            if (el->dp_cbs[ci].callback)
+            {
+                cbs_snap[snap_cnt] = (struct xaml_event_handler *)el->dp_cbs[ci].callback;
+                dps_snap[snap_cnt] = el->dp_cbs[ci].dp;
+                IUnknown_AddRef( (IUnknown *)cbs_snap[snap_cnt] );
+                snap_cnt++;
+            }
+        }
+        ReleaseSRWLockShared( &el->dp_lock );
+
+        for (ci = 0; ci < snap_cnt; ci++)
+        {
+            void *dp_sender = el->outer ? (void *)el->outer : (void *)&el->IDependencyObject_iface;
+            struct xaml_event_handler *h = cbs_snap[ci];
+            __TRY { h->lpVtbl->Invoke( h, dp_sender, dps_snap[ci] ); }
+            __EXCEPT_ALL { }
+            __ENDTRY;
+            IUnknown_Release( (IUnknown *)h );
+        }
+    }
     cnt = xaml_event_registry_snapshot_alloc( &el->asb_text_changed_reg, &handlers );
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
@@ -1236,7 +1340,41 @@ void uwp_asb_fire_text_changed( struct uwp_element *el )
     asb_tc_Release( args );
 }
 
-void uwp_asb_fire_query_submitted( struct uwp_element *el )
+void uwp_asb_fire_suggestion_chosen( struct uwp_element *el, IInspectable *chosen )
+{
+    void **handlers = NULL;
+    unsigned int cnt, i;
+    struct asb_sc_args *args;
+    IInspectable *sender;
+
+    if (!el || !chosen) return;
+    cnt = xaml_event_registry_snapshot_alloc( &el->asb_suggestion_chosen_reg, &handlers );
+    if (!cnt) return;
+    args = calloc( 1, sizeof(*args) );
+    if (!args)
+    {
+        for (i = 0; i < cnt; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        free( handlers );
+        return;
+    }
+    args->lpVtbl = asb_sc_vtbl;
+    args->ref = 1;
+    args->selected_item = chosen;
+    IInspectable_AddRef( chosen );
+    sender = el->outer ? el->outer : &el->IInspectable_iface;
+    for (i = 0; i < cnt; i++)
+    {
+        struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+        __TRY { h->lpVtbl->Invoke( h, sender, (IInspectable *)args ); }
+        __EXCEPT_ALL { TRACE( "uwp_asb_fire_suggestion_chosen handler %u faulted\n", i ); }
+        __ENDTRY;
+        IUnknown_Release( (IUnknown *)h );
+    }
+    free( handlers );
+    asb_sc_Release( args );
+}
+
+void uwp_asb_fire_query_submitted_ex( struct uwp_element *el, IInspectable *chosen )
 {
     void **handlers = NULL;
     unsigned int cnt, i;
@@ -1256,9 +1394,14 @@ void uwp_asb_fire_query_submitted( struct uwp_element *el )
     args->lpVtbl = asb_qs_vtbl;
     args->ref = 1;
     WindowsCreateString( el->text, (UINT32)wcslen( el->text ), &args->query_text );
+    if (chosen)
+    {
+        args->chosen_suggestion = chosen;
+        IInspectable_AddRef( chosen );
+    }
     sender = el->outer ? el->outer : &el->IInspectable_iface;
-    TRACE( "uwp_asb_fire_query_submitted on %s (%s) query=%s handlers=%u\n",
-           debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(el->text), cnt );
+    TRACE( "uwp_asb_fire_query_submitted on %s (%s) query=%s chosen=%p handlers=%u\n",
+           debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(el->text), chosen, cnt );
     for (i = 0; i < cnt; i++)
     {
         struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
@@ -1271,6 +1414,158 @@ void uwp_asb_fire_query_submitted( struct uwp_element *el )
     asb_qs_Release( args );
 }
 
+void uwp_asb_fire_query_submitted( struct uwp_element *el )
+{
+    uwp_asb_fire_query_submitted_ex( el, NULL );
+}
+
+int uwp_asb_get_suggestions( struct uwp_element *asb, IInspectable **out_items, int max_items )
+{
+    int count = 0;
+    if (!asb || !out_items || max_items <= 0) return 0;
+    if (!wcsstr( asb->class_name, L"AutoSuggestBox" )) return 0;
+    if (asb->items_source)
+        count = (int)uwp_winrt_vec_snapshot( asb->items_source, out_items, (unsigned int)max_items );
+    if (count == 0 && asb->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( asb->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; v && i < v->count && count < max_items; i++)
+        {
+            if (v->items[i])
+            {
+                out_items[count] = v->items[i];
+                IInspectable_AddRef( out_items[count] );
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+BOOL uwp_asb_compute_popup_rect( const struct uwp_element *asb, int count, int win_w, int win_h,
+                                 RECT *out_rc, int *out_item_h, int *out_vis_cnt, int *out_pad_y )
+{
+    float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+    int item_h = max( 32, (int)(38.0f * sc + 0.5f) );
+    int pad_y = max( 4, (int)(6.0f * sc + 0.5f) );
+    int vis_cnt, pop_w, pop_h, x0, y0, bw;
+
+    if (!asb || !asb->has_bounds || asb->visibility != 0 || count <= 0 || !out_rc) return FALSE;
+    vis_cnt = min( count, 8 );
+    bw = asb->bounds.right - asb->bounds.left;
+    if (bw >= 560)
+    {
+        pop_w = 560;
+        x0 = asb->bounds.left + (bw - pop_w) / 2;
+    }
+    else
+    {
+        pop_w = max( bw, (int)(320.0f * sc + 0.5f) );
+        x0 = asb->bounds.left;
+    }
+    pop_h = pad_y * 2 + vis_cnt * item_h;
+    if (win_w > 0 && x0 + pop_w > win_w - 4) x0 = max( 4, win_w - 4 - pop_w );
+    y0 = asb->bounds.bottom + 2;
+    if (win_h > 0 && y0 + pop_h > win_h - 4)
+        pop_h = max( item_h + pad_y * 2, win_h - 4 - y0 );
+    SetRect( out_rc, x0, y0, x0 + pop_w, y0 + pop_h );
+    if (out_item_h) *out_item_h = item_h;
+    if (out_vis_cnt) *out_vis_cnt = vis_cnt;
+    if (out_pad_y) *out_pad_y = pad_y;
+    return TRUE;
+}
+
+static void uwp_asb_collect_el_texts( const struct uwp_element *el, WCHAR *out_p, size_t max_p,
+                                      WCHAR *out_s, size_t max_s, int depth )
+{
+    WCHAR rich_buf[512];
+    const WCHAR *txt;
+    if (!el || depth > 8 || el->visibility != 0) return;
+    txt = el->text;
+    if (!txt[0] && el->inlines_coll && uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
+        txt = rich_buf;
+    if (!txt[0] && el->automation_name[0])
+        txt = el->automation_name;
+    if (txt[0] && !wcsstr( el->class_name, L"FontIcon" ) && !(wcslen( txt ) == 1 && (UINT)txt[0] >= 0xE000))
+    {
+        if (!out_p[0])
+            lstrcpynW( out_p, txt, (int)max_p );
+        else if (out_s && max_s > 0 && !out_s[0] && wcscmp( out_p, txt ) != 0)
+            lstrcpynW( out_s, txt, (int)max_s );
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el) uwp_asb_collect_el_texts( ch, out_p, max_p, out_s, max_s, depth + 1 );
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; v && i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el) uwp_asb_collect_el_texts( ch, out_p, max_p, out_s, max_s, depth + 1 );
+        }
+    }
+}
+
+void uwp_asb_get_item_label( struct uwp_element *asb, int idx, IInspectable *item,
+                             WCHAR *out_primary, size_t max_primary,
+                             WCHAR *out_secondary, size_t max_secondary )
+{
+    static const WCHAR *const prim_props[] =
+        { L"Title", L"ProductTitle", L"DisplayTitle", L"DisplayText", L"QueryText",
+          L"Term", L"SuggestedTerm", L"SuggestionText", L"Text", L"Name", L"Label", L"Header" };
+    static const WCHAR *const sec_props[] =
+        { L"Category", L"Subtitle", L"SubTitle", L"PublisherName", L"DisplayPrice", L"MediaType" };
+    struct uwp_element *item_el;
+
+    if (out_primary && max_primary > 0) out_primary[0] = 0;
+    if (out_secondary && max_secondary > 0) out_secondary[0] = 0;
+    if (!out_primary || max_primary == 0) return;
+
+    if (asb && asb->children_coll && idx >= 0)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( asb->children_coll, struct uwp_vec_view, IInspectable_iface );
+        if (v && (unsigned int)idx < v->count)
+        {
+            struct uwp_element *cel = uwp_elem_from_any( v->items[idx] );
+            if (cel)
+                uwp_asb_collect_el_texts( cel, out_primary, max_primary, out_secondary, max_secondary, 0 );
+        }
+    }
+    item_el = uwp_elem_from_any( item );
+    if (!out_primary[0] && item_el)
+        uwp_asb_collect_el_texts( item_el, out_primary, max_primary, out_secondary, max_secondary, 0 );
+    if (!out_primary[0] && item)
+    {
+        uwp_vm_query_string_prop_depth( item, prim_props, ARRAY_SIZE(prim_props), out_primary, max_primary, 2 );
+        if (out_secondary && max_secondary > 0 && !out_secondary[0])
+            uwp_vm_query_string_prop_depth( item, sec_props, ARRAY_SIZE(sec_props), out_secondary, max_secondary, 2 );
+    }
+    if (!out_primary[0] && item)
+        uwp_inspectable_to_string( item, out_primary, max_primary );
+}
+
+static HRESULT WINAPI uwp_asb_get_IsSuggestionListOpen( void *iface, boolean *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = impl ? (boolean)impl->is_open : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_asb_put_IsSuggestionListOpen( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        impl->is_open = (val != 0);
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+
 const void *uwp_asb_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -1280,8 +1575,8 @@ const void *uwp_asb_vtbl[32] =
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
     [6 ... 7] = uwp_generic_noop,
-    [8] = uwp_cd_get_BoolFalse,
-    [9] = uwp_generic_noop,
+    [8] = uwp_asb_get_IsSuggestionListOpen,
+    [9] = uwp_asb_put_IsSuggestionListOpen,
     [10] = uwp_tb_get_Text,
     [11] = uwp_generic_noop,
     [12] = uwp_tb_get_Text,

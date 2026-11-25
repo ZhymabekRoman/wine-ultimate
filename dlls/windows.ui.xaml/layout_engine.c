@@ -320,7 +320,6 @@ static BOOL uwp_is_home_title_panel( struct uwp_element *el, int depth )
 static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
 {
     if (!el || el->visibility != 0 || depth > 14) return FALSE;
-    if (depth == 0 && uwp_is_home_title_panel( el, 0 )) return FALSE;
     if (uwp_has_spotlight_descendant( el, 0 )) return TRUE;
     if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
     if (el->text[0] || el->inlines_coll || el->img_pixels || el->img_loaded) return TRUE;
@@ -378,7 +377,7 @@ static inline double uwp_clamp_top_margin( double mt )
 static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
 {
     double best = 0.0;
-    if (!el || depth > 12 || el->visibility != 0) return 0.0;
+    if (!el || depth > 24 || el->visibility != 0) return 0.0;
     if (el->kind == UWP_KIND_DEFERRED || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
         el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_RESOURCE_DICT ||
         el->kind == UWP_KIND_COLOR || el->kind == UWP_KIND_ACCELERATOR || el->kind == UWP_KIND_XAML_COMMAND)
@@ -387,6 +386,52 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
         return el->height + uwp_clamp_top_margin( el->margin_t ) + max( 0.0, el->margin_b );
     if (el->min_height > 0.0 && !isnan( el->min_height ))
         best = el->min_height;
+    if (wcsstr( el->class_name, L"ItemsRepeater" ) &&
+        !wcsstr( el->name, L"MenuItems" ) && !wcsstr( el->name, L"FooterMenuItems" ))
+    {
+        int aw = 960;
+        const struct uwp_element *anc;
+        for (anc = el->parent; anc; anc = anc->parent)
+        {
+            if (anc->actual_w > 200.0) { aw = (int)anc->actual_w; break; }
+            if (anc->width > 200.0 && !isnan( anc->width )) { aw = (int)anc->width; break; }
+        }
+        if (el->children_coll)
+        {
+            struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int k, vis_cnt = 0;
+            struct uwp_element *ch0 = NULL;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                if (ch && ch->visibility == 0)
+                {
+                    if (!ch0) ch0 = ch;
+                    vis_cnt++;
+                }
+            }
+            if (vis_cnt > 0)
+            {
+                int cols = max( 1, (aw - 12) / 270 );
+                int rows_cnt = (ch0 && wcsstr( ch0->class_name, L"Card" )) ? 1 : (((int)vis_cnt + cols - 1) / cols);
+                double rh = (double)(24 + rows_cnt * 96 + max( 0, rows_cnt - 1 ) * 12) * g_layout_scale;
+                if (rh > best) best = rh;
+            }
+        }
+        if (best <= 0.0)
+        {
+            int di;
+            for (di = 0; di < el->dp_cnt; di++)
+            {
+                if (el->dp_store[di].value && uwp_winrt_vec_count( el->dp_store[di].value ) > 0)
+                {
+                    best = 120.0 * g_layout_scale;
+                    break;
+                }
+            }
+        }
+        return best + uwp_clamp_top_margin( el->margin_t ) + max( 0.0, el->margin_b );
+    }
     if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
         double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
@@ -433,8 +478,6 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
         }
         if (el->max_lines > 0 && lines > el->max_lines)
             lines = el->max_lines;
-        else if (el->max_lines == 0 && lines > 4)
-            lines = 4;
         if (lines > 24) lines = 24;
         {
             double th = line_h * lines + 4.0;
@@ -507,16 +550,25 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
     else if (el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
+        unsigned int k, vis = 0;
+        BOOL is_vert_list = (wcsstr( el->class_name, L"ListView" ) != NULL && !wcsstr( el->class_name, L"Item" ) &&
+                             el->orientation == 0 && el->item_template != NULL);
+        double acc = 0.0;
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
             if (ch && ch != el && ch->visibility == 0)
             {
                 double ch_h = uwp_estimate_auto_height( ch, depth + 1 );
-                if (ch_h > best) best = ch_h;
+                if (is_vert_list && ch_h > 0.0)
+                {
+                    acc += ch_h + (vis > 0 ? 12.0 * g_layout_scale : 0.0);
+                    vis++;
+                }
+                else if (ch_h > best) best = ch_h;
             }
         }
+        if (is_vert_list && acc > best) best = acc;
     }
     if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) &&
         best < 36.0 * g_layout_scale)
@@ -792,7 +844,9 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k, vis = 0;
-        BOOL sum_horiz = (wcsstr( el->class_name, L"ListBox" ) != NULL || wcsstr( el->class_name, L"ItemsControl" ) != NULL);
+        BOOL sum_horiz = (wcsstr( el->class_name, L"ListBox" ) != NULL ||
+                          wcsstr( el->class_name, L"ItemsControl" ) != NULL ||
+                          wcsstr( el->class_name, L"RadioButtons" ) != NULL);
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
@@ -827,11 +881,37 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
     return best;
 }
 
+static BOOL uwp_is_horiz_listview( const struct uwp_element *el )
+{
+    if (!el) return FALSE;
+    if (wcsstr( el->class_name, L"GridView" ) && !wcsstr( el->class_name, L"Item" ))
+        return TRUE;
+    if (wcsstr( el->class_name, L"ListView" ) && !wcsstr( el->class_name, L"Item" ))
+    {
+        if (el->orientation == 1) return TRUE;
+        if (el->item_template) return FALSE;
+        if (el->children_coll)
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int k;
+            for (k = 0; v && k < v->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Template" )) continue;
+                if (ch->kind == UWP_KIND_USER_CONTROL)
+                    return FALSE;
+                break;
+            }
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL uwp_has_horiz_listview_child( const struct uwp_element *el, int depth )
 {
     if (!el || depth > 2 || el->visibility != 0) return FALSE;
-    if ((wcsstr( el->class_name, L"ListView" ) || wcsstr( el->class_name, L"GridView" )) &&
-        !wcsstr( el->class_name, L"Item" ))
+    if (uwp_is_horiz_listview( el ))
         return TRUE;
     if (el->content)
     {
@@ -871,11 +951,29 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
     if (wcsstr( el->class_name, L"ConstrainedBox" ) && avail_w > 0 && avail_w <= 320)
         return (double)avail_w;
     if (wcsstr( el->class_name, L"ItemsRepeater" ) &&
-        wcscmp( el->name, L"MenuItemsHost" ) != 0 && wcscmp( el->name, L"FooterMenuItemsHost" ) != 0)
+        !wcsstr( el->name, L"MenuItems" ) && !wcsstr( el->name, L"FooterMenuItems" ))
     {
-        if (el->children_coll && avail_w >= 400 &&
-            CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count > 0)
-            return 120.0 * g_layout_scale;
+        if (el->children_coll && avail_w >= 400)
+        {
+            struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int k, vis_cnt = 0;
+            struct uwp_element *ch0 = NULL;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                if (ch && ch->visibility == 0)
+                {
+                    if (!ch0) ch0 = ch;
+                    vis_cnt++;
+                }
+            }
+            if (vis_cnt > 0)
+            {
+                int cols = max( 1, (avail_w - 12) / 270 );
+                int rows_cnt = (ch0 && wcsstr( ch0->class_name, L"Card" )) ? 1 : (((int)vis_cnt + cols - 1) / cols);
+                return (double)(24 + rows_cnt * 96 + max( 0, rows_cnt - 1 ) * 12) * g_layout_scale;
+            }
+        }
         return 0.0;
     }
     if (el->kind == UWP_KIND_TEXT_BLOCK)
@@ -918,8 +1016,6 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
         }
         if (el->max_lines > 0 && lines > el->max_lines)
             lines = el->max_lines;
-        else if (el->max_lines == 0 && lines > 4)
-            lines = 4;
         if (lines > 24) lines = 24;
         best = line_h * lines + 4.0;
     }
@@ -1080,9 +1176,7 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
         }
         if (max_span_h > best) best = max_span_h;
     }
-    else if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL ||
-              el->kind == UWP_KIND_USER_CONTROL || el->kind == UWP_KIND_GENERIC) &&
-             (el->content || el->children_coll))
+    else if (el->content || el->children_coll)
     {
         if (el->content)
         {
@@ -1093,22 +1187,32 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
                 if (ch_h > 0.0) best = ch_h + el->padding_t + el->padding_b;
             }
         }
-        if (best <= 0.0 && el->children_coll)
+        if (best <= 0.0 && el->children_coll && !wcsstr( el->class_name, L"AutoSuggestBox" ))
         {
             struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-            unsigned int k;
+            unsigned int k, vis = 0;
+            BOOL is_vert_list = (wcsstr( el->class_name, L"ListView" ) != NULL && !wcsstr( el->class_name, L"Item" ) &&
+                                 !uwp_is_horiz_listview( el ));
+            double acc = 0.0;
             for (k = 0; k < children->count; k++)
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 double ch_h;
-                if (!ch || ch == el || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED) continue;
+                if (!ch || ch == el || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
+                    wcsstr( ch->class_name, L"Template" )) continue;
                 ch_h = uwp_measure_natural_height( ch, avail_w, depth + 1 );
                 if (ch_h > 0.0)
                 {
                     ch_h += uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b );
-                    if (ch_h > best) best = ch_h;
+                    if (is_vert_list)
+                    {
+                        acc += ch_h + (vis > 0 ? 12.0 * g_layout_scale : 0.0);
+                        vis++;
+                    }
+                    else if (ch_h > best) best = ch_h;
                 }
             }
+            if (is_vert_list && acc > best) best = acc;
             if (best > 0.0) best += el->padding_t + el->padding_b;
         }
     }
@@ -1149,7 +1253,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         (wcsstr( el->class_name, L"TeachingTip" ) && !el->is_open) ||
         !wcscmp( el->name, L"TeachingTipTarget" ))
     {
-        el->has_bounds = FALSE;
+        uwp_clear_bounds_tree( el );
         return;
     }
 
@@ -1306,63 +1410,77 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             col_x[ncols] = rc.right;
         }
 
-        for (i = 0; i < nrows; i++)
         {
-            struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
-            BOOL has_vis = FALSE;
-            for (k = 0; k < children->count; k++)
+            BOOL has_star_row = FALSE;
+            for (i = 0; i < nrows; i++)
             {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
-                    ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
-                    ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
-                    ch->grid_row <= i && i < ch->grid_row + ch->grid_row_span)
-                {
-                    int c0 = max( 0, min( ncols - 1, ch->grid_col ) );
-                    int c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
-                    if (col_x[c1] > col_x[c0])
-                    {
-                        has_vis = TRUE;
-                        break;
-                    }
-                }
+                struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
+                int rt = rd ? rd->grid_len_type : 2;
+                double rv = rd ? rd->grid_len_val : 1.0;
+                if (rt == 2 && rv > 0.001) { has_star_row = TRUE; break; }
             }
-            r_type[i] = rd ? rd->grid_len_type : 2;
-            r_val[i]  = rd ? rd->grid_len_val  : 1.0;
-            /* Collapse empty history/dock or 0-star rows */
-            if (r_type[i] == 2 && (r_val[i] <= 0.001 || (i > 0 && !has_vis)))
-            { r_type[i] = 1; r_val[i] = 0; }
-            if (r_type[i] == 0) /* Auto */
+            for (i = 0; i < nrows; i++)
             {
-                double auto_h = 0.0;
-                if (has_vis)
+                struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
+                BOOL has_vis = FALSE;
+                for (k = 0; k < children->count; k++)
                 {
-                    for (k = 0; k < children->count; k++)
+                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                    if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                        ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                        ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
+                        ch->grid_row <= i && i < ch->grid_row + ch->grid_row_span)
                     {
-                        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                        if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
-                            ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
-                            ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
-                            ch->grid_row == i && ch->grid_row_span == 1)
+                        int c0 = max( 0, min( ncols - 1, ch->grid_col ) );
+                        int c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
+                        if (col_x[c1] > col_x[c0])
                         {
-                            double ch_h = uwp_estimate_auto_height( ch, 0 );
-                            if (ch_h > auto_h) auto_h = ch_h;
+                            has_vis = TRUE;
+                            break;
                         }
                     }
-                    if (auto_h > 0.0 && auto_h < 24.0 * g_layout_scale)
-                        auto_h = 24.0 * g_layout_scale;
-                    if (rd && rd->max_height > 0.0 && auto_h > rd->max_height)
-                        auto_h = rd->max_height;
-                    if (rd && rd->min_height > 0.0 && auto_h < rd->min_height)
-                        auto_h = rd->min_height;
-                    if (h >= 400 && auto_h > min( (double)h * 0.35, 320.0 ))
-                        auto_h = min( (double)h * 0.35, 320.0 );
                 }
-                r_type[i] = 1;
-                r_val[i] = auto_h;
+                r_type[i] = rd ? rd->grid_len_type : 2;
+                r_val[i]  = rd ? rd->grid_len_val  : 1.0;
+                /* Collapse empty history/dock or 0-star rows */
+                if (r_type[i] == 2 && (r_val[i] <= 0.001 || (i > 0 && !has_vis)))
+                { r_type[i] = 1; r_val[i] = 0; }
+                if (r_type[i] == 0) /* Auto */
+                {
+                    double auto_h = 0.0;
+                    if (has_vis)
+                    {
+                        for (k = 0; k < children->count; k++)
+                        {
+                            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                            if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                                ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                                ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
+                                ch->grid_row == i && ch->grid_row_span == 1)
+                            {
+                                double ch_h = uwp_estimate_auto_height( ch, 0 );
+                                double nat_ch_h = uwp_measure_natural_height( ch, w, 0 );
+                                if (nat_ch_h > 0.0)
+                                    nat_ch_h += uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b );
+                                if (nat_ch_h > ch_h) ch_h = nat_ch_h;
+                                if (ch_h > auto_h) auto_h = ch_h;
+                            }
+                        }
+                        if (auto_h > 0.0 && auto_h < 24.0 * g_layout_scale)
+                            auto_h = 24.0 * g_layout_scale;
+                        if (rd && rd->max_height > 0.0 && auto_h > rd->max_height)
+                            auto_h = rd->max_height;
+                        if (rd && rd->min_height > 0.0 && auto_h < rd->min_height)
+                            auto_h = rd->min_height;
+                        if (has_star_row && h >= 400 && auto_h > min( (double)h * 0.35, 320.0 ))
+                            auto_h = min( (double)h * 0.35, 320.0 );
+                    }
+                    r_type[i] = 1;
+                    r_val[i] = auto_h;
+                }
+                if (r_type[i] == 1) r_fixed += r_val[i];
+                else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
             }
-            if (r_type[i] == 1) r_fixed += r_val[i];
-            else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
         }
 
         {
@@ -1548,14 +1666,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                         }
                         else
                         {
-                            double mh;
-                            if (uwp_is_home_title_panel( ch, 0 ))
-                            {
-                                ch->has_bounds = FALSE;
-                                idx++;
-                                continue;
-                            }
-                            mh = uwp_measure_natural_height( ch, w, 0 );
+                            double mh = uwp_measure_natural_height( ch, w, 0 );
                             if (mh > 0.0)
                             {
                                 nat_h = max( 24, (int)(mh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
@@ -1770,7 +1881,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             {
                 footer_h = wide_pane
                     ? min( (int)(160 * sc), footer_vis_cnt * (int)(40 * sc) + (int)(12 * sc) )
-                    : min( (int)(180 * sc), footer_vis_cnt * (int)(58 * sc) + (int)(8 * sc) );
+                    : min( (int)(180 * sc), footer_vis_cnt * (int)(58 * sc) + (int)(26 * sc) );
             }
             else if (has_footer_host && pane_visible && pane_w > 0)
             {
@@ -2133,6 +2244,28 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         unsigned int k;
         int avail_w = rc.right - rc.left;
         int avail_h = rc.bottom - rc.top;
+        if (!uwp_is_horiz_listview( el ))
+        {
+            int cur_y = rc.top;
+            int gap = (int)(12.0f * g_layout_scale + 0.5f);
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                double nh;
+                int item_h;
+                RECT crc;
+                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Template" )) continue;
+                nh = uwp_measure_natural_height( ch, avail_w, 0 );
+                if (nh <= 0.0) nh = uwp_estimate_auto_height( ch, 0 );
+                if (nh <= 0.0) nh = 110.0 * g_layout_scale;
+                item_h = max( 48, (int)(nh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
+                SetRect( &crc, rc.left, cur_y, rc.right, cur_y + item_h );
+                if (!ch->parent) ch->parent = el;
+                uwp_arrange_element( ch, crc );
+                cur_y += item_h + gap;
+            }
+            return;
+        }
         if (avail_w >= 480 && avail_h > 0 && avail_h <= 400)
         {
             int pad = 8, gap = 12;
@@ -2208,11 +2341,14 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         return;
     }
 
-    if (el->kind != UWP_KIND_GRID && el->kind != UWP_KIND_STACK_PANEL && el->kind != UWP_KIND_WRAP_PANEL && !uwp_is_combobox( el ) && el->children_coll)
+    if (el->kind != UWP_KIND_GRID && el->kind != UWP_KIND_STACK_PANEL && el->kind != UWP_KIND_WRAP_PANEL &&
+        !uwp_is_combobox( el ) && !wcsstr( el->class_name, L"AutoSuggestBox" ) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k;
-        BOOL is_horiz_list = (wcsstr( el->class_name, L"ListBox" ) != NULL || wcsstr( el->class_name, L"ItemsControl" ) != NULL) &&
+        BOOL is_horiz_list = (wcsstr( el->class_name, L"ListBox" ) != NULL ||
+                              wcsstr( el->class_name, L"ItemsControl" ) != NULL ||
+                              wcsstr( el->class_name, L"RadioButtons" ) != NULL) &&
                              (rc.bottom - rc.top) <= (int)(64 * g_layout_scale);
         int cur_x = rc.left;
         for (k = 0; k < children->count; k++)

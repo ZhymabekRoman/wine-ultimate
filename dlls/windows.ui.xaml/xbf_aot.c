@@ -974,7 +974,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                             uwp_add_xaml_binding( parent_el, owner_cls, pi->name, child_el );
                             handled_custom_obj = TRUE;
                         }
-                        else if (uwp_set_custom_xaml_member_obj( app_outer, owner_cls, pi->name, target, child_raw ))
+                        else if (uwp_set_custom_xaml_member_obj( app_outer ? app_outer : uwp_get_app_outer(), owner_cls, pi->name, target, child_raw ))
                         {
                             if (parent_el && !wcscmp( pi->name, L"Icon" ))
                             {
@@ -1095,10 +1095,33 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         lstrcpynW( parent_el->image_src, child_el->image_src, ARRAY_SIZE(parent_el->image_src) );
                     if (child_el) child_el->parent = parent_el;
                 }
+                else if (child_raw &&
+                         (op->pid == 0x837c ||
+                          (op->pid < hdr->prop_cnt && !wcscmp( fake_ctx.props[op->pid].name, L"ItemTemplateSelector" ))))
+                {
+                    if (parent_el->item_template_selector) IInspectable_Release( parent_el->item_template_selector );
+                    parent_el->item_template_selector = child_raw;
+                    IInspectable_AddRef( child_raw );
+                    if (parent_el->items_source && !uwp_is_combobox( parent_el ))
+                        uwp_items_ctrl_materialize_source( parent_el, parent_el->items_source );
+                }
+                else if (child_raw &&
+                         (op->pid == 0x837b ||
+                          (op->pid < hdr->prop_cnt && !wcscmp( fake_ctx.props[op->pid].name, L"ItemTemplate" )) ||
+                          (child_el && !wcscmp( child_el->class_name, L"Windows.UI.Xaml.DataTemplate" ) &&
+                           op->pid != XBF_PROP_CONTENT && op->pid != XBF_PROP_USERCONTROL_CONTENT)))
+                {
+                    if (parent_el->item_template) IInspectable_Release( parent_el->item_template );
+                    parent_el->item_template = child_raw;
+                    IInspectable_AddRef( child_raw );
+                    if (parent_el->items_source && !uwp_is_combobox( parent_el ))
+                        uwp_items_ctrl_materialize_source( parent_el, parent_el->items_source );
+                }
                 else if (child_raw && op->sv_kind == UWP_RD_OBJ &&
                          (!child_el || (child_el->kind != UWP_KIND_STYLE &&
                                         child_el->kind != UWP_KIND_BRUSH &&
-                                        child_el->kind != UWP_KIND_COLOR)) &&
+                                        child_el->kind != UWP_KIND_COLOR &&
+                                        wcscmp( child_el->class_name, L"Windows.UI.Xaml.DataTemplate" ) != 0)) &&
                          (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_USERCONTROL_CONTENT ||
                           op->pid == XBF_PROP_BORDER_CHILD || op->pid == XBF_PROP_RENDER_TRANSFORM_ORIGIN ||
                           op->pid == XBF_PROP_POPUP_CHILD ||

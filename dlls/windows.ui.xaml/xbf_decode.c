@@ -1956,18 +1956,26 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (sval && sval[0])
             {
                 lstrcpynW( el->uid, sval, ARRAY_SIZE(el->uid) );
-                if (!el->text[0] && !el->content)
+                if (!el->text[0] || el->kind == UWP_KIND_USER_CONTROL || el->outer)
                 {
                     WCHAR res_key[256], res_val[128];
-                    static const WCHAR *std_props[] = { L"Content", L"Text" };
+                    static const WCHAR *std_props[] =
+                        { L"Content", L"Text", L"Title", L"Header", L"Label", L"PlaceholderText", L"ButtonText" };
                     unsigned int sp;
                     DWORD k;
+                    void *ao = (ctx && ctx->app_outer) ? ctx->app_outer : uwp_get_app_outer();
+                    IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
 
-                    for (sp = 0; sp < ARRAY_SIZE(std_props) && !el->text[0]; sp++)
+                    for (sp = 0; sp < ARRAY_SIZE(std_props); sp++)
                     {
                         swprintf( res_key, ARRAY_SIZE(res_key), L"%s/%s", sval, std_props[sp] );
                         if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
-                            lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
+                        {
+                            if (!el->text[0] && (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
+                                lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
+                            if (el->outer && ao && wcsncmp( el->class_name, L"Windows.UI.Xaml.", 16 ) != 0)
+                                uwp_set_custom_xaml_member( ao, el->class_name, std_props[sp], target, res_val );
+                        }
                     }
                     for (k = 0; ctx && k < ctx->prop_cnt && !el->text[0]; k++)
                     {
@@ -1976,7 +1984,9 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                             !wcsncmp( ctx->types[kpi->owner_tid].xmlns, L"using:", 6 ) &&
                             (!wcscmp( kpi->name, L"Character" ) ||
                              !wcscmp( kpi->name, L"Content" ) ||
-                             !wcscmp( kpi->name, L"Text" )))
+                             !wcscmp( kpi->name, L"Text" ) ||
+                             !wcscmp( kpi->name, L"Title" ) ||
+                             !wcscmp( kpi->name, L"Header" )))
                         {
                             swprintf( res_key, ARRAY_SIZE(res_key), L"%s/[%s]%s/%s",
                                       sval, ctx->types[kpi->owner_tid].xmlns,
@@ -2400,7 +2410,11 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
         }
     }
-    if (el && (pid == 0x837c || pid == 0x837b) && is_res_ref && sval && sval[0])
+    if (el && is_res_ref && sval && sval[0] &&
+        (pid == 0x837c || pid == 0x837b ||
+         (!(pid & 0x8000) && ctx && pid < ctx->prop_cnt &&
+          (!wcscmp( ctx->props[pid].name, L"ItemTemplate" ) ||
+           !wcscmp( ctx->props[pid].name, L"ItemTemplateSelector" )))))
     {
         struct uwp_rd_entry *re = NULL;
         struct uwp_rd_bucket *found_b = NULL;
@@ -2410,7 +2424,10 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
             if (res_val)
             {
-                if (pid == 0x837c)
+                BOOL is_sel = (pid == 0x837c ||
+                               (!(pid & 0x8000) && ctx && pid < ctx->prop_cnt &&
+                                !wcscmp( ctx->props[pid].name, L"ItemTemplateSelector" )));
+                if (is_sel)
                 {
                     if (el->item_template_selector) IInspectable_Release( el->item_template_selector );
                     el->item_template_selector = res_val;

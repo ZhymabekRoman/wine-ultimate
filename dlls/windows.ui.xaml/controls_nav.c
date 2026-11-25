@@ -1524,6 +1524,12 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                 }
                 if ((!bel->text[0] || wcschr( bel->text, L'.' )) && impl->min_width >= 120.0)
                     lstrcpynW( bel->text, L"Get", ARRAY_SIZE(bel->text) );
+                if (bel->text[0] && impl->min_width <= 44.0 &&
+                    !wcsstr( impl->class_name, L"ListView" ) && !wcsstr( impl->class_name, L"GridView" ))
+                {
+                    double tw = (double)wcslen( bel->text ) * 8.5 + 28.0;
+                    if (tw > bel->width) bel->width = tw;
+                }
                 uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
             }
             IInspectable_Release( btn_inner );
@@ -1538,8 +1544,13 @@ void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *
 
     if (!impl || !src) return;
     count = uwp_winrt_vec_snapshot( src, items, ARRAY_SIZE(items) );
-    if (!count) return;
+    if (!count)
+    {
+        if (impl->children_coll) uwp_vec_Clear( impl->children_coll );
+        return;
+    }
     if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+    else uwp_vec_Clear( impl->children_coll );
     for (i = 0; i < count; i++)
     {
         uwp_items_ctrl_append_item( impl, items[i] );
@@ -1551,14 +1562,24 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemsSource( void *iface, void *src )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IItemsControl_iface );
     if (!impl) return S_OK;
-    if (impl->items_source == (IInspectable *)src) return S_OK;
-    if (impl->items_source) IInspectable_Release( impl->items_source );
-    impl->items_source = (IInspectable *)src;
-    if (impl->items_source) IInspectable_AddRef( impl->items_source );
+    if (impl->items_source != (IInspectable *)src)
+    {
+        if (impl->items_source) IInspectable_Release( impl->items_source );
+        impl->items_source = (IInspectable *)src;
+        if (impl->items_source) IInspectable_AddRef( impl->items_source );
+    }
     TRACE( "IItemsControl::put_ItemsSource on %s (%s) -> %p\n",
            debugstr_w(impl->class_name), debugstr_w(impl->name), src );
     if (impl->items_source && !uwp_is_combobox( impl ))
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
+    if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
+    {
+        unsigned int cnt = impl->items_source ? uwp_winrt_vec_count( impl->items_source ) : 0;
+        impl->is_open = (cnt > 0 && (impl == g_focused_textbox || impl->text[0] != 0));
+        impl->is_dropdown_open = impl->is_open;
+        impl->hovered_dropdown_idx = -1;
+        impl->dropdown_scroll_offset = 0;
+    }
     if (uwp_is_combobox( impl ) && impl->selected_item)
         uwp_selector_set_selection( impl, -1, impl->selected_item, FALSE, FALSE );
     g_layout_dirty = TRUE;
@@ -1593,7 +1614,7 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemTemplate( void *iface, void *val )
     if (impl->item_template) IInspectable_Release( impl->item_template );
     impl->item_template = (IInspectable *)val;
     if (impl->item_template) IInspectable_AddRef( impl->item_template );
-    if (impl->items_source && !uwp_panel_has_concrete_child( impl ))
+    if (impl->items_source && !uwp_is_combobox( impl ))
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
     g_layout_dirty = TRUE;
     uwp_invalidate_window();
@@ -1619,7 +1640,7 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemTemplateSelector( void *iface, void
     if (impl->item_template_selector) IInspectable_AddRef( impl->item_template_selector );
     TRACE( "IItemsControl::put_ItemTemplateSelector on %s (%s) -> %p\n",
            debugstr_w(impl->class_name), debugstr_w(impl->name), val );
-    if (impl->items_source && !uwp_panel_has_concrete_child( impl ))
+    if (impl->items_source && !uwp_is_combobox( impl ))
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
     g_layout_dirty = TRUE;
     uwp_invalidate_window();

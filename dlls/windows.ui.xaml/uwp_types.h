@@ -546,6 +546,8 @@ struct uwp_element
     struct xaml_event_registry tapped_reg;
     struct xaml_event_registry ptr_canceled_reg;
     struct xaml_event_registry ptr_wheel_reg;
+    struct xaml_event_registry got_focus_reg;
+    struct xaml_event_registry lost_focus_reg;
     struct xaml_event_registry nav_sel_changed_reg;
     struct xaml_event_registry nav_item_invoked_reg;
     struct xaml_event_registry frame_navigated_reg;
@@ -900,6 +902,8 @@ BOOL uwp_panel_has_concrete_child( struct uwp_element *panel );
 void uwp_fire_loaded_tree( struct uwp_element *el );
 void uwp_fire_evc_if_needed( struct uwp_element *el );
 void uwp_fire_size_and_layout_changed( struct uwp_element *el );
+void uwp_ui_fire_got_focus( struct uwp_element *el );
+void uwp_ui_fire_lost_focus( struct uwp_element *el );
 HANDLE get_xaml_window_ready_event( void );
 HRESULT xaml_async_action_create( IAsyncAction **out );
 void **vtbl_dup( const void *src );

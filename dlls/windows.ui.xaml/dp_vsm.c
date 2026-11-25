@@ -1354,6 +1354,23 @@ static HRESULT WINAPI attached_prop_get_dp( void *iface, void **out )
 {
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
+static HRESULT WINAPI auto_props_GetName( void *iface, void *elem, HSTRING *out )
+{
+    struct uwp_element *el = uwp_elem_from_any( elem );
+    if (!out) return E_POINTER;
+    if (el && el->automation_name[0])
+        return WindowsCreateString( el->automation_name, (UINT32)wcslen( el->automation_name ), out );
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI auto_props_SetName( void *iface, void *elem, HSTRING val )
+{
+    struct uwp_element *el = uwp_elem_from_any( elem );
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : NULL;
+    if (el)
+        lstrcpynW( el->automation_name, raw ? raw : L"", ARRAY_SIZE(el->automation_name) );
+    return S_OK;
+}
 static const void *attached_statics_vtbl[64] =
 {
     [0] = uwp_cf_QI,
@@ -1379,7 +1396,9 @@ static const void *attached_statics_vtbl[64] =
     [27] = attached_prop_get_dp,
     [28 ... 29] = uwp_generic_noop,
     [30] = attached_prop_get_dp,
-    [31 ... 63] = uwp_generic_noop,
+    [31] = auto_props_GetName,
+    [32] = auto_props_SetName,
+    [33 ... 63] = uwp_generic_noop,
 };
 struct uwp_class_factory auto_props_factory_obj =
     { {(const struct IActivationFactoryVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, L"Windows.UI.Xaml.Automation.AutomationProperties", { NULL } };

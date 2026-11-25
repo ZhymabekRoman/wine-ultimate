@@ -600,10 +600,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IMenuFlyout2_iface;
     else if (IsEqualGUID( iid, &IID_IAutoSuggestBox_Real_UWP ))
     {
-        if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
-            *out = &impl->IAutoSuggestBox2_iface;
-        else
-            *out = &impl->IItemsControl_iface;
+        *out = &impl->IItemsControl_iface;
     }
     else if (IsEqualGUID( iid, &IID_IAutoSuggestBox2_Real_UWP ))
     {
@@ -845,6 +842,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             { 0x7311e0d4, 0xfe94, 0x4e70, { 0x9b, 0x90, 0xcd, 0xd4, 0x7a, 0xc2, 0x3a, 0xfb } };
         static const GUID IID_IBitmapSource_UWP =
             { 0x23d86411, 0x202f, 0x41b2, { 0x8c, 0x5b, 0xa8, 0xa3, 0xb3, 0x33, 0x80, 0x0b } };
+        static const GUID IID_IAnimatedVisualPlayer_WinUI =
+            { 0xbf7f8865, 0x7b79, 0x5354, { 0x97, 0x88, 0xc2, 0x1e, 0x52, 0x35, 0x91, 0xea } };
         if (IsEqualGUID( iid, &IID_IListViewBase_UWP ))
             *out = &impl->IFlyout_iface;
         else if (IsEqualGUID( iid, &IID_IBitmapImage_UWP ))
@@ -863,7 +862,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                   (impl->kind == UWP_KIND_SCROLL_VIEWER || wcsstr( impl->class_name, L"ScrollViewer" ))) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
-                 IsEqualGUID( iid, &IID_IBitmapImage3_UWP ))
+                 IsEqualGUID( iid, &IID_IBitmapImage3_UWP ) ||
+                 IsEqualGUID( iid, &IID_IAnimatedVisualPlayer_WinUI ))
             *out = &impl->IStyle_iface;
         else if (IsEqualGUID( iid, &IID_ISelector_UWP ))
             *out = &impl->ISelector_iface;

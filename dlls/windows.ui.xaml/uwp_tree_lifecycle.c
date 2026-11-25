@@ -107,7 +107,15 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
                 {
                     __TRY
                     {
-                        proc_bindings( dte, ccc, &next_phase );
+                        int guard = 0;
+                        do
+                        {
+                            UINT32 cur_phase = ccc->phase;
+                            next_phase = -1;
+                            if (FAILED(proc_bindings( dte, ccc, &next_phase ))) break;
+                            if (next_phase <= (INT32)cur_phase) break;
+                            ccc->phase = (UINT32)next_phase;
+                        } while (++guard < 8);
                     }
                     __EXCEPT_ALL {}
                     __ENDTRY;
@@ -131,21 +139,24 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
                                    impl->xaml_bindings[i].path, dc );
     }
 
-    for (i = 0; i < impl->dc_cnt; i++)
+    if (dc != old_dc)
     {
-        if (impl->dc_handlers[i])
+        for (i = 0; i < impl->dc_cnt; i++)
         {
-            struct uwp_dc_args *args = calloc( 1, sizeof(*args) );
-            if (args)
+            if (impl->dc_handlers[i])
             {
-                IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-                struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dc_handlers[i];
-                args->vtbl = dc_args_vtbl;
-                args->ref = 1;
-                args->new_val = dc;
-                if (dc) IInspectable_AddRef( dc );
-                h->lpVtbl->Invoke( h, sender, args );
-                dc_args_Release( args );
+                struct uwp_dc_args *args = calloc( 1, sizeof(*args) );
+                if (args)
+                {
+                    IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dc_handlers[i];
+                    args->vtbl = dc_args_vtbl;
+                    args->ref = 1;
+                    args->new_val = dc;
+                    if (dc) IInspectable_AddRef( dc );
+                    h->lpVtbl->Invoke( h, sender, args );
+                    dc_args_Release( args );
+                }
             }
         }
     }
