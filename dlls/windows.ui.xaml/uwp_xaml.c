@@ -1050,6 +1050,80 @@ static HRESULT WINAPI uwp_frame_get_BackStackDepth( void *iface, INT32 *out )
     return S_OK;
 }
 
+HRESULT WINAPI uwp_frame_GoBack( void *iface )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_vec_view *v;
+    IInspectable *prev_entry;
+    struct uwp_nav_event_args *prev_nea;
+    IInspectable *prev_page = NULL;
+    struct uwp_element *page_el;
+
+    if (!impl || !impl->back_stack) return S_OK;
+    v = CONTAINING_RECORD( impl->back_stack, struct uwp_vec_view, IInspectable_iface );
+    TRACE( "uwp_frame_GoBack: impl=%p (%s) count=%u\n", impl, debugstr_w(impl->name), v->count );
+    if (v->count == 0) return S_OK;
+
+    prev_entry = v->items[v->count - 1];
+    v->items[--v->count] = NULL;
+    if (!prev_entry) return S_OK;
+
+    prev_nea = CONTAINING_RECORD( prev_entry, struct uwp_nav_event_args, INavigationEventArgs_iface );
+    prev_page = prev_nea->content;
+    if (prev_page)
+    {
+        struct uwp_nav_event_args *back_nea = uwp_nav_event_args_create(
+            prev_nea->content, prev_nea->parameter, &prev_nea->source_page_type, prev_nea->transition_info );
+        if (back_nea) back_nea->nav_mode = 1; /* NavigationMode_Back */
+        if (impl->nav_args_item) uwp_nea_Release( impl->nav_args_item );
+        impl->nav_args_item = back_nea ? &back_nea->INavigationEventArgs_iface : NULL;
+        if (impl->nav_args_item) IInspectable_AddRef( impl->nav_args_item );
+        if (impl->content) IInspectable_Release( impl->content );
+        impl->content = prev_page;
+        IInspectable_AddRef( prev_page );
+        page_el = uwp_elem_from_any( prev_page );
+        if (page_el)
+        {
+            page_el->parent = impl;
+            if (!impl->parent || !wcsstr( page_el->class_name, L"Skeleton" ))
+                g_navigated_page_el = page_el;
+        }
+        if (page_el && page_el->outer && back_nea)
+        {
+            void *page_ovr = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( page_el->outer, &IID_IPageOverrides_UWP, &page_ovr )) && page_ovr)
+            {
+                HRESULT (WINAPI *on_nav)(void *, void *) = (void *)(*(void ***)page_ovr)[7];
+                __TRY { if (on_nav) on_nav( page_ovr, &back_nea->INavigationEventArgs_iface ); }
+                __EXCEPT_ALL { }
+                __ENDTRY;
+                IUnknown_Release( (IUnknown *)page_ovr );
+            }
+        }
+        if (impl->frame_navigated_reg.next_token > 0 && back_nea)
+        {
+            void **handlers = NULL;
+            unsigned int cnt = xaml_event_registry_snapshot_alloc( &impl->frame_navigated_reg, &handlers );
+            IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+            unsigned int hi;
+            for (hi = 0; hi < cnt; hi++)
+            {
+                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
+                __TRY { h->lpVtbl->Invoke( h, sender, &back_nea->INavigationEventArgs_iface ); }
+                __EXCEPT_ALL { }
+                __ENDTRY;
+                IUnknown_Release( (IUnknown *)handlers[hi] );
+            }
+            free( handlers );
+        }
+        if (back_nea) uwp_nea_Release( &back_nea->INavigationEventArgs_iface );
+        g_layout_dirty = TRUE;
+        xaml_window_present_current();
+    }
+    uwp_nea_Release( prev_entry );
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result );
 
 static const void *uwp_frame_vtbl[48] =
@@ -1076,7 +1150,7 @@ static const void *uwp_frame_vtbl[48] =
     [19] = uwp_generic_noop,       /* remove_NavigationFailed */
     [20] = uwp_ui_event_add,       /* add_NavigationStopped */
     [21] = uwp_generic_noop,       /* remove_NavigationStopped */
-    [22] = uwp_generic_noop,       /* GoBack */
+    [22] = uwp_frame_GoBack,       /* GoBack */
     [23] = uwp_frame_Navigate,
     [24] = uwp_frame_NavigateWithParam,
     [25 ... 47] = uwp_generic_noop,
@@ -2065,6 +2139,28 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                 }
                 new_content = page_el->outer ? page_el->outer : &page_el->IInspectable_iface;
                 IInspectable_AddRef( new_content );
+                if (impl->content && impl->nav_stack_enabled)
+                {
+                    if (!impl->back_stack)
+                    {
+                        uwp_vec_create( NULL, &impl->back_stack );
+                        if (impl->back_stack)
+                            CONTAINING_RECORD( impl->back_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+                                L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Navigation.PageStackEntry>";
+                    }
+                    if (impl->back_stack && impl->nav_args_item)
+                    {
+                        struct uwp_nav_event_args *prev_nea =
+                            CONTAINING_RECORD( impl->nav_args_item, struct uwp_nav_event_args, INavigationEventArgs_iface );
+                        struct uwp_nav_event_args *pse = uwp_page_stack_entry_create(
+                            prev_nea->content, prev_nea->parameter, &prev_nea->source_page_type, prev_nea->transition_info );
+                        if (pse)
+                        {
+                            uwp_vec_Append( impl->back_stack, &pse->INavigationEventArgs_iface );
+                            uwp_nea_Release( &pse->INavigationEventArgs_iface );
+                        }
+                    }
+                }
                 if (impl->content) IInspectable_Release( impl->content );
                 impl->content = new_content;
                 if ((!impl->parent && !wcsstr( name, L"Skeleton" )) || !g_navigated_page_el)
@@ -2075,6 +2171,9 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                 {
                     struct uwp_nav_event_args *nea = uwp_nav_event_args_create(
                         new_content, (IInspectable *)param, type, (IInspectable *)transition_info );
+                    if (impl->nav_args_item) uwp_nea_Release( impl->nav_args_item );
+                    impl->nav_args_item = nea ? &nea->INavigationEventArgs_iface : NULL;
+                    if (impl->nav_args_item) IInspectable_AddRef( impl->nav_args_item );
 
                     /* Invoke IPageOverrides::OnNavigatedTo (slot 7) if implemented */
                     if (page_el->outer)

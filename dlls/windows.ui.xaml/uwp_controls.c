@@ -635,7 +635,12 @@ static HRESULT WINAPI uwp_frame2_get_BackStack( void *iface, IInspectable **out 
     *out = NULL;
     if (!impl) return E_NOINTERFACE;
     if (!impl->back_stack)
+    {
         uwp_vec_create( NULL, &impl->back_stack );
+        if (impl->back_stack)
+            CONTAINING_RECORD( impl->back_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+                L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Navigation.PageStackEntry>";
+    }
     if (impl->back_stack)
     {
         *out = impl->back_stack;
@@ -650,7 +655,12 @@ static HRESULT WINAPI uwp_frame2_get_ForwardStack( void *iface, IInspectable **o
     *out = NULL;
     if (!impl) return E_NOINTERFACE;
     if (!impl->forward_stack)
+    {
         uwp_vec_create( NULL, &impl->forward_stack );
+        if (impl->forward_stack)
+            CONTAINING_RECORD( impl->forward_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+                L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Navigation.PageStackEntry>";
+    }
     if (impl->forward_stack)
     {
         *out = impl->forward_stack;
@@ -659,9 +669,11 @@ static HRESULT WINAPI uwp_frame2_get_ForwardStack( void *iface, IInspectable **o
     return S_OK;
 }
 
+HRESULT WINAPI uwp_frame_GoBack( void *iface );
 static HRESULT WINAPI uwp_frame3_GoBack( void *iface, void *transitionInfo )
 {
-    return S_OK;
+    (void)transitionInfo;
+    return uwp_frame_GoBack( iface );
 }
 const void *uwp_frame3_vtbl[16] =
 {
@@ -1532,6 +1544,77 @@ static const void *uwp_nea2_vtbl[] =
     uwp_nea2_GetIids, uwp_nea2_GetRuntimeClassName, uwp_nea2_GetTrustLevel,
     uwp_nea2_get_NavigationTransitionInfo,
 };
+
+static const GUID IID_IPageStackEntry_UWP =
+    { 0xef8814a6, 0x9388, 0x4aca, { 0x85, 0x72, 0x40, 0x51, 0x94, 0x06, 0x90, 0x80 } };
+
+static HRESULT WINAPI uwp_pse_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_nav_event_args *a = impl_from_nav_args( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPageStackEntry_UWP ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->INavigationEventArgs_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_INavigationEventArgs_UWP ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->INavigationEventArgs_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_INavigationEventArgs2_UWP ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->INavigationEventArgs2_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI uwp_pse_GetIids( void *iface, ULONG *cnt, IID **iids )
+{
+    IID *out = CoTaskMemAlloc( sizeof(IID) );
+    if (!out) return E_OUTOFMEMORY;
+    out[0] = IID_IPageStackEntry_UWP;
+    *cnt = 1;
+    *iids = out;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pse_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.UI.Xaml.Navigation.PageStackEntry";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+static HRESULT WINAPI uwp_pse_get_NavigationTransitionInfo( void *iface, IInspectable **val )
+{
+    struct uwp_nav_event_args *a = impl_from_nav_args( iface );
+    if (!val) return E_POINTER;
+    *val = a->transition_info;
+    if (*val) IInspectable_AddRef( *val );
+    return S_OK;
+}
+static const void *uwp_pse_vtbl[] =
+{
+    uwp_pse_QI, uwp_nea_AddRef, uwp_nea_Release,
+    uwp_pse_GetIids, uwp_pse_GetRuntimeClassName, uwp_nea_GetTrustLevel,
+    uwp_nea_get_SourcePageType,
+    uwp_nea_get_Parameter,
+    uwp_pse_get_NavigationTransitionInfo,
+};
+
+struct uwp_nav_event_args *uwp_page_stack_entry_create( IInspectable *content, IInspectable *param,
+                                                        const TypeName *type, IInspectable *transition_info )
+{
+    struct uwp_nav_event_args *a = uwp_nav_event_args_create( content, param, type, transition_info );
+    if (a) a->INavigationEventArgs_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pse_vtbl;
+    return a;
+}
 
 struct uwp_nav_event_args *uwp_nav_event_args_create( IInspectable *content, IInspectable *param,
                                                              const TypeName *type, IInspectable *transition_info )

@@ -1195,20 +1195,29 @@ static struct uwp_class_factory sb_factory_winui3_obj =
     { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)sb_statics_vtbl}, L"Microsoft.UI.Xaml.Media.Animation.Storyboard", { NULL } };
 
     /* VisualTreeHelperStatics */
-static HRESULT WINAPI vth_FindPoint( void *iface, double x, double y, void *subtree, void **out )
+static HRESULT WINAPI vth_FindPoint( void *iface, Point pt, void *subtree, void **out )
 {
+    (void)pt; (void)subtree;
     return uwp_vec_create( NULL, (IInspectable **)out );
 }
-static HRESULT WINAPI vth_FindRect( void *iface, double x, double y, double w, double h, void *subtree, void **out )
+static HRESULT WINAPI vth_FindRect( void *iface, const Rect *rc, void *subtree, void **out )
 {
+    (void)rc; (void)subtree;
     return uwp_vec_create( NULL, (IInspectable **)out );
 }
-static HRESULT WINAPI vth_FindPointSub( void *iface, double x, double y, void *subtree, boolean all, void **out )
+static HRESULT WINAPI vth_FindPointSub( void *iface, Point pt, void *subtree, boolean all, void **out )
 {
+    (void)pt; (void)subtree; (void)all;
     return uwp_vec_create( NULL, (IInspectable **)out );
 }
-static HRESULT WINAPI vth_FindRectSub( void *iface, double x, double y, double w, double h, void *subtree, boolean all, void **out )
+static HRESULT WINAPI vth_FindRectSub( void *iface, const Rect *rc, void *subtree, boolean all, void **out )
 {
+    (void)rc; (void)subtree; (void)all;
+    return uwp_vec_create( NULL, (IInspectable **)out );
+}
+static HRESULT WINAPI vth2_GetOpenPopups( void *iface, void *window, void **out )
+{
+    (void)window;
     return uwp_vec_create( NULL, (IInspectable **)out );
 }
 static HRESULT WINAPI vth_GetChild( void *iface, void *ref, INT32 idx, void **out )
@@ -1278,8 +1287,28 @@ static HRESULT WINAPI vth_DisconnectChildren( void *iface, void *el )
 {
     return S_OK;
 }
+static HRESULT WINAPI vth_QI( IActivationFactory *iface, REFIID iid, void **out );
+static const void *vth2_vtbl[16] =
+{
+    [0] = vth_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = vth2_GetOpenPopups,
+    [7 ... 15] = uwp_generic_noop,
+};
+static struct { const void * const *lpVtbl; } vth2_obj = { vth2_vtbl };
+
 static HRESULT WINAPI vth_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
+    static const GUID IID_IVisualTreeHelperStatics2_UWP =
+        { 0x07bcd176, 0x869f, 0x44a7, { 0x87, 0x97, 0x21, 0x03, 0xa4, 0xc3, 0xe4, 0x7a } };
+    static const GUID IID_IVisualTreeHelperStatics2_WinUI =
+        { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
+    static const GUID IID_IVisualTreeHelperStatics2_Alt =
+        { 0x05af3c36, 0x3990, 0x445e, { 0xb9, 0x22, 0xe7, 0x3b, 0x22, 0x89, 0x79, 0x87 } };
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IMarshal ) ||
         IsEqualGUID( iid, &IID_IReferenceTracker_UWP ) ||
@@ -1289,7 +1318,14 @@ static HRESULT WINAPI vth_QI( IActivationFactory *iface, REFIID iid, void **out 
         *out = NULL;
         return E_NOINTERFACE;
     }
-    *out = iface;
+    if (IsEqualGUID( iid, &IID_IVisualTreeHelperStatics2_UWP ) ||
+        IsEqualGUID( iid, &IID_IVisualTreeHelperStatics2_WinUI ) ||
+        IsEqualGUID( iid, &IID_IVisualTreeHelperStatics2_Alt ))
+    {
+        *out = &vth2_obj;
+        return S_OK;
+    }
+    *out = &vth_factory_obj.IActivationFactory_iface;
     return S_OK;
 }
 static const void *vth_vtbl[16] =

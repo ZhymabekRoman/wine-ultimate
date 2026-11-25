@@ -432,6 +432,11 @@ struct uwp_element
     double padding_l, padding_t, padding_r, padding_b;
     int h_align;       /* 0=Left, 1=Center, 2=Right, 3=Stretch */
     int v_align;       /* 0=Top, 1=Center, 2=Bottom, 3=Stretch */
+    int h_content_align; /* 0=Left, 1=Center, 2=Right, 3=Stretch */
+    int v_content_align; /* 0=Top, 1=Center, 2=Bottom, 3=Stretch */
+    BOOL has_h_content_align;
+    BOOL has_v_content_align;
+    double range_val, range_min, range_max;
     double spacing;    /* StackPanel.Spacing */
     double font_size;
     BOOL has_font_size;
@@ -668,6 +673,9 @@ struct uwp_element
     IInspectable *template_owner_comp;
     struct uwp_rd_bucket *template_rd_bucket;
     struct uwp_element *template_root;
+    struct uwp_element *templated_parent;
+    WORD tpl_bind_target_pid;
+    WCHAR tpl_bind_src_prop[64];
     BOOL template_inflated;
     /* Storyboard / DoubleAnimation target state */
     WCHAR anim_target_name[96];

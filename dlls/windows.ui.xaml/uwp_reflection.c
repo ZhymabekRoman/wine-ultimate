@@ -203,6 +203,44 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
                                 boxed_val = box_string_value( str_val );
                                 hr = boxed_val ? S_OK : E_FAIL;
                             }
+                            else if (tn && (!wcscmp( tn, L"TimeSpan" ) || !wcscmp( tn, L"System.TimeSpan" ) ||
+                                            !wcscmp( tn, L"Windows.Foundation.TimeSpan" )))
+                            {
+                                TimeSpan ts = { 0 };
+                                const WCHAR *c1 = wcschr( str_val, L':' );
+                                if (c1)
+                                {
+                                    const WCHAR *c2 = wcschr( c1 + 1, L':' );
+                                    double h = wcstod( str_val, NULL );
+                                    double m = c2 ? wcstod( c1 + 1, NULL ) : 0.0;
+                                    double s = c2 ? wcstod( c2 + 1, NULL ) : wcstod( c1 + 1, NULL );
+                                    ts.Duration = (INT64)((h * 3600.0 + m * 60.0 + s) * 10000000.0);
+                                }
+                                else
+                                {
+                                    ts.Duration = (INT64)(wcstod( str_val, NULL ) * 10000000.0);
+                                }
+                                {
+                                    HSTRING h_pv = NULL;
+                                    IActivationFactory *fac = NULL;
+                                    IPropertyValueStatics *pvs = NULL;
+                                    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &h_pv )) && h_pv)
+                                    {
+                                        if (SUCCEEDED(RoGetActivationFactory( h_pv, &IID_IActivationFactory, (void **)&fac )) && fac)
+                                        {
+                                            if (SUCCEEDED(IActivationFactory_QueryInterface( fac, &IID_IPropertyValueStatics, (void **)&pvs )) && pvs)
+                                            {
+                                                IPropertyValueStatics_CreateTimeSpan( pvs, ts, (IInspectable **)&boxed_val );
+                                                IPropertyValueStatics_Release( pvs );
+                                            }
+                                            IActivationFactory_Release( fac );
+                                        }
+                                        WindowsDeleteString( h_pv );
+                                    }
+                                }
+                                hr = boxed_val ? S_OK : E_FAIL;
+                                is_bool_type = TRUE; /* prevent CreateFromString fallback */
+                            }
                             WindowsDeleteString( h_tname );
                         }
                         if (boxed_val)

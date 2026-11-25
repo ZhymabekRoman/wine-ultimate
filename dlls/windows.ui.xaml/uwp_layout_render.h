@@ -230,6 +230,8 @@ void uwp_resolve_font_family( const WCHAR *raw_spec, WCHAR *out_face, size_t cap
 BOOL uwp_is_bundled_font_face( const WCHAR *face );
 const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *buf, size_t cap );
 void uwp_load_image_asset( struct uwp_element *el );
+void uwp_on_image_loaded( struct uwp_element *el );
+void uwp_resolve_and_load_image( struct uwp_element *el );
 void uwp_media_ensure_started( struct uwp_element *el );
 BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size_t cap );
 BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t cap );
@@ -322,6 +324,8 @@ HRESULT WINAPI uwp_frame2_Navigate( void *iface, void *type_name_ptr, void *para
 HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, void *transition_info, boolean *result );
 struct uwp_nav_event_args *uwp_nav_event_args_create( IInspectable *content, IInspectable *param,
                                                       const TypeName *type, IInspectable *transition_info );
+struct uwp_nav_event_args *uwp_page_stack_entry_create( IInspectable *content, IInspectable *param,
+                                                        const TypeName *type, IInspectable *transition_info );
 ULONG WINAPI uwp_nea_Release( void *iface );
 void uwp_close_flyout_popup( BOOL fire_closed );
 BOOL uwp_popup_handle_escape( void );

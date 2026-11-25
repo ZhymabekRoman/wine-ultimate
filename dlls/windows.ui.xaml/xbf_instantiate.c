@@ -474,8 +474,29 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
         }
         else if (op == 0x1f) /* SetValueFromTemplateBinding: <pid:u16> <src_pid:u16> (no vt byte) */
         {
+            WORD pid, src_pid;
             if (p + 4 > end_p) break;
+            pid = *(const WORD *)(ctx->nodes + p);
+            src_pid = *(const WORD *)(ctx->nodes + p + 2);
             p += 4;
+            if (obj_sp > 0)
+            {
+                UINT32 top_nidx = node_idx_stack[obj_sp - 1];
+                if (top_nidx != (~0u) && top_nidx < ctx->aot->node_cnt &&
+                    !(ctx->aot->nodes[top_nidx].flags & XBF_AOT_NODE_LIGHTWEIGHT))
+                {
+                    struct xbf_aot_op aop = {0};
+                    const WCHAR *src_name = (!(src_pid & 0x8000) && src_pid < ctx->prop_cnt)
+                        ? ctx->props[src_pid].name : L"";
+                    aop.kind = XBF_AOT_OP_TEMPLATE_BINDING;
+                    aop.node_idx = top_nidx;
+                    aop.child_idx = (~0u);
+                    aop.pid = pid;
+                    aop.tid = src_pid;
+                    aop.str_off = xbf_aot_intern_str( ctx->aot, src_name );
+                    xbf_aot_emit_op( ctx->aot, &aop );
+                }
+            }
         }
         else if ((op >= 0x1a && op <= 0x1e) || op == 0x24) /* SetValue / SetStaticResource / SetThemeResource */
         {

@@ -1117,9 +1117,25 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
         {
             struct uwp_element *target_el = (op->node_idx < hdr->node_cnt) ? nodes_el[op->node_idx] : NULL;
             struct uwp_element *val_el = (op->child_idx < hdr->node_cnt) ? nodes_el[op->child_idx] : NULL;
+            if (target_el && val_el && !wcscmp( val_el->class_name, L"Windows.UI.Xaml.NullExtension" ))
+            {
+                if (uwp_is_fg_pid( op->pid ))
+                {
+                    target_el->has_fg = TRUE;
+                    target_el->fg_argb = 0;
+                    target_el->fg_alpha = 0;
+                }
+                break;
+            }
             if (target_el && val_el && val_el->text[0])
             {
                 WCHAR resolved[256] = {0};
+                if (!wcscmp( val_el->class_name, L"Windows.UI.Xaml.Data.TemplateBinding" ))
+                {
+                    target_el->tpl_bind_target_pid = op->pid;
+                    lstrcpynW( target_el->tpl_bind_src_prop, val_el->text, ARRAY_SIZE(target_el->tpl_bind_src_prop) );
+                    break;
+                }
                 if (uwp_pri_lookup_string( val_el->text, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
                 {
                     const WCHAR *pname = (op->pid < hdr->prop_cnt) ? fake_ctx.props[op->pid].name : L"";
@@ -1148,6 +1164,19 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         (op->pid != XBF_PROP_AUTOMATION_ID && !is_vk && is_text_prop && !target_el->text[0]))
                         lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
                 }
+            }
+            break;
+        }
+        case XBF_AOT_OP_TEMPLATE_BINDING:
+        {
+            struct uwp_element *target_el = (op->node_idx < hdr->node_cnt) ? nodes_el[op->node_idx] : NULL;
+            const WCHAR *src_name = xbf_aot_str( hdr, op->str_off );
+            if (target_el && src_name && src_name[0])
+            {
+                target_el->tpl_bind_target_pid = op->pid;
+                lstrcpynW( target_el->tpl_bind_src_prop, src_name, ARRAY_SIZE(target_el->tpl_bind_src_prop) );
+                if (op->pid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT || op->pid == XBF_PROP_FLOW_DIRECTION)
+                    target_el->height = 0.1;
             }
             break;
         }

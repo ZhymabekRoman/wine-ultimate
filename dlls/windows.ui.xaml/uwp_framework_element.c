@@ -954,6 +954,7 @@ HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val
 static void uwp_collect_template_names( struct uwp_element *owner, struct uwp_element *node, int depth )
 {
     if (!owner || !node || depth > 24) return;
+    node->templated_parent = owner;
     if (node->name[0])
     {
         int i;

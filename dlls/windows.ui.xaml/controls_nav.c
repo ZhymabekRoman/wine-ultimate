@@ -262,6 +262,31 @@ const void *uwp_fe3_vtbl[16] =
     [7 ... 15] = uwp_generic_noop,
 };
 
+static HRESULT WINAPI uwp_ctrl_get_HorizontalContentAlignment( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->has_h_content_align) ? impl->h_content_align : 1; /* Center */
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ctrl_put_HorizontalContentAlignment( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->h_content_align = val; impl->has_h_content_align = TRUE; uwp_invalidate_window(); }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ctrl_get_VerticalContentAlignment( void *iface, int *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->has_v_content_align) ? impl->v_content_align : 1; /* Center */
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ctrl_put_VerticalContentAlignment( void *iface, int val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->v_content_align = val; impl->has_v_content_align = TRUE; uwp_invalidate_window(); }
+    return S_OK;
+}
+
 const void *uwp_ctrl_vtbl[64] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -277,7 +302,12 @@ const void *uwp_ctrl_vtbl[64] =
     [10 ... 21] = uwp_generic_noop,
     [22] = uwp_ctrl_get_IsEnabled,
     [23] = uwp_ctrl_put_IsEnabled,
-    [24 ... 43] = uwp_generic_noop,
+    [24 ... 37] = uwp_generic_noop,
+    [38] = uwp_ctrl_get_HorizontalContentAlignment,
+    [39] = uwp_ctrl_put_HorizontalContentAlignment,
+    [40] = uwp_ctrl_get_VerticalContentAlignment,
+    [41] = uwp_ctrl_put_VerticalContentAlignment,
+    [42 ... 43] = uwp_generic_noop,
     [44] = uwp_ctrl_ApplyTemplate,
     [45] = uwp_generic_noop,
     [46] = uwp_ctrl_Focus,
@@ -1407,20 +1437,24 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
         IInspectable *btn_inner = NULL;
         IInspectable *tmpl = NULL;
         IInspectable *sel = (!wcsstr( impl->class_name, L"TileList" ) && !wcsstr( impl->class_name, L"ItemsRepeater" ))
-                                ? impl->item_template_selector : NULL;
+                                ? (impl->item_template_selector ? impl->item_template_selector : impl->item_template) : NULL;
         if (sel)
         {
             void *dts = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector_UWP, &dts )) && dts)
             {
                 HRESULT (WINAPI *sel_fn)(void *, void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
-                if (sel_fn) sel_fn( dts, item, &impl->IDependencyObject_iface, &tmpl );
+                __TRY { if (sel_fn) sel_fn( dts, item, &impl->IDependencyObject_iface, &tmpl ); }
+                __EXCEPT_ALL { tmpl = NULL; }
+                __ENDTRY;
                 IUnknown_Release( (IUnknown *)dts );
             }
             if (!tmpl && SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector2_UWP, &dts )) && dts)
             {
                 HRESULT (WINAPI *sel2_fn)(void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
-                if (sel2_fn) sel2_fn( dts, item, &tmpl );
+                __TRY { if (sel2_fn) sel2_fn( dts, item, &tmpl ); }
+                __EXCEPT_ALL { tmpl = NULL; }
+                __ENDTRY;
                 IUnknown_Release( (IUnknown *)dts );
             }
         }
@@ -1441,6 +1475,9 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                     struct uwp_element *cel = uwp_elem_from_any( content );
                     if (cel)
                     {
+                        cel->parent = impl;
+                        if (cel->kind == UWP_KIND_BUTTON && impl->min_width >= 120.0 && !cel->has_bg)
+                            cel->is_accent_style = TRUE;
                         uwp_vec_Append( impl->children_coll, &cel->IInspectable_iface );
                         uwp_fe_put_DataContext( &cel->IInspectable_iface, item );
                         IUnknown_Release( (IUnknown *)content );
@@ -1459,18 +1496,34 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
             struct uwp_element *bel = uwp_elem_from_any( btn_inner );
             if (bel)
             {
+                static const WCHAR *const act_props[] =
+                    { L"BuyBoxProductActionText", L"ActionText", L"ButtonText", L"DisplayText",
+                      L"Label", L"Title", L"Text", L"Content", L"Header", L"Name" };
+                bel->parent = impl;
                 bel->data_context = (IInspectable *)item;
                 IInspectable_AddRef( bel->data_context );
                 if (!wcsstr( impl->class_name, L"ListView" ) && !wcsstr( impl->class_name, L"GridView" ))
                 {
-                    bel->width = 44.0;
-                    bel->height = 36.0;
+                    bel->width = (impl->min_width > 44.0) ? impl->min_width : 44.0;
+                    bel->height = (impl->min_width > 44.0) ? 40.0 : 36.0;
                 }
-                bel->has_bg = TRUE;
-                bel->bg_argb = 0xE02A2A2A;
-                bel->bg_alpha = 224;
-                uwp_inspectable_to_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
-                if (!bel->text[0]) lstrcpynW( bel->text, L"\x25A1", ARRAY_SIZE(bel->text) );
+                if (impl->min_width >= 120.0)
+                {
+                    bel->is_accent_style = TRUE;
+                }
+                else
+                {
+                    bel->has_bg = TRUE;
+                    bel->bg_argb = 0xE02A2A2A;
+                    bel->bg_alpha = 224;
+                }
+                if (!uwp_vm_query_string_prop_depth( (IInspectable *)item, act_props, ARRAY_SIZE(act_props),
+                                                     bel->text, ARRAY_SIZE(bel->text), 2 ))
+                {
+                    uwp_inspectable_to_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
+                }
+                if ((!bel->text[0] || wcschr( bel->text, L'.' )) && impl->min_width >= 120.0)
+                    lstrcpynW( bel->text, L"Get", ARRAY_SIZE(bel->text) );
                 uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
             }
             IInspectable_Release( btn_inner );
@@ -1540,7 +1593,7 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemTemplate( void *iface, void *val )
     if (impl->item_template) IInspectable_Release( impl->item_template );
     impl->item_template = (IInspectable *)val;
     if (impl->item_template) IInspectable_AddRef( impl->item_template );
-    if (impl->items_source && !impl->children_coll)
+    if (impl->items_source && !uwp_panel_has_concrete_child( impl ))
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
     g_layout_dirty = TRUE;
     uwp_invalidate_window();
@@ -1566,7 +1619,7 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemTemplateSelector( void *iface, void
     if (impl->item_template_selector) IInspectable_AddRef( impl->item_template_selector );
     TRACE( "IItemsControl::put_ItemTemplateSelector on %s (%s) -> %p\n",
            debugstr_w(impl->class_name), debugstr_w(impl->name), val );
-    if (impl->items_source && !impl->children_coll)
+    if (impl->items_source && !uwp_panel_has_concrete_child( impl ))
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
     g_layout_dirty = TRUE;
     uwp_invalidate_window();

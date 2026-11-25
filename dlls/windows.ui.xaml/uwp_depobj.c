@@ -21,12 +21,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wctype.h>
+#include <math.h>
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
 #include "weakreference.h"
 #include "uwp_private.h"
 #include "dp_vsm_private.h"
+#include "xbf_known_types.h"
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 /* ============================================================================
@@ -353,6 +355,63 @@ static BOOL uwp_substr_in_table( const WCHAR *s, const WCHAR *const *table, size
     return FALSE;
 }
 
+static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uwp_element *node,
+                                             const WCHAR *dpname, IInspectable *val, int depth )
+{
+    if (!owner || !node || !dpname || !dpname[0] || depth > 16) return;
+    if (node->templated_parent == owner && node->tpl_bind_src_prop[0] &&
+        !wcscmp( node->tpl_bind_src_prop, dpname ))
+    {
+        if (node->tpl_bind_target_pid == XBF_PROP_TEXTBLOCK_TEXT ||
+            node->tpl_bind_target_pid == XBF_PROP_CONTENT ||
+            node->tpl_bind_target_pid == XBF_PROP_FONTICON_GLYPH)
+        {
+            WCHAR sbuf[256] = {0};
+            if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+            {
+                lstrcpynW( node->text, sbuf, ARRAY_SIZE(node->text) );
+                uwp_invalidate_window();
+            }
+        }
+        else if (node->tpl_bind_target_pid == XBF_PROP_WIDTH)
+        {
+            double dv = 0.0;
+            if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+            {
+                node->width = (dv > 0.1) ? dv : 0.1;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+        }
+        else if (node->tpl_bind_target_pid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT ||
+                 node->tpl_bind_target_pid == XBF_PROP_FLOW_DIRECTION)
+        {
+            double dv = 0.0;
+            if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+            {
+                node->height = (dv > 0.1) ? dv : 0.1;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+        }
+    }
+    if (node->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( node->content );
+        if (ch && ch != node) uwp_sync_template_binding_tree( owner, ch, dpname, val, depth + 1 );
+    }
+    if (node->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( node->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != node) uwp_sync_template_binding_tree( owner, ch, dpname, val, depth + 1 );
+        }
+    }
+}
+
 static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
 {
     static const struct { const WCHAR *dp; const WCHAR *target; } repeater_forwards[] = {
@@ -369,6 +428,8 @@ static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *
     size_t k;
 
     if (!impl || !dpname || !dpname[0]) return;
+    if (impl->template_root)
+        uwp_sync_template_binding_tree( impl, impl->template_root, dpname, val, 0 );
     for (k = 0; k < ARRAY_SIZE(repeater_forwards); k++)
     {
         struct uwp_element *rep;
@@ -716,6 +777,38 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 uwp_combobox_set_open( impl, bv != 0 );
             else if (!wcscmp( dpname, L"DisplayMemberPath" ) && val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
                 lstrcpynW( impl->display_member_path, sbuf, ARRAY_SIZE(impl->display_member_path) );
+        }
+        if (dpname[0])
+        {
+            double dv = 0.0;
+            INT32 ev = 0;
+            if (!wcscmp( dpname, L"Value" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+            {
+                impl->range_val = dv;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"Minimum" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+            {
+                impl->range_min = dv;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"Maximum" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+            {
+                impl->range_max = dv;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"HorizontalContentAlignment" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+            {
+                impl->h_content_align = ev;
+                impl->has_h_content_align = TRUE;
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"VerticalContentAlignment" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+            {
+                impl->v_content_align = ev;
+                impl->has_v_content_align = TRUE;
+                uwp_invalidate_window();
+            }
         }
     }
 

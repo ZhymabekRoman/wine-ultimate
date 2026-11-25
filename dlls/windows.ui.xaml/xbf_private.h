@@ -27,7 +27,7 @@
  * ============================================================================ */
 
 #define XBF_AOT_MAGIC       0x58424641u /* 'XBFA' */
-#define XBF_AOT_VERSION     12u
+#define XBF_AOT_VERSION     13u
 #define XBF_AOT_CACHE_SLOTS 512
 
 enum xbf_aot_node_flags
@@ -54,6 +54,7 @@ enum xbf_aot_op_kind
     XBF_AOT_OP_PROVIDE_VALUE,
     XBF_AOT_OP_RD_LINK_THEME,
     XBF_AOT_OP_RD_STORE,
+    XBF_AOT_OP_TEMPLATE_BINDING,
 };
 
 struct xbf_aot_header

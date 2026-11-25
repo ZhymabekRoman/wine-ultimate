@@ -1063,14 +1063,20 @@ BOOL uwp_panel_has_concrete_child( struct uwp_element *panel )
     if (panel->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( panel->content );
-        if (ch && ch->kind != UWP_KIND_DEFERRED && ch->visibility == 0) return TRUE;
+        if (ch && ch->kind != UWP_KIND_DEFERRED && ch->kind != UWP_KIND_STYLE &&
+            ch->kind != UWP_KIND_BRUSH && ch->kind != UWP_KIND_ACCELERATOR &&
+            ch->kind != UWP_KIND_XAML_COMMAND && !wcsstr( ch->class_name, L"Template" ) &&
+            ch->visibility == 0) return TRUE;
     }
     if (!panel->children_coll) return FALSE;
     v = CONTAINING_RECORD( panel->children_coll, struct uwp_vec_view, IInspectable_iface );
     for (k = 0; k < v->count; k++)
     {
         struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-        if (ch && ch->kind != UWP_KIND_DEFERRED && ch->visibility == 0) return TRUE;
+        if (ch && ch->kind != UWP_KIND_DEFERRED && ch->kind != UWP_KIND_STYLE &&
+            ch->kind != UWP_KIND_BRUSH && ch->kind != UWP_KIND_ACCELERATOR &&
+            ch->kind != UWP_KIND_XAML_COMMAND && !wcsstr( ch->class_name, L"Template" ) &&
+            ch->visibility == 0) return TRUE;
     }
     return FALSE;
 }
@@ -1912,9 +1918,26 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV: /* TextBlock.Text */
         case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE: /* FontIcon.Glyph */
         case XBF_PROP_FONTICON_GLYPH: /* FontIcon.Glyph */
+        case XBF_PROP_TEXTBLOCK_TEXT: /* TextBlock.Text */
+        case 0x81e1: /* TemplateBinding.Property */
         case 0x80fa: /* Run.Text */
             if (sval && sval[0])
                 lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
+            break;
+        case 0x83a7: /* Rectangle.RadiusX */
+        case 0x83a8: /* Rectangle.RadiusY */
+            if (vt == 0x03 || vt == 0x04)
+            {
+                if (num > el->corner_radius) el->corner_radius = num;
+            }
+            break;
+        case 0x8270: /* Control.HorizontalContentAlignment */
+            el->h_content_align = (int)num;
+            el->has_h_content_align = TRUE;
+            break;
+        case 0x8271: /* Control.VerticalContentAlignment */
+            el->v_content_align = (int)num;
+            el->has_v_content_align = TRUE;
             break;
         case XBF_PROP_IMAGE_SOURCE: /* Image.Source */
             if (sval && sval[0])
@@ -2122,7 +2145,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                 el->visibility = (int)num;
             break;
         case 0x812f: /* UIElement.Opacity */
-            if (vt == 0x03 || vt == 0x04)
+            if (vt == 0x03 || vt == 0x04 || vt == 0x01 || vt == 0x02)
                 el->opacity = num;
             else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
                 el->opacity = wcstod( sval, NULL );

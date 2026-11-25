@@ -20,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <excpt.h>
+#include "wine/exception.h"
 #include "private.h"
 #include "wincodec.h"
 #include "uwp_private.h"
@@ -279,11 +281,67 @@ static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, UINT max_dim, BY
     return ok;
 }
 
-static void uwp_on_image_loaded( struct uwp_element *el )
+static void uwp_fire_img_opened_reg( struct uwp_element *target )
+{
+    void **handlers = NULL;
+    unsigned int cnt, i;
+    IInspectable *sender, *args;
+
+    if (!target || target->img_opened_reg.next_token == 0) return;
+    cnt = xaml_event_registry_snapshot_alloc( &target->img_opened_reg, &handlers );
+    xaml_event_registry_clear( &target->img_opened_reg );
+    target->img_opened_reg.next_token = 0;
+    if (!cnt) return;
+    sender = target->outer ? target->outer : &target->IInspectable_iface;
+    args = (IInspectable *)g_routed_args();
+    for (i = 0; i < cnt; i++)
+    {
+        struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+        if (h)
+        {
+            __TRY { h->lpVtbl->Invoke( h, sender, args ); }
+            __EXCEPT_ALL { }
+            __ENDTRY;
+            IUnknown_Release( (IUnknown *)h );
+        }
+    }
+    free( handlers );
+}
+
+void uwp_on_image_loaded( struct uwp_element *el )
 {
     struct uwp_element *anc;
     int hop;
     if (!el) return;
+    uwp_fire_img_opened_reg( el );
+    if (el->img_source)
+    {
+        struct uwp_element *src_el = uwp_elem_from_any( el->img_source );
+        if (src_el && src_el != el)
+        {
+            uwp_fire_img_opened_reg( src_el );
+            if (src_el->img_source)
+            {
+                struct uwp_element *src2_el = uwp_elem_from_any( src_el->img_source );
+                if (src2_el && src2_el != src_el && src2_el != el)
+                    uwp_fire_img_opened_reg( src2_el );
+            }
+        }
+    }
+    if (el->bg_brush)
+    {
+        struct uwp_element *br_el = uwp_elem_from_any( el->bg_brush );
+        if (br_el && br_el != el)
+        {
+            uwp_fire_img_opened_reg( br_el );
+            if (br_el->img_source)
+            {
+                struct uwp_element *bi_el = uwp_elem_from_any( br_el->img_source );
+                if (bi_el && bi_el != br_el && bi_el != el)
+                    uwp_fire_img_opened_reg( bi_el );
+            }
+        }
+    }
     for (anc = el, hop = 0; anc && hop < 4; anc = anc->parent, hop++)
     {
         if (anc->opacity <= 0.005)
@@ -412,11 +470,17 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
             ReleaseSRWLockExclusive( &g_http_img_cache_lock );
             if (!wcscmp( el->image_src, url ))
             {
+                struct uwp_element *anc;
+                int hop;
                 el->img_pixels = px;
                 el->img_w = pw;
                 el->img_h = ph;
                 el->img_loaded = TRUE;
-                uwp_on_image_loaded( el );
+                for (anc = el, hop = 0; anc && hop < 4; anc = anc->parent, hop++)
+                {
+                    if (anc->opacity <= 0.005)
+                        anc->opacity = 1.0;
+                }
                 uwp_invalidate_window();
             }
         }

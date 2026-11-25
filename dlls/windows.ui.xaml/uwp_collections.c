@@ -55,6 +55,26 @@ static const GUID IID_IIterator_ColDef_UWP =
     { 0x4159246b, 0x41be, 0x5bc2, { 0xa0, 0x7e, 0x9f, 0x26, 0xf1, 0xb9, 0x28, 0x71 } };
 static const GUID IID_IIterable_DO_UWP =
     { 0x42e26ae1, 0xd357, 0x57e8, { 0xbb, 0x48, 0xf7, 0x5c, 0x9f, 0xf6, 0x9d, 0x91 } };
+static const GUID IID_IIterable_Popup_UWP =
+    { 0x0af05ce9, 0x3b0f, 0x5a6d, { 0xa0, 0x53, 0xd0, 0x1a, 0x1a, 0x55, 0x4f, 0x8c } };
+static const GUID IID_IIterator_Popup_UWP =
+    { 0x5bcb0970, 0x5472, 0x56e8, { 0xb1, 0x84, 0xd0, 0x1f, 0xb8, 0x1e, 0x40, 0x8a } };
+static const GUID IID_IIterable_VisualState_UWP =
+    { 0x1fb071a3, 0xa064, 0x5619, { 0xa9, 0x4e, 0x23, 0xc0, 0x1a, 0x4c, 0xbf, 0x3a } };
+static const GUID IID_IIterator_VisualState_UWP =
+    { 0xf20bd8bc, 0x6dda, 0x5c71, { 0xbd, 0x39, 0xc5, 0x71, 0x37, 0xc5, 0xa4, 0xed } };
+static const GUID IID_IIterable_SetterBase_UWP =
+    { 0xaafe70cb, 0x90a8, 0x5719, { 0xbd, 0x3e, 0xf0, 0xb0, 0x66, 0xed, 0x16, 0x26 } };
+static const GUID IID_IIterator_SetterBase_UWP =
+    { 0x3198322e, 0x2527, 0x58d1, { 0x8d, 0x92, 0x9d, 0x22, 0xb9, 0x77, 0xd2, 0x55 } };
+static const GUID IID_IIterable_ResourceDictionary_UWP =
+    { 0xeaf20635, 0xa462, 0x5397, { 0xbe, 0xe1, 0xf7, 0xa0, 0x95, 0x04, 0x65, 0x3b } };
+static const GUID IID_IIterator_ResourceDictionary_UWP =
+    { 0x849a2f3a, 0x2e5e, 0x58a8, { 0xb7, 0x6e, 0x73, 0x45, 0x0e, 0xa6, 0x80, 0xc0 } };
+static const GUID IID_IIterable_StateTriggerBase_UWP =
+    { 0x073325bc, 0x8f0f, 0x56d8, { 0xb5, 0x21, 0x6b, 0xe4, 0x76, 0x44, 0xc5, 0x54 } };
+static const GUID IID_IIterator_StateTriggerBase_UWP =
+    { 0xd78b9c25, 0x3214, 0x54c6, { 0x84, 0x05, 0x47, 0x93, 0x44, 0x30, 0x92, 0x77 } };
 
 static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 {
@@ -71,7 +91,12 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IIterable_RowDef_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_ColDef_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_DO_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterable_GradientStop_UWP ))
+        IsEqualGUID( iid, &IID_IIterable_GradientStop_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_Popup_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_VisualState_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_SetterBase_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_ResourceDictionary_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_StateTriggerBase_UWP ))
     {
         *out = &v->IIterable_iface;
         IInspectable_AddRef( iface );
@@ -289,12 +314,18 @@ static HRESULT WINAPI uwp_viter_QI( IInspectable *iface, REFIID iid, void **out 
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IIterator_PageStackEntry_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_IInspectable_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterable_UIElement_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_UIElement_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_Block_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_Inline_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_RowDef_UWP ) ||
         IsEqualGUID( iid, &IID_IIterator_ColDef_UWP ) ||
-        IsEqualGUID( iid, &IID_IIterator_GradientStop_UWP ))
+        IsEqualGUID( iid, &IID_IIterator_GradientStop_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_Popup_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_VisualState_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_SetterBase_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_ResourceDictionary_UWP ) ||
+        IsEqualGUID( iid, &IID_IIterator_StateTriggerBase_UWP ))
     {
         *out = iface;
         IInspectable_AddRef( iface );

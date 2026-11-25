@@ -305,6 +305,8 @@ static HRESULT WINAPI uwp_bi_put_int_noop( void *iface, INT32 val )
 {
     return S_OK;
 }
+static HRESULT WINAPI uwp_img_add_ImageOpened( void *iface, void *handler, EventRegistrationToken *tok );
+static HRESULT WINAPI uwp_img_remove_ImageOpened( void *iface, EventRegistrationToken tok );
 const void *uwp_bi_vtbl[24] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -323,8 +325,8 @@ const void *uwp_bi_vtbl[24] =
     [13] = uwp_bi_put_int_noop,  /* put_DecodePixelHeight */
     [14] = uwp_ui_event_add,     /* add_DownloadProgress */
     [15] = uwp_generic_noop,     /* remove_DownloadProgress */
-    [16] = uwp_ui_event_add,     /* add_ImageOpened */
-    [17] = uwp_generic_noop,     /* remove_ImageOpened */
+    [16] = uwp_img_add_ImageOpened,    /* add_ImageOpened */
+    [17] = uwp_img_remove_ImageOpened, /* remove_ImageOpened */
     [18] = uwp_ui_event_add,     /* add_ImageFailed */
     [19] = uwp_generic_noop,     /* remove_ImageFailed */
     [20 ... 23] = uwp_generic_noop,
@@ -1252,10 +1254,19 @@ const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *
     {
         if (cur->font_family[0] && wcsicmp( cur->font_family, L"XamlAutoFontFamily" ))
         {
-            uwp_resolve_font_family( cur->font_family, buf, cap );
+            if (!wcsicmp( cur->font_family, L"SymbolThemeFontFamily" ))
+                uwp_resolve_font_family( L"Segoe MDL2 Assets", buf, cap );
+            else
+                uwp_resolve_font_family( cur->font_family, buf, cap );
             return buf;
         }
         if (cur->kind == UWP_KIND_PAGE || cur->kind == UWP_KIND_FRAME) break;
+    }
+    if (el && (wcsstr( el->class_name, L"FontIcon" ) || wcsstr( el->class_name, L"SymbolIcon" ) ||
+               (el->text[0] >= 0xE700 && el->text[0] <= 0xF8FF && el->text[1] == 0 &&
+                xaml_gpu_font_has_glyphs( L"Segoe MDL2 Assets", el->text ))))
+    {
+        uwp_resolve_font_family( L"Segoe MDL2 Assets", buf, cap );
     }
     return buf;
 }
@@ -1362,8 +1373,8 @@ const void *uwp_image_brush_vtbl[16] =
     [7] = uwp_img_put_Source,        /* put_ImageSource */
     [8] = uwp_ui_event_add,          /* add_ImageFailed */
     [9] = uwp_generic_noop,          /* remove_ImageFailed */
-    [10] = uwp_ui_event_add,         /* add_ImageOpened */
-    [11] = uwp_generic_noop,         /* remove_ImageOpened */
+    [10] = uwp_img_add_ImageOpened,    /* add_ImageOpened */
+    [11] = uwp_img_remove_ImageOpened, /* remove_ImageOpened */
     [12 ... 15] = uwp_generic_noop,
 };
 

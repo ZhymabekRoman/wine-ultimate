@@ -227,7 +227,7 @@ static BOOL uwp_island_ensure_gpu( HWND hwnd, struct uwp_island_state *st, int w
 static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 {
     int kids = 0;
-    if (!el || depth > 35 || *rem <= 0) return;
+    if (!el || depth > 48 || *rem <= 0) return;
     if (wcsstr( el->class_name, L"HomepageSkeleton" ))
     {
         WARN( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
@@ -239,12 +239,12 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
         kids = (int)CONTAINING_RECORD( el->inlines_coll, struct uwp_vec_view, IInspectable_iface )->count;
     (*rem)--;
     WARN( "%*s%s (%s) rc=(%ld,%ld,%ld,%ld) hb=%d vis=%d op=%.2f kids=%d w=%.0f h=%.0f txt=%s img=%s\n",
-          depth * 2, "", debugstr_w(el->class_name), debugstr_w(el->name),
-          el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom,
-          el->has_bounds, el->visibility, el->opacity, kids,
-          el->width, el->height,
-          el->text[0] ? debugstr_w(el->text) : "\"\"",
-          el->image_src[0] ? debugstr_w(el->image_src) : "\"\"" );
+         depth * 2, "", debugstr_w(el->class_name), debugstr_w(el->name),
+         el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom,
+         el->has_bounds, el->visibility, el->opacity, kids,
+         el->width, el->height,
+         el->text[0] ? debugstr_w(el->text) : "\"\"",
+         el->image_src[0] ? debugstr_w(el->image_src) : "\"\"" );
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
@@ -264,7 +264,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 
 void uwp_debug_dump_root( IInspectable *root )
 {
-    int rem = 500;
+    int rem = 1500;
     if (root) uwp_debug_dump_tree( uwp_elem_from_any( root ), 0, &rem );
 }
 
