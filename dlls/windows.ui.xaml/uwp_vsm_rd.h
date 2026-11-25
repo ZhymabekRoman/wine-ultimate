@@ -73,6 +73,7 @@ struct uwp_rd_entry
 {
     WCHAR key[96];
     enum uwp_rd_kind kind;
+    WORD tid;
     IInspectable *value;
     UINT32 argb;
     BOOL has_argb;

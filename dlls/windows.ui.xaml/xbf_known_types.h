@@ -22,6 +22,7 @@ enum xbf_known_type_id
     XBF_TYPE_DOUBLE = 0x8034,  /* boxed double, used for x:Double resources */
     XBF_TYPE_FONT_FAMILY = 0x803b,
     XBF_TYPE_GRADIENT_STOP = 0x8040,
+    XBF_TYPE_INT32 = 0x804c,  /* boxed int32, used for x:Int32 resources */
     XBF_TYPE_STRING = 0x8071,  /* boxed string, used for x:String resources */
     XBF_TYPE_STYLE = 0x8072,
     XBF_TYPE_THICKNESS = 0x807c,

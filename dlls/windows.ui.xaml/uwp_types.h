@@ -686,6 +686,10 @@ struct uwp_element
     float last_measured_w;
     float last_measured_h;
     BOOL in_measure_arrange;
+    int scroll_y;
+    int scroll_extent_h;
+    struct xaml_event_registry img_opened_reg;
+    WCHAR placeholder[256];
 };
 
 struct xaml_frame_prop

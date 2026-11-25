@@ -178,13 +178,14 @@ const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp,
 COLORREF g_paint_page_bg = RGB( 31, 31, 31 );
 
 static SRWLOCK g_http_img_cache_lock = SRWLOCK_INIT;
+static volatile LONG g_active_http_workers = 0;
 static struct
 {
     WCHAR url[512];
     BYTE *pixels;
     UINT w, h;
     BOOL done;
-} g_http_img_cache[128];
+} g_http_img_cache[256];
 static int g_http_img_cache_cnt = 0;
 
 static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, UINT max_dim, BYTE **out_pixels, UINT *out_w, UINT *out_h )
@@ -276,6 +277,18 @@ static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, UINT max_dim, BY
         IWICImagingFactory_Release( wic );
     }
     return ok;
+}
+
+static void uwp_on_image_loaded( struct uwp_element *el )
+{
+    struct uwp_element *anc;
+    int hop;
+    if (!el) return;
+    for (anc = el, hop = 0; anc && hop < 4; anc = anc->parent, hop++)
+    {
+        if (anc->opacity <= 0.005)
+            anc->opacity = 1.0;
+    }
 }
 
 static DWORD WINAPI uwp_http_image_worker( LPVOID param )
@@ -403,6 +416,7 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
                 el->img_w = pw;
                 el->img_h = ph;
                 el->img_loaded = TRUE;
+                uwp_on_image_loaded( el );
                 uwp_invalidate_window();
             }
         }
@@ -410,6 +424,8 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
     free( buf );
     el->img_loaded = TRUE;
     CoUninitialize();
+    InterlockedDecrement( &g_active_http_workers );
+    uwp_invalidate_window();
     return 0;
 }
 
@@ -456,15 +472,26 @@ void uwp_load_image_asset( struct uwp_element *el )
                 el->img_h = g_http_img_cache[ci].h;
                 el->img_loaded = TRUE;
                 ReleaseSRWLockShared( &g_http_img_cache_lock );
+                uwp_on_image_loaded( el );
                 return;
             }
         }
         ReleaseSRWLockShared( &g_http_img_cache_lock );
+        if (el->has_bounds && (el->bounds.bottom <= 0 || el->bounds.top >= 1150))
+            return;
+        if (InterlockedCompareExchange( &g_active_http_workers, 0, 0 ) >= 10)
+            return;
         if (InterlockedCompareExchange( &el->img_loading, 1, 0 ) == 0)
         {
-            HANDLE th = CreateThread( NULL, 0, uwp_http_image_worker, el, 0, NULL );
+            HANDLE th;
+            InterlockedIncrement( &g_active_http_workers );
+            th = CreateThread( NULL, 0, uwp_http_image_worker, el, 0, NULL );
             if (th) CloseHandle( th );
-            else el->img_loaded = TRUE;
+            else
+            {
+                InterlockedDecrement( &g_active_http_workers );
+                el->img_loaded = TRUE;
+            }
         }
         return;
     }
@@ -524,6 +551,7 @@ void uwp_load_image_asset( struct uwp_element *el )
                                 el->img_pixels = buf;
                                 el->img_w = w;
                                 el->img_h = h;
+                                uwp_on_image_loaded( el );
                                 TRACE( "uwp_load_image_asset: loaded %s (%ux%u)\n", debugstr_w(candidate), w, h );
                             }
                             else free( buf );

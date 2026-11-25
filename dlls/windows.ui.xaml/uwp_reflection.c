@@ -33,44 +33,123 @@ SRWLOCK xaml_meta_cache_lock = SRWLOCK_INIT;
 INIT_ONCE xaml_meta_cache_once = INIT_ONCE_STATIC_INIT;
 struct xaml_meta_cache_entry *xaml_meta_cache[XAML_META_CACHE_SIZE];
 
+struct xaml_member_cache_entry
+{
+    WCHAR key[320];
+    struct xaml_member *member;
+    BOOL resolved;
+    BOOL no_getter;
+};
+static SRWLOCK g_member_cache_lock = SRWLOCK_INIT;
+static struct xaml_member_cache_entry g_member_cache[2048];
+
 BOOL uwp_get_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
                                  const WCHAR *prop_name, void *target_obj, IInspectable **out_val )
 {
-    void *provider = NULL, *xaml_type = NULL, *member = NULL;
+    void *provider = NULL, *xaml_type = NULL;
+    struct xaml_member *xm = NULL;
     HSTRING h_prop = NULL;
-    BOOL ok = FALSE;
+    WCHAR key[320];
+    UINT32 h = 2166136261u;
+    const WCHAR *p;
+    unsigned int idx, probe;
+    BOOL ok = FALSE, found_entry = FALSE, no_getter = FALSE;
+
     if (!out_val) return FALSE;
     *out_val = NULL;
     if (!app_outer || !owner_type_name || !owner_type_name[0] || !prop_name || !target_obj) return FALSE;
-    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) || !provider)
-        return FALSE;
-    xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
-    if (xaml_type)
+
+    swprintf( key, ARRAY_SIZE(key), L"%s.%s", owner_type_name, prop_name );
+    for (p = key; *p; p++) h = (h ^ (UINT32)*p) * 16777619u;
+    idx = h & 2047u;
+
+    AcquireSRWLockShared( &g_member_cache_lock );
+    for (probe = 0; probe < 32; probe++)
     {
-        struct xaml_type *xt = (struct xaml_type *)xaml_type;
-        if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
+        unsigned int slot = (idx + probe) & 2047u;
+        if (!g_member_cache[slot].resolved) break;
+        if (!wcscmp( g_member_cache[slot].key, key ))
         {
-            if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, (struct xaml_member **)&member )) && member)
-            {
-                struct xaml_member *xm = (struct xaml_member *)member;
-                if (xm->lpVtbl->GetValue)
-                {
-                    HRESULT hr = E_FAIL;
-                    __TRY
-                    {
-                        hr = xm->lpVtbl->GetValue( xm, target_obj, out_val );
-                    }
-                    __EXCEPT_ALL { hr = E_FAIL; *out_val = NULL; }
-                    __ENDTRY;
-                    if (SUCCEEDED(hr) && *out_val) ok = TRUE;
-                }
-                IInspectable_Release( (IInspectable *)member );
-            }
-            WindowsDeleteString( h_prop );
+            found_entry = TRUE;
+            no_getter = g_member_cache[slot].no_getter;
+            xm = g_member_cache[slot].member;
+            if (xm && !no_getter) IInspectable_AddRef( (IInspectable *)xm );
+            break;
         }
-        IInspectable_Release( (IInspectable *)xaml_type );
     }
-    IInspectable_Release( (IInspectable *)provider );
+    ReleaseSRWLockShared( &g_member_cache_lock );
+
+    if (found_entry && (no_getter || !xm))
+        return FALSE;
+
+    if (!found_entry)
+    {
+        if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) || !provider)
+            return FALSE;
+        xaml_type = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, owner_type_name );
+        if (xaml_type)
+        {
+            struct xaml_type *xt = (struct xaml_type *)xaml_type;
+            if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
+            {
+                xt->lpVtbl->GetMember( xt, h_prop, &xm );
+                WindowsDeleteString( h_prop );
+            }
+            IInspectable_Release( (IInspectable *)xaml_type );
+        }
+        IInspectable_Release( (IInspectable *)provider );
+
+        AcquireSRWLockExclusive( &g_member_cache_lock );
+        for (probe = 0; probe < 32; probe++)
+        {
+            unsigned int slot = (idx + probe) & 2047u;
+            if (!g_member_cache[slot].resolved || !wcscmp( g_member_cache[slot].key, key ))
+            {
+                if (!g_member_cache[slot].resolved)
+                {
+                    lstrcpynW( g_member_cache[slot].key, key, ARRAY_SIZE(g_member_cache[slot].key) );
+                    g_member_cache[slot].member = xm;
+                    if (xm) IInspectable_AddRef( (IInspectable *)xm );
+                    g_member_cache[slot].no_getter = (xm == NULL || xm->lpVtbl->GetValue == NULL);
+                    g_member_cache[slot].resolved = TRUE;
+                }
+                break;
+            }
+        }
+        ReleaseSRWLockExclusive( &g_member_cache_lock );
+    }
+
+    if (xm)
+    {
+        if (xm->lpVtbl->GetValue)
+        {
+            HRESULT hr = E_FAIL;
+            __TRY
+            {
+                hr = xm->lpVtbl->GetValue( xm, target_obj, out_val );
+            }
+            __EXCEPT_ALL { hr = E_FAIL; *out_val = NULL; }
+            __ENDTRY;
+            if (SUCCEEDED(hr) && *out_val)
+                ok = TRUE;
+            else if (hr == E_NOTIMPL)
+            {
+                AcquireSRWLockExclusive( &g_member_cache_lock );
+                for (probe = 0; probe < 32; probe++)
+                {
+                    unsigned int slot = (idx + probe) & 2047u;
+                    if (!g_member_cache[slot].resolved) break;
+                    if (!wcscmp( g_member_cache[slot].key, key ))
+                    {
+                        g_member_cache[slot].no_getter = TRUE;
+                        break;
+                    }
+                }
+                ReleaseSRWLockExclusive( &g_member_cache_lock );
+            }
+        }
+        IInspectable_Release( (IInspectable *)xm );
+    }
     return ok;
 }
 

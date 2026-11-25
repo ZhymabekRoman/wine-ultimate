@@ -690,6 +690,7 @@ BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwa
     g_gpu.frame_height = height;
     g_gpu.atlas_hits = 0;
     g_gpu.atlas_misses = 0;
+    xaml_gpu_set_clip( NULL );
     return TRUE;
 }
 
@@ -738,7 +739,53 @@ BOOL xaml_gpu_begin_frame_rtv( ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D
     g_gpu.frame_height = height;
     g_gpu.atlas_hits = 0;
     g_gpu.atlas_misses = 0;
+    xaml_gpu_set_clip( NULL );
     return TRUE;
+}
+
+static BOOL g_gpu_has_clip = FALSE;
+static RECT g_gpu_clip_rc;
+
+void xaml_gpu_set_clip( const RECT *clip_rc )
+{
+    if (clip_rc)
+    {
+        g_gpu_clip_rc = *clip_rc;
+        g_gpu_has_clip = TRUE;
+    }
+    else
+    {
+        g_gpu_has_clip = FALSE;
+    }
+}
+
+void xaml_gpu_get_clip( BOOL *has_clip, RECT *clip_rc )
+{
+    if (has_clip) *has_clip = g_gpu_has_clip;
+    if (clip_rc && g_gpu_has_clip) *clip_rc = g_gpu_clip_rc;
+}
+
+static void xaml_gpu_apply_clip( float out_clip[4], const RECT *clip_rc )
+{
+    float l = 0.0f, t = 0.0f, r = (float)g_gpu.frame_width, b = (float)g_gpu.frame_height;
+    if (g_gpu_has_clip)
+    {
+        l = max( l, (float)g_gpu_clip_rc.left );
+        t = max( t, (float)g_gpu_clip_rc.top );
+        r = min( r, (float)g_gpu_clip_rc.right );
+        b = min( b, (float)g_gpu_clip_rc.bottom );
+    }
+    if (clip_rc)
+    {
+        l = max( l, (float)clip_rc->left );
+        t = max( t, (float)clip_rc->top );
+        r = min( r, (float)clip_rc->right );
+        b = min( b, (float)clip_rc->bottom );
+    }
+    out_clip[0] = l;
+    out_clip[1] = t;
+    out_clip[2] = r;
+    out_clip[3] = b;
 }
 
 void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
@@ -746,28 +793,18 @@ void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *cli
                          float border_thickness, float opacity )
 {
     struct xaml_gpu_instance *inst;
+    float clip[4];
     if (!g_gpu.initialized || g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
     if (x1 <= x0 || y1 <= y0) return;
+    xaml_gpu_apply_clip( clip, clip_rc );
+    if (x1 <= clip[0] || x0 >= clip[2] || y1 <= clip[1] || y0 >= clip[3]) return;
 
     inst = &g_gpu.instances[g_gpu.instance_count++];
     inst->rect[0] = x0;
     inst->rect[1] = y0;
     inst->rect[2] = x1;
     inst->rect[3] = y1;
-    if (clip_rc)
-    {
-        inst->clip[0] = (float)clip_rc->left;
-        inst->clip[1] = (float)clip_rc->top;
-        inst->clip[2] = (float)clip_rc->right;
-        inst->clip[3] = (float)clip_rc->bottom;
-    }
-    else
-    {
-        inst->clip[0] = 0.0f;
-        inst->clip[1] = 0.0f;
-        inst->clip[2] = (float)g_gpu.frame_width;
-        inst->clip[3] = (float)g_gpu.frame_height;
-    }
+    memcpy( inst->clip, clip, sizeof(clip) );
     inst->radii[0] = radius;
     inst->radii[1] = radius;
     inst->radii[2] = radius;
@@ -787,28 +824,18 @@ void xaml_gpu_push_gradient_rect( float x0, float y0, float x1, float y1, const 
                                   float stop0, float stop1, float opacity )
 {
     struct xaml_gpu_instance *inst;
+    float clip[4];
     if (!g_gpu.initialized || g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
     if (x1 <= x0 || y1 <= y0) return;
+    xaml_gpu_apply_clip( clip, clip_rc );
+    if (x1 <= clip[0] || x0 >= clip[2] || y1 <= clip[1] || y0 >= clip[3]) return;
 
     inst = &g_gpu.instances[g_gpu.instance_count++];
     inst->rect[0] = x0;
     inst->rect[1] = y0;
     inst->rect[2] = x1;
     inst->rect[3] = y1;
-    if (clip_rc)
-    {
-        inst->clip[0] = (float)clip_rc->left;
-        inst->clip[1] = (float)clip_rc->top;
-        inst->clip[2] = (float)clip_rc->right;
-        inst->clip[3] = (float)clip_rc->bottom;
-    }
-    else
-    {
-        inst->clip[0] = 0.0f;
-        inst->clip[1] = 0.0f;
-        inst->clip[2] = (float)g_gpu.frame_width;
-        inst->clip[3] = (float)g_gpu.frame_height;
-    }
+    memcpy( inst->clip, clip, sizeof(clip) );
     inst->radii[0] = radius;
     inst->radii[1] = radius;
     inst->radii[2] = radius;
@@ -829,28 +856,18 @@ void xaml_gpu_push_ring( float x0, float y0, float x1, float y1, const RECT *cli
                          UINT32 color_argb, float thickness, BOOL arc_quadrant )
 {
     struct xaml_gpu_instance *inst;
+    float clip[4];
     if (!g_gpu.initialized || g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
     if (x1 <= x0 || y1 <= y0) return;
+    xaml_gpu_apply_clip( clip, clip_rc );
+    if (x1 <= clip[0] || x0 >= clip[2] || y1 <= clip[1] || y0 >= clip[3]) return;
 
     inst = &g_gpu.instances[g_gpu.instance_count++];
     inst->rect[0] = x0;
     inst->rect[1] = y0;
     inst->rect[2] = x1;
     inst->rect[3] = y1;
-    if (clip_rc)
-    {
-        inst->clip[0] = (float)clip_rc->left;
-        inst->clip[1] = (float)clip_rc->top;
-        inst->clip[2] = (float)clip_rc->right;
-        inst->clip[3] = (float)clip_rc->bottom;
-    }
-    else
-    {
-        inst->clip[0] = 0.0f;
-        inst->clip[1] = 0.0f;
-        inst->clip[2] = (float)g_gpu.frame_width;
-        inst->clip[3] = (float)g_gpu.frame_height;
-    }
+    memcpy( inst->clip, clip, sizeof(clip) );
     memset( inst->radii, 0, sizeof(inst->radii) );
     rgba_to_float4( color_argb, inst->fill_color );
     memset( inst->border_color, 0, sizeof(inst->border_color) );
@@ -871,12 +888,17 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
     struct atlas_entry *entry = NULL;
     struct xaml_gpu_instance *inst;
     UINT align_flags;
+    float clip[4];
     WCHAR clean_buf[2048];
     WCHAR face[64];
 
     if (!g_gpu.initialized || !text || !text[0] || !rc) return;
     if (g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
     if (rc->right <= rc->left || rc->bottom <= rc->top) return;
+    xaml_gpu_apply_clip( clip, clip_rc );
+    if ((float)rc->right <= clip[0] || (float)rc->left >= clip[2] ||
+        (float)rc->bottom <= clip[1] || (float)rc->top >= clip[3])
+        return;
 
     bw = (UINT)(rc->right - rc->left);
     bh = (UINT)(rc->bottom - rc->top);
@@ -1036,20 +1058,7 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
         inst->rect[2] = (float)(draw_x + (LONG)bw);
         inst->rect[3] = (float)(draw_y + (LONG)bh);
     }
-    if (clip_rc)
-    {
-        inst->clip[0] = (float)clip_rc->left;
-        inst->clip[1] = (float)clip_rc->top;
-        inst->clip[2] = (float)clip_rc->right;
-        inst->clip[3] = (float)clip_rc->bottom;
-    }
-    else
-    {
-        inst->clip[0] = 0.0f;
-        inst->clip[1] = 0.0f;
-        inst->clip[2] = (float)g_gpu.frame_width;
-        inst->clip[3] = (float)g_gpu.frame_height;
-    }
+    memcpy( inst->clip, clip, sizeof(clip) );
     memset( inst->radii, 0, sizeof(inst->radii) );
     inst->fill_color[0] = (float)GetRValue( color ) / 255.0f;
     inst->fill_color[1] = (float)GetGValue( color ) / 255.0f;
@@ -1076,10 +1085,16 @@ void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, c
     UINT idx, probe;
     struct atlas_entry *entry = NULL;
     struct xaml_gpu_instance *inst;
+    float clip[4];
 
     if (!g_gpu.initialized || !bgra_pixels || img_w == 0 || img_h == 0 || !dst_rc) return;
     if (g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
     if (img_w > ATLAS_SIZE - 2 || img_h > ATLAS_SIZE - 2) return;
+    if (dst_rc->right <= dst_rc->left || dst_rc->bottom <= dst_rc->top) return;
+    xaml_gpu_apply_clip( clip, clip_rc );
+    if ((float)dst_rc->right <= clip[0] || (float)dst_rc->left >= clip[2] ||
+        (float)dst_rc->bottom <= clip[1] || (float)dst_rc->top >= clip[3])
+        return;
 
     idx = (UINT)(img_key % ATLAS_HASH_SIZE);
     for (probe = 0; probe < 32; probe++)
@@ -1142,20 +1157,7 @@ void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, c
     inst->rect[1] = (float)dst_rc->top;
     inst->rect[2] = (float)dst_rc->right;
     inst->rect[3] = (float)dst_rc->bottom;
-    if (clip_rc)
-    {
-        inst->clip[0] = (float)clip_rc->left;
-        inst->clip[1] = (float)clip_rc->top;
-        inst->clip[2] = (float)clip_rc->right;
-        inst->clip[3] = (float)clip_rc->bottom;
-    }
-    else
-    {
-        inst->clip[0] = 0.0f;
-        inst->clip[1] = 0.0f;
-        inst->clip[2] = (float)g_gpu.frame_width;
-        inst->clip[3] = (float)g_gpu.frame_height;
-    }
+    memcpy( inst->clip, clip, sizeof(clip) );
     inst->radii[0] = max( 0.0f, radius );
     inst->radii[1] = max( 0.0f, radius );
     inst->radii[2] = max( 0.0f, radius );

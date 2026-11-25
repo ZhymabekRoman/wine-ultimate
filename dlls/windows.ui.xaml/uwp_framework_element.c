@@ -298,11 +298,20 @@ static void uwp_apply_runtime_style_setters( struct uwp_element *target_el, cons
             struct uwp_rd_bucket *found_b = NULL;
             if (uwp_rd_find_entry( NULL, target_el, st->str, 0, &re, &found_b ) && re)
             {
-                IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
-                WARN( "apply_style_setter %s.%s <- res %s (val=%p)\n",
-                      debugstr_w(st->owner_cls), debugstr_w(st->prop_name), debugstr_w(st->str), res_val );
-                if (res_val)
-                    uwp_set_custom_xaml_member_obj( app_outer, st->owner_cls, st->prop_name, target, res_val );
+                if (re->kind == UWP_RD_DOUBLE)
+                {
+                    WCHAR nbuf[64];
+                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", re->dval );
+                    uwp_set_custom_xaml_member( app_outer, st->owner_cls, st->prop_name, target, nbuf );
+                }
+                else
+                {
+                    IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
+                    WARN( "apply_style_setter %s.%s <- res %s (val=%p)\n",
+                          debugstr_w(st->owner_cls), debugstr_w(st->prop_name), debugstr_w(st->str), res_val );
+                    if (res_val)
+                        uwp_set_custom_xaml_member_obj( app_outer, st->owner_cls, st->prop_name, target, res_val );
+                }
             }
         }
         else if (st->vt == 0x01 || st->vt == 0x02)

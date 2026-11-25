@@ -308,7 +308,7 @@ static void paint_gpu_image( ID3D11DeviceContext *ctx, struct uwp_element *el )
             }
         }
     }
-    if (!el->image_src[0])
+    if (!el->image_src[0] && wcscmp( el->placeholder, L"-no-img-" ) != 0)
     {
         static const WCHAR *const img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"Source", L"IconUrl", L"IconUri", L"TileImageUrl", L"BoxArtUrl", L"PosterUrl", L"ThumbnailUrl", L"Images", L"Image", L"Icon" };
         int ai;
@@ -343,6 +343,8 @@ static void paint_gpu_image( ID3D11DeviceContext *ctx, struct uwp_element *el )
                     lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
             }
         }
+        if (!el->image_src[0])
+            lstrcpynW( el->placeholder, L"-no-img-", ARRAY_SIZE(el->placeholder) );
     }
     uwp_load_image_asset( el );
     if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
@@ -556,7 +558,25 @@ static void paint_gpu_shape( ID3D11DeviceContext *ctx, struct uwp_element *el )
         if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
         {
             RECT rc = el->bounds;
-            xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &rc, NULL );
+            int rw = rc.right - rc.left, rh = rc.bottom - rc.top;
+            if (rw >= 600 && rh >= 120)
+            {
+                float uv_crop[4];
+                uwp_compute_uniform_to_fill_uv( rw, rh, (int)el->img_w, (int)el->img_h, uv_crop );
+                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels,
+                                                el->img_w, el->img_h, 0, &rc, uv_crop, &rc,
+                                                (float)el->corner_radius, (float)el->opacity );
+                xaml_gpu_push_gradient_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                                             (float)el->corner_radius, 0xf20e1522u, 0x220e1522u,
+                                             0.0f, 0.5f, 0.92f, 0.5f, 0.22f, 0.88f, 1.0f );
+                xaml_gpu_push_gradient_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                                             (float)el->corner_radius, 0x000a0e16u, 0xc40a0e16u,
+                                             0.5f, 0.38f, 0.5f, 1.0f, 0.0f, 1.0f, 1.0f );
+            }
+            else
+            {
+                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &rc, NULL );
+            }
         }
     }
 }
@@ -678,22 +698,29 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
                     if (!wcscmp( entries[d].title, tbuf )) { dup = 1; break; }
                 if (!dup && tbuf[0])
                 {
-                    static const WCHAR *const spot_desc_props[] =
-                        { L"Description", L"ShortDescription", L"Subtitle", L"Content", L"CardModel", L"Product", L"Data" };
-                    IInspectable *svm = (cur->content && !uwp_elem_from_any( cur->content )) ? cur->content : cur->data_context;
                     lstrcpynW( entries[entry_cnt].title, tbuf, ARRAY_SIZE(entries[0].title) );
                     entries[entry_cnt].sub[0] = 0;
-                    if (svm)
-                        uwp_vm_query_string_prop_depth( svm, spot_desc_props, ARRAY_SIZE(spot_desc_props),
-                                                        entries[entry_cnt].sub, ARRAY_SIZE(entries[0].sub), 2 );
-                    if (!entries[entry_cnt].sub[0] && nl && nl[1])
+                    if (!cur->placeholder[0])
                     {
-                        const WCHAR *tab = wcschr( nl + 1, '\t' );
-                        size_t slen = tab ? (size_t)(tab - (nl + 1)) : wcslen( nl + 1 );
-                        if (slen >= ARRAY_SIZE(entries[0].sub)) slen = ARRAY_SIZE(entries[0].sub) - 1;
-                        memcpy( entries[entry_cnt].sub, nl + 1, slen * sizeof(WCHAR) );
-                        entries[entry_cnt].sub[slen] = 0;
+                        static const WCHAR *const spot_desc_props[] =
+                            { L"Description", L"ShortDescription", L"Subtitle", L"Content", L"CardModel", L"Product", L"Data" };
+                        IInspectable *svm = (cur->content && !uwp_elem_from_any( cur->content )) ? cur->content : cur->data_context;
+                        if (svm)
+                            uwp_vm_query_string_prop_depth( svm, spot_desc_props, ARRAY_SIZE(spot_desc_props),
+                                                            cur->placeholder, ARRAY_SIZE(cur->placeholder), 2 );
+                        if (!cur->placeholder[0] && nl && nl[1])
+                        {
+                            const WCHAR *tab = wcschr( nl + 1, '\t' );
+                            size_t slen = tab ? (size_t)(tab - (nl + 1)) : wcslen( nl + 1 );
+                            if (slen >= ARRAY_SIZE(cur->placeholder)) slen = ARRAY_SIZE(cur->placeholder) - 1;
+                            memcpy( cur->placeholder, nl + 1, slen * sizeof(WCHAR) );
+                            cur->placeholder[slen] = 0;
+                        }
+                        if (!cur->placeholder[0])
+                            lstrcpynW( cur->placeholder, L"-", ARRAY_SIZE(cur->placeholder) );
                     }
+                    if (wcscmp( cur->placeholder, L"-" ) != 0)
+                        lstrcpynW( entries[entry_cnt].sub, cur->placeholder, ARRAY_SIZE(entries[0].sub) );
                     lstrcpynW( entries[entry_cnt].badge, entry_cnt == 0 ? L"FEATURED" : L"TRENDING", ARRAY_SIZE(entries[0].badge) );
                     if (cur->image_src[0]) uwp_load_image_asset( cur );
                     entries[entry_cnt].img_el = cur;
@@ -988,7 +1015,8 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
     BOOL draw_bg = TRUE, draw_bd = TRUE;
     int fh;
 
-    if (!label[0] && (!el->content || !uwp_elem_from_any( el->content )))
+    if (!label[0] && (!el->content || !uwp_elem_from_any( el->content )) &&
+        wcscmp( el->placeholder, L"-no-btn-lbl-" ) != 0 && wcscmp( el->placeholder, L"-no-btn-img-" ) != 0)
     {
         IInspectable *vm = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
         if (vm)
@@ -1029,6 +1057,10 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
                     lstrcpynW( el->text, title_buf, ARRAY_SIZE(el->text) );
                 label = el->text;
             }
+            else
+            {
+                lstrcpynW( el->placeholder, L"-no-btn-lbl-", ARRAY_SIZE(el->placeholder) );
+            }
             if (nested_vm) IInspectable_Release( nested_vm );
         }
     }
@@ -1049,13 +1081,15 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         }
         if (in_items_host && (!el->content || !uwp_elem_from_any( el->content )))
         {
-            if (!el->image_src[0])
+            if (!el->image_src[0] && wcscmp( el->placeholder, L"-no-btn-img-" ) != 0)
             {
                 static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"ScreenshotUrl", L"Image", L"Images", L"Source", L"IconUrl", L"BoxArtUrl", L"PosterUrl" };
                 WCHAR img_buf[512] = {0};
                 if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
                     img_buf[0])
                     lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                else
+                    lstrcpynW( el->placeholder, L"-no-btn-img-", ARRAY_SIZE(el->placeholder) );
             }
             if (el->image_src[0])
                 uwp_load_image_asset( el );
@@ -1703,6 +1737,7 @@ static BOOL is_clr_type_name( const WCHAR *s )
 static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     WCHAR label[128] = {0};
+    if (!wcscmp( el->placeholder, L"-" )) return;
     if (el->text[0])
     {
         lstrcpynW( label, el->text, ARRAY_SIZE(label) );
@@ -1771,6 +1806,8 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
         }
         if (label[0])
             lstrcpynW( el->text, label, ARRAY_SIZE(el->text) );
+        else
+            lstrcpynW( el->placeholder, L"-", ARRAY_SIZE(el->placeholder) );
     }
     if (label[0] && wcscmp( label, L"SettingsButtonName" ) != 0 && wcscmp( el->name, L"SettingsItem" ) != 0)
     {
@@ -1857,7 +1894,7 @@ static IInspectable *uwp_vm_unwrap_one( IInspectable *vm, const WCHAR *const *pr
 
 static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
-    if (!el->text[0])
+    if (!el->text[0] && wcscmp( el->placeholder, L"-no-card-" ) != 0)
     {
         static const WCHAR *const title_props[] =
             { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
@@ -1923,6 +1960,17 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
                 if (img_buf[0])
                     lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
             }
+            if (!el->image_src[0] && el->data_context)
+            {
+                static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"Image", L"Images", L"Source" };
+                if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
+                    img_buf[0])
+                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+            }
+        }
+        else
+        {
+            lstrcpynW( el->placeholder, L"-no-card-", ARRAY_SIZE(el->placeholder) );
         }
         if (vm2) IInspectable_Release( vm2 );
         if (vm1) IInspectable_Release( vm1 );
@@ -1965,14 +2013,6 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
             {
                 lstrcpynW( cat_str, s1, ARRAY_SIZE(cat_str) );
             }
-        }
-        if (!el->image_src[0] && el->data_context)
-        {
-            static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"Image", L"Images", L"Source" };
-            WCHAR img_buf[512] = {0};
-            if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
-                img_buf[0])
-                lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
         }
         InflateRect( &brc, -2, -2 );
         {
@@ -2197,7 +2237,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el)
             uwp_gpu_paint_element( ctx, ch );
-        else if (el->kind == UWP_KIND_CONTENT_CONTROL)
+        else if (el->kind == UWP_KIND_CONTENT_CONTROL &&
+                 (!el->children_coll || CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
             paint_gpu_content_control_vm( ctx, el, surface_bg );
     }
     if (!el->children_coll && (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
@@ -2232,10 +2273,46 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
 
 static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
+    BOOL pushed_clip = FALSE, prev_has_clip = FALSE;
+    RECT prev_clip = { 0 };
+
     if (!el || g_paint_depth >= 48) return;
+    if (el->has_bounds && wcsstr( el->class_name, L"ScrollViewer" ) &&
+        el->bounds.right > el->bounds.left && el->bounds.bottom > el->bounds.top)
+    {
+        RECT new_clip = el->bounds;
+        xaml_gpu_get_clip( &prev_has_clip, &prev_clip );
+        if (prev_has_clip)
+        {
+            if (new_clip.left < prev_clip.left) new_clip.left = prev_clip.left;
+            if (new_clip.top < prev_clip.top) new_clip.top = prev_clip.top;
+            if (new_clip.right > prev_clip.right) new_clip.right = prev_clip.right;
+            if (new_clip.bottom > prev_clip.bottom) new_clip.bottom = prev_clip.bottom;
+        }
+        xaml_gpu_set_clip( &new_clip );
+        pushed_clip = TRUE;
+    }
     g_paint_ancestors[g_paint_depth++] = el;
     uwp_gpu_paint_element_inner( ctx, el );
     g_paint_depth--;
+    if (pushed_clip)
+    {
+        int vp_h = el->bounds.bottom - el->bounds.top;
+        if (el->scroll_extent_h > vp_h && vp_h > 24)
+        {
+            int track_h = vp_h - 8;
+            int thumb_h = max( 24, (int)((INT64)track_h * vp_h / el->scroll_extent_h) );
+            int max_scroll = el->scroll_extent_h - vp_h;
+            int clamped_y = min( max( 0, el->scroll_y ), max_scroll );
+            int thumb_y = el->bounds.top + 4 + (max_scroll > 0 ? (int)((INT64)(track_h - thumb_h) * clamped_y / max_scroll) : 0);
+            BOOL light = uwp_is_light_theme( el );
+            UINT32 thumb_argb = light ? 0x70606060u : 0x70a0a0a8u;
+            xaml_gpu_push_rect( (float)(el->bounds.right - 7), (float)thumb_y,
+                                (float)(el->bounds.right - 3), (float)(thumb_y + thumb_h),
+                                &el->bounds, 2.0f, thumb_argb, 0, 0.0f, 1.0f );
+        }
+        xaml_gpu_set_clip( prev_has_clip ? &prev_clip : NULL );
+    }
 }
 
 static void uwp_gpu_paint_combobox_popup( ID3D11DeviceContext *ctx, int width, int height )
@@ -2366,12 +2443,14 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
         !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
     {
         uwp_vsm_evaluate_tree( g_navigated_page_el, eval_w, eval_h );
+        g_layout_dirty = FALSE;
         uwp_arrange_element( g_navigated_page_el, rc );
         uwp_gpu_paint_element( ctx, g_navigated_page_el );
     }
     else if (root_el && (root_el->content || root_el->children_coll || root_el->xbf_parsed))
     {
         uwp_vsm_evaluate_tree( root_el, eval_w, eval_h );
+        g_layout_dirty = FALSE;
         uwp_arrange_element( root_el, rc );
         uwp_gpu_paint_element( ctx, root_el );
     }

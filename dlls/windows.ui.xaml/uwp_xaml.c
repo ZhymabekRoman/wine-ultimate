@@ -253,10 +253,10 @@ int g_island_hwnd_cnt = 0;
 
 void uwp_invalidate_window( void )
 {
+    g_layout_dirty = TRUE;
     if (g_island_hwnd_cnt > 0)
     {
         int i;
-        g_layout_dirty = TRUE;
         for (i = 0; i < g_island_hwnd_cnt; i++)
         {
             if (g_island_hwnds[i] && IsWindow( g_island_hwnds[i] ) && IsWindowVisible( g_island_hwnds[i] ))
@@ -831,6 +831,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
             { 0x786f2b75, 0x9aa0, 0x454d, { 0xae, 0x06, 0xa2, 0x46, 0x6e, 0x37, 0xc8, 0x32 } };
         static const GUID IID_IScrollViewer3_Real_UWP =
             { 0x74e9be21, 0x5de2, 0x595e, { 0xbc, 0x08, 0xdb, 0xd3, 0xc5, 0x77, 0x49, 0x2c } };
+        static const GUID IID_IScrollAnchorProvider_UWP =
+            { 0x6ae99a0f, 0x478c, 0x5440, { 0xb2, 0xc6, 0xea, 0xd4, 0x37, 0x8e, 0xf8, 0xe4 } };
         static const GUID IID_IStateTrigger_UWP =
             { 0x67adef2e, 0xd8d9, 0x49f7, { 0xa1, 0xfd, 0x2e, 0x35, 0xee, 0xdd, 0x23, 0xcd } };
         static const GUID IID_IBitmapImage_UWP =
@@ -857,6 +859,8 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                  IsEqualGUID( iid, &IID_IListViewBase4_UWP ) ||
                  IsEqualGUID( iid, &IID_IListView_UWP ) ||
                  IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
+                 (IsEqualGUID( iid, &IID_IScrollAnchorProvider_UWP ) &&
+                  (impl->kind == UWP_KIND_SCROLL_VIEWER || wcsstr( impl->class_name, L"ScrollViewer" ))) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage3_UWP ))
@@ -2063,9 +2067,10 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                 IInspectable_AddRef( new_content );
                 if (impl->content) IInspectable_Release( impl->content );
                 impl->content = new_content;
-                if (!impl->parent || !g_navigated_page_el)
+                if ((!impl->parent && !wcsstr( name, L"Skeleton" )) || !g_navigated_page_el)
                     g_navigated_page_el = page_el;
                 page_el->parent = impl;
+                page_el->scroll_y = 0;
 
                 {
                     struct uwp_nav_event_args *nea = uwp_nav_event_args_create(
@@ -2519,7 +2524,7 @@ BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, cons
     if (!info) return FALSE;
     if (!root_el && g_navigated_page_el) root_el = g_navigated_page_el;
     if (!root_el) return FALSE;
-    if (root_el->kind == UWP_KIND_FRAME && g_navigated_page_el)
+    if (root_el->kind == UWP_KIND_FRAME && !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
         root_el = g_navigated_page_el;
 
     if (width > 0 && height > 0 &&

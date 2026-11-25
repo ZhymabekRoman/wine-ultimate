@@ -1604,12 +1604,16 @@ static BOOL uwp_is_textbox( const struct uwp_element *el )
     if (!el || el->visibility != 0 || !el->is_enabled) return FALSE;
     return wcsstr( el->class_name, L"TextBox" ) != NULL ||
            wcsstr( el->class_name, L"AutoSuggestBox" ) != NULL ||
-           wcsstr( el->name, L"SearchBox" ) != NULL;
+           wcsstr( el->name, L"SearchBox" ) != NULL ||
+           wcsstr( el->name, L"SuggestBox" ) != NULL;
 }
 
 struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0) return NULL;
+    if (el->has_bounds && wcsstr( el->class_name, L"ScrollViewer" ) &&
+        (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
+        return NULL;
 
     if (el->has_bounds &&
         x >= el->bounds.left && x < el->bounds.right &&
@@ -1640,7 +1644,8 @@ struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
 void uwp_fire_asb_recursive( struct uwp_element *el, const WCHAR *text, BOOL is_submit )
 {
     if (!el) return;
-    if (text && el->text != text && (wcsstr( el->class_name, L"AutoSuggestBox" ) || wcsstr( el->class_name, L"TextBox" )))
+    if (text && el->text != text && (wcsstr( el->class_name, L"AutoSuggestBox" ) || wcsstr( el->class_name, L"TextBox" ) ||
+                                     wcsstr( el->name, L"SearchBox" ) || wcsstr( el->name, L"SuggestBox" )))
         lstrcpynW( el->text, text, ARRAY_SIZE(el->text) );
     if (is_submit)
         uwp_asb_fire_query_submitted( el );

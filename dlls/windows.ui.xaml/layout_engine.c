@@ -166,8 +166,7 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
     if (!el || !el->outer || el->in_measure_arrange || w <= 0) return;
     if (!wcsstr( el->class_name, L"ItemsRepeater" )) return;
     if (h <= 0) h = 204;
-    if (el->last_measured_w == (float)w && el->last_measured_h == (float)h && el->children_coll &&
-        CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count > 0)
+    if (el->last_measured_w == (float)w && el->last_measured_h == (float)h)
         return;
 
     el->in_measure_arrange = TRUE;
@@ -185,9 +184,12 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
             if (measure_ovr)
             {
                 hr = measure_ovr( fe_ovr, avail, &desired );
-                if (desired.width <= 1.5f && desired.height <= 1.5f && el->evc_cnt > 0)
+                if ((desired.width <= 1.5f && desired.height <= 1.5f && el->evc_cnt > 0) ||
+                    (el->evc_cnt > 0 && !el->evc_fired))
                 {
                     el->evc_fired = FALSE;
+                    if (el->actual_w <= 10.0) el->actual_w = (double)w;
+                    if (el->actual_h <= 10.0) el->actual_h = (double)h;
                     uwp_fire_evc_if_needed( el );
                     hr = measure_ovr( fe_ovr, avail, &desired );
                 }
@@ -301,7 +303,7 @@ static BOOL uwp_has_spotlight_descendant( struct uwp_element *el, int depth )
 static BOOL uwp_is_home_title_panel( struct uwp_element *el, int depth )
 {
     if (!el || depth > 4) return FALSE;
-    if (!wcscmp( el->name, L"HeaderTitle" ) && !wcscmp( el->text, L"Home" )) return TRUE;
+    if (!wcscmp( el->name, L"HeaderTitle" ) || !wcscmp( el->name, L"TitlePanel" )) return TRUE;
     if (el->children_coll)
     {
         struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -1202,7 +1204,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                         auto_h = rd->max_height;
                     if (rd && rd->min_height > 0.0 && auto_h < rd->min_height)
                         auto_h = rd->min_height;
-                    if (h > 0 && auto_h > min( (double)h * 0.35, 320.0 ))
+                    if (h >= 400 && auto_h > min( (double)h * 0.35, 320.0 ))
                         auto_h = min( (double)h * 0.35, 320.0 );
                 }
                 r_type[i] = 1;
@@ -1224,18 +1226,48 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             row_y[nrows] = rc.bottom;
         }
 
-        for (k = 0; k < children->count; k++)
         {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            int r0, r1, c0, c1;
-            RECT crc;
-            if (!ch) continue;
-            r0 = max( 0, min( nrows - 1, ch->grid_row ) );
-            r1 = max( r0 + 1, min( nrows, r0 + ch->grid_row_span ) );
-            c0 = max( 0, min( ncols - 1, ch->grid_col ) );
-            c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
-            SetRect( &crc, col_x[c0], row_y[r0], col_x[c1], row_y[r1] );
-            uwp_arrange_element( ch, crc );
+            BOOL has_scroll_child = FALSE, has_hydrated_child = FALSE;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                BOOL is_skel;
+                if (!ch || ch->visibility != 0) continue;
+                if (wcsstr( ch->class_name, L"ScrollViewer" ))
+                    has_scroll_child = TRUE;
+                is_skel = (!wcscmp( ch->name, L"ShimmerContainer" ) ||
+                           wcsstr( ch->class_name, L"Shimmer" ) != NULL ||
+                           wcsstr( ch->class_name, L"Skeleton" ) != NULL);
+                if (!is_skel && uwp_scroll_child_has_content( ch, 0 ))
+                    has_hydrated_child = TRUE;
+            }
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                BOOL is_skel;
+                int r0, r1, c0, c1;
+                RECT crc;
+                if (!ch) continue;
+                if (has_scroll_child && uwp_is_home_title_panel( ch, 0 ))
+                {
+                    uwp_clear_bounds_tree( ch );
+                    continue;
+                }
+                is_skel = (!wcscmp( ch->name, L"ShimmerContainer" ) ||
+                           wcsstr( ch->class_name, L"Shimmer" ) != NULL ||
+                           wcsstr( ch->class_name, L"Skeleton" ) != NULL);
+                if (has_hydrated_child && is_skel)
+                {
+                    uwp_clear_bounds_tree( ch );
+                    continue;
+                }
+                r0 = max( 0, min( nrows - 1, ch->grid_row ) );
+                r1 = max( r0 + 1, min( nrows, r0 + ch->grid_row_span ) );
+                c0 = max( 0, min( ncols - 1, ch->grid_col ) );
+                c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
+                SetRect( &crc, col_x[c0], row_y[r0], col_x[c1], row_y[r1] );
+                uwp_arrange_element( ch, crc );
+            }
         }
     }
     else if (el->kind == UWP_KIND_STACK_PANEL && el->children_coll)
@@ -1298,134 +1330,142 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             int auto_total_h = max( 0, h - fixed_h );
             double horiz_scale = (el->orientation == 1 && horiz_unmeasured_cnt == 0 && horiz_total_nw > (double)w && w > 0)
                 ? ((double)w / horiz_total_nw) : 1.0;
-            BOOL in_scroll = FALSE;
+            BOOL in_scroll = FALSE, is_top_scroll_panel = TRUE;
+            struct uwp_element *sv = NULL;
             if (el->orientation == 1 && use_horiz_flow && spacing_px > 0 && children->count > 1)
             {
                 struct uwp_element *ch0 = uwp_elem_from_any( children->items[0] );
                 if (ch0 && ch0 != el && ch0->visibility != 0)
                     cur_x += (int)(spacing_px * horiz_scale + 0.5);
             }
-            if (el->orientation == 0 && auto_cnt > 1 && auto_total_h / auto_cnt < 140)
+            if (el->orientation == 0)
             {
                 struct uwp_element *p;
                 int hop;
                 for (p = el->parent, hop = 0; p && hop < 5; p = p->parent, hop++)
                 {
+                    if (p->kind == UWP_KIND_STACK_PANEL && p->orientation == 0)
+                        is_top_scroll_panel = FALSE;
                     if (wcsstr( p->class_name, L"ScrollViewer" ))
                     {
+                        sv = p;
                         in_scroll = TRUE;
                         break;
                     }
                 }
             }
-            for (k = 0; k < children->count; k++)
+            if (in_scroll && sv && is_top_scroll_panel)
             {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                RECT crc = rc;
-                if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
-                    ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
-                    wcsstr( ch->class_name, L"TeachingTip" ) ||
-                    !wcscmp( ch->name, L"TeachingTipTarget" )) continue;
-                if (el->orientation == 1) /* Horizontal */
+                sv->scroll_extent_h = 0;
+                cur_y = rc.top - sv->scroll_y;
+            }
+            {
+                BOOL has_spotlight_slot = FALSE;
+                for (k = 0; k < children->count; k++)
                 {
-                    if (use_horiz_flow)
+                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                    RECT crc = rc;
+                    if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
+                        ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
+                        wcsstr( ch->class_name, L"TeachingTip" ) ||
+                        !wcscmp( ch->name, L"TeachingTipTarget" )) continue;
+                    if (el->orientation == 1) /* Horizontal */
                     {
-                        double nw = uwp_measure_natural_width( ch, 0 );
-                        int slot_w = (nw > 0.0)
-                            ? max( 16, (int)((nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r )) * horiz_scale + 0.5) )
-                            : max( 32, (rc.right - cur_x) / max( 1, (int)vis_cnt - idx ) );
-                        crc.left = cur_x;
-                        crc.right = min( (int)rc.right, cur_x + slot_w );
-                        cur_x = crc.right + (int)(spacing_px * horiz_scale + 0.5);
-                    }
-                    else
-                    {
-                        crc.left  = rc.left + (w * idx) / (int)vis_cnt;
-                        crc.right = rc.left + (w * (idx + 1)) / (int)vis_cnt;
-                    }
-                }
-                else if (in_scroll)
-                {
-                    int nat_h;
-                    if (ch->height > 0.0 && !isnan( ch->height ))
-                    {
-                        int slot_h = (int)(ch->height + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
-                        if (cur_y >= rc.bottom)
+                        if (use_horiz_flow)
                         {
-                            crc.top = cur_y;
+                            double nw = uwp_measure_natural_width( ch, 0 );
+                            int slot_w = (nw > 0.0)
+                                ? max( 16, (int)((nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r )) * horiz_scale + 0.5) )
+                                : max( 32, (rc.right - cur_x) / max( 1, (int)vis_cnt - idx ) );
+                            crc.left = cur_x;
+                            crc.right = min( (int)rc.right, cur_x + slot_w );
+                            cur_x = crc.right + (int)(spacing_px * horiz_scale + 0.5);
+                        }
+                        else
+                        {
+                            crc.left  = rc.left + (w * idx) / (int)vis_cnt;
+                            crc.right = rc.left + (w * (idx + 1)) / (int)vis_cnt;
+                        }
+                    }
+                    else if (in_scroll)
+                    {
+                        int nat_h;
+                        if (ch->height > 0.0 && !isnan( ch->height ))
+                        {
+                            int slot_h = (int)(ch->height + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
+                            crc.top    = cur_y;
                             crc.bottom = cur_y + slot_h;
                             cur_y = crc.bottom + spacing_px;
-                            idx++;
-                            uwp_arrange_element( ch, crc );
-                            continue;
                         }
-                        crc.top    = cur_y;
-                        crc.bottom = min( (int)rc.bottom, cur_y + slot_h );
-                        cur_y = crc.bottom + spacing_px;
-                    }
-                    else
-                    {
-                        double mh;
-                        if (uwp_is_home_title_panel( ch, 0 ))
-                        {
-                            ch->has_bounds = FALSE;
-                            idx++;
-                            continue;
-                        }
-                        mh = uwp_measure_natural_height( ch, w, 0 );
-                        if (mh > 0.0)
-                        {
-                            nat_h = max( 24, (int)(mh + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
-                        }
-                        else if (uwp_has_spotlight_descendant( ch, 0 ))
-                            nat_h = 330;
-                        else if (!uwp_scroll_child_has_content( ch, 0 ))
-                            nat_h = 4;
                         else
-                            nat_h = 168;
-                        if (cur_y >= rc.bottom)
                         {
-                            /* Still arrange off-screen children in virtual coordinates so
-                             * their EffectiveViewportChanged/MeasureOverride run for hydration,
-                             * then clear has_bounds if completely below viewport. */
-                            crc.top = cur_y;
+                            double mh;
+                            if (uwp_is_home_title_panel( ch, 0 ))
+                            {
+                                ch->has_bounds = FALSE;
+                                idx++;
+                                continue;
+                            }
+                            mh = uwp_measure_natural_height( ch, w, 0 );
+                            if (mh > 0.0)
+                            {
+                                nat_h = max( 24, (int)(mh + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
+                            }
+                            else if (uwp_has_spotlight_descendant( ch, 0 ))
+                            {
+                                if (has_spotlight_slot)
+                                {
+                                    uwp_clear_bounds_tree( ch );
+                                    idx++;
+                                    continue;
+                                }
+                                has_spotlight_slot = TRUE;
+                                nat_h = 330;
+                            }
+                            else if (!uwp_scroll_child_has_content( ch, 0 ))
+                                nat_h = 4;
+                            else
+                                nat_h = 168;
+                            crc.top    = cur_y;
                             crc.bottom = cur_y + nat_h;
                             cur_y = crc.bottom + (nat_h > 24 ? 8 : 0);
                             auto_idx++;
-                            idx++;
-                            uwp_arrange_element( ch, crc );
-                            continue;
                         }
-                        crc.top    = cur_y;
-                        crc.bottom = min( (int)rc.bottom, cur_y + nat_h );
-                        cur_y = crc.bottom + (nat_h > 24 ? 8 : 0);
-                        auto_idx++;
-                    }
-                }
-                else
-                {
-                    BOOL has_explicit_h = (ch->height > 0.0 && !isnan( ch->height ));
-                    double nh = has_explicit_h ? ch->height : uwp_measure_natural_height( ch, w, 0 );
-                    if (nh > 0.0 && (has_explicit_h || (int)nh < h))
-                    {
-                        int slot_h = (int)(nh + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
-                        crc.top    = cur_y;
-                        crc.bottom = min( (int)rc.bottom, cur_y + slot_h );
-                        cur_y = crc.bottom + spacing_px;
                     }
                     else
                     {
-                        int slice = (auto_cnt > 0)
-                            ? ((auto_total_h * (auto_idx + 1)) / auto_cnt - (auto_total_h * auto_idx) / auto_cnt)
-                            : 0;
-                        crc.top    = cur_y;
-                        crc.bottom = min( (int)rc.bottom, cur_y + slice );
-                        cur_y = crc.bottom + spacing_px;
-                        auto_idx++;
+                        BOOL has_explicit_h = (ch->height > 0.0 && !isnan( ch->height ));
+                        double nh = has_explicit_h ? ch->height : uwp_measure_natural_height( ch, w, 0 );
+                        if (nh > 0.0 && (has_explicit_h || (int)nh < h))
+                        {
+                            int slot_h = (int)(nh + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
+                            crc.top    = cur_y;
+                            crc.bottom = min( (int)rc.bottom, cur_y + slot_h );
+                            cur_y = crc.bottom + spacing_px;
+                        }
+                        else
+                        {
+                            int slice = (auto_cnt > 0)
+                                ? ((auto_total_h * (auto_idx + 1)) / auto_cnt - (auto_total_h * auto_idx) / auto_cnt)
+                                : 0;
+                            crc.top    = cur_y;
+                            crc.bottom = min( (int)rc.bottom, cur_y + slice );
+                            cur_y = crc.bottom + spacing_px;
+                            auto_idx++;
+                        }
                     }
+                    idx++;
+                    uwp_arrange_element( ch, crc );
                 }
-                idx++;
-                uwp_arrange_element( ch, crc );
+            }
+            if (in_scroll && sv)
+            {
+                int virt_ext = (cur_y + sv->scroll_y) - sv->bounds.top;
+                int vp_h = max( 1, (int)(sv->bounds.bottom - sv->bounds.top) );
+                if (virt_ext > sv->scroll_extent_h)
+                    sv->scroll_extent_h = virt_ext;
+                if (is_top_scroll_panel && sv->scroll_y > max( 0, sv->scroll_extent_h - vp_h ))
+                    sv->scroll_y = max( 0, sv->scroll_extent_h - vp_h );
             }
         }
         if (h >= 60)
@@ -1667,7 +1707,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             int card_h = 96;
             int idx = 0;
 
-            if (children->count >= 2)
+            if (children->count >= 2 && wcscmp( el->placeholder, L"-dedup-" ) != 0)
             {
                 static const WCHAR *const title_props[] =
                     { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header",
@@ -1680,6 +1720,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 
                 if (ch0 && (ch0->data_context || ch0->content))
                 {
+                    lstrcpynW( el->placeholder, L"-dedup-", ARRAY_SIZE(el->placeholder) );
                     for (anc = el->parent, hop = 0; anc && hop < 5 && !full_src; anc = anc->parent, hop++)
                     {
                         for (di = 0; di < anc->dp_cnt; di++)

@@ -642,6 +642,20 @@ const void *uwp_xaml_root_vtbl[16] =
     [11] = uwp_xr_remove_Changed,
     [12 ... 15] = uwp_generic_noop,
 };
+static HRESULT WINAPI uwp_img_add_ImageOpened( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    return xaml_event_registry_add( &impl->img_opened_reg, handler, tok );
+}
+
+static HRESULT WINAPI uwp_img_remove_ImageOpened( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return S_OK;
+    return xaml_event_registry_remove( &impl->img_opened_reg, tok );
+}
+
 const void *uwp_img_vtbl[24] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -654,10 +668,10 @@ const void *uwp_img_vtbl[24] =
     [7] = uwp_img_put_Source,
     [8] = uwp_img_get_Stretch,
     [9] = uwp_img_put_Stretch,
-    [10] = uwp_ui_event_add,     /* add_ImageFailed */
-    [11] = uwp_generic_noop,     /* remove_ImageFailed */
-    [12] = uwp_ui_event_add,     /* add_ImageOpened */
-    [13] = uwp_generic_noop,     /* remove_ImageOpened */
+    [10] = uwp_ui_event_add,         /* add_ImageFailed */
+    [11] = uwp_generic_noop,         /* remove_ImageFailed */
+    [12] = uwp_img_add_ImageOpened,  /* add_ImageOpened */
+    [13] = uwp_img_remove_ImageOpened, /* remove_ImageOpened */
     [14 ... 23] = uwp_generic_noop,
 };
 

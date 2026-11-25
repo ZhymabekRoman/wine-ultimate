@@ -782,8 +782,11 @@ static void xaml_window_refresh_present( HWND hwnd )
     in_refresh = FALSE;
 }
 
+#define XAML_SCP_DIRTY_TIMER_ID 0x58534350
+
 void xaml_mark_window_dirty( void )
 {
+    if (g_in_xaml_present) return;
     InterlockedExchange( &g_xaml_window_dirty, 1 );
     if (global_xaml_window.target_hwnd && IsWindow( global_xaml_window.target_hwnd ))
         InvalidateRect( global_xaml_window.target_hwnd, NULL, FALSE );
@@ -828,6 +831,13 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         {
             xaml_corewindow_sync_size( hwnd );
         }
+        if (global_xaml_window.content)
+        {
+            POINT pt = { (short)LOWORD( lparam ), (short)HIWORD( lparam ) };
+            if (ScreenToClient( top, &pt ) &&
+                uwp_hit_test_interactive_client( global_xaml_window.content, pt.x, pt.y ))
+                return HTCLIENT;
+        }
         goto forward_msg;
     }
     if (msg == WM_PAINT)
@@ -858,6 +868,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                 {
                     if (!g_in_xaml_present && InterlockedExchange( &g_xaml_window_dirty, 0 ) != 0)
                     {
+                        g_in_xaml_present = TRUE;
                         if (xaml_layout_render_gpu( top, (int)rc.right, (int)rc.bottom, global_xaml_window.content,
                                                     global_xaml_window.d3d11_dev, global_xaml_window.d3d11_ctx,
                                                     global_xaml_window.swapchain ) &&
@@ -865,6 +876,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                         {
                             IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
                         }
+                        InterlockedExchange( &g_xaml_window_dirty, 0 );
+                        g_in_xaml_present = FALSE;
                     }
                 }
                 else
@@ -919,23 +932,10 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             xaml_window_refresh_present( hwnd );
         return ret;
     }
-#define XAML_SCP_DIRTY_TIMER_ID 0x58534350
-
     if (msg == WM_TIMER && wparam == XAML_SCP_DIRTY_TIMER_ID)
     {
-        static int scp_ticks = 0;
-        if (g_active_scp_swapchain)
-        {
-            scp_ticks++;
-            if (scp_ticks == 15 && global_xaml_window.content)
-            {
-                ERR( "=== EDITORPAGE TREE DUMP ===\n" );
-                uwp_debug_dump_root( global_xaml_window.content );
-                ERR( "=== END EDITORPAGE TREE DUMP ===\n" );
-            }
-            if (InterlockedCompareExchange( &g_xaml_window_dirty, 0, 0 ))
-                xaml_window_present( &global_xaml_window );
-        }
+        if (!g_in_xaml_present && InterlockedCompareExchange( &g_xaml_window_dirty, 0, 0 ))
+            xaml_window_present( &global_xaml_window );
         return 0;
     }
     if (msg == WM_APP_WV2_START)
@@ -978,6 +978,16 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             uwp_debug_dump_root( global_xaml_window.content );
             return 0;
         }
+        if (uwp_has_focused_textbox())
+        {
+            if (msg == WM_CHAR && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
+            {
+                uwp_keyboard_press_char( (WCHAR)wparam );
+                xaml_mark_window_dirty();
+                xaml_window_present( &global_xaml_window );
+            }
+            return 0;
+        }
         if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
             accel_handled = uwp_dispatch_keydown( hwnd, (UINT)wparam, lparam, NULL );
         if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP)
@@ -988,7 +998,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             uwp_keyboard_press_char( (WCHAR)wparam );
         uwp_sync_calc_display_from_vm();
         xaml_mark_window_dirty();
-        xaml_window_present( &global_xaml_window );
+        if (msg != WM_KEYUP)
+            xaml_window_present( &global_xaml_window );
         if ((accel_handled || (msg != WM_SYSKEYDOWN && SUCCEEDED( hr ))) &&
             xaml_corewindow_prev_proc == (WNDPROC)GetClassLongPtrW( hwnd, GCLP_WNDPROC ))
             return 0;
@@ -1495,9 +1506,9 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     /* 8. Commit the DirectComposition tree (skip when GPU swapchain presents directly to hwnd) */
     if (!impl->gpu_active || g_active_scp_swapchain)
         IDCompositionDesktopDevice_Commit( impl->dcomp_device );
-    if (g_active_scp_swapchain && !impl->scp_timer_armed && IsWindow( hwnd ))
+    if (!impl->scp_timer_armed && IsWindow( hwnd ))
     {
-        SetTimer( hwnd, XAML_SCP_DIRTY_TIMER_ID, 200, NULL );
+        SetTimer( hwnd, XAML_SCP_DIRTY_TIMER_ID, 50, NULL );
         impl->scp_timer_armed = TRUE;
     }
 

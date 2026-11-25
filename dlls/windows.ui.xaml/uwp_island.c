@@ -845,6 +845,8 @@ BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_
     }
 
     /* 2. Walk accelerator registry (innermost / last registered page wins) */
+    if (g_focused_textbox && !(mods & 3))
+        return FALSE;
     active_page = island_root ? uwp_find_owning_page( island_root )
                               : (g_navigated_page_el ? g_navigated_page_el : g_last_created_page);
 

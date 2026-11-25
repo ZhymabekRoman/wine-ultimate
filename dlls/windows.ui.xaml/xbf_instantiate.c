@@ -164,7 +164,8 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                 if (vt_init == 0x08) { sv.argb = (UINT32)num_init; sv.has_argb = TRUE; }
                 else if (sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb )) sv.has_argb = TRUE;
             }
-            else if (tid == XBF_TYPE_DOUBLE)
+            else if (tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 ||
+                     ((op == 0x15 || op == 0x16) && (vt_init == 0x03 || vt_init == 0x04 || vt_init == 0x0b)))
             {
                 sv.kind = UWP_RD_DOUBLE;
                 sv.dval = num_init;
@@ -277,9 +278,10 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                          ((!ctx->connector &&
                            !(tid < ctx->type_cnt && (wcsstr( ctx->types[tid].full_name, L"Breakpoint" ) ||
                                                      wcsstr( ctx->types[tid].full_name, L"TemplateSelector" ) ||
-                                                     wcsstr( ctx->types[tid].full_name, L"Converter" )))) ||
+                                                     wcsstr( ctx->types[tid].full_name, L"Converter" ) ||
+                                                     wcsstr( ctx->types[tid].full_name, L"Layout" )))) ||
                           tid == XBF_TYPE_STYLE || tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
-                          tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_STRING ||
+                          tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 || tid == XBF_TYPE_STRING ||
                           tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_CORNER_RADIUS || tid == XBF_TYPE_FONT_FAMILY ||
                           tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))
                 {

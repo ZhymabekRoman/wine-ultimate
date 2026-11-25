@@ -271,6 +271,13 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
                 }
             }
         }
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Text" ) && impl->text[0] &&
+            (wcsstr( impl->class_name, L"AutoSuggestBox" ) || wcsstr( impl->class_name, L"TextBox" ) ||
+             wcsstr( impl->name, L"SearchBox" ) || wcsstr( impl->name, L"SuggestBox" )))
+        {
+            *out = box_string_value( impl->text );
+            if (*out) return S_OK;
+        }
     }
 
     AcquireSRWLockShared( &impl->dp_lock );
@@ -918,9 +925,21 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 
     if (wcsstr( impl->class_name, L"ItemsRepeater" ))
     {
-        impl->last_measured_w = 0.0f;
-        impl->last_measured_h = 0.0f;
-        uwp_invalidate_window();
+        if (!impl->in_measure_arrange)
+        {
+            struct uwp_element *rep;
+            impl->last_measured_w = 0.0f;
+            impl->last_measured_h = 0.0f;
+            impl->placeholder[0] = 0;
+            rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
+            if (rep && rep != impl && !rep->in_measure_arrange)
+            {
+                rep->last_measured_w = 0.0f;
+                rep->last_measured_h = 0.0f;
+                rep->placeholder[0] = 0;
+            }
+            uwp_invalidate_window();
+        }
     }
     else
     {

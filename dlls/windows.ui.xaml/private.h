@@ -93,6 +93,8 @@ void xaml_gpu_shutdown( void );
 BOOL xaml_has_active_swapchain_panel( void );
 BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
                            UINT width, UINT height, COLORREF clear_color );
+void xaml_gpu_set_clip( const RECT *clip_rc );
+void xaml_gpu_get_clip( BOOL *has_clip, RECT *clip_rc );
 void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
                          float radius, UINT32 fill_argb, UINT32 border_argb,
                          float border_thickness, float opacity );
@@ -168,6 +170,8 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val );
 void uwp_fire_composition_target_rendering( void );
 BOOL uwp_rd_haskey( void *rd_key, void *key_obj );
 BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *app_outer );
+void uwp_handle_overlay_mouse_input_decl( void );
+BOOL uwp_hit_test_interactive_client( IInspectable *root_content, int x, int y );
 BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int wheel_delta,
                                      int width, int height, IInspectable *root_content );
 BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content );
@@ -248,6 +252,7 @@ void xaml_winui_fire_size_changed( float old_w, float old_h, float new_w, float 
 void xaml_winui_fire_pointer_event( enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info );
 void xaml_winui_fire_key_event( BOOL is_down, UINT32 vk, LPARAM lparam );
 void xaml_winui_fire_focus_event( BOOL got_focus );
+BOOL uwp_has_focused_textbox( void );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

@@ -1002,8 +1002,12 @@ const void *uwp_cd_vtbl[48] =
 };
 
 static const GUID IID_IAutoSuggestBoxTextChangedEventArgs_UWP =
+    { 0x3a6f7254, 0x1ed5, 0x4bc5, { 0xa0, 0x60, 0x65, 0x55, 0x30, 0xbc, 0xa6, 0xba } };
+static const GUID IID_IAutoSuggestBoxTextChangedEventArgs_Alt_UWP =
     { 0x38c5e3a3, 0x5f44, 0x47f4, { 0xa4, 0x50, 0x1c, 0x5e, 0x1f, 0x4d, 0x4b, 0x9f } };
 static const GUID IID_IAutoSuggestBoxQuerySubmittedEventArgs_UWP =
+    { 0x78dcb116, 0x818a, 0x4cb5, { 0xbc, 0xa7, 0x38, 0x2c, 0xe6, 0xdd, 0xc9, 0x0d } };
+static const GUID IID_IAutoSuggestBoxQuerySubmittedEventArgs_Alt_UWP =
     { 0xd5f5b0d0, 0x7d72, 0x4c76, { 0x9e, 0x77, 0x28, 0xa3, 0xd5, 0xa2, 0xe7, 0x11 } };
 
 struct asb_tc_args
@@ -1020,7 +1024,8 @@ static HRESULT WINAPI asb_tc_QI( void *iface, REFIID iid, void **out )
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IAutoSuggestBoxTextChangedEventArgs_UWP ))
+        IsEqualGUID( iid, &IID_IAutoSuggestBoxTextChangedEventArgs_UWP ) ||
+        IsEqualGUID( iid, &IID_IAutoSuggestBoxTextChangedEventArgs_Alt_UWP ))
     {
         InterlockedIncrement( &a->ref );
         *out = iface;
@@ -1097,7 +1102,8 @@ static HRESULT WINAPI asb_qs_QI( void *iface, REFIID iid, void **out )
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IAutoSuggestBoxQuerySubmittedEventArgs_UWP ))
+        IsEqualGUID( iid, &IID_IAutoSuggestBoxQuerySubmittedEventArgs_UWP ) ||
+        IsEqualGUID( iid, &IID_IAutoSuggestBoxQuerySubmittedEventArgs_Alt_UWP ))
     {
         InterlockedIncrement( &a->ref );
         *out = iface;

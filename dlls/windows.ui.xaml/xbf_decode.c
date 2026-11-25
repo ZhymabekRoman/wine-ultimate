@@ -192,29 +192,98 @@ static void pri_build_node_path( const BYTE *hs, DWORD hs_sz, DWORD node_off, DW
     buf[pos] = 0;
 }
 
+static DWORD pri_select_english_cand_offset( const BYTE *pri, DWORD pri_sz, DWORD dec )
+{
+    const BYTE *decn_sec = NULL, *d;
+    DWORD decn_sz = 0, size, qualin_at, dq_at, idx_at, val_at;
+    WORD ndist, nqual, nqset, ndec, nidx, dec_first, dec_n, j, k;
+    DWORD fallback_en = (~0u);
+
+    if (!pri_get_section( pri, pri_sz, 0, &decn_sec, &decn_sz ) || decn_sz < 0x2c)
+        return 0;
+    if (memcmp( decn_sec, "[mrm_decn_info]", 15 ) != 0)
+        return 0;
+    d = decn_sec + 0x20;
+    size = decn_sz - 0x20;
+    ndist = *(const WORD *)(d + 0);
+    nqual = *(const WORD *)(d + 2);
+    nqset = *(const WORD *)(d + 4);
+    ndec  = *(const WORD *)(d + 6);
+    nidx  = *(const WORD *)(d + 8);
+    if (dec >= ndec || ndist > 4096 || (DWORD)nidx * 2 > size) return 0;
+
+    qualin_at = 12 + (DWORD)ndec * 4 + (DWORD)nqset * 4;
+    dq_at     = qualin_at + (DWORD)nqual * 8;
+    idx_at    = dq_at + (DWORD)ndist * 12;
+    val_at    = idx_at + (DWORD)nidx * 2;
+    if (val_at > size) return 0;
+
+    dec_first = *(const WORD *)(d + 12 + dec * 4);
+    dec_n     = *(const WORD *)(d + 12 + dec * 4 + 2);
+    if (dec_n <= 1) return 0;
+
+    for (j = 0; j < dec_n; j++)
+    {
+        WORD qs_idx, qf, qn;
+        if ((DWORD)(dec_first + j) >= nidx) break;
+        qs_idx = *(const WORD *)(d + idx_at + (dec_first + j) * 2);
+        if (qs_idx >= nqset) continue;
+        qf = *(const WORD *)(d + 12 + (DWORD)ndec * 4 + (DWORD)qs_idx * 4);
+        qn = *(const WORD *)(d + 12 + (DWORD)ndec * 4 + (DWORD)qs_idx * 4 + 2);
+        for (k = 0; k < qn; k++)
+        {
+            WORD qi, di, qtype;
+            DWORD voff, at;
+            const WCHAR *val_str;
+            if ((DWORD)(qf + k) >= nidx) break;
+            qi = *(const WORD *)(d + idx_at + (qf + k) * 2);
+            if (qi >= nqual) continue;
+            di = *(const WORD *)(d + qualin_at + (DWORD)qi * 8);
+            if (di >= ndist) continue;
+            qtype = *(const WORD *)(d + dq_at + (DWORD)di * 12 + 2);
+            voff  = *(const DWORD *)(d + dq_at + (DWORD)di * 12 + 8);
+            at    = val_at + voff * 2;
+            if (qtype != 0 || at + 2 > size) continue;
+            val_str = (const WCHAR *)(d + at);
+            if (!wcsicmp( val_str, L"en-US" ))
+                return j;
+            if (fallback_en == (~0u) && (!wcsnicmp( val_str, L"en-", 3 ) || !wcsicmp( val_str, L"en" )))
+                fallback_en = j;
+        }
+    }
+    return (fallback_en != (~0u)) ? fallback_en : 0;
+}
+
 static BOOL pri_resolve_item_data( const BYTE *pri, DWORD pri_sz, const BYTE *rm, DWORD rm_sz,
                                    DWORD count1, DWORD extra_sz, DWORD map_off, DWORD cand_off,
-                                   DWORD item_id, const BYTE **out_ptr, DWORD *out_sz )
+                                   DWORD item_id, const BYTE **out_ptr, DWORD *out_sz, BYTE *out_vti )
 {
-    DWORD cand_base = 0;
+    DWORD dec = 0, cand_base = 0, cand_idx;
     WORD data_idx, sec_idx;
     if (item_id < count1)
+    {
+        dec       = *(const WORD *)(rm + map_off + item_id * 4);
         cand_base = *(const WORD *)(rm + map_off + item_id * 4 + 2);
+    }
     else if (extra_sz >= 28)
     {
         DWORD r_off = map_off + count1 * 4 + 28 + (item_id - count1) * 8;
         if (r_off + 8 > cand_off) return FALSE;
+        dec       = *(const DWORD *)(rm + r_off);
         cand_base = *(const DWORD *)(rm + r_off + 4);
     }
     else return FALSE;
-    if (cand_off + (cand_base + 1) * 8 > rm_sz) return FALSE;
-    data_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 4);
-    sec_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 6);
+    cand_idx = cand_base + pri_select_english_cand_offset( pri, pri_sz, dec );
+    if (cand_off + (cand_idx + 1) * 8 > rm_sz) cand_idx = cand_base;
+    if (cand_off + (cand_idx + 1) * 8 > rm_sz) return FALSE;
+    if (out_vti) *out_vti = *(const BYTE *)(rm + cand_off + cand_idx * 8 + 1);
+    data_idx = *(const WORD *)(rm + cand_off + cand_idx * 8 + 4);
+    sec_idx = *(const WORD *)(rm + cand_off + cand_idx * 8 + 6);
     return pri_get_data_item( pri, pri_sz, sec_idx, data_idx, out_ptr, out_sz );
 }
 
 static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffix,
-                                   const BYTE **out_ptr, DWORD *out_sz )
+                                   const BYTE **out_ptr, DWORD *out_sz, BYTE *out_vti )
 {
     DWORD pri_sz = 0, hs_sz = 0, rm_sz = 0;
     const BYTE *pri = pri_get_data( &pri_sz );
@@ -277,7 +346,7 @@ static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffi
     if (matched_item < 0) return FALSE;
 
     return pri_resolve_item_data( pri, pri_sz, rm, rm_sz, count1, extra_sz, map_off, cand_off,
-                                  (DWORD)matched_item, out_ptr, out_sz );
+                                  (DWORD)matched_item, out_ptr, out_sz, out_vti );
 }
 
 void uwp_pri_enum_xbfs_in_blob( const BYTE *pri, DWORD pri_sz,
@@ -328,7 +397,7 @@ void uwp_pri_enum_xbfs_in_blob( const BYTE *pri, DWORD pri_sz,
         plen = strlen( path );
         if (plen < 4 || strcasecmp( path + plen - 4, ".xbf" )) continue;
         if (pri_resolve_item_data( pri, pri_sz, rm, rm_sz, count1, extra_sz, map_off, cand_off,
-                                   iid, &ptr, &sz ) && ptr && sz > 0x50 && !memcmp( ptr, "XBF", 4 ))
+                                   iid, &ptr, &sz, NULL ) && ptr && sz > 0x50 && !memcmp( ptr, "XBF", 4 ))
         {
             if (!cb( path, ptr, sz, ctx )) break;
         }
@@ -550,6 +619,7 @@ BOOL uwp_pri_lookup_string( const WCHAR *res_name, WCHAR *out_buf, int out_chars
     char suffix[256] = {0};
     const BYTE *ptr = NULL;
     DWORD sz = 0;
+    BYTE vti = 0xff;
     size_t i, len;
 
     if (!res_name || !out_buf || out_chars <= 0) return FALSE;
@@ -561,10 +631,10 @@ BOOL uwp_pri_lookup_string( const WCHAR *res_name, WCHAR *out_buf, int out_chars
     full_path[10 + i] = 0;
     snprintf( suffix, sizeof(suffix), "%s", full_path + 10 );
 
-    if (!pri_find_item_by_path( full_path, suffix, &ptr, &sz ) || !ptr || !sz)
+    if (!pri_find_item_by_path( full_path, suffix, &ptr, &sz, &vti ) || !ptr || !sz)
         return FALSE;
 
-    if (sz >= 2 && (sz % 2) == 0 && ptr[1] == 0 && ptr[sz - 1] == 0)
+    if (vti == 0 || (sz >= 2 && (sz % 2) == 0 && ptr[1] == 0 && ptr[sz - 1] == 0))
     {
         int wlen = (int)(sz / 2);
         if (wlen >= out_chars) wlen = out_chars - 1;
@@ -1099,6 +1169,7 @@ void uwp_rd_store_stack_val( struct uwp_rd_bucket *b, const WCHAR *key, struct x
     e->setter_cnt = e->setter_cap = 0;
 
     e->kind = sv->kind;
+    e->tid = sv->tid;
     e->argb = sv->argb;
     e->has_argb = sv->has_argb;
     e->opacity = sv->opacity > 0.0 ? sv->opacity : (sv->kind == UWP_RD_BRUSH ? sv->opacity : 1.0);
@@ -1573,7 +1644,8 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             ctx->props[pid].name[0] && ctx->props[pid].owner_tid < ctx->type_cnt &&
             ctx->types[ctx->props[pid].owner_tid].full_name[0] &&
             (wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Breakpoint" ) ||
-             wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Converter" )))
+             wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Converter" ) ||
+             wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Layout" )))
         {
             void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
             const struct xbf_prop_info *pi = &ctx->props[pid];
@@ -1589,7 +1661,16 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                     if (uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd,
                                            ctx->root_el, sval, 0, &re, &found_b ) && re)
                     {
-                        res_val = uwp_rd_materialize_entry( found_b, re );
+                        if (re->kind == UWP_RD_DOUBLE)
+                        {
+                            WCHAR nbuf[64];
+                            swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", re->dval );
+                            uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, nbuf );
+                        }
+                        else
+                        {
+                            res_val = uwp_rd_materialize_entry( found_b, re );
+                        }
                     }
                     else if (wcsstr( sval, L"Style" ))
                     {
@@ -1608,7 +1689,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                         if (release_res) IInspectable_Release( res_val );
                     }
                 }
-                else if (wcsstr( owner_cls, L"Breakpoint" ) || wcsstr( owner_cls, L"Converter" ))
+                else if (wcsstr( owner_cls, L"Breakpoint" ) || wcsstr( owner_cls, L"Converter" ) || wcsstr( owner_cls, L"Layout" ))
                 {
                     if (vt == 0x01 || vt == 0x02)
                         uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, (vt == 0x02) ? L"True" : L"False" );
@@ -2248,12 +2329,19 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             struct uwp_rd_bucket *found_b = NULL;
             if (ao && uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd, el, sval, 0, &re, &found_b ) && re)
             {
-                IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
-                if (res_val)
+                const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
+                IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+                if (re->kind == UWP_RD_DOUBLE)
                 {
-                    const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
-                    IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-                    uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, target, res_val );
+                    WCHAR nbuf[64];
+                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", re->dval );
+                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
+                }
+                else
+                {
+                    IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
+                    if (res_val)
+                        uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, target, res_val );
                 }
             }
         }
