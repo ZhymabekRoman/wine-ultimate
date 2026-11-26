@@ -289,12 +289,15 @@ static void xaml_event_registry_set_inner_token( struct xaml_event_registry *reg
 
     if (!reg || !inner_tokens || !wrapper_token.value) return;
     EnterCriticalSection( &xaml_event_cs );
-    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    if (reg->entries)
     {
-        if (reg->entries[i].handler && reg->entries[i].token == wrapper_token.value)
+        for (i = 0; i < reg->cap; i++)
         {
-            inner_tokens[i] = inner_token;
-            break;
+            if (reg->entries[i].handler && reg->entries[i].token == wrapper_token.value)
+            {
+                if (i < 64) inner_tokens[i] = inner_token;
+                break;
+            }
         }
     }
     LeaveCriticalSection( &xaml_event_cs );
@@ -309,23 +312,29 @@ static HRESULT xaml_event_registry_remove_with_inner( struct xaml_event_registry
     if (out_inner_token) out_inner_token->value = 0;
     if (out_found) *out_found = FALSE;
     if (!reg) return E_INVALIDARG;
+    if (__atomic_load_n( &reg->count, __ATOMIC_ACQUIRE ) == 0) return S_OK;
     EnterCriticalSection( &xaml_event_cs );
-    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    if (reg->entries)
     {
-        if (reg->entries[i].handler && reg->entries[i].token == token.value)
+        for (i = 0; i < reg->cap; i++)
         {
-            void *h = reg->entries[i].handler;
-            reg->entries[i].handler = NULL;
-            reg->entries[i].token = 0;
-            if (inner_tokens)
+            if (reg->entries[i].handler && reg->entries[i].token == token.value)
             {
-                if (out_inner_token) *out_inner_token = inner_tokens[i];
-                inner_tokens[i].value = 0;
+                void *h = reg->entries[i].handler;
+                reg->entries[i].handler = NULL;
+                reg->entries[i].token = 0;
+                if (reg->count > 0)
+                    __atomic_store_n( &reg->count, (UINT16)(reg->count - 1), __ATOMIC_RELEASE );
+                if (inner_tokens && i < 64)
+                {
+                    if (out_inner_token) *out_inner_token = inner_tokens[i];
+                    inner_tokens[i].value = 0;
+                }
+                if (out_found) *out_found = TRUE;
+                LeaveCriticalSection( &xaml_event_cs );
+                IUnknown_Release( (IUnknown *)h );
+                return S_OK;
             }
-            if (out_found) *out_found = TRUE;
-            LeaveCriticalSection( &xaml_event_cs );
-            IUnknown_Release( (IUnknown *)h );
-            return S_OK;
         }
     }
     LeaveCriticalSection( &xaml_event_cs );

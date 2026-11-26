@@ -30,26 +30,38 @@
 #include "dp_vsm_private.h"
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-IInspectable *box_double_value( double d )
+static INIT_ONCE g_pvs_once = INIT_ONCE_STATIC_INIT;
+static IPropertyValueStatics *g_pvs_singleton = NULL;
+
+static BOOL WINAPI init_pvs_once( INIT_ONCE *once, void *param, void **ctx )
 {
     IActivationFactory *fac = NULL;
-    IPropertyValueStatics *pvs = NULL;
-    IInspectable *out = NULL;
     HSTRING hcls = NULL;
 
-    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &hcls )))
+    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &hcls )) && hcls)
     {
         if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IActivationFactory, (void **)&fac )) && fac)
         {
-            if (SUCCEEDED(IActivationFactory_QueryInterface( fac, &IID_IPropertyValueStatics, (void **)&pvs )) && pvs)
-            {
-                IPropertyValueStatics_CreateDouble( pvs, d, &out );
-                IPropertyValueStatics_Release( pvs );
-            }
+            IActivationFactory_QueryInterface( fac, &IID_IPropertyValueStatics, (void **)&g_pvs_singleton );
             IActivationFactory_Release( fac );
         }
         WindowsDeleteString( hcls );
     }
+    return g_pvs_singleton != NULL;
+}
+
+IPropertyValueStatics *uwp_get_property_value_statics( void )
+{
+    InitOnceExecuteOnce( &g_pvs_once, init_pvs_once, NULL, NULL );
+    return g_pvs_singleton;
+}
+
+IInspectable *box_double_value( double d )
+{
+    IPropertyValueStatics *pvs = uwp_get_property_value_statics();
+    IInspectable *out = NULL;
+
+    if (pvs) IPropertyValueStatics_CreateDouble( pvs, d, &out );
     return out;
 }
 
@@ -324,73 +336,35 @@ static IInspectable *box_color_value( UINT32 argb )
 
 IInspectable *box_string_value( const WCHAR *str )
 {
-    IActivationFactory *fac = NULL;
-    IPropertyValueStatics *pvs = NULL;
+    IPropertyValueStatics *pvs = uwp_get_property_value_statics();
     IInspectable *out = NULL;
-    HSTRING hcls = NULL, hval = NULL;
+    HSTRING hval = NULL;
 
     if (!str) str = L"";
-    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &hcls )))
+    if (pvs)
     {
-        if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IActivationFactory, (void **)&fac )) && fac)
-        {
-            if (SUCCEEDED(IActivationFactory_QueryInterface( fac, &IID_IPropertyValueStatics, (void **)&pvs )) && pvs)
-            {
-                WindowsCreateString( str, wcslen(str), &hval );
-                IPropertyValueStatics_CreateString( pvs, hval, &out );
-                if (hval) WindowsDeleteString( hval );
-                IPropertyValueStatics_Release( pvs );
-            }
-            IActivationFactory_Release( fac );
-        }
-        WindowsDeleteString( hcls );
+        WindowsCreateString( str, wcslen(str), &hval );
+        IPropertyValueStatics_CreateString( pvs, hval, &out );
+        if (hval) WindowsDeleteString( hval );
     }
     return out;
 }
 
 IInspectable *box_int32_value( INT32 v )
 {
-    IActivationFactory *fac = NULL;
-    IPropertyValueStatics *pvs = NULL;
+    IPropertyValueStatics *pvs = uwp_get_property_value_statics();
     IInspectable *out = NULL;
-    HSTRING hcls = NULL;
 
-    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &hcls )))
-    {
-        if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IActivationFactory, (void **)&fac )) && fac)
-        {
-            if (SUCCEEDED(IActivationFactory_QueryInterface( fac, &IID_IPropertyValueStatics, (void **)&pvs )) && pvs)
-            {
-                IPropertyValueStatics_CreateInt32( pvs, v, &out );
-                IPropertyValueStatics_Release( pvs );
-            }
-            IActivationFactory_Release( fac );
-        }
-        WindowsDeleteString( hcls );
-    }
+    if (pvs) IPropertyValueStatics_CreateInt32( pvs, v, &out );
     return out;
 }
 
 IInspectable *box_bool_value( boolean b )
 {
-    IActivationFactory *fac = NULL;
-    IPropertyValueStatics *pvs = NULL;
+    IPropertyValueStatics *pvs = uwp_get_property_value_statics();
     IInspectable *out = NULL;
-    HSTRING hcls = NULL;
 
-    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &hcls )))
-    {
-        if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IActivationFactory, (void **)&fac )) && fac)
-        {
-            if (SUCCEEDED(IActivationFactory_QueryInterface( fac, &IID_IPropertyValueStatics, (void **)&pvs )) && pvs)
-            {
-                IPropertyValueStatics_CreateBoolean( pvs, b, &out );
-                IPropertyValueStatics_Release( pvs );
-            }
-            IActivationFactory_Release( fac );
-        }
-        WindowsDeleteString( hcls );
-    }
+    if (pvs) IPropertyValueStatics_CreateBoolean( pvs, b, &out );
     return out;
 }
 

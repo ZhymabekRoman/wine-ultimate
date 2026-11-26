@@ -305,6 +305,7 @@ static void uwp_fire_img_opened_reg( struct uwp_element *target )
             IUnknown_Release( (IUnknown *)h );
         }
     }
+    if (args) IInspectable_Release( args );
     free( handlers );
 }
 

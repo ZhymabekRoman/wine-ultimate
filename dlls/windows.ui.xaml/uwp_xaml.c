@@ -1144,7 +1144,10 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     if (*out)
     {
         TRACE( "uwp_nondelegating_QI: matched %s -> %p on %s\n", debugstr_guid(iid), *out, debugstr_w(impl->class_name) );
-        uwp_sub_AddRef( (IInspectable *)*out );
+        if (impl->delegating && impl->outer)
+            IInspectable_AddRef( impl->outer );
+        else
+            InterlockedIncrement( &impl->ref );
         return S_OK;
     }
 
@@ -2235,20 +2238,97 @@ static struct uwp_dp_changed_args g_dp_routed_args = { (const void *)dp_changed_
  * calls GetRuntimeClassName on it, so it must be an element face naming
  * RoutedEventArgs. */
 struct uwp_element *g_routed_args_el = NULL;
+struct uwp_routed_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+};
+
+static HRESULT WINAPI uwp_routed_args_QI( IInspectable *iface, REFIID iid, void **out )
+{
+    struct uwp_routed_args *a = CONTAINING_RECORD( iface, struct uwp_routed_args, IInspectable_iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_QI_UWP ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_Clone_UWP ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs2_UWP ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_WinUI3 ))
+    {
+        *out = iface;
+        InterlockedIncrement( &a->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_routed_args_AddRef( IInspectable *iface )
+{
+    struct uwp_routed_args *a = CONTAINING_RECORD( iface, struct uwp_routed_args, IInspectable_iface );
+    return InterlockedIncrement( &a->ref );
+}
+static ULONG WINAPI uwp_routed_args_Release( IInspectable *iface )
+{
+    struct uwp_routed_args *a = CONTAINING_RECORD( iface, struct uwp_routed_args, IInspectable_iface );
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI uwp_routed_args_GetIids( IInspectable *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_routed_args_GetRuntimeClassName( IInspectable *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.UI.Xaml.RoutedEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI uwp_routed_args_GetTrustLevel( IInspectable *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_routed_args_get_OriginalSource( void *iface, IInspectable **out )
+{
+    if (!out) return E_POINTER;
+    if (g_routed_args_el)
+    {
+        IInspectable *src = g_routed_args_el->outer ? g_routed_args_el->outer : &g_routed_args_el->IInspectable_iface;
+        IInspectable_AddRef( src );
+        *out = src;
+    }
+    else
+    {
+        *out = NULL;
+    }
+    return S_OK;
+}
+static const void *const uwp_routed_args_vtbl[16] =
+{
+    uwp_routed_args_QI,
+    uwp_routed_args_AddRef,
+    uwp_routed_args_Release,
+    uwp_routed_args_GetIids,
+    uwp_routed_args_GetRuntimeClassName,
+    uwp_routed_args_GetTrustLevel,
+    uwp_routed_args_get_OriginalSource,
+    [7 ... 15] = uwp_generic_noop,
+};
+
 /* McgMarshal caches the RCW (__ComObject) per IUnknown pointer and pins its
  * interop type at the first crossing.  Handlers registered on one element
  * often use distinct delegate args types (RoutedEventArgs vs RoutedEventArgs2),
- * so each fire allocates its own args object to keep cached RCW types matching. */
+ * so each fire allocates its own lightweight args object to keep cached RCW types matching. */
 void *g_routed_args(void)
 {
-    void *inst = NULL;
-    struct uwp_element *el;
-    uwp_element_create( L"Windows.UI.Xaml.RoutedEventArgs", NULL, NULL, &inst );
-    el = uwp_elem_from_any( inst );
-    if (el && !g_routed_args_el) g_routed_args_el = el;
-    if (el && el->outer) return el->outer;
-    if (el) return &el->IInspectable_iface;
-    return &g_dp_routed_args;
+    struct uwp_routed_args *a = malloc( sizeof(*a) );
+    if (!a) return &g_dp_routed_args;
+    a->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_routed_args_vtbl;
+    a->ref = 1;
+    return &a->IInspectable_iface;
 }
 #define g_dummy_routed_args g_routed_args()
 
@@ -2388,12 +2468,14 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                         {
                             HRESULT (WINAPI *on_nav)(void *, void *) = (void *)(*(void ***)page_ovr)[7];
                             HRESULT nav_hr = S_OK;
+                            IInspectable *fallback_args = nea ? NULL : (IInspectable *)g_routed_args();
                             __TRY
                             {
-                                nav_hr = on_nav ? on_nav( page_ovr, nea ? (void *)&nea->INavigationEventArgs_iface : g_routed_args() ) : S_OK;
+                                nav_hr = on_nav ? on_nav( page_ovr, nea ? (void *)&nea->INavigationEventArgs_iface : (void *)fallback_args ) : S_OK;
                             }
                             __EXCEPT_ALL { nav_hr = E_FAIL; }
                             __ENDTRY;
+                            if (fallback_args) IInspectable_Release( fallback_args );
                             TRACE( "uwp_frame_navigate_impl OnNavigatedTo -> hr %#lx\n", nav_hr );
                             IUnknown_Release( (IUnknown *)page_ovr );
                         }
@@ -2409,14 +2491,16 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                         for (hi = 0; hi < cnt; hi++)
                         {
                             struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
+                            IInspectable *fallback_args = nea ? NULL : (IInspectable *)g_routed_args();
                             TRACE( "uwp_frame_navigate_impl firing Navigated[%u] on %s (%s)\n",
                                    hi, debugstr_w(impl->class_name), debugstr_w(impl->name) );
                             __TRY
                             {
-                                h->lpVtbl->Invoke( h, sender, nea ? &nea->INavigationEventArgs_iface : g_routed_args() );
+                                h->lpVtbl->Invoke( h, sender, nea ? &nea->INavigationEventArgs_iface : fallback_args );
                             }
                             __EXCEPT_ALL { WARN( "Frame::Navigated[%u] threw\n", hi ); }
                             __ENDTRY;
+                            if (fallback_args) IInspectable_Release( fallback_args );
                             IUnknown_Release( (IUnknown *)handlers[hi] );
                         }
                         free( handlers );

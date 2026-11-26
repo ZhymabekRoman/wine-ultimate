@@ -45,10 +45,25 @@ UINT64 xbf_aot_compute_hash( const BYTE *xbf, DWORD xbf_sz, const WCHAR *root_cl
     DWORD i;
     const BYTE *p;
 
-    for (i = 0; i < xbf_sz; i++)
+    if (xbf_is_immutable_pri_blob( xbf, xbf_sz ))
     {
-        h ^= xbf[i];
+        uintptr_t ptr_val = (uintptr_t)xbf;
+        h ^= 0x5au;
         h *= 1099511628211ULL;
+        p = (const BYTE *)&ptr_val;
+        for (i = 0; i < sizeof(ptr_val); i++)
+        {
+            h ^= p[i];
+            h *= 1099511628211ULL;
+        }
+    }
+    else
+    {
+        for (i = 0; i < xbf_sz; i++)
+        {
+            h ^= xbf[i];
+            h *= 1099511628211ULL;
+        }
     }
     p = (const BYTE *)&xbf_sz;
     for (i = 0; i < sizeof(xbf_sz); i++)
@@ -196,13 +211,13 @@ UINT32 xbf_aot_append_setters( struct xbf_aot_builder *b, const struct uwp_style
     return start;
 }
 
-void xbf_aot_snapshot_vsm( struct xbf_aot_builder *b, struct uwp_element *root_el, int start_group_idx )
+void xbf_aot_snapshot_vsm( struct xbf_aot_builder *b, const struct xbf_vsm_holder *holder, int start_group_idx )
 {
     int g, s, t;
-    if (!b || b->aborted || !root_el || start_group_idx >= root_el->vsm_group_cnt) return;
-    for (g = start_group_idx; g < root_el->vsm_group_cnt; g++)
+    if (!b || b->aborted || !holder || start_group_idx >= holder->vsm_group_cnt) return;
+    for (g = start_group_idx; g < holder->vsm_group_cnt; g++)
     {
-        const struct uwp_vsm_group *src_g = &root_el->vsm_groups[g];
+        const struct uwp_vsm_group *src_g = &holder->vsm_groups[g];
         struct xbf_aot_vsm_group *dst_g;
         UINT32 state_start = b->vsm_state_cnt;
 

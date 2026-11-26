@@ -551,8 +551,6 @@ void uwp_sync_all_template_presenters( struct uwp_element *impl )
     }
 }
 
-static SRWLOCK g_setval_lock = SRWLOCK_INIT;
-
 static BOOL uwp_dp_values_equal( IInspectable *a, IInspectable *b )
 {
     boolean ba = FALSE, bb = FALSE;
@@ -626,49 +624,44 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     IInspectable *old_val = NULL;
-    WCHAR str_val[2048] = {0};
     int i;
-    static struct { DWORD tid; struct uwp_element *el; void *dp; IInspectable *val; } setval_stack[64];
-    static int setval_depth = 0;
-    DWORD cur_tid = GetCurrentThreadId();
+    static __thread struct { struct uwp_element *el; void *dp; IInspectable *val; } setval_stack[64];
+    static __thread int setval_depth = 0;
     BOOL found_existing = FALSE;
     BOOL same_val = FALSE;
     BOOL pushed_setval = FALSE;
     int si;
 
     if (!impl || !dp) return S_OK;
-    AcquireSRWLockExclusive( &g_setval_lock );
     for (si = 0; si < setval_depth; si++)
     {
-        if (setval_stack[si].tid == cur_tid && setval_stack[si].el == impl &&
+        if (setval_stack[si].el == impl &&
             setval_stack[si].dp == dp && uwp_dp_values_equal( setval_stack[si].val, val ))
-        {
-            ReleaseSRWLockExclusive( &g_setval_lock );
             return S_OK;
-        }
     }
     if (setval_depth >= (int)ARRAY_SIZE(setval_stack))
-    {
-        ReleaseSRWLockExclusive( &g_setval_lock );
         return S_OK;
-    }
-    ReleaseSRWLockExclusive( &g_setval_lock );
 
     if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
 
     /* Check if val is a string (e.g. CalculationResult.DisplayValue or Content) */
-    if (val && uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
+    if (val)
     {
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
         const WCHAR *dpn = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
         if (uwp_should_sync_display_text( impl, dpn ))
         {
-            uwp_elem_set_text( impl, str_val );
-            if (impl->tpl_normal_output)
-                uwp_elem_set_text( impl->tpl_normal_output, str_val );
-            TRACE( "SetValue updated display text on %s (%s) -> %s\n",
-                   debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_val) );
-            uwp_invalidate_window();
+            WCHAR str_val[2048];
+            str_val[0] = 0;
+            if (uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
+            {
+                uwp_elem_set_text( impl, str_val );
+                if (impl->tpl_normal_output)
+                    uwp_elem_set_text( impl->tpl_normal_output, str_val );
+                TRACE( "SetValue updated display text on %s (%s) -> %s\n",
+                       debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_val) );
+                uwp_invalidate_window();
+            }
         }
     }
     {
@@ -893,17 +886,14 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         return S_OK;
     }
 
-    AcquireSRWLockExclusive( &g_setval_lock );
     if (setval_depth < (int)ARRAY_SIZE(setval_stack))
     {
-        setval_stack[setval_depth].tid = cur_tid;
         setval_stack[setval_depth].el = impl;
         setval_stack[setval_depth].dp = dp;
         setval_stack[setval_depth].val = val;
         setval_depth++;
         pushed_setval = TRUE;
     }
-    ReleaseSRWLockExclusive( &g_setval_lock );
 
     /* Fire PropertyMetadata PropertyChangedCallback if present */
     {
@@ -1046,16 +1036,14 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     }
     if (pushed_setval)
     {
-        AcquireSRWLockExclusive( &g_setval_lock );
         for (si = setval_depth - 1; si >= 0; si--)
         {
-            if (setval_stack[si].tid == cur_tid && setval_stack[si].el == impl && setval_stack[si].dp == dp)
+            if (setval_stack[si].el == impl && setval_stack[si].dp == dp)
             {
                 setval_stack[si] = setval_stack[--setval_depth];
                 break;
             }
         }
-        ReleaseSRWLockExclusive( &g_setval_lock );
     }
 
     if (uwp_is_items_repeater( impl ))

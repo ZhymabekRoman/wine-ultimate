@@ -1806,9 +1806,11 @@ void uwp_ui_fire_got_focus( struct uwp_element *el )
         {
             struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
             IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
-            __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+            IInspectable *args = (IInspectable *)g_routed_args();
+            __TRY { h->lpVtbl->Invoke( h, sender, args ); }
             __EXCEPT_ALL { }
             __ENDTRY;
+            if (args) IInspectable_Release( args );
             IUnknown_Release( (IUnknown *)h );
         }
         free( handlers );
@@ -1828,9 +1830,11 @@ void uwp_ui_fire_lost_focus( struct uwp_element *el )
         {
             struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
             IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
-            __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+            IInspectable *args = (IInspectable *)g_routed_args();
+            __TRY { h->lpVtbl->Invoke( h, sender, args ); }
             __EXCEPT_ALL { }
             __ENDTRY;
+            if (args) IInspectable_Release( args );
             IUnknown_Release( (IUnknown *)h );
         }
         free( handlers );

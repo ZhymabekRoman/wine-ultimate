@@ -927,15 +927,18 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
                 prev_sp = (c == ' ');
             }
         }
+        if (out_i >= ARRAY_SIZE(entry->text)) out_i = ARRAY_SIZE(entry->text) - 1;
         clean_buf[out_i] = 0;
         text = clean_buf;
         tlen = out_i;
         if (!tlen) return;
     }
+    else if (tlen >= ARRAY_SIZE(entry->text))
+    {
+        tlen = ARRAY_SIZE(entry->text) - 1;
+    }
 
     uwp_resolve_font_family( font_family, face, ARRAY_SIZE(face) );
-    if (wcsicmp( face, L"Segoe UI" ) != 0 && !xaml_gpu_font_has_glyphs( face, text ))
-        lstrcpynW( face, L"Segoe UI", ARRAY_SIZE(face) );
 
     align_flags = (dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_WORDBREAK | DT_EDITCONTROL)) | DT_NOPREFIX;
     h = fnv1a_bytes( &font_height, sizeof(font_height), 0 );
@@ -974,9 +977,14 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
     {
         UINT ax = 0, ay = 0, y, x;
         RECT local_rc = { 0, 0, (LONG)bw, (LONG)bh };
-        HFONT hf = xaml_gpu_get_font( face, font_height, font_weight );
+        const WCHAR *render_face = face;
+        HFONT hf;
         HGDIOBJ old_font;
         D3D11_BOX dst_box;
+
+        if (wcsicmp( face, L"Segoe UI" ) != 0 && !xaml_gpu_font_has_glyphs( face, text ))
+            render_face = L"Segoe UI";
+        hf = xaml_gpu_get_font( render_face, font_height, font_weight );
 
         if (!atlas_alloc_rect( ctx, bw, bh, &ax, &ay ))
             return;
@@ -1181,8 +1189,8 @@ void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, c
         memcpy( inst->uv, entry->uv, sizeof(inst->uv) );
     }
     inst->params[0] = 0.0f;
-    inst->params[1] = opacity;
-    inst->params[2] = 1.0f;
+    inst->params[1] = 1.0f; /* Atlas quad */
+    inst->params[2] = opacity;
     inst->params[3] = 0.0f;
 }
 

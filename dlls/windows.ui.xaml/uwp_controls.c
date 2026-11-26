@@ -291,9 +291,11 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
             for (k = 0; k < count; k++)
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[k];
-                __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+                IInspectable *args = (IInspectable *)g_routed_args();
+                __TRY { h->lpVtbl->Invoke( h, sender, args ); }
                 __EXCEPT_ALL {}
                 __ENDTRY;
+                if (args) IInspectable_Release( args );
                 IUnknown_Release( (IUnknown *)handlers[k] );
             }
             free( handlers );
@@ -630,12 +632,50 @@ const void *uwp_tbtn_vtbl[32] =
     [15 ... 31] = uwp_generic_noop,
 };
 
+static SRWLOCK g_open_popups_lock = SRWLOCK_INIT;
+static struct uwp_element *g_open_popups[16];
+static int g_open_popup_cnt = 0;
+
+static void uwp_open_popups_track( struct uwp_element *impl, BOOL open )
+{
+    int i;
+    AcquireSRWLockExclusive( &g_open_popups_lock );
+    if (open)
+    {
+        for (i = 0; i < g_open_popup_cnt; i++)
+            if (g_open_popups[i] == impl) { ReleaseSRWLockExclusive( &g_open_popups_lock ); return; }
+        if (g_open_popup_cnt < (int)ARRAY_SIZE(g_open_popups))
+        {
+            g_open_popups[g_open_popup_cnt] = impl;
+            __atomic_store_n( &g_open_popup_cnt, g_open_popup_cnt + 1, __ATOMIC_RELEASE );
+        }
+    }
+    else
+    {
+        for (i = 0; i < g_open_popup_cnt; i++)
+        {
+            if (g_open_popups[i] == impl)
+            {
+                if (i + 1 < g_open_popup_cnt)
+                    memmove( &g_open_popups[i], &g_open_popups[i + 1],
+                             (size_t)(g_open_popup_cnt - i - 1) * sizeof(g_open_popups[0]) );
+                g_open_popups[g_open_popup_cnt - 1] = NULL;
+                __atomic_store_n( &g_open_popup_cnt, g_open_popup_cnt - 1, __ATOMIC_RELEASE );
+                break;
+            }
+        }
+    }
+    ReleaseSRWLockExclusive( &g_open_popups_lock );
+}
+
 void uwp_popup_set_open( struct uwp_element *impl, BOOL open )
 {
     BOOL prev;
     if (!impl) return;
     prev = impl->is_dropdown_open;
     impl->is_dropdown_open = (open != 0);
+    if (impl->kind == UWP_KIND_POPUP)
+        uwp_open_popups_track( impl, impl->is_dropdown_open );
     if (impl->is_dropdown_open && impl->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( impl->content );
@@ -660,9 +700,11 @@ void uwp_popup_set_open( struct uwp_element *impl, BOOL open )
         for (i = 0; i < count; i++)
         {
             struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
-            __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+            IInspectable *args = (IInspectable *)g_routed_args();
+            __TRY { h->lpVtbl->Invoke( h, sender, args ); }
             __EXCEPT_ALL {}
             __ENDTRY;
+            if (args) IInspectable_Release( args );
             IUnknown_Release( (IUnknown *)handlers[i] );
         }
         free( handlers );
@@ -673,19 +715,21 @@ void uwp_popup_set_open( struct uwp_element *impl, BOOL open )
 
 int uwp_get_open_popups( struct uwp_element **out_list, int max_cnt )
 {
-    struct uwp_element *el;
-    int cnt = 0;
-    AcquireSRWLockShared( &g_all_uwp_elems_lock );
-    for (el = g_all_uwp_elems_head; el; el = el->next_reg)
+    int i, cnt = 0;
+    if (__atomic_load_n( &g_open_popup_cnt, __ATOMIC_ACQUIRE ) == 0)
+        return 0;
+    AcquireSRWLockShared( &g_open_popups_lock );
+    for (i = 0; i < g_open_popup_cnt; i++)
     {
-        if (el->kind == UWP_KIND_POPUP && el->is_dropdown_open && el->content && el->visibility == 0)
+        struct uwp_element *el = g_open_popups[i];
+        if (el && el->kind == UWP_KIND_POPUP && el->is_dropdown_open && el->content && el->visibility == 0)
         {
             if (out_list && cnt < max_cnt)
                 out_list[cnt] = el;
             cnt++;
         }
     }
-    ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+    ReleaseSRWLockShared( &g_open_popups_lock );
     return out_list ? min( cnt, max_cnt ) : cnt;
 }
 

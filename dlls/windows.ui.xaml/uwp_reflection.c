@@ -221,22 +221,9 @@ void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
                                     ts.Duration = (INT64)(wcstod( str_val, NULL ) * 10000000.0);
                                 }
                                 {
-                                    HSTRING h_pv = NULL;
-                                    IActivationFactory *fac = NULL;
-                                    IPropertyValueStatics *pvs = NULL;
-                                    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &h_pv )) && h_pv)
-                                    {
-                                        if (SUCCEEDED(RoGetActivationFactory( h_pv, &IID_IActivationFactory, (void **)&fac )) && fac)
-                                        {
-                                            if (SUCCEEDED(IActivationFactory_QueryInterface( fac, &IID_IPropertyValueStatics, (void **)&pvs )) && pvs)
-                                            {
-                                                IPropertyValueStatics_CreateTimeSpan( pvs, ts, (IInspectable **)&boxed_val );
-                                                IPropertyValueStatics_Release( pvs );
-                                            }
-                                            IActivationFactory_Release( fac );
-                                        }
-                                        WindowsDeleteString( h_pv );
-                                    }
+                                    IPropertyValueStatics *pvs = uwp_get_property_value_statics();
+                                    if (pvs)
+                                        IPropertyValueStatics_CreateTimeSpan( pvs, ts, (IInspectable **)&boxed_val );
                                 }
                                 hr = boxed_val ? S_OK : E_FAIL;
                                 is_bool_type = TRUE; /* prevent CreateFromString fallback */

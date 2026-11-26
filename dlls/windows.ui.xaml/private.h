@@ -190,7 +190,9 @@ struct xaml_event_entry
 
 struct xaml_event_registry
 {
-    struct xaml_event_entry entries[64];
+    struct xaml_event_entry *entries;
+    UINT16 count;
+    UINT16 cap;
     INT64 next_token;
 };
 

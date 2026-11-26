@@ -419,6 +419,33 @@ static INIT_ONCE g_pri_xbf_cat_once = INIT_ONCE_STATIC_INIT;
 struct pri_xbf_catalog g_winui_pri_cat = {0};
 BOOL g_winui_pri_cat_done = FALSE;
 
+BOOL xbf_is_immutable_pri_blob( const BYTE *xbf, DWORD xbf_sz )
+{
+    DWORD k;
+    if (!xbf || !xbf_sz) return FALSE;
+    if (g_pri_data && xbf >= g_pri_data && xbf_sz <= g_pri_size &&
+        (DWORD)(xbf - g_pri_data) <= g_pri_size - xbf_sz)
+        return TRUE;
+    if (g_winui_pri_data && xbf >= g_winui_pri_data && xbf_sz <= g_winui_pri_size &&
+        (DWORD)(xbf - g_winui_pri_data) <= g_winui_pri_size - xbf_sz)
+        return TRUE;
+    for (k = 0; k < g_pri_cat.cnt; k++)
+    {
+        const BYTE *d = g_pri_cat.entries[k].data;
+        DWORD sz = g_pri_cat.entries[k].size;
+        if (d && xbf >= d && xbf_sz <= sz && (DWORD)(xbf - d) <= sz - xbf_sz)
+            return TRUE;
+    }
+    for (k = 0; k < g_winui_pri_cat.cnt; k++)
+    {
+        const BYTE *d = g_winui_pri_cat.entries[k].data;
+        DWORD sz = g_winui_pri_cat.entries[k].size;
+        if (d && xbf >= d && xbf_sz <= sz && (DWORD)(xbf - d) <= sz - xbf_sz)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 BOOL pri_xbf_collect_cb( const char *path, const BYTE *xbf, DWORD sz, void *ctx )
 {
     struct pri_xbf_catalog *cat = ctx;

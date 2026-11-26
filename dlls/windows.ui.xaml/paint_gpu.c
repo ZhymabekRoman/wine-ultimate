@@ -2911,6 +2911,7 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
 
     TRACE( "xaml_layout_render_gpu: %ux%u instances=%u atlas_hits=%u atlas_misses=%u\n",
            width, height, inst_cnt, hits, misses );
+    if (TRACE_ON(xaml))
     {
         HDC probe = GetDC( hwnd );
         if (probe)

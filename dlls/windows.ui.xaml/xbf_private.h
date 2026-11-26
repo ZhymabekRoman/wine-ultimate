@@ -242,6 +242,13 @@ BOOL xbf_read_style_defer_table( struct xbf_ctx *ctx, DWORD *io_p, DWORD end_p,
 BOOL xbf_read_rd_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
                                DWORD def_sub_sz, struct xbf_rd_table *tbl, int *io_prop_sp );
 
+struct xbf_vsm_holder
+{
+    struct uwp_vsm_group *vsm_groups;
+    int vsm_group_cnt;
+    int vsm_group_cap;
+};
+
 /* xbf_aot.c */
 UINT64 xbf_aot_compute_hash( const BYTE *xbf, DWORD xbf_sz, const WCHAR *root_cls, int only_sub_idx );
 UINT32 xbf_aot_intern_str( struct xbf_aot_builder *b, const WCHAR *s );
@@ -253,7 +260,7 @@ UINT32 xbf_aot_add_node( struct xbf_aot_builder *b, const WCHAR *cls_name, const
 void xbf_aot_emit_op( struct xbf_aot_builder *b, const struct xbf_aot_op *op_in );
 void xbf_aot_add_defer( struct xbf_aot_builder *b, const WCHAR *name, int sub_idx, UINT32 parent_panel_idx );
 UINT32 xbf_aot_append_setters( struct xbf_aot_builder *b, const struct uwp_style_setter *setters, int cnt );
-void xbf_aot_snapshot_vsm( struct xbf_aot_builder *b, struct uwp_element *root_el, int start_group_idx );
+void xbf_aot_snapshot_vsm( struct xbf_aot_builder *b, const struct xbf_vsm_holder *holder, int start_group_idx );
 void xbf_aot_builder_free( struct xbf_aot_builder *b );
 struct xbf_aot_header *xbf_aot_finalize( struct xbf_aot_builder *b, const struct xbf_ctx *ctx );
 struct xbf_aot_cache_slot *xbf_aot_cache_acquire( UINT64 hash, DWORD xbf_sz, int only_sub_idx );

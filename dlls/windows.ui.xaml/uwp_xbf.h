@@ -180,6 +180,7 @@ extern char g_loaded_res_xbfs[128][256];
 
 /* PRI / XBF decode, instantiation, deferred realization & metadata cache APIs */
 void ensure_winui_pri_cat( void );
+BOOL xbf_is_immutable_pri_blob( const BYTE *xbf, DWORD xbf_sz );
 const BYTE *pri_get_data( DWORD *out_size );
 const BYTE *winui_pri_get_data( DWORD *out_size );
 void pri_map_file_to( const WCHAR *pri_path, const BYTE **out_data, DWORD *out_size );

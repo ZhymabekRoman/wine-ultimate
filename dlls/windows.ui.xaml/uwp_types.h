@@ -953,6 +953,7 @@ extern SRWLOCK g_all_uwp_elems_lock;
 extern struct uwp_element *g_last_created_page;
 
 /* Boxing / unboxing / reflection helpers */
+IPropertyValueStatics *uwp_get_property_value_statics( void );
 IInspectable *box_bool_value( boolean b );
 IInspectable *box_double_value( double d );
 IInspectable *box_int32_value( INT32 v );

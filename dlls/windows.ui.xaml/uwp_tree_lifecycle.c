@@ -329,11 +329,12 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
             if (el->loaded_handlers[i])
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)el->loaded_handlers[i];
+                IInspectable *args = (IInspectable *)g_routed_args();
                 TRACE( "Firing Loaded handler[%d] on %s (%s)\n",
                        i, debugstr_w(el->class_name), debugstr_w(el->name) );
                 __TRY
                 {
-                    HRESULT lhr = h->lpVtbl->Invoke( h, sender, g_routed_args() );
+                    HRESULT lhr = h->lpVtbl->Invoke( h, sender, args );
                     if (FAILED(lhr))
                         WARN( "Loaded handler[%d] on %s (%s) returned hr %#lx\n",
                               i, debugstr_w(el->class_name), debugstr_w(el->name), lhr );
@@ -347,6 +348,7 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
                           debugstr_w( g_routed_args_el ? g_routed_args_el->class_name : L"?" ) );
                 }
                 __ENDTRY;
+                if (args) IInspectable_Release( args );
             }
         }
         /* EVC is fired during Arrange (uwp_fire_evc_if_needed) once Measure has run. */

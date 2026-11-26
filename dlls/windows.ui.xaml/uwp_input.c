@@ -421,9 +421,11 @@ void uwp_invoke_button( struct uwp_element *btn )
                 HMODULE mod = NULL;
                 void *inv = h->lpVtbl->Invoke;
                 HRESULT chr;
+                IInspectable *args = (IInspectable *)g_routed_args();
                 GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                     (LPCSTR)inv, &mod );
-                chr = h->lpVtbl->Invoke( h, sender, g_routed_args() );
+                chr = h->lpVtbl->Invoke( h, sender, args );
+                if (args) IInspectable_Release( args );
                 WARN( "uwp_invoke_button: Click[%d] h=%p inv=%p (mod=%p +0x%lx) sender=%p -> hr=%#lx\n",
                       i, h, inv, mod, mod ? (unsigned long)((const char *)inv - (const char *)mod) : 0ul,
                       sender, (unsigned long)chr );

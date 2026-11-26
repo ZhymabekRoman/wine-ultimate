@@ -55,7 +55,26 @@ static void xbf_compile_emit_rd_store( struct xbf_aot_builder *aot, UINT32 paren
     xbf_aot_emit_op( aot, &aop );
 }
 
-static void xbf_vsm_holder_free( struct uwp_element *holder )
+static struct uwp_vsm_group *xbf_vsm_holder_add_group( struct xbf_vsm_holder *holder, const WCHAR *name )
+{
+    struct uwp_vsm_group *g;
+    if (!holder) return NULL;
+    if (holder->vsm_group_cnt >= holder->vsm_group_cap)
+    {
+        int ncap = holder->vsm_group_cap ? holder->vsm_group_cap * 2 : 4;
+        struct uwp_vsm_group *ng = realloc( holder->vsm_groups, (size_t)ncap * sizeof(*ng) );
+        if (!ng) return NULL;
+        holder->vsm_groups = ng;
+        holder->vsm_group_cap = ncap;
+    }
+    g = &holder->vsm_groups[holder->vsm_group_cnt++];
+    memset( g, 0, sizeof(*g) );
+    g->active_state_idx = -1;
+    if (name && name[0]) lstrcpynW( g->name, name, ARRAY_SIZE(g->name) );
+    return g;
+}
+
+static void xbf_vsm_holder_free( struct xbf_vsm_holder *holder )
 {
     int g, s;
     if (!holder) return;
@@ -66,12 +85,14 @@ static void xbf_vsm_holder_free( struct uwp_element *holder )
         free( holder->vsm_groups[g].states );
     }
     free( holder->vsm_groups );
-    free( holder );
+    holder->vsm_groups = NULL;
+    holder->vsm_group_cnt = 0;
+    holder->vsm_group_cap = 0;
 }
 
 static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_initial_root,
                                    const struct xbf_rd_table *rd_tbl, UINT32 active_rd_node_idx,
-                                   struct uwp_element *vsm_holder )
+                                   struct xbf_vsm_holder *vsm_holder )
 {
     DWORD sub_start = 0, end_p = 0, sub_sz = 0, p;
     struct xbf_stack_val val_stack[64];
@@ -244,12 +265,12 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
             if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && vsm_holder)
             {
                 if (tid == XBF_TYPE_VISUAL_STATE_GROUP)
-                    uwp_vsm_add_group( vsm_holder, NULL );
+                    xbf_vsm_holder_add_group( vsm_holder, NULL );
                 else if (tid == XBF_TYPE_VISUAL_STATE)
                 {
                     struct uwp_vsm_group *grp = (vsm_holder->vsm_group_cnt > 0)
                         ? &vsm_holder->vsm_groups[vsm_holder->vsm_group_cnt - 1]
-                        : uwp_vsm_add_group( vsm_holder, L"DefaultGroup" );
+                        : xbf_vsm_holder_add_group( vsm_holder, L"DefaultGroup" );
                     uwp_vsm_add_state( grp, NULL );
                 }
             }
@@ -1020,7 +1041,8 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
     struct xbf_ctx ctx = {0};
     struct xbf_aot_builder aot_b = {0};
     struct uwp_element *root_el_pre;
-    struct uwp_element *vsm_holder = NULL;
+    struct xbf_vsm_holder vsm_holder_storage = {0};
+    struct xbf_vsm_holder *vsm_holder = NULL;
     struct xbf_aot_header *tpl = NULL;
     LARGE_INTEGER t0 = {0}, t1 = {0}, freq = {0};
     BOOL is_template = (out_created != NULL && attach_root == NULL);
@@ -1252,7 +1274,7 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
 
     /* 4. Compile Node Substreams to AOT IR (no live UI/COM side effects) */
     if (!rd_only && ctx.root_el)
-        vsm_holder = calloc( 1, sizeof(*vsm_holder) );
+        vsm_holder = &vsm_holder_storage;
 
     ctx.nodes = xbf + 12 + ctx.meta_sz;
     if (ctx.node_sz >= 12)

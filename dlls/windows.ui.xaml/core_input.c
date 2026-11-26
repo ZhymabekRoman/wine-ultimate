@@ -39,7 +39,7 @@ CRITICAL_SECTION xaml_event_cs = { &xaml_event_cs_debug, -1, 0, 0, 0, 0 };
 
 HRESULT xaml_event_registry_add( struct xaml_event_registry *reg, void *handler, EventRegistrationToken *token )
 {
-    unsigned int i;
+    unsigned int i, slot;
 
     if (!reg) return E_INVALIDARG;
     if (!handler)
@@ -49,21 +49,44 @@ HRESULT xaml_event_registry_add( struct xaml_event_registry *reg, void *handler,
     }
 
     EnterCriticalSection( &xaml_event_cs );
-    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    slot = reg->cap;
+    for (i = 0; i < reg->cap; i++)
     {
         if (!reg->entries[i].handler)
         {
-            INT64 tok = InterlockedIncrement64( &reg->next_token );
-            IUnknown_AddRef( (IUnknown *)handler );
-            reg->entries[i].handler = handler;
-            reg->entries[i].token = tok;
-            if (token) token->value = tok;
-            LeaveCriticalSection( &xaml_event_cs );
-            return S_OK;
+            slot = i;
+            break;
         }
     }
+    if (slot == reg->cap)
+    {
+        unsigned int new_cap = reg->cap ? (unsigned int)reg->cap * 2 : 4;
+        struct xaml_event_entry *new_entries;
+        if (new_cap > 32768)
+        {
+            LeaveCriticalSection( &xaml_event_cs );
+            return E_OUTOFMEMORY;
+        }
+        new_entries = realloc( reg->entries, new_cap * sizeof(*new_entries) );
+        if (!new_entries)
+        {
+            LeaveCriticalSection( &xaml_event_cs );
+            return E_OUTOFMEMORY;
+        }
+        memset( new_entries + reg->cap, 0, (new_cap - reg->cap) * sizeof(*new_entries) );
+        reg->entries = new_entries;
+        reg->cap = (UINT16)new_cap;
+    }
+    {
+        INT64 tok = InterlockedIncrement64( &reg->next_token );
+        IUnknown_AddRef( (IUnknown *)handler );
+        reg->entries[slot].handler = handler;
+        reg->entries[slot].token = tok;
+        __atomic_store_n( &reg->count, (UINT16)(reg->count + 1), __ATOMIC_RELEASE );
+        if (token) token->value = tok;
+    }
     LeaveCriticalSection( &xaml_event_cs );
-    return E_OUTOFMEMORY;
+    return S_OK;
 }
 
 HRESULT xaml_event_registry_remove( struct xaml_event_registry *reg, EventRegistrationToken token )
@@ -71,14 +94,17 @@ HRESULT xaml_event_registry_remove( struct xaml_event_registry *reg, EventRegist
     unsigned int i;
 
     if (!reg) return E_INVALIDARG;
+    if (__atomic_load_n( &reg->count, __ATOMIC_ACQUIRE ) == 0) return S_OK;
     EnterCriticalSection( &xaml_event_cs );
-    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    for (i = 0; i < reg->cap; i++)
     {
         if (reg->entries[i].handler && reg->entries[i].token == token.value)
         {
             void *h = reg->entries[i].handler;
             reg->entries[i].handler = NULL;
             reg->entries[i].token = 0;
+            if (reg->count > 0)
+                __atomic_store_n( &reg->count, (UINT16)(reg->count - 1), __ATOMIC_RELEASE );
             LeaveCriticalSection( &xaml_event_cs );
             IUnknown_Release( (IUnknown *)h );
             return S_OK;
@@ -93,8 +119,9 @@ unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void
     unsigned int i, count = 0;
 
     if (!reg || !out || !max_out) return 0;
+    if (__atomic_load_n( &reg->count, __ATOMIC_ACQUIRE ) == 0) return 0;
     EnterCriticalSection( &xaml_event_cs );
-    for (i = 0; i < ARRAY_SIZE( reg->entries ) && count < max_out; i++)
+    for (i = 0; i < reg->cap && count < max_out; i++)
     {
         if (reg->entries[i].handler)
         {
@@ -108,15 +135,15 @@ unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void
 
 unsigned int xaml_event_registry_snapshot_alloc( struct xaml_event_registry *reg, void ***out_handlers )
 {
-    unsigned int i, count = 0, idx = 0;
+    unsigned int i, count, idx = 0;
     void **buf;
 
     if (out_handlers) *out_handlers = NULL;
     if (!reg || !out_handlers) return 0;
+    if (__atomic_load_n( &reg->count, __ATOMIC_ACQUIRE ) == 0) return 0;
     EnterCriticalSection( &xaml_event_cs );
-    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
-        if (reg->entries[i].handler) count++;
-    if (!count)
+    count = reg->count;
+    if (!count || !reg->entries)
     {
         LeaveCriticalSection( &xaml_event_cs );
         return 0;
@@ -127,7 +154,7 @@ unsigned int xaml_event_registry_snapshot_alloc( struct xaml_event_registry *reg
         LeaveCriticalSection( &xaml_event_cs );
         return 0;
     }
-    for (i = 0; i < ARRAY_SIZE( reg->entries ) && idx < count; i++)
+    for (i = 0; i < reg->cap && idx < count; i++)
     {
         if (reg->entries[i].handler)
         {
@@ -142,23 +169,26 @@ unsigned int xaml_event_registry_snapshot_alloc( struct xaml_event_registry *reg
 
 void xaml_event_registry_clear( struct xaml_event_registry *reg )
 {
-    void *to_release[64];
-    unsigned int i, count = 0;
+    struct xaml_event_entry *entries;
+    unsigned int i, cap;
 
     if (!reg) return;
+    if (__atomic_load_n( &reg->count, __ATOMIC_ACQUIRE ) == 0 &&
+        !__atomic_load_n( &reg->entries, __ATOMIC_ACQUIRE ))
+        return;
     EnterCriticalSection( &xaml_event_cs );
-    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
-    {
-        if (reg->entries[i].handler)
-        {
-            to_release[count++] = reg->entries[i].handler;
-            reg->entries[i].handler = NULL;
-            reg->entries[i].token = 0;
-        }
-    }
+    entries = reg->entries;
+    cap = reg->cap;
+    reg->entries = NULL;
+    reg->cap = 0;
+    __atomic_store_n( &reg->count, 0, __ATOMIC_RELEASE );
     LeaveCriticalSection( &xaml_event_cs );
-    for (i = 0; i < count; i++)
-        IUnknown_Release( (IUnknown *)to_release[i] );
+    if (entries)
+    {
+        for (i = 0; i < cap; i++)
+            if (entries[i].handler) IUnknown_Release( (IUnknown *)entries[i].handler );
+        free( entries );
+    }
 }
 
 /* ---- Mouse PointerDevice + PointerPoint + PointerPointProperties + Core PointerEventArgs ---- */
