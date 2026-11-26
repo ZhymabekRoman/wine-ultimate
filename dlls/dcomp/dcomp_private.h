@@ -337,8 +337,34 @@ static inline BOOL dcomp_is_equal_guid(const GUID *a, const GUID *b)
 
 void dcomp_lock(void);
 void dcomp_unlock(void);
+void dcomp_render_lock(void);
+void dcomp_render_unlock(void);
+BOOL dcomp_render_trylock(void);
 void dcomp_reclaim_push(IUnknown *object);
+void dcomp_reclaim_drain(void);
+BOOL dcomp_compare_handles(HANDLE h1, HANDLE h2);
+void dcomp_signal_compositor_clock(void);
+ULONGLONG dcomp_qpc_now(void);
+unsigned int dcomp_qpc_elapsed_ms(ULONGLONG since, LARGE_INTEGER freq);
+BOOL composite_device(struct composition_device *device);
+HWND find_root_top_level_window(void);
+HRESULT get_default_rendering_device(IUnknown **out_device);
+HRESULT device_get_or_create_rendering_device(struct composition_device *device, IUnknown **out_rendering_device);
+HRESULT dcomp_create_surface_from_handle(struct composition_device *device, HANDLE handle, IUnknown **surface);
+HRESULT dcomp_desktop_device_create_shared_resource(IDCompositionDeviceUnknown *iface, REFIID riid, void **obj);
+HRESULT dcomp_desktop_device_open_shared_resource_handle(IDCompositionDeviceUnknown *iface, IUnknown *unknown, HANDLE *handle);
 void shared_visual_cache_set(HANDLE handle, IDCompositionVisual *root);
+IDCompositionVisual *shared_visual_query_root(HANDLE shared_visual_handle);
+struct composition_visual *shared_visual_cached_root(HANDLE shared_visual_handle);
+struct composition_visual *find_root_visual_container(struct composition_target *target,
+        struct composition_target **out_host_target);
+struct composition_visual *resolve_shared_visual_root(HANDLE shared_handle);
+BOOL visual_tree_has_content(struct composition_visual *visual);
+BOOL target_delegates_to_in_process_target(const struct composition_target *target, const struct composition_visual *root);
+BOOL CALLBACK dcomp_enforce_own_captured_cb(HWND hwnd, LPARAM lparam);
+void dcomp_enforce_captured_toolwindow(HWND top);
+void dcomp_hide_captured_hwnd(HWND hwnd);
+HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *handle);
 HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
         DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface);
 HRESULT create_virtual_surface(struct composition_surface_factory *factory, UINT width, UINT height,
@@ -361,9 +387,19 @@ void visual_get_transform_3d(const struct composition_visual *visual, UINT width
         const D3DMATRIX *world_transform, float vp_x, float vp_y, float vp_w, float vp_h, D3DMATRIX *out);
 unsigned int visual_get_transform_version(const struct composition_visual *visual);
 struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
+HRESULT WINAPI dxgi_bind_external_memory(IUnknown *obj, HANDLE nt_handle, UINT64 alloc_size);
+HRESULT WINAPI dxgi_swapchain_get_presented_surface(IDXGISwapChain *swapchain, IDXGISurface **surface);
+#define COMPOSITOR_CLOCK_MAX_HANDLES 16
+extern HANDLE g_commit_completion_event;
+extern HANDLE g_swapchain_present_event;
+extern HANDLE g_compositor_clock_handles[COMPOSITOR_CLOCK_MAX_HANDLES];
+extern volatile LONG g_compositor_clock_handle_count;
+extern HWND g_dcomp_captured_top_hwnd;
+extern struct composition_surface *g_last_rendered_surface;
 extern struct list dcomp_devices;
 extern volatile LONG dcomp_tree_version;
 extern volatile LONG dcomp_transform_version;
+extern LONG g_batch_id_counter;
 
 
 #endif /* __WINE_DCOMP_PRIVATE_H */

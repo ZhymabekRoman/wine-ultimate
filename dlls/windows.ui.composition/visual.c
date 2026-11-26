@@ -116,10 +116,15 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
             { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } };
         static const GUID IID_IVisual_Calc4_local =
             { 0x9476bf11, 0xe24b, 0x5bf9, { 0x9e, 0xbe, 0x62, 0x74, 0x10, 0x9b, 0x27, 0x11 } };
-        if (IsEqualGUID( iid, &IID_ICompositionObject4_local ) ||
-            IsEqualGUID( iid, &IID_ICompositionObject4_winrt ))
+        if (IsEqualGUID( iid, &IID_ICompositionObject4_winrt ))
         {
             *out = &impl->ICompositionObject4_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_ICompositionObject4_local ))
+        {
+            *out = &impl->ICompositionObject4Alt_iface;
             IInspectable_AddRef( (IInspectable *)*out );
             return S_OK;
         }
@@ -206,6 +211,9 @@ static ULONG WINAPI visual_Release( struct IVisual *iface )
     if (!ref)
     {
         if (impl->children) IInspectable_Release( (IInspectable *)&impl->children->IVisualCollection_iface );
+        if (impl->shapes) IInspectable_Release( (IInspectable *)impl->shapes );
+        if (impl->view_box) IInspectable_Release( (IInspectable *)impl->view_box );
+        if (impl->redirect_source) IInspectable_Release( (IInspectable *)impl->redirect_source );
         if (impl->brush) IInspectable_Release( (IInspectable *)impl->brush );
         if (impl->clip) IInspectable_Release( (IInspectable *)impl->clip );
         if (impl->properties)
@@ -228,7 +236,8 @@ static HRESULT WINAPI visual_GetIids( struct IVisual *iface, ULONG *iid_count, I
 static HRESULT WINAPI visual_GetRuntimeClassName( struct IVisual *iface, HSTRING *class_name )
 {
     struct visual *impl = impl_from_IVisual( iface );
-    const WCHAR *name = impl->is_sprite ? RuntimeClass_Windows_UI_Composition_SpriteVisual
+    const WCHAR *name = impl->is_shape ? L"Windows.UI.Composition.ShapeVisual"
+            : impl->is_sprite ? RuntimeClass_Windows_UI_Composition_SpriteVisual
             : RuntimeClass_Windows_UI_Composition_ContainerVisual;
 
     return WindowsCreateString( name, lstrlenW( name ), class_name );
@@ -713,7 +722,8 @@ static HRESULT WINAPI shape_visual_GetIids( void *iface, ULONG *c, IID **i )
 }
 static HRESULT WINAPI shape_visual_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.UI.Composition.ShapeVisual", 35, n );
+    static const WCHAR name[] = L"Windows.UI.Composition.ShapeVisual";
+    return WindowsCreateString( name, ARRAYSIZE(name) - 1, n );
 }
 static HRESULT WINAPI shape_visual_GetTrustLevel( void *iface, TrustLevel *l )
 {
@@ -798,7 +808,8 @@ static HRESULT WINAPI redirect_visual_GetIids( void *iface, ULONG *c, IID **i )
 }
 static HRESULT WINAPI redirect_visual_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.UI.Composition.RedirectVisual", 35, n );
+    static const WCHAR name[] = L"Windows.UI.Composition.RedirectVisual";
+    return WindowsCreateString( name, ARRAYSIZE(name) - 1, n );
 }
 static HRESULT WINAPI redirect_visual_GetTrustLevel( void *iface, TrustLevel *l )
 {
@@ -1118,6 +1129,59 @@ static const void *const visual_obj4_vtbl[] =
     visual_obj4_TryGetAnimationController,
 };
 
+static inline struct visual *visual_from_co4_alt( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct visual, ICompositionObject4Alt_iface );
+}
+static HRESULT WINAPI visual_obj4_alt_QI( void *iface, REFIID iid, void **out ) { return visual_QueryInterface( &visual_from_co4_alt(iface)->IVisual_iface, iid, out ); }
+static ULONG WINAPI visual_obj4_alt_AddRef( void *iface ) { return visual_AddRef( &visual_from_co4_alt(iface)->IVisual_iface ); }
+static ULONG WINAPI visual_obj4_alt_Release( void *iface ) { return visual_Release( &visual_from_co4_alt(iface)->IVisual_iface ); }
+static HRESULT WINAPI visual_obj4_alt_GetIids( void *iface, ULONG *c, IID **i ) { return visual_GetIids( &visual_from_co4_alt(iface)->IVisual_iface, c, i ); }
+static HRESULT WINAPI visual_obj4_alt_GetRuntimeClassName( void *iface, HSTRING *n ) { return visual_GetRuntimeClassName( &visual_from_co4_alt(iface)->IVisual_iface, n ); }
+static HRESULT WINAPI visual_obj4_alt_GetTrustLevel( void *iface, TrustLevel *l ) { return visual_GetTrustLevel( &visual_from_co4_alt(iface)->IVisual_iface, l ); }
+static HRESULT WINAPI visual_obj4_alt_slot6( void *iface, void *a1, void **a2 )
+{
+    struct visual *impl = visual_from_co4_alt( iface );
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+
+    /*
+     * {f2bd13c3-ba7e-4b0f-9126-ffb7536b8176} is queried on visuals both as a
+     * 2-arg shape-collection getter (iface, CompositionShapeCollection **out)
+     * and as 3-arg ICompositionObject4::TryGetAnimationController(iface, prop, out).
+     * Handle the 2-arg stack out-pointer call natively so callers never need to
+     * patch this vtable slot.
+     */
+    if (tib && a1 >= tib->StackLimit && a1 < tib->StackBase
+        && (((ULONG_PTR)a1 & (sizeof(void *) - 1)) == 0) && *(void **)a1 == NULL)
+    {
+        if (!impl->shapes)
+            impl->shapes = comp5_stub_create_public( L"Windows.UI.Composition.CompositionShapeCollection" );
+        *(void **)a1 = impl->shapes;
+        if (impl->shapes) IInspectable_AddRef( (IInspectable *)impl->shapes );
+        return impl->shapes ? S_OK : E_OUTOFMEMORY;
+    }
+    if (!a2) return E_POINTER;
+    *a2 = comp5_stub_create_public( L"Windows.UI.Composition.AnimationController" );
+    return *a2 ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT WINAPI visual_obj4_alt_get_ViewBox( void *iface, void **value )
+{
+    return shape_visual_get_ViewBox( &visual_from_co4_alt(iface)->IShapeVisual_iface, value );
+}
+static HRESULT WINAPI visual_obj4_alt_put_ViewBox( void *iface, void *value )
+{
+    return shape_visual_put_ViewBox( &visual_from_co4_alt(iface)->IShapeVisual_iface, value );
+}
+static const void *const visual_obj4_alt_vtbl[32] =
+{
+    visual_obj4_alt_QI, visual_obj4_alt_AddRef, visual_obj4_alt_Release,
+    visual_obj4_alt_GetIids, visual_obj4_alt_GetRuntimeClassName, visual_obj4_alt_GetTrustLevel,
+    visual_obj4_alt_slot6,
+    visual_obj4_alt_get_ViewBox,
+    visual_obj4_alt_put_ViewBox,
+    [9 ... 31] = shape_visual_noop,
+};
+
 static struct visual *visual_create( struct compositor *compositor, BOOL is_sprite, BOOL is_shape )
 {
     struct visual *impl;
@@ -1134,6 +1198,7 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
     impl->ICompositionObject_iface.lpVtbl = &visual_object_vtbl;
     impl->ICompositionObject2_iface.lpVtbl = (const struct IInspectableVtbl *)visual_obj2_vtbl;
     impl->ICompositionObject4_iface.lpVtbl = (const struct IInspectableVtbl *)visual_obj4_vtbl;
+    impl->ICompositionObject4Alt_iface.lpVtbl = (const struct IInspectableVtbl *)visual_obj4_alt_vtbl;
     impl->IClosable_iface.lpVtbl = &visual_closable_vtbl;
     impl->ref = 1;
     impl->compositor = compositor;

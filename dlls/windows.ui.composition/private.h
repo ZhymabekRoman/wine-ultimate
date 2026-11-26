@@ -383,6 +383,7 @@ struct visual
     struct ICompositionObject ICompositionObject_iface;
     struct IInspectable ICompositionObject2_iface;
     struct IInspectable ICompositionObject4_iface;
+    struct IInspectable ICompositionObject4Alt_iface;
     struct IClosable IClosable_iface;
     LONG ref;
     struct compositor *compositor;

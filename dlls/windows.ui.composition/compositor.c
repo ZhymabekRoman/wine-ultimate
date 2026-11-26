@@ -744,6 +744,7 @@ struct comp5_stub
     void *prop2;
     void *prop3;
     float f1, f2, f3, f4;
+    const void *co4_alt_vtbl;
 };
 
 static const GUID IID_IReferenceTracker_local =
@@ -762,10 +763,15 @@ static HRESULT WINAPI comp5_stub_QI( void *iface, REFIID iid, void **out )
         *out = NULL;
         return E_NOINTERFACE;
     }
-    if (IsEqualGUID( iid, &IID_ICompositionObject4_local ) ||
-        IsEqualGUID( iid, &IID_ICompositionObject4_winrt ))
+    if (IsEqualGUID( iid, &IID_ICompositionObject4_winrt ))
     {
         *out = &obj->co4_vtbl;
+        InterlockedIncrement( &obj->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICompositionObject4_local ))
+    {
+        *out = &obj->co4_alt_vtbl;
         InterlockedIncrement( &obj->ref );
         return S_OK;
     }
@@ -890,6 +896,41 @@ static const void *comp5_co4_vtbl[16] =
     [7 ... 15] = comp5_stub_noop,
 };
 
+static inline struct comp5_stub *comp5_from_co4_alt( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct comp5_stub, co4_alt_vtbl );
+}
+static HRESULT WINAPI comp5_co4_alt_QI( void *iface, REFIID iid, void **out ) { return comp5_stub_QI( comp5_from_co4_alt(iface), iid, out ); }
+static ULONG WINAPI comp5_co4_alt_AddRef( void *iface ) { return comp5_stub_AddRef( comp5_from_co4_alt(iface) ); }
+static ULONG WINAPI comp5_co4_alt_Release( void *iface ) { return comp5_stub_Release( comp5_from_co4_alt(iface) ); }
+static HRESULT WINAPI comp5_co4_alt_GetIids( void *iface, ULONG *cnt, IID **iids ) { return comp5_stub_GetIids( comp5_from_co4_alt(iface), cnt, iids ); }
+static HRESULT WINAPI comp5_co4_alt_GetRuntimeClassName( void *iface, HSTRING *name ) { return comp5_stub_GetRuntimeClassName( comp5_from_co4_alt(iface), name ); }
+static HRESULT WINAPI comp5_co4_alt_GetTrustLevel( void *iface, TrustLevel *lvl ) { return comp5_stub_GetTrustLevel( comp5_from_co4_alt(iface), lvl ); }
+static HRESULT WINAPI comp5_co4_alt_slot6( void *iface, void *a1, void **a2 )
+{
+    struct comp5_stub *obj = comp5_from_co4_alt( iface );
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+
+    if (tib && a1 >= tib->StackLimit && a1 < tib->StackBase
+        && (((ULONG_PTR)a1 & (sizeof(void *) - 1)) == 0) && *(void **)a1 == NULL)
+    {
+        if (!obj->prop1)
+            comp5_stub_create( L"Windows.UI.Composition.CompositionShapeCollection", &obj->prop1 );
+        *(void **)a1 = obj->prop1;
+        if (obj->prop1) InterlockedIncrement( &((struct comp5_stub *)obj->prop1)->ref );
+        return obj->prop1 ? S_OK : E_OUTOFMEMORY;
+    }
+    if (!a2) return E_POINTER;
+    return comp5_stub_create( L"Windows.UI.Composition.AnimationController", a2 );
+}
+static const void *comp5_co4_alt_vtbl[16] =
+{
+    comp5_co4_alt_QI, comp5_co4_alt_AddRef, comp5_co4_alt_Release,
+    comp5_co4_alt_GetIids, comp5_co4_alt_GetRuntimeClassName, comp5_co4_alt_GetTrustLevel,
+    comp5_co4_alt_slot6,
+    [7 ... 15] = comp5_stub_noop,
+};
+
 static HRESULT comp5_stub_create( const WCHAR *name, void **out )
 {
     struct comp5_stub *obj;
@@ -897,6 +938,7 @@ static HRESULT comp5_stub_create( const WCHAR *name, void **out )
     if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
     obj->vtbl = comp5_stub_vtbl;
     obj->co4_vtbl = comp5_co4_vtbl;
+    obj->co4_alt_vtbl = comp5_co4_alt_vtbl;
     obj->ref = 1;
     obj->class_name = name;
     *out = obj;

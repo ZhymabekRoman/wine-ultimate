@@ -730,6 +730,124 @@ static HWND create_test_window( void )
     return CreateWindowA( cls.lpszClassName, "test", 0, 0, 0, 100, 100, NULL, NULL, cls.hInstance, NULL );
 }
 
+static void test_shape_visual_and_co4( struct ICompositor *compositor )
+{
+    static const GUID IID_ICompositor5_test =
+        { 0x48ea31ad, 0x7fcd, 0x4076, { 0xa7, 0x9c, 0x90, 0xcc, 0x4b, 0x85, 0x2c, 0x9b } };
+    static const GUID IID_ICompositionObject4_winrt_test =
+        { 0x0bb3784c, 0x346b, 0x4a7c, { 0x96, 0x6b, 0x73, 0x10, 0x96, 0x65, 0x53, 0xd5 } };
+    static const GUID IID_ICompositionObject4_alt_test =
+        { 0xf2bd13c3, 0xba7e, 0x4b0f, { 0x91, 0x26, 0xff, 0xb7, 0x53, 0x6b, 0x81, 0x76 } };
+    IInspectable *comp5 = NULL, *shape_vis = NULL, *co4 = NULL, *co4_alt = NULL;
+    IInspectable *shapes = NULL, *ctrl = NULL;
+    struct IContainerVisual *cv = NULL;
+    HSTRING prop = NULL, cls = NULL;
+    HRESULT hr;
+
+    hr = ICompositor_QueryInterface( compositor, &IID_ICompositor5_test, (void **)&comp5 );
+    ok( hr == S_OK && comp5, "Compositor should answer ICompositor5, hr %#lx.\n", hr );
+    if (comp5)
+    {
+        HRESULT (WINAPI *create_shape_visual)(void *, void **) = (void *)((void **)comp5->lpVtbl)[21];
+        hr = create_shape_visual( comp5, (void **)&shape_vis );
+        ok( hr == S_OK && shape_vis, "CreateShapeVisual failed, hr %#lx.\n", hr );
+        if (shape_vis)
+        {
+            HRESULT (WINAPI *get_shapes)(void *, void **) = (void *)((void **)shape_vis->lpVtbl)[6];
+
+            hr = IInspectable_GetRuntimeClassName( shape_vis, &cls );
+            ok( hr == S_OK && cls && !wcscmp( WindowsGetStringRawBuffer( cls, NULL ),
+                    L"Windows.UI.Composition.ShapeVisual" ),
+                    "unexpected ShapeVisual class name, hr %#lx.\n", hr );
+            if (cls) { WindowsDeleteString( cls ); cls = NULL; }
+
+            hr = get_shapes( shape_vis, (void **)&shapes );
+            ok( hr == S_OK && shapes, "IShapeVisual::get_Shapes failed, hr %#lx.\n", hr );
+            if (shapes)
+            {
+                hr = IInspectable_GetRuntimeClassName( shapes, &cls );
+                ok( hr == S_OK && cls && !wcscmp( WindowsGetStringRawBuffer( cls, NULL ),
+                        L"Windows.UI.Composition.CompositionShapeCollection" ),
+                        "unexpected Shapes class name, hr %#lx.\n", hr );
+                if (cls) { WindowsDeleteString( cls ); cls = NULL; }
+                IInspectable_Release( shapes );
+                shapes = NULL;
+            }
+
+            hr = IInspectable_QueryInterface( shape_vis, &IID_ICompositionObject4_alt_test, (void **)&co4_alt );
+            ok( hr == S_OK && co4_alt, "ShapeVisual QI {f2bd13c3} failed, hr %#lx.\n", hr );
+            if (co4_alt)
+            {
+                HRESULT (WINAPI *slot6_get)(void *, void **) = (void *)((void **)co4_alt->lpVtbl)[6];
+                HRESULT (WINAPI *slot6_try)(void *, HSTRING, void **) = (void *)((void **)co4_alt->lpVtbl)[6];
+
+                shapes = NULL;
+                hr = slot6_get( co4_alt, (void **)&shapes );
+                ok( hr == S_OK && shapes, "{f2bd13c3} 2-arg slot6 failed, hr %#lx.\n", hr );
+                if (shapes)
+                {
+                    hr = IInspectable_GetRuntimeClassName( shapes, &cls );
+                    ok( hr == S_OK && cls && !wcscmp( WindowsGetStringRawBuffer( cls, NULL ),
+                            L"Windows.UI.Composition.CompositionShapeCollection" ),
+                            "unexpected {f2bd13c3} 2-arg class name, hr %#lx.\n", hr );
+                    if (cls) { WindowsDeleteString( cls ); cls = NULL; }
+                    IInspectable_Release( shapes );
+                    shapes = NULL;
+                }
+
+                WindowsCreateString( L"Offset", 6, &prop );
+                ctrl = NULL;
+                hr = slot6_try( co4_alt, prop, (void **)&ctrl );
+                ok( hr == S_OK && ctrl, "{f2bd13c3} 3-arg slot6 failed, hr %#lx.\n", hr );
+                if (ctrl)
+                {
+                    hr = IInspectable_GetRuntimeClassName( ctrl, &cls );
+                    ok( hr == S_OK && cls && !wcscmp( WindowsGetStringRawBuffer( cls, NULL ),
+                            L"Windows.UI.Composition.AnimationController" ),
+                            "unexpected {f2bd13c3} 3-arg class name, hr %#lx.\n", hr );
+                    if (cls) { WindowsDeleteString( cls ); cls = NULL; }
+                    IInspectable_Release( ctrl );
+                    ctrl = NULL;
+                }
+                WindowsDeleteString( prop );
+                prop = NULL;
+                IInspectable_Release( co4_alt );
+                co4_alt = NULL;
+            }
+            IInspectable_Release( shape_vis );
+        }
+        IInspectable_Release( comp5 );
+    }
+
+    hr = ICompositor_CreateContainerVisual( compositor, &cv );
+    ok( hr == S_OK && cv, "CreateContainerVisual failed, hr %#lx.\n", hr );
+    if (cv)
+    {
+        hr = IContainerVisual_QueryInterface( cv, &IID_ICompositionObject4_winrt_test, (void **)&co4 );
+        ok( hr == S_OK && co4, "ContainerVisual QI ICompositionObject4 failed, hr %#lx.\n", hr );
+        if (co4)
+        {
+            HRESULT (WINAPI *try_get)(void *, HSTRING, void **) = (void *)((void **)co4->lpVtbl)[6];
+            WindowsCreateString( L"Opacity", 7, &prop );
+            ctrl = NULL;
+            hr = try_get( co4, prop, (void **)&ctrl );
+            ok( hr == S_OK && ctrl, "ICompositionObject4::TryGetAnimationController failed, hr %#lx.\n", hr );
+            if (ctrl)
+            {
+                hr = IInspectable_GetRuntimeClassName( ctrl, &cls );
+                ok( hr == S_OK && cls && !wcscmp( WindowsGetStringRawBuffer( cls, NULL ),
+                        L"Windows.UI.Composition.AnimationController" ),
+                        "unexpected AnimationController class name, hr %#lx.\n", hr );
+                if (cls) { WindowsDeleteString( cls ); cls = NULL; }
+                IInspectable_Release( ctrl );
+            }
+            WindowsDeleteString( prop );
+            IInspectable_Release( co4 );
+        }
+        IContainerVisual_Release( cv );
+    }
+}
+
 START_TEST( comp )
 {
     struct ICompositor *compositor;
@@ -779,6 +897,7 @@ START_TEST( comp )
     test_visuals( compositor );
     test_property_set( compositor );
     test_brushes_clips_easing( compositor );
+    test_shape_visual_and_co4( compositor );
 
     hwnd = create_test_window();
     ok( !!hwnd, "failed to create test window, err %lu.\n", GetLastError() );

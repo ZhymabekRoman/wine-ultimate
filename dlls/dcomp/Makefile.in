@@ -5,8 +5,10 @@ IMPORTS  = d2d1 dwmapi user32 gdi32 d3dcompiler dxgi wined3d win32u
 VER_PRODUCTVERSION = 10,0,14393,0
 
 SOURCES = \
+	composite.c \
 	dcomp_private_iface.idl \
 	device.c \
+	shared_surface.c \
 	surface.c \
 	target.c \
 	transform.c \
