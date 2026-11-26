@@ -73,7 +73,7 @@ static HRESULT WINAPI cwv2_settings_QueryInterface( IInspectable *iface, REFIID 
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    ERR( "cwv2_settings_QueryInterface: unknown IID %s\n", debugstr_guid( iid ) );
+    TRACE( "cwv2_settings_QueryInterface: unknown IID %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -206,7 +206,7 @@ static HRESULT WINAPI cwv2_settings2_put_UserAgent( void *iface, HSTRING ua )
 {
     struct cwv2_settings *impl = impl_from_settings2( iface );
     const WCHAR *s = ua ? WindowsGetStringRawBuffer( ua, NULL ) : L"";
-    ERR( "cwv2_settings2_put_UserAgent: %s\n", debugstr_w( s ) );
+    TRACE( "cwv2_settings2_put_UserAgent: %s\n", debugstr_w( s ) );
     if (impl->loader_settings2 && *(void ***)impl->loader_settings2)
     {
         HRESULT (WINAPI *fn)( void *, LPCWSTR ) = (*(void ***)impl->loader_settings2)[22];
@@ -489,12 +489,12 @@ static HRESULT WINAPI cwv2_env_factory_GetTrustLevel( IActivationFactory *iface,
 { if (lvl) *lvl = BaseTrust; return S_OK; }
 static HRESULT WINAPI cwv2_env_factory_CreateAsync( void *iface, void **op )
 {
-    ERR( "cwv2_env_factory_CreateAsync op=%p\n", op );
+    TRACE( "cwv2_env_factory_CreateAsync op=%p\n", op );
     return cwv2_env_create_op( op );
 }
 static HRESULT WINAPI cwv2_env_factory_CreateWithOptionsAsync( void *iface, HSTRING browser, HSTRING udf, void *opts, void **op )
 {
-    ERR( "cwv2_env_factory_CreateWithOptionsAsync udf=%s op=%p\n", debugstr_hstring( udf ), op );
+    TRACE( "cwv2_env_factory_CreateWithOptionsAsync udf=%s op=%p\n", debugstr_hstring( udf ), op );
     return cwv2_env_create_op( op );
 }
 static HRESULT WINAPI cwv2_env_factory_GetAvailableBrowserVersionString( void *iface, HSTRING *ver )
@@ -822,14 +822,14 @@ static HRESULT WINAPI profile_AddBrowserExtension( void *iface, HSTRING path, vo
     struct cwv2_result_completed_handler *h = (struct cwv2_result_completed_handler *)handler;
     void *ext = NULL;
     (void)iface;
-    ERR( "profile_AddBrowserExtension %s handler %p\n", debugstr_hstring( path ), handler );
+    TRACE( "profile_AddBrowserExtension %s handler %p\n", debugstr_hstring( path ), handler );
     cwv2_asyncop_create( NULL, &ext );
     if (handler) h->lpVtbl->Invoke( h, S_OK, ext );
     return S_OK;
 }
 static HRESULT WINAPI profile_ClearBrowsingDataAllAsync( void *iface, void **op )
 {
-    ERR( "profile_ClearBrowsingDataAllAsync iface %p, op %p\n", iface, op );
+    TRACE( "profile_ClearBrowsingDataAllAsync iface %p, op %p\n", iface, op );
     return xaml_async_action_create( (IAsyncAction **)op );
 }
 
@@ -839,7 +839,7 @@ static HRESULT WINAPI profile_generic_slot( void *iface, ... )
     const void **vt = *(const void ***)iface;
     int slot = 0;
     while (slot < 256 && vt[slot] != (const void *)profile_generic_slot) slot++;
-    ERR( "profile_slot %d iface %p\n", slot, iface );
+    TRACE( "profile_slot %d iface %p\n", slot, iface );
     return S_OK;
 }
 

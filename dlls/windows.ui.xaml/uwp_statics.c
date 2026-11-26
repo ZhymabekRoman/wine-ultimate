@@ -178,7 +178,7 @@ static HRESULT WINAPI ecp_QueryInterface( void *iface, REFIID iid, void **out )
         *out = (void *)&ecp_statics2_obj;
         return S_OK;
     }
-    ERR( "ecp_QueryInterface unknown iid %s\n", debugstr_guid( iid ) );
+    TRACE( "ecp_QueryInterface unknown iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -261,7 +261,7 @@ static HRESULT WINAPI ecp_SetElementChildVisual( void *iface, void *elem, void *
         if (dcomp_vis && dcomp_vis != root && g_ecp_child_visual != dcomp_vis)
         {
             HRESULT hr_add = IDCompositionVisual_AddVisual( root, dcomp_vis, TRUE, NULL );
-            ERR( "ecp_SetElementChildVisual elem=%p vis=%p dcomp=%p root=%p hr=%#lx\n",
+            TRACE( "ecp_SetElementChildVisual elem=%p vis=%p dcomp=%p root=%p hr=%#lx\n",
                  elem, visual, dcomp_vis, root, hr_add );
             if (SUCCEEDED(hr_add))
             {
@@ -1080,7 +1080,7 @@ static HRESULT WINAPI comp_target_GetCompositorForCurrentThread( void *iface, vo
     if (!out) return E_POINTER;
     *out = NULL;
     comp = ecp_get_compositor();
-    ERR( "comp_target_GetCompositorForCurrentThread -> %p\n", comp );
+    TRACE( "comp_target_GetCompositorForCurrentThread -> %p\n", comp );
     if (!comp) return E_FAIL;
     __x_ABI_CWindows_CUI_CComposition_CICompositor_AddRef( comp );
     *out = comp;
@@ -1098,7 +1098,7 @@ static HRESULT WINAPI comp_target_QI( void *iface, REFIID iid, void **out )
         *out = NULL;
         return E_NOINTERFACE;
     }
-    ERR( "comp_target_QI iid=%s\n", debugstr_guid( iid ) );
+    TRACE( "comp_target_QI iid=%s\n", debugstr_guid( iid ) );
     *out = (void *)&comp_target_statics_obj;
     return S_OK;
 }
@@ -1295,17 +1295,17 @@ static HRESULT WINAPI ceol_QueryInterface( void *iface, REFIID iid, void **out )
     {
         InterlockedIncrement( &impl->ref );
         *out = &impl->target_vtbl;
-        ERR( "ceol_QueryInterface -> IDCompositionTarget %p (dcomp_vis=%p)\n", *out, impl->placement_dcomp_vis );
+        TRACE( "ceol_QueryInterface -> IDCompositionTarget %p (dcomp_vis=%p)\n", *out, impl->placement_dcomp_vis );
         return S_OK;
     }
     if ((IsEqualGUID( iid, &IID_IDCompositionVisual_local ) ||
          IsEqualGUID( iid, &IID_IDCompositionVisual2_local )) && impl->placement_dcomp_vis)
     {
         HRESULT hr = IDCompositionVisual_QueryInterface( impl->placement_dcomp_vis, iid, out );
-        ERR( "ceol_QueryInterface -> IDCompositionVisual %p hr=%#lx\n", *out, hr );
+        TRACE( "ceol_QueryInterface -> IDCompositionVisual %p hr=%#lx\n", *out, hr );
         return hr;
     }
-    ERR( "ceol_QueryInterface unsupported iid %s\n", debugstr_guid( iid ) );
+    TRACE( "ceol_QueryInterface unsupported iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1332,7 +1332,7 @@ static HRESULT WINAPI ceol_get_PlacementVisual( void *iface, void **out )
     *out = impl->placement_visual;
     if (impl->placement_visual)
         __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_AddRef( impl->placement_visual );
-    ERR( "ceol_get_PlacementVisual -> %p\n", *out );
+    TRACE( "ceol_get_PlacementVisual -> %p\n", *out );
     return S_OK;
 }
 static HRESULT WINAPI ceol_target_QueryInterface( void *iface, REFIID iid, void **out )
@@ -1353,7 +1353,7 @@ static HRESULT WINAPI ceol_target_SetRoot( void *iface, IDCompositionVisual *vis
 {
     struct xaml_ceol *impl = ceol_from_target( iface );
     HRESULT hr = S_OK;
-    ERR( "ceol_target_SetRoot(impl=%p, visual=%p, placement_dcomp_vis=%p)\n", impl, visual, impl->placement_dcomp_vis );
+    TRACE( "ceol_target_SetRoot(impl=%p, visual=%p, placement_dcomp_vis=%p)\n", impl, visual, impl->placement_dcomp_vis );
     if (impl->placement_dcomp_vis)
     {
         IDCompositionVisual_RemoveAllVisuals( impl->placement_dcomp_vis );
@@ -1404,7 +1404,7 @@ static HRESULT WINAPI ceol_statics_Create( void *iface, void *compositor_arg, vo
     }
     __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_QueryInterface(
         impl->placement_visual, &IID_IDCompositionVisual_local, (void **)&impl->placement_dcomp_vis );
-    ERR( "ceol_statics_Create -> %p (placement_visual=%p, dcomp_vis=%p)\n",
+    TRACE( "ceol_statics_Create -> %p (placement_visual=%p, dcomp_vis=%p)\n",
          impl, impl->placement_visual, impl->placement_dcomp_vis );
     *out = &impl->link_vtbl;
     return S_OK;

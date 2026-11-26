@@ -50,7 +50,7 @@ static HRESULT WINAPI collection_QueryInterface( IInspectable *iface, REFIID iid
 {
     struct xaml_collection *impl = impl_from_collection( iface );
 
-    ERR( "collection_QueryInterface %p %s\n", iface, debugstr_guid(iid) );
+    TRACE( "collection_QueryInterface %p %s\n", iface, debugstr_guid(iid) );
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
@@ -78,7 +78,7 @@ static HRESULT WINAPI collection_QueryInterface( IInspectable *iface, REFIID iid
             v->IInspectable_iface.lpVtbl =
                 (const struct IInspectableVtbl *)vtbl_dup( collection_view_vtbl );
             impl->vector_view = v;
-            ERR( "collection QI %p IV3 vectorview created %p\n", iface, v );
+            TRACE( "collection QI %p IV3 vectorview created %p\n", iface, v );
         }
         else InterlockedIncrement( &v->ref );
         *out = (IInspectable *)v;
@@ -107,7 +107,7 @@ static ULONG WINAPI collection_Release( IInspectable *iface )
         unsigned int i;
         if (impl->capacity == ~0u)                        /* IV3 view shard: array shared */
         {
-            ERR( "collection_Release view %p freed\n", iface );
+            TRACE( "collection_Release view %p freed\n", iface );
             if (impl->vector_view == impl) impl->vector_view = NULL;
             if (impl->parent)                             /* drop parent's stale cache slot */
             {
@@ -137,13 +137,13 @@ static HRESULT WINAPI collection_GetIids( IInspectable *iface, ULONG *count, IID
 static HRESULT WINAPI collection_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
     static const WCHAR nm[] = L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Controls.RowDefinition>";
-    ERR( "collection_GetRuntimeClassName iface %p\n", iface );
+    TRACE( "collection_GetRuntimeClassName iface %p\n", iface );
     return WindowsCreateString( nm, ARRAYSIZE(nm) - 1, name );
 }
 
 static HRESULT WINAPI collection_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 {
-    ERR( "collection_GetTrustLevel iface %p\n", iface );
+    TRACE( "collection_GetTrustLevel iface %p\n", iface );
     if (level) *level = BaseTrust;
     return S_OK;
 }
@@ -159,7 +159,7 @@ struct xaml_iterator
 
 static HRESULT WINAPI iterator_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
-    ERR( "iterator_QueryInterface %p %s\n", iface, debugstr_guid(iid) );
+    TRACE( "iterator_QueryInterface %p %s\n", iface, debugstr_guid(iid) );
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
@@ -177,14 +177,14 @@ static ULONG WINAPI iterator_AddRef( IInspectable *iface )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
     ULONG ref = InterlockedIncrement( &impl->ref );
-    ERR( "iterator_AddRef iface %p ref %lu\n", iface, ref );
+    TRACE( "iterator_AddRef iface %p ref %lu\n", iface, ref );
     return ref;
 }
 static ULONG WINAPI iterator_Release( IInspectable *iface )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
     ULONG ref;
-    ERR( "iterator_Release iface %p\n", iface );
+    TRACE( "iterator_Release iface %p\n", iface );
     ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
@@ -197,7 +197,7 @@ static ULONG WINAPI iterator_Release( IInspectable *iface )
 }
 static HRESULT WINAPI iterator_GetIids( IInspectable *iface, ULONG *count, IID **iids )
 {
-    ERR( "iterator_GetIids iface %p\n", iface );
+    TRACE( "iterator_GetIids iface %p\n", iface );
     if (count) *count = 0;
     if (iids) *iids = NULL;
     return S_OK;
@@ -205,12 +205,12 @@ static HRESULT WINAPI iterator_GetIids( IInspectable *iface, ULONG *count, IID *
 static HRESULT WINAPI iterator_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
     static const WCHAR nm[] = L"Windows.Foundation.Collections.IIterator`1<Windows.UI.Xaml.Controls.RowDefinition>";
-    ERR( "iterator_GetRuntimeClassName iface %p\n", iface );
+    TRACE( "iterator_GetRuntimeClassName iface %p\n", iface );
     return WindowsCreateString( nm, ARRAYSIZE(nm) - 1, name );
 }
 static HRESULT WINAPI iterator_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 {
-    ERR( "iterator_GetTrustLevel iface %p\n", iface );
+    TRACE( "iterator_GetTrustLevel iface %p\n", iface );
     if (level) *level = BaseTrust;
     return S_OK;
 }
@@ -218,7 +218,7 @@ static HRESULT WINAPI iterator_GetTrustLevel( IInspectable *iface, TrustLevel *l
 static HRESULT WINAPI iterator_get_Current( void *iface, void **current )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
-    ERR( "iterator_get_Current iface %p current %p\n", iface, current );
+    TRACE( "iterator_get_Current iface %p current %p\n", iface, current );
     if (!current) return E_POINTER;
     if (impl->coll && impl->index < impl->end)
     {
@@ -240,7 +240,7 @@ static HRESULT WINAPI iterator_get_HasCurrent( void *iface, boolean *has_current
 static HRESULT WINAPI iterator_MoveNext( void *iface, boolean *has_current )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
-    ERR( "iterator_MoveNext iface %p has %p\n", iface, has_current );
+    TRACE( "iterator_MoveNext iface %p has %p\n", iface, has_current );
     if (impl->coll && impl->index < impl->end) impl->index++;
     if (has_current) *has_current = (impl->coll && impl->index < impl->end);
     return S_OK;
@@ -250,7 +250,7 @@ static HRESULT WINAPI iterator_GetMany( void *iface, unsigned int count, void **
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
     unsigned int n = 0;
-    ERR( "iterator_GetMany iface %p count %u\n", iface, count );
+    TRACE( "iterator_GetMany iface %p count %u\n", iface, count );
     if (impl->coll && impl->index < impl->coll->count)
     {
         n = min( count, impl->coll->count - impl->index );
@@ -302,7 +302,7 @@ static HRESULT WINAPI iterable_First( void *iface, void **current )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
     struct xaml_iterator *it;
-    ERR( "iterable_First iface %p out %p\n", iface, current );
+    TRACE( "iterable_First iface %p out %p\n", iface, current );
     if (!current) return E_POINTER;
     if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
     it->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( iterator_vtbl );
@@ -361,8 +361,8 @@ static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **ite
     struct xaml_collection *impl = impl_from_collection( iface );
     void **cv = (void **)iface;
     void **cv0 = *(void ***)cv;
-    ERR( "collection_GetAt iface %p, index %lu (0x%lx), item %p, count %u\n", iface, (unsigned long)index, (unsigned long)index, item, impl->count );
-    ERR( "COLDUMP self %p lpVtbl %p v0 %p v1 %p v6 %p v7 %p\n", cv, cv0, cv0[0], cv0[1], cv0[6], cv0[7] );
+    TRACE( "collection_GetAt iface %p, index %lu (0x%lx), item %p, count %u\n", iface, (unsigned long)index, (unsigned long)index, item, impl->count );
+    TRACE( "COLDUMP self %p lpVtbl %p v0 %p v1 %p v6 %p v7 %p\n", cv, cv0, cv0[0], cv0[1], cv0[6], cv0[7] );
     if (!item || index > 0x10000)
     {
         void **first = (void **)index;
@@ -377,12 +377,12 @@ static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **ite
         it->end = impl->count;
         IInspectable_AddRef( &impl->IInspectable_iface );
         *first = &it->IInspectable_iface;
-        ERR( "IIterable::First created iterator %p for coll %p at %p\n", *first, impl, first );
+        TRACE( "IIterable::First created iterator %p for coll %p at %p\n", *first, impl, first );
         {
             void **v = (void **)*first;
             void **v0 = *(void ***)v;
-            ERR( "ITERDUMP self %p lpVtbl %p v0 %p v1 %p v6 %p v7 %p v8 %p v9 %p\n",
-                 v, v0, v0[0], v0[1], v0[6], v0[7], v0[8], v0[9] );
+            TRACE( "ITERDUMP self %p lpVtbl %p v0 %p v1 %p v6 %p v7 %p v8 %p v9 %p\n",
+                   v, v0, v0[0], v0[1], v0[6], v0[7], v0[8], v0[9] );
         }
         return S_OK;
     }
@@ -399,7 +399,7 @@ static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **ite
 static HRESULT WINAPI collection_get_Size( void *iface, unsigned int *size )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
-    ERR( "collection_get_Size iface %p size %p count %u\n", iface, size, impl->count );
+    TRACE( "collection_get_Size iface %p size %p count %u\n", iface, size, impl->count );
     if (size) *size = impl->count;
     return S_OK;
 }
@@ -474,7 +474,7 @@ static HRESULT WINAPI collection_RemoveAt( void *iface, unsigned int index )
 HRESULT WINAPI collection_Append( void *iface, void *item )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
-    ERR( "collection_Append iface %p, item %p, count was %u\n", iface, item, impl->count );
+    TRACE( "collection_Append iface %p, item %p, count was %u\n", iface, item, impl->count );
     if (impl->count >= impl->capacity)
     {
         unsigned int new_cap = impl->capacity ? impl->capacity * 2 : 8;
@@ -521,7 +521,7 @@ static HRESULT WINAPI collection_GetMany_view( void *iface, unsigned int count, 
     struct xaml_collection *impl = impl_from_collection( iface );
     unsigned int n = min(count, impl->count);
     if (items && n) memcpy( items, impl->items, n * sizeof(*impl->items) );
-    ERR( "collection_GetMany_view iface %p count %u -> %u\n", iface, count, n );
+    TRACE( "collection_GetMany_view iface %p count %u -> %u\n", iface, count, n );
     if (actual) *actual = n;
     return S_OK;
 }

@@ -1739,7 +1739,7 @@ static HRESULT ciis_ptr_add_kind( void *iface, int kind, void *handler, EventReg
             impl->tokens[kind][i] = tok;
             if (token) token->value = tok;
             LeaveCriticalSection( &g_ciis_cs );
-            ERR( "ciis_ptr_add_kind kind=%d handler=%p tok=%lld\n", kind, handler, (long long)tok );
+            TRACE( "ciis_ptr_add_kind kind=%d handler=%p tok=%lld\n", kind, handler, (long long)tok );
             return S_OK;
         }
     }
@@ -1804,8 +1804,8 @@ void uwp_ciis_dispatch_pointer_event( enum xaml_pointer_event_kind kind, const s
 
     if (!n_srcs) return;
     if (kind == XAML_PTR_PRESSED || kind == XAML_PTR_WHEEL)
-        ERR( "uwp_ciis_dispatch_pointer_event kind=%d pos=(%.1f,%.1f) R=%d L=%d wheel=%d srcs=%d\n",
-             kind, info->x, info->y, info->is_right, info->is_left, info->wheel_delta, n_srcs );
+        TRACE( "uwp_ciis_dispatch_pointer_event kind=%d pos=(%.1f,%.1f) R=%d L=%d wheel=%d srcs=%d\n",
+               kind, info->x, info->y, info->is_right, info->is_left, info->wheel_delta, n_srcs );
     args = xaml_core_pointer_args_create( info );
     if (!args)
     {
@@ -1941,7 +1941,7 @@ static HRESULT WINAPI uwp_scp_CreateCoreIndependentInputSource( void *iface, UIN
 {
     struct core_ind_input_source *src;
     int i;
-    ERR( "uwp_scp_CreateCoreIndependentInputSource dev=%#x\n", device_types );
+    TRACE( "uwp_scp_CreateCoreIndependentInputSource dev=%#x\n", device_types );
     if (!out) return E_POINTER;
     if (!(src = calloc( 1, sizeof(*src) ))) return E_OUTOFMEMORY;
     src->lpVtbl_base = ciis_base_vtbl;
@@ -1990,7 +1990,7 @@ static HRESULT WINAPI uwp_scp_native_SetSwapChain( void *iface, void *sc )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, ISwapChainPanelNative2_iface );
     HRESULT hr;
-    ERR( "uwp_scp_native_SetSwapChain iface=%p sc=%p\n", iface, sc );
+    TRACE( "uwp_scp_native_SetSwapChain iface=%p sc=%p\n", iface, sc );
     xaml_set_active_swapchain_panel( impl, sc );
     hr = xaml_attach_swapchain_panel_content( (IUnknown *)sc, &impl->scp_visual );
     if (sc)
@@ -2001,8 +2001,8 @@ static HRESULT WINAPI uwp_scp_native_SetSwapChain( void *iface, void *sc )
         {
             impl->actual_w = (double)w;
             impl->actual_h = (double)h;
-            ERR( "uwp_scp_native_SetSwapChain firing SizeChanged %ux%u (handlers=%d)\n",
-                 w, h, impl->size_changed_cnt );
+            TRACE( "uwp_scp_native_SetSwapChain firing SizeChanged %ux%u (handlers=%d)\n",
+                   w, h, impl->size_changed_cnt );
             uwp_fire_size_and_layout_changed( impl );
         }
     }
@@ -2011,7 +2011,7 @@ static HRESULT WINAPI uwp_scp_native_SetSwapChain( void *iface, void *sc )
 static HRESULT WINAPI uwp_scp_native_SetSwapChainHandle( void *iface, HANDLE h )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, ISwapChainPanelNative2_iface );
-    ERR( "uwp_scp_native_SetSwapChainHandle iface=%p h=%p\n", iface, h );
+    TRACE( "uwp_scp_native_SetSwapChainHandle iface=%p h=%p\n", iface, h );
     return xaml_attach_swapchain_panel_handle( h, &impl->scp_visual );
 }
 static const void *uwp_scp_native_vtbl[8] =

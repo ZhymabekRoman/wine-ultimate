@@ -2428,7 +2428,7 @@ static void set_resource_loader_scope( const WCHAR *raw )
     {
         lstrcpynW( resource_loader_primary, norm, (INT)(slash - norm) + 1 );
         scope_pri_index = load_named_pri( resource_loader_primary );
-        ERR( "TWINAPI: loader scope %s, primary %s, secondary pri %s\n", debugstr_w( resource_loader_scope ),
+        TRACE( "TWINAPI: loader scope %s, primary %s, secondary pri %s\n", debugstr_w( resource_loader_scope ),
              debugstr_w( resource_loader_primary ), scope_pri_index ? "loaded" : "missing" );
     }
 }
@@ -2866,7 +2866,7 @@ static HRESULT WINAPI resource_loader_factory_ActivateInstance( void *iface, voi
 static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *iface, HSTRING name, void **loader )
 {
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
-    ERR( "TWINAPI: CreateResourceLoaderByName name %s\n", debugstr_hstring(name) );
+    TRACE( "TWINAPI: CreateResourceLoaderByName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
     set_resource_loader_scope( raw );
     *loader = &resource_loader_obj.vtbl_loader;
@@ -2875,14 +2875,14 @@ static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *
 
 static HRESULT WINAPI resource_loader_statics_GetStringForReference( void *iface, void *uri, HSTRING *value )
 {
-    ERR( "TWINAPI: GetStringForReference uri %p\n", uri );
+    TRACE( "TWINAPI: GetStringForReference uri %p\n", uri );
     if (!value) return E_POINTER;
     return WindowsCreateString( L"", 0, value );
 }
 
 static HRESULT WINAPI resource_loader_statics2_GetForCurrentView( void *iface, void **loader )
 {
-    ERR( "TWINAPI: GetForCurrentView\n" );
+    TRACE( "TWINAPI: GetForCurrentView\n" );
     if (!loader) return E_POINTER;
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
@@ -2890,7 +2890,7 @@ static HRESULT WINAPI resource_loader_statics2_GetForCurrentView( void *iface, v
 static HRESULT WINAPI resource_loader_statics2_GetForCurrentViewWithName( void *iface, HSTRING name, void **loader )
 {
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
-    ERR( "TWINAPI: GetForCurrentViewWithName name %s\n", debugstr_hstring(name) );
+    TRACE( "TWINAPI: GetForCurrentViewWithName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
     set_resource_loader_scope( raw );
     *loader = &resource_loader_obj.vtbl_loader;
@@ -2898,7 +2898,7 @@ static HRESULT WINAPI resource_loader_statics2_GetForCurrentViewWithName( void *
 }
 static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUse( void *iface, void **loader )
 {
-    ERR( "TWINAPI: GetForViewIndependentUse\n" );
+    TRACE( "TWINAPI: GetForViewIndependentUse\n" );
     if (!loader) return E_POINTER;
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;
@@ -2906,7 +2906,7 @@ static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUse( void *i
 static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUseWithName( void *iface, HSTRING name, void **loader )
 {
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
-    ERR( "TWINAPI: GetForViewIndependentUseWithName name %s\n", debugstr_hstring(name) );
+    TRACE( "TWINAPI: GetForViewIndependentUseWithName name %s\n", debugstr_hstring(name) );
     if (!loader) return E_POINTER;
     set_resource_loader_scope( raw );
     *loader = &resource_loader_obj.vtbl_loader;
@@ -2915,7 +2915,7 @@ static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUseWithName(
 
 static HRESULT WINAPI resource_loader_statics3_GetForUIContext( void *iface, void *context, void **loader )
 {
-    ERR( "TWINAPI: GetForUIContext context %p\n", context );
+    TRACE( "TWINAPI: GetForUIContext context %p\n", context );
     if (!loader) return E_POINTER;
     *loader = &resource_loader_obj.vtbl_loader;
     return S_OK;

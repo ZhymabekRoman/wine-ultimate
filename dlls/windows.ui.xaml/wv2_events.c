@@ -60,7 +60,7 @@ static HRESULT WINAPI evargs_QueryInterface( IInspectable *iface, REFIID iid, vo
         IInspectable_AddRef( iface );
         return S_OK;
     }
-    ERR( "evargs_QueryInterface: unknown iid %s (winrt=%s)\n", debugstr_guid( iid ), debugstr_guid( &impl->winrt_iid ) );
+    TRACE( "evargs_QueryInterface: unknown iid %s (winrt=%s)\n", debugstr_guid( iid ), debugstr_guid( &impl->winrt_iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -172,7 +172,7 @@ static const void *cwv2_navstart_args_vtbl[256] =
 static HRESULT WINAPI navcomp_get_IsSuccess( void *iface, boolean *out )
 {
     HRESULT hr = evargs_get_bool( impl_from_evargs( iface ), 3, out );
-    ERR( "navcomp_get_IsSuccess hr=%#lx success=%d\n", hr, out ? *out : -1 );
+    TRACE( "navcomp_get_IsSuccess hr=%#lx success=%d\n", hr, out ? *out : -1 );
     return hr;
 }
 static HRESULT WINAPI navcomp_get_WebErrorStatus( void *iface, int *out )
@@ -231,18 +231,18 @@ static const void *cwv2_domloaded_args_vtbl[256] =
 static HRESULT WINAPI wrr_req_get_Uri( void *iface, HSTRING *out )
 {
     HRESULT hr = evargs_get_str( impl_from_evargs( iface ), 3, out );
-    ERR( "wrr_req_get_Uri hr=%#lx uri=%s\n", hr, out ? debugstr_hstring( *out ) : "(null)" );
+    TRACE( "wrr_req_get_Uri hr=%#lx uri=%s\n", hr, out ? debugstr_hstring( *out ) : "(null)" );
     return hr;
 }
 static HRESULT WINAPI wrr_req_get_Method( void *iface, HSTRING *out )
 {
     HRESULT hr = evargs_get_str( impl_from_evargs( iface ), 5, out );
-    ERR( "wrr_req_get_Method hr=%#lx\n", hr );
+    TRACE( "wrr_req_get_Method hr=%#lx\n", hr );
     return hr;
 }
 static HRESULT WINAPI wrr_req_get_Content( void *iface, void **out )
 {
-    ERR( "wrr_req_get_Content\n" );
+    TRACE( "wrr_req_get_Content\n" );
     if (!out) return E_POINTER;
     *out = NULL;
     return S_OK;
@@ -291,7 +291,7 @@ static HRESULT WINAPI wrr_headers_SetHeader( void *iface, HSTRING name, HSTRING 
     struct cwv2_event_args *impl = impl_from_evargs( iface );
     const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
     const WCHAR *v = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
-    ERR( "wrr_headers_SetHeader %s=%s\n", debugstr_w( n ), debugstr_w( v ) );
+    TRACE( "wrr_headers_SetHeader %s=%s\n", debugstr_w( n ), debugstr_w( v ) );
     if (impl->com_args && *(void ***)impl->com_args)
     {
         HRESULT (WINAPI *fn)( void *, LPCWSTR, LPCWSTR ) = (*(void ***)impl->com_args)[6];
@@ -339,7 +339,7 @@ static HRESULT WINAPI wrr_req_get_Headers( void *iface, void **out )
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             hr = fn( impl->com_args, &com_hdr );
     }
-    ERR( "wrr_req_get_Headers hr=%#lx com_hdr=%p\n", hr, com_hdr );
+    TRACE( "wrr_req_get_Headers hr=%#lx com_hdr=%p\n", hr, com_hdr );
     if (FAILED( hr ) || !com_hdr) return SUCCEEDED( hr ) ? E_FAIL : hr;
     wrap = calloc( 1, sizeof(*wrap) );
     if (!wrap)
@@ -401,25 +401,25 @@ static HRESULT WINAPI wrr_evargs_get_Request( void *iface, void **out )
     wrap->winrt_iid = IID_ICoreWebView2WebResourceRequest_rt;
     wrap->com_args = com_req;
     *out = &wrap->IInspectable_iface;
-    ERR( "wrr_evargs_get_Request -> %p (com=%p)\n", *out, com_req );
+    TRACE( "wrr_evargs_get_Request -> %p (com=%p)\n", *out, com_req );
     return S_OK;
 }
 static HRESULT WINAPI wrr_evargs_get_Response( void *iface, void **out )
 {
-    ERR( "wrr_evargs_get_Response\n" );
+    TRACE( "wrr_evargs_get_Response\n" );
     if (!out) return E_POINTER;
     *out = NULL;
     return S_OK;
 }
 static HRESULT WINAPI wrr_evargs_put_Response( void *iface, void *resp )
 {
-    ERR( "wrr_evargs_put_Response resp=%p\n", resp );
+    TRACE( "wrr_evargs_put_Response resp=%p\n", resp );
     return S_OK;
 }
 static HRESULT WINAPI wrr_deferral_Complete( void *iface )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
-    ERR( "wrr_deferral_Complete com=%p\n", impl->com_args );
+    TRACE( "wrr_deferral_Complete com=%p\n", impl->com_args );
     if (impl->com_args && *(void ***)impl->com_args)
     {
         HRESULT (WINAPI *fn)( void * ) = (*(void ***)impl->com_args)[3];
@@ -442,7 +442,7 @@ static HRESULT WINAPI wrr_evargs_GetDeferral( void *iface, void **out )
     if (!out) return E_POINTER;
     *out = NULL;
     /* Diagnostic: do not hold browser-side deferral open if app never calls Complete() */
-    ERR( "wrr_evargs_GetDeferral (non-blocking)\n" );
+    TRACE( "wrr_evargs_GetDeferral (non-blocking)\n" );
     wrap = calloc( 1, sizeof(*wrap) );
     if (!wrap) return E_OUTOFMEMORY;
     wrap->IInspectable_iface.lpVtbl = (const IInspectableVtbl *)cwv2_deferral_vtbl;
@@ -455,7 +455,7 @@ static HRESULT WINAPI wrr_evargs_GetDeferral( void *iface, void **out )
 static HRESULT WINAPI wrr_evargs_get_ResourceContext( void *iface, int *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
-    ERR( "wrr_evargs_get_ResourceContext iface=%p out=%p\n", iface, out );
+    TRACE( "wrr_evargs_get_ResourceContext iface=%p out=%p\n", iface, out );
     if (!out) return E_POINTER;
     *out = 0;
     if (impl->com_args && *(void ***)impl->com_args)
@@ -555,7 +555,7 @@ static HRESULT WINAPI evbridge_Invoke( void *t, void *com_sender, void *com_args
     struct cwv2_event_args *ea = NULL;
     HRESULT hr = S_OK;
     if (!wh || !b->owner) return S_OK;
-    ERR( "evbridge_Invoke: slot=%d iid=%s com_args=%p\n", 0, debugstr_guid( &b->args_iid ), com_args );
+    TRACE( "evbridge_Invoke: slot=%d iid=%s com_args=%p\n", 0, debugstr_guid( &b->args_iid ), com_args );
     if (com_args && (ea = calloc( 1, sizeof(*ea) )))
     {
         ea->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( b->args_vtbl ? b->args_vtbl : cwv2_generic_evargs_vtbl );
@@ -565,7 +565,7 @@ static HRESULT WINAPI evbridge_Invoke( void *t, void *com_sender, void *com_args
         ((IUnknown *)com_args)->lpVtbl->AddRef( com_args );
     }
     hr = wh->lpVtbl->Invoke( wh, &b->owner->IInspectable_iface, ea ? &ea->IInspectable_iface : NULL );
-    ERR( "evbridge_Invoke: done iid=%s hr=%#lx\n", debugstr_guid( &b->args_iid ), hr );
+    TRACE( "evbridge_Invoke: done iid=%s hr=%#lx\n", debugstr_guid( &b->args_iid ), hr );
     if (ea) evargs_Release( &ea->IInspectable_iface );
     return hr;
 }
@@ -664,7 +664,7 @@ HRESULT WINAPI cwv2_2_NavigateWithWebResourceRequest( void *iface, void *request
 {
     struct core_webview2 *impl = impl_from_cwv2_2( iface );
     void *c2 = cwv2_get_com_iface( impl, &impl->loader_core2, &IID_ICoreWebView2_2_com );
-    ERR( "cwv2_2_NavigateWithWebResourceRequest request=%p c2=%p\n", request, c2 );
+    TRACE( "cwv2_2_NavigateWithWebResourceRequest request=%p c2=%p\n", request, c2 );
     if (impl->owner) impl->owner->navigated = TRUE;
     if (c2 && request)
     {
@@ -709,7 +709,7 @@ HRESULT WINAPI cwv2_get_Profile( void *iface, void **out )
 {
     struct cwv2_profile *p;
     (void)iface;
-    ERR( "cwv2_get_Profile\n" );
+    TRACE( "cwv2_get_Profile\n" );
     if (!out) return E_POINTER;
     if (!(p = calloc( 1, sizeof(*p) ))) return E_OUTOFMEMORY;
     p->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_profile_vtbl );
@@ -729,7 +729,7 @@ HRESULT WINAPI cwv2_generic_slot( void *iface, ... )
     {
         void *a1 = va_arg( arg, void * );
         void *a2 = va_arg( arg, void * );
-        ERR( "cwv2_slot %d iface %p a1 %p a2 %p\n", slot, iface, a1, a2 );
+        TRACE( "cwv2_slot %d iface %p a1 %p a2 %p\n", slot, iface, a1, a2 );
     }
     va_end( arg );
     return S_OK;

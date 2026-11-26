@@ -550,7 +550,7 @@ static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApp
             return S_OK;
         }
     }
-    ERR( "activated_event_args: %s not implemented.\n", debugstr_guid( iid ) );
+    FIXME( "activated_event_args: %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }

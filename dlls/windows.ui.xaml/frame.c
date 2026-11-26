@@ -374,7 +374,7 @@ static HRESULT WINAPI frame_Navigate( void *iface, void *type_name_ptr, boolean 
 
 HRESULT WINAPI frame_generic_slot( void *iface, ... )
 {
-    ERR( "frame generic slot called on %p\n", iface );
+    TRACE( "frame generic slot called on %p\n", iface );
     return S_OK;
 }
 

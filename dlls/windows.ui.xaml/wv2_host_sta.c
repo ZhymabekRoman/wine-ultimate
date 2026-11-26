@@ -83,7 +83,7 @@ const void *cwv2_args_vtbl[256] =
 HRESULT WINAPI wv2_get_CoreWebView2( void *iface, void **out )
 {
     struct xaml_element *impl = impl_from_IWebView2( iface );
-    ERR( "wv2_get_CoreWebView2 iface %p, out %p, core %p\n", iface, out, impl->core_webview2 );
+    TRACE( "wv2_get_CoreWebView2 iface %p, out %p, core %p\n", iface, out, impl->core_webview2 );
     if (!out) return E_POINTER;
     *out = impl->core_webview2;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
@@ -387,8 +387,8 @@ static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
             ICoreWebView2CompositionController *comp_ctrl = g_active_wv2_impl->loader_comp_ctrl;
             HRESULT hr_m = comp_ctrl->lpVtbl->SendMouseInput( comp_ctrl, ev_kind, vkeys, 0, pt );
             if (ev_kind == WM_LBUTTONDOWN || ev_kind == WM_LBUTTONUP)
-                ERR( "wv2_sta_wndproc: SendMouseInput(%#x) pt=%ld,%ld vkeys=%#x hr=%#lx\n",
-                     ev_kind, pt.x, pt.y, vkeys, hr_m );
+                TRACE( "wv2_sta_wndproc: SendMouseInput(%#x) pt=%ld,%ld vkeys=%#x hr=%#lx\n",
+                       ev_kind, pt.x, pt.y, vkeys, hr_m );
             else if (ev_kind != WM_MOUSEMOVE)
                 TRACE( "wv2_sta_wndproc: SendMouseInput(%#x) pt=%ld,%ld vkeys=%#x hr=%#lx\n",
                        ev_kind, pt.x, pt.y, vkeys, hr_m );
@@ -688,7 +688,7 @@ void wv2_ensure_host_subclass( HWND parent )
             g_wv2_child_sync_ticks = 0;
             SetTimer( parent, WV2_CHILD_SYNC_TIMER_ID, 250, NULL );
         }
-        ERR( "wv2_ensure_host_subclass: subclassed parent=%p prev=%p\n", parent, prev );
+        TRACE( "wv2_ensure_host_subclass: subclassed parent=%p prev=%p\n", parent, prev );
     }
 }
 
@@ -724,7 +724,7 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
                 else
                     SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
                                   SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
-                ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
+                TRACE( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
                        child, debugstr_w( cls ), ctx->width, ctx->height );
             }
         }
@@ -799,8 +799,8 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
             ShowWindow( hwnd, SW_SHOW );
             SetWindowPos( hwnd, HWND_TOP, 0, 0, ctx->width, ctx->height,
                           SWP_SHOWWINDOW | SWP_NOACTIVATE );
-            ERR( "wv2_sync_top_cb: re-parented and positioned child %p (%s) to parent %p %dx%d\n",
-                 hwnd, debugstr_w( cls ), parent, ctx->width, ctx->height );
+            TRACE( "wv2_sync_top_cb: re-parented and positioned child %p (%s) to parent %p %dx%d\n",
+                   hwnd, debugstr_w( cls ), parent, ctx->width, ctx->height );
             EnumChildWindows( hwnd, wv2_sync_child_cb, lparam );
             ctx->count++;
         }
@@ -867,7 +867,7 @@ DWORD WINAPI wv2_sta_thread( void *arg )
             break;
         }
     }
-    ERR( "wv2_sta_thread: starting browser, target=%p\n", hw );
+    TRACE( "wv2_sta_thread: starting browser, target=%p\n", hw );
     impl->parent_hwnd = hw;
     g_wv2_core_hwnd = hw;
     wv2_start_browser( impl );

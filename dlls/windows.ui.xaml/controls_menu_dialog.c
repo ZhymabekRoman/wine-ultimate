@@ -1679,7 +1679,7 @@ static HRESULT WINAPI uwp_sv_put_Content( void *iface, void *val )
     struct uwp_element *ch;
     if (!impl) return S_OK;
     ch = uwp_elem_from_any( val );
-    ERR( "uwp_sv_put_Content impl=%p(%s) val=%p(%s)\n",
+    TRACE( "uwp_sv_put_Content impl=%p(%s) val=%p(%s)\n",
          impl, debugstr_w(impl->class_name), val, ch ? debugstr_w(ch->class_name) : "?" );
     if (ch && uwp_sv_would_cycle( impl, ch ))
     {

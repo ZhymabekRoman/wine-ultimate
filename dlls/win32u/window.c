@@ -2869,7 +2869,7 @@ WORD WINAPI NtUserSetWindowWord( HWND hwnd, INT offset, WORD newval )
 LONG WINAPI NtUserSetWindowLong( HWND hwnd, INT offset, LONG newval, BOOL ansi )
 {
     if (offset == GWL_STYLE || offset == GWL_EXSTYLE)
-        ERR( "win: NtUserSetWindowLong hwnd %p idx %d style %08x\n", hwnd, offset, newval );
+        TRACE( "win: NtUserSetWindowLong hwnd %p idx %d style %08x\n", hwnd, offset, newval );
     return set_window_long( hwnd, offset, sizeof(LONG), newval, ansi );
 }
 
@@ -2879,7 +2879,7 @@ LONG WINAPI NtUserSetWindowLong( HWND hwnd, INT offset, LONG newval, BOOL ansi )
 LONG_PTR WINAPI NtUserSetWindowLongPtr( HWND hwnd, INT offset, LONG_PTR newval, BOOL ansi )
 {
     if (offset == GWL_STYLE || offset == GWL_EXSTYLE)
-        ERR( "win: NtUserSetWindowLongPtr hwnd %p idx %d style %08x\n", hwnd, offset, (UINT)newval );
+        TRACE( "win: NtUserSetWindowLongPtr hwnd %p idx %d style %08x\n", hwnd, offset, (UINT)newval );
     return set_window_long( hwnd, offset, sizeof(LONG_PTR), newval, ansi );
 }
 
@@ -5488,7 +5488,7 @@ BOOL WINAPI NtUserSetWindowPos( HWND hwnd, HWND after, INT x, INT y, INT cx, INT
 {
     WINDOWPOS winpos;
 
-    ERR( "SWP: hwnd %p, after %p, %d,%d (%dx%d), flags %08x\n", hwnd, after, x, y, cx, cy, flags );
+    TRACE( "SWP: hwnd %p, after %p, %d,%d (%dx%d), flags %08x\n", hwnd, after, x, y, cx, cy, flags );
     if(TRACE_ON(win)) dump_winpos_flags(flags);
 
     if (is_broadcast( hwnd ))
@@ -6437,7 +6437,7 @@ BOOL WINAPI NtUserShowWindow( HWND hwnd, INT cmd )
 {
     HWND full_handle;
 
-    ERR( "win: NtUserShowWindow hwnd %p cmd %d\n", hwnd, cmd );
+    TRACE( "win: NtUserShowWindow hwnd %p cmd %d\n", hwnd, cmd );
 
     if (is_broadcast(hwnd))
     {
@@ -6797,7 +6797,7 @@ static BOOL user_destroy_window( HWND hwnd, BOOL winevent )
 {
     BOOL is_child;
 
-    ERR( "user_destroy_window hwnd %p called by %p\n", hwnd, __builtin_return_address(0) );
+    TRACE( "user_destroy_window hwnd %p called by %p\n", hwnd, __builtin_return_address(0) );
 
     if (!(hwnd = is_current_thread_window( hwnd )) || is_desktop_window( hwnd ))
     {
@@ -7430,7 +7430,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     if (!(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ))
         call_hooks( WH_SHELL, HSHELL_WINDOWCREATED, (WPARAM)hwnd, 0, 0 );
 
-    ERR( "created window %p class %s name %s style %08x exstyle %08x parent %p\n", hwnd, debugstr_us(class_name), debugstr_us(window_name), cs.style, cs.dwExStyle, cs.hwndParent );
+    TRACE( "created window %p class %s name %s style %08x exstyle %08x parent %p\n", hwnd, debugstr_us(class_name), debugstr_us(window_name), cs.style, cs.dwExStyle, cs.hwndParent );
     set_thread_dpi_awareness_context( context );
 
     toplevel = NtUserGetAncestor( hwnd, GA_ROOT );

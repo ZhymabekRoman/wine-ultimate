@@ -626,7 +626,7 @@ static const IID IID_pinterface_IMapView_HSTRING_IInspectable =
 
 static HRESULT resources_propget( struct application *impl, REFIID iid, void **out )
 {
-    ERR( "resources_propget impl %p, iid %s\n", impl, debugstr_guid( iid ) );
+    TRACE( "resources_propget impl %p, iid %s\n", impl, debugstr_guid( iid ) );
     if (!impl) return E_FAIL;
     if (!impl->resources)
     {
@@ -690,7 +690,7 @@ static struct application *app_from_iface( void *iface )
 static HRESULT WINAPI application_get_Resources( void *iface, void **value )
 {
     struct application *impl = app_from_iface( iface );
-    ERR( "application_get_Resources iface %p, impl %p\n", iface, impl );
+    TRACE( "application_get_Resources iface %p, impl %p\n", iface, impl );
     if (!value) return E_POINTER;
     return resources_propget( impl, &IID_IResourceDictionary_WinUI, value );
 }
@@ -750,7 +750,7 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
 {
     struct application *impl = impl_from_IApplication( iface );
 
-    ERR( "application_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    TRACE( "application_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (impl->outer &&
         !IsEqualGUID( iid, &IID_IApplication ) &&
@@ -897,7 +897,7 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
 {
     struct application *impl = impl_from_inner_IInspectable( iface );
 
-    ERR( "application_inner_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    TRACE( "application_inner_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (IsEqualGUID( iid, &IID_IApplication_WinUI3 ))
     {
@@ -1017,7 +1017,7 @@ static inline struct application *impl_from_ms_IApplication( void *iface )
 static HRESULT WINAPI application_ms_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct application *impl = impl_from_ms_IApplication( iface );
-    ERR( "application_ms_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    TRACE( "application_ms_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
     return application_QueryInterface( &impl->IApplication_iface, iid, out );
 }
 
@@ -1672,7 +1672,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
         {
             if (SUCCEEDED( xaml_create_instance_from_provider( xaml_get_app_caps()->design_component, &font_scale ) ) && font_scale)
             {
-                ERR( "binding font_scale %p to conn_id 6\n", font_scale );
+                TRACE( "binding font_scale %p to conn_id 6\n", font_scale );
                 b_conn->lpVtbl->Connect( b_conn, 6, font_scale );
                 IInspectable_Release( (IInspectable *)font_scale );
             }
@@ -1938,7 +1938,7 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
 {
     struct application *impl;
 
-    ERR( "application_factory_CreateInstance outer %p, inner %p, instance %p\n", outer, inner, instance );
+    TRACE( "application_factory_CreateInstance outer %p, inner %p, instance %p\n", outer, inner, instance );
 
     impl = calloc( 1, sizeof(*impl) );
     if (!impl) return E_OUTOFMEMORY;
@@ -2085,7 +2085,7 @@ static HRESULT WINAPI ms_application_statics_get_Current( IApplicationStatics *i
         IApplication **current )
 {
     struct application_factory *impl = impl_from_ms_IApplicationStatics( iface );
-    ERR( "ms_application_statics_get_Current iface %p, current %p, current_application %p, outer %p\n",
+    TRACE( "ms_application_statics_get_Current iface %p, current %p, current_application %p, outer %p\n",
          iface, current, current_application, current_application ? current_application->outer : NULL );
     if (!current) return E_POINTER;
     if (!current_application)

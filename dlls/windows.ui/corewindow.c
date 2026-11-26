@@ -3221,7 +3221,7 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
 
     {
         static int cwp_depth;
-        if (cwp_depth < 10) ERR( "CWP d=%d hwnd %p msg %x\n", cwp_depth, hwnd, msg );
+        if (cwp_depth < 10) TRACE( "CWP d=%d hwnd %p msg %x\n", cwp_depth, hwnd, msg );
         cwp_depth++;
     }
     switch (msg)

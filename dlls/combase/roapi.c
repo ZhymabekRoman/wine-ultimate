@@ -1814,7 +1814,7 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
     TRACE("Found library %s for class %s\n", debugstr_w(library), debugstr_hstring(classid));
 
     hr = pDllGetActivationFactory(classid, factory);
-    ERR( "pDllGetActivationFactory(%s) in %s -> hr %#lx, factory %p\n", debugstr_w(raw), debugstr_w(library), hr, *factory );
+    TRACE( "pDllGetActivationFactory(%s) in %s -> hr %#lx, factory %p\n", debugstr_w(raw), debugstr_w(library), hr, *factory );
     if (FAILED(hr))
     {
         WCHAR *seed_lib = NULL;
@@ -3508,67 +3508,72 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
 {
     IRestrictedErrorInfo *info;
     BOOL ret = FALSE;
-    void *bt[32];
-    USHORT n = RtlCaptureStackBackTrace( 0, 32, bt, NULL );
-    USHORT i;
 
-    ERR( "RoOriginateLanguageException error %#lx, message %s, exception %p\n", error, debugstr_hstring( message ), language_exception );
-    for (i = 0; i < n; i++)
-        TRACE( "  originate_bt[%u] = %p\n", i, bt[i] );
+    TRACE( "RoOriginateLanguageException error %#lx, message %s, exception %p\n", error, debugstr_hstring( message ), language_exception );
 
-    if (language_exception)
+    if (TRACE_ON(combase))
     {
-        IInspectable *insp = NULL;
-        IRestrictedErrorInfo *re = NULL;
-        static const GUID IID_IRestrictedErrorInfo_local =
-            { 0x82ba7092, 0x4c88, 0x427d, { 0xa7, 0xbc, 0x16, 0xdd, 0x93, 0xfe, 0xb6, 0x7e } };
+        void *bt[32];
+        USHORT n = RtlCaptureStackBackTrace( 0, 32, bt, NULL );
+        USHORT i;
 
-        if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IInspectable, (void **)&insp )))
-        {
-            HSTRING rname = NULL;
-            insp->lpVtbl->GetRuntimeClassName( insp, &rname );
-            ERR( "language_exception runtime class: %s\n", debugstr_hstring( rname ) );
-            WindowsDeleteString( rname );
-            insp->lpVtbl->Release( insp );
-        }
+        for (i = 0; i < n; i++)
+            TRACE( "  originate_bt[%u] = %p\n", i, bt[i] );
 
+        if (language_exception)
         {
-            static const GUID IID_IStringable =
-                { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
-            IInspectable *stringable = NULL;
-            if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IStringable, (void **)&stringable )))
+            IInspectable *insp = NULL;
+            IRestrictedErrorInfo *re = NULL;
+            static const GUID IID_IRestrictedErrorInfo_local =
+                { 0x82ba7092, 0x4c88, 0x427d, { 0xa7, 0xbc, 0x16, 0xdd, 0x93, 0xfe, 0xb6, 0x7e } };
+
+            if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IInspectable, (void **)&insp )))
             {
-                void **s_vtbl = *(void ***)stringable;
-                HRESULT (WINAPI *pToString)( void *, HSTRING * ) = (void *)s_vtbl[6];
-                HSTRING str = NULL;
-                if (SUCCEEDED(pToString( stringable, &str )) && str)
-                {
-                    UINT32 len = 0;
-                    const WCHAR *wstr = WindowsGetStringRawBuffer( str, &len );
-                    char utf8[4096];
-                    int n = WideCharToMultiByte( CP_UTF8, 0, wstr, len, utf8, sizeof(utf8) - 1, NULL, NULL );
-                    if (n > 0)
-                    {
-                        utf8[n] = '\0';
-                        ERR( "language_exception IStringable::ToString:\n%s\n", utf8 );
-                    }
-                    WindowsDeleteString( str );
-                }
-                IInspectable_Release( stringable );
+                HSTRING rname = NULL;
+                insp->lpVtbl->GetRuntimeClassName( insp, &rname );
+                TRACE( "language_exception runtime class: %s\n", debugstr_hstring( rname ) );
+                WindowsDeleteString( rname );
+                insp->lpVtbl->Release( insp );
             }
-        }
 
-        if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IRestrictedErrorInfo_local, (void **)&re )))
-        {
-            BSTR desc = NULL, rest = NULL, sid = NULL;
-            HRESULT err = 0;
-            re->lpVtbl->GetErrorDetails( re, &desc, &err, &rest, &sid );
-            ERR( "language_exception IRestrictedErrorInfo: desc=%s, rest=%s, err=%#lx\n",
-                 debugstr_w( desc ), debugstr_w( rest ), err );
-            SysFreeString( desc );
-            SysFreeString( rest );
-            SysFreeString( sid );
-            re->lpVtbl->Release( re );
+            {
+                static const GUID IID_IStringable =
+                    { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+                IInspectable *stringable = NULL;
+                if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IStringable, (void **)&stringable )))
+                {
+                    void **s_vtbl = *(void ***)stringable;
+                    HRESULT (WINAPI *pToString)( void *, HSTRING * ) = (void *)s_vtbl[6];
+                    HSTRING str = NULL;
+                    if (SUCCEEDED(pToString( stringable, &str )) && str)
+                    {
+                        UINT32 len = 0;
+                        const WCHAR *wstr = WindowsGetStringRawBuffer( str, &len );
+                        char utf8[4096];
+                        int n = WideCharToMultiByte( CP_UTF8, 0, wstr, len, utf8, sizeof(utf8) - 1, NULL, NULL );
+                        if (n > 0)
+                        {
+                            utf8[n] = '\0';
+                            TRACE( "language_exception IStringable::ToString:\n%s\n", utf8 );
+                        }
+                        WindowsDeleteString( str );
+                    }
+                    IInspectable_Release( stringable );
+                }
+            }
+
+            if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IRestrictedErrorInfo_local, (void **)&re )))
+            {
+                BSTR desc = NULL, rest = NULL, sid = NULL;
+                HRESULT err = 0;
+                re->lpVtbl->GetErrorDetails( re, &desc, &err, &rest, &sid );
+                TRACE( "language_exception IRestrictedErrorInfo: desc=%s, rest=%s, err=%#lx\n",
+                       debugstr_w( desc ), debugstr_w( rest ), err );
+                SysFreeString( desc );
+                SysFreeString( rest );
+                SysFreeString( sid );
+                re->lpVtbl->Release( re );
+            }
         }
     }
 

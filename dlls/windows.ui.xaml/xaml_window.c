@@ -687,7 +687,7 @@ void xaml_set_active_swapchain_panel( void *el, void *sc )
         impl->gpu_active = FALSE;
         impl->gpu_rendered_once = FALSE;
         InterlockedExchange( &g_xaml_window_dirty, 1 );
-        ERR( "xaml_set_active_swapchain_panel: switched XAML swapchain to DComp overlay mode for sc=%p\n", sc );
+        TRACE( "xaml_set_active_swapchain_panel: switched XAML swapchain to DComp overlay mode for sc=%p\n", sc );
     }
 }
 
@@ -699,8 +699,8 @@ HRESULT xaml_attach_swapchain_panel_content( IUnknown *content, IDCompositionVis
     if (!slot) return E_POINTER;
     if (!impl->dcomp_device || !impl->dcomp_root_visual)
     {
-        ERR( "xaml_attach_swapchain_panel_content: dcomp not ready (dev=%p root=%p)\n",
-             impl->dcomp_device, impl->dcomp_root_visual );
+        TRACE( "xaml_attach_swapchain_panel_content: dcomp not ready (dev=%p root=%p)\n",
+               impl->dcomp_device, impl->dcomp_root_visual );
         return S_OK;
     }
     if (!impl->dcomp_target && impl->target_hwnd)
@@ -721,7 +721,7 @@ HRESULT xaml_attach_swapchain_panel_content( IUnknown *content, IDCompositionVis
     }
     hr = IDCompositionVisual_SetContent( (IDCompositionVisual *)*slot, content );
     IDCompositionDesktopDevice_Commit( impl->dcomp_device );
-    ERR( "xaml_attach_swapchain_panel_content content=%p vis=%p hr=%#lx\n", content, *slot, hr );
+    TRACE( "xaml_attach_swapchain_panel_content content=%p vis=%p hr=%#lx\n", content, *slot, hr );
     return hr;
 }
 
@@ -940,7 +940,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     }
     if (msg == WM_APP_WV2_START)
     {
-        ERR( "xaml_corewindow_wndproc: WM_APP_WV2_START hwnd %p\n", hwnd );
+        TRACE( "xaml_corewindow_wndproc: WM_APP_WV2_START hwnd %p\n", hwnd );
         xaml_wv2_handle_start_msg( lparam );
         return 0;
     }
@@ -2098,7 +2098,7 @@ static HRESULT WINAPI xaml_window_zero_out( void *iface, void *a2, void *a3 );
 
 static HRESULT WINAPI xaml_window_add_Loaded( void *iface, void *handler, EventRegistrationToken *token )
 {
-    ERR( "xaml_window_add_Loaded iface %p handler %p\n", iface, handler );
+    TRACE( "xaml_window_add_Loaded iface %p handler %p\n", iface, handler );
     if (token) token->value = 1;
     xaml_register_loaded( handler, (IInspectable *)iface );
     return S_OK;

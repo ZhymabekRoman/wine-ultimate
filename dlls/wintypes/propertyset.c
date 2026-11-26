@@ -608,7 +608,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, HSTRIN
     if (FAILED(hr) && hkey)
     {
         const WCHAR *name = WindowsGetStringRawBuffer( hkey, NULL );
-        ERR( "propertyset_Lookup missing key: %s\n", debugstr_w(name) );
+        TRACE( "propertyset_Lookup missing key: %s\n", debugstr_w(name) );
         if (name)
         {
             if (!wcscmp( name, L"AppMinWindowWidth" ))

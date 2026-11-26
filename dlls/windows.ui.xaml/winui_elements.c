@@ -441,7 +441,7 @@ ULONG WINAPI element_Release( IInspectable *iface )
         /* Leak-keep elements: the .NET 8 ComWrappers RCW caches the native
          * iface and QIs it after our ref drains (r100-r106 stale-iface AV in
          * element_QueryInterface via coreclr thunk). Tree is app-lifetime. */
-        ERR( "element_Release iface %p ref 0 (leak-kept)\n", iface );
+        TRACE( "element_Release iface %p ref 0 (leak-kept)\n", iface );
         InterlockedIncrement( &impl->ref );
         return 1;
     }
@@ -465,7 +465,7 @@ HRESULT WINAPI element_GetIids( IInspectable *iface, ULONG *count, IID **iids )
             arr[0] = IID_IReferenceTracker;
             arr[1] = IID_IWeakReferenceSource;
             arr[2] = IID_IGrid;
-            ERR( "element_GetIids arr %p count 3\n", arr );
+            TRACE( "element_GetIids arr %p count 3\n", arr );
             *count = 3;
             *iids = arr;
         }
@@ -484,14 +484,14 @@ HRESULT WINAPI element_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 
 HRESULT WINAPI element_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 {
-    ERR( "element_GetTrustLevel iface %p\n", iface );
+    TRACE( "element_GetTrustLevel iface %p\n", iface );
     if (level) *level = BaseTrust;
     return S_OK;
 }
 
 HRESULT WINAPI element_generic_slot( void *iface, ... )
 {
-    ERR( "element_generic_slot iface %p\n", iface );
+    TRACE( "element_generic_slot iface %p\n", iface );
     return S_OK;
 }
 
@@ -545,7 +545,7 @@ static struct tracker_entry *tracker_lookup( void *iface, int create )
 static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
 {
     struct tracker_entry *e = tracker_lookup( iface, 1 );
-    ERR( "xaml_ConnectFromTrackerSource iface %p source %p\n", iface, source );
+    TRACE( "xaml_ConnectFromTrackerSource iface %p source %p\n", iface, source );
     if (e && !e->source && source)
     {
         /* .NET RCW passes its own GCHandle as source, not a COM pointer.
@@ -557,7 +557,7 @@ static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
 static HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface )
 {
     struct tracker_entry *e = tracker_lookup( iface, 0 );
-    ERR( "xaml_AddRefFromTrackerSource iface %p source %p\n", iface, e ? e->source : NULL );
+    TRACE( "xaml_AddRefFromTrackerSource iface %p source %p\n", iface, e ? e->source : NULL );
     return S_OK;
 }
 
@@ -625,7 +625,7 @@ static HRESULT WINAPI element_remove_event_generic( void *iface, EventRegistrati
 HRESULT WINAPI element_add_Loaded( void *iface, void *handler, EventRegistrationToken *token )
 {
     struct xaml_element *impl = impl_from_element( (IInspectable *)iface );
-    ERR( "element_add_Loaded iface %p, handler %p, token %p\n", iface, handler, token );
+    TRACE( "element_add_Loaded iface %p, handler %p, token %p\n", iface, handler, token );
     if (token) token->value = 1;
     impl->loaded_fn = handler;
     xaml_register_loaded( handler, (IInspectable *)iface );
@@ -680,7 +680,7 @@ void xaml_fire_all_loaded( void )
         HRESULT (WINAPI *fn)( void *, void *, void * );
         if (!snap[i].handler) continue;
         fn = (void *)((void **)((void **)snap[i].handler)[0])[3];
-        ERR( "firing Loaded on %p handler %p\n", (void *)snap[i].sender, snap[i].handler );
+        TRACE( "firing Loaded on %p handler %p\n", (void *)snap[i].sender, snap[i].handler );
         fn( snap[i].handler, (void *)snap[i].sender, NULL );
     }
     free( snap );
@@ -695,8 +695,7 @@ HRESULT WINAPI element_remove_Loaded( void *iface, EventRegistrationToken token 
 static HRESULT WINAPI element_get_Content( void *iface, void **out )
 {
     struct xaml_element *impl = impl_from_element( iface );
-    TRACE( "element_get_Content iface %p, out %p\n", iface, out );
-    ERR( "TRACEROWS element_get_Content iface %p out %p content %p\n", iface, out, impl->content );
+    TRACE( "TRACEROWS element_get_Content iface %p out %p content %p\n", iface, out, impl->content );
     if (!out) return E_POINTER;
     *out = impl->content;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
@@ -706,7 +705,7 @@ static HRESULT WINAPI element_get_Content( void *iface, void **out )
 static HRESULT WINAPI element_put_Content( void *iface, void *val )
 {
     struct xaml_element *impl = impl_from_element( iface );
-    ERR( "element_put_Content iface %p, val %p\n", iface, val );
+    TRACE( "element_put_Content iface %p, val %p\n", iface, val );
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
     return S_OK;
@@ -715,8 +714,7 @@ static HRESULT WINAPI element_put_Content( void *iface, void *val )
 static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
 {
     struct xaml_element *impl = impl_from_element( iface );
-    ERR( "TRACEROWS element_grid_get_RowDefinitions iface %p out %p\n", iface, out );
-    TRACE( "element_grid_get_RowDefinitions iface %p, out %p\n", iface, out );
+    TRACE( "TRACEROWS element_grid_get_RowDefinitions iface %p out %p\n", iface, out );
     if (!out) return E_POINTER;
     {
         IInspectable *rd = NULL;
@@ -729,7 +727,7 @@ static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
             element_create_typed( L"Windows.UI.Xaml.Controls.RowDefinition", (void **)&rd2 );
             collection_Append( (void *)impl->row_defs, rd );
             collection_Append( (void *)impl->row_defs, rd2 ? rd2 : rd );
-            ERR( "seeded fresh row_defs count %u\n", c->count );
+            TRACE( "seeded fresh row_defs count %u\n", c->count );
         }
     }
     /* Slots are shared: IUIElement::set_Visibility(iface, int) can land on a
@@ -764,7 +762,7 @@ static HRESULT WINAPI element_grid_get_ColumnDefinitions( void *iface, void **ou
         element_create_typed( L"Windows.UI.Xaml.Controls.ColumnDefinition", (void **)&cd2 );
         collection_Append( (void *)impl->col_defs, cd );
         collection_Append( (void *)impl->col_defs, cd2 ? cd2 : cd );
-        ERR( "seeded fresh col_defs\n" );
+        TRACE( "seeded fresh col_defs\n" );
     }
     __TRY
     {
@@ -908,7 +906,7 @@ struct xaml_grid_length { double value; unsigned int unit; };
 static HRESULT WINAPI rowdef_get_Height( void *iface, void *out )
 {
     struct xaml_grid_length gl = { 1.0, 2 };
-    ERR( "rowdef_get_Height iface %p out %p\n", iface, out );
+    TRACE( "rowdef_get_Height iface %p out %p\n", iface, out );
     if (out) *(struct xaml_grid_length *)out = gl;
     return S_OK;
 }
@@ -1179,8 +1177,8 @@ HRESULT xaml_async_action_create( IAsyncAction **out )
 
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height )
 {
-    ERR( "xaml_wv2_on_window_ready hwnd=%p %ux%u active=%p queued=%d\n",
-         hwnd, width, height, g_active_wv2_impl, g_active_wv2_impl ? g_active_wv2_impl->browser_queued : -1 );
+    TRACE( "xaml_wv2_on_window_ready hwnd=%p %ux%u active=%p queued=%d\n",
+           hwnd, width, height, g_active_wv2_impl, g_active_wv2_impl ? g_active_wv2_impl->browser_queued : -1 );
     g_wv2_core_hwnd = hwnd;
     if (g_active_wv2_impl) g_active_wv2_impl->parent_hwnd = hwnd;
     wv2_ensure_host_subclass( hwnd );
@@ -1200,8 +1198,8 @@ void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height )
                 g_active_wv2_impl->visual_attached = TRUE;
                 xaml_dcomp_commit();
             }
-            ERR( "xaml_wv2_on_window_ready: AddVisual root=%p vis=%p hr=%#lx\n",
-                 root, g_active_wv2_impl->visual, hr_add );
+            TRACE( "xaml_wv2_on_window_ready: AddVisual root=%p vis=%p hr=%#lx\n",
+                   root, g_active_wv2_impl->visual, hr_add );
         }
     }
     if (g_wv2_host_hwnd && IsWindow( g_wv2_host_hwnd ) && width > 0 && height > 0)
@@ -1309,7 +1307,7 @@ static HRESULT WINAPI xaml_root_QueryInterface( void *iface, REFIID iid, void **
         *out = (void *)&xaml_root_weak_src_obj;
         return S_OK;
     }
-    ERR( "xaml_root_QueryInterface unsupported iid %s\n", debugstr_guid( iid ) );
+    TRACE( "xaml_root_QueryInterface unsupported iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1358,7 +1356,7 @@ static HRESULT WINAPI xaml_root_native_get_HostWindow( void *iface, HWND *out )
 {
     if (!out) return E_POINTER;
     *out = xaml_get_window_hwnd();
-    ERR( "xaml_root_native_get_HostWindow -> %p\n", *out );
+    TRACE( "xaml_root_native_get_HostWindow -> %p\n", *out );
     return S_OK;
 }
 static const void *xaml_root_native_vtbl[4] =
@@ -1826,7 +1824,7 @@ static HRESULT WINAPI grid_factory_CreateInstance( void *iface, void *outer, voi
 static HRESULT WINAPI rowdef_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
     HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.RowDefinition", (void **)instance );
-    ERR( "rowdef_factory_ActivateInstance -> %p hr %08lx\n", (void *)*instance, hr );
+    TRACE( "rowdef_factory_ActivateInstance -> %p hr %08lx\n", (void *)*instance, hr );
     return hr;
 }
 
@@ -1839,14 +1837,14 @@ static HRESULT WINAPI rowdef_factory_CreateInstance( void *iface, void *outer, v
         if (inner) { *inner = (void *)impl; IInspectable_AddRef( (IInspectable *)*inner ); }
         *instance = (void *)impl;
     }
-    ERR( "rowdef_factory_CreateInstance outer %p -> %p hr %08lx\n", outer, (void *)impl, hr );
+    TRACE( "rowdef_factory_CreateInstance outer %p -> %p hr %08lx\n", outer, (void *)impl, hr );
     return hr;
 }
 
 static HRESULT WINAPI coldef_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
     HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.ColumnDefinition", (void **)instance );
-    ERR( "coldef_factory_ActivateInstance -> %p hr %08lx\n", (void *)*instance, hr );
+    TRACE( "coldef_factory_ActivateInstance -> %p hr %08lx\n", (void *)*instance, hr );
     return hr;
 }
 
@@ -1859,7 +1857,7 @@ static HRESULT WINAPI coldef_factory_CreateInstance( void *iface, void *outer, v
         if (inner) { *inner = (void *)impl; IInspectable_AddRef( (IInspectable *)*inner ); }
         *instance = (void *)impl;
     }
-    ERR( "coldef_factory_CreateInstance outer %p -> %p hr %08lx\n", outer, (void *)impl, hr );
+    TRACE( "coldef_factory_CreateInstance outer %p -> %p hr %08lx\n", outer, (void *)impl, hr );
     return hr;
 }
 
