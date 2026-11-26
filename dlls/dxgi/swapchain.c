@@ -100,6 +100,28 @@ BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc)
     return TRUE;
 }
 
+BOOL dxgi_validate_swapchain_fullscreen_desc(const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc)
+{
+    if (desc && !desc->Windowed)
+    {
+        if (!(desc->ScanlineOrdering >= DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED
+                && desc->ScanlineOrdering <= DXGI_MODE_SCANLINE_ORDER_LOWER_FIELD_FIRST))
+        {
+            WARN("Invalid scaline order %#x.\n", desc->ScanlineOrdering);
+            return FALSE;
+        }
+
+        if (!(desc->Scaling >= DXGI_MODE_SCALING_UNSPECIFIED
+                && desc->Scaling <= DXGI_MODE_SCALING_STRETCHED))
+        {
+            WARN("Invalid scaling %#x.\n", desc->Scaling);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 HRESULT dxgi_get_output_from_window(IWineDXGIFactory *factory, HWND window, IDXGIOutput **dxgi_output)
 {
     unsigned int adapter_idx, output_idx;
@@ -1133,9 +1155,16 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
          * commits (e.g. MS Paint strokes) leaves the window on the initial frame.
          * Notify dcomp so its composite thread re-composites now. */
         dxgi_notify_dcomp_presented( &swapchain->IDXGISwapChain4_iface );
-        if (swapchain->frame_latency_semaphore
-                && !ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL))
-            ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
+        if (swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)
+        {
+            HANDLE waitable = wined3d_swapchain_get_frame_latency_waitable_object(swapchain->wined3d_swapchain);
+            if (waitable)
+            {
+                if (!ReleaseSemaphore(waitable, 1, NULL))
+                    ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
+                CloseHandle(waitable);
+            }
+        }
         if (sync_interval && !(flags & DXGI_PRESENT_DO_NOT_WAIT))
             Sleep(16);
         return S_OK;
@@ -1153,10 +1182,6 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
                 swapchain->back_buffer_index = (swapchain->back_buffer_index + 1) % swapchain->buffer_count;
             }
         }
-
-        if (swapchain->frame_latency_semaphore
-                && !ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL))
-            ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
     }
     return hr;
 }
@@ -1215,6 +1240,15 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_SetFullscreen
         return DXGI_ERROR_INVALID_CALL;
     }
 
+    if (fullscreen)
+    {
+        DXGI_SWAP_CHAIN_FULLSCREEN_DESC test_fullscreen_desc = swapchain->fullscreen_desc;
+
+        test_fullscreen_desc.Windowed = FALSE;
+        if (!dxgi_validate_swapchain_fullscreen_desc(&test_fullscreen_desc))
+            return DXGI_ERROR_INVALID_CALL;
+    }
+
     if (target)
     {
         IDXGIOutput_AddRef(target);
@@ -1271,7 +1305,8 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetFullscreenState(IDXGISwapCha
         BOOL *fullscreen, IDXGIOutput **target)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-    struct wined3d_swapchain_desc swapchain_desc;
+    struct wined3d_swapchain_state *state;
+    BOOL windowed;
     HRESULT hr;
 
     TRACE("iface %p, fullscreen %p, target %p.\n", iface, fullscreen, target);
@@ -1279,16 +1314,17 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetFullscreenState(IDXGISwapCha
     if (fullscreen || target)
     {
         wined3d_mutex_lock();
-        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &swapchain_desc);
+        state = wined3d_swapchain_get_state(swapchain->wined3d_swapchain);
+        windowed = wined3d_swapchain_state_is_windowed(state);
         wined3d_mutex_unlock();
     }
 
     if (fullscreen)
-        *fullscreen = !swapchain_desc.windowed;
+        *fullscreen = !windowed;
 
     if (target)
     {
-        if (!swapchain_desc.windowed)
+        if (!windowed)
         {
             if (!swapchain->target && FAILED(hr = IDXGISwapChain4_GetContainingOutput(iface, &swapchain->target)))
                 return hr;
@@ -1501,7 +1537,8 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetFullscreenDesc(IDXGISwapChai
         DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-    struct wined3d_swapchain_desc wined3d_desc;
+    struct wined3d_swapchain_state *state;
+    BOOL windowed;
 
     TRACE("iface %p, desc %p.\n", iface, desc);
 
@@ -1512,16 +1549,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetFullscreenDesc(IDXGISwapChai
     }
 
     wined3d_mutex_lock();
-    wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
+    state = wined3d_swapchain_get_state(swapchain->wined3d_swapchain);
+    windowed = wined3d_swapchain_state_is_windowed(state);
     wined3d_mutex_unlock();
 
-    FIXME("Ignoring ScanlineOrdering and Scaling.\n");
-
-    desc->RefreshRate.Numerator = wined3d_desc.refresh_rate;
-    desc->RefreshRate.Denominator = 1;
-    desc->ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED;
-    desc->Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
-    desc->Windowed = wined3d_desc.windowed;
+    *desc = swapchain->fullscreen_desc;
+    desc->Windowed = windowed;
 
     return S_OK;
 }
@@ -1641,75 +1674,36 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetSourceSize(IDXGISwapChain4 *
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMaximumFrameLatency(IDXGISwapChain4 *iface, UINT max_latency)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    HRESULT hr;
 
     TRACE("iface %p, max_latency %u.\n", iface, max_latency);
 
-    if (!(swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
-    {
-        WARN("DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT not set for swap chain %p.\n", iface);
-        return DXGI_ERROR_INVALID_CALL;
-    }
-
-    if (!max_latency)
-    {
-        WARN("Invalid maximum frame latency %u.\n", max_latency);
-        return DXGI_ERROR_INVALID_CALL;
-    }
-
-    if (max_latency > swapchain->frame_latency && swapchain->frame_latency_semaphore)
-    {
-        if (!ReleaseSemaphore(swapchain->frame_latency_semaphore, max_latency - swapchain->frame_latency, NULL))
-        {
-            ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
-            return HRESULT_FROM_WIN32(GetLastError());
-        }
-    }
-
-    swapchain->frame_latency = max_latency;
-    return S_OK;
+    wined3d_mutex_lock();
+    hr = wined3d_swapchain_set_max_frame_latency(swapchain->wined3d_swapchain, max_latency);
+    wined3d_mutex_unlock();
+    return hr == WINED3DERR_INVALIDCALL ? DXGI_ERROR_INVALID_CALL : hr;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMaximumFrameLatency(IDXGISwapChain4 *iface, UINT *max_latency)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    HRESULT hr;
 
     TRACE("iface %p, max_latency %p.\n", iface, max_latency);
 
-    if (!(swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
-    {
-        WARN("DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT not set for swap chain %p.\n", iface);
-        return DXGI_ERROR_INVALID_CALL;
-    }
-
-    if (!max_latency)
-        return DXGI_ERROR_INVALID_CALL;
-
-    *max_latency = swapchain->frame_latency;
-    return S_OK;
+    wined3d_mutex_lock();
+    hr = wined3d_swapchain_get_max_frame_latency(swapchain->wined3d_swapchain, max_latency);
+    wined3d_mutex_unlock();
+    return hr == WINED3DERR_INVALIDCALL ? DXGI_ERROR_INVALID_CALL : hr;
 }
 
 static HANDLE STDMETHODCALLTYPE d3d11_swapchain_GetFrameLatencyWaitableObject(IDXGISwapChain4 *iface)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-    HANDLE dup;
 
     TRACE("iface %p.\n", iface);
 
-    if (!(swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)
-            || !swapchain->frame_latency_semaphore)
-    {
-        WARN("DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT not set for swap chain %p.\n", iface);
-        return NULL;
-    }
-
-    if (!DuplicateHandle(GetCurrentProcess(), swapchain->frame_latency_semaphore, GetCurrentProcess(),
-            &dup, 0, FALSE, DUPLICATE_SAME_ACCESS))
-    {
-        ERR("Cannot duplicate handle, last error %lu.\n", GetLastError());
-        return NULL;
-    }
-
-    return dup;
+    return wined3d_swapchain_get_frame_latency_waitable_object(swapchain->wined3d_swapchain);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMatrixTransform(IDXGISwapChain4 *iface,
@@ -1850,8 +1844,6 @@ static void STDMETHODCALLTYPE d3d11_swapchain_wined3d_object_released(void *pare
 {
     struct d3d11_swapchain *swapchain = parent;
 
-    if (swapchain->frame_latency_semaphore)
-        CloseHandle(swapchain->frame_latency_semaphore);
     wined3d_private_store_cleanup(&swapchain->private_store);
     free(parent);
 }
@@ -1974,7 +1966,7 @@ HRESULT WINAPI dxgi_swapchain_get_presented_surface(IDXGISwapChain *swapchain, I
 }
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
-        struct wined3d_swapchain_desc *desc, UINT dxgi_flags)
+        struct wined3d_swapchain_desc *desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc, UINT dxgi_flags)
 {
     struct wined3d_swapchain_state *state;
     BOOL fullscreen;
@@ -1994,6 +1986,13 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     swapchain->IDXGISwapChain4_iface.lpVtbl = &d3d11_swapchain_vtbl;
     swapchain->IDXGISwapChainPartner_iface.lpVtbl = (const IUnknownVtbl *)dxgi_swapchain_partner_vtbl;
     swapchain->state_parent.ops = &d3d11_swapchain_state_parent_ops;
+    if (fullscreen_desc)
+        swapchain->fullscreen_desc = *fullscreen_desc;
+    else
+    {
+        memset(&swapchain->fullscreen_desc, 0, sizeof(swapchain->fullscreen_desc));
+        swapchain->fullscreen_desc.Windowed = TRUE;
+    }
     swapchain->refcount = 1;
     InitializeSRWLock(&swapchain->snap_lock);
     swapchain->snap_tex[0] = NULL;
@@ -2014,20 +2013,6 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     swapchain->back_buffer_index = 0;
     swapchain->front_buffer_index = desc->backbuffer_count > 1 ? desc->backbuffer_count - 1 : 0;
     swapchain->present_interval = 0;
-    swapchain->frame_latency_semaphore = NULL;
-    swapchain->frame_latency = (swapchain->flip_model
-            && (dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)) ? 1 : 3;
-    if (swapchain->flip_model && (dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
-    {
-        if (!(swapchain->frame_latency_semaphore = CreateSemaphoreW(NULL, swapchain->frame_latency, LONG_MAX, NULL)))
-        {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            WARN("Failed to create frame latency semaphore, hr %#lx.\n", hr);
-            IWineDXGIFactory_Release(swapchain->factory);
-            IWineDXGIDevice_Release(swapchain->device);
-            return hr;
-        }
-    }
     wined3d_mutex_lock();
     wined3d_private_store_init(&swapchain->private_store);
 
@@ -2081,11 +2066,6 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     return S_OK;
 
 cleanup:
-    if (swapchain->frame_latency_semaphore)
-    {
-        CloseHandle(swapchain->frame_latency_semaphore);
-        swapchain->frame_latency_semaphore = NULL;
-    }
     wined3d_private_store_cleanup(&swapchain->private_store);
     wined3d_mutex_unlock();
     IWineDXGIFactory_Release(swapchain->factory);
@@ -3435,6 +3415,15 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d12_swapchain_SetFullscreen
         return DXGI_ERROR_INVALID_CALL;
     }
 
+    if (fullscreen)
+    {
+        DXGI_SWAP_CHAIN_FULLSCREEN_DESC test_fullscreen_desc = *fullscreen_desc;
+
+        test_fullscreen_desc.Windowed = FALSE;
+        if (!dxgi_validate_swapchain_fullscreen_desc(&test_fullscreen_desc))
+            return DXGI_ERROR_INVALID_CALL;
+    }
+
     if (target)
     {
         IDXGIOutput_AddRef(target);
@@ -4418,7 +4407,6 @@ HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *qu
         const DXGI_SWAP_CHAIN_DESC1 *swapchain_desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc,
         IDXGISwapChain1 **swapchain)
 {
-    DXGI_SWAP_CHAIN_FULLSCREEN_DESC default_fullscreen_desc;
     struct D3D12_COMMAND_QUEUE_DESC queue_desc;
     struct d3d12_swapchain *object;
     ID3D12Device *device;
@@ -4430,13 +4418,6 @@ HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *qu
     queue_desc = ID3D12CommandQueue_GetDesc(queue);
     if (queue_desc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
         return DXGI_ERROR_INVALID_CALL;
-
-    if (!fullscreen_desc)
-    {
-        memset(&default_fullscreen_desc, 0, sizeof(default_fullscreen_desc));
-        default_fullscreen_desc.Windowed = TRUE;
-        fullscreen_desc = &default_fullscreen_desc;
-    }
 
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;

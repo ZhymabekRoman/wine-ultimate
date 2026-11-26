@@ -215,6 +215,7 @@ struct d3d11_swapchain
     IWineDXGIDevice *device;
     IWineDXGIFactory *factory;
 
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc;
     IDXGIOutput *target;
     LONG present_count;
     LONG in_set_fullscreen_state;
@@ -228,8 +229,6 @@ struct d3d11_swapchain
     BOOL flip_model;
     BOOL is_composition_surface;
 
-    HANDLE frame_latency_semaphore;
-    UINT frame_latency;
     HANDLE shm_kmt_handle;
     HANDLE shm_map;
     void *shm_ptr;
@@ -257,7 +256,7 @@ struct d3d11_swapchain
 };
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
-        struct wined3d_swapchain_desc *desc, UINT dxgi_flags);
+        struct wined3d_swapchain_desc *desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc, UINT dxgi_flags);
 void d3d11_swapchain_mark_composition(IDXGISwapChain1 *iface);
 
 HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *queue, HWND window,
@@ -265,6 +264,7 @@ HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *qu
         IDXGISwapChain1 **swapchain);
 
 BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc);
+BOOL dxgi_validate_swapchain_fullscreen_desc(const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc);
 
 struct dxgi_runtime_desc
 {

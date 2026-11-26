@@ -310,6 +310,12 @@ dwrite_fallback_map[] =
     { NULL, "1C00-1C4F",              NULL, { L"Noto Sans Lepcha", NULL } },
     { NULL, "1C50-1C7F",              NULL, { L"Noto Sans Ol Chiki", NULL } },
 
+    /* Phonetic Extensions            - 1D00-1D7F
+       Phonetic Extensions Supplement - 1D80-1DBF
+       Latin Extended Additional      - 1E00-1EFF */
+    { NULL, "1D00-1D7F, 1D80-1DBF, "
+            "1E00-1EFF",              NULL, { L"Noto Sans", NULL } },
+
     /* Arrows - 2190-21FF */
     { NULL, "2190-21FF",              NULL, { L"Noto Sans Symbols", NULL } },
 

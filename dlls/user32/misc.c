@@ -517,92 +517,38 @@ LRESULT WINAPI PackTouchHitTestingProximityEvaluation(const TOUCH_HIT_TESTING_IN
     return 0;
 }
 
-/**********************************************************************
- * GetPointerType [USER32.@]
- */
-BOOL WINAPI GetPointerType(UINT32 id, POINTER_INPUT_TYPE *type)
-{
-    TRACE("(%u %p)\n", id, type);
-
-    if (id != 1 || !type)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    *type = PT_MOUSE;
-    return TRUE;
-}
-
 BOOL WINAPI GetPointerInfo(UINT32 id, POINTER_INFO *info)
 {
-    UINT32 entries = 1, pointers = 1;
+    UINT32 count = 1;
 
-    TRACE("(%d %p)\n", id, info);
+    TRACE( "id %d, info %p\n", id, info );
 
-    if (!info)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    return NtUserGetPointerInfoList(id, PT_POINTER, 0, 0, sizeof(*info), &entries, &pointers, info);
+    return NtUserGetPointerInfoList( id, PT_POINTER, 0, 0, sizeof(*info), &count, &count, info );
 }
 
-BOOL WINAPI GetPointerFrameInfo(UINT32 id, UINT32 *pointer_count, POINTER_INFO *info)
+BOOL WINAPI GetPointerInfoHistory( UINT32 id, UINT32 *count, POINTER_INFO *info )
+{
+    UINT32 pointers = 1;
+
+    TRACE( "id %u, count %p, info %p\n", id, count, info );
+
+    return NtUserGetPointerInfoList( id, PT_POINTER, 0, 0, sizeof(*info), count, &pointers, info );
+}
+
+BOOL WINAPI GetPointerFrameInfo( UINT32 id, UINT32 *count, POINTER_INFO *info )
 {
     UINT32 entries = 1;
 
-    TRACE("(%d %p %p)\n", id, pointer_count, info);
+    TRACE( "id %u, count %p, info %p\n", id, count, info );
 
-    if (!pointer_count)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    if (!info)
-    {
-        *pointer_count = 1;
-        return TRUE;
-    }
-
-    if (*pointer_count < 1)
-    {
-        *pointer_count = 1;
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-
-    return NtUserGetPointerInfoList(id, PT_POINTER, 0, 0, sizeof(*info), &entries, pointer_count, info);
+    return NtUserGetPointerInfoList( id, PT_POINTER, 0, 0, sizeof(*info), &entries, count, info );
 }
 
-BOOL WINAPI GetPointerFrameInfoHistory(UINT32 id, UINT32 *entries_count, UINT32 *pointer_count, POINTER_INFO *info)
+BOOL WINAPI GetPointerFrameInfoHistory( UINT32 id, UINT32 *entries, UINT32 *pointers, POINTER_INFO *info )
 {
-    TRACE("(%d %p %p %p)\n", id, entries_count, pointer_count, info);
+    TRACE( "id %u, entries %p, pointers %p, info %p\n", id, entries, pointers, info );
 
-    if (!entries_count || !pointer_count)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    if (!info)
-    {
-        *entries_count = 1;
-        *pointer_count = 1;
-        return TRUE;
-    }
-
-    if (*entries_count < 1 || *pointer_count < 1)
-    {
-        *entries_count = 1;
-        *pointer_count = 1;
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-
-    return NtUserGetPointerInfoList(id, PT_POINTER, 0, 0, sizeof(*info), entries_count, pointer_count, info);
+    return NtUserGetPointerInfoList( id, PT_POINTER, 0, 0, sizeof(*info), entries, pointers, info );
 }
 
 BOOL WINAPI GetPointerInputTransform(UINT32 id, UINT32 history_count, INPUT_TRANSFORM *transform)
