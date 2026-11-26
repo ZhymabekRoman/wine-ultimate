@@ -101,17 +101,17 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         int cx = (rc.left + rc.right) / 2;
         int cy = min( rc.bottom - 36, (rc.top + rc.bottom) / 2 + 120 );
         int r = 18;
-        COLORREF track_cr = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 68, 68, 68 ), surface_bg );
-        COLORREF arc_cr = (el->has_fg && el->fg_alpha > 0)
-            ? blend_argb_over( el->fg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"AccentBrush", uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
-        HPEN track_pen = CreatePen( PS_SOLID, 3, track_cr );
-        HPEN arc_pen = CreatePen( PS_SOLID, 3, arc_cr );
+        COLORREF track_cr, arc_cr;
+        HPEN track_pen, arc_pen;
         HBRUSH null_br = GetStockObject( NULL_BRUSH );
-        HGDIOBJ old_pen = SelectObject( hdc, track_pen );
-        HGDIOBJ old_br = SelectObject( hdc, null_br );
-        BOOL eok = Ellipse( hdc, cx - r, cy - r, cx + r, cy + r );
-        BOOL aok;
+        HGDIOBJ old_pen, old_br;
+        BOOL eok, aok;
+        uwp_paint_resolve_progress_ring_colors( el, surface_bg, &track_cr, &arc_cr );
+        track_pen = CreatePen( PS_SOLID, 3, track_cr );
+        arc_pen = CreatePen( PS_SOLID, 3, arc_cr );
+        old_pen = SelectObject( hdc, track_pen );
+        old_br = SelectObject( hdc, null_br );
+        eok = Ellipse( hdc, cx - r, cy - r, cx + r, cy + r );
         SelectObject( hdc, arc_pen );
         aok = Arc( hdc, cx - r, cy - r, cx + r, cy + r, cx, cy - r, cx - r, cy );
         TRACE( "uwp_paint PROGRESS_RING (%d,%d r=%d) eok=%d aok=%d top_px=%06lx\n",
@@ -132,50 +132,28 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                             uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg ) );
         }
     }
-    else if (wcsstr( el->name, L"ContentFrame1" ))
-    {
-        RECT rc = el->bounds;
-        COLORREF cbg = uwp_paint_resolve_color( el, L"CardBackgroundFillColorDefaultBrush", RGB( 40, 40, 40 ), surface_bg );
-        HBRUSH br = CreateSolidBrush( cbg );
-        HGDIOBJ old_br = SelectObject( hdc, br );
-        Rectangle( hdc, rc.left, rc.top, rc.right, rc.bottom );
-        SelectObject( hdc, old_br );
-        DeleteObject( br );
-    }
     else if (uwp_is_text_input( el ))
     {
         RECT rc = el->bounds;
-        BOOL focused = (g_focused_textbox == el);
-        const WCHAR *txt = uwp_elem_text( el );
-        COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
-            ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 42, 42, 42 ), surface_bg );
-        COLORREF sbd = focused
-            ? uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg )
-            : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 90, 90, 90 ), surface_bg );
-        COLORREF sfg = txt[0]
-            ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), sbg )
-            : ((el->has_fg && el->fg_alpha > 0)
-                ? blend_argb_over( el->fg_argb, sbg )
-                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 185, 185, 185 ), sbg ));
-        HBRUSH br = CreateSolidBrush( sbg );
-        HPEN pen = CreatePen( PS_SOLID, focused ? 2 : 1, sbd );
-        HFONT font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-        HGDIOBJ old_br = SelectObject( hdc, br );
-        HGDIOBJ old_pen = SelectObject( hdc, pen );
-        HGDIOBJ old_font = SelectObject( hdc, font );
+        struct uwp_element *inner_tb = uwp_paint_find_inner_search_textbox( el, 0 );
+        const WCHAR *txt = uwp_has_text( el ) ? uwp_elem_text( el ) : uwp_elem_text( inner_tb );
+        BOOL focused = (g_focused_textbox == el) || (inner_tb && g_focused_textbox == inner_tb) ||
+                       uwp_elem_is_descendant( el, g_focused_textbox );
+        COLORREF sbg, sbd, sfg;
+        HBRUSH br;
+        HPEN pen;
+        HFONT font;
+        HGDIOBJ old_br, old_pen, old_font;
         WCHAR disp[264];
-        const WCHAR *fallback = wcsstr( el->name, L"SearchBox" )
-            ? L"\x26b2  Search apps, games, movies and more"
-            : L"Find";
-        if (txt[0])
-            swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2  %s|" : L"\x26b2  %s", txt );
-        else if (focused)
-            lstrcpynW( disp, L"\x26b2  |", ARRAY_SIZE(disp) );
-        else
-            lstrcpynW( disp, fallback, ARRAY_SIZE(disp) );
+        uwp_paint_resolve_searchbox_style( el, surface_bg, focused, txt, &sbg, &sbd, &sfg, disp, ARRAY_SIZE(disp) );
+        br = CreateSolidBrush( sbg );
+        pen = CreatePen( PS_SOLID, focused ? 2 : 1, sbd );
+        font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+        old_br = SelectObject( hdc, br );
+        old_pen = SelectObject( hdc, pen );
+        old_font = SelectObject( hdc, font );
         RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6 );
         SetTextColor( hdc, sfg );
         SetBkMode( hdc, TRANSPARENT );
@@ -192,14 +170,15 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
     else if (uwp_is_teaching_tip( el ) && el->is_open)
     {
         RECT rc = el->bounds;
-        COLORREF tbg = (el->has_bg && el->bg_alpha > 0)
-            ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"SolidBackgroundFillColorTertiaryBrush", RGB( 44, 44, 44 ), surface_bg );
-        COLORREF tbd = uwp_paint_resolve_color( el, L"SurfaceStrokeColorFlyoutBrush", RGB( 82, 82, 82 ), surface_bg );
-        HBRUSH br = CreateSolidBrush( tbg );
-        HPEN pen = CreatePen( PS_SOLID, 1, tbd );
-        HGDIOBJ old_br = SelectObject( hdc, br );
-        HGDIOBJ old_pen = SelectObject( hdc, pen );
+        COLORREF tbg, tbd;
+        HBRUSH br;
+        HPEN pen;
+        HGDIOBJ old_br, old_pen;
+        uwp_paint_resolve_teaching_tip_colors( el, surface_bg, &tbg, &tbd );
+        br = CreateSolidBrush( tbg );
+        pen = CreatePen( PS_SOLID, 1, tbd );
+        old_br = SelectObject( hdc, br );
+        old_pen = SelectObject( hdc, pen );
         RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8 );
         SelectObject( hdc, old_pen );
         SelectObject( hdc, old_br );
@@ -287,15 +266,16 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         if (uwp_is_pivot_item( el ) && uwp_has_text( el ))
         {
             RECT trc = el->bounds;
-            BOOL is_first = (wcsstr( el->name, L"History" ) != NULL);
-            int fh = max( 13, (int)(15 * g_layout_scale + 0.5f) );
-            HFONT font = CreateFontW( -fh, 0, 0, 0, is_first ? FW_SEMIBOLD : FW_NORMAL,
-                                      FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                                      CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-            HGDIOBJ old_font = SelectObject( hdc, font );
-            COLORREF tfg = is_first
-                ? uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg )
-                : uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), surface_bg );
+            BOOL is_first = FALSE;
+            int fh = 13;
+            COLORREF tfg, acc;
+            HFONT font;
+            HGDIOBJ old_font;
+            uwp_paint_resolve_pivot_item_style( el, surface_bg, &is_first, &fh, &tfg, &acc );
+            font = CreateFontW( -fh, 0, 0, 0, is_first ? FW_SEMIBOLD : FW_NORMAL,
+                                FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            old_font = SelectObject( hdc, font );
             SetTextColor( hdc, tfg );
             SetBkMode( hdc, TRANSPARENT );
             DrawTextW( hdc, uwp_elem_text( el ), -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
@@ -304,8 +284,6 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             if (is_first)
             {
                 RECT bar = { trc.left, trc.bottom - 3, min( trc.right, trc.left + 52 ), trc.bottom };
-                COLORREF acc = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
-                                   uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
                 HBRUSH abr = CreateSolidBrush( acc );
                 FillRect( hdc, &bar, abr );
                 DeleteObject( abr );
@@ -327,11 +305,10 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         HGDIOBJ old_br = NULL, old_pen = NULL, old_font;
         int fh;
 
-        /* Skip invisible shortcut-only buttons (CopyButton, PasteButton) */
-        if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
+        if (uwp_paint_is_invisible_shortcut_button( el ))
             return;
 
-        if (wcsstr( el->name, L"NavItem" ))
+        if (uwp_paint_is_nav_toggle_item( el ))
         {
             RECT rc = el->bounds;
             BOOL selected = (el->is_checked == 1);
@@ -379,55 +356,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         InflateRect( &brc, -2, -2 );
         if (brc.right <= brc.left || brc.bottom <= brc.top) return;
 
-        if (el->has_bg)
-        {
-            if (el->bg_alpha == 0)
-            {
-                draw_bg = el->is_pressed || el->is_hovered;
-                bg = el->is_pressed ? RGB( 55, 55, 55 ) : (el->is_hovered ? RGB( 45, 45, 45 ) : surface_bg);
-            }
-            else
-            {
-                bg = blend_argb_over( el->bg_argb, surface_bg );
-                if (el->is_pressed)
-                    bg = RGB( max( 0, (int)GetRValue(bg) - 20 ), max( 0, (int)GetGValue(bg) - 20 ), max( 0, (int)GetBValue(bg) - 20 ) );
-            }
-        }
-        else if (el->is_accent_style)
-        {
-            bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
-                     uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
-            if (el->is_pressed)
-                bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
-        }
-        else
-        {
-            bg = uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg );
-            if (el->is_pressed)
-                bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
-        }
-
-        if (el->has_border)
-        {
-            draw_bd = (el->border_alpha > 0);
-            bd = blend_argb_over( el->border_argb, surface_bg );
-        }
-        else if (!draw_bg)
-        {
-            draw_bd = FALSE;
-            bd = surface_bg;
-        }
-        else
-        {
-            bd = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 68, 68, 68 ), surface_bg );
-        }
-
-        if (!el->is_enabled)
-            fg = uwp_paint_resolve_color( el, L"TextFillColorDisabledBrush", RGB( 120, 120, 120 ), bg );
-        else if (el->has_fg && el->fg_alpha > 0)
-            fg = blend_argb_over( el->fg_argb, bg );
-        else
-            fg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), bg );
+        uwp_paint_resolve_button_style( el, surface_bg, label, &draw_bg, &draw_bd, &bg, &fg, &bd, NULL, NULL );
 
         fh = max( (int)(12 * g_layout_scale + 0.5f), min( (int)(24 * g_layout_scale + 0.5f), (int)((brc.bottom - brc.top) * 2 / 5) ) );
         font = CreateFontW( -fh, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
@@ -598,32 +527,9 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     uwp_ensure_app_resources_loaded();
     xaml_get_layout_metrics( hwnd, NULL, &g_layout_scale );
     SetRect( &rc, 0, 0, width, height );
-    eval_w = (double)width / g_layout_scale;
-    eval_h = (double)height / g_layout_scale;
-    if (hwnd && IsWindow( hwnd ))
-    {
-        HWND top = GetAncestor( hwnd, GA_ROOT );
-        RECT top_rc;
-        if (top && GetClientRect( top, &top_rc ) && top_rc.right > 0 && top_rc.bottom > 0)
-        {
-            eval_w = (double)(top_rc.right - top_rc.left) / g_layout_scale;
-            eval_h = (double)(top_rc.bottom - top_rc.top) / g_layout_scale;
-        }
-    }
-
+    uwp_paint_resolve_eval_size( hwnd, width, height, &eval_w, &eval_h );
     root_el = uwp_elem_from_any( content );
-    bg_scope = (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
-                !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
-        ? g_navigated_page_el : root_el;
-
-    {
-        COLORREF def_bg = uwp_is_light_theme( bg_scope ) ? RGB( 243, 243, 243 ) : RGB( 31, 31, 31 );
-        if (bg_scope && bg_scope->has_bg && bg_scope->bg_alpha > 0)
-            page_bg = blend_argb_over( bg_scope->bg_argb, def_bg );
-        else
-            page_bg = uwp_paint_resolve_color( bg_scope, L"ApplicationPageBackgroundThemeBrush",
-                                               def_bg, def_bg );
-    }
+    page_bg = uwp_paint_resolve_page_bg( root_el, &bg_scope );
     g_paint_page_bg = page_bg;
 
     bg_brush = CreateSolidBrush( page_bg );

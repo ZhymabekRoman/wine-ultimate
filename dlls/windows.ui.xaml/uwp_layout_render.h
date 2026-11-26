@@ -235,6 +235,38 @@ const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *
 void uwp_load_image_asset( struct uwp_element *el );
 void uwp_on_image_loaded( struct uwp_element *el );
 void uwp_resolve_and_load_image( struct uwp_element *el );
+UINT32 uwp_cr_to_argb( COLORREF cr );
+BOOL uwp_is_nav_settings_item( const struct uwp_element *el );
+BOOL uwp_is_skeleton_subtree( const struct uwp_element *el, int depth );
+BOOL uwp_is_zero_layout_anchor( const struct uwp_element *el );
+BOOL uwp_paint_is_invisible_shortcut_button( const struct uwp_element *el );
+BOOL uwp_paint_is_nav_toggle_item( const struct uwp_element *el );
+BOOL uwp_paint_pivot_item_is_selected( const struct uwp_element *el );
+void uwp_paint_resolve_pivot_item_style( struct uwp_element *el, COLORREF surface_bg,
+                                         BOOL *out_selected, int *out_fh,
+                                         COLORREF *out_fg, COLORREF *out_accent );
+void uwp_paint_resolve_progress_ring_colors( struct uwp_element *el, COLORREF surface_bg,
+                                             COLORREF *out_track, COLORREF *out_arc );
+void uwp_paint_resolve_teaching_tip_colors( struct uwp_element *el, COLORREF surface_bg,
+                                            COLORREF *out_bg, COLORREF *out_bd );
+void uwp_paint_resolve_searchbox_style( struct uwp_element *el, COLORREF surface_bg,
+                                        BOOL focused, const WCHAR *cur_txt,
+                                        COLORREF *out_bg, COLORREF *out_bd, COLORREF *out_fg,
+                                        WCHAR *disp, size_t disp_cap );
+void uwp_paint_resolve_button_style( struct uwp_element *el, COLORREF surface_bg, const WCHAR *label,
+                                     BOOL *out_draw_bg, BOOL *out_draw_bd,
+                                     COLORREF *out_bg, COLORREF *out_fg, COLORREF *out_bd,
+                                     UINT32 *out_bg_argb, UINT32 *out_bd_argb );
+void uwp_paint_resolve_eval_size( HWND hwnd, int width, int height, double *out_w, double *out_h );
+COLORREF uwp_paint_resolve_page_bg( struct uwp_element *root_el, struct uwp_element **out_bg_scope );
+void uwp_compute_uniform_to_fill_uv( int dst_w, int dst_h, int src_w, int src_h, float uv_crop[4] );
+void uwp_paint_first_subtree_text( const struct uwp_element *el, WCHAR *buf, size_t cap, int depth );
+struct uwp_element *uwp_paint_find_inner_search_textbox( struct uwp_element *el, int depth );
+BOOL uwp_paint_btn_child_has_text( const struct uwp_element *el, int depth );
+BOOL uwp_paint_nav_tree_has_checked_item( const struct uwp_element *el, int depth );
+BOOL uwp_paint_nav_is_first_selectable_item( const struct uwp_element *el );
+BOOL uwp_paint_is_clr_type_name( const WCHAR *s );
+IInspectable *uwp_paint_vm_unwrap_one( IInspectable *vm, const WCHAR *const *props, unsigned int count );
 void uwp_media_ensure_started( struct uwp_element *el );
 BOOL uwp_extract_comp_brush_image_src( IInspectable *brush, WCHAR *out_uri, size_t cap );
 BOOL uwp_extract_visual_image_src( IInspectable *visual, WCHAR *out_uri, size_t cap );

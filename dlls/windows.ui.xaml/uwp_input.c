@@ -142,7 +142,7 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
          UWP_EV_CNT( el, click_reg ) > 0 || el->command != NULL || el->flyout != NULL ||
          uwp_is_menubar_item( el )))
     {
-        if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
+        if (uwp_paint_is_invisible_shortcut_button( el ))
             return NULL;
         return el;
     }
@@ -340,7 +340,9 @@ void uwp_invoke_button( struct uwp_element *btn )
         int target_chk = is_radio ? 1 : ((btn->is_checked == 1) ? 0 : 1);
         uwp_toggle_button_set_checked( btn, target_chk, TRUE );
         if (btn->parent &&
-            ((btn->parent->class_flags & UWP_CF_RADIO_BUTTON) || is_radio || !wcscmp( btn->parent->name, L"ShortcutItems" )) &&
+            ((btn->parent->class_flags & (UWP_CF_RADIO_BUTTON | UWP_CF_ITEMS_REPEATER | UWP_CF_ITEMS_CONTROL |
+                                          UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW | UWP_CF_LISTBOX)) ||
+             is_radio || UWP_EV_CNT( btn->parent, sel_changed_reg ) > 0) &&
             btn->parent->children_coll)
         {
             struct uwp_element *rb = btn->parent;

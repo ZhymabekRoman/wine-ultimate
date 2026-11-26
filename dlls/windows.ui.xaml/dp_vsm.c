@@ -607,21 +607,6 @@ static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_grou
         }
         uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_VISIBILITY );
         target->visibility = vis;
-        if (!wcscmp( target->name, L"DockPanel" ))
-        {
-            struct uwp_element *hbtn = uwp_vsm_find_target( scope, L"HistoryButton" );
-            struct uwp_element *mbtn = uwp_vsm_find_target( scope, L"MemoryButton" );
-            if (hbtn)
-            {
-                uwp_vsm_record_snapshot( grp, hbtn, UWP_VSM_PROP_VISIBILITY );
-                hbtn->visibility = (vis == 0) ? 1 : 0;
-            }
-            if (mbtn)
-            {
-                uwp_vsm_record_snapshot( grp, mbtn, UWP_VSM_PROP_VISIBILITY );
-                mbtn->visibility = (vis == 0) ? 1 : 0;
-            }
-        }
     }
     else if (wcsstr( prop, L"IsEnabled" ))
     {

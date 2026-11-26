@@ -199,7 +199,7 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
                           desired.width, desired.height,
                           el->children_coll ? CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count : 0,
                           el->dp_cnt );
-                    if ((desired.width == 1.0f && desired.height == 1.0f) || !wcscmp( el->name, L"TileList" ))
+                    if (desired.width == 1.0f && desired.height == 1.0f)
                     {
                         int di;
                         for (di = 0; di < el->dp_cnt && di < 8; di++)
@@ -338,21 +338,39 @@ static BOOL uwp_has_spotlight_descendant( struct uwp_element *el, int depth )
     return uwp_has_spotlight_descendant_ex( el, depth, NULL );
 }
 
-static BOOL uwp_is_home_title_panel( struct uwp_element *el, int depth )
+static BOOL uwp_subtree_has_rich_control( const struct uwp_element *el, int depth )
 {
-    if (!el || depth > 4) return FALSE;
-    if (!wcscmp( el->name, L"HeaderTitle" ) || !wcscmp( el->name, L"TitlePanel" )) return TRUE;
+    if (!el || depth > 5 || el->visibility != 0) return FALSE;
+    if (el->kind == UWP_KIND_IMAGE || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
+        el->kind == UWP_KIND_SCROLL_VIEWER || uwp_is_scroll_viewer( el ) || uwp_is_items_repeater( el ) ||
+        uwp_is_text_input( el ) || uwp_is_combobox( el ) ||
+        (el->class_flags & (UWP_CF_SPOTLIGHT | UWP_CF_MEDIA_PLAYER | UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW | UWP_CF_CARD)))
+        return TRUE;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_subtree_has_rich_control( ch, depth + 1 )) return TRUE;
+    }
     if (el->children_coll)
     {
         struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int i;
-        for (i = 0; i < v->count; i++)
+        for (i = 0; v && i < v->count; i++)
         {
             struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
-            if (ch && ch != el && uwp_is_home_title_panel( ch, depth + 1 )) return TRUE;
+            if (ch && ch != el && uwp_subtree_has_rich_control( ch, depth + 1 )) return TRUE;
         }
     }
     return FALSE;
+}
+
+static BOOL uwp_is_scroll_overlay_title( struct uwp_element *ch, struct uwp_element *sv_child )
+{
+    if (!ch || !sv_child || ch == sv_child || ch->visibility != 0) return FALSE;
+    if (ch->grid_row != sv_child->grid_row || ch->grid_col != sv_child->grid_col) return FALSE;
+    if (uwp_subtree_has_rich_control( ch, 0 )) return FALSE;
+    if (!uwp_paint_btn_child_has_text( ch, 0 )) return FALSE;
+    return uwp_has_spotlight_descendant( sv_child, 0 );
 }
 
 static BOOL uwp_scroll_child_has_content_ex( struct uwp_element *el, int depth, BOOL *trunc )
@@ -826,7 +844,7 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
         const WCHAR *txt = uwp_elem_text( el );
         double raw_fs = (el->font_size > 0.0 ? el->font_size : 14.0);
         int eff_fw = el->font_weight;
-        BOOL is_sec_hdr = (!wcscmp( el->name, L"SectionTitle" ));
+        BOOL is_sec_hdr = FALSE;
         const struct uwp_element *anc;
         int hop;
         double fs;
@@ -840,11 +858,15 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
                     raw_fs = anc->font_size;
                 if (eff_fw <= 0 && anc->font_weight > 0)
                     eff_fw = anc->font_weight;
-                if (!wcscmp( anc->name, L"ShowAllButton" ) || !wcscmp( anc->name, L"SectionViewAllButton" ))
+                if (anc->kind == UWP_KIND_BUTTON && !anc->has_bg && !anc->bg_brush && !anc->has_border &&
+                    !anc->is_accent_style && anc->h_align != 1 &&
+                    (raw_fs >= 18.0 || eff_fw >= FW_SEMIBOLD))
                     is_sec_hdr = TRUE;
                 break;
             }
         }
+        if (!is_sec_hdr && raw_fs >= 18.0 && eff_fw >= FW_SEMIBOLD)
+            is_sec_hdr = TRUE;
         if (is_sec_hdr)
         {
             if (raw_fs < 18.0) raw_fs = 18.0;
@@ -1222,7 +1244,7 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
             double ch_h;
             if (!ch || ch == el || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
                 ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
-                uwp_is_teaching_tip( ch ) || !wcscmp( ch->name, L"TeachingTipTarget" ))
+                uwp_is_teaching_tip( ch ) || uwp_is_zero_layout_anchor( ch ))
                 continue;
             ch_h = uwp_measure_natural_height( ch, inner_w, depth + 1 );
             if (ch_h <= 0.0)
@@ -1418,18 +1440,798 @@ static int uwp_align_axis( LONG *start, LONG *end, double explicit_size, int ali
     return span;
 }
 
+static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_view *children,
+                                         RECT rc, int w, int h,
+                                         int *out_nrows, int *out_ncols,
+                                         int row_y[32], int col_x[32] )
+{
+    struct uwp_vec_view *rows = el->row_defs_coll ? CONTAINING_RECORD( el->row_defs_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+    struct uwp_vec_view *cols = el->col_defs_coll ? CONTAINING_RECORD( el->col_defs_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+    int nrows = (rows && rows->count > 0) ? (int)rows->count : 1;
+    int ncols = (cols && cols->count > 0) ? (int)cols->count : 1;
+    double r_type[32], r_val[32], c_type[32], c_val[32];
+    double r_fixed = 0, r_stars = 0, c_fixed = 0, c_stars = 0;
+    BOOL has_star_row = FALSE;
+    unsigned int k;
+    int i;
+
+    if (nrows > 30) nrows = 30;
+    if (ncols > 30) ncols = 30;
+
+    for (i = 0; i < ncols; i++)
+    {
+        struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
+        c_type[i] = cd ? cd->grid_len_type : 2;
+        c_val[i]  = cd ? cd->grid_len_val  : 1.0;
+        if (c_type[i] == 2 && c_val[i] <= 0.001) { c_type[i] = 1; c_val[i] = 0; }
+        if (c_type[i] == 0)
+        {
+            double auto_w = 0.0;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                    ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                    ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
+                    ch->grid_col == i && ch->grid_col_span == 1)
+                {
+                    double cw = uwp_measure_natural_width( ch, 0 );
+                    if (cw > 0.0) cw += max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
+                    else cw = (ch->min_width > 0.0 ? ch->min_width : 0.0);
+                    if (cw > auto_w) auto_w = cw;
+                }
+            }
+            c_type[i] = 1;
+            c_val[i] = min( auto_w, (double)w );
+        }
+        if (c_type[i] == 1)
+        {
+            if (cd && cd->max_width > 0.0 && c_val[i] > cd->max_width) c_val[i] = cd->max_width;
+            if (cd && cd->min_width > 0.0 && c_val[i] < cd->min_width) c_val[i] = cd->min_width;
+            c_fixed += c_val[i];
+        }
+        else c_stars += (c_val[i] > 0 ? c_val[i] : 1.0);
+    }
+
+    if (c_stars > 0)
+    {
+        double rem_w = max( 0.0, (double)w - c_fixed );
+        for (i = 0; i < ncols; i++)
+        {
+            struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
+            if (c_type[i] != 1 && cd && cd->max_width > 0.0 && c_stars > 0)
+            {
+                double st = (c_val[i] > 0 ? c_val[i] : 1.0);
+                if (rem_w * (st / c_stars) > cd->max_width)
+                {
+                    c_type[i] = 1; c_val[i] = cd->max_width;
+                    c_fixed += cd->max_width; c_stars -= st;
+                    rem_w = max( 0.0, (double)w - c_fixed );
+                }
+            }
+        }
+    }
+
+    {
+        double rem_w = max( 0.0, (double)w - c_fixed ), cur_x = (double)rc.left;
+        for (i = 0; i < ncols; i++)
+        {
+            col_x[i] = (int)(cur_x + 0.5);
+            if (c_type[i] == 1) cur_x += c_val[i];
+            else if (c_stars > 0) cur_x += rem_w * (c_val[i] / c_stars);
+        }
+        col_x[ncols] = rc.right;
+    }
+
+    for (i = 0; i < nrows; i++)
+    {
+        struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
+        int rt = rd ? rd->grid_len_type : 2;
+        double rv = rd ? rd->grid_len_val : 1.0;
+        if (rt == 2 && rv > 0.001) { has_star_row = TRUE; break; }
+    }
+    for (i = 0; i < nrows; i++)
+    {
+        struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
+        BOOL has_vis = FALSE;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
+                ch->grid_row <= i && i < ch->grid_row + ch->grid_row_span)
+            {
+                int c0 = max( 0, min( ncols - 1, ch->grid_col ) );
+                int c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
+                if (col_x[c1] > col_x[c0]) { has_vis = TRUE; break; }
+            }
+        }
+        r_type[i] = rd ? rd->grid_len_type : 2;
+        r_val[i]  = rd ? rd->grid_len_val  : 1.0;
+        if (r_type[i] == 2 && (r_val[i] <= 0.001 || (i > 0 && !has_vis)))
+        { r_type[i] = 1; r_val[i] = 0; }
+        if (r_type[i] == 0)
+        {
+            double auto_h = 0.0;
+            if (has_vis)
+            {
+                for (k = 0; k < children->count; k++)
+                {
+                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                    if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                        ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                        ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
+                        ch->grid_row == i && ch->grid_row_span == 1)
+                    {
+                        double ch_h = uwp_estimate_auto_height( ch, 0 );
+                        double nat_ch_h = uwp_measure_natural_height( ch, w, 0 );
+                        if (nat_ch_h > 0.0)
+                            nat_ch_h += uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b );
+                        if (nat_ch_h > ch_h) ch_h = nat_ch_h;
+                        if (ch_h > auto_h) auto_h = ch_h;
+                    }
+                }
+                if (auto_h > 0.0 && auto_h < 24.0 * g_layout_scale) auto_h = 24.0 * g_layout_scale;
+                if (rd && rd->max_height > 0.0 && auto_h > rd->max_height) auto_h = rd->max_height;
+                if (rd && rd->min_height > 0.0 && auto_h < rd->min_height) auto_h = rd->min_height;
+                if (has_star_row && h >= 400 && auto_h > min( (double)h * 0.35, 320.0 ))
+                    auto_h = min( (double)h * 0.35, 320.0 );
+            }
+            r_type[i] = 1; r_val[i] = auto_h;
+        }
+        if (r_type[i] == 1) r_fixed += r_val[i];
+        else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
+    }
+
+    {
+        double rem_h = max( 0.0, (double)h - r_fixed ), cur_y = (double)rc.top;
+        for (i = 0; i < nrows; i++)
+        {
+            row_y[i] = (int)(cur_y + 0.5);
+            if (r_type[i] == 1) cur_y += r_val[i];
+            else if (r_stars > 0) cur_y += rem_h * (r_val[i] / r_stars);
+        }
+        row_y[nrows] = (r_stars == 0 && (int)(cur_y + 0.5) > (int)rc.bottom) ? (int)(cur_y + 0.5) : (int)rc.bottom;
+    }
+    *out_nrows = nrows;
+    *out_ncols = ncols;
+}
+
+static void arrange_grid( struct uwp_element *el, RECT rc, int w, int h )
+{
+    struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+    int nrows = 1, ncols = 1;
+    int row_y[32], col_x[32];
+    struct uwp_element *sv_child = NULL;
+    BOOL has_hydrated_child = FALSE;
+    unsigned int k;
+
+    arrange_grid_compute_tracks( el, children, rc, w, h, &nrows, &ncols, row_y, col_x );
+
+    for (k = 0; k < children->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        if (!ch || ch->visibility != 0) continue;
+        if (!sv_child && uwp_is_scroll_viewer( ch )) sv_child = ch;
+        if (!uwp_is_skeleton_subtree( ch, 0 ) && uwp_scroll_child_has_content( ch, 0 ))
+            has_hydrated_child = TRUE;
+    }
+    for (k = 0; k < children->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        int r0, r1, c0, c1;
+        RECT crc;
+        if (!ch) continue;
+        if (sv_child && uwp_is_scroll_overlay_title( ch, sv_child ))
+        {
+            uwp_clear_bounds_tree( ch );
+            continue;
+        }
+        if (has_hydrated_child && uwp_is_skeleton_subtree( ch, 0 ))
+        {
+            uwp_clear_bounds_tree( ch );
+            continue;
+        }
+        r0 = max( 0, min( nrows - 1, ch->grid_row ) );
+        r1 = max( r0 + 1, min( nrows, r0 + ch->grid_row_span ) );
+        c0 = max( 0, min( ncols - 1, ch->grid_col ) );
+        c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
+        SetRect( &crc, col_x[c0], row_y[r0], col_x[c1], row_y[r1] );
+        uwp_arrange_element( ch, crc );
+    }
+}
+
+static BOOL stack_child_is_layout_active( const struct uwp_element *ch )
+{
+    return ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+           ch->kind != UWP_KIND_ACCELERATOR && ch->kind != UWP_KIND_XAML_COMMAND &&
+           !uwp_is_teaching_tip( ch ) && !uwp_is_zero_layout_anchor( ch );
+}
+
+static void arrange_stack_panel( struct uwp_element *el, RECT rc, int w, int h )
+{
+    struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+    unsigned int k, vis_cnt = 0;
+    int fixed_h = 0, auto_cnt = 0;
+    int spacing_px = (el->spacing > 0.0 && !isnan( el->spacing )) ? (int)(el->spacing + 0.5) : 0;
+    BOOL use_horiz_flow = FALSE;
+    double horiz_total_nw = 0.0;
+    int horiz_unmeasured_cnt = 0;
+
+    for (k = 0; k < children->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        if (!stack_child_is_layout_active( ch )) continue;
+        vis_cnt++;
+        if (el->orientation == 1)
+        {
+            double nw = uwp_measure_natural_width( ch, 0 );
+            if (nw > 0.0 || (ch->width > 0.0 && !isnan( ch->width )) ||
+                ch->kind == UWP_KIND_IMAGE || ch->kind == UWP_KIND_TEXT_BLOCK ||
+                ch->kind == UWP_KIND_BUTTON || ch->kind == UWP_KIND_TOGGLE_BUTTON ||
+                ch->kind == UWP_KIND_CONTENT_CONTROL || ch->kind == UWP_KIND_BORDER ||
+                ch->kind == UWP_KIND_USER_CONTROL || uwp_is_combobox( ch ))
+                use_horiz_flow = TRUE;
+            if (nw > 0.0) horiz_total_nw += nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
+            else horiz_unmeasured_cnt++;
+        }
+        else
+        {
+            double nh = uwp_measure_natural_height( ch, w, 0 );
+            if (nh > 0.0) fixed_h += (int)(nh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
+            else auto_cnt++;
+        }
+    }
+    if (vis_cnt > 1 && el->orientation == 0) fixed_h += (int)(vis_cnt - 1) * spacing_px;
+    if (vis_cnt > 0 && el->orientation == 1)
+    {
+        struct uwp_element *ch0 = (children->count > 0) ? uwp_elem_from_any( children->items[0] ) : NULL;
+        unsigned int gaps = (vis_cnt > 1) ? (vis_cnt - 1) : 0;
+        if (ch0 && ch0 != el && ch0->visibility != 0) gaps++;
+        horiz_total_nw += (double)gaps * spacing_px;
+    }
+
+    if (vis_cnt > 0)
+    {
+        int idx = 0, auto_idx = 0, cur_y = rc.top, cur_x = rc.left;
+        int auto_total_h = max( 0, h - fixed_h );
+        double horiz_scale = (el->orientation == 1 && horiz_unmeasured_cnt == 0 && horiz_total_nw > (double)w && w > 0)
+            ? ((double)w / horiz_total_nw) : 1.0;
+        BOOL in_scroll = FALSE, is_top_scroll_panel = TRUE, has_spotlight_slot = FALSE;
+        struct uwp_element *sv = NULL;
+
+        if (el->orientation == 1 && use_horiz_flow && spacing_px > 0 && children->count > 1)
+        {
+            struct uwp_element *ch0 = uwp_elem_from_any( children->items[0] );
+            if (ch0 && ch0 != el && ch0->visibility != 0)
+                cur_x += (int)(spacing_px * horiz_scale + 0.5);
+        }
+        if (el->orientation == 0)
+        {
+            struct uwp_element *p;
+            int hop;
+            for (p = el->parent, hop = 0; p && hop < 5; p = p->parent, hop++)
+            {
+                if (p->kind == UWP_KIND_STACK_PANEL && p->orientation == 0) is_top_scroll_panel = FALSE;
+                if (uwp_is_scroll_viewer( p )) { sv = p; in_scroll = TRUE; break; }
+            }
+        }
+        if (in_scroll && sv && is_top_scroll_panel)
+        {
+            sv->scroll_extent_h = 0;
+            cur_y = rc.top - sv->scroll_y;
+        }
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            RECT crc = rc;
+            if (!stack_child_is_layout_active( ch )) continue;
+            if (el->orientation == 1)
+            {
+                if (use_horiz_flow)
+                {
+                    double nw = uwp_measure_natural_width( ch, 0 );
+                    int slot_w = (nw > 0.0)
+                        ? max( 16, (int)((nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r )) * horiz_scale + 0.5) )
+                        : max( 32, (rc.right - cur_x) / max( 1, (int)vis_cnt - idx ) );
+                    crc.left = cur_x;
+                    crc.right = min( (int)rc.right, cur_x + slot_w );
+                    cur_x = crc.right + (int)(spacing_px * horiz_scale + 0.5);
+                }
+                else
+                {
+                    crc.left  = rc.left + (w * idx) / (int)vis_cnt;
+                    crc.right = rc.left + (w * (idx + 1)) / (int)vis_cnt;
+                }
+            }
+            else if (in_scroll)
+            {
+                if (ch->height > 0.0 && !isnan( ch->height ) && !uwp_has_horiz_listview_child( ch, 0 ))
+                {
+                    int slot_h = (int)(ch->height + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
+                    crc.top = cur_y; crc.bottom = cur_y + slot_h;
+                    cur_y = crc.bottom + spacing_px;
+                }
+                else
+                {
+                    double mh = uwp_measure_natural_height( ch, w, 0 );
+                    int nat_h;
+                    if (mh > 0.0)
+                        nat_h = max( 24, (int)(mh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
+                    else if (uwp_has_spotlight_descendant( ch, 0 ))
+                    {
+                        if (has_spotlight_slot) { uwp_clear_bounds_tree( ch ); idx++; continue; }
+                        has_spotlight_slot = TRUE; nat_h = 330;
+                    }
+                    else nat_h = uwp_scroll_child_has_content( ch, 0 ) ? 168 : 4;
+                    crc.top = cur_y; crc.bottom = cur_y + nat_h;
+                    cur_y = crc.bottom + (nat_h > 24 ? 8 : 0);
+                    auto_idx++;
+                }
+            }
+            else
+            {
+                double nh = uwp_measure_natural_height( ch, w, 0 );
+                if (nh > 0.0)
+                {
+                    int slot_h = (int)(nh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
+                    crc.top = cur_y; crc.bottom = min( (int)rc.bottom, cur_y + slot_h );
+                    cur_y = crc.bottom + spacing_px;
+                }
+                else
+                {
+                    int slice = (auto_cnt > 0)
+                        ? ((auto_total_h * (auto_idx + 1)) / auto_cnt - (auto_total_h * auto_idx) / auto_cnt) : 0;
+                    crc.top = cur_y; crc.bottom = min( (int)rc.bottom, cur_y + slice );
+                    cur_y = crc.bottom + spacing_px;
+                    auto_idx++;
+                }
+            }
+            idx++;
+            uwp_arrange_element( ch, crc );
+        }
+        if (in_scroll && sv)
+        {
+            int virt_ext = (cur_y + sv->scroll_y) - sv->bounds.top;
+            int vp_h = max( 1, (int)(sv->bounds.bottom - sv->bounds.top) );
+            if (virt_ext > sv->scroll_extent_h) sv->scroll_extent_h = virt_ext;
+            if (is_top_scroll_panel && sv->scroll_y > max( 0, sv->scroll_extent_h - vp_h ))
+                sv->scroll_y = max( 0, sv->scroll_extent_h - vp_h );
+        }
+    }
+    if (h >= 60)
+    {
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch->visibility == 0 && uwp_is_teaching_tip( ch ) && ch->is_open)
+                uwp_arrange_element( ch, rc );
+        }
+    }
+}
+
+static void arrange_menu_bar( struct uwp_element *el, RECT rc )
+{
+    if (el->outer && (!el->children_coll ||
+        CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
+    {
+        void *mb = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IMenuBar_WinUI, &mb )) && mb)
+        {
+            const struct abi_menu_bar *amb = (const struct abi_menu_bar *)mb;
+            void *vec = NULL;
+            if (amb->lpVtbl->get_Items && SUCCEEDED(amb->lpVtbl->get_Items( mb, &vec )) && vec)
+            {
+                const struct abi_winrt_vector *avec = (const struct abi_winrt_vector *)vec;
+                UINT32 cnt = 0, k;
+                if (avec->lpVtbl->get_Size && SUCCEEDED(avec->lpVtbl->get_Size( vec, &cnt )) && cnt > 0)
+                {
+                    if (!el->children_coll) uwp_vec_create( el, &el->children_coll );
+                    for (k = 0; k < cnt; k++)
+                    {
+                        void *item = NULL;
+                        if (avec->lpVtbl->GetAt && SUCCEEDED(avec->lpVtbl->GetAt( vec, k, &item )) && item)
+                        {
+                            if (el->children_coll) uwp_vec_Append( el->children_coll, item );
+                            IUnknown_Release( (IUnknown *)item );
+                        }
+                    }
+                }
+                IUnknown_Release( (IUnknown *)vec );
+            }
+            IUnknown_Release( (IUnknown *)mb );
+        }
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k, idx = 0;
+        int item_w = (int)(56 * g_layout_scale);
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            RECT crc;
+            if (!ch || ch->visibility != 0 || uwp_is_accelerator( ch )) continue;
+            ch->parent = el;
+            if (!uwp_is_menubar_item( ch ))
+            {
+                lstrcpynW( ch->class_name, L"Microsoft.UI.Xaml.Controls.MenuBarItem", ARRAY_SIZE(ch->class_name) );
+                uwp_elem_sync_class_flags( ch );
+            }
+            SetRect( &crc, rc.left + 8 + (int)idx * item_w, rc.top,
+                     min( (int)rc.right, (int)rc.left + 8 + (int)(idx + 1) * item_w ), rc.bottom );
+            ch->bounds = crc;
+            ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
+            ch->actual_w = (double)(crc.right - crc.left);
+            ch->actual_h = (double)(crc.bottom - crc.top);
+            if (ch->kind == UWP_KIND_GENERIC && uwp_has_text( ch )) ch->kind = UWP_KIND_TEXT_BLOCK;
+            idx++;
+        }
+    }
+}
+
+static void arrange_pivot( struct uwp_element *el, RECT rc, int h )
+{
+    struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+    unsigned int k;
+    int tab_w = (int)(84 * g_layout_scale);
+    int tab_h = min( h, (int)(36 * g_layout_scale) );
+    for (k = 0; k < children->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        RECT crc;
+        if (!ch || ch->visibility != 0) continue;
+        ch->margin_t = 0;
+        SetRect( &crc, rc.left + 16 + (int)k * tab_w, rc.top + 8,
+                 min( (int)rc.right, (int)rc.left + 16 + (int)(k + 1) * tab_w ), rc.top + 8 + tab_h );
+        ch->bounds = crc;
+        ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
+        ch->actual_w = (double)(crc.right - crc.left);
+        ch->actual_h = (double)(crc.bottom - crc.top);
+    }
+}
+
+static void arrange_nav_view( struct uwp_element *el, RECT rc )
+{
+    struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+    float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+    int avail_w = rc.right - rc.left;
+    int eff_mode = uwp_nav_effective_display_mode( el, avail_w );
+    double compact_len = ne ? ne->nav_compact_pane_length : 68.0;
+    double open_len = ne ? ne->nav_open_pane_length : 280.0;
+    BOOL is_pane_open = ne ? ne->nav_is_pane_open : FALSE;
+    BOOL is_settings_vis = ne ? ne->nav_is_settings_visible : TRUE;
+    BOOL is_toggle_vis = ne ? ne->nav_is_pane_toggle_visible : TRUE;
+    int closed_rail_w = (eff_mode == 1) ? (int)(max( 48.0, compact_len ) * sc + 0.5) : 0;
+    int open_pane_w = (int)(max( 48.0, min( 340.0, open_len > 0.0 ? open_len : 280.0 ) ) * sc + 0.5);
+    BOOL pane_visible = is_pane_open || (eff_mode != 0);
+    int pane_w = min( avail_w, is_pane_open ? open_pane_w : closed_rail_w );
+    int content_left = rc.left + ((eff_mode == 2 && is_pane_open) ? open_pane_w : closed_rail_w);
+    BOOL show_toggle = is_toggle_vis && (eff_mode != 2);
+
+    if (ne)
+    {
+        if (pane_visible && pane_w > 0)
+            SetRect( &ne->nav_pane_bounds, rc.left, rc.top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom );
+        else
+            SetRectEmpty( &ne->nav_pane_bounds );
+    }
+
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        int menu_top = rc.top + (show_toggle ? (int)(48 * sc + 0.5f) : (int)(12 * sc + 0.5f));
+        int footer_vis_cnt = 0, footer_h = 0, footer_top;
+        BOOL has_footer_host = FALSE, wide_pane = (pane_w >= (int)(130 * sc));
+
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && !wcscmp( ch->name, L"FooterMenuItemsHost" ))
+            {
+                has_footer_host = TRUE;
+                if (ch->children_coll)
+                {
+                    struct uwp_vec_view *fv = CONTAINING_RECORD( ch->children_coll, struct uwp_vec_view, IInspectable_iface );
+                    unsigned int fk;
+                    for (fk = 0; fk < fv->count; fk++)
+                    {
+                        struct uwp_element *fch = uwp_elem_from_any( fv->items[fk] );
+                        if (!fch) continue;
+                        if (uwp_is_nav_settings_item( fch ))
+                        {
+                            if (is_settings_vis && wide_pane) footer_vis_cnt++;
+                        }
+                        else if (!wide_pane && (uwp_is_nav_header( fch ) || uwp_is_nav_separator( fch )))
+                            continue;
+                        else if (fch->visibility == 0)
+                            footer_vis_cnt++;
+                    }
+                }
+            }
+        }
+        if (footer_vis_cnt > 0)
+            footer_h = wide_pane
+                ? min( (int)(160 * sc), footer_vis_cnt * (int)(40 * sc) + (int)(12 * sc) )
+                : min( (int)(180 * sc), footer_vis_cnt * (int)(58 * sc) + (int)(26 * sc) );
+        else if (has_footer_host && pane_visible && pane_w > 0)
+            footer_h = wide_pane ? (is_settings_vis ? (int)(46 * sc) : (int)(40 * sc)) : (int)(124 * sc);
+        footer_top = max( menu_top + (int)(60 * sc), (int)rc.bottom - footer_h - 4 );
+
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            RECT crc;
+            if (!ch) continue;
+            if (!wcscmp( ch->name, L"TogglePaneButton" ))
+            {
+                if (!show_toggle || ch->visibility != 0) { uwp_clear_bounds_tree( ch ); continue; }
+                SetRect( &crc, rc.left + (int)(6 * sc + 0.5f), rc.top + (int)(6 * sc + 0.5f),
+                         rc.left + (int)(44 * sc + 0.5f), rc.top + (int)(42 * sc + 0.5f) );
+                ch->bounds = crc;
+                ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
+                ch->actual_w = (double)(crc.right - crc.left);
+                ch->actual_h = (double)(crc.bottom - crc.top);
+                continue;
+            }
+            if (!wcscmp( ch->name, L"MenuItemsHost" ))
+            {
+                if (!pane_visible || pane_w <= 0 || ch->visibility != 0) { uwp_clear_bounds_tree( ch ); continue; }
+                SetRect( &crc, rc.left, menu_top, min( (int)rc.right, (int)rc.left + pane_w ), footer_top );
+                uwp_arrange_element( ch, crc );
+                continue;
+            }
+            if (!wcscmp( ch->name, L"FooterMenuItemsHost" ))
+            {
+                if (!pane_visible || pane_w <= 0 || footer_h <= 0 || ch->visibility != 0) { uwp_clear_bounds_tree( ch ); continue; }
+                SetRect( &crc, rc.left, footer_top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom - 4 );
+                uwp_arrange_element( ch, crc );
+                continue;
+            }
+            if (ch->visibility != 0) continue;
+            uwp_arrange_element( ch, rc );
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el)
+        {
+            RECT content_rc;
+            SetRect( &content_rc, content_left, rc.top, rc.right, rc.bottom );
+            uwp_arrange_element( ch, content_rc );
+        }
+    }
+}
+
+static void arrange_items_repeater( struct uwp_element *el, RECT rc )
+{
+    struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+    unsigned int k;
+    BOOL is_nav_rail = (!wcscmp( el->name, L"MenuItemsHost" ) || !wcscmp( el->name, L"FooterMenuItemsHost" ));
+    int avail_w = rc.right - rc.left;
+    float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+
+    if (!is_nav_rail && avail_w >= 480)
+    {
+        struct uwp_element *ch0_peek = (children->count > 0) ? uwp_elem_from_any( children->items[0] ) : NULL;
+        int pad = 12, gap = 12;
+        int cols = max( 1, (avail_w - pad) / 270 );
+        int card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
+        int card_h = (ch0_peek && !uwp_is_card( ch0_peek )) ? 124 : 96;
+        int idx = 0;
+
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            int col, row, x0, y0;
+            RECT crc;
+            if (!ch || ch->visibility != 0) continue;
+            col = idx % cols; row = idx / cols;
+            x0 = rc.left + pad + col * (card_w + gap);
+            y0 = rc.top + pad + row * (card_h + gap);
+            if (y0 >= rc.bottom) { ch->has_bounds = FALSE; idx++; continue; }
+            SetRect( &crc, x0, y0, x0 + card_w, min( (int)rc.bottom, y0 + card_h ) );
+            uwp_arrange_element( ch, crc );
+            idx++;
+        }
+        return;
+    }
+
+    if (is_nav_rail && avail_w >= (int)(130 * sc))
+    {
+        struct uwp_element *nav = el->parent;
+        BOOL is_footer = !wcscmp( el->name, L"FooterMenuItemsHost" );
+        int scroll_y = (!is_footer && nav && uwp_is_nav_view( nav ) && nav->nav) ? nav->nav->nav_scroll_y : 0;
+        int cur_y = rc.top - scroll_y;
+        BOOL rev = FALSE;
+        if (!is_footer && children->count > 1)
+        {
+            struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
+            if (last_ch && !wcscmp( uwp_elem_text( last_ch ), L"Home" )) rev = TRUE;
+        }
+        for (k = 0; k < children->count; k++)
+        {
+            unsigned int idx = rev ? (children->count - 1 - k) : k;
+            struct uwp_element *ch = uwp_elem_from_any( children->items[idx] );
+            BOOL is_settings_item;
+            int row_h;
+            RECT crc;
+            if (!ch) continue;
+            is_settings_item = uwp_is_nav_settings_item( ch );
+            if (is_settings_item)
+            {
+                if (!nav || !uwp_elem_nav_is_settings_visible( nav )) { uwp_clear_bounds_tree( ch ); continue; }
+                if (!uwp_has_text( ch )) uwp_elem_set_text( ch, L"Settings" );
+                ch->visibility = 0;
+            }
+            else if (ch->visibility != 0) { uwp_clear_bounds_tree( ch ); continue; }
+            if (uwp_is_nav_header( ch )) { if (k > 0) cur_y += (int)(6 * sc + 0.5f); row_h = (int)(30 * sc + 0.5f); }
+            else if (uwp_is_nav_separator( ch )) row_h = (int)(11 * sc + 0.5f);
+            else row_h = (int)(36 * sc + 0.5f);
+            if (cur_y + row_h <= rc.top || cur_y >= rc.bottom)
+                uwp_clear_bounds_tree( ch );
+            else
+            {
+                SetRect( &crc, rc.left + (int)(6 * sc + 0.5f), max( (int)rc.top, cur_y ),
+                         rc.right - (int)(6 * sc + 0.5f), min( (int)rc.bottom, cur_y + row_h ) );
+                uwp_arrange_element( ch, crc );
+            }
+            cur_y += row_h + 2;
+        }
+        return;
+    }
+
+    {
+        int cur_y = rc.top, item_h = is_nav_rail ? 54 : 80;
+        BOOL rev = FALSE;
+        if (is_nav_rail && children->count > 1)
+        {
+            struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
+            if (last_ch && !wcscmp( uwp_elem_text( last_ch ), L"Home" )) rev = TRUE;
+        }
+        for (k = 0; k < children->count; k++)
+        {
+            unsigned int idx = rev ? (children->count - 1 - k) : k;
+            struct uwp_element *ch = uwp_elem_from_any( children->items[idx] );
+            RECT crc;
+            if (!ch || ch->visibility != 0) continue;
+            if (is_nav_rail && (uwp_is_nav_header( ch ) || uwp_is_nav_separator( ch ) || uwp_is_nav_settings_item( ch )))
+            {
+                uwp_clear_bounds_tree( ch );
+                continue;
+            }
+            SetRect( &crc, rc.left + 4, cur_y, rc.right - 4, min( (int)rc.bottom, cur_y + item_h ) );
+            uwp_arrange_element( ch, crc );
+            cur_y += item_h + 4;
+        }
+    }
+}
+
+static BOOL arrange_list_or_grid_view( struct uwp_element *el, RECT rc )
+{
+    struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+    unsigned int k;
+    int avail_w = rc.right - rc.left, avail_h = rc.bottom - rc.top;
+
+    if (!uwp_is_horiz_listview( el ))
+    {
+        int cur_y = rc.top, gap = (int)(12.0f * g_layout_scale + 0.5f);
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            double nh;
+            int item_h;
+            RECT crc;
+            if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
+            nh = uwp_measure_natural_height( ch, avail_w, 0 );
+            if (nh <= 0.0) nh = uwp_estimate_auto_height( ch, 0 );
+            if (nh <= 0.0) nh = 110.0 * g_layout_scale;
+            item_h = max( 48, (int)(nh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
+            SetRect( &crc, rc.left, cur_y, rc.right, cur_y + item_h );
+            if (!ch->parent) ch->parent = el;
+            uwp_arrange_element( ch, crc );
+            cur_y += item_h + gap;
+        }
+        return TRUE;
+    }
+    if (avail_w >= 480 && avail_h > 0 && avail_h <= 400)
+    {
+        int pad = 8, gap = 12, idx = 0;
+        int item_h = max( 64, avail_h - pad );
+        int item_w = max( 180, min( 320, (item_h * 16) / 9 ) );
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            int x0;
+            RECT crc;
+            if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
+            x0 = rc.left + pad + idx * (item_w + gap);
+            if (x0 >= rc.right) { ch->has_bounds = FALSE; idx++; continue; }
+            SetRect( &crc, x0, rc.top + pad / 2,
+                     min( (int)rc.right, x0 + item_w ),
+                     min( (int)rc.bottom, rc.top + pad / 2 + item_h ) );
+            if (!ch->parent) ch->parent = el;
+            uwp_arrange_element( ch, crc );
+            idx++;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void arrange_wrap_panel( struct uwp_element *el, RECT rc )
+{
+    struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+    int cur_x = rc.left, cur_y = rc.top, row_h = 0;
+    int sp = (el->spacing > 0.0) ? (int)(el->spacing + 0.5) : 4;
+    unsigned int k;
+    for (k = 0; k < children->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        double nw, nh;
+        int cw, ch_h;
+        RECT crc;
+        if (!ch || ch == el || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
+            ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND)
+            continue;
+        nw = uwp_measure_natural_width( ch, 0 );
+        if (nw <= 0.0) nw = 80.0;
+        cw = max( 16, (int)(nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r ) + 0.5) );
+        nh = uwp_measure_natural_height( ch, cw, 0 );
+        if (nh <= 0.0) nh = 32.0;
+        ch_h = max( 16, (int)(nh + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
+        if (cur_x > rc.left && cur_x + cw > rc.right)
+        {
+            cur_x = rc.left; cur_y += row_h + sp; row_h = 0;
+        }
+        crc.left = cur_x; crc.top = cur_y;
+        crc.right = min( (int)rc.right, cur_x + cw );
+        crc.bottom = min( (int)rc.bottom, cur_y + ch_h );
+        uwp_arrange_element( ch, crc );
+        cur_x = crc.right + sp;
+        if (ch_h > row_h) row_h = ch_h;
+    }
+}
+
+static void arrange_generic_children( struct uwp_element *el, RECT rc )
+{
+    struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+    unsigned int k;
+    BOOL is_horiz_list = ((el->class_flags & (UWP_CF_LISTBOX | UWP_CF_ITEMS_CONTROL | UWP_CF_RADIO_BUTTON)) != 0) &&
+                         (rc.bottom - rc.top) <= (int)(64 * g_layout_scale);
+    int cur_x = rc.left;
+    for (k = 0; k < children->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        if (!ch || ch == el || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
+        if (is_horiz_list && ch->visibility == 0)
+        {
+            double nw = uwp_measure_natural_width( ch, 0 );
+            int cw = (nw > 0.0) ? (int)(nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r ) + 0.5) : (rc.right - cur_x);
+            RECT crc = { cur_x, rc.top, min( (int)rc.right, cur_x + cw ), rc.bottom };
+            uwp_arrange_element( ch, crc );
+            cur_x = crc.right + (int)(12 * g_layout_scale);
+        }
+        else
+            uwp_arrange_element( ch, rc );
+    }
+}
+
 static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 {
     int w, h;
-    double eff_w, eff_h;
+    double eff_w, eff_h, prev_w, prev_h;
     BOOL margin_clamped;
+
     if (!el) return;
     if (el->visibility != 0 || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
         el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_DEFERRED ||
         el->kind == UWP_KIND_RESOURCE_DICT || el->kind == UWP_KIND_COLOR ||
         el->kind == UWP_KIND_ACCELERATOR || el->kind == UWP_KIND_XAML_COMMAND ||
-        (uwp_is_teaching_tip( el ) && !el->is_open) ||
-        !wcscmp( el->name, L"TeachingTipTarget" ))
+        (uwp_is_teaching_tip( el ) && !el->is_open) || uwp_is_zero_layout_anchor( el ))
     {
         uwp_clear_bounds_tree( el );
         return;
@@ -1441,17 +2243,14 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         (el->kind == UWP_KIND_STACK_PANEL || el->kind == UWP_KIND_BORDER ||
          el->kind == UWP_KIND_USER_CONTROL || el->kind == UWP_KIND_CONTENT_CONTROL ||
          el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
-         el->kind == UWP_KIND_GENERIC || el->kind == UWP_KIND_WRAP_PANEL ||
-         uwp_is_combobox( el )))
+         el->kind == UWP_KIND_GENERIC || el->kind == UWP_KIND_WRAP_PANEL || uwp_is_combobox( el )))
     {
         double nw = uwp_measure_natural_width( el, 0 );
         if (nw > 0.0) eff_w = nw;
     }
-    if (el->max_width > 0.0 && !isnan( el->max_width ) && (eff_w <= 0.0 || eff_w > el->max_width))
-    {
-        if (rc.right - rc.left > (LONG)el->max_width)
-            eff_w = el->max_width;
-    }
+    if (el->max_width > 0.0 && !isnan( el->max_width ) && (eff_w <= 0.0 || eff_w > el->max_width) &&
+        rc.right - rc.left > (LONG)el->max_width)
+        eff_w = el->max_width;
     w = uwp_align_axis( &rc.left, &rc.right, eff_w, el->h_align );
 
     eff_h = el->height;
@@ -1470,946 +2269,45 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         double nh = uwp_measure_natural_height( el, w, 0 );
         if (nh > 0.0) eff_h = nh;
     }
-    if (el->max_height > 0.0 && !isnan( el->max_height ) && (eff_h <= 0.0 || eff_h > el->max_height))
-    {
-        if (rc.bottom - rc.top > (LONG)el->max_height)
-            eff_h = el->max_height;
-    }
+    if (el->max_height > 0.0 && !isnan( el->max_height ) && (eff_h <= 0.0 || eff_h > el->max_height) &&
+        rc.bottom - rc.top > (LONG)el->max_height)
+        eff_h = el->max_height;
     h = uwp_align_axis( &rc.top, &rc.bottom, eff_h, el->v_align );
-    {
-        double prev_w = el->actual_w, prev_h = el->actual_h;
-        el->bounds = rc;
-        el->has_bounds = (w > 0 && h > 0);
-        el->actual_w = (double)w;
-        el->actual_h = (double)h;
-        if (uwp_loaded_needs_fire( el ))
-            uwp_fire_loaded_tree( el );
-        if (!margin_clamped && w > 0 && h > 0 &&
-            (prev_w != el->actual_w || prev_h != el->actual_h || el->last_sc_w == 0.0f || UWP_EV_CNT( el, layout_updated_reg ) > 0))
-            uwp_fire_size_and_layout_changed( el );
-    }
+
+    prev_w = el->actual_w; prev_h = el->actual_h;
+    el->bounds = rc;
+    el->has_bounds = (w > 0 && h > 0);
+    el->actual_w = (double)w;
+    el->actual_h = (double)h;
+    if (uwp_loaded_needs_fire( el )) uwp_fire_loaded_tree( el );
+    if (!margin_clamped && w > 0 && h > 0 &&
+        (prev_w != el->actual_w || prev_h != el->actual_h || el->last_sc_w == 0.0f || UWP_EV_CNT( el, layout_updated_reg ) > 0))
+        uwp_fire_size_and_layout_changed( el );
 
     uwp_invoke_winui_measure_arrange( el, w, h );
     uwp_fire_evc_if_needed( el );
-    if (el->kind == UWP_KIND_IMAGE)
-        uwp_resolve_and_load_image( el );
-    if (el->media && el->media->img_pixels)
-        uwp_on_image_loaded( el );
-
+    if (el->kind == UWP_KIND_IMAGE) uwp_resolve_and_load_image( el );
+    if (el->media && el->media->img_pixels) uwp_on_image_loaded( el );
     if (el->items_source && !uwp_panel_has_concrete_child( el ))
-    {
         uwp_items_ctrl_materialize_source( el, el->items_source );
-    }
 
-    if (el->kind == UWP_KIND_GRID && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        struct uwp_vec_view *rows = el->row_defs_coll ? CONTAINING_RECORD( el->row_defs_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
-        struct uwp_vec_view *cols = el->col_defs_coll ? CONTAINING_RECORD( el->col_defs_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
-        int nrows = (rows && rows->count > 0) ? (int)rows->count : 1;
-        int ncols = (cols && cols->count > 0) ? (int)cols->count : 1;
-        int row_y[32], col_x[32];
-        double r_type[32], r_val[32], c_type[32], c_val[32];
-        double r_fixed = 0, r_stars = 0, c_fixed = 0, c_stars = 0;
-        unsigned int k;
-        int i;
+    if (el->kind == UWP_KIND_GRID && el->children_coll) arrange_grid( el, rc, w, h );
+    else if (el->kind == UWP_KIND_STACK_PANEL && el->children_coll) arrange_stack_panel( el, rc, w, h );
+    else if (uwp_is_menubar( el )) { arrange_menu_bar( el, rc ); return; }
+    else if (uwp_is_pivot( el ) && el->children_coll) { arrange_pivot( el, rc, h ); return; }
 
-        /* In UWP, a Grid with no RowDefinitions/ColumnDefinitions has 1 row / 1 column
-         * (out-of-range Grid.Row/Grid.Column values clamp to 0 so overlays stack properly). */
-        if (nrows > 30) nrows = 30;
-        if (ncols > 30) ncols = 30;
-
-        for (i = 0; i < ncols; i++)
-        {
-            struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
-            c_type[i] = cd ? cd->grid_len_type : 2;
-            c_val[i]  = cd ? cd->grid_len_val  : 1.0;
-            if (c_type[i] == 2 && c_val[i] <= 0.001) { c_type[i] = 1; c_val[i] = 0; }
-            if (c_type[i] == 0)
-            {
-                double auto_w = 0.0;
-                for (k = 0; k < children->count; k++)
-                {
-                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                    if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
-                        ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
-                        ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
-                        ch->grid_col == i && ch->grid_col_span == 1)
-                    {
-                        double cw = uwp_measure_natural_width( ch, 0 );
-                        if (cw > 0.0) cw += max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
-                        else cw = (ch->min_width > 0.0 ? ch->min_width : 0.0);
-                        if (cw > auto_w) auto_w = cw;
-                    }
-                }
-                c_type[i] = 1;
-                c_val[i] = min( auto_w, (double)w );
-            }
-            if (c_type[i] == 1)
-            {
-                if (cd && cd->max_width > 0.0 && c_val[i] > cd->max_width) c_val[i] = cd->max_width;
-                if (cd && cd->min_width > 0.0 && c_val[i] < cd->min_width) c_val[i] = cd->min_width;
-                c_fixed += c_val[i];
-            }
-            else c_stars += (c_val[i] > 0 ? c_val[i] : 1.0);
-        }
-
-        /* Respect ColumnDefinition.MaxWidth on star columns (e.g. ColumnHistory MaxWidth=320) */
-        if (c_stars > 0)
-        {
-            double rem_w = max( 0.0, (double)w - c_fixed );
-            for (i = 0; i < ncols; i++)
-            {
-                struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
-                if (c_type[i] != 1 && cd && cd->max_width > 0.0 && c_stars > 0)
-                {
-                    double st = (c_val[i] > 0 ? c_val[i] : 1.0);
-                    double share = rem_w * (st / c_stars);
-                    if (share > cd->max_width)
-                    {
-                        c_type[i] = 1;
-                        c_val[i] = cd->max_width;
-                        c_fixed += cd->max_width;
-                        c_stars -= st;
-                        rem_w = max( 0.0, (double)w - c_fixed );
-                    }
-                }
-            }
-        }
-
-        {
-            double rem_w = max( 0.0, (double)w - c_fixed );
-            double cur_x = (double)rc.left;
-            for (i = 0; i < ncols; i++)
-            {
-                col_x[i] = (int)(cur_x + 0.5);
-                if (c_type[i] == 1) cur_x += c_val[i];
-                else if (c_stars > 0) cur_x += rem_w * (c_val[i] / c_stars);
-            }
-            col_x[ncols] = rc.right;
-        }
-
-        {
-            BOOL has_star_row = FALSE;
-            for (i = 0; i < nrows; i++)
-            {
-                struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
-                int rt = rd ? rd->grid_len_type : 2;
-                double rv = rd ? rd->grid_len_val : 1.0;
-                if (rt == 2 && rv > 0.001) { has_star_row = TRUE; break; }
-            }
-            for (i = 0; i < nrows; i++)
-            {
-                struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
-                BOOL has_vis = FALSE;
-                for (k = 0; k < children->count; k++)
-                {
-                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                    if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
-                        ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
-                        ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
-                        ch->grid_row <= i && i < ch->grid_row + ch->grid_row_span)
-                    {
-                        int c0 = max( 0, min( ncols - 1, ch->grid_col ) );
-                        int c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
-                        if (col_x[c1] > col_x[c0])
-                        {
-                            has_vis = TRUE;
-                            break;
-                        }
-                    }
-                }
-                r_type[i] = rd ? rd->grid_len_type : 2;
-                r_val[i]  = rd ? rd->grid_len_val  : 1.0;
-                /* Collapse empty history/dock or 0-star rows */
-                if (r_type[i] == 2 && (r_val[i] <= 0.001 || (i > 0 && !has_vis)))
-                { r_type[i] = 1; r_val[i] = 0; }
-                if (r_type[i] == 0) /* Auto */
-                {
-                    double auto_h = 0.0;
-                    if (has_vis)
-                    {
-                        for (k = 0; k < children->count; k++)
-                        {
-                            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                            if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
-                                ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
-                                ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
-                                ch->grid_row == i && ch->grid_row_span == 1)
-                            {
-                                double ch_h = uwp_estimate_auto_height( ch, 0 );
-                                double nat_ch_h = uwp_measure_natural_height( ch, w, 0 );
-                                if (nat_ch_h > 0.0)
-                                    nat_ch_h += uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b );
-                                if (nat_ch_h > ch_h) ch_h = nat_ch_h;
-                                if (ch_h > auto_h) auto_h = ch_h;
-                            }
-                        }
-                        if (auto_h > 0.0 && auto_h < 24.0 * g_layout_scale)
-                            auto_h = 24.0 * g_layout_scale;
-                        if (rd && rd->max_height > 0.0 && auto_h > rd->max_height)
-                            auto_h = rd->max_height;
-                        if (rd && rd->min_height > 0.0 && auto_h < rd->min_height)
-                            auto_h = rd->min_height;
-                        if (has_star_row && h >= 400 && auto_h > min( (double)h * 0.35, 320.0 ))
-                            auto_h = min( (double)h * 0.35, 320.0 );
-                    }
-                    r_type[i] = 1;
-                    r_val[i] = auto_h;
-                }
-                if (r_type[i] == 1) r_fixed += r_val[i];
-                else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
-            }
-        }
-
-        {
-            double rem_h = max( 0.0, (double)h - r_fixed );
-            double cur_y = (double)rc.top;
-            for (i = 0; i < nrows; i++)
-            {
-                row_y[i] = (int)(cur_y + 0.5);
-                if (r_type[i] == 1) cur_y += r_val[i];
-                else if (r_stars > 0) cur_y += rem_h * (r_val[i] / r_stars);
-            }
-            row_y[nrows] = (r_stars == 0 && (int)(cur_y + 0.5) > (int)rc.bottom) ? (int)(cur_y + 0.5) : (int)rc.bottom;
-        }
-
-        {
-            BOOL has_scroll_child = FALSE, has_hydrated_child = FALSE;
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                BOOL is_skel;
-                if (!ch || ch->visibility != 0) continue;
-                if (uwp_is_scroll_viewer( ch ))
-                    has_scroll_child = TRUE;
-                is_skel = (!wcscmp( ch->name, L"ShimmerContainer" ) ||
-                           (ch->class_flags & (UWP_CF_SHIMMER | UWP_CF_SKELETON)) != 0);
-                if (!is_skel && uwp_scroll_child_has_content( ch, 0 ))
-                    has_hydrated_child = TRUE;
-            }
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                BOOL is_skel;
-                int r0, r1, c0, c1;
-                RECT crc;
-                if (!ch) continue;
-                if (has_scroll_child && uwp_is_home_title_panel( ch, 0 ))
-                {
-                    uwp_clear_bounds_tree( ch );
-                    continue;
-                }
-                is_skel = (!wcscmp( ch->name, L"ShimmerContainer" ) ||
-                           (ch->class_flags & (UWP_CF_SHIMMER | UWP_CF_SKELETON)) != 0);
-                if (has_hydrated_child && is_skel)
-                {
-                    uwp_clear_bounds_tree( ch );
-                    continue;
-                }
-                r0 = max( 0, min( nrows - 1, ch->grid_row ) );
-                r1 = max( r0 + 1, min( nrows, r0 + ch->grid_row_span ) );
-                c0 = max( 0, min( ncols - 1, ch->grid_col ) );
-                c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
-                SetRect( &crc, col_x[c0], row_y[r0], col_x[c1], row_y[r1] );
-                uwp_arrange_element( ch, crc );
-            }
-        }
-    }
-    else if (el->kind == UWP_KIND_STACK_PANEL && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k, vis_cnt = 0;
-        int fixed_h = 0, auto_cnt = 0;
-        int spacing_px = (el->spacing > 0.0 && !isnan( el->spacing )) ? (int)(el->spacing + 0.5) : 0;
-        BOOL use_horiz_flow = FALSE;
-        double horiz_total_nw = 0.0;
-        int horiz_unmeasured_cnt = 0;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
-                ch->kind != UWP_KIND_ACCELERATOR && ch->kind != UWP_KIND_XAML_COMMAND &&
-                !uwp_is_teaching_tip( ch ) &&
-                wcscmp( ch->name, L"TeachingTipTarget" ) != 0)
-            {
-                vis_cnt++;
-                if (el->orientation == 1)
-                {
-                    double nw = uwp_measure_natural_width( ch, 0 );
-                    if (nw > 0.0 || (ch->width > 0.0 && !isnan( ch->width )) ||
-                        ch->kind == UWP_KIND_IMAGE || ch->kind == UWP_KIND_TEXT_BLOCK ||
-                        ch->kind == UWP_KIND_BUTTON || ch->kind == UWP_KIND_TOGGLE_BUTTON ||
-                        ch->kind == UWP_KIND_CONTENT_CONTROL || ch->kind == UWP_KIND_BORDER ||
-                        ch->kind == UWP_KIND_USER_CONTROL || uwp_is_combobox( ch ))
-                        use_horiz_flow = TRUE;
-                    if (nw > 0.0)
-                        horiz_total_nw += nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
-                    else
-                        horiz_unmeasured_cnt++;
-                }
-                else
-                {
-                    double nh = uwp_measure_natural_height( ch, w, 0 );
-                    if (nh > 0.0)
-                        fixed_h += (int)(nh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
-                    else
-                        auto_cnt++;
-                }
-            }
-        }
-        if (vis_cnt > 1 && el->orientation == 0)
-            fixed_h += (int)(vis_cnt - 1) * spacing_px;
-        if (vis_cnt > 0 && el->orientation == 1)
-        {
-            struct uwp_element *ch0 = (children->count > 0) ? uwp_elem_from_any( children->items[0] ) : NULL;
-            unsigned int gaps = (vis_cnt > 1) ? (vis_cnt - 1) : 0;
-            if (ch0 && ch0 != el && ch0->visibility != 0)
-                gaps++;
-            horiz_total_nw += (double)gaps * spacing_px;
-        }
-        if (vis_cnt > 0)
-        {
-            int idx = 0, auto_idx = 0, cur_y = rc.top, cur_x = rc.left;
-            int auto_total_h = max( 0, h - fixed_h );
-            double horiz_scale = (el->orientation == 1 && horiz_unmeasured_cnt == 0 && horiz_total_nw > (double)w && w > 0)
-                ? ((double)w / horiz_total_nw) : 1.0;
-            BOOL in_scroll = FALSE, is_top_scroll_panel = TRUE;
-            struct uwp_element *sv = NULL;
-            if (el->orientation == 1 && use_horiz_flow && spacing_px > 0 && children->count > 1)
-            {
-                struct uwp_element *ch0 = uwp_elem_from_any( children->items[0] );
-                if (ch0 && ch0 != el && ch0->visibility != 0)
-                    cur_x += (int)(spacing_px * horiz_scale + 0.5);
-            }
-            if (el->orientation == 0)
-            {
-                struct uwp_element *p;
-                int hop;
-                for (p = el->parent, hop = 0; p && hop < 5; p = p->parent, hop++)
-                {
-                    if (p->kind == UWP_KIND_STACK_PANEL && p->orientation == 0)
-                        is_top_scroll_panel = FALSE;
-                    if (uwp_is_scroll_viewer( p ))
-                    {
-                        sv = p;
-                        in_scroll = TRUE;
-                        break;
-                    }
-                }
-            }
-            if (in_scroll && sv && is_top_scroll_panel)
-            {
-                sv->scroll_extent_h = 0;
-                cur_y = rc.top - sv->scroll_y;
-            }
-            {
-                BOOL has_spotlight_slot = FALSE;
-                for (k = 0; k < children->count; k++)
-                {
-                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                    RECT crc = rc;
-                    if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
-                        ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
-                        uwp_is_teaching_tip( ch ) ||
-                        !wcscmp( ch->name, L"TeachingTipTarget" )) continue;
-                    if (el->orientation == 1) /* Horizontal */
-                    {
-                        if (use_horiz_flow)
-                        {
-                            double nw = uwp_measure_natural_width( ch, 0 );
-                            int slot_w = (nw > 0.0)
-                                ? max( 16, (int)((nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r )) * horiz_scale + 0.5) )
-                                : max( 32, (rc.right - cur_x) / max( 1, (int)vis_cnt - idx ) );
-                            crc.left = cur_x;
-                            crc.right = min( (int)rc.right, cur_x + slot_w );
-                            cur_x = crc.right + (int)(spacing_px * horiz_scale + 0.5);
-                        }
-                        else
-                        {
-                            crc.left  = rc.left + (w * idx) / (int)vis_cnt;
-                            crc.right = rc.left + (w * (idx + 1)) / (int)vis_cnt;
-                        }
-                    }
-                    else if (in_scroll)
-                    {
-                        int nat_h;
-                        if (ch->height > 0.0 && !isnan( ch->height ) && !uwp_has_horiz_listview_child( ch, 0 ))
-                        {
-                            int slot_h = (int)(ch->height + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
-                            crc.top    = cur_y;
-                            crc.bottom = cur_y + slot_h;
-                            cur_y = crc.bottom + spacing_px;
-                        }
-                        else
-                        {
-                            double mh = uwp_measure_natural_height( ch, w, 0 );
-                            if (mh > 0.0)
-                            {
-                                nat_h = max( 24, (int)(mh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
-                            }
-                            else if (uwp_has_spotlight_descendant( ch, 0 ))
-                            {
-                                if (has_spotlight_slot)
-                                {
-                                    uwp_clear_bounds_tree( ch );
-                                    idx++;
-                                    continue;
-                                }
-                                has_spotlight_slot = TRUE;
-                                nat_h = 330;
-                            }
-                            else if (!uwp_scroll_child_has_content( ch, 0 ))
-                                nat_h = 4;
-                            else
-                                nat_h = 168;
-                            crc.top    = cur_y;
-                            crc.bottom = cur_y + nat_h;
-                            cur_y = crc.bottom + (nat_h > 24 ? 8 : 0);
-                            auto_idx++;
-                        }
-                    }
-                    else
-                    {
-                        double nh = uwp_measure_natural_height( ch, w, 0 );
-                        if (nh > 0.0)
-                        {
-                            int slot_h = (int)(nh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5);
-                            crc.top    = cur_y;
-                            crc.bottom = min( (int)rc.bottom, cur_y + slot_h );
-                            cur_y = crc.bottom + spacing_px;
-                        }
-                        else
-                        {
-                            int slice = (auto_cnt > 0)
-                                ? ((auto_total_h * (auto_idx + 1)) / auto_cnt - (auto_total_h * auto_idx) / auto_cnt)
-                                : 0;
-                            crc.top    = cur_y;
-                            crc.bottom = min( (int)rc.bottom, cur_y + slice );
-                            cur_y = crc.bottom + spacing_px;
-                            auto_idx++;
-                        }
-                    }
-                    idx++;
-                    uwp_arrange_element( ch, crc );
-                }
-            }
-            if (in_scroll && sv)
-            {
-                int virt_ext = (cur_y + sv->scroll_y) - sv->bounds.top;
-                int vp_h = max( 1, (int)(sv->bounds.bottom - sv->bounds.top) );
-                if (virt_ext > sv->scroll_extent_h)
-                    sv->scroll_extent_h = virt_ext;
-                if (is_top_scroll_panel && sv->scroll_y > max( 0, sv->scroll_extent_h - vp_h ))
-                    sv->scroll_y = max( 0, sv->scroll_extent_h - vp_h );
-            }
-        }
-        if (h >= 60)
-        {
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                if (ch && ch->visibility == 0 && uwp_is_teaching_tip( ch ) && ch->is_open)
-                    uwp_arrange_element( ch, rc );
-            }
-        }
-    }
-    else if (uwp_is_menubar( el ))
-    {
-        if (el->outer && (!el->children_coll ||
-            CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
-        {
-            void *mb = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IMenuBar_WinUI, &mb )) && mb)
-            {
-                const struct abi_menu_bar *amb = (const struct abi_menu_bar *)mb;
-                void *vec = NULL;
-                if (amb->lpVtbl->get_Items && SUCCEEDED(amb->lpVtbl->get_Items( mb, &vec )) && vec)
-                {
-                    const struct abi_winrt_vector *avec = (const struct abi_winrt_vector *)vec;
-                    UINT32 cnt = 0, k;
-                    if (avec->lpVtbl->get_Size && SUCCEEDED(avec->lpVtbl->get_Size( vec, &cnt )) && cnt > 0)
-                    {
-                        if (!el->children_coll) uwp_vec_create( el, &el->children_coll );
-                        for (k = 0; k < cnt; k++)
-                        {
-                            void *item = NULL;
-                            if (avec->lpVtbl->GetAt && SUCCEEDED(avec->lpVtbl->GetAt( vec, k, &item )) && item)
-                            {
-                                if (el->children_coll) uwp_vec_Append( el->children_coll, item );
-                                IUnknown_Release( (IUnknown *)item );
-                            }
-                        }
-                    }
-                    IUnknown_Release( (IUnknown *)vec );
-                }
-                IUnknown_Release( (IUnknown *)mb );
-            }
-        }
-        if (el->children_coll)
-        {
-            struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-            unsigned int k, idx = 0;
-            int item_w = (int)(56 * g_layout_scale);
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                RECT crc;
-                if (!ch || ch->visibility != 0 || uwp_is_accelerator( ch )) continue;
-                ch->parent = el;
-                if (!uwp_is_menubar_item( ch ))
-                {
-                    lstrcpynW( ch->class_name, L"Microsoft.UI.Xaml.Controls.MenuBarItem", ARRAY_SIZE(ch->class_name) );
-                    uwp_elem_sync_class_flags( ch );
-                }
-                SetRect( &crc, rc.left + 8 + (int)idx * item_w, rc.top,
-                         min( (int)rc.right, (int)rc.left + 8 + (int)(idx + 1) * item_w ), rc.bottom );
-                ch->bounds = crc;
-                ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
-                ch->actual_w = (double)(crc.right - crc.left);
-                ch->actual_h = (double)(crc.bottom - crc.top);
-                if (ch->kind == UWP_KIND_GENERIC && uwp_has_text( ch ))
-                    ch->kind = UWP_KIND_TEXT_BLOCK;
-                idx++;
-            }
-        }
+    if (uwp_is_nav_view( el )) { arrange_nav_view( el, rc ); return; }
+    if (uwp_is_items_repeater( el ) && el->children_coll) { arrange_items_repeater( el, rc ); return; }
+    if ((el->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)) && el->children_coll && arrange_list_or_grid_view( el, rc ))
         return;
-    }
-    else if (uwp_is_pivot( el ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        int tab_w = (int)(84 * g_layout_scale);
-        int tab_h = min( h, (int)(36 * g_layout_scale) );
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            RECT crc;
-            if (!ch || ch->visibility != 0) continue;
-            ch->margin_t = 0;
-            SetRect( &crc, rc.left + 16 + (int)k * tab_w, rc.top + 8,
-                     min( (int)rc.right, (int)rc.left + 16 + (int)(k + 1) * tab_w ), rc.top + 8 + tab_h );
-            ch->bounds = crc;
-            ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
-            ch->actual_w = (double)(crc.right - crc.left);
-            ch->actual_h = (double)(crc.bottom - crc.top);
-        }
-        return;
-    }
-
-    if (uwp_is_nav_view( el ))
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
-        int avail_w = rc.right - rc.left;
-        int eff_mode = uwp_nav_effective_display_mode( el, avail_w );
-        double compact_len = ne ? ne->nav_compact_pane_length : 68.0;
-        double open_len = ne ? ne->nav_open_pane_length : 280.0;
-        BOOL is_pane_open = ne ? ne->nav_is_pane_open : FALSE;
-        BOOL is_settings_vis = ne ? ne->nav_is_settings_visible : TRUE;
-        BOOL is_toggle_vis = ne ? ne->nav_is_pane_toggle_visible : TRUE;
-        int closed_rail_w = (eff_mode == 1) ? (int)(max( 48.0, compact_len ) * sc + 0.5) : 0;
-        int open_pane_w = (int)(max( 48.0, min( 340.0, open_len > 0.0 ? open_len : 280.0 ) ) * sc + 0.5);
-        BOOL pane_visible = is_pane_open || (eff_mode != 0);
-        int pane_w = is_pane_open ? open_pane_w : closed_rail_w;
-        int content_left = rc.left + ((eff_mode == 2 && is_pane_open) ? open_pane_w : closed_rail_w);
-        BOOL show_toggle = is_toggle_vis && (eff_mode != 2);
-        int footer_vis_cnt = 0;
-        BOOL has_footer_host = FALSE;
-
-        if (pane_w > avail_w) pane_w = avail_w;
-        if (ne)
-        {
-            if (pane_visible && pane_w > 0)
-                SetRect( &ne->nav_pane_bounds, rc.left, rc.top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom );
-            else
-                SetRectEmpty( &ne->nav_pane_bounds );
-        }
-
-        if (el->children_coll)
-        {
-            struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-            unsigned int k;
-            int menu_top = rc.top + (show_toggle ? (int)(48 * sc + 0.5f) : (int)(12 * sc + 0.5f));
-            int footer_h = 0, footer_top;
-            BOOL wide_pane = (pane_w >= (int)(130 * sc));
-
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                if (ch && !wcscmp( ch->name, L"FooterMenuItemsHost" ))
-                {
-                    has_footer_host = TRUE;
-                    if (ch->children_coll)
-                    {
-                        struct uwp_vec_view *fv = CONTAINING_RECORD( ch->children_coll, struct uwp_vec_view, IInspectable_iface );
-                        unsigned int fk;
-                        for (fk = 0; fk < fv->count; fk++)
-                        {
-                            struct uwp_element *fch = uwp_elem_from_any( fv->items[fk] );
-                            if (!fch) continue;
-                            if (!wcscmp( fch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( fch ), L"SettingsButtonName" ))
-                            {
-                                if (is_settings_vis && wide_pane)
-                                    footer_vis_cnt++;
-                            }
-                            else if (!wide_pane && (uwp_is_nav_header( fch ) || uwp_is_nav_separator( fch )))
-                            {
-                                continue;
-                            }
-                            else if (fch->visibility == 0)
-                            {
-                                footer_vis_cnt++;
-                            }
-                        }
-                    }
-                }
-            }
-            if (footer_vis_cnt > 0)
-            {
-                footer_h = wide_pane
-                    ? min( (int)(160 * sc), footer_vis_cnt * (int)(40 * sc) + (int)(12 * sc) )
-                    : min( (int)(180 * sc), footer_vis_cnt * (int)(58 * sc) + (int)(26 * sc) );
-            }
-            else if (has_footer_host && pane_visible && pane_w > 0)
-            {
-                /* Reserve initial footer strip so WinUI ItemsRepeater runs Measure/Arrange and materializes footer items */
-                footer_h = wide_pane
-                    ? (is_settings_vis ? (int)(46 * sc) : (int)(40 * sc))
-                    : (int)(124 * sc);
-            }
-            footer_top = max( menu_top + (int)(60 * sc), (int)rc.bottom - footer_h - 4 );
-
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                RECT crc;
-                if (!ch) continue;
-                if (!wcscmp( ch->name, L"TogglePaneButton" ))
-                {
-                    if (!show_toggle || ch->visibility != 0)
-                    {
-                        uwp_clear_bounds_tree( ch );
-                        continue;
-                    }
-                    SetRect( &crc, rc.left + (int)(6 * sc + 0.5f), rc.top + (int)(6 * sc + 0.5f),
-                             rc.left + (int)(44 * sc + 0.5f), rc.top + (int)(42 * sc + 0.5f) );
-                    ch->bounds = crc;
-                    ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
-                    ch->actual_w = (double)(crc.right - crc.left);
-                    ch->actual_h = (double)(crc.bottom - crc.top);
-                    continue;
-                }
-                if (!wcscmp( ch->name, L"MenuItemsHost" ))
-                {
-                    if (!pane_visible || pane_w <= 0 || ch->visibility != 0)
-                    {
-                        uwp_clear_bounds_tree( ch );
-                        continue;
-                    }
-                    SetRect( &crc, rc.left, menu_top, min( (int)rc.right, (int)rc.left + pane_w ), footer_top );
-                    uwp_arrange_element( ch, crc );
-                    continue;
-                }
-                if (!wcscmp( ch->name, L"FooterMenuItemsHost" ))
-                {
-                    if (!pane_visible || pane_w <= 0 || footer_h <= 0 || ch->visibility != 0)
-                    {
-                        uwp_clear_bounds_tree( ch );
-                        continue;
-                    }
-                    SetRect( &crc, rc.left, footer_top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom - 4 );
-                    uwp_arrange_element( ch, crc );
-                    continue;
-                }
-                if (ch->visibility != 0) continue;
-                uwp_arrange_element( ch, rc );
-            }
-        }
-        if (el->content)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( el->content );
-            if (ch && ch != el)
-            {
-                RECT content_rc;
-                SetRect( &content_rc, content_left, rc.top, rc.right, rc.bottom );
-                uwp_arrange_element( ch, content_rc );
-            }
-        }
-        return;
-    }
-
-    if (uwp_is_items_repeater( el ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        BOOL is_nav_rail = (!wcscmp( el->name, L"MenuItemsHost" ) || !wcscmp( el->name, L"FooterMenuItemsHost" ));
-        int avail_w = rc.right - rc.left;
-
-        if (!is_nav_rail && avail_w >= 480)
-        {
-            struct uwp_element *ch0_peek = (children->count > 0) ? uwp_elem_from_any( children->items[0] ) : NULL;
-            int pad = 12, gap = 12;
-            int cols = max( 1, (avail_w - pad) / 270 );
-            int card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
-            int card_h = (ch0_peek && !uwp_is_card( ch0_peek )) ? 124 : 96;
-            int idx = 0;
-
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                int col, row, x0, y0;
-                RECT crc;
-                if (!ch || ch->visibility != 0) continue;
-                col = idx % cols;
-                row = idx / cols;
-                x0 = rc.left + pad + col * (card_w + gap);
-                y0 = rc.top + pad + row * (card_h + gap);
-                if (y0 >= rc.bottom)
-                {
-                    ch->has_bounds = FALSE;
-                    idx++;
-                    continue;
-                }
-                SetRect( &crc, x0, y0, x0 + card_w, min( (int)rc.bottom, y0 + card_h ) );
-                uwp_arrange_element( ch, crc );
-                idx++;
-            }
-            return;
-        }
-        if (is_nav_rail && avail_w >= (int)(130 * ((g_layout_scale > 0.25f) ? g_layout_scale : 1.0f)))
-        {
-            float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
-            struct uwp_element *nav = el->parent;
-            BOOL is_footer = !wcscmp( el->name, L"FooterMenuItemsHost" );
-            int scroll_y = (!is_footer && nav && uwp_is_nav_view( nav ) && nav->nav) ? nav->nav->nav_scroll_y : 0;
-            int cur_y = rc.top - scroll_y;
-            BOOL rev = FALSE;
-            if (!is_footer && children->count > 1)
-            {
-                struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
-                if (last_ch && !wcscmp( uwp_elem_text( last_ch ), L"Home" ))
-                    rev = TRUE;
-            }
-            for (k = 0; k < children->count; k++)
-            {
-                unsigned int idx = rev ? (children->count - 1 - k) : k;
-                struct uwp_element *ch = uwp_elem_from_any( children->items[idx] );
-                BOOL is_settings_item;
-                int row_h;
-                RECT crc;
-                if (!ch) continue;
-                is_settings_item = (!wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( ch ), L"SettingsButtonName" ));
-                if (is_settings_item)
-                {
-                    if (!nav || !uwp_elem_nav_is_settings_visible( nav ))
-                    {
-                        uwp_clear_bounds_tree( ch );
-                        continue;
-                    }
-                    if (!uwp_has_text( ch ) || !wcscmp( uwp_elem_text( ch ), L"SettingsButtonName" ))
-                        uwp_elem_set_text( ch, L"Settings" );
-                    ch->visibility = 0;
-                }
-                else if (ch->visibility != 0)
-                {
-                    uwp_clear_bounds_tree( ch );
-                    continue;
-                }
-                if (uwp_is_nav_header( ch ))
-                {
-                    if (k > 0) cur_y += (int)(6 * sc + 0.5f);
-                    row_h = (int)(30 * sc + 0.5f);
-                }
-                else if (uwp_is_nav_separator( ch ))
-                {
-                    row_h = (int)(11 * sc + 0.5f);
-                }
-                else
-                {
-                    row_h = (int)(36 * sc + 0.5f);
-                }
-                if (cur_y + row_h <= rc.top || cur_y >= rc.bottom)
-                {
-                    uwp_clear_bounds_tree( ch );
-                }
-                else
-                {
-                    SetRect( &crc, rc.left + (int)(6 * sc + 0.5f), max( (int)rc.top, cur_y ),
-                             rc.right - (int)(6 * sc + 0.5f), min( (int)rc.bottom, cur_y + row_h ) );
-                    if (is_settings_item && ch->visibility != 0)
-                    {
-                        ch->bounds = crc;
-                        ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
-                        ch->actual_w = (double)(crc.right - crc.left);
-                        ch->actual_h = (double)(crc.bottom - crc.top);
-                    }
-                    else
-                    {
-                        uwp_arrange_element( ch, crc );
-                    }
-                }
-                cur_y += row_h + 2;
-            }
-            return;
-        }
-        {
-            int cur_y = rc.top;
-            int item_h = is_nav_rail ? 54 : 80;
-            BOOL rev = FALSE;
-            if (is_nav_rail && children->count > 1)
-            {
-                struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
-                if (last_ch && !wcscmp( uwp_elem_text( last_ch ), L"Home" ))
-                    rev = TRUE;
-            }
-            for (k = 0; k < children->count; k++)
-            {
-                unsigned int idx = rev ? (children->count - 1 - k) : k;
-                struct uwp_element *ch = uwp_elem_from_any( children->items[idx] );
-                RECT crc;
-                if (!ch || ch->visibility != 0) continue;
-                if (is_nav_rail && (uwp_is_nav_header( ch ) || uwp_is_nav_separator( ch ) ||
-                                    !wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( ch ), L"SettingsButtonName" )))
-                {
-                    uwp_clear_bounds_tree( ch );
-                    continue;
-                }
-                SetRect( &crc, rc.left + 4, cur_y, rc.right - 4, min( (int)rc.bottom, cur_y + item_h ) );
-                uwp_arrange_element( ch, crc );
-                cur_y += item_h + 4;
-            }
-            return;
-        }
-    }
-
-    if ((el->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        int avail_w = rc.right - rc.left;
-        int avail_h = rc.bottom - rc.top;
-        if (!uwp_is_horiz_listview( el ))
-        {
-            int cur_y = rc.top;
-            int gap = (int)(12.0f * g_layout_scale + 0.5f);
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                double nh;
-                int item_h;
-                RECT crc;
-                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
-                nh = uwp_measure_natural_height( ch, avail_w, 0 );
-                if (nh <= 0.0) nh = uwp_estimate_auto_height( ch, 0 );
-                if (nh <= 0.0) nh = 110.0 * g_layout_scale;
-                item_h = max( 48, (int)(nh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
-                SetRect( &crc, rc.left, cur_y, rc.right, cur_y + item_h );
-                if (!ch->parent) ch->parent = el;
-                uwp_arrange_element( ch, crc );
-                cur_y += item_h + gap;
-            }
-            return;
-        }
-        if (avail_w >= 480 && avail_h > 0 && avail_h <= 400)
-        {
-            int pad = 8, gap = 12;
-            int item_h = max( 64, avail_h - pad );
-            int item_w = max( 180, min( 320, (item_h * 16) / 9 ) );
-            int idx = 0;
-            for (k = 0; k < children->count; k++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                int x0;
-                RECT crc;
-                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
-                x0 = rc.left + pad + idx * (item_w + gap);
-                if (x0 >= rc.right)
-                {
-                    ch->has_bounds = FALSE;
-                    idx++;
-                    continue;
-                }
-                SetRect( &crc, x0, rc.top + pad / 2,
-                         min( (int)rc.right, x0 + item_w ),
-                         min( (int)rc.bottom, rc.top + pad / 2 + item_h ) );
-                if (!ch->parent) ch->parent = el;
-                uwp_arrange_element( ch, crc );
-                idx++;
-            }
-            return;
-        }
-    }
 
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el)
-            uwp_arrange_element( ch, rc );
+        if (ch && ch != el) uwp_arrange_element( ch, rc );
     }
-
-    if (el->kind == UWP_KIND_WRAP_PANEL && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int cur_x = rc.left, cur_y = rc.top, row_h = 0;
-        int sp = (el->spacing > 0.0) ? (int)(el->spacing + 0.5) : 4;
-        unsigned int k;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            double nw, nh;
-            int cw, ch_h;
-            RECT crc;
-            if (!ch || ch == el || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
-                ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND)
-                continue;
-            nw = uwp_measure_natural_width( ch, 0 );
-            if (nw <= 0.0) nw = 80.0;
-            cw = max( 16, (int)(nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r ) + 0.5) );
-            nh = uwp_measure_natural_height( ch, cw, 0 );
-            if (nh <= 0.0) nh = 32.0;
-            ch_h = max( 16, (int)(nh + max( 0.0, ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
-            if (cur_x > rc.left && cur_x + cw > rc.right)
-            {
-                cur_x = rc.left;
-                cur_y += row_h + sp;
-                row_h = 0;
-            }
-            crc.left = cur_x;
-            crc.top = cur_y;
-            crc.right = min( (int)rc.right, cur_x + cw );
-            crc.bottom = min( (int)rc.bottom, cur_y + ch_h );
-            uwp_arrange_element( ch, crc );
-            cur_x = crc.right + sp;
-            if (ch_h > row_h) row_h = ch_h;
-        }
-        return;
-    }
-
+    if (el->kind == UWP_KIND_WRAP_PANEL && el->children_coll) { arrange_wrap_panel( el, rc ); return; }
     if (el->kind != UWP_KIND_GRID && el->kind != UWP_KIND_STACK_PANEL && el->kind != UWP_KIND_WRAP_PANEL &&
         !uwp_is_combobox( el ) && !uwp_is_autosuggest( el ) && el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        BOOL is_horiz_list = ((el->class_flags & (UWP_CF_LISTBOX | UWP_CF_ITEMS_CONTROL | UWP_CF_RADIO_BUTTON)) != 0) &&
-                             (rc.bottom - rc.top) <= (int)(64 * g_layout_scale);
-        int cur_x = rc.left;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (!ch || ch == el || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
-            if (is_horiz_list && ch->visibility == 0)
-            {
-                double nw = uwp_measure_natural_width( ch, 0 );
-                int cw = (nw > 0.0) ? (int)(nw + max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r ) + 0.5) : (rc.right - cur_x);
-                RECT crc = { cur_x, rc.top, min( (int)rc.right, cur_x + cw ), rc.bottom };
-                uwp_arrange_element( ch, crc );
-                cur_x = crc.right + (int)(12 * g_layout_scale);
-            }
-            else
-            {
-                uwp_arrange_element( ch, rc );
-            }
-        }
-    }
+        arrange_generic_children( el, rc );
 }

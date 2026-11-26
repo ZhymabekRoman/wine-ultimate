@@ -17,6 +17,7 @@ SOURCES = \
 	image_loader.c \
 	layout_engine.c \
 	main.c \
+	paint_common.c \
 	paint_gdi.c \
 	paint_gpu.c \
 	pri.c \

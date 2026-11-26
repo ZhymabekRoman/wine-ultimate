@@ -90,32 +90,899 @@ static void xbf_vsm_holder_free( struct xbf_vsm_holder *holder )
     holder->vsm_group_cap = 0;
 }
 
-static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_initial_root,
-                                   const struct xbf_rd_table *rd_tbl, UINT32 active_rd_node_idx,
-                                   struct xbf_vsm_holder *vsm_holder )
+struct xbf_sub_state
 {
-    DWORD sub_start = 0, end_p = 0, sub_sz = 0, p;
+    struct xbf_ctx *ctx;
+    int sub_idx;
+    DWORD sub_start;
+    DWORD end_p;
+    DWORD sub_sz;
+    DWORD p;
+    const struct xbf_rd_table *rd_tbl;
+    UINT32 active_rd_node_idx;
+    struct xbf_vsm_holder *vsm_holder;
+
     struct xbf_stack_val val_stack[64];
     DWORD start_off_stack[64];
     UINT32 node_idx_stack[64];
     BOOL is_rd_stack[64];
-    int obj_sp = 0, base_sp = 0;
+    int obj_sp;
+    int base_sp;
     WORD prop_stack[64];
-    int prop_sp = 0;
-    struct xbf_stack_val last_popped;
-    DWORD last_popped_off = 0;
-    UINT32 last_popped_node_idx = (~0u);
-    BOOL last_popped_is_rd = FALSE;
-    BOOL has_last_popped = FALSE;
+    int prop_sp;
 
-    memset( val_stack, 0, sizeof(val_stack) );
-    memset( &last_popped, 0, sizeof(last_popped) );
-    memset( start_off_stack, 0, sizeof(start_off_stack) );
-    memset( node_idx_stack, 0xff, sizeof(node_idx_stack) );
-    memset( is_rd_stack, 0, sizeof(is_rd_stack) );
+    struct xbf_stack_val last_popped;
+    DWORD last_popped_off;
+    UINT32 last_popped_node_idx;
+    BOOL last_popped_is_rd;
+    BOOL has_last_popped;
+};
+
+static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_initial_root,
+                                   const struct xbf_rd_table *rd_tbl, UINT32 active_rd_node_idx,
+                                   struct xbf_vsm_holder *vsm_holder );
+
+static void xbf_sub_clear_last_popped( struct xbf_sub_state *st )
+{
+    free( st->last_popped.setters );
+    memset( &st->last_popped, 0, sizeof(st->last_popped) );
+    st->last_popped_node_idx = (~0u);
+    st->last_popped_is_rd = FALSE;
+    st->has_last_popped = FALSE;
+}
+
+static BOOL xbf_sub_seek_next_rd_entry( struct xbf_sub_state *st, DWORD cur_rel_off )
+{
+    DWORD next_off = 0xffffffffu;
+    int k;
+
+    if (!st->rd_tbl) return FALSE;
+    for (k = 0; k < st->rd_tbl->count; k++)
+    {
+        if (st->rd_tbl->items[k].sub_off > cur_rel_off && st->rd_tbl->items[k].sub_off < next_off)
+            next_off = st->rd_tbl->items[k].sub_off;
+    }
+    if (next_off == 0xffffffffu || next_off >= st->sub_sz) return FALSE;
+
+    st->p = st->sub_start + next_off;
+    while (st->obj_sp > st->base_sp)
+    {
+        st->obj_sp--;
+        free( st->val_stack[st->obj_sp].setters );
+        memset( &st->val_stack[st->obj_sp], 0, sizeof(st->val_stack[st->obj_sp]) );
+    }
+    st->prop_sp = 0;
+    xbf_sub_clear_last_popped( st );
+    return TRUE;
+}
+
+static void xbf_compile_init_sv_kind( struct xbf_ctx *ctx, BYTE op, WORD tid,
+                                      int vt_init, double num_init, const WCHAR *sbuf_init,
+                                      const double vec4_init[4], struct xbf_stack_val *sv )
+{
+    if (tid == XBF_TYPE_COLOR)
+    {
+        sv->kind = UWP_RD_COLOR;
+        if (vt_init == 0x08) { sv->argb = (UINT32)num_init; sv->has_argb = TRUE; }
+        else if (sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv->argb )) sv->has_argb = TRUE;
+    }
+    else if (tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 ||
+             ((op == 0x15 || op == 0x16) && (vt_init == 0x03 || vt_init == 0x04 || vt_init == 0x0b)))
+    {
+        sv->kind = UWP_RD_DOUBLE;
+        sv->dval = num_init;
+    }
+    else if (tid == XBF_TYPE_GRID_LENGTH)
+    {
+        sv->kind = UWP_RD_DOUBLE;
+        sv->dval = (vt_init == 0x07) ? vec4_init[1] : num_init;
+    }
+    else if (tid == XBF_TYPE_THICKNESS)
+    {
+        sv->kind = UWP_RD_THICKNESS;
+        memcpy( sv->vec4, vec4_init, sizeof(sv->vec4) );
+    }
+    else if (tid == XBF_TYPE_CORNER_RADIUS)
+    {
+        sv->kind = UWP_RD_THICKNESS;
+        if (vt_init == 0x06) memcpy( sv->vec4, vec4_init, sizeof(sv->vec4) );
+        else if (vt_init == 0x03 || vt_init == 0x04)
+            sv->vec4[0] = sv->vec4[1] = sv->vec4[2] = sv->vec4[3] = num_init;
+        else if (sbuf_init[0])
+        {
+            const WCHAR *src = sbuf_init;
+            WCHAR *ep = NULL;
+            double v0 = wcstod( src, &ep );
+            sv->vec4[0] = sv->vec4[1] = sv->vec4[2] = sv->vec4[3] = v0;
+            if (ep && (*ep == L',' || *ep == L' '))
+            {
+                int ci;
+                for (ci = 1; ci < 4 && *ep; ci++)
+                {
+                    while (*ep == L',' || *ep == L' ') ep++;
+                    if (!*ep) break;
+                    sv->vec4[ci] = wcstod( ep, &ep );
+                }
+            }
+        }
+    }
+    else if (tid == XBF_TYPE_FONT_FAMILY)
+    {
+        sv->kind = UWP_RD_FONT_FAMILY;
+        if (sbuf_init[0])
+        {
+            WCHAR face[64] = {0};
+            lstrcpynW( sv->str_val, sbuf_init, ARRAY_SIZE(sv->str_val) );
+            uwp_resolve_font_family( sbuf_init, face, ARRAY_SIZE(face) );
+        }
+    }
+    else if (tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_BRUSH_B ||
+             tid == XBF_TYPE_IMAGE_BRUSH || tid == XBF_TYPE_LINEAR_GRADIENT_BRUSH ||
+             (!(tid & 0x8000) && tid < ctx->type_cnt && wcsstr( ctx->types[tid].short_name, L"Brush" )))
+    {
+        sv->kind = UWP_RD_BRUSH;
+        if (op == 0x16 && sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv->argb ))
+            sv->has_argb = TRUE;
+    }
+    else if (tid == XBF_TYPE_DATA_TEMPLATE || tid == XBF_TYPE_CONTROL_TEMPLATE)
+        sv->kind = UWP_RD_DATA_TEMPLATE;
+    else if (tid == XBF_TYPE_STYLE)
+        sv->kind = UWP_RD_STYLE;
+    else if ((op == 0x15 || op == 0x16) && sbuf_init[0])
+    {
+        sv->kind = UWP_RD_STRING;
+        lstrcpynW( sv->str_val, sbuf_init, ARRAY_SIZE(sv->str_val) );
+    }
+    sv->tid = tid;
+}
+
+static BOOL xbf_compile_push_object( struct xbf_sub_state *st, BYTE op, DWORD cur_rel_off )
+{
+    struct xbf_ctx *ctx = st->ctx;
+    WORD tid;
+    const WCHAR *cls_name = L"Windows.UI.Xaml.Controls.ContentControl";
+    struct xbf_stack_val sv = {0};
+    int vt_init = 0;
+    double num_init = 0, vec4_init[4] = {0};
+    WCHAR sbuf_init[256] = {0};
+    BOOL is_rd_type = FALSE;
+    UINT32 cur_node_idx = (~0u);
+    UINT8 nflags = 0;
+    const WCHAR *short_n = L"";
+    BOOL reuse_active_rd;
+
+    sv.opacity = 1.0;
+    if (st->p + 2 > st->end_p) return FALSE;
+    tid = *(const WORD *)(ctx->nodes + st->p);
+    st->p += 2;
+    if ((op == 0x15 || op == 0x16) &&
+        !xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt_init, &num_init,
+                         sbuf_init, ARRAY_SIZE(sbuf_init), vec4_init ))
+        return FALSE;
+
+    TRACE( "XBF compile push op=%#x tid=%#x cls=%s at %lu/%lu (sub %d)\n", op, tid,
+           (tid < ctx->type_cnt) ? debugstr_w(ctx->types[tid].full_name) : "(btype)",
+           (unsigned long)cur_rel_off, (unsigned long)st->end_p, st->sub_idx );
+
+    if (tid == XBF_TYPE_RESOURCE_DICTIONARY) is_rd_type = TRUE;
+    else if (!(tid & 0x8000) && tid < ctx->type_cnt &&
+             (wcsstr( ctx->types[tid].short_name, L"ResourceDictionary" ) ||
+              !wcscmp( ctx->types[tid].short_name, L"XamlControlsResources" ) ||
+              (st->prop_sp > 0 && st->prop_stack[st->prop_sp - 1] == XBF_PROP_MERGED_DICTIONARIES)))
+        is_rd_type = TRUE;
+
+    xbf_compile_init_sv_kind( ctx, op, tid, vt_init, num_init, sbuf_init, vec4_init, &sv );
+
+    if ((st->sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && st->vsm_holder)
+    {
+        if (tid == XBF_TYPE_VISUAL_STATE_GROUP)
+            xbf_vsm_holder_add_group( st->vsm_holder, NULL );
+        else if (tid == XBF_TYPE_VISUAL_STATE)
+        {
+            struct uwp_vsm_group *grp = (st->vsm_holder->vsm_group_cnt > 0)
+                ? &st->vsm_holder->vsm_groups[st->vsm_holder->vsm_group_cnt - 1]
+                : xbf_vsm_holder_add_group( st->vsm_holder, L"DefaultGroup" );
+            uwp_vsm_add_state( grp, NULL );
+        }
+    }
+
+    if (st->obj_sp >= (int)ARRAY_SIZE(st->val_stack))
+    {
+        free( sv.setters );
+        return TRUE;
+    }
+
+    reuse_active_rd = (st->rd_tbl != NULL && st->obj_sp == 0 && is_rd_type && st->active_rd_node_idx != (~0u));
+    if (is_rd_type) nflags |= XBF_AOT_NODE_IS_RD;
+    if (reuse_active_rd)
+    {
+        cur_node_idx = st->active_rd_node_idx;
+        if (cur_node_idx < ctx->aot->node_cnt)
+            ctx->aot->nodes[cur_node_idx].flags |= XBF_AOT_NODE_IS_RD;
+    }
+    else if (op == 0x17 && ctx->root_el)
+    {
+        nflags |= XBF_AOT_NODE_ROOT_REUSE;
+        cur_node_idx = 0;
+        if (ctx->aot->node_cnt > 0)
+            ctx->aot->nodes[0].flags |= nflags;
+    }
+    else if ((ctx->rd_only || st->rd_tbl) && !is_rd_type &&
+             ((!ctx->connector &&
+               !(tid < ctx->type_cnt && (wcsstr( ctx->types[tid].full_name, L"Breakpoint" ) ||
+                                         wcsstr( ctx->types[tid].full_name, L"TemplateSelector" ) ||
+                                         wcsstr( ctx->types[tid].full_name, L"Converter" ) ||
+                                         wcsstr( ctx->types[tid].full_name, L"Layout" )))) ||
+              tid == XBF_TYPE_STYLE || tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
+              tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 || tid == XBF_TYPE_STRING ||
+              tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_CORNER_RADIUS || tid == XBF_TYPE_FONT_FAMILY ||
+              tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))
+    {
+        nflags |= XBF_AOT_NODE_LIGHTWEIGHT;
+        cur_node_idx = xbf_aot_add_node( ctx->aot, L"", L"", tid, nflags, FALSE, 0 );
+    }
+    else if (tid & 0x8000)
+    {
+        cls_name = uwp_btype_to_class_name( tid );
+        nflags |= XBF_AOT_NODE_BUILTIN;
+        if (tid == XBF_TYPE_DEFERRED_ELEMENT) nflags |= XBF_AOT_NODE_DEFERRED;
+        cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
+                                         (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
+    }
+    else if (tid < ctx->type_cnt)
+    {
+        cls_name = ctx->types[tid].full_name;
+        nflags |= XBF_AOT_NODE_APP_TYPE;
+        short_n = ctx->types[tid].short_name;
+        if (!wcsncmp( ctx->types[tid].xmlns, L"using:", 6 )) nflags |= XBF_AOT_NODE_USING_NS;
+        if (is_rd_type || wcsstr( cls_name, L"ResourceString" ) || wcsstr( cls_name, L"ResourceVirtualKey" ))
+            nflags |= XBF_AOT_NODE_NO_PROVIDER;
+        cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, short_n, tid, nflags,
+                                         (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
+    }
+    else
+    {
+        cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
+                                         (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
+    }
+
+    if (cur_node_idx != (~0u) && !reuse_active_rd)
+    {
+        struct xbf_aot_op aop = {0};
+        aop.kind = XBF_AOT_OP_CREATE_NODE;
+        aop.node_idx = cur_node_idx;
+        aop.child_idx = (~0u);
+        xbf_aot_emit_op( ctx->aot, &aop );
+    }
+    st->val_stack[st->obj_sp] = sv;
+    st->start_off_stack[st->obj_sp] = cur_rel_off;
+    st->node_idx_stack[st->obj_sp] = cur_node_idx;
+    st->is_rd_stack[st->obj_sp] = is_rd_type;
+    st->obj_sp++;
+    return TRUE;
+}
+
+static BOOL xbf_compile_set_prop( struct xbf_sub_state *st, BYTE op )
+{
+    struct xbf_ctx *ctx = st->ctx;
+    WORD pid;
+    int vt = 0;
+    double num = 0, vec4[4] = {0};
+    WCHAR sbuf[256] = {0};
+    BOOL is_res_ref = (op == 0x1e || op == 0x24);
+    struct xbf_stack_val *top_sv;
+    UINT32 top_nidx;
+
+    if (st->p + 2 > st->end_p) return FALSE;
+    pid = *(const WORD *)(ctx->nodes + st->p);
+    st->p += 2;
+    if (!xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ))
+        return FALSE;
+    if (st->obj_sp <= 0) return TRUE;
+
+    top_sv = &st->val_stack[st->obj_sp - 1];
+    top_nidx = st->node_idx_stack[st->obj_sp - 1];
+    xbf_apply_property( ctx, NULL, top_sv, pid, vt, num, sbuf, vec4, is_res_ref );
+
+    if (top_nidx != (~0u) && top_nidx < ctx->aot->node_cnt &&
+        !(ctx->aot->nodes[top_nidx].flags & XBF_AOT_NODE_LIGHTWEIGHT))
+    {
+        struct xbf_aot_op aop = {0};
+        aop.kind = XBF_AOT_OP_SET_PROP;
+        aop.node_idx = top_nidx;
+        aop.child_idx = (~0u);
+        aop.pid = pid;
+        aop.vt = vt;
+        aop.num = num;
+        memcpy( aop.vec4, vec4, sizeof(aop.vec4) );
+        aop.str_off = xbf_aot_intern_str( ctx->aot, sbuf );
+        aop.is_res_ref = is_res_ref ? 1 : 0;
+        xbf_aot_emit_op( ctx->aot, &aop );
+    }
+
+    if ((st->sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && st->vsm_holder && st->vsm_holder->vsm_group_cnt > 0)
+    {
+        struct uwp_vsm_group *grp = &st->vsm_holder->vsm_groups[st->vsm_holder->vsm_group_cnt - 1];
+        struct uwp_vsm_state *vst = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
+        if (!vst) return TRUE;
+        if (top_sv->tid == XBF_TYPE_ADAPTIVE_TRIGGER && (pid == XBF_PROP_MIN_WINDOW_HEIGHT || pid == XBF_PROP_MIN_WINDOW_WIDTH))
+        {
+            double trig_val = num;
+            if ((is_res_ref || vt == 0x05 || vt == 0x09) && sbuf[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx->target_rd, ctx->root_el, sbuf, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                    trig_val = de->dval;
+                else
+                    trig_val = wcstod( sbuf, NULL );
+            }
+            if (pid == XBF_PROP_MIN_WINDOW_HEIGHT) vst->min_window_height = trig_val;
+            else vst->min_window_width = trig_val;
+            vst->has_trigger = TRUE;
+        }
+        else if (top_sv->tid == XBF_TYPE_SETTER_A || top_sv->tid == XBF_TYPE_SETTER_B)
+        {
+            if (pid == XBF_PROP_SETTER_TARGET && sbuf[0])
+                vsm_split_setter_target( sbuf, top_sv->vsm_target, ARRAY_SIZE(top_sv->vsm_target),
+                                         top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
+            else if (pid == XBF_PROP_SETTER_VALUE)
+            {
+                lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
+                top_sv->vsm_vt = vt; top_sv->vsm_num = num;
+                top_sv->vsm_is_res_ref = is_res_ref; top_sv->vsm_has_val = TRUE;
+            }
+        }
+        else if (top_sv->tid == XBF_TYPE_OBJECT_ANIMATION_USING_KEY_FRAMES)
+        {
+            if (pid == XBF_PROP_STORYBOARD_TARGET_NAME && sbuf[0])
+                lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
+            else if (pid == XBF_PROP_STORYBOARD_TARGET_PROPERTY && sbuf[0])
+                vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
+        }
+        else if (top_sv->tid == XBF_TYPE_DISCRETE_OBJECT_KEY_FRAME && pid == XBF_PROP_KEYFRAME_VALUE)
+        {
+            lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
+            top_sv->vsm_vt = vt; top_sv->vsm_num = num;
+            top_sv->vsm_is_res_ref = is_res_ref; top_sv->vsm_has_val = TRUE;
+        }
+        else if (top_sv->tid == XBF_TYPE_DOUBLE_ANIMATION || top_sv->tid == XBF_TYPE_DOUBLE_ANIMATION_B)
+        {
+            if (pid == XBF_PROP_STORYBOARD_TARGET_NAME && sbuf[0])
+                lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
+            else if (pid == XBF_PROP_STORYBOARD_TARGET_PROPERTY && sbuf[0])
+                vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
+            else if (pid == XBF_PROP_DOUBLE_ANIMATION_TO)
+            {
+                lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
+                top_sv->vsm_vt = vt; top_sv->vsm_num = num;
+                top_sv->vsm_is_res_ref = is_res_ref; top_sv->vsm_has_val = TRUE;
+            }
+        }
+    }
+    return TRUE;
+}
+
+static void xbf_compile_pop_object( struct xbf_sub_state *st )
+{
+    struct xbf_ctx *ctx = st->ctx;
+    BYTE next_op;
+
+    if (st->obj_sp <= st->base_sp)
+    {
+        xbf_sub_clear_last_popped( st );
+        return;
+    }
+
+    free( st->last_popped.setters );
+    st->obj_sp--;
+    st->last_popped = st->val_stack[st->obj_sp];
+    st->last_popped_off = st->start_off_stack[st->obj_sp];
+    st->last_popped_node_idx = st->node_idx_stack[st->obj_sp];
+    st->last_popped_is_rd = st->is_rd_stack[st->obj_sp];
+    memset( &st->val_stack[st->obj_sp], 0, sizeof(st->val_stack[st->obj_sp]) );
+    st->has_last_popped = TRUE;
+
+    if ((st->sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && st->vsm_holder && st->vsm_holder->vsm_group_cnt > 0)
+    {
+        struct uwp_vsm_group *grp = &st->vsm_holder->vsm_groups[st->vsm_holder->vsm_group_cnt - 1];
+        struct uwp_vsm_state *vst = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
+        if (vst)
+        {
+            if ((st->last_popped.tid == XBF_TYPE_SETTER_A || st->last_popped.tid == XBF_TYPE_SETTER_B ||
+                 st->last_popped.tid == XBF_TYPE_DOUBLE_ANIMATION || st->last_popped.tid == XBF_TYPE_DOUBLE_ANIMATION_B) &&
+                st->last_popped.vsm_target[0] && st->last_popped.vsm_prop[0] && st->last_popped.vsm_has_val)
+            {
+                uwp_vsm_state_add_setter( vst, st->last_popped.vsm_target, st->last_popped.vsm_prop,
+                                          st->last_popped.vsm_val_str, st->last_popped.vsm_vt,
+                                          st->last_popped.vsm_num, st->last_popped.vsm_is_res_ref );
+            }
+            else if (st->last_popped.tid == XBF_TYPE_DISCRETE_OBJECT_KEY_FRAME && st->last_popped.vsm_has_val &&
+                     st->obj_sp > 0 && st->val_stack[st->obj_sp - 1].tid == XBF_TYPE_OBJECT_ANIMATION_USING_KEY_FRAMES &&
+                     st->val_stack[st->obj_sp - 1].vsm_target[0] && st->val_stack[st->obj_sp - 1].vsm_prop[0])
+            {
+                uwp_vsm_state_add_setter( vst, st->val_stack[st->obj_sp - 1].vsm_target,
+                                          st->val_stack[st->obj_sp - 1].vsm_prop,
+                                          st->last_popped.vsm_val_str, st->last_popped.vsm_vt,
+                                          st->last_popped.vsm_num, st->last_popped.vsm_is_res_ref );
+            }
+            else if (st->last_popped.tid == XBF_TYPE_VISUAL_STATE && !vst->name[0])
+            {
+                WCHAR synth[64];
+                swprintf( synth, ARRAY_SIZE(synth), L"__vsm_g%d_s%d",
+                          st->vsm_holder->vsm_group_cnt - 1, grp->state_cnt - 1 );
+                lstrcpynW( vst->name, synth, ARRAY_SIZE(vst->name) );
+                if (st->last_popped_node_idx != (~0u))
+                {
+                    struct xbf_aot_op aop = {0};
+                    aop.kind = XBF_AOT_OP_SET_XNAME;
+                    aop.node_idx = st->last_popped_node_idx;
+                    aop.child_idx = (~0u);
+                    aop.str_off = xbf_aot_intern_str( ctx->aot, synth );
+                    xbf_aot_emit_op( ctx->aot, &aop );
+                }
+            }
+        }
+    }
+
+    next_op = (st->p < st->end_p) ? ctx->nodes[st->p] : 0xff;
+    if (next_op == 0x0a || next_op == 0x07 || next_op == 0x08 || next_op == 0x09 || next_op == 0x20)
+        return;
+
+    /* Indexed ResourceDictionary entry without trailing 0x0a AddToDictionary */
+    if (st->rd_tbl &&
+        (st->obj_sp == st->base_sp || (st->obj_sp == st->base_sp + 1 && st->is_rd_stack[st->obj_sp - 1])))
+    {
+        UINT32 rd_parent_idx = (st->obj_sp > 0 && st->is_rd_stack[st->obj_sp - 1])
+            ? st->node_idx_stack[st->obj_sp - 1] : st->active_rd_node_idx;
+        int k;
+        BOOL matched_key = FALSE;
+        for (k = 0; k < st->rd_tbl->count; k++)
+        {
+            if (st->rd_tbl->items[k].sub_off == st->last_popped_off &&
+                st->rd_tbl->items[k].key_sid < ctx->str_cnt && ctx->strs[st->rd_tbl->items[k].key_sid])
+            {
+                xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, st->last_popped_node_idx,
+                                           ctx->strs[st->rd_tbl->items[k].key_sid], &st->last_popped );
+                matched_key = TRUE;
+            }
+        }
+        if (matched_key)
+        {
+            xbf_sub_clear_last_popped( st );
+            return;
+        }
+    }
+
+    /* Implicit Style (TargetType without explicit x:Key) inside a ResourceDictionary */
+    if (st->has_last_popped && st->last_popped.kind == UWP_RD_STYLE && st->last_popped.target_type[0] &&
+        (ctx->rd_only || (st->obj_sp > 0 && st->is_rd_stack[st->obj_sp - 1])))
+    {
+        UINT32 rd_parent_idx = (st->obj_sp > 0 && st->is_rd_stack[st->obj_sp - 1])
+            ? st->node_idx_stack[st->obj_sp - 1] : st->active_rd_node_idx;
+        xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, st->last_popped_node_idx,
+                                   st->last_popped.target_type, &st->last_popped );
+    }
+}
+
+static BOOL xbf_compile_attach_ops( struct xbf_sub_state *st, BYTE op )
+{
+    struct xbf_ctx *ctx = st->ctx;
+
+    if (op == 0x0a)
+    {
+        int vt = 0;
+        double num = 0;
+        WCHAR kbuf[128] = {0};
+        if (!xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt, &num, kbuf, ARRAY_SIZE(kbuf), NULL ))
+            return FALSE;
+        if (st->has_last_popped && kbuf[0])
+        {
+            WORD pid = (st->prop_sp > 0) ? st->prop_stack[st->prop_sp - 1] : 0;
+            UINT32 parent_idx = (st->obj_sp > 0 && st->node_idx_stack[st->obj_sp - 1] != (~0u))
+                ? st->node_idx_stack[st->obj_sp - 1] : st->active_rd_node_idx;
+            if (pid == XBF_PROP_THEME_DICTIONARIES && st->last_popped_is_rd && st->last_popped_node_idx != (~0u))
+            {
+                struct xbf_aot_op aop = {0};
+                aop.kind = XBF_AOT_OP_RD_LINK_THEME;
+                aop.node_idx = parent_idx;
+                aop.child_idx = st->last_popped_node_idx;
+                aop.str_off = xbf_aot_intern_str( ctx->aot, kbuf );
+                xbf_aot_emit_op( ctx->aot, &aop );
+            }
+            else
+                xbf_compile_emit_rd_store( ctx->aot, parent_idx, st->last_popped_node_idx, kbuf, &st->last_popped );
+        }
+        xbf_sub_clear_last_popped( st );
+        return TRUE;
+    }
+    if (op == 0x08)
+    {
+        if (st->has_last_popped && st->obj_sp > 0 &&
+            st->node_idx_stack[st->obj_sp - 1] != (~0u) && st->last_popped_node_idx != (~0u))
+        {
+            struct xbf_aot_op aop = {0};
+            aop.kind = XBF_AOT_OP_ADD_CHILD;
+            aop.node_idx = st->node_idx_stack[st->obj_sp - 1];
+            aop.child_idx = st->last_popped_node_idx;
+            aop.pid = (st->prop_sp > 0) ? st->prop_stack[st->prop_sp - 1] : XBF_PROP_PANEL_CHILDREN;
+            xbf_aot_emit_op( ctx->aot, &aop );
+        }
+        xbf_sub_clear_last_popped( st );
+        return TRUE;
+    }
+    if (op == 0x07)
+    {
+        WORD pid;
+        if (st->end_p - st->p < 2) return FALSE;
+        pid = *(const WORD *)(ctx->nodes + st->p);
+        st->p += 2;
+        if (st->has_last_popped && (st->obj_sp == 0 || st->node_idx_stack[st->obj_sp - 1] != (~0u)))
+        {
+            struct xbf_aot_op aop = {0};
+            aop.kind = XBF_AOT_OP_SET_OBJ_PROP;
+            aop.sv_kind = (UINT8)st->last_popped.kind;
+            aop.has_argb = st->last_popped.has_argb ? 1 : 0;
+            aop.pid = pid;
+            aop.node_idx = (st->obj_sp > 0) ? st->node_idx_stack[st->obj_sp - 1] : (~0u);
+            aop.child_idx = st->last_popped_node_idx;
+            aop.argb = st->last_popped.argb;
+            aop.num = st->last_popped.opacity;
+            if (st->last_popped.kind == UWP_RD_STYLE)
+            {
+                aop.str_off = xbf_aot_intern_str( ctx->aot, st->last_popped.based_on );
+                if (st->last_popped.setter_cnt > 0 && st->last_popped.setters)
+                {
+                    aop.setter_start = xbf_aot_append_setters( ctx->aot, st->last_popped.setters, st->last_popped.setter_cnt );
+                    aop.setter_cnt = (UINT32)st->last_popped.setter_cnt;
+                }
+            }
+            else
+                aop.str_off = xbf_aot_intern_str( ctx->aot, st->last_popped.str_val );
+            xbf_aot_emit_op( ctx->aot, &aop );
+        }
+        xbf_sub_clear_last_popped( st );
+        return TRUE;
+    }
+    if (op == 0x20)
+    {
+        WORD pid;
+        if (st->end_p - st->p < 2) return FALSE;
+        pid = *(const WORD *)(ctx->nodes + st->p);
+        st->p += 2;
+        if (st->has_last_popped && st->obj_sp > 0 &&
+            st->node_idx_stack[st->obj_sp - 1] != (~0u) && st->last_popped_node_idx != (~0u))
+        {
+            struct xbf_aot_op aop = {0};
+            aop.kind = XBF_AOT_OP_PROVIDE_VALUE;
+            aop.pid = pid;
+            aop.node_idx = st->node_idx_stack[st->obj_sp - 1];
+            aop.child_idx = st->last_popped_node_idx;
+            xbf_aot_emit_op( ctx->aot, &aop );
+        }
+        xbf_sub_clear_last_popped( st );
+        return TRUE;
+    }
+    xbf_sub_clear_last_popped( st );
+    return TRUE;
+}
+
+/* Returns 1 = handled, 0 = break loop, -1 = not a meta op */
+static int xbf_compile_meta_ops( struct xbf_sub_state *st, BYTE op, DWORD cur_rel_off )
+{
+    struct xbf_ctx *ctx = st->ctx;
+
+    switch (op)
+    {
+    case 0x12:
+        if (st->end_p - st->p < 6) return 0;
+        st->p += 6;
+        return 1;
+    case 0x03:
+    {
+        DWORD plen;
+        if (st->end_p - st->p < 6) return 0;
+        plen = *(const DWORD *)(ctx->nodes + st->p + 2);
+        if (plen > (st->end_p - (st->p + 6)) / 2) return 0;
+        st->p += 6 + plen * 2;
+        return 1;
+    }
+    case 0x0b:
+    {
+        DWORD slen;
+        if (st->end_p - st->p < 4) return 0;
+        slen = *(const DWORD *)(ctx->nodes + st->p);
+        st->p += 4;
+        if (slen > (st->end_p - st->p) / 2) return 0;
+        if (st->obj_sp > 0 && st->node_idx_stack[st->obj_sp - 1] != (~0u) && slen > 0)
+        {
+            WCHAR xcls[128];
+            DWORD cp = min( slen, (DWORD)(ARRAY_SIZE(xcls) - 1) );
+            struct xbf_aot_op aop = {0};
+            memcpy( xcls, ctx->nodes + st->p, cp * sizeof(WCHAR) );
+            xcls[cp] = 0;
+            aop.kind = XBF_AOT_OP_SET_XCLASS;
+            aop.node_idx = st->node_idx_stack[st->obj_sp - 1];
+            aop.child_idx = (~0u);
+            aop.str_off = xbf_aot_intern_str( ctx->aot, xcls );
+            xbf_aot_emit_op( ctx->aot, &aop );
+        }
+        st->p += slen * 2;
+        return 1;
+    }
+    case 0x0c:
+    {
+        int vt = 0;
+        double num = 0;
+        if (!xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt, &num, NULL, 0, NULL )) return 0;
+        if (st->obj_sp > 0 && st->node_idx_stack[st->obj_sp - 1] != (~0u))
+        {
+            struct xbf_aot_op aop = {0};
+            aop.kind = XBF_AOT_OP_CONNECT;
+            aop.node_idx = st->node_idx_stack[st->obj_sp - 1];
+            aop.child_idx = (~0u);
+            aop.cid = (int)num;
+            xbf_aot_emit_op( ctx->aot, &aop );
+        }
+        return 1;
+    }
+    case 0x0d:
+    {
+        int vt = 0;
+        double num = 0;
+        WCHAR sbuf[128] = {0};
+        if (!xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) return 0;
+        if (st->obj_sp > 0 && sbuf[0])
+        {
+            WORD top_tid = st->val_stack[st->obj_sp - 1].tid;
+            UINT32 top_nidx = st->node_idx_stack[st->obj_sp - 1];
+            if (top_nidx != (~0u) && top_nidx < ctx->aot->node_cnt &&
+                !(ctx->aot->nodes[top_nidx].flags & XBF_AOT_NODE_LIGHTWEIGHT))
+            {
+                struct xbf_aot_op aop = {0};
+                aop.kind = XBF_AOT_OP_SET_XNAME;
+                aop.node_idx = top_nidx;
+                aop.child_idx = (~0u);
+                aop.str_off = xbf_aot_intern_str( ctx->aot, sbuf );
+                xbf_aot_emit_op( ctx->aot, &aop );
+            }
+            if ((st->sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && st->vsm_holder && st->vsm_holder->vsm_group_cnt > 0)
+            {
+                struct uwp_vsm_group *grp = &st->vsm_holder->vsm_groups[st->vsm_holder->vsm_group_cnt - 1];
+                if (top_tid == XBF_TYPE_VISUAL_STATE_GROUP)
+                    lstrcpynW( grp->name, sbuf, ARRAY_SIZE(grp->name) );
+                else if (top_tid == XBF_TYPE_VISUAL_STATE && grp->state_cnt > 0)
+                    lstrcpynW( grp->states[grp->state_cnt - 1].name, sbuf, ARRAY_SIZE(grp->states[grp->state_cnt - 1].name) );
+            }
+        }
+        return 1;
+    }
+    case 0x0e:
+    {
+        int vt = 0;
+        double num = 0;
+        WCHAR sbuf[128] = {0};
+        if (!xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) return 0;
+        if (sbuf[0] && (st->obj_sp == 0 || st->node_idx_stack[st->obj_sp - 1] != (~0u)))
+        {
+            struct xbf_aot_op aop = {0};
+            aop.kind = XBF_AOT_OP_SET_PROP;
+            aop.vt = (UINT8)vt;
+            aop.pid = XBF_PROP_AUTOMATION_ID;
+            aop.node_idx = (st->obj_sp > 0) ? st->node_idx_stack[st->obj_sp - 1] : 0u;
+            aop.child_idx = (~0u);
+            aop.str_off = xbf_aot_intern_str( ctx->aot, sbuf );
+            xbf_aot_emit_op( ctx->aot, &aop );
+        }
+        return 1;
+    }
+    case 0x13:
+        if (st->p + 2 > st->end_p) return 0;
+        if (st->prop_sp < (int)ARRAY_SIZE(st->prop_stack))
+            st->prop_stack[st->prop_sp++] = *(const WORD *)(ctx->nodes + st->p);
+        st->p += 2;
+        return 1;
+    case 0x01:
+    case 0x27:
+        return 1;
+    case 0x26:
+        if (st->p + 4 > st->end_p) return 0;
+        st->p += 4;
+        return 1;
+    case 0x04:
+    {
+        int vt = 0;
+        double num = 0, vec4[4] = {0};
+        WCHAR sbuf[256] = {0};
+        return xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ) ? 1 : 0;
+    }
+    case 0x11:
+    {
+        DWORD sub_i = 0, def_sz = 0, c1 = 0, c2 = 0;
+        if (st->end_p - st->p < 2) return 0;
+        st->p += 2;
+        if (!xbf_read_uleb( ctx->nodes, &st->p, st->end_p, &sub_i )) return 0;
+        if (!xbf_get_substream_bounds( ctx, sub_i, NULL, NULL, &def_sz )) return 0;
+        if (!xbf_read_uleb( ctx->nodes, &st->p, st->end_p, &c1 )) return 0;
+        if (!xbf_read_uleb( ctx->nodes, &st->p, st->end_p, &c2 )) return 0;
+        (void)def_sz;
+        if (c1 > (st->end_p - st->p) / 2 || c2 > (st->end_p - st->p) / 2 - c1) return 0;
+        st->p += (c1 + c2) * 2;
+        if (st->obj_sp > 0 && (st->val_stack[st->obj_sp - 1].tid == XBF_TYPE_DATA_TEMPLATE ||
+                               st->val_stack[st->obj_sp - 1].tid == XBF_TYPE_CONTROL_TEMPLATE))
+        {
+            st->val_stack[st->obj_sp - 1].template_xbf_data = ctx->xbf;
+            st->val_stack[st->obj_sp - 1].template_xbf_size = ctx->xbf_sz;
+            st->val_stack[st->obj_sp - 1].template_sub_idx = sub_i;
+            if (st->node_idx_stack[st->obj_sp - 1] < ctx->aot->node_cnt)
+                ctx->aot->nodes[st->node_idx_stack[st->obj_sp - 1]].template_sub_idx = sub_i;
+            TRACE( "XBF Template SetDeferredProperty captured substream %u\n", (unsigned)sub_i );
+        }
+        return 1;
+    }
+    case 0x02:
+        if (st->prop_sp > 0) st->prop_sp--;
+        return 1;
+    case 0x1d:
+    {
+        WORD pid, t_tid;
+        if (st->p + 4 > st->end_p) return 0;
+        pid = *(const WORD *)(ctx->nodes + st->p);
+        t_tid = *(const WORD *)(ctx->nodes + st->p + 2);
+        st->p += 4;
+        if (st->obj_sp > 0 && st->val_stack[st->obj_sp - 1].kind == UWP_RD_STYLE && pid == XBF_PROP_STYLE_TARGET_TYPE)
+        {
+            const WCHAR *tname = (t_tid & 0x8000)
+                ? uwp_btype_to_class_name( t_tid )
+                : ((t_tid < ctx->type_cnt) ? ctx->types[t_tid].full_name : L"");
+            if (tname && tname[0])
+                lstrcpynW( st->val_stack[st->obj_sp - 1].target_type, tname, ARRAY_SIZE(st->val_stack[st->obj_sp - 1].target_type) );
+        }
+        return 1;
+    }
+    case 0x1f:
+    {
+        WORD pid, src_pid;
+        if (st->p + 4 > st->end_p) return 0;
+        pid = *(const WORD *)(ctx->nodes + st->p);
+        src_pid = *(const WORD *)(ctx->nodes + st->p + 2);
+        st->p += 4;
+        if (st->obj_sp > 0)
+        {
+            UINT32 top_nidx = st->node_idx_stack[st->obj_sp - 1];
+            if (top_nidx != (~0u) && top_nidx < ctx->aot->node_cnt &&
+                !(ctx->aot->nodes[top_nidx].flags & XBF_AOT_NODE_LIGHTWEIGHT))
+            {
+                struct xbf_aot_op aop = {0};
+                const WCHAR *src_name = (!(src_pid & 0x8000) && src_pid < ctx->prop_cnt)
+                    ? ctx->props[src_pid].name : L"";
+                aop.kind = XBF_AOT_OP_TEMPLATE_BINDING;
+                aop.node_idx = top_nidx;
+                aop.child_idx = (~0u);
+                aop.pid = pid;
+                aop.tid = src_pid;
+                aop.str_off = xbf_aot_intern_str( ctx->aot, src_name );
+                xbf_aot_emit_op( ctx->aot, &aop );
+            }
+        }
+        return 1;
+    }
+    case 0x22:
+    {
+        int vt = 0;
+        double num = 0;
+        WCHAR sbuf[128] = {0};
+        if (!xbf_read_value( ctx, ctx->nodes, &st->p, st->end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) return 0;
+        xbf_sub_clear_last_popped( st );
+        st->last_popped.kind = UWP_RD_ALIAS;
+        st->last_popped.opacity = 1.0;
+        lstrcpynW( st->last_popped.str_val, sbuf, ARRAY_SIZE(st->last_popped.str_val) );
+        st->last_popped_off = cur_rel_off;
+        st->has_last_popped = TRUE;
+        return 1;
+    }
+    default:
+        return -1;
+    }
+}
+
+static BOOL xbf_compile_defer_substream( struct xbf_sub_state *st, DWORD cur_rel_off )
+{
+    struct xbf_ctx *ctx = st->ctx;
+    DWORD def_sub = 0, def_sub_sz = 0;
+    BYTE def_kind;
+
+    if (!xbf_read_uleb( ctx->nodes, &st->p, st->end_p, &def_sub ) || st->end_p - st->p < 3) return FALSE;
+    if (!xbf_get_substream_bounds( ctx, def_sub, NULL, NULL, &def_sub_sz )) return FALSE;
+    def_kind = ctx->nodes[st->p + 2];
+    st->p += 3;
+
+    if (def_kind == 0x09)
+    {
+        WORD nsid;
+        const WCHAR *dname;
+        UINT32 ppanel_idx;
+        if (st->end_p - st->p < 4) return FALSE;
+        nsid = *(const WORD *)(ctx->nodes + st->p);
+        dname = (nsid < ctx->str_cnt && ctx->strs[nsid]) ? ctx->strs[nsid] : L"";
+        ppanel_idx = (st->obj_sp >= 2 && st->node_idx_stack[st->obj_sp - 2] != (~0u))
+            ? st->node_idx_stack[st->obj_sp - 2] : 0u;
+        st->p += 4;
+        xbf_aot_add_defer( ctx->aot, dname, def_sub, ppanel_idx );
+        return TRUE;
+    }
+    if (def_kind == 0x05)
+    {
+        if (!xbf_read_vsm_defer_header( ctx->nodes, &st->p, st->end_p, def_sub_sz, &st->prop_sp ))
+            return FALSE;
+        if (!ctx->rd_only)
+        {
+            BOOL prev_vsm = ctx->vsm_collect;
+            ctx->vsm_collect = (st->sub_idx == 0);
+            xbf_compile_substream( ctx, (int)def_sub, ctx->root_el != NULL, NULL, st->active_rd_node_idx, st->vsm_holder );
+            ctx->vsm_collect = prev_vsm;
+        }
+        else if (ctx->sub_done && def_sub < ctx->sub_cnt)
+            ctx->sub_done[def_sub] = TRUE;
+        return TRUE;
+    }
+    if (def_kind == 0x08)
+    {
+        struct xbf_stack_val *style_sv = (st->obj_sp > 0) ? &st->val_stack[st->obj_sp - 1] : NULL;
+        if (ctx->sub_done && def_sub < ctx->sub_cnt)
+            ctx->sub_done[def_sub] = TRUE;
+        return xbf_read_style_defer_table( ctx, &st->p, st->end_p, def_sub, def_sub_sz, style_sv, &st->prop_sp );
+    }
+    if (def_kind == 0x0a)
+    {
+        struct xbf_rd_table tbl = {0};
+        UINT32 sub_rd_node_idx = (st->obj_sp > 0 && st->node_idx_stack[st->obj_sp - 1] != (~0u))
+            ? st->node_idx_stack[st->obj_sp - 1] : st->active_rd_node_idx;
+        BOOL prev_rd_only;
+        if (!xbf_read_rd_defer_header( ctx->nodes, &st->p, st->end_p, def_sub_sz, &tbl, &st->prop_sp ))
+        {
+            free( tbl.items );
+            return FALSE;
+        }
+        prev_rd_only = ctx->rd_only;
+        ctx->rd_only = TRUE;
+        xbf_compile_substream( ctx, (int)def_sub, FALSE, &tbl, sub_rd_node_idx, st->vsm_holder );
+        ctx->rd_only = prev_rd_only;
+        free( tbl.items );
+        return TRUE;
+    }
+
+    if (st->obj_sp > 0 && st->val_stack[st->obj_sp - 1].tid == XBF_TYPE_DATA_TEMPLATE)
+    {
+        st->val_stack[st->obj_sp - 1].template_xbf_data = ctx->xbf;
+        st->val_stack[st->obj_sp - 1].template_xbf_size = ctx->xbf_sz;
+        st->val_stack[st->obj_sp - 1].template_sub_idx = def_sub;
+        if (st->node_idx_stack[st->obj_sp - 1] < ctx->aot->node_cnt)
+            ctx->aot->nodes[st->node_idx_stack[st->obj_sp - 1]].template_sub_idx = def_sub;
+        TRACE( "XBF DataTemplate captured deferred substream %u (kind=%#x)\n", (unsigned)def_sub, def_kind );
+    }
+    if (xbf_sub_seek_next_rd_entry( st, cur_rel_off )) return TRUE;
+    TRACE( "XBF unknown DeferSubstream kind=%#x at %lu/%lu\n", def_kind, (unsigned long)st->p, (unsigned long)st->end_p );
+    return FALSE;
+}
+
+static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_initial_root,
+                                   const struct xbf_rd_table *rd_tbl, UINT32 active_rd_node_idx,
+                                   struct xbf_vsm_holder *vsm_holder )
+{
+    struct xbf_sub_state st;
+
+    memset( &st, 0, sizeof(st) );
+    memset( st.node_idx_stack, 0xff, sizeof(st.node_idx_stack) );
+    st.last_popped_node_idx = (~0u);
+    st.ctx = ctx;
+    st.sub_idx = sub_idx;
+    st.rd_tbl = rd_tbl;
+    st.active_rd_node_idx = active_rd_node_idx;
+    st.vsm_holder = vsm_holder;
 
     if (!ctx->aot || ctx->aot->aborted) return;
-    if (sub_idx < 0 || !xbf_get_substream_bounds( ctx, (DWORD)sub_idx, &sub_start, &end_p, &sub_sz ))
+    if (sub_idx < 0 || !xbf_get_substream_bounds( ctx, (DWORD)sub_idx, &st.sub_start, &st.end_p, &st.sub_sz ))
         return;
     if (ctx->sub_done)
     {
@@ -123,912 +990,71 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
         ctx->sub_done[sub_idx] = TRUE;
     }
 
-    p = sub_start;
-
+    st.p = st.sub_start;
     if (has_initial_root)
     {
-        node_idx_stack[0] = 0u;
-        obj_sp = 1;
-        base_sp = 1;
+        st.node_idx_stack[0] = 0u;
+        st.obj_sp = 1;
+        st.base_sp = 1;
     }
 
-    while (p < end_p)
+    while (st.p < st.end_p)
     {
-        DWORD cur_rel_off = p - sub_start;
-        BYTE op = ctx->nodes[p++];
-        if (op == 0x12) /* LineInfo (6 bytes) */
-        {
-            if (end_p - p < 6) break;
-            p += 6;
-        }
-        else if (op == 0x03) /* Xmlns prefix */
-        {
-            DWORD plen;
-            if (end_p - p < 6) break;
-            plen = *(const DWORD *)(ctx->nodes + p + 2);
-            if (plen > (end_p - (p + 6)) / 2) break;
-            p += 6 + plen * 2;
-        }
-        else if (op == 0x17 || op == 0x14 || op == 0x15 || op == 0x16)
-        {
-            WORD tid;
-            const WCHAR *cls_name = L"Windows.UI.Xaml.Controls.ContentControl";
-            struct xbf_stack_val sv = {0};
-            int vt_init = 0;
-            double num_init = 0, vec4_init[4] = {0};
-            WCHAR sbuf_init[256] = {0};
-            BOOL is_rd_type = FALSE;
+        DWORD cur_rel_off = st.p - st.sub_start;
+        BYTE op = ctx->nodes[st.p++];
+        int meta_rc;
 
-            sv.opacity = 1.0;
-            if (p + 2 > end_p) break;
-            tid = *(const WORD *)(ctx->nodes + p);
-            p += 2;
-            if (op == 0x15 || op == 0x16)
-            {
-                if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt_init, &num_init, sbuf_init, ARRAY_SIZE(sbuf_init), vec4_init ))
-                    break;
-            }
-            TRACE( "XBF compile push op=%#x tid=%#x cls=%s at %lu/%lu (sub %d)\n", op, tid,
-                   (tid < ctx->type_cnt) ? debugstr_w(ctx->types[tid].full_name) : "(btype)",
-                   (unsigned long)cur_rel_off, (unsigned long)end_p, sub_idx );
-
-            if (tid == XBF_TYPE_RESOURCE_DICTIONARY) is_rd_type = TRUE;
-            else if (!(tid & 0x8000) && tid < ctx->type_cnt &&
-                     (wcsstr( ctx->types[tid].short_name, L"ResourceDictionary" ) ||
-                      !wcscmp( ctx->types[tid].short_name, L"XamlControlsResources" ) ||
-                      (prop_sp > 0 && prop_stack[prop_sp - 1] == XBF_PROP_MERGED_DICTIONARIES)))
-                is_rd_type = TRUE;
-
-            if (tid == XBF_TYPE_COLOR)
-            {
-                sv.kind = UWP_RD_COLOR;
-                if (vt_init == 0x08) { sv.argb = (UINT32)num_init; sv.has_argb = TRUE; }
-                else if (sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb )) sv.has_argb = TRUE;
-            }
-            else if (tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 ||
-                     ((op == 0x15 || op == 0x16) && (vt_init == 0x03 || vt_init == 0x04 || vt_init == 0x0b)))
-            {
-                sv.kind = UWP_RD_DOUBLE;
-                sv.dval = num_init;
-            }
-            else if (tid == XBF_TYPE_GRID_LENGTH)
-            {
-                sv.kind = UWP_RD_DOUBLE;
-                sv.dval = (vt_init == 0x07) ? vec4_init[1] : num_init;
-            }
-            else if (tid == XBF_TYPE_THICKNESS)
-            {
-                sv.kind = UWP_RD_THICKNESS;
-                memcpy( sv.vec4, vec4_init, sizeof(sv.vec4) );
-            }
-            else if (tid == XBF_TYPE_CORNER_RADIUS)
-            {
-                sv.kind = UWP_RD_THICKNESS;
-                if (vt_init == 0x06)
-                {
-                    memcpy( sv.vec4, vec4_init, sizeof(sv.vec4) );
-                }
-                else if (vt_init == 0x03 || vt_init == 0x04)
-                {
-                    sv.vec4[0] = sv.vec4[1] = sv.vec4[2] = sv.vec4[3] = num_init;
-                }
-                else if (sbuf_init[0])
-                {
-                    WCHAR *ep = sbuf_init;
-                    double v0 = wcstod( ep, &ep );
-                    sv.vec4[0] = sv.vec4[1] = sv.vec4[2] = sv.vec4[3] = v0;
-                    if (ep && (*ep == L',' || *ep == L' '))
-                    {
-                        int ci;
-                        for (ci = 1; ci < 4 && *ep; ci++)
-                        {
-                            while (*ep == L',' || *ep == L' ') ep++;
-                            if (!*ep) break;
-                            sv.vec4[ci] = wcstod( ep, &ep );
-                        }
-                    }
-                }
-            }
-            else if (tid == XBF_TYPE_FONT_FAMILY)
-            {
-                sv.kind = UWP_RD_FONT_FAMILY;
-                if (sbuf_init[0])
-                {
-                    WCHAR face[64] = {0};
-                    lstrcpynW( sv.str_val, sbuf_init, ARRAY_SIZE(sv.str_val) );
-                    uwp_resolve_font_family( sbuf_init, face, ARRAY_SIZE(face) );
-                }
-            }
-            else if (tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_BRUSH_B ||
-                     tid == XBF_TYPE_IMAGE_BRUSH || tid == XBF_TYPE_LINEAR_GRADIENT_BRUSH ||
-                     (!(tid & 0x8000) && tid < ctx->type_cnt && wcsstr( ctx->types[tid].short_name, L"Brush" )))
-            {
-                sv.kind = UWP_RD_BRUSH;
-                if (op == 0x16 && sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb ))
-                    sv.has_argb = TRUE;
-            }
-            else if (tid == XBF_TYPE_DATA_TEMPLATE || tid == XBF_TYPE_CONTROL_TEMPLATE)
-            {
-                sv.kind = UWP_RD_DATA_TEMPLATE;
-            }
-            else if (tid == XBF_TYPE_STYLE)
-            {
-                sv.kind = UWP_RD_STYLE;
-            }
-            else if ((op == 0x15 || op == 0x16) && sbuf_init[0])
-            {
-                sv.kind = UWP_RD_STRING;
-                lstrcpynW( sv.str_val, sbuf_init, ARRAY_SIZE(sv.str_val) );
-            }
-            sv.tid = tid;
-
-            if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && vsm_holder)
-            {
-                if (tid == XBF_TYPE_VISUAL_STATE_GROUP)
-                    xbf_vsm_holder_add_group( vsm_holder, NULL );
-                else if (tid == XBF_TYPE_VISUAL_STATE)
-                {
-                    struct uwp_vsm_group *grp = (vsm_holder->vsm_group_cnt > 0)
-                        ? &vsm_holder->vsm_groups[vsm_holder->vsm_group_cnt - 1]
-                        : xbf_vsm_holder_add_group( vsm_holder, L"DefaultGroup" );
-                    uwp_vsm_add_state( grp, NULL );
-                }
-            }
-
-            if (obj_sp < (int)ARRAY_SIZE(val_stack))
-            {
-                UINT32 cur_node_idx = (~0u);
-                UINT8 nflags = 0;
-                const WCHAR *short_n = L"";
-                BOOL reuse_active_rd = (rd_tbl != NULL && obj_sp == 0 && is_rd_type && active_rd_node_idx != (~0u));
-                if (is_rd_type) nflags |= XBF_AOT_NODE_IS_RD;
-                if (reuse_active_rd)
-                {
-                    cur_node_idx = active_rd_node_idx;
-                    if (cur_node_idx < ctx->aot->node_cnt)
-                        ctx->aot->nodes[cur_node_idx].flags |= XBF_AOT_NODE_IS_RD;
-                }
-                else if (op == 0x17 && ctx->root_el)
-                {
-                    nflags |= XBF_AOT_NODE_ROOT_REUSE;
-                    cur_node_idx = 0;
-                    if (ctx->aot->node_cnt > 0)
-                        ctx->aot->nodes[0].flags |= nflags;
-                }
-                else if ((ctx->rd_only || rd_tbl) && !is_rd_type &&
-                         ((!ctx->connector &&
-                           !(tid < ctx->type_cnt && (wcsstr( ctx->types[tid].full_name, L"Breakpoint" ) ||
-                                                     wcsstr( ctx->types[tid].full_name, L"TemplateSelector" ) ||
-                                                     wcsstr( ctx->types[tid].full_name, L"Converter" ) ||
-                                                     wcsstr( ctx->types[tid].full_name, L"Layout" )))) ||
-                          tid == XBF_TYPE_STYLE || tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
-                          tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 || tid == XBF_TYPE_STRING ||
-                          tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_CORNER_RADIUS || tid == XBF_TYPE_FONT_FAMILY ||
-                          tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))
-                {
-                    nflags |= XBF_AOT_NODE_LIGHTWEIGHT;
-                    cur_node_idx = xbf_aot_add_node( ctx->aot, L"", L"", tid, nflags, FALSE, 0 );
-                }
-                else if (tid & 0x8000)
-                {
-                    cls_name = uwp_btype_to_class_name( tid );
-                    nflags |= XBF_AOT_NODE_BUILTIN;
-                    if (tid == XBF_TYPE_DEFERRED_ELEMENT) nflags |= XBF_AOT_NODE_DEFERRED;
-                    cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
-                                                     (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
-                }
-                else if (tid < ctx->type_cnt)
-                {
-                    cls_name = ctx->types[tid].full_name;
-                    nflags |= XBF_AOT_NODE_APP_TYPE;
-                    short_n = ctx->types[tid].short_name;
-                    if (!wcsncmp( ctx->types[tid].xmlns, L"using:", 6 )) nflags |= XBF_AOT_NODE_USING_NS;
-                    if (is_rd_type || wcsstr( cls_name, L"ResourceString" ) || wcsstr( cls_name, L"ResourceVirtualKey" ))
-                        nflags |= XBF_AOT_NODE_NO_PROVIDER;
-                    cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, short_n, tid, nflags,
-                                                     (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
-                }
-                else
-                {
-                    cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
-                                                     (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
-                }
-                if (cur_node_idx != (~0u) && !reuse_active_rd)
-                {
-                    struct xbf_aot_op aop = {0};
-                    aop.kind = XBF_AOT_OP_CREATE_NODE;
-                    aop.node_idx = cur_node_idx;
-                    aop.child_idx = (~0u);
-                    xbf_aot_emit_op( ctx->aot, &aop );
-                }
-                val_stack[obj_sp] = sv;
-                start_off_stack[obj_sp] = cur_rel_off;
-                node_idx_stack[obj_sp] = cur_node_idx;
-                is_rd_stack[obj_sp] = is_rd_type;
-                obj_sp++;
-            }
-            else
-            {
-                free( sv.setters );
-            }
-        }
-        else if (op == 0x0b) /* x:Class */
+        if (op == 0x17 || op == 0x14 || op == 0x15 || op == 0x16)
         {
-            DWORD slen;
-            if (end_p - p < 4) break;
-            slen = *(const DWORD *)(ctx->nodes + p);
-            p += 4;
-            if (slen > (end_p - p) / 2) break;
-            if (obj_sp > 0 && node_idx_stack[obj_sp - 1] != (~0u) && slen > 0)
-            {
-                WCHAR xcls[128];
-                DWORD cp = min( slen, (DWORD)(ARRAY_SIZE(xcls) - 1) );
-                struct xbf_aot_op aop = {0};
-                memcpy( xcls, ctx->nodes + p, cp * sizeof(WCHAR) );
-                xcls[cp] = 0;
-                aop.kind = XBF_AOT_OP_SET_XCLASS;
-                aop.node_idx = node_idx_stack[obj_sp - 1];
-                aop.child_idx = (~0u);
-                aop.str_off = xbf_aot_intern_str( ctx->aot, xcls );
-                xbf_aot_emit_op( ctx->aot, &aop );
-            }
-            p += slen * 2;
+            if (!xbf_compile_push_object( &st, op, cur_rel_off )) break;
         }
-        else if (op == 0x0c) /* ConnectionId */
+        else if ((op >= 0x1a && op <= 0x1c) || op == 0x1e || op == 0x24)
         {
-            int vt = 0;
-            double num = 0;
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, NULL, 0, NULL )) break;
-            if (obj_sp > 0 && node_idx_stack[obj_sp - 1] != (~0u))
-            {
-                struct xbf_aot_op aop = {0};
-                aop.kind = XBF_AOT_OP_CONNECT;
-                aop.node_idx = node_idx_stack[obj_sp - 1];
-                aop.child_idx = (~0u);
-                aop.cid = (int)num;
-                xbf_aot_emit_op( ctx->aot, &aop );
-            }
+            if (!xbf_compile_set_prop( &st, op )) break;
         }
-        else if (op == 0x0d) /* x:Name */
+        else if (op == 0x21)
         {
-            int vt = 0;
-            double num = 0;
-            WCHAR sbuf[128] = {0};
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
-            if (obj_sp > 0 && sbuf[0])
-            {
-                WORD top_tid = val_stack[obj_sp - 1].tid;
-                UINT32 top_nidx = node_idx_stack[obj_sp - 1];
-                if (top_nidx != (~0u) && top_nidx < ctx->aot->node_cnt &&
-                    !(ctx->aot->nodes[top_nidx].flags & XBF_AOT_NODE_LIGHTWEIGHT))
-                {
-                    struct xbf_aot_op aop = {0};
-                    aop.kind = XBF_AOT_OP_SET_XNAME;
-                    aop.node_idx = top_nidx;
-                    aop.child_idx = (~0u);
-                    aop.str_off = xbf_aot_intern_str( ctx->aot, sbuf );
-                    xbf_aot_emit_op( ctx->aot, &aop );
-                }
-                if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && vsm_holder && vsm_holder->vsm_group_cnt > 0)
-                {
-                    struct uwp_vsm_group *grp = &vsm_holder->vsm_groups[vsm_holder->vsm_group_cnt - 1];
-                    if (top_tid == XBF_TYPE_VISUAL_STATE_GROUP)
-                        lstrcpynW( grp->name, sbuf, ARRAY_SIZE(grp->name) );
-                    else if (top_tid == XBF_TYPE_VISUAL_STATE && grp->state_cnt > 0)
-                        lstrcpynW( grp->states[grp->state_cnt - 1].name, sbuf, ARRAY_SIZE(grp->states[grp->state_cnt - 1].name) );
-                }
-            }
+            xbf_compile_pop_object( &st );
         }
-        else if (op == 0x0e) /* x:Uid */
+        else if (op == 0x0a || op == 0x08 || op == 0x07 || op == 0x20 || op == 0x09)
         {
-            int vt = 0;
-            double num = 0;
-            WCHAR sbuf[128] = {0};
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
-            if (sbuf[0] && (obj_sp == 0 || node_idx_stack[obj_sp - 1] != (~0u)))
-            {
-                struct xbf_aot_op aop = {0};
-                aop.kind = XBF_AOT_OP_SET_PROP;
-                aop.vt = (UINT8)vt;
-                aop.pid = XBF_PROP_AUTOMATION_ID;
-                aop.node_idx = (obj_sp > 0) ? node_idx_stack[obj_sp - 1] : 0u;
-                aop.child_idx = (~0u);
-                aop.str_off = xbf_aot_intern_str( ctx->aot, sbuf );
-                xbf_aot_emit_op( ctx->aot, &aop );
-            }
+            if (!xbf_compile_attach_ops( &st, op )) break;
         }
-        else if (op == 0x13) /* PushProperty */
+        else if (op == 0x0f)
         {
-            WORD pid;
-            if (p + 2 > end_p) break;
-            pid = *(const WORD *)(ctx->nodes + p);
-            p += 2;
-            if (prop_sp < (int)ARRAY_SIZE(prop_stack))
-                prop_stack[prop_sp++] = pid;
+            if (!xbf_compile_defer_substream( &st, cur_rel_off )) break;
         }
-        else if (op == 0x01 || op == 0x27) /* EndOfAttributes / EndConditionalScope */
+        else if ((meta_rc = xbf_compile_meta_ops( &st, op, cur_rel_off )) >= 0)
         {
-        }
-        else if (op == 0x26) /* BeginConditionalScope <pred_tid:u16> <arg_sid:u16> */
-        {
-            if (p + 4 > end_p) break;
-            p += 4;
-        }
-        else if (op == 0x04) /* PushConstant <xbf_value> */
-        {
-            int vt = 0;
-            double num = 0, vec4[4] = {0};
-            WCHAR sbuf[256] = {0};
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 )) break;
-        }
-        else if (op == 0x11) /* SetDeferredProperty <pid:u16> <sub_idx:uleb> <c1:uleb> <c2:uleb> <(c1+c2)*u16> */
-        {
-            DWORD sub_i = 0, def_sz = 0, c1 = 0, c2 = 0;
-            if (end_p - p < 2) break;
-            p += 2;
-            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &sub_i )) break;
-            if (!xbf_get_substream_bounds( ctx, sub_i, NULL, NULL, &def_sz )) break;
-            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c1 )) break;
-            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c2 )) break;
-            (void)def_sz;
-            if (c1 > (end_p - p) / 2 || c2 > (end_p - p) / 2 - c1) break;
-            p += (c1 + c2) * 2;
-            if (obj_sp > 0 && (val_stack[obj_sp - 1].tid == XBF_TYPE_DATA_TEMPLATE ||
-                               val_stack[obj_sp - 1].tid == XBF_TYPE_CONTROL_TEMPLATE))
-            {
-                val_stack[obj_sp - 1].template_xbf_data = ctx->xbf;
-                val_stack[obj_sp - 1].template_xbf_size = ctx->xbf_sz;
-                val_stack[obj_sp - 1].template_sub_idx = sub_i;
-                if (node_idx_stack[obj_sp - 1] < ctx->aot->node_cnt)
-                    ctx->aot->nodes[node_idx_stack[obj_sp - 1]].template_sub_idx = sub_i;
-                TRACE( "XBF Template SetDeferredProperty captured substream %u\n", (unsigned)sub_i );
-            }
-        }
-        else if (op == 0x02) /* PopProperty */
-        {
-            if (prop_sp > 0) prop_sp--;
-        }
-        else if (op == 0x1d) /* SetValueWithType: <pid:u16> <tid:u16> */
-        {
-            WORD pid, t_tid;
-            if (p + 4 > end_p) break;
-            pid = *(const WORD *)(ctx->nodes + p);
-            t_tid = *(const WORD *)(ctx->nodes + p + 2);
-            p += 4;
-            if (obj_sp > 0 && val_stack[obj_sp - 1].kind == UWP_RD_STYLE && pid == XBF_PROP_STYLE_TARGET_TYPE)
-            {
-                const WCHAR *tname = (t_tid & 0x8000)
-                    ? uwp_btype_to_class_name( t_tid )
-                    : ((t_tid < ctx->type_cnt) ? ctx->types[t_tid].full_name : L"");
-                if (tname && tname[0])
-                    lstrcpynW( val_stack[obj_sp - 1].target_type, tname, ARRAY_SIZE(val_stack[obj_sp - 1].target_type) );
-            }
-        }
-        else if (op == 0x1f) /* SetValueFromTemplateBinding: <pid:u16> <src_pid:u16> (no vt byte) */
-        {
-            WORD pid, src_pid;
-            if (p + 4 > end_p) break;
-            pid = *(const WORD *)(ctx->nodes + p);
-            src_pid = *(const WORD *)(ctx->nodes + p + 2);
-            p += 4;
-            if (obj_sp > 0)
-            {
-                UINT32 top_nidx = node_idx_stack[obj_sp - 1];
-                if (top_nidx != (~0u) && top_nidx < ctx->aot->node_cnt &&
-                    !(ctx->aot->nodes[top_nidx].flags & XBF_AOT_NODE_LIGHTWEIGHT))
-                {
-                    struct xbf_aot_op aop = {0};
-                    const WCHAR *src_name = (!(src_pid & 0x8000) && src_pid < ctx->prop_cnt)
-                        ? ctx->props[src_pid].name : L"";
-                    aop.kind = XBF_AOT_OP_TEMPLATE_BINDING;
-                    aop.node_idx = top_nidx;
-                    aop.child_idx = (~0u);
-                    aop.pid = pid;
-                    aop.tid = src_pid;
-                    aop.str_off = xbf_aot_intern_str( ctx->aot, src_name );
-                    xbf_aot_emit_op( ctx->aot, &aop );
-                }
-            }
-        }
-        else if ((op >= 0x1a && op <= 0x1e) || op == 0x24) /* SetValue / SetStaticResource / SetThemeResource */
-        {
-            WORD pid;
-            int vt = 0;
-            double num = 0, vec4[4] = {0};
-            WCHAR sbuf[256] = {0};
-            BOOL is_res_ref = (op == 0x1e || op == 0x24);
-            if (p + 2 > end_p) break;
-            pid = *(const WORD *)(ctx->nodes + p);
-            p += 2;
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 )) break;
-            if (obj_sp > 0)
-            {
-                struct xbf_stack_val *top_sv = &val_stack[obj_sp - 1];
-                UINT32 top_nidx = node_idx_stack[obj_sp - 1];
-
-                /* Update compile-time stack value metadata (brush color/opacity, style BasedOn, etc.) */
-                xbf_apply_property( ctx, NULL, top_sv, pid, vt, num, sbuf, vec4, is_res_ref );
-
-                if (top_nidx != (~0u) && top_nidx < ctx->aot->node_cnt &&
-                    !(ctx->aot->nodes[top_nidx].flags & XBF_AOT_NODE_LIGHTWEIGHT))
-                {
-                    struct xbf_aot_op aop = {0};
-                    aop.kind = XBF_AOT_OP_SET_PROP;
-                    aop.node_idx = top_nidx;
-                    aop.child_idx = (~0u);
-                    aop.pid = pid;
-                    aop.vt = vt;
-                    aop.num = num;
-                    memcpy( aop.vec4, vec4, sizeof(aop.vec4) );
-                    aop.str_off = xbf_aot_intern_str( ctx->aot, sbuf );
-                    aop.is_res_ref = is_res_ref ? 1 : 0;
-                    xbf_aot_emit_op( ctx->aot, &aop );
-                }
-                if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && vsm_holder && vsm_holder->vsm_group_cnt > 0)
-                {
-                    struct uwp_vsm_group *grp = &vsm_holder->vsm_groups[vsm_holder->vsm_group_cnt - 1];
-                    struct uwp_vsm_state *st = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
-                    if (top_sv->tid == XBF_TYPE_ADAPTIVE_TRIGGER && st && (pid == XBF_PROP_MIN_WINDOW_HEIGHT || pid == XBF_PROP_MIN_WINDOW_WIDTH))
-                    {
-                        double trig_val = num;
-                        if ((is_res_ref || vt == 0x05 || vt == 0x09) && sbuf[0])
-                        {
-                            struct uwp_rd_entry *de = NULL;
-                            if (uwp_rd_find_entry( ctx->target_rd, ctx->root_el, sbuf, 0, &de, NULL ) &&
-                                de && de->kind == UWP_RD_DOUBLE)
-                                trig_val = de->dval;
-                            else
-                                trig_val = wcstod( sbuf, NULL );
-                        }
-                        if (pid == XBF_PROP_MIN_WINDOW_HEIGHT) st->min_window_height = trig_val;
-                        else st->min_window_width = trig_val;
-                        st->has_trigger = TRUE;
-                    }
-                    else if ((top_sv->tid == XBF_TYPE_SETTER_A || top_sv->tid == XBF_TYPE_SETTER_B) && st)
-                    {
-                        if (pid == XBF_PROP_SETTER_TARGET && sbuf[0])
-                            vsm_split_setter_target( sbuf, top_sv->vsm_target, ARRAY_SIZE(top_sv->vsm_target),
-                                                     top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
-                        else if (pid == XBF_PROP_SETTER_VALUE)
-                        {
-                            lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
-                            top_sv->vsm_vt = vt;
-                            top_sv->vsm_num = num;
-                            top_sv->vsm_is_res_ref = is_res_ref;
-                            top_sv->vsm_has_val = TRUE;
-                        }
-                    }
-                    else if (top_sv->tid == XBF_TYPE_OBJECT_ANIMATION_USING_KEY_FRAMES && st)
-                    {
-                        if (pid == XBF_PROP_STORYBOARD_TARGET_NAME && sbuf[0])
-                            lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
-                        else if (pid == XBF_PROP_STORYBOARD_TARGET_PROPERTY && sbuf[0])
-                            vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
-                    }
-                    else if (top_sv->tid == XBF_TYPE_DISCRETE_OBJECT_KEY_FRAME && st && pid == XBF_PROP_KEYFRAME_VALUE)
-                    {
-                        lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
-                        top_sv->vsm_vt = vt;
-                        top_sv->vsm_num = num;
-                        top_sv->vsm_is_res_ref = is_res_ref;
-                        top_sv->vsm_has_val = TRUE;
-                    }
-                    else if ((top_sv->tid == XBF_TYPE_DOUBLE_ANIMATION || top_sv->tid == XBF_TYPE_DOUBLE_ANIMATION_B) && st) /* DoubleAnimation */
-                    {
-                        if (pid == XBF_PROP_STORYBOARD_TARGET_NAME && sbuf[0])
-                            lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
-                        else if (pid == XBF_PROP_STORYBOARD_TARGET_PROPERTY && sbuf[0])
-                            vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
-                        else if (pid == XBF_PROP_DOUBLE_ANIMATION_TO) /* DoubleAnimation.To */
-                        {
-                            lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
-                            top_sv->vsm_vt = vt;
-                            top_sv->vsm_num = num;
-                            top_sv->vsm_is_res_ref = is_res_ref;
-                            top_sv->vsm_has_val = TRUE;
-                        }
-                    }
-                }
-            }
-        }
-        else if (op == 0x22) /* AddStaticResourceValue <xbf_value> */
-        {
-            int vt = 0;
-            double num = 0;
-            WCHAR sbuf[128] = {0};
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
-            free( last_popped.setters );
-            memset( &last_popped, 0, sizeof(last_popped) );
-            last_popped.kind = UWP_RD_ALIAS;
-            last_popped.opacity = 1.0;
-            lstrcpynW( last_popped.str_val, sbuf, ARRAY_SIZE(last_popped.str_val) );
-            last_popped_off = cur_rel_off;
-            last_popped_node_idx = (~0u);
-            last_popped_is_rd = FALSE;
-            has_last_popped = TRUE;
-        }
-        else if (op == 0x21) /* EndOfObject / PopObject */
-        {
-            if (obj_sp > base_sp)
-            {
-                free( last_popped.setters );
-                obj_sp--;
-                last_popped = val_stack[obj_sp];
-                last_popped_off = start_off_stack[obj_sp];
-                last_popped_node_idx = node_idx_stack[obj_sp];
-                last_popped_is_rd = is_rd_stack[obj_sp];
-                memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) );
-                has_last_popped = TRUE;
-
-                if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && vsm_holder && vsm_holder->vsm_group_cnt > 0)
-                {
-                    struct uwp_vsm_group *grp = &vsm_holder->vsm_groups[vsm_holder->vsm_group_cnt - 1];
-                    struct uwp_vsm_state *st = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
-                    if ((last_popped.tid == XBF_TYPE_SETTER_A || last_popped.tid == XBF_TYPE_SETTER_B) && st &&
-                        last_popped.vsm_target[0] && last_popped.vsm_prop[0] && last_popped.vsm_has_val)
-                    {
-                        uwp_vsm_state_add_setter( st, last_popped.vsm_target, last_popped.vsm_prop,
-                                                  last_popped.vsm_val_str, last_popped.vsm_vt,
-                                                  last_popped.vsm_num, last_popped.vsm_is_res_ref );
-                    }
-                    else if (last_popped.tid == XBF_TYPE_DISCRETE_OBJECT_KEY_FRAME && st && last_popped.vsm_has_val &&
-                             obj_sp > 0 && val_stack[obj_sp - 1].tid == XBF_TYPE_OBJECT_ANIMATION_USING_KEY_FRAMES &&
-                             val_stack[obj_sp - 1].vsm_target[0] && val_stack[obj_sp - 1].vsm_prop[0])
-                    {
-                        uwp_vsm_state_add_setter( st, val_stack[obj_sp - 1].vsm_target,
-                                                  val_stack[obj_sp - 1].vsm_prop,
-                                                  last_popped.vsm_val_str, last_popped.vsm_vt,
-                                                  last_popped.vsm_num, last_popped.vsm_is_res_ref );
-                    }
-                    else if ((last_popped.tid == XBF_TYPE_DOUBLE_ANIMATION || last_popped.tid == XBF_TYPE_DOUBLE_ANIMATION_B) && st &&
-                             last_popped.vsm_target[0] && last_popped.vsm_prop[0] && last_popped.vsm_has_val)
-                    {
-                        uwp_vsm_state_add_setter( st, last_popped.vsm_target, last_popped.vsm_prop,
-                                                  last_popped.vsm_val_str, last_popped.vsm_vt,
-                                                  last_popped.vsm_num, last_popped.vsm_is_res_ref );
-                    }
-                    else if (last_popped.tid == XBF_TYPE_VISUAL_STATE && st && !st->name[0])
-                    {
-                        WCHAR synth[64];
-                        swprintf( synth, ARRAY_SIZE(synth), L"__vsm_g%d_s%d",
-                                  vsm_holder->vsm_group_cnt - 1, grp->state_cnt - 1 );
-                        lstrcpynW( st->name, synth, ARRAY_SIZE(st->name) );
-                        if (last_popped_node_idx != (~0u))
-                        {
-                            struct xbf_aot_op aop = {0};
-                            aop.kind = XBF_AOT_OP_SET_XNAME;
-                            aop.node_idx = last_popped_node_idx;
-                            aop.child_idx = (~0u);
-                            aop.str_off = xbf_aot_intern_str( ctx->aot, synth );
-                            xbf_aot_emit_op( ctx->aot, &aop );
-                        }
-                    }
-                }
-
-                /* Indexed ResourceDictionary entry without trailing 0x0a AddToDictionary (e.g. Dark.xbf, TileDataTemplates.xbf) */
-                if (rd_tbl &&
-                    (obj_sp == base_sp || (obj_sp == base_sp + 1 && is_rd_stack[obj_sp - 1])))
-                {
-                    BYTE next_op = (p < end_p) ? ctx->nodes[p] : 0xff;
-                    if (next_op != 0x0a && next_op != 0x07 && next_op != 0x08 && next_op != 0x09 && next_op != 0x20)
-                    {
-                        UINT32 rd_parent_idx = (obj_sp > 0 && is_rd_stack[obj_sp - 1])
-                            ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
-                        int k;
-                        BOOL matched_key = FALSE;
-                        for (k = 0; k < rd_tbl->count; k++)
-                        {
-                            if (rd_tbl->items[k].sub_off == last_popped_off &&
-                                rd_tbl->items[k].key_sid < ctx->str_cnt && ctx->strs[rd_tbl->items[k].key_sid])
-                            {
-                                xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, last_popped_node_idx,
-                                                           ctx->strs[rd_tbl->items[k].key_sid], &last_popped );
-                                matched_key = TRUE;
-                            }
-                        }
-                        if (matched_key)
-                        {
-                            free( last_popped.setters );
-                            memset( &last_popped, 0, sizeof(last_popped) );
-                            last_popped_node_idx = (~0u);
-                            last_popped_is_rd = FALSE;
-                            has_last_popped = FALSE;
-                        }
-                    }
-                }
-
-                /* Implicit Style (TargetType without explicit x:Key) inside a ResourceDictionary */
-                if (has_last_popped && last_popped.kind == UWP_RD_STYLE && last_popped.target_type[0] &&
-                    (ctx->rd_only || (obj_sp > 0 && is_rd_stack[obj_sp - 1])))
-                {
-                    BYTE next_op = (p < end_p) ? ctx->nodes[p] : 0xff;
-                    if (next_op != 0x0a && next_op != 0x07 && next_op != 0x08 && next_op != 0x09 && next_op != 0x20)
-                    {
-                        UINT32 rd_parent_idx = (obj_sp > 0 && is_rd_stack[obj_sp - 1])
-                            ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
-                        xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, last_popped_node_idx,
-                                                   last_popped.target_type, &last_popped );
-                    }
-                }
-            }
-            else
-            {
-                free( last_popped.setters );
-                memset( &last_popped, 0, sizeof(last_popped) );
-                last_popped_node_idx = (~0u);
-                last_popped_is_rd = FALSE;
-                has_last_popped = FALSE;
-            }
-        }
-        else if (op == 0x0a) /* AddToDictionary <xbf_value> */
-        {
-            int vt = 0;
-            double num = 0;
-            WCHAR kbuf[128] = {0};
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, kbuf, ARRAY_SIZE(kbuf), NULL )) break;
-            if (has_last_popped && kbuf[0])
-            {
-                WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : 0;
-                UINT32 parent_idx = (obj_sp > 0 && node_idx_stack[obj_sp - 1] != (~0u))
-                    ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
-                if (pid == XBF_PROP_THEME_DICTIONARIES && last_popped_is_rd && last_popped_node_idx != (~0u))
-                {
-                    struct xbf_aot_op aop = {0};
-                    aop.kind = XBF_AOT_OP_RD_LINK_THEME;
-                    aop.node_idx = parent_idx;
-                    aop.child_idx = last_popped_node_idx;
-                    aop.str_off = xbf_aot_intern_str( ctx->aot, kbuf );
-                    xbf_aot_emit_op( ctx->aot, &aop );
-                }
-                else
-                {
-                    xbf_compile_emit_rd_store( ctx->aot, parent_idx, last_popped_node_idx, kbuf, &last_popped );
-                }
-            }
-            free( last_popped.setters );
-            memset( &last_popped, 0, sizeof(last_popped) );
-            last_popped_node_idx = (~0u);
-            last_popped_is_rd = FALSE;
-            has_last_popped = FALSE;
-        }
-        else if (op == 0x08) /* AddToCollection */
-        {
-            if (has_last_popped && obj_sp > 0)
-            {
-                WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : XBF_PROP_PANEL_CHILDREN;
-                if (node_idx_stack[obj_sp - 1] != (~0u) && last_popped_node_idx != (~0u))
-                {
-                    struct xbf_aot_op aop = {0};
-                    aop.kind = XBF_AOT_OP_ADD_CHILD;
-                    aop.node_idx = node_idx_stack[obj_sp - 1];
-                    aop.child_idx = last_popped_node_idx;
-                    aop.pid = pid;
-                    xbf_aot_emit_op( ctx->aot, &aop );
-                }
-            }
-            free( last_popped.setters );
-            memset( &last_popped, 0, sizeof(last_popped) );
-            last_popped_node_idx = (~0u);
-            last_popped_is_rd = FALSE;
-            has_last_popped = FALSE;
-        }
-        else if (op == 0x07) /* SetObjectProperty <pid:u16> */
-        {
-            WORD pid = 0;
-            if (end_p - p < 2) break;
-            pid = *(const WORD *)(ctx->nodes + p);
-            p += 2;
-            if (has_last_popped)
-            {
-                if (obj_sp == 0 || node_idx_stack[obj_sp - 1] != (~0u))
-                {
-                    struct xbf_aot_op aop = {0};
-                    aop.kind = XBF_AOT_OP_SET_OBJ_PROP;
-                    aop.sv_kind = (UINT8)last_popped.kind;
-                    aop.has_argb = last_popped.has_argb ? 1 : 0;
-                    aop.pid = pid;
-                    aop.node_idx = (obj_sp > 0) ? node_idx_stack[obj_sp - 1] : (~0u);
-                    aop.child_idx = last_popped_node_idx;
-                    aop.argb = last_popped.argb;
-                    aop.num = last_popped.opacity;
-                    if (last_popped.kind == UWP_RD_STYLE)
-                    {
-                        aop.str_off = xbf_aot_intern_str( ctx->aot, last_popped.based_on );
-                        if (last_popped.setter_cnt > 0 && last_popped.setters)
-                        {
-                            aop.setter_start = xbf_aot_append_setters( ctx->aot, last_popped.setters, last_popped.setter_cnt );
-                            aop.setter_cnt = (UINT32)last_popped.setter_cnt;
-                        }
-                    }
-                    else
-                    {
-                        aop.str_off = xbf_aot_intern_str( ctx->aot, last_popped.str_val );
-                    }
-                    xbf_aot_emit_op( ctx->aot, &aop );
-                }
-            }
-            free( last_popped.setters );
-            memset( &last_popped, 0, sizeof(last_popped) );
-            last_popped_node_idx = (~0u);
-            last_popped_is_rd = FALSE;
-            has_last_popped = FALSE;
-        }
-        else if (op == 0x20) /* ProvideValue and SetProperty (u16 pid) */
-        {
-            WORD pid = 0;
-            if (end_p - p < 2) break;
-            pid = *(const WORD *)(ctx->nodes + p);
-            p += 2;
-            if (has_last_popped && obj_sp > 0 && node_idx_stack[obj_sp - 1] != (~0u) && last_popped_node_idx != (~0u))
-            {
-                struct xbf_aot_op aop = {0};
-                aop.kind = XBF_AOT_OP_PROVIDE_VALUE;
-                aop.pid = pid;
-                aop.node_idx = node_idx_stack[obj_sp - 1];
-                aop.child_idx = last_popped_node_idx;
-                xbf_aot_emit_op( ctx->aot, &aop );
-            }
-            free( last_popped.setters );
-            memset( &last_popped, 0, sizeof(last_popped) );
-            last_popped_node_idx = (~0u);
-            last_popped_is_rd = FALSE;
-            has_last_popped = FALSE;
-        }
-        else if (op == 0x09)
-        {
-            free( last_popped.setters );
-            memset( &last_popped, 0, sizeof(last_popped) );
-            last_popped_node_idx = (~0u);
-            last_popped_is_rd = FALSE;
-            has_last_popped = FALSE;
-        }
-        else if (op == 0x0f) /* DeferSubstream */
-        {
-            DWORD def_sub = 0, def_sub_sz = 0;
-            BYTE def_kind;
-            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &def_sub ) || end_p - p < 3) break;
-            if (!xbf_get_substream_bounds( ctx, def_sub, NULL, NULL, &def_sub_sz )) break;
-            def_kind = ctx->nodes[p + 2];
-            p += 3;
-
-            if (def_kind == 0x09) /* DeferredElement: <name_sid:u16> <00> <01> */
-            {
-                if (end_p - p < 4) break;
-                {
-                    WORD nsid = *(const WORD *)(ctx->nodes + p);
-                    const WCHAR *dname = (nsid < ctx->str_cnt && ctx->strs[nsid]) ? ctx->strs[nsid] : L"";
-                    UINT32 ppanel_idx = (obj_sp >= 2 && node_idx_stack[obj_sp - 2] != (~0u))
-                        ? node_idx_stack[obj_sp - 2] : 0u;
-                    p += 4;
-                    xbf_aot_add_defer( ctx->aot, dname, def_sub, ppanel_idx );
-                }
-            }
-            else if (def_kind == 0x05) /* VisualStateGroupCollection */
-            {
-                if (!xbf_read_vsm_defer_header( ctx->nodes, &p, end_p, def_sub_sz, &prop_sp ))
-                    break;
-                if (!ctx->rd_only)
-                {
-                    BOOL prev_vsm = ctx->vsm_collect;
-                    ctx->vsm_collect = (sub_idx == 0);
-                    xbf_compile_substream( ctx, (int)def_sub, ctx->root_el != NULL, NULL, active_rd_node_idx, vsm_holder );
-                    ctx->vsm_collect = prev_vsm;
-                }
-                else if (ctx->sub_done && def_sub < ctx->sub_cnt)
-                    ctx->sub_done[def_sub] = TRUE;
-            }
-            else if (def_kind == 0x08) /* Style Setters table */
-            {
-                struct xbf_stack_val *style_sv = (obj_sp > 0) ? &val_stack[obj_sp - 1] : NULL;
-                if (ctx->sub_done && def_sub < ctx->sub_cnt)
-                    ctx->sub_done[def_sub] = TRUE;
-                if (!xbf_read_style_defer_table( ctx, &p, end_p, def_sub, def_sub_sz, style_sv, &prop_sp ))
-                    break;
-            }
-            else if (def_kind == 0x0a) /* ResourceDictionary table */
-            {
-                struct xbf_rd_table tbl = {0};
-                UINT32 sub_rd_node_idx = (obj_sp > 0 && node_idx_stack[obj_sp - 1] != (~0u))
-                    ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
-                if (!xbf_read_rd_defer_header( ctx->nodes, &p, end_p, def_sub_sz, &tbl, &prop_sp ))
-                {
-                    free( tbl.items );
-                    break;
-                }
-                {
-                    BOOL prev_rd_only = ctx->rd_only;
-                    ctx->rd_only = TRUE;
-                    xbf_compile_substream( ctx, (int)def_sub, FALSE, &tbl, sub_rd_node_idx, vsm_holder );
-                    ctx->rd_only = prev_rd_only;
-                }
-                free( tbl.items );
-            }
-            else
-            {
-                if (obj_sp > 0 && val_stack[obj_sp - 1].tid == XBF_TYPE_DATA_TEMPLATE)
-                {
-                    val_stack[obj_sp - 1].template_xbf_data = ctx->xbf;
-                    val_stack[obj_sp - 1].template_xbf_size = ctx->xbf_sz;
-                    val_stack[obj_sp - 1].template_sub_idx = def_sub;
-                    if (node_idx_stack[obj_sp - 1] < ctx->aot->node_cnt)
-                        ctx->aot->nodes[node_idx_stack[obj_sp - 1]].template_sub_idx = def_sub;
-                    TRACE( "XBF DataTemplate captured deferred substream %u (kind=%#x)\n",
-                           (unsigned)def_sub, def_kind );
-                }
-                if (rd_tbl)
-                {
-                    DWORD next_off = 0xffffffffu;
-                    int k;
-                    for (k = 0; k < rd_tbl->count; k++)
-                    {
-                        if (rd_tbl->items[k].sub_off > cur_rel_off && rd_tbl->items[k].sub_off < next_off)
-                            next_off = rd_tbl->items[k].sub_off;
-                    }
-                    if (next_off != 0xffffffffu && next_off < sub_sz)
-                    {
-                        p = sub_start + next_off;
-                        while (obj_sp > base_sp) { obj_sp--; free( val_stack[obj_sp].setters ); memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) ); }
-                        prop_sp = 0;
-                        free( last_popped.setters );
-                        memset( &last_popped, 0, sizeof(last_popped) );
-                        last_popped_node_idx = (~0u);
-                        last_popped_is_rd = FALSE;
-                        has_last_popped = FALSE;
-                        continue;
-                    }
-                }
-                TRACE( "XBF unknown DeferSubstream kind=%#x at %lu/%lu\n", def_kind, (unsigned long)p, (unsigned long)end_p );
-                break;
-            }
+            if (meta_rc == 0) break;
         }
         else
         {
             TRACE( "XBF unknown op=%#x at %lu/%lu (sub %d) top_tid=%#x next=[%02x %02x %02x %02x]\n",
-                   op, (unsigned long)cur_rel_off, (unsigned long)sub_sz, sub_idx,
-                   obj_sp > 0 ? val_stack[obj_sp - 1].tid : 0,
-                   p < end_p ? ctx->nodes[p] : 0, p + 1 < end_p ? ctx->nodes[p + 1] : 0,
-                   p + 2 < end_p ? ctx->nodes[p + 2] : 0, p + 3 < end_p ? ctx->nodes[p + 3] : 0 );
-            if (rd_tbl)
-            {
-                DWORD next_off = 0xffffffffu;
-                int k;
-                for (k = 0; k < rd_tbl->count; k++)
-                {
-                    if (rd_tbl->items[k].sub_off > cur_rel_off && rd_tbl->items[k].sub_off < next_off)
-                        next_off = rd_tbl->items[k].sub_off;
-                }
-                if (next_off != 0xffffffffu && next_off < sub_sz)
-                {
-                    p = sub_start + next_off;
-                    while (obj_sp > base_sp) { obj_sp--; free( val_stack[obj_sp].setters ); memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) ); }
-                    prop_sp = 0;
-                    free( last_popped.setters );
-                    memset( &last_popped, 0, sizeof(last_popped) );
-                    last_popped_node_idx = (~0u);
-                    last_popped_is_rd = FALSE;
-                    has_last_popped = FALSE;
-                    continue;
-                }
-            }
+                   op, (unsigned long)cur_rel_off, (unsigned long)st.sub_sz, sub_idx,
+                   st.obj_sp > 0 ? st.val_stack[st.obj_sp - 1].tid : 0,
+                   st.p < st.end_p ? ctx->nodes[st.p] : 0, st.p + 1 < st.end_p ? ctx->nodes[st.p + 1] : 0,
+                   st.p + 2 < st.end_p ? ctx->nodes[st.p + 2] : 0, st.p + 3 < st.end_p ? ctx->nodes[st.p + 3] : 0 );
+            if (xbf_sub_seek_next_rd_entry( &st, cur_rel_off )) continue;
             TRACE( "XBF unrecognized op=%#x at %lu/%lu (sub %d), scanning forward\n",
-                   op, (unsigned long)cur_rel_off, (unsigned long)end_p, sub_idx );
-            while (p < end_p)
+                   op, (unsigned long)cur_rel_off, (unsigned long)st.end_p, sub_idx );
+            while (st.p < st.end_p)
             {
-                if (ctx->nodes[p] == 0x21 || ctx->nodes[p] == 0x07 || ctx->nodes[p] == 0x08 ||
-                    ctx->nodes[p] == 0x14 || ctx->nodes[p] == 0x15)
+                if (ctx->nodes[st.p] == 0x21 || ctx->nodes[st.p] == 0x07 || ctx->nodes[st.p] == 0x08 ||
+                    ctx->nodes[st.p] == 0x14 || ctx->nodes[st.p] == 0x15)
                     break;
-                p++;
+                st.p++;
             }
-            if (p >= end_p) break;
+            if (st.p >= st.end_p) break;
         }
     }
 
-    while (obj_sp > base_sp)
+    while (st.obj_sp > st.base_sp)
     {
-        obj_sp--;
-        free( val_stack[obj_sp].setters );
+        st.obj_sp--;
+        free( st.val_stack[st.obj_sp].setters );
     }
-    free( last_popped.setters );
+    free( st.last_popped.setters );
 }
 
 void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,

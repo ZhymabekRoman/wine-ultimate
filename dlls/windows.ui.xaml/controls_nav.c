@@ -189,7 +189,6 @@ static HRESULT WINAPI uwp_nav_probe38( void *iface, ... ) { TRACE( "navview-vtbl
 static HRESULT WINAPI uwp_nav_probe39( void *iface, ... ) { TRACE( "navview-vtbl slot 39 hit\n" ); return S_OK; }
 static HRESULT WINAPI uwp_nav_probe41( void *iface, ... ) { TRACE( "navview-vtbl slot 41 hit\n" ); return S_OK; }
 static HRESULT WINAPI uwp_nav_probe42( void *iface, ... ) { TRACE( "navview-vtbl slot 42 hit\n" ); return S_OK; }
-static HRESULT WINAPI uwp_nav_probe44( void *iface, ... ) { TRACE( "navview-vtbl slot 44 hit\n" ); return S_OK; }
 static HRESULT WINAPI uwp_nav_probe45( void *iface, ... ) { TRACE( "navview-vtbl slot 45 hit\n" ); return S_OK; }
 static HRESULT WINAPI uwp_nav_probe46( void *iface, ... ) { TRACE( "navview-vtbl slot 46 hit\n" ); return S_OK; }
 static HRESULT WINAPI uwp_nav_probe47( void *iface, ... ) { TRACE( "navview-vtbl slot 47 hit\n" ); return S_OK; }
@@ -213,7 +212,7 @@ const void *uwp_navview_vtbl[112] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_nav_probe6,[11] = uwp_nav_probe11,[12] = uwp_nav_probe12,[19] = uwp_nav_probe19,[20] = uwp_nav_probe20,[21] = uwp_nav_probe21,[22] = uwp_nav_probe22,[23] = uwp_nav_probe23,[24] = uwp_nav_probe24,[25] = uwp_nav_probe25,[26] = uwp_nav_probe26,[27] = uwp_nav_probe27,[28] = uwp_nav_probe28,[29] = uwp_nav_probe29,[30] = uwp_nav_probe30,[35] = uwp_nav_probe35,[38] = uwp_nav_probe38,[39] = uwp_nav_probe39,[41] = uwp_nav_probe41,[42] = uwp_nav_probe42,[44] = uwp_nav_probe44,[45] = uwp_nav_probe45,[46] = uwp_nav_probe46,[47] = uwp_nav_probe47,[48] = uwp_nav_probe48,[49] = uwp_nav_probe49,[50] = uwp_nav_probe50,[52] = uwp_nav_probe52,[53] = uwp_nav_probe53,[54] = uwp_nav_probe54,[55] = uwp_nav_probe55,[58] = uwp_nav_probe58,[59] = uwp_nav_probe59,[60] = uwp_nav_probe60,[61] = uwp_nav_probe61,
+    [6] = uwp_nav_probe6,[11] = uwp_nav_probe11,[12] = uwp_nav_probe12,[19] = uwp_nav_probe19,[20] = uwp_nav_probe20,[21] = uwp_nav_probe21,[22] = uwp_nav_probe22,[23] = uwp_nav_probe23,[24] = uwp_nav_probe24,[25] = uwp_nav_probe25,[26] = uwp_nav_probe26,[27] = uwp_nav_probe27,[28] = uwp_nav_probe28,[29] = uwp_nav_probe29,[30] = uwp_nav_probe30,[35] = uwp_nav_probe35,[38] = uwp_nav_probe38,[39] = uwp_nav_probe39,[41] = uwp_nav_probe41,[42] = uwp_nav_probe42,[45] = uwp_nav_probe45,[46] = uwp_nav_probe46,[47] = uwp_nav_probe47,[48] = uwp_nav_probe48,[49] = uwp_nav_probe49,[50] = uwp_nav_probe50,[52] = uwp_nav_probe52,[53] = uwp_nav_probe53,[54] = uwp_nav_probe54,[55] = uwp_nav_probe55,[58] = uwp_nav_probe58,[59] = uwp_nav_probe59,[60] = uwp_nav_probe60,[61] = uwp_nav_probe61,
 
     [7] = uwp_fe_get_Resources,
     [8] = uwp_fe_put_Resources,

@@ -1933,140 +1933,113 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
         uwp_elem_set_font_family( el, saved_ff );
 }
 
-void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
-                                WORD pid, int vt, double num, const WCHAR *sval,
-                                const double vec4[4], BOOL is_res_ref )
+static void xbf_apply_stack_val_prop( struct xbf_ctx *ctx, struct uwp_element *el,
+                                      struct xbf_stack_val *sv, WORD pid, int vt,
+                                      double num, const WCHAR *sval, BOOL is_res_ref )
 {
     UINT32 argb = 0;
 
-    if (sv)
+    if (!sv) return;
+    if (sv->kind == UWP_RD_BRUSH)
     {
-        if (sv->kind == UWP_RD_BRUSH)
+        if (pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR || pid == XBF_PROP_FALLBACK_COLOR)
         {
-            if (pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR || pid == XBF_PROP_FALLBACK_COLOR) /* SolidColorBrush.Color / RevealBrush.Color */
+            if (vt == 0x08) { sv->argb = (UINT32)num; sv->has_argb = TRUE; }
+            else if (sval && sval[0])
             {
-                if (vt == 0x08)
-                {
-                    sv->argb = (UINT32)num;
-                    sv->has_argb = TRUE;
-                }
-                else if (sval && sval[0])
-                {
-                    if (uwp_parse_color_string( sval, &argb ))
-                    {
-                        sv->argb = argb;
-                        sv->has_argb = TRUE;
-                    }
-                    else
-                    {
-                        lstrcpynW( sv->str_val, sval, ARRAY_SIZE(sv->str_val) );
-                    }
-                }
-            }
-            else if (pid == XBF_PROP_BRUSH_OPACITY) /* Brush.Opacity */
-            {
-                if (vt == 0x03 || vt == 0x04)
-                    sv->opacity = num;
-                else if (sval && sval[0])
-                {
-                    struct uwp_rd_entry *de = NULL;
-                    if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                        de && de->kind == UWP_RD_DOUBLE)
-                        sv->opacity = de->dval;
-                }
+                if (uwp_parse_color_string( sval, &argb )) { sv->argb = argb; sv->has_argb = TRUE; }
+                else lstrcpynW( sv->str_val, sval, ARRAY_SIZE(sv->str_val) );
             }
         }
-        else if (sv->kind == UWP_RD_STYLE && pid == XBF_PROP_BASED_ON && sval && sval[0]) /* Style.BasedOn */
+        else if (pid == XBF_PROP_BRUSH_OPACITY)
         {
-            uwp_extract_resource_key( sval, sv->based_on, ARRAY_SIZE(sv->based_on) );
+            if (vt == 0x03 || vt == 0x04) sv->opacity = num;
+            else if (sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                    sv->opacity = de->dval;
+            }
         }
-        else if (sv->kind == UWP_RD_COLOR && pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR && vt == 0x08)
-        {
-            sv->argb = (UINT32)num;
-            sv->has_argb = TRUE;
-        }
+    }
+    else if (sv->kind == UWP_RD_STYLE && pid == XBF_PROP_BASED_ON && sval && sval[0])
+        uwp_extract_resource_key( sval, sv->based_on, ARRAY_SIZE(sv->based_on) );
+    else if (sv->kind == UWP_RD_COLOR && pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR && vt == 0x08)
+    {
+        sv->argb = (UINT32)num;
+        sv->has_argb = TRUE;
     }
 
-    if (!el)
+    if (el || !sv->raw || !ctx || (pid & 0x8000) || pid >= ctx->prop_cnt) return;
+    if (!ctx->props[pid].name[0] || ctx->props[pid].owner_tid >= ctx->type_cnt) return;
     {
-        if (sv && sv->raw && ctx && !(pid & 0x8000) && pid < ctx->prop_cnt &&
-            ctx->props[pid].name[0] && ctx->props[pid].owner_tid < ctx->type_cnt &&
-            ctx->types[ctx->props[pid].owner_tid].full_name[0] &&
-            (wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Breakpoint" ) ||
-             wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Converter" ) ||
-             wcsstr( ctx->types[ctx->props[pid].owner_tid].full_name, L"Layout" )))
+        const struct xbf_prop_info *pi = &ctx->props[pid];
+        const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
+        void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
+        if (!owner_cls[0] || !ao) return;
+        if (!wcsstr( owner_cls, L"Breakpoint" ) && !wcsstr( owner_cls, L"Converter" ) && !wcsstr( owner_cls, L"Layout" ))
+            return;
+        if (is_res_ref && sval && sval[0])
         {
-            void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
-            const struct xbf_prop_info *pi = &ctx->props[pid];
-            const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
-            if (ao)
+            struct uwp_rd_entry *re = NULL;
+            struct uwp_rd_bucket *found_b = NULL;
+            IInspectable *res_val = NULL;
+            BOOL release_res = FALSE;
+            if (uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd,
+                                   ctx->root_el, sval, 0, &re, &found_b ) && re)
             {
-                if (is_res_ref && sval && sval[0])
+                if (re->kind == UWP_RD_DOUBLE)
                 {
-                    struct uwp_rd_entry *re = NULL;
-                    struct uwp_rd_bucket *found_b = NULL;
-                    IInspectable *res_val = NULL;
-                    BOOL release_res = FALSE;
-                    if (uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd,
-                                           ctx->root_el, sval, 0, &re, &found_b ) && re)
-                    {
-                        if (re->kind == UWP_RD_DOUBLE)
-                        {
-                            WCHAR nbuf[64];
-                            swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", re->dval );
-                            uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, nbuf );
-                        }
-                        else
-                        {
-                            res_val = uwp_rd_materialize_entry( found_b, re );
-                        }
-                    }
-                    else if (wcsstr( sval, L"Style" ))
-                    {
-                        void *st = NULL;
-                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Style", NULL, NULL, &st )) && st)
-                        {
-                            struct uwp_element *st_el = uwp_elem_from_any( st );
-                            if (st_el) lstrcpynW( st_el->name, sval, ARRAY_SIZE(st_el->name) );
-                            res_val = (IInspectable *)st;
-                            release_res = TRUE;
-                        }
-                    }
-                    if (res_val)
-                    {
-                        uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, sv->raw, res_val );
-                        if (release_res) IInspectable_Release( res_val );
-                    }
+                    WCHAR nbuf[64];
+                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", re->dval );
+                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, nbuf );
                 }
-                else if (wcsstr( owner_cls, L"Breakpoint" ) || wcsstr( owner_cls, L"Converter" ) || wcsstr( owner_cls, L"Layout" ))
+                else
+                    res_val = uwp_rd_materialize_entry( found_b, re );
+            }
+            else if (wcsstr( sval, L"Style" ))
+            {
+                void *st = NULL;
+                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Style", NULL, NULL, &st )) && st)
                 {
-                    if (vt == 0x01 || vt == 0x02)
-                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, (vt == 0x02) ? L"True" : L"False" );
-                    else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
-                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, sval );
-                    else if (vt == 0x03 || vt == 0x04 || vt == 0x0b)
-                    {
-                        WCHAR nbuf[64];
-                        swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
-                        uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, nbuf );
-                    }
+                    struct uwp_element *st_el = uwp_elem_from_any( st );
+                    if (st_el) lstrcpynW( st_el->name, sval, ARRAY_SIZE(st_el->name) );
+                    res_val = (IInspectable *)st;
+                    release_res = TRUE;
                 }
             }
+            if (res_val)
+            {
+                uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, sv->raw, res_val );
+                if (release_res) IInspectable_Release( res_val );
+            }
         }
-        return;
+        else if (vt == 0x01 || vt == 0x02)
+            uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, (vt == 0x02) ? L"True" : L"False" );
+        else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+            uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, sval );
+        else if (vt == 0x03 || vt == 0x04 || vt == 0x0b)
+        {
+            WCHAR nbuf[64];
+            swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
+            uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, nbuf );
+        }
     }
+}
+
+static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_element *el,
+                                          WORD pid, int vt, double num, const WCHAR *sval )
+{
+    UINT32 argb = 0;
 
     if (el->kind == UWP_KIND_BRUSH)
     {
         if (pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR || pid == XBF_PROP_FALLBACK_COLOR)
         {
             struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
-            if (!sa) return;
-            if (vt == 0x08)
-            {
-                sa->brush_argb = (UINT32)num;
-                sa->has_brush_argb = TRUE;
-            }
+            if (!sa) return TRUE;
+            if (vt == 0x08) { sa->brush_argb = (UINT32)num; sa->has_brush_argb = TRUE; }
             else if (sval && sval[0])
             {
                 if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
@@ -2074,12 +2047,9 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                     sa->brush_argb = argb;
                     sa->has_brush_argb = TRUE;
                 }
-                else
-                {
-                    lstrcpynW( sa->brush_color_ref, sval, ARRAY_SIZE(sa->brush_color_ref) );
-                }
+                else lstrcpynW( sa->brush_color_ref, sval, ARRAY_SIZE(sa->brush_color_ref) );
             }
-            return;
+            return TRUE;
         }
         if (pid == XBF_PROP_BRUSH_OPACITY)
         {
@@ -2088,14 +2058,13 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                 struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
                 if (sa) sa->brush_opacity = num;
             }
-            return;
+            return TRUE;
         }
         if ((pid == XBF_PROP_LGB_START_POINT || pid == XBF_PROP_LGB_END_POINT) && sval && sval[0])
         {
             struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
             WCHAR *endp = NULL;
-            float px = (float)wcstod( sval, &endp );
-            float py = 0.0f;
+            float px = (float)wcstod( sval, &endp ), py = 0.0f;
             if (endp)
             {
                 while (*endp == L' ' || *endp == L',' || *endp == L';') endp++;
@@ -2106,39 +2075,37 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                 if (pid == XBF_PROP_LGB_START_POINT) { sa->grad_start_x = px; sa->grad_start_y = py; }
                 else { sa->grad_end_x = px; sa->grad_end_y = py; }
             }
-            return;
+            return TRUE;
         }
-        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_X)
+        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_X || pid == XBF_PROP_TILEBRUSH_ALIGNMENT_Y)
         {
             struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
-            if (sa) sa->tile_align_x = (int)num;
-            return;
-        }
-        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_Y)
-        {
-            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
-            if (sa) sa->tile_align_y = (int)num;
-            return;
+            if (sa)
+            {
+                if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_X) sa->tile_align_x = (int)num;
+                else sa->tile_align_y = (int)num;
+            }
+            return TRUE;
         }
         if (pid == XBF_PROP_TILEBRUSH_STRETCH)
         {
             struct uwp_media_ext *m = uwp_elem_ensure_media( el );
             if (m) m->media_stretch = (int)num;
-            return;
+            return TRUE;
         }
     }
 
     if (pid == XBF_PROP_GRADIENTSTOP_COLOR)
     {
         struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
-        if (!sa) return;
+        if (!sa) return TRUE;
         if (vt == 0x08) { sa->brush_argb = (UINT32)num; sa->has_brush_argb = TRUE; }
         else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
         {
             sa->brush_argb = argb;
             sa->has_brush_argb = TRUE;
         }
-        return;
+        return TRUE;
     }
     if (pid == XBF_PROP_GRADIENTSTOP_OFFSET)
     {
@@ -2147,755 +2114,670 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
             if (sa) sa->grad_stop_offset = num;
         }
-        return;
+        return TRUE;
     }
-
-    if (el->kind == UWP_KIND_RESOURCE_DICT && pid == XBF_PROP_RESOURCE_DICTIONARY_SOURCE && sval && sval[0]) /* Source */
+    if (el->kind == UWP_KIND_RESOURCE_DICT && pid == XBF_PROP_RESOURCE_DICTIONARY_SOURCE && sval && sval[0])
     {
         uwp_load_res_xbf_into_bucket( ctx ? ctx->base_xbf_dir : NULL, sval, uwp_rd_bucket_for_el( el, TRUE ) );
-        return;
+        return TRUE;
     }
 
-    if (pid & 0x8000)
+    if (!(pid & 0x8000)) return FALSE;
+    if (uwp_is_bg_pid( pid ))
     {
-        if (uwp_is_bg_pid( pid ))
-        {
-            if (vt == 0x08)
-                uwp_el_set_bg_argb( el, (UINT32)num );
-            else if (sval && sval[0] &&
-                     uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
-                uwp_el_set_bg_argb( el, argb );
-            return;
-        }
-        if (uwp_is_fg_pid( pid ))
-        {
-            if (vt == 0x08)
-                uwp_el_set_fg_argb( el, (UINT32)num );
-            else if (sval && sval[0] &&
-                     uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
-                uwp_el_set_fg_argb( el, argb );
-            return;
-        }
-        if (uwp_is_border_pid( pid ))
-        {
-            if (vt == 0x08)
-                uwp_el_set_border_argb( el, (UINT32)num );
-            else if (sval && sval[0] &&
-                     uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
-                uwp_el_set_border_argb( el, argb );
-            return;
-        }
+        if (vt == 0x08) uwp_el_set_bg_argb( el, (UINT32)num );
+        else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+            uwp_el_set_bg_argb( el, argb );
+        return TRUE;
+    }
+    if (uwp_is_fg_pid( pid ))
+    {
+        if (vt == 0x08) uwp_el_set_fg_argb( el, (UINT32)num );
+        else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+            uwp_el_set_fg_argb( el, argb );
+        return TRUE;
+    }
+    if (uwp_is_border_pid( pid ))
+    {
+        if (vt == 0x08) uwp_el_set_border_argb( el, (UINT32)num );
+        else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+            uwp_el_set_border_argb( el, argb );
+        return TRUE;
+    }
+    return FALSE;
+}
 
-        switch (pid)
-        {
-        case XBF_PROP_STYLE: /* FrameworkElement.Style */
-            if (sval && sval[0])
-                uwp_apply_style_by_name( ctx, el, sval );
-            break;
-        case XBF_PROP_GRID_ROW: el->grid_row = (int)num; break;
-        case XBF_PROP_GRID_COLUMN: el->grid_col = (int)num; break;
-        case XBF_PROP_GRID_ROW_SPAN: el->grid_row_span = max( 1, (int)num ); break;
-        case XBF_PROP_GRID_COLUMN_SPAN: el->grid_col_span = max( 1, (int)num ); break;
-        case XBF_PROP_ROWDEF_HEIGHT: /* RowDefinition.Height */
-        case XBF_PROP_COLUMNDEF_WIDTH: /* ColumnDefinition.Width */
-            if (vt == 0x07) { el->grid_len_type = (int)vec4[0]; el->grid_len_val = vec4[1]; }
-            else if (vt == 0x03 || vt == 0x04) { el->grid_len_type = 1; el->grid_len_val = num; }
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE)
-                {
-                    el->grid_len_type = 1;
-                    el->grid_len_val = de->dval;
-                }
-            }
-            break;
-        case XBF_PROP_COLUMNDEF_MAXWIDTH: /* ColumnDefinition.MaxWidth */
-        case XBF_PROP_FRAMEWORKELEMENT_MAXWIDTH: /* FrameworkElement.MaxWidth */
-            if (vt == 0x03 || vt == 0x04) el->max_width = num;
-            break;
-        case XBF_PROP_COLUMNDEF_MINWIDTH: /* ColumnDefinition.MinWidth */
-            if (vt == 0x03 || vt == 0x04) el->min_width = num;
-            break;
-        case XBF_PROP_ROWDEF_MAXHEIGHT: /* RowDefinition.MaxHeight */
-        case XBF_PROP_FRAMEWORKELEMENT_MAXHEIGHT: /* FrameworkElement.MaxHeight */
-            if (vt == 0x03 || vt == 0x04) el->max_height = num;
-            break;
-        case XBF_PROP_ROWDEF_MINHEIGHT: /* RowDefinition.MinHeight */
-            if (vt == 0x03 || vt == 0x04) el->min_height = num;
-            break;
-        case XBF_PROP_MARGIN: /* Margin */
-            if (vt == 0x06)
-            {
-                el->margin_l = vec4[0]; el->margin_t = vec4[1];
-                el->margin_r = vec4[2]; el->margin_b = vec4[3];
-            }
-            break;
-        case XBF_PROP_CONTROL_PADDING: /* Control.Padding */
-        case XBF_PROP_BORDER_PADDING: /* Border.Padding */
-        case XBF_PROP_PANEL_IS_IGNORING_TRANSITIONS: /* Border.Padding */
-            if (vt == 0x06)
-            {
-                el->padding_l = vec4[0]; el->padding_t = vec4[1];
-                el->padding_r = vec4[2]; el->padding_b = vec4[3];
-            }
-            break;
-        case XBF_PROP_CONTROL_BORDER_THICKNESS: /* Control.BorderThickness */
-        case XBF_PROP_BORDER_THICKNESS: /* Border.BorderThickness */
-        case XBF_PROP_PANEL_CHILDREN_TRANSITIONS: /* Border.BorderThickness */
-        case XBF_PROP_GRID_BORDER_THICKNESS:
-        case XBF_PROP_STACKPANEL_BORDER_THICKNESS:
-            if (vt == 0x06)
-            {
-                el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
-                el->border_thick_r = vec4[2]; el->border_thick_b = vec4[3];
-            }
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *te = NULL;
-                struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
-                if (uwp_rd_find_entry( hint_rd, el, sval, 0, &te, NULL ) && te && te->kind == UWP_RD_THICKNESS)
-                {
-                    el->border_thick_l = te->vec4[0]; el->border_thick_t = te->vec4[1];
-                    el->border_thick_r = te->vec4[2]; el->border_thick_b = te->vec4[3];
-                }
-            }
-            break;
-        case XBF_PROP_BORDER_CORNER_RADIUS: /* Border.CornerRadius */
-        case XBF_PROP_GRID_CORNER_RADIUS:
-        case XBF_PROP_STACKPANEL_CORNER_RADIUS:
-        case XBF_PROP_CONTROL_CORNER_RADIUS:
-            if (vt == 0x06)
-                el->corner_radius = max( max( vec4[0], vec4[1] ), max( vec4[2], vec4[3] ) );
-            else if (vt == 0x03 || vt == 0x04)
-                el->corner_radius = num;
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *ce = NULL;
-                struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
-                if (uwp_rd_find_entry( hint_rd, el, sval, 0, &ce, NULL ) && ce)
-                {
-                    if (ce->kind == UWP_RD_THICKNESS)
-                        el->corner_radius = max( max( ce->vec4[0], ce->vec4[1] ), max( ce->vec4[2], ce->vec4[3] ) );
-                    else if (ce->kind == UWP_RD_DOUBLE && ce->dval > 0.0)
-                        el->corner_radius = ce->dval;
-                }
-            }
-            else if (sval && sval[0])
-            {
-                double cr = wcstod( sval, NULL );
-                if (cr > 0.0) el->corner_radius = cr;
-            }
-            break;
-        case XBF_PROP_CONTENT: /* ContentControl.Content */
-        case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV: /* TextBlock.Text / MenuFlyoutItem.Text */
-        case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE: /* FontIcon.Glyph */
-        case XBF_PROP_FONTICON_GLYPH: /* FontIcon.Glyph */
-        case XBF_PROP_TEXTBLOCK_TEXT: /* TextBlock.Text */
-        case XBF_PROP_TEMPLATE_BINDING_PROPERTY:
-        case XBF_PROP_BINDING_PATH:
-        case XBF_PROP_RUN_TEXT:
-            if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && uwp_elem_uid( el )[0] && uwp_has_text( el )))
-                uwp_elem_set_text( el, sval );
-            break;
-        case XBF_PROP_BINDING_ELEMENT_NAME:
-            if (sval && sval[0])
-                uwp_elem_set_placeholder( el, sval );
-            break;
-        case XBF_PROP_RECTANGLE_RADIUS_X:
-        case XBF_PROP_RECTANGLE_RADIUS_Y:
-            if (vt == 0x03 || vt == 0x04)
-            {
-                if (num > el->corner_radius) el->corner_radius = num;
-            }
-            break;
-        case XBF_PROP_CONTROL_HORIZONTAL_CONTENT_ALIGNMENT:
-            el->h_content_align = (int)num;
-            el->has_h_content_align = TRUE;
-            break;
-        case XBF_PROP_CONTROL_VERTICAL_CONTENT_ALIGNMENT:
-            el->v_content_align = (int)num;
-            el->has_v_content_align = TRUE;
-            break;
-        case XBF_PROP_IMAGE_SOURCE: /* Image.Source */
-            if (sval && sval[0])
-            {
-                struct uwp_media_ext *m = uwp_elem_ensure_media( el );
-                if (m) lstrcpynW( m->image_src, sval, ARRAY_SIZE(m->image_src) );
-            }
-            break;
-        case XBF_PROP_IMAGE_STRETCH:
-        case XBF_PROP_TILEBRUSH_STRETCH:
-            if (vt == 0x04 || vt == 0x0b)
-            {
-                struct uwp_media_ext *m = uwp_elem_ensure_media( el );
-                if (m) m->media_stretch = (int)num;
-            }
-            break;
-        case XBF_PROP_AUTOMATION_NAME: /* AutomationProperties.Name - never leak into visible text */
-            if (sval && sval[0])
-                uwp_elem_set_automation_name( el, sval );
-            break;
-        case XBF_PROP_AUTOMATION_ID: /* x:Uid or AutomationId */
-            if (sval && sval[0])
-            {
-                uwp_elem_set_uid( el, sval );
-                if (!uwp_has_text( el ) || el->kind == UWP_KIND_USER_CONTROL || el->outer)
-                {
-                    WCHAR res_key[256], res_val[128];
-                    static const WCHAR *std_props[] =
-                        { L"Content", L"Text", L"Title", L"Header", L"Label", L"PlaceholderText", L"ButtonText" };
-                    unsigned int sp;
-                    DWORD k;
-                    void *ao = (ctx && ctx->app_outer) ? ctx->app_outer : uwp_get_app_outer();
-                    IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element *el,
+                                         WORD pid, int vt, double num, const WCHAR *sval,
+                                         const double vec4[4], BOOL is_res_ref )
+{
+    double resolved = 0.0;
 
-                    for (sp = 0; sp < ARRAY_SIZE(std_props); sp++)
-                    {
-                        swprintf( res_key, ARRAY_SIZE(res_key), L"%s/%s", sval, std_props[sp] );
-                        if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
-                        {
-                            if (!uwp_has_text( el ) && (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
-                                uwp_elem_set_text( el, res_val );
-                            if (el->outer && ao && !(el->class_flags & UWP_CF_UWP_PREFIX))
-                                uwp_set_custom_xaml_member( ao, el->class_name, std_props[sp], target, res_val );
-                        }
-                    }
-                    for (k = 0; ctx && k < ctx->prop_cnt && !uwp_has_text( el ); k++)
-                    {
-                        const struct xbf_prop_info *kpi = &ctx->props[k];
-                        if (kpi->owner_tid < ctx->type_cnt &&
-                            !wcsncmp( ctx->types[kpi->owner_tid].xmlns, L"using:", 6 ) &&
-                            (!wcscmp( kpi->name, L"Character" ) ||
-                             !wcscmp( kpi->name, L"Content" ) ||
-                             !wcscmp( kpi->name, L"Text" ) ||
-                             !wcscmp( kpi->name, L"Title" ) ||
-                             !wcscmp( kpi->name, L"Header" )))
-                        {
-                            swprintf( res_key, ARRAY_SIZE(res_key), L"%s/[%s]%s/%s",
-                                      sval, ctx->types[kpi->owner_tid].xmlns,
-                                      ctx->types[kpi->owner_tid].short_name, kpi->name );
-                            if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
-                                uwp_elem_set_text( el, res_val );
-                        }
-                    }
-                }
-            }
-            break;
-        case XBF_PROP_TEXTELEMENT_FONT_FAMILY:
-            if (vt == 0x03 || vt == 0x04)
-            {
-                if (num > 0) { el->font_size = num; el->has_font_size = TRUE; }
-                break;
-            }
-            if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE && de->dval > 0)
-                {
-                    el->font_size = de->dval;
-                    el->has_font_size = TRUE;
-                    break;
-                }
-            }
-            /* fall through */
-        case XBF_PROP_CONTENTPRESENTER_FONT_FAMILY:
-        case XBF_PROP_CONTROL_FONT_FAMILY:
-        case XBF_PROP_TEXTBLOCK_FONT_FAMILY:
-        case XBF_PROP_FONTICON_FONT_FAMILY:
-            if (sval && sval[0])
-            {
-                WCHAR face[64] = {0};
-                const WCHAR *ff_spec = sval;
-                if (is_res_ref || !wcschr( sval, L'#' ))
-                {
-                    struct uwp_rd_entry *fe = NULL;
-                    if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &fe, NULL ) &&
-                        fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
-                        ff_spec = fe->str_val;
-                }
-                uwp_elem_set_font_family( el, ff_spec );
-                uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
-            }
-            break;
-        case XBF_PROP_POPUP_HORIZONTAL_OFFSET: /* FontSize */
-        case XBF_PROP_CONTROL_FONTSIZE: /* Control.FontSize */
-        case XBF_PROP_TEXTBLOCK_FONTSIZE: /* TextBlock.FontSize */
-        case XBF_PROP_TEXTELEMENT_FONTSIZE: /* TextElement.FontSize */
-        case XBF_PROP_FONTICON_FONTSIZE: /* FontIcon.FontSize */
-            if (vt == 0x03 || vt == 0x04)
-            {
-                if (num > 0) { el->font_size = num; el->has_font_size = TRUE; }
-            }
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE && de->dval > 0)
-                {
-                    el->font_size = de->dval;
-                    el->has_font_size = TRUE;
-                }
-            }
-            break;
-        case XBF_PROP_TEXTBLOCK_FONT_WEIGHT: /* TextBlock.FontWeight */
-        case XBF_PROP_CONTROL_FONT_WEIGHT: /* Control.FontWeight */
-        case XBF_PROP_TEXTELEMENT_FONT_WEIGHT: /* TextElement.FontWeight */
+    switch (pid)
+    {
+    case XBF_PROP_STYLE:
+        if (sval && sval[0]) uwp_apply_style_by_name( ctx, el, sval );
+        return TRUE;
+    case XBF_PROP_GRID_ROW: el->grid_row = (int)num; return TRUE;
+    case XBF_PROP_GRID_COLUMN: el->grid_col = (int)num; return TRUE;
+    case XBF_PROP_GRID_ROW_SPAN: el->grid_row_span = max( 1, (int)num ); return TRUE;
+    case XBF_PROP_GRID_COLUMN_SPAN: el->grid_col_span = max( 1, (int)num ); return TRUE;
+    case XBF_PROP_ROWDEF_HEIGHT:
+    case XBF_PROP_COLUMNDEF_WIDTH:
+        if (vt == 0x07) { el->grid_len_type = (int)vec4[0]; el->grid_len_val = vec4[1]; }
+        else if (vt == 0x03 || vt == 0x04) { el->grid_len_type = 1; el->grid_len_val = num; }
+        else if (is_res_ref && sval && sval[0])
         {
-            int fw = uwp_parse_font_weight( sval, num, vt );
-            if (fw > 0) el->font_weight = fw;
-            break;
+            struct uwp_rd_entry *de = NULL;
+            if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                de && de->kind == UWP_RD_DOUBLE)
+            {
+                el->grid_len_type = 1;
+                el->grid_len_val = de->dval;
+            }
         }
-        case XBF_PROP_TEXTBLOCK_TEXT_ALIGNMENT: /* TextBlock.TextAlignment */
-            el->text_align = (int)num;
-            el->has_text_align = TRUE;
-            break;
-        case XBF_PROP_TEXTBLOCK_TEXT_WRAPPING: /* TextBlock.TextWrapping */
-        case XBF_PROP_RICHTEXTBLOCK_TEXT_WRAPPING:
-            if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
-            {
-                if (!wcsicmp( sval, L"NoWrap" )) el->text_wrapping = 1;
-                else if (!wcsicmp( sval, L"WrapWholeWords" )) el->text_wrapping = 3;
-                else if (!wcsicmp( sval, L"Wrap" )) el->text_wrapping = 2;
-            }
-            else
-                el->text_wrapping = (int)num;
-            break;
-        case XBF_PROP_TEXTBLOCK_MAX_LINES:
-        case XBF_PROP_RICHTEXTBLOCK_MAX_LINES:
-            if (vt == 0x03 || vt == 0x04)
-                el->max_lines = max( 0, (int)num );
-            else if (sval && sval[0])
-                el->max_lines = max( 0, (int)wcstol( sval, NULL, 10 ) );
-            break;
-        case XBF_PROP_WIDTH: /* Width */
-            if (vt == 0x03 || vt == 0x04) el->width = num;
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE)
-                    el->width = de->dval;
-            }
-            break;
-        case XBF_PROP_FLOW_DIRECTION: /* Height */
-        case XBF_PROP_FRAMEWORKELEMENT_HEIGHT: /* FrameworkElement.Height */
-            if (vt == 0x03 || vt == 0x04) el->height = num;
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE)
-                    el->height = de->dval;
-            }
-            break;
-        case XBF_PROP_MIN_WIDTH: /* MinWidth */
-            if (vt == 0x03 || vt == 0x04) el->min_width = num;
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE)
-                    el->min_width = de->dval;
-            }
-            break;
-        case XBF_PROP_MIN_HEIGHT: /* MinHeight */
-            if (vt == 0x03 || vt == 0x04) el->min_height = num;
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE)
-                    el->min_height = de->dval;
-            }
-            break;
-        case XBF_PROP_HORIZONTAL_ALIGNMENT: /* HorizontalAlignment */
-            el->h_align = (int)num;
-            break;
-        case XBF_PROP_VERTICAL_ALIGNMENT: /* VerticalAlignment */
-            el->v_align = (int)num;
-            break;
-        case XBF_PROP_ORIENTATION: /* StackPanel.Orientation */
-        case XBF_PROP_STACKPANEL_ORIENTATION: /* StackPanel.Orientation (XBF v2) */
-            el->orientation = (int)num;
-            break;
-        case XBF_PROP_STACKPANEL_SPACING: /* StackPanel.Spacing */
-            if (vt == 0x03 || vt == 0x04)
-                el->spacing = num;
-            else if (is_res_ref && sval && sval[0])
-            {
-                struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                    de && de->kind == UWP_RD_DOUBLE)
-                    el->spacing = de->dval;
-            }
-            break;
-        case XBF_PROP_UIELEMENT_VISIBILITY_V2: /* UIElement.Visibility (XBF v2) */
-        case XBF_PROP_UIELEMENT_VISIBILITY: /* UIElement.Visibility */
-            if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
-                el->visibility = !wcsicmp( sval, L"Collapsed" ) ? 1 : 0;
-            else
-                el->visibility = (int)num;
-            break;
-        case XBF_PROP_UIELEMENT_OPACITY:
-            if (vt == 0x03 || vt == 0x04 || vt == 0x01 || vt == 0x02)
-                el->opacity = num;
-            else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
-                el->opacity = wcstod( sval, NULL );
-            break;
-        case XBF_PROP_STORYBOARD_TARGET_NAME: /* Storyboard.TargetName */
-            if (sval && sval[0])
-            {
-                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
-                if (sa) lstrcpynW( sa->anim_target_name, sval, ARRAY_SIZE(sa->anim_target_name) );
-            }
-            break;
-        case XBF_PROP_STORYBOARD_TARGET_PROPERTY: /* Storyboard.TargetProperty */
-            if (sval && sval[0])
-            {
-                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
-                if (sa) vsm_clean_prop_name( sval, sa->anim_target_prop, ARRAY_SIZE(sa->anim_target_prop) );
-            }
-            break;
-        case XBF_PROP_DOUBLE_ANIMATION_TO:
+        return TRUE;
+    case XBF_PROP_COLUMNDEF_MAXWIDTH:
+    case XBF_PROP_FRAMEWORKELEMENT_MAXWIDTH:
+        if (vt == 0x03 || vt == 0x04) el->max_width = num;
+        return TRUE;
+    case XBF_PROP_COLUMNDEF_MINWIDTH:
+        if (vt == 0x03 || vt == 0x04) el->min_width = num;
+        return TRUE;
+    case XBF_PROP_ROWDEF_MAXHEIGHT:
+    case XBF_PROP_FRAMEWORKELEMENT_MAXHEIGHT:
+        if (vt == 0x03 || vt == 0x04) el->max_height = num;
+        return TRUE;
+    case XBF_PROP_ROWDEF_MINHEIGHT:
+        if (vt == 0x03 || vt == 0x04) el->min_height = num;
+        return TRUE;
+    case XBF_PROP_MARGIN:
+        if (vt == 0x06)
         {
-            double to_val = 0.0;
-            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &to_val ))
-            {
-                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
-                if (sa)
-                {
-                    sa->anim_to = to_val;
-                    sa->anim_has_to = TRUE;
-                }
-            }
-            break;
+            el->margin_l = vec4[0]; el->margin_t = vec4[1];
+            el->margin_r = vec4[2]; el->margin_b = vec4[3];
         }
-        case XBF_PROP_ACCELERATOR_KEY: /* KeyboardAccelerator.Key */
-            el->accel_key = (UINT)num;
-            uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
-            break;
-        case XBF_PROP_ACCELERATOR_MODIFIERS: /* KeyboardAccelerator.Modifiers */
-            el->accel_mods = (UINT)num;
-            uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
-            break;
-        case XBF_PROP_ACCELERATOR_SCOPE_OWNER: /* KeyboardAccelerator.IsEnabled */
-            el->accel_enabled = (num != 0.0);
-            uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
-            break;
-        case XBF_PROP_ITEMS_CONTROL_DISPLAY_MEMBER_PATH:
-            if (sval && sval[0])
+        return TRUE;
+    case XBF_PROP_CONTROL_PADDING:
+    case XBF_PROP_BORDER_PADDING:
+    case XBF_PROP_PANEL_IS_IGNORING_TRANSITIONS:
+        if (vt == 0x06)
+        {
+            el->padding_l = vec4[0]; el->padding_t = vec4[1];
+            el->padding_r = vec4[2]; el->padding_b = vec4[3];
+        }
+        return TRUE;
+    case XBF_PROP_CONTROL_BORDER_THICKNESS:
+    case XBF_PROP_BORDER_THICKNESS:
+    case XBF_PROP_PANEL_CHILDREN_TRANSITIONS:
+    case XBF_PROP_GRID_BORDER_THICKNESS:
+    case XBF_PROP_STACKPANEL_BORDER_THICKNESS:
+        if (vt == 0x06)
+        {
+            el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
+            el->border_thick_r = vec4[2]; el->border_thick_b = vec4[3];
+        }
+        else if (is_res_ref && sval && sval[0])
+        {
+            struct uwp_rd_entry *te = NULL;
+            struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
+            if (uwp_rd_find_entry( hint_rd, el, sval, 0, &te, NULL ) && te && te->kind == UWP_RD_THICKNESS)
             {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-                if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
+                el->border_thick_l = te->vec4[0]; el->border_thick_t = te->vec4[1];
+                el->border_thick_r = te->vec4[2]; el->border_thick_b = te->vec4[3];
             }
-            break;
-        case XBF_PROP_SYMBOL_ICON_SYMBOL:
-            if ((vt == 0x04 || vt == 0x0b) && (int)num >= 0xE000 && (int)num <= 0xFFFF)
+        }
+        return TRUE;
+    case XBF_PROP_BORDER_CORNER_RADIUS:
+    case XBF_PROP_GRID_CORNER_RADIUS:
+    case XBF_PROP_STACKPANEL_CORNER_RADIUS:
+    case XBF_PROP_CONTROL_CORNER_RADIUS:
+        if (vt == 0x06)
+            el->corner_radius = max( max( vec4[0], vec4[1] ), max( vec4[2], vec4[3] ) );
+        else if (vt == 0x03 || vt == 0x04)
+            el->corner_radius = num;
+        else if (is_res_ref && sval && sval[0])
+        {
+            struct uwp_rd_entry *ce = NULL;
+            struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
+            if (uwp_rd_find_entry( hint_rd, el, sval, 0, &ce, NULL ) && ce)
             {
-                WCHAR sym = (WCHAR)(int)num;
-                uwp_elem_set_text_n( el, &sym, 1 );
-                if (!uwp_elem_font_family( el )[0])
-                    uwp_elem_set_font_family( el, L"Segoe MDL2 Assets" );
+                if (ce->kind == UWP_RD_THICKNESS)
+                    el->corner_radius = max( max( ce->vec4[0], ce->vec4[1] ), max( ce->vec4[2], ce->vec4[3] ) );
+                else if (ce->kind == UWP_RD_DOUBLE && ce->dval > 0.0)
+                    el->corner_radius = ce->dval;
             }
-            break;
-        case XBF_PROP_TOGGLE_BUTTON_IS_CHECKED:
-        case XBF_PROP_TOGGLE_MENU_FLYOUT_ITEM_IS_CHECKED:
-            if (vt == 0x01 || vt == 0x02) el->is_checked = (vt == 0x02) ? 1 : 0;
-            else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
-            else el->is_checked = (num != 0.0) ? 1 : 0;
-            break;
+        }
+        else if (sval && sval[0])
+        {
+            double cr = wcstod( sval, NULL );
+            if (cr > 0.0) el->corner_radius = cr;
+        }
+        return TRUE;
+    case XBF_PROP_RECTANGLE_RADIUS_X:
+    case XBF_PROP_RECTANGLE_RADIUS_Y:
+        if ((vt == 0x03 || vt == 0x04) && num > el->corner_radius)
+            el->corner_radius = num;
+        return TRUE;
+    case XBF_PROP_CONTROL_HORIZONTAL_CONTENT_ALIGNMENT:
+        el->h_content_align = (int)num; el->has_h_content_align = TRUE; return TRUE;
+    case XBF_PROP_CONTROL_VERTICAL_CONTENT_ALIGNMENT:
+        el->v_content_align = (int)num; el->has_v_content_align = TRUE; return TRUE;
+    case XBF_PROP_WIDTH:
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->width = resolved;
+        return TRUE;
+    case XBF_PROP_FLOW_DIRECTION:
+    case XBF_PROP_FRAMEWORKELEMENT_HEIGHT:
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->height = resolved;
+        return TRUE;
+    case XBF_PROP_MIN_WIDTH:
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->min_width = resolved;
+        return TRUE;
+    case XBF_PROP_MIN_HEIGHT:
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->min_height = resolved;
+        return TRUE;
+    case XBF_PROP_HORIZONTAL_ALIGNMENT: el->h_align = (int)num; return TRUE;
+    case XBF_PROP_VERTICAL_ALIGNMENT: el->v_align = (int)num; return TRUE;
+    case XBF_PROP_ORIENTATION:
+    case XBF_PROP_STACKPANEL_ORIENTATION: el->orientation = (int)num; return TRUE;
+    case XBF_PROP_STACKPANEL_SPACING:
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->spacing = resolved;
+        return TRUE;
+    case XBF_PROP_UIELEMENT_VISIBILITY_V2:
+    case XBF_PROP_UIELEMENT_VISIBILITY:
+        if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+            el->visibility = !wcsicmp( sval, L"Collapsed" ) ? 1 : 0;
+        else
+            el->visibility = (int)num;
+        return TRUE;
+    case XBF_PROP_UIELEMENT_OPACITY:
+        if (vt == 0x03 || vt == 0x04 || vt == 0x01 || vt == 0x02) el->opacity = num;
+        else if ((vt == 0x05 || vt == 0x09) && sval && sval[0]) el->opacity = wcstod( sval, NULL );
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static void xbf_apply_uid_pri_lookup( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *sval )
+{
+    WCHAR res_key[256], res_val[128];
+    static const WCHAR *std_props[] =
+        { L"Content", L"Text", L"Title", L"Header", L"Label", L"PlaceholderText", L"ButtonText" };
+    unsigned int sp;
+    DWORD k;
+    void *ao = (ctx && ctx->app_outer) ? ctx->app_outer : uwp_get_app_outer();
+    IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+
+    uwp_elem_set_uid( el, sval );
+    if (uwp_has_text( el ) && el->kind != UWP_KIND_USER_CONTROL && !el->outer) return;
+
+    for (sp = 0; sp < ARRAY_SIZE(std_props); sp++)
+    {
+        swprintf( res_key, ARRAY_SIZE(res_key), L"%s/%s", sval, std_props[sp] );
+        if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
+        {
+            if (!uwp_has_text( el ) && (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
+                uwp_elem_set_text( el, res_val );
+            if (el->outer && ao && !(el->class_flags & UWP_CF_UWP_PREFIX))
+                uwp_set_custom_xaml_member( ao, el->class_name, std_props[sp], target, res_val );
         }
     }
-    else if (ctx && pid < ctx->prop_cnt)
+    for (k = 0; ctx && k < ctx->prop_cnt && !uwp_has_text( el ); k++)
     {
-        const struct xbf_prop_info *pi = &ctx->props[pid];
-        if (!wcscmp( pi->name, L"IsChecked" ) || !wcscmp( pi->name, L"IsSelected" ))
+        const struct xbf_prop_info *kpi = &ctx->props[k];
+        if (kpi->owner_tid < ctx->type_cnt &&
+            !wcsncmp( ctx->types[kpi->owner_tid].xmlns, L"using:", 6 ) &&
+            (!wcscmp( kpi->name, L"Character" ) || !wcscmp( kpi->name, L"Content" ) ||
+             !wcscmp( kpi->name, L"Text" ) || !wcscmp( kpi->name, L"Title" ) || !wcscmp( kpi->name, L"Header" )))
         {
-            if (vt == 0x01 || vt == 0x02) el->is_checked = (vt == 0x02) ? 1 : 0;
-            else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
-            else el->is_checked = (num != 0.0) ? 1 : 0;
+            swprintf( res_key, ARRAY_SIZE(res_key), L"%s/[%s]%s/%s",
+                      sval, ctx->types[kpi->owner_tid].xmlns,
+                      ctx->types[kpi->owner_tid].short_name, kpi->name );
+            if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
+                uwp_elem_set_text( el, res_val );
         }
-        if (!wcscmp( pi->name, L"DisplayMemberPath" ) && sval && sval[0])
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
-        }
-        else if (!wcscmp( pi->name, L"PaneDisplayMode" ) && uwp_is_nav_view( el ))
-        {
-            int mode = -1;
-            if (vt == 0x04 || vt == 0x0b) mode = (int)num;
-            else if (sval && sval[0])
-            {
-                if (!wcscmp( sval, L"Auto" )) mode = 0;
-                else if (!wcscmp( sval, L"Left" )) mode = 1;
-                else if (!wcscmp( sval, L"Top" )) mode = 2;
-                else if (!wcscmp( sval, L"LeftCompact" )) mode = 3;
-                else if (!wcscmp( sval, L"LeftMinimal" )) mode = 4;
-            }
-            if (mode >= 0 && mode <= 4)
-            {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-                if (ne)
-                {
-                    ne->nav_pane_display_mode = mode;
-                    ne->nav_pane_display_mode_set = TRUE;
-                }
-                TRACE( "xbf_apply_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
-                       debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
-            }
-        }
-        else if (!wcscmp( pi->name, L"IsPaneOpen" ) && uwp_is_nav_view( el ))
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne)
-            {
-                if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_open = (vt == 0x02);
-                else if (sval && sval[0]) ne->nav_is_pane_open = !wcsicmp( sval, L"True" );
-            }
-            uwp_nav_track_open_state( el );
-        }
-        else if (!wcscmp( pi->name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
-        {
-            double d = 0.0;
-            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-            {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-                if (ne) ne->nav_open_pane_length = d;
-            }
-        }
-        else if (!wcscmp( pi->name, L"CompactPaneLength" ) && uwp_is_nav_view( el ))
-        {
-            double d = 0.0;
-            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-            {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-                if (ne) ne->nav_compact_pane_length = d;
-            }
-        }
-        else if (!wcscmp( pi->name, L"CompactModeThresholdWidth" ) && uwp_is_nav_view( el ))
-        {
-            double d = 0.0;
-            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-            {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-                if (ne) ne->nav_compact_threshold = d;
-            }
-        }
-        else if (!wcscmp( pi->name, L"ExpandedModeThresholdWidth" ) && uwp_is_nav_view( el ))
-        {
-            double d = 0.0;
-            if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-            {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-                if (ne) ne->nav_expanded_threshold = d;
-            }
-        }
-        else if (!wcscmp( pi->name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne)
-            {
-                if (vt == 0x01 || vt == 0x02) ne->nav_is_settings_visible = (vt == 0x02);
-                else if (sval && sval[0]) ne->nav_is_settings_visible = !wcsicmp( sval, L"True" );
-            }
-        }
-        else if (!wcscmp( pi->name, L"IsPaneToggleButtonVisible" ) && uwp_is_nav_view( el ))
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne)
-            {
-                if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_toggle_visible = (vt == 0x02);
-                else if (sval && sval[0]) ne->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
-            }
-        }
-        if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
-                 (el->kind == UWP_KIND_TEXT_BLOCK || (el->class_flags & (UWP_CF_RUN | UWP_CF_INLINE))))
-        {
+    }
+}
+
+static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct uwp_element *el,
+                                                   WORD pid, int vt, double num, const WCHAR *sval,
+                                                   BOOL is_res_ref )
+{
+    switch (pid)
+    {
+    case XBF_PROP_CONTENT:
+    case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV:
+    case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE:
+    case XBF_PROP_FONTICON_GLYPH:
+    case XBF_PROP_TEXTBLOCK_TEXT:
+    case XBF_PROP_TEMPLATE_BINDING_PROPERTY:
+    case XBF_PROP_BINDING_PATH:
+    case XBF_PROP_RUN_TEXT:
+        if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && uwp_elem_uid( el )[0] && uwp_has_text( el )))
             uwp_elem_set_text( el, sval );
-        }
-        else if ((!wcscmp( pi->name, L"Source" ) || !wcscmp( pi->name, L"UriSource" ) || !wcscmp( pi->name, L"ImageSource" )) &&
-                 sval && sval[0] && !is_res_ref)
+        break;
+    case XBF_PROP_BINDING_ELEMENT_NAME:
+        if (sval && sval[0]) uwp_elem_set_placeholder( el, sval );
+        break;
+    case XBF_PROP_IMAGE_SOURCE:
+        if (sval && sval[0])
         {
             struct uwp_media_ext *m = uwp_elem_ensure_media( el );
             if (m) lstrcpynW( m->image_src, sval, ARRAY_SIZE(m->image_src) );
         }
-        else if (!wcscmp( pi->name, L"Stretch" ))
+        break;
+    case XBF_PROP_IMAGE_STRETCH:
+    case XBF_PROP_TILEBRUSH_STRETCH:
+        if (vt == 0x04 || vt == 0x0b)
         {
             struct uwp_media_ext *m = uwp_elem_ensure_media( el );
-            if (m)
+            if (m) m->media_stretch = (int)num;
+        }
+        break;
+    case XBF_PROP_AUTOMATION_NAME:
+        if (sval && sval[0]) uwp_elem_set_automation_name( el, sval );
+        break;
+    case XBF_PROP_AUTOMATION_ID:
+        if (sval && sval[0]) xbf_apply_uid_pri_lookup( ctx, el, sval );
+        break;
+    case XBF_PROP_TEXTELEMENT_FONT_FAMILY:
+        if (vt == 0x03 || vt == 0x04)
+        {
+            if (num > 0) { el->font_size = num; el->has_font_size = TRUE; }
+            break;
+        }
+        if (is_res_ref && sval && sval[0])
+        {
+            struct uwp_rd_entry *de = NULL;
+            if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                de && de->kind == UWP_RD_DOUBLE && de->dval > 0)
             {
-                if (vt == 0x04 || vt == 0x0b) m->media_stretch = (int)num;
-                else if (sval && sval[0])
-                {
-                    if (!wcsicmp( sval, L"None" )) m->media_stretch = 0;
-                    else if (!wcsicmp( sval, L"Fill" )) m->media_stretch = 1;
-                    else if (!wcsicmp( sval, L"Uniform" )) m->media_stretch = 2;
-                    else if (!wcsicmp( sval, L"UniformToFill" )) m->media_stretch = 3;
-                }
+                el->font_size = de->dval;
+                el->has_font_size = TRUE;
+                break;
             }
         }
-        else if (!wcscmp( pi->name, L"FontFamily" ) && sval && sval[0])
+        /* fall through */
+    case XBF_PROP_CONTENTPRESENTER_FONT_FAMILY:
+    case XBF_PROP_CONTROL_FONT_FAMILY:
+    case XBF_PROP_TEXTBLOCK_FONT_FAMILY:
+    case XBF_PROP_FONTICON_FONT_FAMILY:
+        if (sval && sval[0])
         {
             WCHAR face[64] = {0};
             const WCHAR *ff_spec = sval;
-            struct uwp_rd_entry *fe = NULL;
-            if ((is_res_ref || !wcschr( sval, L'#' )) &&
-                uwp_rd_find_entry( ctx->target_rd, el, sval, 0, &fe, NULL ) &&
-                fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
-                ff_spec = fe->str_val;
+            if (is_res_ref || !wcschr( sval, L'#' ))
+            {
+                struct uwp_rd_entry *fe = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &fe, NULL ) &&
+                    fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
+                    ff_spec = fe->str_val;
+            }
             uwp_elem_set_font_family( el, ff_spec );
             uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
         }
-        else if ((!wcscmp( pi->name, L"VirtualKeyControlChord" ) ||
-                  !wcscmp( pi->name, L"VirtualKeyAltChord" ) ||
-                  !wcscmp( pi->name, L"VirtualKeyShiftChord" ) ||
-                  !wcscmp( pi->name, L"VirtualKeyControlShiftChord" )) && sval && sval[0])
+        break;
+    case XBF_PROP_POPUP_HORIZONTAL_OFFSET:
+    case XBF_PROP_CONTROL_FONTSIZE:
+    case XBF_PROP_TEXTBLOCK_FONTSIZE:
+    case XBF_PROP_TEXTELEMENT_FONTSIZE:
+    case XBF_PROP_FONTICON_FONTSIZE:
+    {
+        double fs = 0.0;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &fs ) && fs > 0.0)
         {
-            UINT vk = uwp_parse_vk_string( sval );
-            UINT mods = !wcscmp( pi->name, L"VirtualKeyControlChord" ) ? 1 :
-                        (!wcscmp( pi->name, L"VirtualKeyAltChord" ) ? 2 :
-                         (!wcscmp( pi->name, L"VirtualKeyShiftChord" ) ? 4 : 5));
-            if (vk)
-                uwp_accel_register( NULL, el, vk, mods, TRUE );
+            el->font_size = fs;
+            el->has_font_size = TRUE;
         }
-        else if (!wcscmp( pi->name, L"ButtonId" ) && sval && sval[0])
+        break;
+    }
+    case XBF_PROP_TEXTBLOCK_FONT_WEIGHT:
+    case XBF_PROP_CONTROL_FONT_WEIGHT:
+    case XBF_PROP_TEXTELEMENT_FONT_WEIGHT:
+    {
+        int fw = uwp_parse_font_weight( sval, num, vt );
+        if (fw > 0) el->font_weight = fw;
+        break;
+    }
+    case XBF_PROP_TEXTBLOCK_TEXT_ALIGNMENT:
+        el->text_align = (int)num; el->has_text_align = TRUE; break;
+    case XBF_PROP_TEXTBLOCK_TEXT_WRAPPING:
+    case XBF_PROP_RICHTEXTBLOCK_TEXT_WRAPPING:
+        if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
         {
-            IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-            const WCHAR *owner_cls = (pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0])
-                ? ctx->types[pi->owner_tid].full_name
-                : (el->class_name[0] ? el->class_name : NULL);
-            if (owner_cls)
-                uwp_set_custom_xaml_member( ctx->app_outer, owner_cls, L"ButtonId", target, sval );
-            /* Fallback label from ButtonId if button still has no text */
-            if (!uwp_has_text( el ))
-            {
-                static const struct { const WCHAR *id; const WCHAR *label; } btn_id_map[] = {
-                    { L"Zero",       L"0" },
-                    { L"One",        L"1" },
-                    { L"Two",        L"2" },
-                    { L"Three",      L"3" },
-                    { L"Four",       L"4" },
-                    { L"Five",       L"5" },
-                    { L"Six",        L"6" },
-                    { L"Seven",      L"7" },
-                    { L"Eight",      L"8" },
-                    { L"Nine",       L"9" },
-                    { L"Decimal",    L"." },
-                    { L"Add",        L"+" },
-                    { L"Subtract",   L"-" },
-                    { L"Multiply",   L"\x00d7" },
-                    { L"Divide",     L"\x00f7" },
-                    { L"Equals",     L"=" },
-                    { L"Clear",      L"C" },
-                    { L"ClearEntry", L"CE" },
-                    { L"Backspace",  L"\x232b" },
-                    { L"Negate",     L"+/-" },
-                    { L"Percent",    L"%" },
-                    { L"Invert",     L"1/x" },
-                    { L"Power",      L"x\x00b2" },
-                    { L"Sqrt",       L"\x221a" },
-                };
-                unsigned int bi;
-                for (bi = 0; bi < ARRAY_SIZE(btn_id_map); bi++)
-                {
-                    if (!wcscmp( sval, btn_id_map[bi].id ))
-                    {
-                        uwp_elem_set_text( el, btn_id_map[bi].label );
-                        break;
-                    }
-                }
-            }
+            if (!wcsicmp( sval, L"NoWrap" )) el->text_wrapping = 1;
+            else if (!wcsicmp( sval, L"WrapWholeWords" )) el->text_wrapping = 3;
+            else if (!wcsicmp( sval, L"Wrap" )) el->text_wrapping = 2;
         }
-        else if (is_res_ref && sval && sval[0] && pi->name[0] &&
-                 pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0] &&
-                 wcsncmp( ctx->types[pi->owner_tid].full_name, L"Windows.UI.Xaml.", 16 ) != 0)
+        else el->text_wrapping = (int)num;
+        break;
+    case XBF_PROP_TEXTBLOCK_MAX_LINES:
+    case XBF_PROP_RICHTEXTBLOCK_MAX_LINES:
+        if (vt == 0x03 || vt == 0x04) el->max_lines = max( 0, (int)num );
+        else if (sval && sval[0]) el->max_lines = max( 0, (int)wcstol( sval, NULL, 10 ) );
+        break;
+    case XBF_PROP_STORYBOARD_TARGET_NAME:
+        if (sval && sval[0])
         {
-            void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
-            struct uwp_rd_entry *re = NULL;
-            struct uwp_rd_bucket *found_b = NULL;
-            if (ao && uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd, el, sval, 0, &re, &found_b ) && re)
-            {
-                const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
-                IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-                if (re->kind == UWP_RD_DOUBLE)
-                {
-                    WCHAR nbuf[64];
-                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", re->dval );
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
-                }
-                else
-                {
-                    IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
-                    if (res_val)
-                        uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, target, res_val );
-                }
-            }
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa) lstrcpynW( sa->anim_target_name, sval, ARRAY_SIZE(sa->anim_target_name) );
         }
-        else if (pi->name[0] && pi->owner_tid < ctx->type_cnt &&
-                 ctx->types[pi->owner_tid].full_name[0] &&
-                 wcsncmp( ctx->types[pi->owner_tid].full_name, L"Windows.UI.Xaml.", 16 ) != 0 &&
-                 (vt == 0x01 || vt == 0x02 || vt == 0x03 || vt == 0x04 || vt == 0x09 || vt == 0x0b || vt == 0x0c || (vt == 0x05 && sval && sval[0])))
+        break;
+    case XBF_PROP_STORYBOARD_TARGET_PROPERTY:
+        if (sval && sval[0])
         {
-            void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
-            if (ao)
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa) vsm_clean_prop_name( sval, sa->anim_target_prop, ARRAY_SIZE(sa->anim_target_prop) );
+        }
+        break;
+    case XBF_PROP_DOUBLE_ANIMATION_TO:
+    {
+        double to_val = 0.0;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &to_val ))
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa) { sa->anim_to = to_val; sa->anim_has_to = TRUE; }
+        }
+        break;
+    }
+    case XBF_PROP_ACCELERATOR_KEY:
+        el->accel_key = (UINT)num;
+        uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
+        break;
+    case XBF_PROP_ACCELERATOR_MODIFIERS:
+        el->accel_mods = (UINT)num;
+        uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
+        break;
+    case XBF_PROP_ACCELERATOR_SCOPE_OWNER:
+        el->accel_enabled = (num != 0.0);
+        uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
+        break;
+    case XBF_PROP_ITEMS_CONTROL_DISPLAY_MEMBER_PATH:
+        if (sval && sval[0])
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
+        }
+        break;
+    case XBF_PROP_SYMBOL_ICON_SYMBOL:
+        if ((vt == 0x04 || vt == 0x0b) && (int)num >= 0xE000 && (int)num <= 0xFFFF)
+        {
+            WCHAR sym = (WCHAR)(int)num;
+            uwp_elem_set_text_n( el, &sym, 1 );
+            if (!uwp_elem_font_family( el )[0])
+                uwp_elem_set_font_family( el, L"Segoe MDL2 Assets" );
+        }
+        break;
+    case XBF_PROP_TOGGLE_BUTTON_IS_CHECKED:
+    case XBF_PROP_TOGGLE_MENU_FLYOUT_ITEM_IS_CHECKED:
+        if (vt == 0x01 || vt == 0x02) el->is_checked = (vt == 0x02) ? 1 : 0;
+        else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
+        else el->is_checked = (num != 0.0) ? 1 : 0;
+        break;
+    }
+}
+
+static void xbf_apply_custom_nav_prop( struct xbf_ctx *ctx, struct uwp_element *el,
+                                       const struct xbf_prop_info *pi, int vt,
+                                       double num, const WCHAR *sval, BOOL is_res_ref )
+{
+    if (!wcscmp( pi->name, L"DisplayMemberPath" ) && sval && sval[0])
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
+        return;
+    }
+    if (!uwp_is_nav_view( el )) return;
+    if (!wcscmp( pi->name, L"PaneDisplayMode" ))
+    {
+        int mode = -1;
+        if (vt == 0x04 || vt == 0x0b) mode = (int)num;
+        else if (sval && sval[0])
+        {
+            if (!wcscmp( sval, L"Auto" )) mode = 0;
+            else if (!wcscmp( sval, L"Left" )) mode = 1;
+            else if (!wcscmp( sval, L"Top" )) mode = 2;
+            else if (!wcscmp( sval, L"LeftCompact" )) mode = 3;
+            else if (!wcscmp( sval, L"LeftMinimal" )) mode = 4;
+        }
+        if (mode >= 0 && mode <= 4)
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) { ne->nav_pane_display_mode = mode; ne->nav_pane_display_mode_set = TRUE; }
+            TRACE( "xbf_apply_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
+                   debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
+        }
+    }
+    else if (!wcscmp( pi->name, L"IsPaneOpen" ))
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne)
+        {
+            if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_open = (vt == 0x02);
+            else if (sval && sval[0]) ne->nav_is_pane_open = !wcsicmp( sval, L"True" );
+        }
+        uwp_nav_track_open_state( el );
+    }
+    else if (!wcscmp( pi->name, L"OpenPaneLength" ) || !wcscmp( pi->name, L"CompactPaneLength" ) ||
+             !wcscmp( pi->name, L"CompactModeThresholdWidth" ) || !wcscmp( pi->name, L"ExpandedModeThresholdWidth" ))
+    {
+        double d = 0.0;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (!ne) return;
+            if (!wcscmp( pi->name, L"OpenPaneLength" )) ne->nav_open_pane_length = d;
+            else if (!wcscmp( pi->name, L"CompactPaneLength" )) ne->nav_compact_pane_length = d;
+            else if (!wcscmp( pi->name, L"CompactModeThresholdWidth" )) ne->nav_compact_threshold = d;
+            else ne->nav_expanded_threshold = d;
+        }
+    }
+    else if (!wcscmp( pi->name, L"IsSettingsVisible" ) || !wcscmp( pi->name, L"IsPaneToggleButtonVisible" ))
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        BOOL flag;
+        if (!ne) return;
+        if (vt == 0x01 || vt == 0x02) flag = (vt == 0x02);
+        else if (sval && sval[0]) flag = !wcsicmp( sval, L"True" );
+        else return;
+        if (!wcscmp( pi->name, L"IsSettingsVisible" )) ne->nav_is_settings_visible = flag;
+        else ne->nav_is_pane_toggle_visible = flag;
+    }
+}
+
+static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
+                                   const struct xbf_prop_info *pi, int vt,
+                                   double num, const WCHAR *sval, BOOL is_res_ref )
+{
+    if (!wcscmp( pi->name, L"IsChecked" ) || !wcscmp( pi->name, L"IsSelected" ))
+    {
+        if (vt == 0x01 || vt == 0x02) el->is_checked = (vt == 0x02) ? 1 : 0;
+        else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
+        else el->is_checked = (num != 0.0) ? 1 : 0;
+    }
+    xbf_apply_custom_nav_prop( ctx, el, pi, vt, num, sval, is_res_ref );
+
+    if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
+        (el->kind == UWP_KIND_TEXT_BLOCK || (el->class_flags & (UWP_CF_RUN | UWP_CF_INLINE))))
+    {
+        uwp_elem_set_text( el, sval );
+    }
+    else if ((!wcscmp( pi->name, L"Source" ) || !wcscmp( pi->name, L"UriSource" ) || !wcscmp( pi->name, L"ImageSource" )) &&
+             sval && sval[0] && !is_res_ref)
+    {
+        struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+        if (m) lstrcpynW( m->image_src, sval, ARRAY_SIZE(m->image_src) );
+    }
+    else if (!wcscmp( pi->name, L"Stretch" ))
+    {
+        struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+        if (m)
+        {
+            if (vt == 0x04 || vt == 0x0b) m->media_stretch = (int)num;
+            else if (sval && sval[0])
             {
-                const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
-                IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-                BOOL is_nav_pane_mode = (!wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
-                                         !wcscmp( pi->name, L"PaneDisplayMode" ));
-                if (vt == 0x01 || vt == 0x02)
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, (vt == 0x02) ? L"True" : L"False" );
-                else if (vt == 0x05 && sval && sval[0])
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, sval );
-                else if (is_nav_pane_mode)
-                {
-                    static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
-                    int m = (int)num;
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target,
-                                                (m >= 0 && m < 5) ? modes[m] : L"Auto" );
-                }
-                else
-                {
-                    WCHAR nbuf[64];
-                    swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
-                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
-                }
+                if (!wcsicmp( sval, L"None" )) m->media_stretch = 0;
+                else if (!wcsicmp( sval, L"Fill" )) m->media_stretch = 1;
+                else if (!wcsicmp( sval, L"Uniform" )) m->media_stretch = 2;
+                else if (!wcsicmp( sval, L"UniformToFill" )) m->media_stretch = 3;
             }
         }
     }
+    else if (!wcscmp( pi->name, L"FontFamily" ) && sval && sval[0])
     {
-        BOOL is_sel = FALSE;
-        if (el && is_res_ref && sval && sval[0] && xbf_prop_is_item_template( pid, ctx, &is_sel ))
+        WCHAR face[64] = {0};
+        const WCHAR *ff_spec = sval;
+        struct uwp_rd_entry *fe = NULL;
+        if ((is_res_ref || !wcschr( sval, L'#' )) &&
+            uwp_rd_find_entry( ctx->target_rd, el, sval, 0, &fe, NULL ) &&
+            fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
+            ff_spec = fe->str_val;
+        uwp_elem_set_font_family( el, ff_spec );
+        uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
+    }
+    else if ((!wcscmp( pi->name, L"VirtualKeyControlChord" ) || !wcscmp( pi->name, L"VirtualKeyAltChord" ) ||
+              !wcscmp( pi->name, L"VirtualKeyShiftChord" ) || !wcscmp( pi->name, L"VirtualKeyControlShiftChord" )) &&
+             sval && sval[0])
+    {
+        UINT vk = uwp_parse_vk_string( sval );
+        UINT mods = !wcscmp( pi->name, L"VirtualKeyControlChord" ) ? 1 :
+                    (!wcscmp( pi->name, L"VirtualKeyAltChord" ) ? 2 :
+                     (!wcscmp( pi->name, L"VirtualKeyShiftChord" ) ? 4 : 5));
+        if (vk) uwp_accel_register( NULL, el, vk, mods, TRUE );
+    }
+    else if (!wcscmp( pi->name, L"ButtonId" ) && sval && sval[0])
+    {
+        IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+        const WCHAR *owner_cls = (pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0])
+            ? ctx->types[pi->owner_tid].full_name
+            : (el->class_name[0] ? el->class_name : NULL);
+        if (owner_cls) uwp_set_custom_xaml_member( ctx->app_outer, owner_cls, L"ButtonId", target, sval );
+        if (!uwp_has_text( el ))
         {
-            struct uwp_rd_entry *re = NULL;
-            struct uwp_rd_bucket *found_b = NULL;
-            if (uwp_rd_find_entry( ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL,
-                                   el, sval, 0, &re, &found_b ) && re)
+            static const struct { const WCHAR *id; const WCHAR *label; } btn_id_map[] = {
+                { L"Zero", L"0" }, { L"One", L"1" }, { L"Two", L"2" }, { L"Three", L"3" },
+                { L"Four", L"4" }, { L"Five", L"5" }, { L"Six", L"6" }, { L"Seven", L"7" },
+                { L"Eight", L"8" }, { L"Nine", L"9" }, { L"Decimal", L"." }, { L"Add", L"+" },
+                { L"Subtract", L"-" }, { L"Multiply", L"\x00d7" }, { L"Divide", L"\x00f7" },
+                { L"Equals", L"=" }, { L"Clear", L"C" }, { L"ClearEntry", L"CE" },
+                { L"Backspace", L"\x232b" }, { L"Negate", L"+/-" }, { L"Percent", L"%" },
+                { L"Invert", L"1/x" }, { L"Power", L"x\x00b2" }, { L"Sqrt", L"\x221a" },
+            };
+            unsigned int bi;
+            for (bi = 0; bi < ARRAY_SIZE(btn_id_map); bi++)
+            {
+                if (!wcscmp( sval, btn_id_map[bi].id )) { uwp_elem_set_text( el, btn_id_map[bi].label ); break; }
+            }
+        }
+    }
+    else if (is_res_ref && sval && sval[0] && pi->name[0] &&
+             pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0] &&
+             wcsncmp( ctx->types[pi->owner_tid].full_name, L"Windows.UI.Xaml.", 16 ) != 0)
+    {
+        void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
+        struct uwp_rd_entry *re = NULL;
+        struct uwp_rd_bucket *found_b = NULL;
+        if (ao && uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd, el, sval, 0, &re, &found_b ) && re)
+        {
+            const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
+            IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+            if (re->kind == UWP_RD_DOUBLE)
+            {
+                WCHAR nbuf[64];
+                swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", re->dval );
+                uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
+            }
+            else
             {
                 IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
-                if (res_val)
-                {
-                    if (is_sel)
-                    {
-                        if (el->item_template_selector) IInspectable_Release( el->item_template_selector );
-                        el->item_template_selector = res_val;
-                        IInspectable_AddRef( res_val );
-                    }
-                    else
-                    {
-                        if (el->item_template) IInspectable_Release( el->item_template );
-                        el->item_template = res_val;
-                        IInspectable_AddRef( res_val );
-                    }
-                    TRACE( "xbf_apply_property: %s (%s) pid=%#x -> res %s (%p)\n",
-                           debugstr_w(el->class_name), debugstr_w(el->name), pid, debugstr_w(sval), res_val );
-                }
+                if (res_val) uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, target, res_val );
             }
         }
     }
+    else if (pi->name[0] && pi->owner_tid < ctx->type_cnt &&
+             ctx->types[pi->owner_tid].full_name[0] &&
+             wcsncmp( ctx->types[pi->owner_tid].full_name, L"Windows.UI.Xaml.", 16 ) != 0 &&
+             (vt == 0x01 || vt == 0x02 || vt == 0x03 || vt == 0x04 || vt == 0x09 || vt == 0x0b || vt == 0x0c || (vt == 0x05 && sval && sval[0])))
+    {
+        void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
+        if (ao)
+        {
+            const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
+            IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+            BOOL is_nav_pane_mode = (!wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
+                                     !wcscmp( pi->name, L"PaneDisplayMode" ));
+            if (vt == 0x01 || vt == 0x02)
+                uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, (vt == 0x02) ? L"True" : L"False" );
+            else if (vt == 0x05 && sval && sval[0])
+                uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, sval );
+            else if (is_nav_pane_mode)
+            {
+                static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
+                int m = (int)num;
+                uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, (m >= 0 && m < 5) ? modes[m] : L"Auto" );
+            }
+            else
+            {
+                WCHAR nbuf[64];
+                swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
+                uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, nbuf );
+            }
+        }
+    }
+}
+
+static void xbf_apply_item_template_res_ref( struct xbf_ctx *ctx, struct uwp_element *el,
+                                             WORD pid, const WCHAR *sval )
+{
+    BOOL is_sel = FALSE;
+    struct uwp_rd_entry *re = NULL;
+    struct uwp_rd_bucket *found_b = NULL;
+    IInspectable *res_val;
+
+    if (!el || !sval || !sval[0] || !xbf_prop_is_item_template( pid, ctx, &is_sel )) return;
+    if (!uwp_rd_find_entry( ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL,
+                            el, sval, 0, &re, &found_b ) || !re)
+        return;
+    res_val = uwp_rd_materialize_entry( found_b, re );
+    if (!res_val) return;
+    if (is_sel)
+    {
+        if (el->item_template_selector) IInspectable_Release( el->item_template_selector );
+        el->item_template_selector = res_val;
+        IInspectable_AddRef( res_val );
+    }
+    else
+    {
+        if (el->item_template) IInspectable_Release( el->item_template );
+        el->item_template = res_val;
+        IInspectable_AddRef( res_val );
+    }
+    TRACE( "xbf_apply_property: %s (%s) pid=%#x -> res %s (%p)\n",
+           debugstr_w(el->class_name), debugstr_w(el->name), pid, debugstr_w(sval), res_val );
+}
+
+void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
+                         WORD pid, int vt, double num, const WCHAR *sval,
+                         const double vec4[4], BOOL is_res_ref )
+{
+    if (sv)
+        xbf_apply_stack_val_prop( ctx, el, sv, pid, vt, num, sval, is_res_ref );
+    if (!el) return;
+    if (xbf_apply_brush_or_grad_prop( ctx, el, pid, vt, num, sval )) return;
+
+    if (pid & 0x8000)
+    {
+        if (!xbf_apply_known_layout_prop( ctx, el, pid, vt, num, sval, vec4, is_res_ref ))
+            xbf_apply_known_text_and_control_prop( ctx, el, pid, vt, num, sval, is_res_ref );
+    }
+    else if (ctx && pid < ctx->prop_cnt)
+    {
+        xbf_apply_custom_prop( ctx, el, &ctx->props[pid], vt, num, sval, is_res_ref );
+    }
+
+    if (is_res_ref)
+        xbf_apply_item_template_res_ref( ctx, el, pid, sval );
 }
 
 static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WORD target_pid,

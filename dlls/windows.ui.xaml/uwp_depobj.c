@@ -511,7 +511,7 @@ static BOOL uwp_should_sync_display_text( const struct uwp_element *impl, const 
 
     if (uwp_wcs_in_table( dpn, meta_dps, ARRAY_SIZE(meta_dps) ))
         return FALSE;
-    if (uwp_is_tooltip( impl ) || !wcscmp( impl->name, L"SettingsItem" ))
+    if (uwp_is_tooltip( impl ) || uwp_is_nav_settings_item( impl ))
         return FALSE;
     return uwp_is_display_result_element( impl ) ||
            uwp_substr_in_table( impl->class_name, text_class_substrs, ARRAY_SIZE(text_class_substrs) ) ||
@@ -635,17 +635,377 @@ void uwp_nav_select_item( struct uwp_element *nav, struct uwp_element *nvi )
     uwp_invalidate_window();
 }
 
+static void uwp_setval_sync_display_text( struct uwp_element *impl, const WCHAR *dpn, IInspectable *val )
+{
+    WCHAR str_val[2048];
+    if (!val || !uwp_should_sync_display_text( impl, dpn )) return;
+    str_val[0] = 0;
+    if (uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
+    {
+        uwp_elem_set_text( impl, str_val );
+        if (impl->tpl_normal_output)
+            uwp_elem_set_text( impl->tpl_normal_output, str_val );
+        TRACE( "SetValue updated display text on %s (%s) -> %s\n",
+               debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_val) );
+        uwp_invalidate_window();
+    }
+}
+
+static void uwp_setval_apply_nav_dp( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
+{
+    if (uwp_is_nav_view( impl ))
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+        INT32 ev = 0;
+        boolean bv = FALSE;
+        double dv = 0.0;
+        if (!ne) return;
+        if (!wcscmp( dpname, L"PaneDisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+        {
+            ne->nav_pane_display_mode = ev;
+            ne->nav_pane_display_mode_set = TRUE;
+            TRACE( "NavView(%s) SetValue PaneDisplayMode=%d\n", debugstr_w(impl->name), ev );
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"DisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+        {
+            ne->nav_display_mode = ev;
+            ne->nav_display_mode_set = TRUE;
+            TRACE( "NavView(%s) SetValue DisplayMode=%d\n", debugstr_w(impl->name), ev );
+        }
+        else if (!wcscmp( dpname, L"IsPaneOpen" ) && val && uwp_unbox_bool( val, &bv ))
+        {
+            ne->nav_is_pane_open = (bv != 0);
+            uwp_nav_track_open_state( impl );
+            if (!ne->nav_is_pane_open) ne->nav_scroll_y = 0;
+            TRACE( "NavView(%s) SetValue IsPaneOpen=%d\n", debugstr_w(impl->name), (int)ne->nav_is_pane_open );
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"OpenPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+        {
+            ne->nav_open_pane_length = dv;
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"CompactPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+        {
+            ne->nav_compact_pane_length = dv;
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"CompactModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+            ne->nav_compact_threshold = dv;
+        else if (!wcscmp( dpname, L"ExpandedModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+            ne->nav_expanded_threshold = dv;
+        else if (!wcscmp( dpname, L"IsSettingsVisible" ) && val && uwp_unbox_bool( val, &bv ))
+        {
+            ne->nav_is_settings_visible = (bv != 0);
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"IsPaneToggleButtonVisible" ) && val && uwp_unbox_bool( val, &bv ))
+        {
+            ne->nav_is_pane_toggle_visible = (bv != 0);
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"SelectedItem" ))
+        {
+            uwp_replace_iface( &ne->selected_item, val );
+            if (val) uwp_nav_sync_selection_tree( impl, NULL, val, 0 );
+            uwp_invalidate_window();
+        }
+        return;
+    }
+    if (uwp_is_nav_item( impl ))
+    {
+        boolean bv = FALSE;
+        if (!wcscmp( dpname, L"Icon" ))
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+            if (ne && uwp_replace_iface( &ne->nav_icon, val ))
+                uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"IsSelected" ) && val && uwp_unbox_bool( val, &bv ))
+        {
+            if (bv) uwp_nav_select_item( NULL, impl );
+            else { impl->is_checked = 0; uwp_invalidate_window(); }
+        }
+    }
+}
+
+static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
+{
+    double dv = 0.0;
+    INT32 ev = 0;
+
+    if (!dpname[0]) return;
+    if (uwp_is_nav_view( impl ) || uwp_is_nav_item( impl ))
+        uwp_setval_apply_nav_dp( impl, dpname, val );
+    else if (impl->class_flags & UWP_CF_RADIO_BUTTON)
+    {
+        INT32 iv = -1;
+        if (!wcscmp( dpname, L"SelectedIndex" ) && val && uwp_unbox_int32( val, &iv ))
+            uwp_selector_set_selection( impl, iv, NULL, TRUE, FALSE );
+        else if (!wcscmp( dpname, L"SelectedItem" ))
+            uwp_selector_set_selection( impl, -1, val, FALSE, FALSE );
+    }
+    else if (uwp_is_combobox( impl ))
+    {
+        INT32 iv = -1;
+        boolean bv = FALSE;
+        WCHAR sbuf[64] = {0};
+        if (!wcscmp( dpname, L"SelectedIndex" ) && val && uwp_unbox_int32( val, &iv ))
+            uwp_selector_set_selection( impl, iv, NULL, TRUE, FALSE );
+        else if (!wcscmp( dpname, L"SelectedItem" ))
+            uwp_selector_set_selection( impl, -1, val, FALSE, FALSE );
+        else if (!wcscmp( dpname, L"IsDropDownOpen" ) && val && uwp_unbox_bool( val, &bv ))
+            uwp_combobox_set_open( impl, bv != 0 );
+        else if (!wcscmp( dpname, L"DisplayMemberPath" ) && val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+            if (ne) lstrcpynW( ne->display_member_path, sbuf, ARRAY_SIZE(ne->display_member_path) );
+        }
+    }
+
+    if (!wcscmp( dpname, L"Value" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+    {
+        impl->range_val = dv;
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"Minimum" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+    {
+        impl->range_min = dv;
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"Maximum" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+    {
+        impl->range_max = dv;
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"HorizontalContentAlignment" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+    {
+        impl->h_content_align = ev;
+        impl->has_h_content_align = TRUE;
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"VerticalContentAlignment" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+    {
+        impl->v_content_align = ev;
+        impl->has_v_content_align = TRUE;
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"Flyout" ))
+    {
+        uwp_replace_iface( &impl->flyout, val );
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"IsChecked" ) || !wcscmp( dpname, L"IsSelected" ))
+    {
+        boolean bv = FALSE;
+        if (!val) impl->is_checked = 0;
+        else if (uwp_unbox_bool( val, &bv )) impl->is_checked = bv ? 1 : 0;
+        uwp_invalidate_window();
+    }
+    else if (impl->kind == UWP_KIND_POPUP)
+    {
+        boolean bv = FALSE;
+        if (!wcscmp( dpname, L"IsOpen" ) && val && uwp_unbox_bool( val, &bv ))
+            uwp_popup_set_open( impl, bv != 0 );
+        else if (!wcscmp( dpname, L"HorizontalOffset" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+        {
+            impl->popup_h_offset = dv;
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"VerticalOffset" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+        {
+            impl->popup_v_offset = dv;
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"IsLightDismissEnabled" ) && val && uwp_unbox_bool( val, &bv ))
+            impl->popup_light_dismiss = (bv != 0);
+    }
+}
+
+static void uwp_setval_apply_media_source_dp( struct uwp_element *impl, IInspectable *val )
+{
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    impl->probe_flags &= ~UWP_PF_NO_IMG;
+    if (m && m->img_source != val)
+    {
+        if (m->img_source) IInspectable_Release( m->img_source );
+        m->img_source = val;
+        if (m->img_source) IInspectable_AddRef( m->img_source );
+    }
+    if (val && m)
+    {
+        WCHAR resolved_src[512] = {0};
+        struct uwp_element *src_el = uwp_elem_from_any( val );
+        const WCHAR *src_str = uwp_elem_image_src( src_el );
+        if (src_str[0])
+            lstrcpynW( resolved_src, src_str, ARRAY_SIZE(resolved_src) );
+        else if (!uwp_unbox_string( val, resolved_src, ARRAY_SIZE(resolved_src) ))
+            uwp_extract_uri_string( val, resolved_src, ARRAY_SIZE(resolved_src) );
+        if (resolved_src[0])
+        {
+            lstrcpynW( m->image_src, resolved_src, ARRAY_SIZE(m->image_src) );
+            m->img_loaded = FALSE;
+            InterlockedExchange( &m->img_loading, 0 );
+            if (impl->parent && impl->parent->kind == UWP_KIND_IMAGE)
+            {
+                struct uwp_media_ext *pm = uwp_elem_ensure_media( impl->parent );
+                impl->parent->probe_flags &= ~UWP_PF_NO_IMG;
+                if (pm)
+                {
+                    lstrcpynW( pm->image_src, resolved_src, ARRAY_SIZE(pm->image_src) );
+                    pm->img_loaded = FALSE;
+                    InterlockedExchange( &pm->img_loading, 0 );
+                }
+            }
+            uwp_invalidate_window();
+        }
+    }
+    else if (impl->kind == UWP_KIND_IMAGE && m)
+    {
+        m->image_src[0] = 0;
+        m->img_loaded = FALSE;
+        InterlockedExchange( &m->img_loading, 0 );
+        uwp_invalidate_window();
+    }
+}
+
+static void uwp_setval_fire_metadata_cb( struct uwp_element *impl, void *dp,
+                                         IPropertyMetadata *meta,
+                                         IInspectable **old_val, IInspectable *val )
+{
+    IInspectable *def_val = xaml_pm_get_default_value( meta );
+    IPropertyChangedCallback *cb = xaml_pm_get_callback( meta );
+    struct uwp_dp_changed_args *args;
+    IInspectable *sender;
+    HRESULT cb_hr = S_OK;
+    IInspectable *nv = NULL;
+
+    if (!*old_val && def_val)
+    {
+        *old_val = def_val;
+        IInspectable_AddRef( *old_val );
+    }
+    if (!cb || (!*old_val && !val)) return;
+
+    args = calloc( 1, sizeof(*args) );
+    if (!args) return;
+    sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+    args->vtbl = dp_changed_args_vtbl;
+    args->ref = 1;
+    args->dp = dp;
+    if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
+    args->old_val = *old_val;
+    if (*old_val) IInspectable_AddRef( *old_val );
+    args->new_val = val;
+    if (val) IInspectable_AddRef( val );
+    TRACE( "uwp_do_SetValue invoking PropertyChangedCallback=%p sender=%p (%s) dp=%p old=%p new=%p\n",
+           cb, sender, debugstr_w(impl->class_name), dp, *old_val, val );
+    __TRY
+    {
+        cb_hr = IPropertyChangedCallback_Invoke( cb, (IDependencyObject *)sender,
+                                                 (IDependencyPropertyChangedEventArgs *)args );
+    }
+    __EXCEPT_ALL { cb_hr = E_FAIL; }
+    __ENDTRY;
+    if (FAILED(cb_hr))
+        WARN( "uwp_do_SetValue PropertyChangedCallback=%p sender=%p (%s) dp=%p -> FAILED hr %#lx\n",
+              cb, sender, debugstr_w(impl->class_name), dp, cb_hr );
+    IDependencyPropertyChangedEventArgs_get_NewValue( (IDependencyPropertyChangedEventArgs *)args, &nv );
+    TRACE( "uwp_do_SetValue callback read NewValue -> %p (val %p)\n", (void *)nv, (void *)val );
+    if (nv) IInspectable_Release( nv );
+    dp_args_Release( args );
+}
+
+static void uwp_setval_fire_dp_callbacks( struct uwp_element *impl, void *dp )
+{
+    struct xaml_event_handler *cbs_snap[32];
+    int snap_cnt = 0, i;
+
+    AcquireSRWLockShared( &impl->dp_lock );
+    for (i = 0; i < impl->dp_cb_cnt && snap_cnt < (int)ARRAY_SIZE(cbs_snap); i++)
+    {
+        if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].callback)
+        {
+            cbs_snap[snap_cnt] = (struct xaml_event_handler *)impl->dp_cbs[i].callback;
+            IUnknown_AddRef( (IUnknown *)cbs_snap[snap_cnt] );
+            snap_cnt++;
+        }
+    }
+    ReleaseSRWLockShared( &impl->dp_lock );
+
+    for (i = 0; i < snap_cnt; i++)
+    {
+        void *sender = impl->outer ? (void *)impl->outer : (void *)&impl->IDependencyObject_iface;
+        struct xaml_event_handler *h = cbs_snap[i];
+        HRESULT cb_hr = S_OK;
+        __TRY { cb_hr = h->lpVtbl->Invoke( h, sender, dp ); }
+        __EXCEPT_ALL { cb_hr = E_FAIL; }
+        __ENDTRY;
+        TRACE( "uwp_do_SetValue dp_cb[%d] h=%p sender=%p (%s) dp=%p -> hr %#lx\n",
+               i, h, sender, debugstr_w(impl->class_name), dp, cb_hr );
+        IUnknown_Release( (IUnknown *)h );
+    }
+}
+
+static void uwp_setval_post_commit( struct uwp_element *impl, const WCHAR *dpn, IInspectable *val )
+{
+    if (uwp_is_items_repeater( impl ))
+    {
+        struct uwp_element *rep;
+        if (impl->in_measure_arrange) return;
+        impl->last_measured_w = 0.0f;
+        impl->last_measured_h = 0.0f;
+        impl->probe_flags = 0;
+        rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
+        if (rep && rep != impl && !rep->in_measure_arrange)
+        {
+            rep->last_measured_w = 0.0f;
+            rep->last_measured_h = 0.0f;
+            rep->probe_flags = 0;
+        }
+        uwp_invalidate_window();
+        return;
+    }
+    if (!dpn[0]) return;
+    if (!wcscmp( dpn, L"ItemsSource" ) || !wcscmp( dpn, L"Content" ) ||
+        !wcscmp( dpn, L"DataContext" ) || !wcscmp( dpn, L"Text" ) || !wcscmp( dpn, L"Visibility" ))
+    {
+        if (!wcscmp( dpn, L"Content" ) || !wcscmp( dpn, L"DataContext" ))
+        {
+            impl->probe_flags = 0;
+            if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
+        }
+        if (!wcscmp( dpn, L"ItemsSource" ))
+        {
+            uwp_replace_iface( &impl->items_source, val );
+            if (val && !uwp_is_combobox( impl ))
+                uwp_items_ctrl_materialize_source( impl, val );
+            else if (uwp_is_combobox( impl ) && uwp_elem_selected_item( impl ))
+                uwp_selector_set_selection( impl, -1, uwp_elem_selected_item( impl ), FALSE, FALSE );
+        }
+        uwp_invalidate_window();
+    }
+}
+
 HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 {
-    struct uwp_element *impl = uwp_elem_from_any( iface );
-    IInspectable *old_val = NULL;
-    int i;
     static __thread struct { struct uwp_element *el; void *dp; IInspectable *val; } setval_stack[64];
     static __thread int setval_depth = 0;
-    BOOL found_existing = FALSE;
-    BOOL same_val = FALSE;
-    BOOL pushed_setval = FALSE;
-    int si;
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    IInspectable *old_val = NULL;
+    const WCHAR *dpn;
+    IPropertyMetadata *meta;
+    BOOL found_existing = FALSE, same_val = FALSE, pushed_setval = FALSE;
+    int i, si;
 
     if (!impl || !dp) return S_OK;
     for (si = 0; si < setval_depth; si++)
@@ -658,217 +1018,15 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         return S_OK;
 
     if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
+    dpn = xaml_dp_get_name( dp );
 
-    /* Check if val is a string (e.g. CalculationResult.DisplayValue or Content) */
-    if (val)
-    {
-        const WCHAR *dpn = xaml_dp_get_name( dp );
-        if (uwp_should_sync_display_text( impl, dpn ))
-        {
-            WCHAR str_val[2048];
-            str_val[0] = 0;
-            if (uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
-            {
-                uwp_elem_set_text( impl, str_val );
-                if (impl->tpl_normal_output)
-                    uwp_elem_set_text( impl->tpl_normal_output, str_val );
-                TRACE( "SetValue updated display text on %s (%s) -> %s\n",
-                       debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_val) );
-                uwp_invalidate_window();
-            }
-        }
-    }
-    if (!wcscmp( xaml_dp_get_name( dp ), L"DataContext" ))
+    uwp_setval_sync_display_text( impl, dpn, val );
+    if (!wcscmp( dpn, L"DataContext" ))
         uwp_propagate_data_context( impl, val );
     if (uwp_is_tabview( impl ))
-    {
-        uwp_tabview_handle_dp( impl, xaml_dp_get_name( dp ), val );
-    }
+        uwp_tabview_handle_dp( impl, dpn, val );
     else
-    {
-        const WCHAR *dpname = xaml_dp_get_name( dp );
-        if (dpname[0] && uwp_is_nav_view( impl ))
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
-            INT32 ev = 0;
-            boolean bv = FALSE;
-            double dv = 0.0;
-            if (!ne) { }
-            else if (!wcscmp( dpname, L"PaneDisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
-            {
-                ne->nav_pane_display_mode = ev;
-                ne->nav_pane_display_mode_set = TRUE;
-                TRACE( "NavView(%s) SetValue PaneDisplayMode=%d\n", debugstr_w(impl->name), ev );
-                g_layout_dirty = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"DisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
-            {
-                ne->nav_display_mode = ev;
-                ne->nav_display_mode_set = TRUE;
-                TRACE( "NavView(%s) SetValue DisplayMode=%d\n", debugstr_w(impl->name), ev );
-            }
-            else if (!wcscmp( dpname, L"IsPaneOpen" ) && val && uwp_unbox_bool( val, &bv ))
-            {
-                ne->nav_is_pane_open = (bv != 0);
-                uwp_nav_track_open_state( impl );
-                if (!ne->nav_is_pane_open) ne->nav_scroll_y = 0;
-                TRACE( "NavView(%s) SetValue IsPaneOpen=%d\n", debugstr_w(impl->name), (int)ne->nav_is_pane_open );
-                g_layout_dirty = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"OpenPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
-            {
-                ne->nav_open_pane_length = dv;
-                g_layout_dirty = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"CompactPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
-            {
-                ne->nav_compact_pane_length = dv;
-                g_layout_dirty = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"CompactModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
-            {
-                ne->nav_compact_threshold = dv;
-            }
-            else if (!wcscmp( dpname, L"ExpandedModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
-            {
-                ne->nav_expanded_threshold = dv;
-            }
-            else if (!wcscmp( dpname, L"IsSettingsVisible" ) && val && uwp_unbox_bool( val, &bv ))
-            {
-                ne->nav_is_settings_visible = (bv != 0);
-                g_layout_dirty = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"IsPaneToggleButtonVisible" ) && val && uwp_unbox_bool( val, &bv ))
-            {
-                ne->nav_is_pane_toggle_visible = (bv != 0);
-                g_layout_dirty = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"SelectedItem" ))
-            {
-                uwp_replace_iface( &ne->selected_item, val );
-                if (val)
-                    uwp_nav_sync_selection_tree( impl, NULL, val, 0 );
-                uwp_invalidate_window();
-            }
-        }
-        else if (dpname[0] && uwp_is_nav_item( impl ))
-        {
-            boolean bv = FALSE;
-            if (!wcscmp( dpname, L"Icon" ))
-            {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
-                if (ne && uwp_replace_iface( &ne->nav_icon, val ))
-                    uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"IsSelected" ) && val && uwp_unbox_bool( val, &bv ))
-            {
-                if (bv)
-                    uwp_nav_select_item( NULL, impl );
-                else
-                {
-                    impl->is_checked = 0;
-                    uwp_invalidate_window();
-                }
-            }
-        }
-        else if (dpname[0] && (impl->class_flags & UWP_CF_RADIO_BUTTON))
-        {
-            INT32 iv = -1;
-            if (!wcscmp( dpname, L"SelectedIndex" ) && val && uwp_unbox_int32( val, &iv ))
-                uwp_selector_set_selection( impl, iv, NULL, TRUE, FALSE );
-            else if (!wcscmp( dpname, L"SelectedItem" ))
-                uwp_selector_set_selection( impl, -1, val, FALSE, FALSE );
-        }
-        else if (dpname[0] && uwp_is_combobox( impl ))
-        {
-            INT32 iv = -1;
-            boolean bv = FALSE;
-            WCHAR sbuf[64] = {0};
-            if (!wcscmp( dpname, L"SelectedIndex" ) && val && uwp_unbox_int32( val, &iv ))
-                uwp_selector_set_selection( impl, iv, NULL, TRUE, FALSE );
-            else if (!wcscmp( dpname, L"SelectedItem" ))
-                uwp_selector_set_selection( impl, -1, val, FALSE, FALSE );
-            else if (!wcscmp( dpname, L"IsDropDownOpen" ) && val && uwp_unbox_bool( val, &bv ))
-                uwp_combobox_set_open( impl, bv != 0 );
-            else if (!wcscmp( dpname, L"DisplayMemberPath" ) && val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
-            {
-                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
-                if (ne) lstrcpynW( ne->display_member_path, sbuf, ARRAY_SIZE(ne->display_member_path) );
-            }
-        }
-        if (dpname[0])
-        {
-            double dv = 0.0;
-            INT32 ev = 0;
-            if (!wcscmp( dpname, L"Value" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
-            {
-                impl->range_val = dv;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"Minimum" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
-            {
-                impl->range_min = dv;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"Maximum" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
-            {
-                impl->range_max = dv;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"HorizontalContentAlignment" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
-            {
-                impl->h_content_align = ev;
-                impl->has_h_content_align = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"VerticalContentAlignment" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
-            {
-                impl->v_content_align = ev;
-                impl->has_v_content_align = TRUE;
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"Flyout" ))
-            {
-                uwp_replace_iface( &impl->flyout, val );
-                uwp_invalidate_window();
-            }
-            else if (!wcscmp( dpname, L"IsChecked" ) || !wcscmp( dpname, L"IsSelected" ))
-            {
-                boolean bv = FALSE;
-                if (!val)
-                    impl->is_checked = 0;
-                else if (uwp_unbox_bool( val, &bv ))
-                    impl->is_checked = bv ? 1 : 0;
-                uwp_invalidate_window();
-            }
-            else if (impl->kind == UWP_KIND_POPUP)
-            {
-                boolean bv = FALSE;
-                if (!wcscmp( dpname, L"IsOpen" ) && val && uwp_unbox_bool( val, &bv ))
-                    uwp_popup_set_open( impl, bv != 0 );
-                else if (!wcscmp( dpname, L"HorizontalOffset" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
-                {
-                    impl->popup_h_offset = dv;
-                    g_layout_dirty = TRUE;
-                    uwp_invalidate_window();
-                }
-                else if (!wcscmp( dpname, L"VerticalOffset" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
-                {
-                    impl->popup_v_offset = dv;
-                    g_layout_dirty = TRUE;
-                    uwp_invalidate_window();
-                }
-                else if (!wcscmp( dpname, L"IsLightDismissEnabled" ) && val && uwp_unbox_bool( val, &bv ))
-                    impl->popup_light_dismiss = (bv != 0);
-            }
-        }
-    }
+        uwp_setval_apply_control_dp( impl, dpn, val );
 
     AcquireSRWLockExclusive( &impl->dp_lock );
     for (i = 0; i < impl->dp_cnt; i++)
@@ -877,11 +1035,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         {
             found_existing = TRUE;
             old_val = impl->dp_store[i].value;
-            if (old_val == val)
-            {
-                same_val = TRUE;
-                break;
-            }
+            if (old_val == val) { same_val = TRUE; break; }
             impl->dp_store[i].value = val;
             if (val) IInspectable_AddRef( val );
             break;
@@ -918,155 +1072,18 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         pushed_setval = TRUE;
     }
 
-    /* Fire PropertyMetadata PropertyChangedCallback if present */
-    {
-        const WCHAR *dpn = xaml_dp_get_name( dp );
-        IPropertyMetadata *meta = xaml_dp_get_metadata( dp );
-        if (dpn[0])
-            uwp_sync_template_presenter( impl, dpn, val );
-        if (!wcscmp( dpn, L"Style" ))
-            uwp_fe_put_Style( &impl->IInspectable_iface, val );
-        if (!wcscmp( dpn, L"Source" ) || !wcscmp( dpn, L"UriSource" ) || !wcscmp( dpn, L"ImageSource" ))
-        {
-            struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
-            impl->probe_flags &= ~UWP_PF_NO_IMG;
-            if (m && m->img_source != val)
-            {
-                if (m->img_source) IInspectable_Release( m->img_source );
-                m->img_source = val;
-                if (m->img_source) IInspectable_AddRef( m->img_source );
-            }
-            if (val && m)
-            {
-                WCHAR resolved_src[512] = {0};
-                struct uwp_element *src_el = uwp_elem_from_any( val );
-                const WCHAR *src_str = uwp_elem_image_src( src_el );
-                if (src_str[0])
-                    lstrcpynW( resolved_src, src_str, ARRAY_SIZE(resolved_src) );
-                else if (!uwp_unbox_string( val, resolved_src, ARRAY_SIZE(resolved_src) ))
-                    uwp_extract_uri_string( val, resolved_src, ARRAY_SIZE(resolved_src) );
-                if (resolved_src[0])
-                {
-                    lstrcpynW( m->image_src, resolved_src, ARRAY_SIZE(m->image_src) );
-                    m->img_loaded = FALSE;
-                    InterlockedExchange( &m->img_loading, 0 );
-                    if (impl->parent && impl->parent->kind == UWP_KIND_IMAGE)
-                    {
-                        struct uwp_media_ext *pm = uwp_elem_ensure_media( impl->parent );
-                        impl->parent->probe_flags &= ~UWP_PF_NO_IMG;
-                        if (pm)
-                        {
-                            lstrcpynW( pm->image_src, resolved_src, ARRAY_SIZE(pm->image_src) );
-                            pm->img_loaded = FALSE;
-                            InterlockedExchange( &pm->img_loading, 0 );
-                        }
-                    }
-                    uwp_invalidate_window();
-                }
-            }
-            else if (impl->kind == UWP_KIND_IMAGE && m)
-            {
-                m->image_src[0] = 0;
-                m->img_loaded = FALSE;
-                InterlockedExchange( &m->img_loading, 0 );
-                uwp_invalidate_window();
-            }
-        }
-        if (xaml_is_builtin_dp( dp ) && (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST))
-        {
-            HSTRING hvc = NULL;
-            if (val) IInspectable_GetRuntimeClassName( val, &hvc );
-            WARN( "TileList_SetValue (%s) dp=%s val=%p (%s) cb=%p\n",
-                  debugstr_w(impl->name), debugstr_w(dpn), val,
-                  hvc ? debugstr_w(WindowsGetStringRawBuffer(hvc, NULL)) : "\"null\"",
-                  xaml_pm_get_callback( meta ) );
-            if (hvc) WindowsDeleteString( hvc );
-        }
-        if (meta)
-        {
-            IInspectable *def_val = xaml_pm_get_default_value( meta );
-            IPropertyChangedCallback *cb = xaml_pm_get_callback( meta );
-            if (!old_val && def_val)
-            {
-                old_val = def_val;
-                IInspectable_AddRef( old_val );
-            }
-            if (cb && (old_val || val))
-            {
-                struct uwp_dp_changed_args *args = calloc( 1, sizeof(*args) );
-                if (args)
-                {
-                    IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-                    args->vtbl = dp_changed_args_vtbl;
-                    args->ref = 1;
-                    args->dp = dp;
-                    if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
-                    args->old_val = old_val;
-                    if (old_val) IInspectable_AddRef( old_val );
-                    args->new_val = val;
-                    if (val) IInspectable_AddRef( val );
-                    TRACE( "uwp_do_SetValue invoking PropertyChangedCallback=%p sender=%p (%s) dp=%p old=%p new=%p\n",
-                           cb, sender, debugstr_w(impl->class_name), dp, old_val, val );
-                    {
-                        HRESULT cb_hr = S_OK;
-                        __TRY
-                        {
-                            cb_hr = IPropertyChangedCallback_Invoke( cb, (IDependencyObject *)sender,
-                                                                     (IDependencyPropertyChangedEventArgs *)args );
-                        }
-                        __EXCEPT_ALL { cb_hr = E_FAIL; }
-                        __ENDTRY;
-                        if (FAILED(cb_hr))
-                            WARN( "uwp_do_SetValue PropertyChangedCallback=%p sender=%p (%s) dp=%p -> FAILED hr %#lx\n",
-                                  cb, sender, debugstr_w(impl->class_name), dp, cb_hr );
-                    }
-                    {
-                        IInspectable *nv = NULL;
-                        IDependencyPropertyChangedEventArgs_get_NewValue( (IDependencyPropertyChangedEventArgs *)args, &nv );
-                        TRACE( "uwp_do_SetValue callback read NewValue -> %p (val %p)\n", (void *)nv, (void *)val );
-                        if (nv) IInspectable_Release( nv );
-                    }
-                    dp_args_Release( args );
-                }
-            }
-        }
-    }
+    meta = xaml_dp_get_metadata( dp );
+    if (dpn[0])
+        uwp_sync_template_presenter( impl, dpn, val );
+    if (!wcscmp( dpn, L"Style" ))
+        uwp_fe_put_Style( &impl->IInspectable_iface, val );
+    if (!wcscmp( dpn, L"Source" ) || !wcscmp( dpn, L"UriSource" ) || !wcscmp( dpn, L"ImageSource" ))
+        uwp_setval_apply_media_source_dp( impl, val );
+    if (meta)
+        uwp_setval_fire_metadata_cb( impl, dp, meta, &old_val, val );
 
-    /* Fire registered DependencyPropertyChangedCallbacks (snapshot under lock) */
-    {
-        struct xaml_event_handler *cbs_snap[32];
-        int snap_cnt = 0;
+    uwp_setval_fire_dp_callbacks( impl, dp );
 
-        AcquireSRWLockShared( &impl->dp_lock );
-        for (i = 0; i < impl->dp_cb_cnt && snap_cnt < (int)ARRAY_SIZE(cbs_snap); i++)
-        {
-            if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].callback)
-            {
-                cbs_snap[snap_cnt] = (struct xaml_event_handler *)impl->dp_cbs[i].callback;
-                IUnknown_AddRef( (IUnknown *)cbs_snap[snap_cnt] );
-                snap_cnt++;
-            }
-        }
-        ReleaseSRWLockShared( &impl->dp_lock );
-
-        for (i = 0; i < snap_cnt; i++)
-        {
-            void *sender = impl->outer ? (void *)impl->outer : (void *)&impl->IDependencyObject_iface;
-            struct xaml_event_handler *h = cbs_snap[i];
-            HRESULT cb_hr = S_OK;
-            __TRY
-            {
-                cb_hr = h->lpVtbl->Invoke( h, sender, dp );
-            }
-            __EXCEPT_ALL { cb_hr = E_FAIL; }
-            __ENDTRY;
-            TRACE( "uwp_do_SetValue dp_cb[%d] h=%p sender=%p (%s) dp=%p -> hr %#lx\n",
-                   i, h, sender, debugstr_w(impl->class_name), dp, cb_hr );
-            if (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST)
-                WARN( "TileList dp_cb[%d] dp=%p -> hr %#lx\n", i, dp, cb_hr );
-            IUnknown_Release( (IUnknown *)h );
-        }
-    }
     if (pushed_setval)
     {
         for (si = setval_depth - 1; si >= 0; si--)
@@ -1079,48 +1096,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         }
     }
 
-    if (uwp_is_items_repeater( impl ))
-    {
-        if (!impl->in_measure_arrange)
-        {
-            struct uwp_element *rep;
-            impl->last_measured_w = 0.0f;
-            impl->last_measured_h = 0.0f;
-            impl->probe_flags = 0;
-            rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
-            if (rep && rep != impl && !rep->in_measure_arrange)
-            {
-                rep->last_measured_w = 0.0f;
-                rep->last_measured_h = 0.0f;
-                rep->probe_flags = 0;
-            }
-            uwp_invalidate_window();
-        }
-    }
-    else
-    {
-        const WCHAR *dpn = xaml_dp_get_name( dp );
-        if (dpn[0] &&
-            (!wcscmp( dpn, L"ItemsSource" ) || !wcscmp( dpn, L"Content" ) ||
-             !wcscmp( dpn, L"DataContext" ) ||
-             !wcscmp( dpn, L"Text" ) || !wcscmp( dpn, L"Visibility" )))
-        {
-            if (!wcscmp( dpn, L"Content" ) || !wcscmp( dpn, L"DataContext" ))
-            {
-                impl->probe_flags = 0;
-                if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
-            }
-            if (!wcscmp( dpn, L"ItemsSource" ))
-            {
-                uwp_replace_iface( &impl->items_source, val );
-                if (val && !uwp_is_combobox( impl ))
-                    uwp_items_ctrl_materialize_source( impl, val );
-                else if (uwp_is_combobox( impl ) && uwp_elem_selected_item( impl ))
-                    uwp_selector_set_selection( impl, -1, uwp_elem_selected_item( impl ), FALSE, FALSE );
-            }
-            uwp_invalidate_window();
-        }
-    }
+    uwp_setval_post_commit( impl, dpn, val );
 
     if (old_val) IInspectable_Release( old_val );
     if ((ULONG_PTR)dp >= 0x10000) IUnknown_Release( (IUnknown *)dp );

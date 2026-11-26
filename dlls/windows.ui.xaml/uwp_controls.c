@@ -93,7 +93,7 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     {
         if (uwp_is_tooltip( impl ))
             return S_OK;
-        if (!wcscmp( str_buf, L"SettingsButtonName" ) || !wcscmp( impl->name, L"SettingsItem" ))
+        if (uwp_is_nav_settings_item( impl ))
         {
             uwp_elem_clear_text( impl );
             if (!wcscmp( impl->name, L"SettingsItem" ))

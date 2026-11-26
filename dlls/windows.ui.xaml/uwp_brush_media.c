@@ -937,9 +937,6 @@ static HRESULT WINAPI uwp_shape_put_Fill( void *iface, IInspectable *val )
         struct uwp_element *b_el;
         uwp_xcbb_ensure_connected( val );
         b_el = uwp_elem_from_any( val );
-        if (wcsstr( impl->name, L"HeroImage" ))
-            TRACE( "uwp_shape_put_Fill(HeroImage %s): val=%p b_el=%p b_cls=%s\n",
-                   debugstr_w(impl->name), val, b_el, b_el ? debugstr_w(b_el->class_name) : "?" );
         if (b_el)
         {
             const WCHAR *b_src = uwp_elem_image_src( b_el );

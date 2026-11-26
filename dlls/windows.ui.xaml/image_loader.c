@@ -147,7 +147,7 @@ const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp,
 {
     const WCHAR *s = uwp_elem_text( el );
     if (!s || !s[0]) return L"";
-    if (!wcscmp( s, L"SettingsButtonName" ) || !wcscmp( el->name, L"SettingsItem" )) return L"";
+    if (uwp_is_nav_settings_item( el )) return L"";
     if (s[1] == 0)
     {
         WCHAR ff_buf[64];
@@ -769,7 +769,8 @@ void uwp_load_image_asset( struct uwp_element *el )
     {
         int ci;
         UINT max_dim = 384;
-        if ((el->class_flags2 & UWP_CF2_LOADED_IMAGE_SURF) || wcsstr( el->name, L"Hero" ) ||
+        if ((el->class_flags2 & UWP_CF2_LOADED_IMAGE_SURF) || (el->class_flags & UWP_CF_SPOTLIGHT) ||
+            el->width > 320.0 || el->height > 320.0 ||
             (el->has_bounds && ((el->bounds.right - el->bounds.left) > 320 || (el->bounds.bottom - el->bounds.top) > 320)))
             max_dim = 1024;
 
