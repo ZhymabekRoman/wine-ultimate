@@ -51,27 +51,11 @@ static void d3dkmt_object_destroy( struct object *obj );
 
 static const struct object_ops d3dkmt_object_ops =
 {
-    sizeof(struct d3dkmt_object),   /* size */
-    &no_type,                       /* type */
-    d3dkmt_object_dump,             /* dump */
-    no_add_queue,                   /* add_queue */
-    NULL,                           /* remove_queue */
-    NULL,                           /* signaled */
-    NULL,                           /* satisfied */
-    no_signal,                      /* signal */
-    d3dkmt_object_get_fd,           /* get_fd */
-    default_get_sync,               /* get_sync */
-    default_map_access,             /* map_access */
-    default_get_sd,                 /* get_sd */
-    default_set_sd,                 /* set_sd */
-    no_get_full_name,               /* get_full_name */
-    no_lookup_name,                 /* lookup_name */
-    no_link_name,                   /* link_name */
-    NULL,                           /* unlink_name */
-    no_open_file,                   /* open_file */
-    no_kernel_obj_list,             /* get_kernel_obj_list */
-    no_close_handle,                /* close_handle */
-    d3dkmt_object_destroy,          /* destroy */
+    .size    = sizeof(struct d3dkmt_object),
+    .type    = &no_type,
+    .dump    = d3dkmt_object_dump,
+    .get_fd  = d3dkmt_object_get_fd,
+    .destroy = d3dkmt_object_destroy,
 };
 
 static enum server_fd_type d3dkmt_get_fd_type( struct fd *fd )
@@ -81,18 +65,7 @@ static enum server_fd_type d3dkmt_get_fd_type( struct fd *fd )
 
 static const struct fd_ops d3dkmt_fd_ops =
 {
-    default_fd_get_poll_events,   /* get_poll_events */
-    default_poll_event,           /* poll_event */
-    d3dkmt_get_fd_type,           /* get_fd_type */
-    no_fd_read,                   /* read */
-    no_fd_write,                  /* write */
-    no_fd_flush,                  /* flush */
-    no_fd_get_file_info,          /* get_file_info */
-    no_fd_get_volume_info,        /* get_volume_info */
-    no_fd_ioctl,                  /* ioctl */
-    default_fd_cancel_async,      /* cancel_async */
-    no_fd_queue_async,            /* queue_async */
-    default_fd_reselect_async     /* reselect_async */
+    .get_fd_type = d3dkmt_get_fd_type,
 };
 
 struct keyed_wait
@@ -119,27 +92,10 @@ static void d3dkmt_mutex_destroy( struct object *obj );
 
 static const struct object_ops d3dkmt_mutex_ops =
 {
-    sizeof(struct d3dkmt_mutex),    /* size */
-    &no_type,                       /* type */
-    d3dkmt_mutex_dump,              /* dump */
-    no_add_queue,                   /* add_queue */
-    NULL,                           /* remove_queue */
-    NULL,                           /* signaled */
-    NULL,                           /* satisfied */
-    no_signal,                      /* signal */
-    no_get_fd,                      /* get_fd */
-    default_get_sync,               /* get_sync */
-    default_map_access,             /* map_access */
-    default_get_sd,                 /* get_sd */
-    default_set_sd,                 /* set_sd */
-    no_get_full_name,               /* get_full_name */
-    no_lookup_name,                 /* lookup_name */
-    no_link_name,                   /* link_name */
-    NULL,                           /* unlink_name */
-    no_open_file,                   /* open_file */
-    no_kernel_obj_list,             /* get_kernel_obj_list */
-    no_close_handle,                /* close_handle */
-    d3dkmt_mutex_destroy,           /* destroy */
+    .size    = sizeof(struct d3dkmt_mutex),
+    .type    = &no_type,
+    .dump    = d3dkmt_mutex_dump,
+    .destroy = d3dkmt_mutex_destroy,
 };
 
 #define DXGK_SHARED_SYNC_QUERY_STATE  0x0001
@@ -171,27 +127,10 @@ static void dxgk_shared_sync_destroy( struct object *obj );
 
 static const struct object_ops dxgk_shared_sync_ops =
 {
-    sizeof(struct dxgk_shared_sync),    /* size */
-    &dxgk_shared_sync_type,             /* type */
-    dxgk_shared_sync_dump,              /* dump */
-    no_add_queue,                       /* add_queue */
-    NULL,                               /* remove_queue */
-    NULL,                               /* signaled */
-    NULL,                               /* satisfied */
-    no_signal,                          /* signal */
-    no_get_fd,                          /* get_fd */
-    default_get_sync,                   /* get_sync */
-    default_map_access,                 /* map_access */
-    default_get_sd,                     /* get_sd */
-    default_set_sd,                     /* set_sd */
-    default_get_full_name,              /* get_full_name */
-    no_lookup_name,                     /* lookup_name */
-    directory_link_name,                /* link_name */
-    default_unlink_name,                /* unlink_name */
-    no_open_file,                       /* open_file */
-    no_kernel_obj_list,                 /* get_kernel_obj_list */
-    no_close_handle,                    /* close_handle */
-    dxgk_shared_sync_destroy,           /* destroy */
+    .size    = sizeof(struct dxgk_shared_sync),
+    .type    = &dxgk_shared_sync_type,
+    .dump    = dxgk_shared_sync_dump,
+    .destroy = dxgk_shared_sync_destroy,
 };
 
 static void dxgk_shared_sync_dump( struct object *obj, int verbose )
@@ -238,27 +177,10 @@ static void dxgk_shared_resource_destroy( struct object *obj );
 
 static const struct object_ops dxgk_shared_resource_ops =
 {
-    sizeof(struct dxgk_shared_resource),    /* size */
-    &dxgk_shared_resource_type,             /* type */
-    dxgk_shared_resource_dump,              /* dump */
-    no_add_queue,                           /* add_queue */
-    NULL,                                   /* remove_queue */
-    NULL,                                   /* signaled */
-    NULL,                                   /* satisfied */
-    no_signal,                              /* signal */
-    no_get_fd,                              /* get_fd */
-    default_get_sync,                       /* get_sync */
-    default_map_access,                     /* map_access */
-    default_get_sd,                         /* get_sd */
-    default_set_sd,                         /* set_sd */
-    default_get_full_name,                  /* get_full_name */
-    no_lookup_name,                         /* lookup_name */
-    directory_link_name,                    /* link_name */
-    default_unlink_name,                    /* unlink_name */
-    no_open_file,                           /* open_file */
-    no_kernel_obj_list,                     /* get_kernel_obj_list */
-    no_close_handle,                        /* close_handle */
-    dxgk_shared_resource_destroy,           /* destroy */
+    .size    = sizeof(struct dxgk_shared_resource),
+    .type    = &dxgk_shared_resource_type,
+    .dump    = dxgk_shared_resource_dump,
+    .destroy = dxgk_shared_resource_destroy,
 };
 
 static void dxgk_shared_resource_dump( struct object *obj, int verbose )
@@ -898,27 +820,10 @@ static void composition_destroy( struct object *obj );
 
 static const struct object_ops composition_ops =
 {
-    sizeof(struct composition),             /* size */
-    &composition_type,                      /* type */
-    composition_dump,                       /* dump */
-    no_add_queue,                           /* add_queue */
-    NULL,                                   /* remove_queue */
-    NULL,                                   /* signaled */
-    NULL,                                   /* satisfied */
-    no_signal,                              /* signal */
-    no_get_fd,                              /* get_fd */
-    default_get_sync,                       /* get_sync */
-    default_map_access,                     /* map_access */
-    default_get_sd,                         /* get_sd */
-    default_set_sd,                         /* set_sd */
-    default_get_full_name,                  /* get_full_name */
-    no_lookup_name,                         /* lookup_name */
-    directory_link_name,                    /* link_name */
-    default_unlink_name,                    /* unlink_name */
-    no_open_file,                           /* open_file */
-    no_kernel_obj_list,                     /* get_kernel_obj_list */
-    no_close_handle,                        /* close_handle */
-    composition_destroy,                    /* destroy */
+    .size    = sizeof(struct composition),
+    .type    = &composition_type,
+    .dump    = composition_dump,
+    .destroy = composition_destroy,
 };
 
 static void composition_dump( struct object *obj, int verbose )

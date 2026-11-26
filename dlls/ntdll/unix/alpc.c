@@ -453,6 +453,7 @@ NTSTATUS WINAPI NtAlpcCreatePort( HANDLE *port_handle, OBJECT_ATTRIBUTES *obj_at
 
     if (!port_handle) return STATUS_ACCESS_VIOLATION;
     *port_handle = NULL;
+    if (port_attr && (port_attr->Flags & 0x100000)) return STATUS_INVALID_PARAMETER;
 
     if ((ret = alloc_object_attributes( obj_attr, &objattr, &len ))) return ret;
 

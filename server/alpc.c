@@ -492,36 +492,35 @@ static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port
                                                    struct alpc_pending_conn *found,
                                                    client_ptr_t port_context, int open_commit );
 
+static const WCHAR alpc_port_name[] = {'A','L','P','C',' ','P','o','r','t'};
+
+struct type_descr alpc_port_type =
+{
+    { alpc_port_name, sizeof(alpc_port_name) }, /* name */
+    ALPC_PORT_ALL_ACCESS,                       /* valid_access */
+    {                                           /* mapping */
+        STANDARD_RIGHTS_READ | ALPC_PORT_QUERY_STATE,
+        DELETE | ALPC_PORT_QUERY_STATE,
+        0,
+        ALPC_PORT_ALL_ACCESS
+    },
+};
+
 static void alpc_port_dump( struct object *obj, int verbose );
 static struct fd *alpc_port_get_fd( struct object *obj );
 static int alpc_port_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
 static void alpc_port_destroy( struct object *obj );
-static unsigned int alpc_port_map_access( struct object *obj, unsigned int access );
 static struct alpc_port *alpc_port_pair( struct alpc_port *port );
 
 static const struct object_ops alpc_port_ops =
 {
-    sizeof(struct alpc_port),  /* size */
-    &no_type,                  /* type */
-    alpc_port_dump,            /* dump */
-    NULL,                      /* add_queue */
-    NULL,                      /* remove_queue */
-    NULL,                      /* signaled */
-    NULL,                      /* satisfied */
-    no_signal,                 /* signal */
-    alpc_port_get_fd,          /* get_fd */
-    default_fd_get_sync,       /* get_sync */
-    alpc_port_map_access,      /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    default_get_full_name,     /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    directory_link_name,       /* link_name */
-    default_unlink_name,       /* unlink_name */
-    no_open_file,              /* open_file */
-    no_kernel_obj_list,        /* get_kernel_obj_list */
-    alpc_port_close_handle,    /* close_handle */
-    alpc_port_destroy,         /* destroy */
+    .size         = sizeof(struct alpc_port),
+    .type         = &alpc_port_type,
+    .dump         = alpc_port_dump,
+    .get_fd       = alpc_port_get_fd,
+    .get_sync     = default_fd_get_sync,
+    .close_handle = alpc_port_close_handle,
+    .destroy      = alpc_port_destroy,
 };
 
 static void alpc_shm_sync_port( struct alpc_port *port )
@@ -800,18 +799,10 @@ static enum server_fd_type alpc_fd_get_type( struct fd *fd );
 
 static const struct fd_ops alpc_fd_ops =
 {
-    default_fd_get_poll_events,
-    default_poll_event,
-    alpc_fd_get_type,
-    alpc_fd_read,
-    alpc_fd_write,
-    no_fd_flush,
-    default_fd_get_file_info,
-    no_fd_get_volume_info,
-    no_fd_ioctl,
-    default_fd_cancel_async,
-    no_fd_queue_async,
-    default_fd_reselect_async,
+    .get_fd_type   = alpc_fd_get_type,
+    .read          = alpc_fd_read,
+    .write         = alpc_fd_write,
+    .get_file_info = default_fd_get_file_info,
 };
 
 /* ---- Object ops ---- */
@@ -826,15 +817,6 @@ static struct fd *alpc_port_get_fd( struct object *obj )
 {
     struct alpc_port *port = (struct alpc_port *)obj;
     return (struct fd *)grab_object( port->fd );
-}
-
-static unsigned int alpc_port_map_access( struct object *obj, unsigned int access )
-{
-    if (access & GENERIC_READ)    access |= FILE_GENERIC_READ;
-    if (access & GENERIC_WRITE)   access |= FILE_GENERIC_WRITE;
-    if (access & GENERIC_EXECUTE) access |= STANDARD_RIGHTS_EXECUTE;
-    if (access & GENERIC_ALL)     access |= FILE_ALL_ACCESS;
-    return access & ~(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
 }
 
 /* Free a message that never reached its receiver.  A queued handle duplicate

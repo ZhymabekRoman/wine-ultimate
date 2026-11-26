@@ -412,27 +412,15 @@ static int completion_wait_close_handle( struct object *obj, struct process *pro
 
 static const struct object_ops completion_wait_ops =
 {
-    sizeof(struct completion_wait), /* size */
-    &no_type,                       /* type */
-    completion_wait_dump,           /* dump */
-    add_queue,                      /* add_queue */
-    remove_queue,                   /* remove_queue */
-    completion_wait_signaled,       /* signaled */
-    completion_wait_satisfied,      /* satisfied */
-    no_signal,                      /* signal */
-    no_get_fd,                      /* get_fd */
-    default_get_sync,               /* get_sync */
-    default_map_access,             /* map_access */
-    default_get_sd,                 /* get_sd */
-    default_set_sd,                 /* set_sd */
-    no_get_full_name,               /* get_full_name */
-    no_lookup_name,                 /* lookup_name */
-    no_link_name,                   /* link_name */
-    NULL,                           /* unlink_name */
-    no_open_file,                   /* open_file */
-    no_kernel_obj_list,             /* get_kernel_obj_list */
-    completion_wait_close_handle,   /* close_handle */
-    completion_wait_destroy         /* destroy */
+    .size         = sizeof(struct completion_wait),
+    .type         = &no_type,
+    .dump         = completion_wait_dump,
+    .add_queue    = add_queue,
+    .remove_queue = remove_queue,
+    .signaled     = completion_wait_signaled,
+    .satisfied    = completion_wait_satisfied,
+    .close_handle = completion_wait_close_handle,
+    .destroy      = completion_wait_destroy,
 };
 
 static int completion_wait_close_handle( struct object *obj, struct process *process, obj_handle_t handle )
@@ -514,27 +502,12 @@ static void completion_destroy( struct object * );
 
 static const struct object_ops completion_ops =
 {
-    sizeof(struct completion), /* size */
-    &completion_type,          /* type */
-    completion_dump,           /* dump */
-    NULL,                      /* add_queue */
-    NULL,                      /* remove_queue */
-    NULL,                      /* signaled */
-    NULL,                      /* satisfied */
-    no_signal,                 /* signal */
-    no_get_fd,                 /* get_fd */
-    completion_get_sync,       /* get_sync */
-    default_map_access,        /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    default_get_full_name,     /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    directory_link_name,       /* link_name */
-    default_unlink_name,       /* unlink_name */
-    no_open_file,              /* open_file */
-    no_kernel_obj_list,        /* get_kernel_obj_list */
-    completion_close_handle,   /* close_handle */
-    completion_destroy         /* destroy */
+    .size         = sizeof(struct completion),
+    .type         = &completion_type,
+    .dump         = completion_dump,
+    .get_sync     = completion_get_sync,
+    .close_handle = completion_close_handle,
+    .destroy      = completion_destroy,
 };
 
 static void completion_destroy( struct object *obj)
@@ -973,27 +946,10 @@ static void wait_completion_packet_destroy( struct object *obj );
 
 static const struct object_ops wait_completion_packet_ops =
 {
-    sizeof(struct wait_completion_packet), /* size */
-    &no_type,                       /* type */
-    wait_completion_packet_dump,    /* dump */
-    NULL,                           /* add_queue */
-    NULL,                           /* remove_queue */
-    NULL,                           /* signaled */
-    NULL,                           /* satisfied */
-    no_signal,                      /* signal */
-    no_get_fd,                      /* get_fd */
-    default_get_sync,               /* get_sync */
-    default_map_access,             /* map_access */
-    default_get_sd,                 /* get_sd */
-    default_set_sd,                 /* set_sd */
-    no_get_full_name,               /* get_full_name */
-    no_lookup_name,                 /* lookup_name */
-    no_link_name,                   /* link_name */
-    NULL,                           /* unlink_name */
-    no_open_file,                   /* open_file */
-    no_kernel_obj_list,             /* get_kernel_obj_list */
-    no_close_handle,                /* close_handle */
-    wait_completion_packet_destroy  /* destroy */
+    .size    = sizeof(struct wait_completion_packet),
+    .type    = &no_type,
+    .dump    = wait_completion_packet_dump,
+    .destroy = wait_completion_packet_destroy,
 };
 
 static void wait_completion_packet_dump( struct object *obj, int verbose )
@@ -1034,7 +990,7 @@ static void wake_packet_fire( struct wait_completion_packet *packet, int signal_
                  packet, packet->target, packet->completion, (unsigned long)packet->ckey, (unsigned long)packet->cvalue, signal_target );
     if (signal_target && packet->target)
     {
-        struct object *sync = packet->target->ops->get_sync( packet->target );
+        struct object *sync = get_obj_sync( packet->target );
         if (sync)
         {
             signal_sync( sync );
@@ -1167,7 +1123,7 @@ DECL_HANDLER(associate_wait_completion_packet)
      * packet after processing reports only a wake that completed again. */
     reply->signaled = 0;
     {
-        struct object *sync = target->ops->get_sync( target );
+        struct object *sync = get_obj_sync( target );
         int ready = (sync && sync->ops->signaled && sync->ops->signaled( sync, NULL ));
         if (ready)
         {

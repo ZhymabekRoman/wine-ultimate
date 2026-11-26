@@ -225,14 +225,11 @@ static HRESULT buffer_create_raw( UINT32 capacity, BOOL zero_init, struct buffer
     impl->capacity = capacity;
     impl->length = 0;
 
-    if (capacity)
+    impl->data = zero_init ? calloc( 1, capacity ? capacity : 1 ) : malloc( capacity ? capacity : 1 );
+    if (!impl->data)
     {
-        impl->data = zero_init ? calloc( 1, capacity ) : malloc( capacity );
-        if (!impl->data)
-        {
-            free( impl );
-            return E_OUTOFMEMORY;
-        }
+        free( impl );
+        return E_OUTOFMEMORY;
     }
 
     *out = impl;
@@ -2675,7 +2672,15 @@ static ULONG WINAPI data_writer_Release( IDataWriter *iface )
     if (!ref)
     {
         if (impl->output_stream)
+        {
+            IClosable *closable = NULL;
+            if (SUCCEEDED(IOutputStream_QueryInterface( impl->output_stream, &IID_IClosable, (void **)&closable )))
+            {
+                IClosable_Close( closable );
+                IClosable_Release( closable );
+            }
             IOutputStream_Release( impl->output_stream );
+        }
         if (impl->scratch_buf)
             IBuffer_Release( &impl->scratch_buf->IBuffer_iface );
         DeleteCriticalSection( &impl->cs );
@@ -2982,6 +2987,11 @@ static HRESULT WINAPI data_writer_StoreAsync( IDataWriter *iface, IAsyncOperatio
         LeaveCriticalSection( &impl->cs );
         return RO_E_CLOSED;
     }
+    if (!impl->output_stream)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return HRESULT_FROM_WIN32( ERROR_INVALID_OPERATION );
+    }
     stored = impl->length;
     if (impl->output_stream && impl->length)
     {
@@ -3048,7 +3058,7 @@ static HRESULT WINAPI data_writer_FlushAsync( IDataWriter *iface, IAsyncOperatio
     if (impl->output_stream)
         return IOutputStream_FlushAsync( impl->output_stream, operation );
 
-    return async_operation_boolean_create( L"Windows.Foundation.IAsyncOperation`1<Boolean>", TRUE, operation );
+    return HRESULT_FROM_WIN32( ERROR_INVALID_OPERATION );
 }
 
 static HRESULT WINAPI data_writer_DetachBuffer( IDataWriter *iface, IBuffer **buffer )
@@ -3068,7 +3078,7 @@ static HRESULT WINAPI data_writer_DetachBuffer( IDataWriter *iface, IBuffer **bu
         LeaveCriticalSection( &impl->cs );
         return RO_E_CLOSED;
     }
-    if (FAILED(hr = buffer_create( impl->length, &buf )))
+    if (FAILED(hr = buffer_create( impl->length > 512 ? impl->length : 512, &buf )))
     {
         LeaveCriticalSection( &impl->cs );
         return hr;

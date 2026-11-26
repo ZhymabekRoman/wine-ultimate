@@ -126,8 +126,6 @@ static HRESULT wg_sample_create_mf_with_flags(IMFSample *mf_sample, MF2DBuffer_L
             sample->u.mf.buffer = NULL;
             sample->u.mf.buffer2d = buffer2d;
             IMF2DBuffer2_GetContiguousLength(buffer2d, &current_length);
-            if (pitch < 0)
-                pitch = -pitch;
         }
         else
         {

@@ -3002,6 +3002,10 @@ static NTSTATUS map_pe_header( void *ptr, size_t size, size_t map_size, int fd, 
  */
 static void *get_host_addr_space_limit(void)
 {
+#ifdef __APPLE__
+    /* See MACH_VM_MAX_ADDRESS_RAW in xnu osfmk/mach/arm/vm_param.h */
+    return (void *)0x7ffffe000000;
+#else
     unsigned int flags = MAP_PRIVATE | MAP_ANON;
     UINT_PTR addr = (UINT_PTR)1 << 63;
 
@@ -3024,6 +3028,7 @@ static void *get_host_addr_space_limit(void)
     if (addr > 0xf00000000000) addr = 0xf00000000000;  /* keep Redhawk card tables
                                                           (base + base/128) under the kernel window */
     return (void *)addr;
+#endif
 }
 
 #endif /* _WIN64 */
