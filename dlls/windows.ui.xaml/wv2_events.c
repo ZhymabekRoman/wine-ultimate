@@ -82,10 +82,11 @@ static ULONG WINAPI evargs_Release( IInspectable *iface )
 
 static HRESULT evargs_get_str( struct cwv2_event_args *impl, int com_slot, HSTRING *out )
 {
+    const struct abi_slot_iface *ca = (const struct abi_slot_iface *)impl->com_args;
     if (!out) return E_POINTER;
-    if (impl->com_args && *(void ***)impl->com_args)
+    if (ca && ca->lpVtbl && com_slot >= 0 && com_slot < (int)ARRAY_SIZE(ca->lpVtbl->slots))
     {
-        HRESULT (WINAPI *fn)( void *, LPWSTR * ) = (*(void ***)impl->com_args)[com_slot];
+        HRESULT (WINAPI *fn)( void *, LPWSTR * ) = ca->lpVtbl->slots[com_slot];
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
         {
             LPWSTR raw = NULL;
@@ -104,11 +105,12 @@ static HRESULT evargs_get_str( struct cwv2_event_args *impl, int com_slot, HSTRI
 }
 static HRESULT evargs_get_bool( struct cwv2_event_args *impl, int com_slot, boolean *out )
 {
+    const struct abi_slot_iface *ca = (const struct abi_slot_iface *)impl->com_args;
     BOOL b = FALSE;
     if (!out) return E_POINTER;
-    if (impl->com_args && *(void ***)impl->com_args)
+    if (ca && ca->lpVtbl && com_slot >= 0 && com_slot < (int)ARRAY_SIZE(ca->lpVtbl->slots))
     {
-        HRESULT (WINAPI *fn)( void *, BOOL * ) = (*(void ***)impl->com_args)[com_slot];
+        HRESULT (WINAPI *fn)( void *, BOOL * ) = ca->lpVtbl->slots[com_slot];
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
         {
             HRESULT hr = fn( impl->com_args, &b );
@@ -121,9 +123,10 @@ static HRESULT evargs_get_bool( struct cwv2_event_args *impl, int com_slot, bool
 }
 static HRESULT evargs_put_bool( struct cwv2_event_args *impl, int com_slot, boolean val )
 {
-    if (impl->com_args && *(void ***)impl->com_args)
+    const struct abi_slot_iface *ca = (const struct abi_slot_iface *)impl->com_args;
+    if (ca && ca->lpVtbl && com_slot >= 0 && com_slot < (int)ARRAY_SIZE(ca->lpVtbl->slots))
     {
-        HRESULT (WINAPI *fn)( void *, BOOL ) = (*(void ***)impl->com_args)[com_slot];
+        HRESULT (WINAPI *fn)( void *, BOOL ) = ca->lpVtbl->slots[com_slot];
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             return fn( impl->com_args, !!val );
     }
@@ -131,10 +134,11 @@ static HRESULT evargs_put_bool( struct cwv2_event_args *impl, int com_slot, bool
 }
 static HRESULT evargs_get_u64( struct cwv2_event_args *impl, int com_slot, UINT64 *out )
 {
+    const struct abi_slot_iface *ca = (const struct abi_slot_iface *)impl->com_args;
     if (!out) return E_POINTER;
-    if (impl->com_args && *(void ***)impl->com_args)
+    if (ca && ca->lpVtbl && com_slot >= 0 && com_slot < (int)ARRAY_SIZE(ca->lpVtbl->slots))
     {
-        HRESULT (WINAPI *fn)( void *, UINT64 * ) = (*(void ***)impl->com_args)[com_slot];
+        HRESULT (WINAPI *fn)( void *, UINT64 * ) = ca->lpVtbl->slots[com_slot];
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             return fn( impl->com_args, out );
     }
@@ -178,11 +182,12 @@ static HRESULT WINAPI navcomp_get_IsSuccess( void *iface, boolean *out )
 static HRESULT WINAPI navcomp_get_WebErrorStatus( void *iface, int *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_nav_comp_args *nc = (const struct abi_wv2_nav_comp_args *)impl->com_args;
     if (!out) return E_POINTER;
-    if (impl->com_args && *(void ***)impl->com_args)
+    if (nc && nc->lpVtbl)
     {
-        HRESULT (WINAPI *fn)( void *, int * ) = (*(void ***)impl->com_args)[4];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000) return fn( impl->com_args, out );
+        if (nc->lpVtbl->get_WebErrorStatus && (ULONG_PTR)nc->lpVtbl->get_WebErrorStatus < (ULONG_PTR)0x7ffc00000000)
+            return nc->lpVtbl->get_WebErrorStatus( impl->com_args, out );
     }
     *out = 0;
     return S_OK;
@@ -250,17 +255,15 @@ static HRESULT WINAPI wrr_req_get_Content( void *iface, void **out )
 static HRESULT WINAPI wrr_headers_GetHeader( void *iface, HSTRING name, HSTRING *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_http_headers *hh = (const struct abi_wv2_http_headers *)impl->com_args;
     const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
     LPWSTR raw = NULL;
     HRESULT hr = E_FAIL;
     if (!out) return E_POINTER;
     *out = NULL;
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, LPCWSTR, LPWSTR * ) = (*(void ***)impl->com_args)[3];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            hr = fn( impl->com_args, n, &raw );
-    }
+    if (hh && hh->lpVtbl && hh->lpVtbl->GetHeader &&
+        (ULONG_PTR)hh->lpVtbl->GetHeader < (ULONG_PTR)0x7ffc00000000)
+        hr = hh->lpVtbl->GetHeader( impl->com_args, n, &raw );
     if (SUCCEEDED( hr ) && raw)
     {
         hr = WindowsCreateString( raw, lstrlenW( raw ), out );
@@ -273,43 +276,37 @@ static HRESULT WINAPI wrr_headers_GetHeader( void *iface, HSTRING name, HSTRING 
 static HRESULT WINAPI wrr_headers_Contains( void *iface, HSTRING name, boolean *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_http_headers *hh = (const struct abi_wv2_http_headers *)impl->com_args;
     const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
     BOOL b = FALSE;
     HRESULT hr = S_OK;
     if (!out) return E_POINTER;
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, LPCWSTR, BOOL * ) = (*(void ***)impl->com_args)[5];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            hr = fn( impl->com_args, n, &b );
-    }
+    if (hh && hh->lpVtbl && hh->lpVtbl->Contains &&
+        (ULONG_PTR)hh->lpVtbl->Contains < (ULONG_PTR)0x7ffc00000000)
+        hr = hh->lpVtbl->Contains( impl->com_args, n, &b );
     *out = !!b;
     return hr;
 }
 static HRESULT WINAPI wrr_headers_SetHeader( void *iface, HSTRING name, HSTRING val )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_http_headers *hh = (const struct abi_wv2_http_headers *)impl->com_args;
     const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
     const WCHAR *v = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
     TRACE( "wrr_headers_SetHeader %s=%s\n", debugstr_w( n ), debugstr_w( v ) );
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, LPCWSTR, LPCWSTR ) = (*(void ***)impl->com_args)[6];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            return fn( impl->com_args, n, v );
-    }
+    if (hh && hh->lpVtbl && hh->lpVtbl->SetHeader &&
+        (ULONG_PTR)hh->lpVtbl->SetHeader < (ULONG_PTR)0x7ffc00000000)
+        return hh->lpVtbl->SetHeader( impl->com_args, n, v );
     return S_OK;
 }
 static HRESULT WINAPI wrr_headers_RemoveHeader( void *iface, HSTRING name )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_http_headers *hh = (const struct abi_wv2_http_headers *)impl->com_args;
     const WCHAR *n = name ? WindowsGetStringRawBuffer( name, NULL ) : L"";
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, LPCWSTR ) = (*(void ***)impl->com_args)[7];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            return fn( impl->com_args, n );
-    }
+    if (hh && hh->lpVtbl && hh->lpVtbl->RemoveHeader &&
+        (ULONG_PTR)hh->lpVtbl->RemoveHeader < (ULONG_PTR)0x7ffc00000000)
+        return hh->lpVtbl->RemoveHeader( impl->com_args, n );
     return S_OK;
 }
 static const void *cwv2_wrr_headers_vtbl[256] =
@@ -327,18 +324,16 @@ static const void *cwv2_wrr_headers_vtbl[256] =
 static HRESULT WINAPI wrr_req_get_Headers( void *iface, void **out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_wrr_req *req = (const struct abi_wv2_wrr_req *)impl->com_args;
     void *com_hdr = NULL;
     struct cwv2_event_args *wrap;
     HRESULT hr = E_FAIL;
 
     if (!out) return E_POINTER;
     *out = NULL;
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, void ** ) = (*(void ***)impl->com_args)[9];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            hr = fn( impl->com_args, &com_hdr );
-    }
+    if (req && req->lpVtbl && req->lpVtbl->get_Headers &&
+        (ULONG_PTR)req->lpVtbl->get_Headers < (ULONG_PTR)0x7ffc00000000)
+        hr = req->lpVtbl->get_Headers( impl->com_args, &com_hdr );
     TRACE( "wrr_req_get_Headers hr=%#lx com_hdr=%p\n", hr, com_hdr );
     if (FAILED( hr ) || !com_hdr) return SUCCEEDED( hr ) ? E_FAIL : hr;
     wrap = calloc( 1, sizeof(*wrap) );
@@ -377,18 +372,16 @@ static const void *cwv2_wrr_req_vtbl[256] =
 static HRESULT WINAPI wrr_evargs_get_Request( void *iface, void **out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_wrr_evargs *eva = (const struct abi_wv2_wrr_evargs *)impl->com_args;
     void *com_req = NULL;
     struct cwv2_event_args *wrap;
     HRESULT hr = E_FAIL;
 
     if (!out) return E_POINTER;
     *out = NULL;
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, void ** ) = (*(void ***)impl->com_args)[3];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            hr = fn( impl->com_args, &com_req );
-    }
+    if (eva && eva->lpVtbl && eva->lpVtbl->get_Request &&
+        (ULONG_PTR)eva->lpVtbl->get_Request < (ULONG_PTR)0x7ffc00000000)
+        hr = eva->lpVtbl->get_Request( impl->com_args, &com_req );
     if (FAILED( hr ) || !com_req) return SUCCEEDED( hr ) ? E_FAIL : hr;
     wrap = calloc( 1, sizeof(*wrap) );
     if (!wrap)
@@ -419,13 +412,11 @@ static HRESULT WINAPI wrr_evargs_put_Response( void *iface, void *resp )
 static HRESULT WINAPI wrr_deferral_Complete( void *iface )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_deferral *def = (const struct abi_wv2_deferral *)impl->com_args;
     TRACE( "wrr_deferral_Complete com=%p\n", impl->com_args );
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void * ) = (*(void ***)impl->com_args)[3];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            return fn( impl->com_args );
-    }
+    if (def && def->lpVtbl && def->lpVtbl->Complete &&
+        (ULONG_PTR)def->lpVtbl->Complete < (ULONG_PTR)0x7ffc00000000)
+        return def->lpVtbl->Complete( impl->com_args );
     return S_OK;
 }
 static const void *cwv2_deferral_vtbl[256] =
@@ -455,15 +446,13 @@ static HRESULT WINAPI wrr_evargs_GetDeferral( void *iface, void **out )
 static HRESULT WINAPI wrr_evargs_get_ResourceContext( void *iface, int *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_wrr_evargs *eva = (const struct abi_wv2_wrr_evargs *)impl->com_args;
     TRACE( "wrr_evargs_get_ResourceContext iface=%p out=%p\n", iface, out );
     if (!out) return E_POINTER;
     *out = 0;
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, int * ) = (*(void ***)impl->com_args)[7];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            return fn( impl->com_args, out );
-    }
+    if (eva && eva->lpVtbl && eva->lpVtbl->get_ResourceContext &&
+        (ULONG_PTR)eva->lpVtbl->get_ResourceContext < (ULONG_PTR)0x7ffc00000000)
+        return eva->lpVtbl->get_ResourceContext( impl->com_args, out );
     return S_OK;
 }
 
@@ -484,15 +473,13 @@ static const void *cwv2_wrr_evargs_vtbl[256] =
 static HRESULT WINAPI procfail_get_ProcessFailedKind( void *iface, int *out )
 {
     struct cwv2_event_args *impl = impl_from_evargs( iface );
+    const struct abi_wv2_procfail_args *pf = (const struct abi_wv2_procfail_args *)impl->com_args;
     HRESULT hr = S_OK;
     if (!out) return E_POINTER;
     *out = 0;
-    if (impl->com_args && *(void ***)impl->com_args)
-    {
-        HRESULT (WINAPI *fn)( void *, int * ) = (*(void ***)impl->com_args)[3];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            hr = fn( impl->com_args, out );
-    }
+    if (pf && pf->lpVtbl && pf->lpVtbl->get_ProcessFailedKind &&
+        (ULONG_PTR)pf->lpVtbl->get_ProcessFailedKind < (ULONG_PTR)0x7ffc00000000)
+        hr = pf->lpVtbl->get_ProcessFailedKind( impl->com_args, out );
     ERR( "procfail_get_ProcessFailedKind hr=%#lx kind=%d\n", hr, *out );
     return hr;
 }

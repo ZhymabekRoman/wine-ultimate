@@ -22,6 +22,7 @@
 
 #include "private.h"
 #include "app_private.h"
+#include "uwp_abi_vtbls.h"
 #include "windows.applicationmodel.activation.h"
 
 
@@ -79,8 +80,8 @@ static HRESULT WINAPI app_view_activated_Invoke(
         WARN( "QI IApplicationOverrides_WinUI returned hr %#lx, overrides %p\n", hr_winui, overrides );
         if (SUCCEEDED(hr_winui) && overrides)
         {
-            void **ov_vtbl = *(void ***)overrides;
-            HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[6];
+            const struct abi_app_overrides_winui *ov = (const struct abi_app_overrides_winui *)overrides;
+            HRESULT (WINAPI *on_launched)( void *, void * ) = ov->lpVtbl->OnLaunched;
             WARN( "invoking WinUI3 App OnLaunched %p (overrides %p, args %p)\n",
                    on_launched, overrides, args );
             if (on_launched) on_launched( overrides, args );
@@ -92,19 +93,19 @@ static HRESULT WINAPI app_view_activated_Invoke(
             WARN( "QI IApplicationOverrides_UWP returned hr %#lx, overrides %p\n", hr_uwp, overrides );
             if (SUCCEEDED(hr_uwp) && overrides)
             {
-                void **ov_vtbl = *(void ***)overrides;
+                const struct abi_app_overrides_uwp *ov = (const struct abi_app_overrides_uwp *)overrides;
                 __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind kind = 0;
                 if (args) __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_get_Kind( args, &kind );
                 if (kind == 0 /* ActivationKind_Launch */)
                 {
-                    HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
+                    HRESULT (WINAPI *on_launched)( void *, void * ) = ov->lpVtbl->OnLaunched;
                     WARN( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
                            on_launched, overrides, args );
                     if (on_launched) on_launched( overrides, args );
                 }
                 else
                 {
-                    HRESULT (WINAPI *on_activated)( void *, void * ) = (void *)ov_vtbl[6];
+                    HRESULT (WINAPI *on_activated)( void *, void * ) = ov->lpVtbl->OnActivated;
                     WARN( "invoking UWP App OnActivated(kind=%d) via QI %p (overrides %p, args %p)\n",
                            (int)kind, on_activated, overrides, args );
                     if (on_activated) on_activated( overrides, args );
@@ -113,8 +114,8 @@ static HRESULT WINAPI app_view_activated_Invoke(
             }
             else
             {
-                void **vtbl = *(void ***)current_application->outer;
-                HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)vtbl[6];
+                const struct abi_app_overrides_winui *ov = (const struct abi_app_overrides_winui *)current_application->outer;
+                HRESULT (WINAPI *on_launched)( void *, void * ) = ov->lpVtbl->OnLaunched;
                 WARN( "invoking App OnLaunched fallback vtbl[6] %p (outer %p, args %p)\n",
                        on_launched, current_application->outer, args );
                 if (on_launched) on_launched( current_application->outer, args );
@@ -1315,8 +1316,8 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
         }
         if (SUCCEEDED(hr) && provider)
         {
-            void **vtbl = *(void ***)provider;
-            HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
+            const struct abi_xaml_metadata_provider *mp = (const struct abi_xaml_metadata_provider *)provider;
+            HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = mp->lpVtbl->GetXamlTypeByFullName;
             if (get_by_name && SUCCEEDED(WindowsCreateString( full_name, wcslen(full_name), &hname )) && hname)
             {
                 TRACE( "GetXamlTypeByFullName(%s) calling...\n", debugstr_w(full_name) );
@@ -1328,11 +1329,11 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
                 WindowsDeleteString( hname );
                 if (SUCCEEDED(hr) && xaml_type)
                 {
-                    void **type_vtbl = *(void ***)xaml_type;
+                    const struct abi_xaml_type *xt = (const struct abi_xaml_type *)xaml_type;
                     /* IXamlType: slot 11 is IsConstructible on both UWP and WinUI 3;
                      * ActivateInstance is slot 18 (UWP) / slot 19 (WinUI 3). */
-                    HRESULT (WINAPI *get_is_constructible)(void *, boolean *) = (void *)type_vtbl[11];
-                    HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[is_uwp ? 18 : 19];
+                    HRESULT (WINAPI *get_is_constructible)(void *, boolean *) = xt->lpVtbl->get_IsConstructible;
+                    HRESULT (WINAPI *activate)(void *, void **) = is_uwp ? xt->lpVtbl->ActivateInstance_UWP : xt->lpVtbl->ActivateInstance_WinUI;
                     boolean constructible = TRUE;
                     if (get_is_constructible)
                         get_is_constructible( xaml_type, &constructible );
@@ -1409,9 +1410,8 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
         {
             for (i = 0; i < uwp_xbf_control_cnt; i++)
             {
-                void *c = uwp_xbf_controls[i];
-                HRESULT (WINAPI *put_enabled)( void *, boolean ) = (void *)(*(void ***)c)[23];
-                if (put_enabled) put_enabled( c, TRUE );
+                const struct abi_control_uwp *c = (const struct abi_control_uwp *)uwp_xbf_controls[i];
+                if (c->lpVtbl->put_IsEnabled) c->lpVtbl->put_IsEnabled( uwp_xbf_controls[i], TRUE );
             }
             return;
         }
@@ -1446,10 +1446,9 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
 
     if (uri_insp && SUCCEEDED(IInspectable_QueryInterface(uri_insp, &IID_IUriRuntimeClass_g, &uri_rt)))
     {
-        typedef HRESULT (WINAPI *p_get_RawUri)(void *, HSTRING *);
-        p_get_RawUri get_raw_uri = (p_get_RawUri)(*(void ***)uri_rt)[6]; /* slot 6: get_AbsoluteUri */
+        const struct abi_uri_runtime_class *auri = (const struct abi_uri_runtime_class *)uri_rt;
         HSTRING raw = NULL;
-        if (SUCCEEDED(get_raw_uri(uri_rt, &raw)) && raw)
+        if (auri->lpVtbl->get_AbsoluteUri && SUCCEEDED(auri->lpVtbl->get_AbsoluteUri(uri_rt, &raw)) && raw)
         {
             const WCHAR *str = WindowsGetStringRawBuffer(raw, NULL);
             const WCHAR *slash = wcsrchr(str, '/');
@@ -1478,7 +1477,8 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
     GetModuleFileNameW(NULL, pri_path, MAX_PATH);
     p_slash = wcsrchr(pri_path, '\\');
     if (p_slash) *(p_slash + 1) = 0;
-    lstrcatW(pri_path, L"resources.pri");
+    if (wcslen(pri_path) + ARRAY_SIZE(L"resources.pri") <= ARRAY_SIZE(pri_path))
+        lstrcpynW(pri_path + wcslen(pri_path), L"resources.pri", (int)(ARRAY_SIZE(pri_path) - wcslen(pri_path)));
 
     hFile = CreateFileW(pri_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (hFile != INVALID_HANDLE_VALUE)
@@ -2156,11 +2156,11 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
                current_application->outer, hr, provider );
         if (SUCCEEDED(hr) && provider)
         {
-            void **vtbl = *(void ***)provider;
+            const struct abi_xaml_metadata_provider *mp = (const struct abi_xaml_metadata_provider *)provider;
             /* Slot 6: GetXamlType(TypeName, IXamlType**) */
-            HRESULT (WINAPI *get_xaml_type)(void *, TypeName, void **) = (void *)vtbl[6];
+            HRESULT (WINAPI *get_xaml_type)(void *, TypeName, void **) = mp->lpVtbl->GetXamlType;
             /* Slot 7: GetXamlTypeByFullName(HSTRING, IXamlType**) */
-            HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
+            HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = mp->lpVtbl->GetXamlTypeByFullName;
 
             hr = E_FAIL;
             if (get_by_name && type && type->Name)
@@ -2185,21 +2185,19 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
             }
             if (SUCCEEDED(hr) && xaml_type)
             {
-                void **type_vtbl = *(void ***)xaml_type;
+                const struct abi_xaml_type *xt = (const struct abi_xaml_type *)xaml_type;
                 /* Dispatch on the IXamlType face the returned type itself answers:
                  * UWP IXamlType has ActivateInstance at slot 18; WinUI 3 IXamlType
                  * merged get_BoxedType at slot 17, so ActivateInstance is at slot 19. */
-                int act_slot = 18;
                 void *type2 = NULL;
-                HRESULT (WINAPI *activate)(void *, void **);
+                HRESULT (WINAPI *activate)(void *, void **) = xt->lpVtbl->ActivateInstance_UWP;
                 if (SUCCEEDED( IInspectable_QueryInterface( (IInspectable *)xaml_type,
                                                             &IID_IXamlType_WinUI3_g, &type2 ) ) && type2)
                 {
-                    act_slot = 19;
+                    activate = xt->lpVtbl->ActivateInstance_WinUI;
                     IInspectable_Release( (IInspectable *)type2 );
                 }
-                activate = (void *)type_vtbl[act_slot];
-                TRACE( "calling IXamlType::ActivateInstance slot %d (%p)\n", act_slot, activate );
+                TRACE( "calling IXamlType::ActivateInstance (%p)\n", activate );
                 if (activate)
                 {
                     hr = activate( xaml_type, (void **)out );

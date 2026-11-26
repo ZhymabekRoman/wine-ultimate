@@ -228,15 +228,10 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 {
     int kids = 0;
     if (!el || depth > 48 || *rem <= 0) return;
-    if (el->class_flags & (UWP_CF_SKELETON | UWP_CF_SHIMMER))
+    if (el->class_flags2 & (UWP_CF2_HOMEPAGE_SKEL | UWP_CF2_SEARCHPAGE_SKEL | UWP_CF2_SHIMMER_PRODUCT))
     {
-        if (wcsstr( el->class_name, L"HomepageSkeleton" ) ||
-            wcsstr( el->class_name, L"SearchPageSkeleton" ) ||
-            wcsstr( el->class_name, L"ShimmerProductView" ))
-        {
-            ERR( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
-            return;
-        }
+        ERR( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
+        return;
     }
     if (el->children_coll)
         kids = (int)CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count;
@@ -250,7 +245,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
          el->width, el->height,
          uwp_has_text( el ) ? debugstr_w(uwp_elem_text( el )) : "\"\"",
          el->image_src[0] ? debugstr_w(el->image_src) : "\"\"" );
-    if (wcsstr( el->class_name, L".Controls.Card" ))
+    if (el->class_flags2 & UWP_CF2_DOT_CARD)
         return;
     if (el->content)
     {
@@ -593,7 +588,7 @@ static void CALLBACK uwp_dispatcher_timer_proc( HWND hwnd, UINT msg, UINT_PTR id
         {
             h->lpVtbl->Invoke( h, sender, NULL );
         }
-        __EXCEPT_ALL {}
+        __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
         __ENDTRY;
         IUnknown_Release( (IUnknown *)handlers[i] );
     }

@@ -947,15 +947,14 @@ unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_item
     }
     if (vec)
     {
-        HRESULT (WINAPI *get_at)(void *, unsigned int, void **) = (void *)(*(void ***)vec)[6];
-        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
+        const struct abi_winrt_vector *avec = (const struct abi_winrt_vector *)vec;
         unsigned int sz = 0, i;
-        if (get_sz && get_at && SUCCEEDED(get_sz( vec, &sz )))
+        if (avec->lpVtbl->get_Size && avec->lpVtbl->GetAt && SUCCEEDED(avec->lpVtbl->get_Size( vec, &sz )))
         {
             for (i = 0; i < sz && count < max_items; i++)
             {
                 void *it = NULL;
-                if (SUCCEEDED(get_at( vec, i, &it )) && it)
+                if (SUCCEEDED(avec->lpVtbl->GetAt( vec, i, &it )) && it)
                     out_items[count++] = (IInspectable *)it;
             }
         }
@@ -971,23 +970,21 @@ unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_item
     }
     if (vec)
     {
-        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)vec)[6];
+        const struct abi_winrt_iterable *ait = (const struct abi_winrt_iterable *)vec;
         void *iter = NULL;
-        if (first && SUCCEEDED(first( vec, &iter )) && iter)
+        if (ait->lpVtbl->First && SUCCEEDED(ait->lpVtbl->First( vec, &iter )) && iter)
         {
-            HRESULT (WINAPI *get_cur)(void *, void **) = (void *)(*(void ***)iter)[6];
-            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
-            HRESULT (WINAPI *move_next)(void *, boolean *) = (void *)(*(void ***)iter)[8];
+            const struct abi_winrt_iterator *aiv = (const struct abi_winrt_iterator *)iter;
             boolean has = FALSE;
-            if (has_cur && SUCCEEDED(has_cur( iter, &has )) && has)
+            if (aiv->lpVtbl->get_HasCurrent && SUCCEEDED(aiv->lpVtbl->get_HasCurrent( iter, &has )) && has)
             {
                 while (has && count < max_items)
                 {
                     void *it = NULL;
-                    if (get_cur && SUCCEEDED(get_cur( iter, &it )) && it)
+                    if (aiv->lpVtbl->get_Current && SUCCEEDED(aiv->lpVtbl->get_Current( iter, &it )) && it)
                         out_items[count++] = (IInspectable *)it;
                     has = FALSE;
-                    if (!move_next || FAILED(move_next( iter, &has )) || !has) break;
+                    if (!aiv->lpVtbl->MoveNext || FAILED(aiv->lpVtbl->MoveNext( iter, &has )) || !has) break;
                 }
             }
             IUnknown_Release( (IUnknown *)iter );
@@ -1028,8 +1025,8 @@ unsigned int uwp_winrt_vec_count( IInspectable *coll )
     }
     if (vec)
     {
-        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)vec)[7];
-        if (get_sz && FAILED(get_sz( vec, &sz ))) sz = 0;
+        const struct abi_winrt_vector *avec = (const struct abi_winrt_vector *)vec;
+        if (avec->lpVtbl->get_Size && FAILED(avec->lpVtbl->get_Size( vec, &sz ))) sz = 0;
         IUnknown_Release( (IUnknown *)vec );
         return sz;
     }

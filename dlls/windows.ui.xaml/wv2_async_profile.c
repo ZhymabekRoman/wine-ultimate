@@ -134,11 +134,12 @@ static HRESULT WINAPI cwv2_settings_GetTrustLevel( IInspectable *iface, TrustLev
 
 static HRESULT settings_get_bool( struct cwv2_settings *impl, int com_slot, boolean *val )
 {
+    const struct abi_slot_iface *ls = (const struct abi_slot_iface *)impl->loader_settings;
     BOOL b = TRUE;
     if (!val) return E_POINTER;
-    if (impl->loader_settings && *(void ***)impl->loader_settings)
+    if (ls && ls->lpVtbl && com_slot >= 0 && com_slot < (int)ARRAY_SIZE(ls->lpVtbl->slots))
     {
-        HRESULT (WINAPI *fn)( void *, BOOL * ) = (*(void ***)impl->loader_settings)[com_slot];
+        HRESULT (WINAPI *fn)( void *, BOOL * ) = ls->lpVtbl->slots[com_slot];
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
         {
             HRESULT hr = fn( impl->loader_settings, &b );
@@ -151,9 +152,10 @@ static HRESULT settings_get_bool( struct cwv2_settings *impl, int com_slot, bool
 }
 static HRESULT settings_put_bool( struct cwv2_settings *impl, int com_slot, boolean val )
 {
-    if (impl->loader_settings && *(void ***)impl->loader_settings)
+    const struct abi_slot_iface *ls = (const struct abi_slot_iface *)impl->loader_settings;
+    if (ls && ls->lpVtbl && com_slot >= 0 && com_slot < (int)ARRAY_SIZE(ls->lpVtbl->slots))
     {
-        HRESULT (WINAPI *fn)( void *, BOOL ) = (*(void ***)impl->loader_settings)[com_slot];
+        HRESULT (WINAPI *fn)( void *, BOOL ) = ls->lpVtbl->slots[com_slot];
         if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
             return fn( impl->loader_settings, !!val );
     }
@@ -181,23 +183,21 @@ SETTINGS_BOOL_PAIR( IsBuiltInErrorPageEnabled, 19, 20 )
 static HRESULT WINAPI cwv2_settings2_get_UserAgent( void *iface, HSTRING *ua )
 {
     struct cwv2_settings *impl = impl_from_settings2( iface );
+    const struct abi_wv2_settings2 *ls2 = (const struct abi_wv2_settings2 *)impl->loader_settings2;
     if (!ua) return E_POINTER;
-    if (impl->loader_settings2 && *(void ***)impl->loader_settings2)
+    if (ls2 && ls2->lpVtbl && ls2->lpVtbl->get_UserAgent &&
+        (ULONG_PTR)ls2->lpVtbl->get_UserAgent < (ULONG_PTR)0x7ffc00000000)
     {
-        HRESULT (WINAPI *fn)( void *, LPWSTR * ) = (*(void ***)impl->loader_settings2)[21];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+        LPWSTR raw = NULL;
+        HRESULT hr = ls2->lpVtbl->get_UserAgent( impl->loader_settings2, &raw );
+        if (SUCCEEDED( hr ) && raw)
         {
-            LPWSTR raw = NULL;
-            HRESULT hr = fn( impl->loader_settings2, &raw );
-            if (SUCCEEDED( hr ) && raw)
-            {
-                hr = WindowsCreateString( raw, lstrlenW( raw ), ua );
-                CoTaskMemFree( raw );
-                return hr;
-            }
-            if (raw) CoTaskMemFree( raw );
+            hr = WindowsCreateString( raw, lstrlenW( raw ), ua );
+            CoTaskMemFree( raw );
             return hr;
         }
+        if (raw) CoTaskMemFree( raw );
+        return hr;
     }
     return WindowsCreateString( L"", 0, ua );
 }
@@ -205,14 +205,12 @@ static HRESULT WINAPI cwv2_settings2_get_UserAgent( void *iface, HSTRING *ua )
 static HRESULT WINAPI cwv2_settings2_put_UserAgent( void *iface, HSTRING ua )
 {
     struct cwv2_settings *impl = impl_from_settings2( iface );
+    const struct abi_wv2_settings2 *ls2 = (const struct abi_wv2_settings2 *)impl->loader_settings2;
     const WCHAR *s = ua ? WindowsGetStringRawBuffer( ua, NULL ) : L"";
     TRACE( "cwv2_settings2_put_UserAgent: %s\n", debugstr_w( s ) );
-    if (impl->loader_settings2 && *(void ***)impl->loader_settings2)
-    {
-        HRESULT (WINAPI *fn)( void *, LPCWSTR ) = (*(void ***)impl->loader_settings2)[22];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
-            return fn( impl->loader_settings2, s );
-    }
+    if (ls2 && ls2->lpVtbl && ls2->lpVtbl->put_UserAgent &&
+        (ULONG_PTR)ls2->lpVtbl->put_UserAgent < (ULONG_PTR)0x7ffc00000000)
+        return ls2->lpVtbl->put_UserAgent( impl->loader_settings2, s );
     if (impl->owner)
         cwv2_queue_op( impl->owner, CWV2_OP_SETTING_UA, 0, FALSE, s, NULL, NULL, NULL, NULL );
     return S_OK;
@@ -391,9 +389,9 @@ static HRESULT WINAPI env_asyncop_put_Completed( void *iface, void *handler )
     impl->handler = handler;
     if (handler)
     {
-        HRESULT (WINAPI *invoke)( void *, void *, int ) = (*(void ***)handler)[3];
+        const struct abi_async_op_completed_handler *ah = (const struct abi_async_op_completed_handler *)handler;
         ((IInspectable *)handler)->lpVtbl->AddRef( handler );
-        if (invoke) invoke( handler, iface, 1 /* Completed */ );
+        if (ah->lpVtbl->Invoke) ah->lpVtbl->Invoke( handler, iface, 1 /* Completed */ );
     }
     return S_OK;
 }

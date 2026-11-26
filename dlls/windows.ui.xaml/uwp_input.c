@@ -508,7 +508,7 @@ static BOOL uwp_fire_tapped( struct uwp_element *el, int x, int y )
         {
             h->lpVtbl->Invoke( h, sender, &args->ITappedRoutedEventArgs_iface );
         }
-        __EXCEPT_ALL {}
+        __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
         __ENDTRY;
         IUnknown_Release( (IUnknown *)handlers[i] );
     }
@@ -1396,13 +1396,13 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
             {
                 if (!((char *)ctrl_ovr >= (char *)cur && (char *)ctrl_ovr < (char *)(cur + 1)))
                 {
-                    HRESULT (WINAPI *on_tapped)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[14];
-                    if (on_tapped)
+                    const struct abi_ctrl_overrides *aco = (const struct abi_ctrl_overrides *)ctrl_ovr;
+                    if (aco->lpVtbl->OnTapped)
                     {
                         WARN( "uwp_fire_tapped_bubble: IControlOverrides::OnTapped on %s (%s) txt=%s\n",
                               debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(uwp_elem_text( cur )) );
-                        __TRY { on_tapped( ctrl_ovr, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
-                        __EXCEPT_ALL {}
+                        __TRY { aco->lpVtbl->OnTapped( ctrl_ovr, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
+                        __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                         __ENDTRY;
                     }
                 }
@@ -1500,7 +1500,9 @@ BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_eve
             {
                 if (!((char *)ctrl_ovr >= (char *)cur && (char *)ctrl_ovr < (char *)(cur + 1)))
                 {
-                    HRESULT (WINAPI *on_ptr)(void *, void *) = (void *)(*(void ***)ctrl_ovr)[ovr_slot];
+                    const struct abi_slot_iface *aco = (const struct abi_slot_iface *)ctrl_ovr;
+                    HRESULT (WINAPI *on_ptr)(void *, void *) =
+                        (ovr_slot >= 0 && ovr_slot < (int)ARRAY_SIZE(aco->lpVtbl->slots)) ? aco->lpVtbl->slots[ovr_slot] : NULL;
                     if (on_ptr)
                     {
                         __TRY

@@ -50,7 +50,7 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
     if (!b_el) return FALSE;
 
     /* 1. LinearGradientBrush */
-    if (b_el->gradient_stops_coll || wcsstr( b_el->class_name, L"LinearGradientBrush" ))
+    if (b_el->gradient_stops_coll || (b_el->class_flags2 & UWP_CF2_LINEAR_GRADIENT))
     {
         struct uwp_vec_view *gv = NULL;
         struct { double off; UINT32 argb; } stops[16];
@@ -1805,14 +1805,14 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
         if (!glyph[0])
         {
             if (!wcscmp( el->name, L"SettingsItem" ) || !wcscmp( label, L"Settings" ))
-                lstrcpyW( glyph, L"\x2699" );
-            else if (!wcscmp( label, L"Home" )) lstrcpyW( glyph, L"\x2302" );
-            else if (!wcscmp( label, L"Apps" )) lstrcpyW( glyph, L"\x25A6" );
-            else if (!wcscmp( label, L"Gaming" )) lstrcpyW( glyph, L"\x2726" );
-            else if (!wcscmp( label, L"Themes" )) lstrcpyW( glyph, L"\x25C8" );
-            else if (!wcscmp( label, L"Library" )) lstrcpyW( glyph, L"\x25A4" );
-            else if (!wcscmp( label, L"Help" )) lstrcpyW( glyph, L"?" );
-            else lstrcpyW( glyph, L"\x2022" );
+                lstrcpynW( glyph, L"\x2699", ARRAY_SIZE(glyph) );
+            else if (!wcscmp( label, L"Home" )) lstrcpynW( glyph, L"\x2302", ARRAY_SIZE(glyph) );
+            else if (!wcscmp( label, L"Apps" )) lstrcpynW( glyph, L"\x25A6", ARRAY_SIZE(glyph) );
+            else if (!wcscmp( label, L"Gaming" )) lstrcpynW( glyph, L"\x2726", ARRAY_SIZE(glyph) );
+            else if (!wcscmp( label, L"Themes" )) lstrcpynW( glyph, L"\x25C8", ARRAY_SIZE(glyph) );
+            else if (!wcscmp( label, L"Library" )) lstrcpynW( glyph, L"\x25A4", ARRAY_SIZE(glyph) );
+            else if (!wcscmp( label, L"Help" )) lstrcpynW( glyph, L"?", ARRAY_SIZE(glyph) );
+            else lstrcpynW( glyph, L"\x2022", ARRAY_SIZE(glyph) );
         }
         if (!gfont[0])
         {
@@ -1959,19 +1959,19 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
             if (SUCCEEDED(IInspectable_QueryInterface( el->content, &IID_ICustomPropertyProvider_UWP, &cpp )) && cpp)
             {
                 static const WCHAR *const prop_names[] = { L"Title", L"Label", L"DisplayName", L"Header", L"Text", L"Content", L"Name" };
-                HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
+                const struct abi_custom_property_provider *acpp = (const struct abi_custom_property_provider *)cpp;
                 unsigned int pi;
                 for (pi = 0; pi < ARRAY_SIZE(prop_names) && !label[0]; pi++)
                 {
                     HSTRING hp = NULL;
                     void *cp = NULL;
-                    if (get_prop && SUCCEEDED(WindowsCreateString( prop_names[pi], wcslen(prop_names[pi]), &hp )) && hp)
+                    if (acpp->lpVtbl->GetCustomProperty && SUCCEEDED(WindowsCreateString( prop_names[pi], wcslen(prop_names[pi]), &hp )) && hp)
                     {
-                        if (SUCCEEDED(get_prop( cpp, hp, &cp )) && cp)
+                        if (SUCCEEDED(acpp->lpVtbl->GetCustomProperty( cpp, hp, &cp )) && cp)
                         {
-                            HRESULT (WINAPI *get_val)(void *, IInspectable *, IInspectable **) = (void *)(*(void ***)cp)[8];
+                            const struct abi_custom_property *acp = (const struct abi_custom_property *)cp;
                             IInspectable *pval = NULL;
-                            if (get_val && SUCCEEDED(get_val( cp, el->content, &pval )) && pval)
+                            if (acp->lpVtbl->GetValue && SUCCEEDED(acp->lpVtbl->GetValue( cp, el->content, &pval )) && pval)
                             {
                                 uwp_unbox_string( pval, label, ARRAY_SIZE(label) );
                                 IInspectable_Release( pval );
@@ -2039,12 +2039,11 @@ static IInspectable *uwp_vm_unwrap_one( IInspectable *vm, const WCHAR *const *pr
     }
     if (!nv && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICustomPropertyProvider_UWP, &cpp )) && cpp)
     {
-        HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
-        HRESULT (WINAPI *get_type)(void *, TypeName *) = (void *)(*(void ***)cpp)[9];
-        if (get_type)
+        const struct abi_custom_property_provider *acpp = (const struct abi_custom_property_provider *)cpp;
+        if (acpp->lpVtbl->get_Type)
         {
             TypeName tn = {0};
-            if (SUCCEEDED(get_type( cpp, &tn )) && tn.Name)
+            if (SUCCEEDED(acpp->lpVtbl->get_Type( cpp, &tn )) && tn.Name)
             {
                 WCHAR tcls[256] = {0}, *comma;
                 const WCHAR *raw = WindowsGetStringRawBuffer( tn.Name, NULL );
@@ -2063,12 +2062,12 @@ static IInspectable *uwp_vm_unwrap_one( IInspectable *vm, const WCHAR *const *pr
         {
             HSTRING hp = NULL;
             void *cp = NULL;
-            if (get_prop && SUCCEEDED(WindowsCreateString( props[ni], wcslen(props[ni]), &hp )) && hp)
+            if (acpp->lpVtbl->GetCustomProperty && SUCCEEDED(WindowsCreateString( props[ni], wcslen(props[ni]), &hp )) && hp)
             {
-                if (SUCCEEDED(get_prop( cpp, hp, &cp )) && cp)
+                if (SUCCEEDED(acpp->lpVtbl->GetCustomProperty( cpp, hp, &cp )) && cp)
                 {
-                    HRESULT (WINAPI *get_val)(void *, IInspectable *, IInspectable **) = (void *)(*(void ***)cp)[8];
-                    if (get_val) get_val( cp, vm, &nv );
+                    const struct abi_custom_property *acp = (const struct abi_custom_property *)cp;
+                    if (acp->lpVtbl->GetValue) acp->lpVtbl->GetValue( cp, vm, &nv );
                     IUnknown_Release( (IUnknown *)cp );
                 }
                 WindowsDeleteString( hp );
@@ -2139,7 +2138,7 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
             for (vi = 0; vi < ARRAY_SIZE(vms) && !price_buf[0]; vi++)
                 if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], price_props, ARRAY_SIZE(price_props), price_buf, ARRAY_SIZE(price_buf), 3 );
             if (!price_buf[0] && (rating_buf[0] || cat_buf[0]))
-                lstrcpyW( price_buf, L"Free" );
+                lstrcpynW( price_buf, L"Free", ARRAY_SIZE(price_buf) );
             if (!cat_buf[0] && !rating_buf[0] && !price_buf[0])
             {
                 for (vi = 0; vi < ARRAY_SIZE(vms) && !cat_buf[0]; vi++)

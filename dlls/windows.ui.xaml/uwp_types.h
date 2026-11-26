@@ -170,6 +170,50 @@ enum uwp_elem_kind
 #define UWP_CF_UWP_PREFIX               (1ULL << 62)
 #define UWP_CF_DATA_TEMPLATE            (1ULL << 63)
 
+/* Secondary bitmask flags cached on struct uwp_element::class_flags2 via uwp_elem_sync_class_flags(). */
+#define UWP_CF2_TEMPLATE_SELECTOR       (1ULL << 0)
+#define UWP_CF2_FRAME                   (1ULL << 1)
+#define UWP_CF2_NAV_TRANSITION          (1ULL << 2)
+#define UWP_CF2_IMAGE                   (1ULL << 3)
+#define UWP_CF2_EASE                    (1ULL << 4)
+#define UWP_CF2_NAVVIEW_WINUI           (1ULL << 5)
+#define UWP_CF2_NAVVIEW_ITEM_WINUI      (1ULL << 6)
+#define UWP_CF2_GRID                    (1ULL << 7)
+#define UWP_CF2_VISUAL_STATE            (1ULL << 8)
+#define UWP_CF2_BINDING                 (1ULL << 9)
+#define UWP_CF2_TEMPLATE_BINDING        (1ULL << 10)
+#define UWP_CF2_NULL_EXT                (1ULL << 11)
+#define UWP_CF2_GRADIENT_STOP           (1ULL << 12)
+#define UWP_CF2_LINEAR_GRADIENT         (1ULL << 13)
+#define UWP_CF2_FLYOUT_EXACT            (1ULL << 14)
+#define UWP_CF2_MENU_FLYOUT_EXACT       (1ULL << 15)
+#define UWP_CF2_CMDBAR_FLYOUT_EXACT     (1ULL << 16)
+#define UWP_CF2_HYPERLINK_EXACT         (1ULL << 17)
+#define UWP_CF2_NAV_VIEW_ITEM_CTRL      (1ULL << 18)
+#define UWP_CF2_NAV_VIEW_CTRL           (1ULL << 19)
+#define UWP_CF2_DWS_HOST                (1ULL << 20)
+#define UWP_CF2_LOADED_IMAGE_SURF       (1ULL << 21)
+#define UWP_CF2_COLLECTION              (1ULL << 22)
+#define UWP_CF2_ANIMATION_SET           (1ULL << 23)
+#define UWP_CF2_HOMEPAGE_SKEL           (1ULL << 24)
+#define UWP_CF2_SEARCHPAGE_SKEL         (1ULL << 25)
+#define UWP_CF2_SHIMMER_PRODUCT         (1ULL << 26)
+#define UWP_CF2_DOT_CARD                (1ULL << 27)
+#define UWP_CF2_XAML_UICOMMAND          (1ULL << 28)
+#define UWP_CF2_FLYOUT_ITEM             (1ULL << 29)
+#define UWP_CF2_CONTENT_DIALOG          (1ULL << 30)
+#define UWP_CF2_DISPATCHER_TIMER        (1ULL << 31)
+#define UWP_CF2_REL_SOURCE              (1ULL << 32)
+#define UWP_CF2_SYMBOL_ICON_EXACT       (1ULL << 33)
+#define UWP_CF2_CIRCLE_EASE             (1ULL << 34)
+#define UWP_CF2_EXP_EASE                (1ULL << 35)
+#define UWP_CF2_POWER_EASE              (1ULL << 36)
+#define UWP_CF2_SINE_EASE               (1ULL << 37)
+#define UWP_CF2_QUAD_EASE               (1ULL << 38)
+#define UWP_CF2_CUBIC_EASE              (1ULL << 39)
+#define UWP_CF2_QUARTIC_EASE            (1ULL << 40)
+#define UWP_CF2_QUINTIC_EASE            (1ULL << 41)
+
 enum uwp_rd_kind
 {
     UWP_RD_OBJ = 0,
@@ -435,6 +479,7 @@ struct uwp_element
     BOOL outer_pinned;           /* visual tree holds an explicit AddRef on outer to prevent GC while live */
     enum uwp_elem_kind kind;
     UINT64 class_flags;
+    UINT64 class_flags2;
     WCHAR class_name[128];
     WCHAR x_class[128];
     WCHAR name[64];
@@ -597,9 +642,6 @@ struct uwp_element
     BOOL is_dropdown_open;
     int hovered_dropdown_idx;
     int dropdown_scroll_offset;
-    RECT dropdown_bounds;
-    int dropdown_item_h;
-    int dropdown_visible_cnt;
     WCHAR display_member_path[64];
     struct xaml_event_registry sel_changed_reg;
     struct xaml_event_registry cb_opened_reg;
@@ -651,8 +693,6 @@ struct uwp_element
     int nav_scroll_y;
     RECT nav_pane_bounds;
     IInspectable *nav_icon;
-    WCHAR nav_icon_glyph[16];
-    WCHAR nav_icon_font[64];
     SRWLOCK dp_lock;
     struct uwp_dp_entry *dp_store;
     int dp_cnt;
@@ -664,8 +704,6 @@ struct uwp_element
     /* Template children cache (for CalculationResult etc.) */
     struct uwp_element *tpl_text_container;
     struct uwp_element *tpl_normal_output;
-    struct uwp_element *tpl_scroll_left;
-    struct uwp_element *tpl_scroll_right;
     /* Named children & deferred substreams for FindName */
     struct uwp_element **named_elems;
     int named_cnt;
@@ -720,7 +758,6 @@ struct uwp_element
     volatile LONG video_started;
     volatile LONG video_stop;
     struct uwp_element *next_reg;
-    int adopted_faulted_ctor;
     IInspectable *provider_inst;
     void *outer_unk;
     /* KeyboardAccelerator, XamlUICommand, PreviewKeyDown, TeachingTip state */

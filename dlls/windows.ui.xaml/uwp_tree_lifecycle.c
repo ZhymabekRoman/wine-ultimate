@@ -93,8 +93,8 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
             struct uwp_ccc_args *ccc = calloc( 1, sizeof(*ccc) );
             if (ccc)
             {
+                const struct abi_data_template_extension *adte = (const struct abi_data_template_extension *)dte;
                 INT32 next_phase = -1;
-                HRESULT (WINAPI *proc_bindings)(void *, void *, INT32 *) = (void *)(*(void ***)dte)[8];
                 ccc->vtbl = uwp_ccc_vtbl;
                 ccc->ref = 1;
                 ccc->item = dc;
@@ -103,7 +103,7 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
                 IInspectable_AddRef( ccc->item_container );
                 ccc->phase = 0;
                 ccc->in_recycle = FALSE;
-                if (proc_bindings)
+                if (adte->lpVtbl->ProcessBindings)
                 {
                     __TRY
                     {
@@ -112,12 +112,12 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
                         {
                             UINT32 cur_phase = ccc->phase;
                             next_phase = -1;
-                            if (FAILED(proc_bindings( dte, ccc, &next_phase ))) break;
+                            if (FAILED(adte->lpVtbl->ProcessBindings( dte, ccc, &next_phase ))) break;
                             if (next_phase <= (INT32)cur_phase) break;
                             ccc->phase = (UINT32)next_phase;
                         } while (++guard < 8);
                     }
-                    __EXCEPT_ALL {}
+                    __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                     __ENDTRY;
                 }
                 uwp_ccc_Release( ccc );
@@ -202,14 +202,14 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
     if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_UWP, &fe_ovr )) && fe_ovr)
     {
         /* Slot 8 on IFrameworkElementOverrides is OnApplyTemplate() */
-        HRESULT (WINAPI *on_apply)(void *) = (void *)(*(void ***)fe_ovr)[8];
-        if (on_apply)
+        const struct abi_fe_overrides *afo = (const struct abi_fe_overrides *)fe_ovr;
+        if (afo->lpVtbl->OnApplyTemplate)
         {
             WARN( "Calling IFrameworkElementOverrides::OnApplyTemplate on %s (%s) named_cnt=%d\n",
                    debugstr_w(el->class_name), debugstr_w(el->name), el->named_cnt );
             __TRY
             {
-                on_apply( fe_ovr );
+                afo->lpVtbl->OnApplyTemplate( fe_ovr );
             }
             __EXCEPT_ALL
             {
@@ -257,6 +257,7 @@ void uwp_fire_size_and_layout_changed( struct uwp_element *el )
                 }
                 __EXCEPT_ALL
                 {
+                    WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
                 }
                 __ENDTRY;
             }
@@ -278,6 +279,7 @@ void uwp_fire_size_and_layout_changed( struct uwp_element *el )
                 }
                 __EXCEPT_ALL
                 {
+                    WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
                 }
                 __ENDTRY;
             }
@@ -411,7 +413,7 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
     /* NavigationView raises SelectionChanged/ItemInvoked once after its own
      * Loaded handlers so the app's navigation handler populates the content
      * Frame (ContentFrame1.Navigate in Clock's MainPage) before we recurse. */
-    if (!el->nav_fired && el->class_name[0] && wcsstr( el->class_name, L".Controls.NavigationView" ))
+    if (!el->nav_fired && (el->class_flags2 & UWP_CF2_NAV_VIEW_CTRL))
     {
         struct uwp_element *item = uwp_nav_find_item( el, 0 );
         IInspectable *item_obj = item ? (item->outer ? item->outer : &item->IInspectable_iface) : NULL;

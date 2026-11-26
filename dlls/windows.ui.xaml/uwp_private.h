@@ -28,5 +28,6 @@
 #include "uwp_vsm_rd.h"
 #include "uwp_layout_render.h"
 #include "uwp_vtables.h"
+#include "uwp_abi_vtbls.h"
 
 #endif /* UWP_PRIVATE_H */

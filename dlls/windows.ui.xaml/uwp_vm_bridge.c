@@ -55,8 +55,12 @@ BOOL WINAPI init_pri_once( INIT_ONCE *once, void *param, void **ctx )
     GetModuleFileNameW( NULL, pri_path, MAX_PATH );
     slash = wcsrchr( pri_path, '\\' );
     if (slash) *(slash + 1) = 0;
-    lstrcatW( pri_path, L"resources.pri" );
-    pri_map_file_to( pri_path, &g_pri_data, &g_pri_size );
+    if (wcslen( pri_path ) + ARRAY_SIZE(L"resources.pri") <= ARRAY_SIZE(pri_path))
+    {
+        lstrcpynW( pri_path + wcslen( pri_path ), L"resources.pri",
+                   (int)(ARRAY_SIZE(pri_path) - wcslen( pri_path )) );
+        pri_map_file_to( pri_path, &g_pri_data, &g_pri_size );
+    }
     return TRUE;
 }
 
@@ -77,24 +81,21 @@ BOOL WINAPI init_pri_xbf_cat_once( INIT_ONCE *once, void *param, void **ctx )
         scan_disk_xbfs_in_dir( exe_dir, "", &g_pri_cat );
         if (wcslen( exe_dir ) + 3 < ARRAY_SIZE(pattern))
         {
-            lstrcpyW( pattern, exe_dir );
-            lstrcatW( pattern, L"\\*" );
-            hfind = FindFirstFileW( pattern, &fd );
-            if (hfind != INVALID_HANDLE_VALUE)
+        swprintf( pattern, ARRAY_SIZE(pattern), L"%.256s\\*", exe_dir );
+        hfind = FindFirstFileW( pattern, &fd );
+        if (hfind != INVALID_HANDLE_VALUE)
+        {
+            do
             {
-                do
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    wcscmp( fd.cFileName, L"." ) && wcscmp( fd.cFileName, L".." ) &&
+                    wcsicmp( fd.cFileName, L"dependencies" ))
                 {
-                    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                        wcscmp( fd.cFileName, L"." ) && wcscmp( fd.cFileName, L".." ) &&
-                        wcsicmp( fd.cFileName, L"dependencies" ))
+                    WCHAR sub_dir[MAX_PATH];
+                    char sub_a[128] = {0};
+                    if (wcslen( exe_dir ) + 1 + wcslen( fd.cFileName ) < ARRAY_SIZE(sub_dir))
                     {
-                        WCHAR sub_dir[MAX_PATH];
-                        char sub_a[128] = {0};
-                        if (wcslen( exe_dir ) + 1 + wcslen( fd.cFileName ) < ARRAY_SIZE(sub_dir))
-                        {
-                            lstrcpyW( sub_dir, exe_dir );
-                            lstrcatW( sub_dir, L"\\" );
-                            lstrcatW( sub_dir, fd.cFileName );
+                        swprintf( sub_dir, ARRAY_SIZE(sub_dir), L"%s\\%s", exe_dir, fd.cFileName );
                             WideCharToMultiByte( CP_UTF8, 0, fd.cFileName, -1, sub_a, sizeof(sub_a) - 1, NULL, NULL );
                             scan_disk_xbfs_in_dir( sub_dir, sub_a, &g_pri_cat );
                         }
@@ -348,8 +349,8 @@ static BOOL uwp_vm_read_display_value( IInspectable *vm, const WCHAR *vm_class_n
     /* 3. Fallback to default interface slot 7 get_DisplayValue(HSTRING*) */
     __TRY
     {
-        HRESULT (WINAPI *get_disp)(void *, HSTRING *) = (void *)(*(void ***)vm)[7];
-        if (get_disp) hr = get_disp( vm, &hval );
+        const struct abi_calc_vm_display *avm = (const struct abi_calc_vm_display *)vm;
+        if (avm->lpVtbl->get_DisplayValue) hr = avm->lpVtbl->get_DisplayValue( vm, &hval );
     }
     __EXCEPT_ALL
     {
@@ -440,7 +441,7 @@ void uwp_calc_vm_teardown( BOOL final_cleanup )
             if (npc->lpVtbl->remove_PropertyChanged)
             {
                 __TRY { npc->lpVtbl->remove_PropertyChanged( npc, g_calc_vm.npc_token ); }
-                __EXCEPT_ALL { }
+                __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                 __ENDTRY;
             }
         }
@@ -819,9 +820,8 @@ static IInspectable *uwp_make_button_pressed_args( int code )
                         HRESULT chr = E_FAIL;
                         __TRY
                         {
-                            HRESULT (WINAPI *create_inst)(void *, HSTRING, INT32, IInspectable **) =
-                                (void *)(*(void ***)fac)[6];
-                            if (create_inst) chr = create_inst( fac, NULL, code, &args );
+                            const struct abi_calc_btn_args_factory *abaf = (const struct abi_calc_btn_args_factory *)fac;
+                            if (abaf->lpVtbl->CreateInstance) chr = abaf->lpVtbl->CreateInstance( fac, NULL, code, &args );
                         }
                         __EXCEPT_ALL { chr = E_FAIL; args = NULL; }
                         __ENDTRY;

@@ -413,8 +413,8 @@ BOOL uwp_unbox_bool( void *obj, boolean *out_val )
     if (!obj || !out_val) return FALSE;
     if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)obj, &IID_IReference_Boolean, &iref )) && iref)
     {
-        HRESULT (WINAPI *get_val)(void *, boolean *) = (void *)(*(void ***)iref)[6];
-        HRESULT hr = get_val ? get_val( iref, out_val ) : E_FAIL;
+        const struct abi_iref_bool *air = (const struct abi_iref_bool *)iref;
+        HRESULT hr = air->lpVtbl->get_Value ? air->lpVtbl->get_Value( iref, out_val ) : E_FAIL;
         IUnknown_Release( (IUnknown *)iref );
         if (SUCCEEDED(hr)) return TRUE;
     }
@@ -1253,11 +1253,11 @@ BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_
     if (!scope_el || !scope_el->is_accent_style)
     {
         if (!wcscmp( key, L"ButtonBackground" ) || !wcscmp( key, L"DropDownButtonBackground" ))
-            lstrcpyW( key, L"ControlFillColorDefaultBrush" );
+            lstrcpynW( key, L"ControlFillColorDefaultBrush", ARRAY_SIZE(key) );
         else if (!wcscmp( key, L"ButtonForeground" ) || !wcscmp( key, L"DropDownButtonForeground" ))
-            lstrcpyW( key, L"TextFillColorPrimaryBrush" );
+            lstrcpynW( key, L"TextFillColorPrimaryBrush", ARRAY_SIZE(key) );
         else if (!wcscmp( key, L"ButtonBorderBrush" ) || !wcscmp( key, L"DropDownButtonBorderBrush" ))
-            lstrcpyW( key, L"ControlStrokeColorDefaultBrush" );
+            lstrcpynW( key, L"ControlStrokeColorDefaultBrush", ARRAY_SIZE(key) );
     }
 
     uwp_ensure_app_resources_loaded();

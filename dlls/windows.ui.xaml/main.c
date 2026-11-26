@@ -20,6 +20,7 @@
 #include "initguid.h"
 #include "private.h"
 #include "uwp_guids.h"
+#include "uwp_abi_vtbls.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -611,21 +612,21 @@ static IInspectable *dp_create_primitive_default( HSTRING type_name )
     {
         if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IPropertyValueStatics_local, &pvs )) && pvs)
         {
-            void **vt = *(void ***)pvs;
+            const struct abi_property_value_statics *apv = (const struct abi_property_value_statics *)pvs;
             if (!wcscmp( tname, L"Boolean" ))
-                ((HRESULT (WINAPI *)(void *, boolean, IInspectable **))vt[17])( pvs, FALSE, &ret );
+                apv->lpVtbl->CreateBoolean( pvs, FALSE, &ret );
             else if (!wcscmp( tname, L"Int32" ))
-                ((HRESULT (WINAPI *)(void *, INT32, IInspectable **))vt[10])( pvs, 0, &ret );
+                apv->lpVtbl->CreateInt32( pvs, 0, &ret );
             else if (!wcscmp( tname, L"UInt32" ))
-                ((HRESULT (WINAPI *)(void *, UINT32, IInspectable **))vt[11])( pvs, 0, &ret );
+                apv->lpVtbl->CreateUInt32( pvs, 0, &ret );
             else if (!wcscmp( tname, L"Int64" ))
-                ((HRESULT (WINAPI *)(void *, INT64, IInspectable **))vt[12])( pvs, 0, &ret );
+                apv->lpVtbl->CreateInt64( pvs, 0, &ret );
             else if (!wcscmp( tname, L"UInt64" ))
-                ((HRESULT (WINAPI *)(void *, UINT64, IInspectable **))vt[13])( pvs, 0, &ret );
+                apv->lpVtbl->CreateUInt64( pvs, 0, &ret );
             else if (!wcscmp( tname, L"Single" ))
-                ((HRESULT (WINAPI *)(void *, float, IInspectable **))vt[14])( pvs, 0.0f, &ret );
+                apv->lpVtbl->CreateSingle( pvs, 0.0f, &ret );
             else if (!wcscmp( tname, L"Double" ))
-                ((HRESULT (WINAPI *)(void *, double, IInspectable **))vt[15])( pvs, 0.0, &ret );
+                apv->lpVtbl->CreateDouble( pvs, 0.0, &ret );
             IUnknown_Release( (IUnknown *)pvs );
         }
         WindowsDeleteString( hcls );

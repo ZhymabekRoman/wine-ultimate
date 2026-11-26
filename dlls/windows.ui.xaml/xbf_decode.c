@@ -88,8 +88,12 @@ const BYTE *winui_pri_get_data( DWORD *out_size )
             {
                 slash = wcsrchr( pri_path, '\\' );
                 if (slash) *(slash + 1) = 0;
-                lstrcatW( pri_path, L"resources.pri" );
-                pri_map_file_to( pri_path, &g_winui_pri_data, &g_winui_pri_size );
+                if (wcslen( pri_path ) + ARRAY_SIZE(L"resources.pri") <= ARRAY_SIZE(pri_path))
+                {
+                    lstrcpynW( pri_path + wcslen( pri_path ), L"resources.pri",
+                               (int)(ARRAY_SIZE(pri_path) - wcslen( pri_path )) );
+                    pri_map_file_to( pri_path, &g_winui_pri_data, &g_winui_pri_size );
+                }
             }
         }
     }
@@ -725,8 +729,7 @@ void scan_disk_xbfs_in_dir( const WCHAR *dir_path, const char *rel_prefix, struc
     HANDLE hfind;
 
     if (wcslen( dir_path ) + 7 >= ARRAY_SIZE(pattern)) return;
-    lstrcpyW( pattern, dir_path );
-    lstrcatW( pattern, L"\\*.xbf" );
+    swprintf( pattern, ARRAY_SIZE(pattern), L"%s\\*.xbf", dir_path );
     hfind = FindFirstFileW( pattern, &fd );
     if (hfind == INVALID_HANDLE_VALUE) return;
     do
@@ -736,9 +739,7 @@ void scan_disk_xbfs_in_dir( const WCHAR *dir_path, const char *rel_prefix, struc
         {
             HANDLE hfile, hmap;
             DWORD sz;
-            lstrcpyW( full, dir_path );
-            lstrcatW( full, L"\\" );
-            lstrcatW( full, fd.cFileName );
+            swprintf( full, ARRAY_SIZE(full), L"%s\\%s", dir_path, fd.cFileName );
             hfile = CreateFileW( full, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
             if (hfile != INVALID_HANDLE_VALUE)
             {
@@ -848,9 +849,9 @@ static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_
     /* Replace .xaml with .xbf, or append .xbf */
     len = strlen( full_path );
     if (len >= 5 && !strcasecmp( full_path + len - 5, ".xaml" ))
-        strcpy( full_path + len - 5, ".xbf" );
-    else if (len < 4 || strcasecmp( full_path + len - 4, ".xbf" ))
-        strcat( full_path, ".xbf" );
+        memcpy( full_path + len - 5, ".xbf", 5 );
+    else if ((len < 4 || strcasecmp( full_path + len - 4, ".xbf" )) && len + 5 <= sizeof(full_path))
+        memcpy( full_path + len, ".xbf", 5 );
 
     if (!is_appx && base_xbf_dir && base_xbf_dir[0])
     {

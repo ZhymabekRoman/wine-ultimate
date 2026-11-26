@@ -242,8 +242,8 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
                     void *pp = NULL;
                     if (SUCCEEDED(IInspectable_QueryInterface( bel->tag, &IID_IPropertyPath_UWP, &pp )) && pp)
                     {
-                        HRESULT (WINAPI *get_path)(void *, HSTRING *) = (void *)(*(void ***)pp)[6];
-                        if (get_path && SUCCEEDED(get_path( pp, &h_path )) && h_path)
+                        const struct abi_property_path *app = (const struct abi_property_path *)pp;
+                        if (app->lpVtbl->get_Path && SUCCEEDED(app->lpVtbl->get_Path( pp, &h_path )) && h_path)
                             path_str = WindowsGetStringRawBuffer( h_path, NULL );
                         IUnknown_Release( (IUnknown *)pp );
                     }
@@ -276,7 +276,7 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
             {
                 void *sender = btn->outer ? (void *)btn->outer : (void *)&btn->IDependencyObject_iface;
                 __TRY { cbs[i]->lpVtbl->Invoke( cbs[i], sender, cb_dps[i] ); }
-                __EXCEPT_ALL {}
+                __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                 __ENDTRY;
                 IUnknown_Release( (IUnknown *)cbs[i] );
             }
@@ -293,7 +293,7 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
                 struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[k];
                 IInspectable *args = (IInspectable *)g_routed_args();
                 __TRY { h->lpVtbl->Invoke( h, sender, args ); }
-                __EXCEPT_ALL {}
+                __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                 __ENDTRY;
                 if (args) IInspectable_Release( args );
                 IUnknown_Release( (IUnknown *)handlers[k] );
@@ -702,7 +702,7 @@ void uwp_popup_set_open( struct uwp_element *impl, BOOL open )
             struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
             IInspectable *args = (IInspectable *)g_routed_args();
             __TRY { h->lpVtbl->Invoke( h, sender, args ); }
-            __EXCEPT_ALL {}
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
             if (args) IInspectable_Release( args );
             IUnknown_Release( (IUnknown *)handlers[i] );
@@ -1435,14 +1435,14 @@ static HRESULT WINAPI uwp_dts_SelectTemplate( IInspectable *iface, IInspectable 
     if (!impl->outer) return S_OK;
     if (SUCCEEDED(IInspectable_QueryInterface( impl->outer, &IID_IDataTemplateSelectorOverrides_UWP, &ovr )) && ovr)
     {
-        HRESULT (WINAPI *fn)(void *, void *, void *, void **) = (void *)(*(void ***)ovr)[6];
-        if (fn) fn( ovr, item, container, (void **)out );
+        const struct abi_dts_overrides *adts = (const struct abi_dts_overrides *)ovr;
+        if (adts->lpVtbl->SelectTemplateCore) adts->lpVtbl->SelectTemplateCore( ovr, item, container, (void **)out );
         IUnknown_Release( (IUnknown *)ovr );
     }
     if (!*out && SUCCEEDED(IInspectable_QueryInterface( impl->outer, &IID_IDataTemplateSelectorOverrides2_UWP, &ovr )) && ovr)
     {
-        HRESULT (WINAPI *fn)(void *, void *, void **) = (void *)(*(void ***)ovr)[6];
-        if (fn) fn( ovr, item, (void **)out );
+        const struct abi_dts_overrides2 *adts2 = (const struct abi_dts_overrides2 *)ovr;
+        if (adts2->lpVtbl->SelectTemplateForItemCore) adts2->lpVtbl->SelectTemplateForItemCore( ovr, item, (void **)out );
         IUnknown_Release( (IUnknown *)ovr );
     }
     return S_OK;
@@ -1457,14 +1457,14 @@ static HRESULT WINAPI uwp_dts2_SelectTemplateForItem( IInspectable *iface, IInsp
     if (!impl->outer) return S_OK;
     if (SUCCEEDED(IInspectable_QueryInterface( impl->outer, &IID_IDataTemplateSelectorOverrides2_UWP, &ovr )) && ovr)
     {
-        HRESULT (WINAPI *fn)(void *, void *, void **) = (void *)(*(void ***)ovr)[6];
-        if (fn) fn( ovr, item, (void **)out );
+        const struct abi_dts_overrides2 *adts2 = (const struct abi_dts_overrides2 *)ovr;
+        if (adts2->lpVtbl->SelectTemplateForItemCore) adts2->lpVtbl->SelectTemplateForItemCore( ovr, item, (void **)out );
         IUnknown_Release( (IUnknown *)ovr );
     }
     if (!*out && SUCCEEDED(IInspectable_QueryInterface( impl->outer, &IID_IDataTemplateSelectorOverrides_UWP, &ovr )) && ovr)
     {
-        HRESULT (WINAPI *fn)(void *, void *, void *, void **) = (void *)(*(void ***)ovr)[6];
-        if (fn) fn( ovr, item, NULL, (void **)out );
+        const struct abi_dts_overrides *adts = (const struct abi_dts_overrides *)ovr;
+        if (adts->lpVtbl->SelectTemplateCore) adts->lpVtbl->SelectTemplateCore( ovr, item, NULL, (void **)out );
         IUnknown_Release( (IUnknown *)ovr );
     }
     return S_OK;

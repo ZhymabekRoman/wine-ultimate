@@ -282,12 +282,12 @@ static HRESULT wv2_sta_send_character_input( struct xaml_element *impl, HWND hos
             WCHAR script[512];
             if (ch == '\b')
             {
-                lstrcpyW( script,
+                lstrcpynW( script,
                     L"(function(){var a=document.activeElement;"
                     L"if(!a||(a.tagName!=='INPUT'&&a.tagName!=='TEXTAREA'&&!a.isContentEditable)){"
                     L"a=document.querySelector('input:not([type=hidden]),textarea,[contenteditable=true]');"
                     L"if(a)a.focus();}"
-                    L"if(a)document.execCommand('delete',false,null);})()" );
+                    L"if(a)document.execCommand('delete',false,null);})()", ARRAY_SIZE(script) );
             }
             else if (ch >= 0x20)
             {

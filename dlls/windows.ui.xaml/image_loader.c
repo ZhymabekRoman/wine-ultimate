@@ -466,7 +466,7 @@ static void uwp_fire_img_opened_reg( struct uwp_element *target )
         if (h)
         {
             __TRY { h->lpVtbl->Invoke( h, sender, args ); }
-            __EXCEPT_ALL { }
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
             IUnknown_Release( (IUnknown *)h );
         }
@@ -762,7 +762,7 @@ void uwp_load_image_asset( struct uwp_element *el )
     {
         int ci;
         UINT max_dim = 384;
-        if (wcsstr( el->class_name, L"LoadedImageSurface" ) || wcsstr( el->name, L"Hero" ) ||
+        if ((el->class_flags2 & UWP_CF2_LOADED_IMAGE_SURF) || wcsstr( el->name, L"Hero" ) ||
             (el->has_bounds && ((el->bounds.right - el->bounds.left) > 320 || (el->bounds.bottom - el->bounds.top) > 320)))
             max_dim = 1024;
 

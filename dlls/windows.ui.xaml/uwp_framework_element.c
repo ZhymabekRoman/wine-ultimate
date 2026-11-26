@@ -873,9 +873,9 @@ HRESULT WINAPI uwp_ctrl_put_FontFamily( void *iface, IInspectable *val )
             void *iff = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IFontFamily_UWP, &iff )) && iff)
             {
+                const struct abi_font_family *aff = (const struct abi_font_family *)iff;
                 HSTRING hs = NULL;
-                HRESULT (WINAPI *get_src)(void *, HSTRING *) = (void *)(*(void ***)iff)[6];
-                if (get_src && SUCCEEDED(get_src( iff, &hs )) && hs)
+                if (aff->lpVtbl->get_Source && SUCCEEDED(aff->lpVtbl->get_Source( iff, &hs )) && hs)
                 {
                     const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
                     if (s) lstrcpynW( raw, s, ARRAY_SIZE(raw) );
@@ -950,9 +950,9 @@ HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val
             void *iref = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_TypeName, &iref )) && iref)
             {
+                const struct abi_iref_typename *air = (const struct abi_iref_typename *)iref;
                 TypeName tn = { NULL, 0 };
-                HRESULT (WINAPI *get_val)(void *, TypeName *) = (void *)(*(void ***)iref)[6];
-                if (get_val && SUCCEEDED(get_val( iref, &tn )) && tn.Name)
+                if (air->lpVtbl->get_Value && SUCCEEDED(air->lpVtbl->get_Value( iref, &tn )) && tn.Name)
                 {
                     const WCHAR *s = WindowsGetStringRawBuffer( tn.Name, NULL );
                     if (s) lstrcpynW( impl->default_style_key_name, s, ARRAY_SIZE(impl->default_style_key_name) );
@@ -1537,9 +1537,9 @@ static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *
         }
         else if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)handler, &IID_IReference_PointerEventHandler, &iref )) && iref)
         {
+            const struct abi_iref_ptr *air = (const struct abi_iref_ptr *)iref;
             void *unwrapped = NULL;
-            HRESULT (WINAPI *get_val)(void *, void **) = (void *)(*(void ***)iref)[6];
-            if (get_val && SUCCEEDED(get_val( iref, &unwrapped )) && unwrapped)
+            if (air->lpVtbl->get_Value && SUCCEEDED(air->lpVtbl->get_Value( iref, &unwrapped )) && unwrapped)
             {
                 if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)unwrapped, &IID_IPointerEventHandler_UWP, &peh )) && peh)
                 {
@@ -1735,6 +1735,7 @@ static HRESULT WINAPI uwp_ui_UpdateLayout( void *iface )
                     }
                     __EXCEPT_ALL
                     {
+                        WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
                     }
                     __ENDTRY;
                     IUnknown_Release( (IUnknown *)h );
@@ -1808,7 +1809,7 @@ void uwp_ui_fire_got_focus( struct uwp_element *el )
             IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
             IInspectable *args = (IInspectable *)g_routed_args();
             __TRY { h->lpVtbl->Invoke( h, sender, args ); }
-            __EXCEPT_ALL { }
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
             if (args) IInspectable_Release( args );
             IUnknown_Release( (IUnknown *)h );
@@ -1832,7 +1833,7 @@ void uwp_ui_fire_lost_focus( struct uwp_element *el )
             IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
             IInspectable *args = (IInspectable *)g_routed_args();
             __TRY { h->lpVtbl->Invoke( h, sender, args ); }
-            __EXCEPT_ALL { }
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
             if (args) IInspectable_Release( args );
             IUnknown_Release( (IUnknown *)h );
@@ -2057,7 +2058,7 @@ void uwp_update_binding_source( IInspectable *src, const WCHAR *path, IInspectab
                 WindowsDeleteString( h_cls );
             }
         }
-        __EXCEPT_ALL {}
+        __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
         __ENDTRY;
         IUnknown_Release( (IUnknown *)provider );
     }
@@ -2120,9 +2121,9 @@ void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
         void *pp = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( bel->tag, &IID_IPropertyPath_UWP, &pp )) && pp)
         {
+            const struct abi_property_path *app = (const struct abi_property_path *)pp;
             HSTRING h_path = NULL;
-            HRESULT (WINAPI *get_path)(void *, HSTRING *) = (void *)(*(void ***)pp)[6];
-            if (get_path && SUCCEEDED(get_path( pp, &h_path )) && h_path)
+            if (app->lpVtbl->get_Path && SUCCEEDED(app->lpVtbl->get_Path( pp, &h_path )) && h_path)
             {
                 const WCHAR *raw = WindowsGetStringRawBuffer( h_path, NULL );
                 if (raw) lstrcpynW( path_buf, raw, ARRAY_SIZE(path_buf) );
@@ -2172,8 +2173,8 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
         void *pp = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( bel->tag, &IID_IPropertyPath_UWP, &pp )) && pp)
         {
-            HRESULT (WINAPI *get_path)(void *, HSTRING *) = (void *)(*(void ***)pp)[6];
-            if (get_path && SUCCEEDED(get_path( pp, &h_path )) && h_path)
+            const struct abi_property_path *app = (const struct abi_property_path *)pp;
+            if (app->lpVtbl->get_Path && SUCCEEDED(app->lpVtbl->get_Path( pp, &h_path )) && h_path)
                 path_str = WindowsGetStringRawBuffer( h_path, NULL );
             IUnknown_Release( (IUnknown *)pp );
         }

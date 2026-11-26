@@ -1168,9 +1168,8 @@ HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value )
     WindowsDeleteString( hstr );
     if (SUCCEEDED(hr) && statics)
     {
-        void **vtbl = *(void ***)statics;
-        HRESULT (WINAPI *pGetForCurrentThread)(void *, void **) = (void *)vtbl[6];
-        if (pGetForCurrentThread) hr = pGetForCurrentThread( statics, (void **)&dq );
+        const struct abi_dispatcher_queue_statics *dqs = (const struct abi_dispatcher_queue_statics *)statics;
+        if (dqs->lpVtbl->GetForCurrentThread) hr = dqs->lpVtbl->GetForCurrentThread( statics, (void **)&dq );
         IInspectable_Release( statics );
     }
     if (dq)

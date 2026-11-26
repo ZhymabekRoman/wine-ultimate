@@ -97,6 +97,106 @@ static void test_ColorHelper(void)
 
 static const GUID IID_ISwapChainPanelNative = {0xf92f19d2, 0x3ade, 0x45a6, {0xa2, 0x0c, 0xf6, 0xf1, 0xea, 0x90, 0x55, 0x4b}};
 
+struct test_thickness;
+
+struct test_ptr_args_vtbl
+{
+    void *pad0_8[9];
+    HRESULT (WINAPI *put_Handled)(void *, boolean);
+    HRESULT (WINAPI *GetCurrentPoint)(void *, void *, IPointerPoint **);
+};
+struct test_ptr_args_iface { const struct test_ptr_args_vtbl *lpVtbl; };
+
+struct test_window_statics_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_Current)(void *, void **);
+};
+struct test_window_statics_iface { const struct test_window_statics_vtbl *lpVtbl; };
+
+struct test_window_vtbl
+{
+    void *pad0_8[9];
+    HRESULT (WINAPI *put_Content)(void *, void *);
+    HRESULT (WINAPI *get_CoreWindow)(void *, ICoreWindow **);
+    void *pad11_19[9];
+    HRESULT (WINAPI *Activate)(void *);
+};
+struct test_window_iface { const struct test_window_vtbl *lpVtbl; };
+
+struct test_fe_vtbl
+{
+    void *pad0_15[16];
+    HRESULT (WINAPI *put_Width)(void *, double);
+    void *pad17;
+    HRESULT (WINAPI *put_Height)(void *, double);
+    void *pad19_31[13];
+    HRESULT (WINAPI *put_Margin)(void *, struct test_thickness *);
+    void *pad33;
+    HRESULT (WINAPI *put_Name)(void *, HSTRING);
+    void *pad35_36[2];
+    HRESULT (WINAPI *put_DataContext)(void *, void *);
+};
+struct test_fe_iface { const struct test_fe_vtbl *lpVtbl; };
+
+struct test_panel_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_Children)(void *, void **);
+};
+struct test_panel_iface { const struct test_panel_vtbl *lpVtbl; };
+
+struct test_vec_vtbl
+{
+    void *pad0_12[13];
+    HRESULT (WINAPI *Append)(void *, void *);
+};
+struct test_vec_iface { const struct test_vec_vtbl *lpVtbl; };
+
+struct test_ui_vtbl
+{
+    void *pad0_56[57];
+    HRESULT (WINAPI *add_PointerPressed)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_PointerPressed)(void *, EventRegistrationToken);
+};
+struct test_ui_iface { const struct test_ui_vtbl *lpVtbl; };
+
+struct test_tb_vtbl
+{
+    void *pad0_25[26];
+    HRESULT (WINAPI *get_Text)(void *, HSTRING *);
+};
+struct test_tb_iface { const struct test_tb_vtbl *lpVtbl; };
+
+struct test_pc_handler_vtbl
+{
+    void *pad0_2[3];
+    HRESULT (WINAPI *Invoke)(void *, void *, void *);
+};
+struct test_pc_handler_iface { const struct test_pc_handler_vtbl *lpVtbl; };
+
+struct test_dp_statics_vtbl
+{
+    void *pad0_6[7];
+    HRESULT (WINAPI *Register)(void *, HSTRING, void *, void *, void *, IUnknown **);
+};
+struct test_dp_statics_iface { const struct test_dp_statics_vtbl *lpVtbl; };
+
+struct test_do_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *GetValue)(void *, void *, IInspectable **);
+    HRESULT (WINAPI *SetValue)(void *, void *, IInspectable *);
+};
+struct test_do_iface { const struct test_do_vtbl *lpVtbl; };
+
+struct test_xr_statics_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *Load)(void *, HSTRING, IInspectable **);
+};
+struct test_xr_statics_iface { const struct test_xr_statics_vtbl *lpVtbl; };
+
 static void test_Application(void)
 {
     static const WCHAR *class_name = L"Windows.UI.Xaml.Application";
@@ -715,10 +815,9 @@ static HRESULT WINAPI elem_ptr_Invoke( void *iface, IInspectable *sender, void *
     h->fired_cnt++;
     if (args && SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)args, &IID_IPointerRoutedEventArgs_test, &pargs ) ) && pargs)
     {
-        HRESULT (WINAPI *get_cur)(void *, void *, IPointerPoint **) = (void *)(*(void ***)pargs)[10];
-        HRESULT (WINAPI *put_handled)(void *, boolean) = (void *)(*(void ***)pargs)[9];
+        const struct test_ptr_args_iface *pa = (const struct test_ptr_args_iface *)pargs;
         IPointerPoint *pt = NULL;
-        if (get_cur && SUCCEEDED( get_cur( pargs, NULL, &pt ) ) && pt)
+        if (pa->lpVtbl->GetCurrentPoint && SUCCEEDED( pa->lpVtbl->GetCurrentPoint( pargs, NULL, &pt ) ) && pt)
         {
             Point pos = {0};
             IPointerPoint_get_Position( pt, &pos );
@@ -726,7 +825,7 @@ static HRESULT WINAPI elem_ptr_Invoke( void *iface, IInspectable *sender, void *
             h->last_abs_y = pos.Y;
             IPointerPoint_Release( pt );
         }
-        if (h->rel_elem && get_cur && SUCCEEDED( get_cur( pargs, h->rel_elem, &pt ) ) && pt)
+        if (h->rel_elem && pa->lpVtbl->GetCurrentPoint && SUCCEEDED( pa->lpVtbl->GetCurrentPoint( pargs, h->rel_elem, &pt ) ) && pt)
         {
             Point pos = {0};
             IPointerPoint_get_Position( pt, &pos );
@@ -734,8 +833,8 @@ static HRESULT WINAPI elem_ptr_Invoke( void *iface, IInspectable *sender, void *
             h->last_rel_y = pos.Y;
             IPointerPoint_Release( pt );
         }
-        if (h->set_handled && put_handled)
-            put_handled( pargs, TRUE );
+        if (h->set_handled && pa->lpVtbl->put_Handled)
+            pa->lpVtbl->put_Handled( pargs, TRUE );
         IUnknown_Release( (IUnknown *)pargs );
     }
     return S_OK;
@@ -812,17 +911,17 @@ static void test_PointerBridge( void )
     ok( hr == S_OK, "QI IWindowStatics hr %#lx\n", hr );
     if (FAILED(hr)) return;
 
-    hr = ((HRESULT (WINAPI *)(void *, void **))(*(void ***)win_statics)[6])( win_statics, (void **)&win );
+    hr = ((const struct test_window_statics_iface *)win_statics)->lpVtbl->get_Current( win_statics, (void **)&win );
     IInspectable_Release( win_statics );
     ok( hr == S_OK && win != NULL, "get_Current hr %#lx\n", hr );
     if (FAILED(hr) || !win) return;
     check_interface( win, &IID_IWindow_test, FALSE );
 
     /* Activate creates/attaches the CoreWindow HWND and subclasses it */
-    hr = ((HRESULT (WINAPI *)(void *))(*(void ***)win)[20])( win );
+    hr = ((const struct test_window_iface *)win)->lpVtbl->Activate( win );
     ok( hr == S_OK, "Window.Activate hr %#lx\n", hr );
 
-    hr = ((HRESULT (WINAPI *)(void *, ICoreWindow **))(*(void ***)win)[10])( win, &cw );
+    hr = ((const struct test_window_iface *)win)->lpVtbl->get_CoreWindow( win, &cw );
     ok( hr == S_OK && cw != NULL, "Window.get_CoreWindow hr %#lx\n", hr );
     if (!cw) { IInspectable_Release( win ); return; }
 
@@ -904,23 +1003,23 @@ static void test_PointerBridge( void )
 
     IInspectable_QueryInterface( parent_obj, &IID_IFrameworkElement_test, &parent_fe );
     IInspectable_QueryInterface( child_obj, &IID_IFrameworkElement_test, &child_fe );
-    ((HRESULT (WINAPI *)(void *, double))(*(void ***)parent_fe)[16])( parent_fe, 200.0 );
-    ((HRESULT (WINAPI *)(void *, double))(*(void ***)parent_fe)[18])( parent_fe, 200.0 );
-    ((HRESULT (WINAPI *)(void *, double))(*(void ***)child_fe)[16])( child_fe, 80.0 );
-    ((HRESULT (WINAPI *)(void *, double))(*(void ***)child_fe)[18])( child_fe, 80.0 );
-    ((HRESULT (WINAPI *)(void *, struct test_thickness *))(*(void ***)child_fe)[32])( child_fe, &margin );
+    ((const struct test_fe_iface *)parent_fe)->lpVtbl->put_Width( parent_fe, 200.0 );
+    ((const struct test_fe_iface *)parent_fe)->lpVtbl->put_Height( parent_fe, 200.0 );
+    ((const struct test_fe_iface *)child_fe)->lpVtbl->put_Width( child_fe, 80.0 );
+    ((const struct test_fe_iface *)child_fe)->lpVtbl->put_Height( child_fe, 80.0 );
+    ((const struct test_fe_iface *)child_fe)->lpVtbl->put_Margin( child_fe, &margin );
 
     IInspectable_QueryInterface( parent_obj, &IID_IPanel_test, &parent_panel );
-    ((HRESULT (WINAPI *)(void *, void **))(*(void ***)parent_panel)[6])( parent_panel, &children_vec );
-    ((HRESULT (WINAPI *)(void *, void *))(*(void ***)children_vec)[13])( children_vec, child_obj );
+    ((const struct test_panel_iface *)parent_panel)->lpVtbl->get_Children( parent_panel, &children_vec );
+    ((const struct test_vec_iface *)children_vec)->lpVtbl->Append( children_vec, child_obj );
 
     IInspectable_QueryInterface( parent_obj, &IID_IUIElement_test, &parent_ui );
     IInspectable_QueryInterface( child_obj, &IID_IUIElement_test, &child_ui );
     h_child.rel_elem = child_obj;
-    ((HRESULT (WINAPI *)(void *, void *, EventRegistrationToken *))(*(void ***)child_ui)[57])( child_ui, &h_child, &tok_child );
-    ((HRESULT (WINAPI *)(void *, void *, EventRegistrationToken *))(*(void ***)parent_ui)[57])( parent_ui, &h_parent, &tok_parent );
+    ((const struct test_ui_iface *)child_ui)->lpVtbl->add_PointerPressed( child_ui, &h_child, &tok_child );
+    ((const struct test_ui_iface *)parent_ui)->lpVtbl->add_PointerPressed( parent_ui, &h_parent, &tok_parent );
 
-    ((HRESULT (WINAPI *)(void *, void *))(*(void ***)win)[9])( win, parent_obj );
+    ((const struct test_window_iface *)win)->lpVtbl->put_Content( win, parent_obj );
     pump_messages( hwnd );
 
     /* Inside child rect [20,20 .. 100,100]: child fires and bubbles to parent */
@@ -949,9 +1048,9 @@ static void test_PointerBridge( void )
     ok( h_child.fired_cnt == 2, "expected child count 2, got %d\n", h_child.fired_cnt );
     ok( h_parent.fired_cnt == 1, "expected parent count still 1 when Handled=TRUE, got %d\n", h_parent.fired_cnt );
 
-    ((HRESULT (WINAPI *)(void *, EventRegistrationToken))(*(void ***)child_ui)[58])( child_ui, tok_child );
-    ((HRESULT (WINAPI *)(void *, EventRegistrationToken))(*(void ***)parent_ui)[58])( parent_ui, tok_parent );
-    ((HRESULT (WINAPI *)(void *, void *))(*(void ***)win)[9])( win, NULL );
+    ((const struct test_ui_iface *)child_ui)->lpVtbl->remove_PointerPressed( child_ui, tok_child );
+    ((const struct test_ui_iface *)parent_ui)->lpVtbl->remove_PointerPressed( parent_ui, tok_parent );
+    ((const struct test_window_iface *)win)->lpVtbl->put_Content( win, NULL );
     IUnknown_Release( (IUnknown *)child_ui );
     IUnknown_Release( (IUnknown *)parent_ui );
     IUnknown_Release( (IUnknown *)children_vec );
@@ -1126,16 +1225,16 @@ static void test_VmDataContextBinding( void )
 
     /* Name the element "Results" so it acts as a CalculationResult display sink */
     WindowsCreateString( L"Results", 7, &str );
-    hr = ((HRESULT (WINAPI *)(void *, HSTRING))(*(void ***)res_fe)[34])( res_fe, str );
+    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_Name( res_fe, str );
     WindowsDeleteString( str );
     ok( hr == S_OK, "put_Name(Results) hr %#lx\n", hr );
 
     /* 1. Setting DataContext to vm1 subscribes to INotifyPropertyChanged and syncs DisplayValue ("42") */
-    hr = ((HRESULT (WINAPI *)(void *, void *))(*(void ***)res_fe)[37])( res_fe, &vm1.vtbl_insp );
+    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_DataContext( res_fe, &vm1.vtbl_insp );
     ok( hr == S_OK, "put_DataContext(vm1) hr %#lx\n", hr );
     ok( vm1.add_pc_cnt == 1 && vm1.pc_handler != NULL, "expected add_PropertyChanged count 1, got %d\n", vm1.add_pc_cnt );
 
-    hr = ((HRESULT (WINAPI *)(void *, HSTRING *))(*(void ***)res_tb)[26])( res_tb, &htxt );
+    hr = ((const struct test_tb_iface *)res_tb)->lpVtbl->get_Text( res_tb, &htxt );
     raw = htxt ? WindowsGetStringRawBuffer( htxt, NULL ) : NULL;
     ok( hr == S_OK && raw && !wcscmp( raw, L"42" ), "expected CalculationResult text '42', got %s\n", wine_dbgstr_w( raw ) );
     if (htxt) { WindowsDeleteString( htxt ); htxt = NULL; }
@@ -1144,27 +1243,27 @@ static void test_VmDataContextBinding( void )
     vm1.display_val = L"314";
     if (vm1.pc_handler)
     {
-        HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)vm1.pc_handler)[3];
-        invoke( vm1.pc_handler, &vm1.vtbl_insp, NULL );
+        const struct test_pc_handler_iface *pch = (const struct test_pc_handler_iface *)vm1.pc_handler;
+        pch->lpVtbl->Invoke( vm1.pc_handler, &vm1.vtbl_insp, NULL );
     }
-    hr = ((HRESULT (WINAPI *)(void *, HSTRING *))(*(void ***)res_tb)[26])( res_tb, &htxt );
+    hr = ((const struct test_tb_iface *)res_tb)->lpVtbl->get_Text( res_tb, &htxt );
     raw = htxt ? WindowsGetStringRawBuffer( htxt, NULL ) : NULL;
     ok( hr == S_OK && raw && !wcscmp( raw, L"314" ), "expected updated CalculationResult text '314', got %s\n", wine_dbgstr_w( raw ) );
     if (htxt) { WindowsDeleteString( htxt ); htxt = NULL; }
 
     /* 3. Switching DataContext to vm2 unsubscribes/releases vm1 and syncs vm2 ("2718") */
-    hr = ((HRESULT (WINAPI *)(void *, void *))(*(void ***)res_fe)[37])( res_fe, &vm2.vtbl_insp );
+    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_DataContext( res_fe, &vm2.vtbl_insp );
     ok( hr == S_OK, "put_DataContext(vm2) hr %#lx\n", hr );
     ok( vm1.rem_pc_cnt == 1, "expected vm1 remove_PropertyChanged count 1, got %d\n", vm1.rem_pc_cnt );
     ok( vm1.ref == 1, "expected vm1 refcount restored to 1 after teardown, got %ld\n", vm1.ref );
 
-    hr = ((HRESULT (WINAPI *)(void *, HSTRING *))(*(void ***)res_tb)[26])( res_tb, &htxt );
+    hr = ((const struct test_tb_iface *)res_tb)->lpVtbl->get_Text( res_tb, &htxt );
     raw = htxt ? WindowsGetStringRawBuffer( htxt, NULL ) : NULL;
     ok( hr == S_OK && raw && !wcscmp( raw, L"2718" ), "expected CalculationResult text '2718', got %s\n", wine_dbgstr_w( raw ) );
     if (htxt) { WindowsDeleteString( htxt ); htxt = NULL; }
 
     /* 4. Clearing DataContext to NULL unsubscribes and releases vm2 */
-    hr = ((HRESULT (WINAPI *)(void *, void *))(*(void ***)res_fe)[37])( res_fe, NULL );
+    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_DataContext( res_fe, NULL );
     ok( hr == S_OK, "put_DataContext(NULL) hr %#lx\n", hr );
     ok( vm2.rem_pc_cnt == 1, "expected vm2 remove_PropertyChanged count 1, got %d\n", vm2.rem_pc_cnt );
     ok( vm2.ref == 1, "expected vm2 refcount restored to 1 after teardown, got %ld\n", vm2.ref );
@@ -1221,7 +1320,7 @@ static void test_VectorGrowthBeyondOldCaps( void )
         swprintf( prop_name, ARRAY_SIZE(prop_name), L"TestDP_%d", i );
         WindowsCreateString( prop_name, wcslen( prop_name ), &hname );
         /* Slot 7 on IDependencyPropertyStatics: Register(HSTRING, TypeName, TypeName, IPropertyMetadata*, IDependencyProperty**) */
-        hr = ((HRESULT (WINAPI *)(void *, HSTRING, void *, void *, void *, IUnknown **))(*(void ***)dp_statics)[7])(
+        hr = ((const struct test_dp_statics_iface *)dp_statics)->lpVtbl->Register(
             dp_statics, hname, &tname, &tname, NULL, &dps[i] );
         WindowsDeleteString( hname );
         ok( hr == S_OK && dps[i] != NULL, "Register DP[%d] hr %#lx\n", i, hr );
@@ -1236,7 +1335,7 @@ static void test_VectorGrowthBeyondOldCaps( void )
             IActivationFactory_Release( tb_af );
         }
         /* Slot 7 on IDependencyObject: SetValue(IDependencyProperty*, IInspectable*) */
-        hr = ((HRESULT (WINAPI *)(void *, void *, IInspectable *))(*(void ***)do_iface)[7])( do_iface, dps[i], vals[i] );
+        hr = ((const struct test_do_iface *)do_iface)->lpVtbl->SetValue( do_iface, dps[i], vals[i] );
         ok( hr == S_OK, "SetValue DP[%d] hr %#lx\n", i, hr );
     }
 
@@ -1245,7 +1344,7 @@ static void test_VectorGrowthBeyondOldCaps( void )
     {
         IInspectable *got = NULL;
         /* Slot 6 on IDependencyObject: GetValue(IDependencyProperty*, IInspectable**) */
-        hr = ((HRESULT (WINAPI *)(void *, void *, IInspectable **))(*(void ***)do_iface)[6])( do_iface, dps[i], &got );
+        hr = ((const struct test_do_iface *)do_iface)->lpVtbl->GetValue( do_iface, dps[i], &got );
         ok( hr == S_OK && got == vals[i], "GetValue DP[%d] expected %p, got %p (hr %#lx)\n", i, vals[i], got, hr );
         if (got) IInspectable_Release( got );
         if (vals[i]) IInspectable_Release( vals[i] );
@@ -1344,7 +1443,7 @@ static void test_TruncatedXbfBounds( void )
         hr = WindowsCreateString( (const WCHAR *)blob, sizeof(blob) / sizeof(WCHAR), &str );
         if (FAILED(hr)) { all_ok = FALSE; break; }
         /* Slot 6 on IXamlReaderStatics: Load(HSTRING, IInspectable**) */
-        hr = ((HRESULT (WINAPI *)(void *, HSTRING, IInspectable **))(*(void ***)xr_statics)[6])( xr_statics, str, &root );
+        hr = ((const struct test_xr_statics_iface *)xr_statics)->lpVtbl->Load( xr_statics, str, &root );
         WindowsDeleteString( str );
         if (FAILED(hr) || !root) all_ok = FALSE;
         if (root) IInspectable_Release( root );

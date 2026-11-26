@@ -144,6 +144,14 @@ struct uwp_vsm_group
     int snapshot_cap;
 };
 
+#define UWP_FF_COMP_TARGET          (1ULL << 0)
+#define UWP_FF_COMPOSABLE_FALLBACK  (1ULL << 1)
+#define UWP_FF_PROP_PATH            (1ULL << 2)
+#define UWP_FF_SYMBOL_ICON          (1ULL << 3)
+#define UWP_FF_UIELEMENT            (1ULL << 4)
+#define UWP_FF_BUTTON               (1ULL << 5)
+#define UWP_FF_TOGGLE_BTN_OR_MENU   (1ULL << 6)
+
 struct uwp_class_factory
 {
     IActivationFactory IActivationFactory_iface;
@@ -153,7 +161,31 @@ struct uwp_class_factory
     IInspectable IDpStatics_iface;
     IInspectable IBitmapImageFactory_iface;
     IInspectable IFontFamilyFactory_iface;
+    UINT64 factory_flags;
 };
+
+static inline UINT64 uwp_cf_compute_flags( const WCHAR *cls )
+{
+    UINT64 f = 0;
+    if (!cls || !cls[0]) return 0;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Media.CompositionTarget" )) f |= UWP_FF_COMP_TARGET;
+    if (wcsstr( cls, L"Control" ) || wcsstr( cls, L"Source" ) || wcsstr( cls, L"Box" ) ||
+        wcsstr( cls, L"Item" ) || wcsstr( cls, L"View" ) || wcsstr( cls, L"Panel" ) ||
+        wcsstr( cls, L"Button" ) || wcsstr( cls, L"Selector" ) || wcsstr( cls, L"Flyout" ) ||
+        wcsstr( cls, L"Separator" ) || wcsstr( cls, L"Trigger" ) || wcsstr( cls, L"Transition" ) ||
+        wcsstr( cls, L"Extension" ) || wcsstr( cls, L"BitmapSource" ) || wcsstr( cls, L"Accelerator" ) ||
+        wcsstr( cls, L"Command" ) || wcsstr( cls, L"Timer" ) || wcsstr( cls, L"Configuration" ) ||
+        wcsstr( cls, L"Collection" ) || wcsstr( cls, L"Shadow" ))
+        f |= UWP_FF_COMPOSABLE_FALLBACK;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" )) f |= UWP_FF_PROP_PATH;
+    else if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" )) f |= UWP_FF_SYMBOL_ICON;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.UIElement" )) f |= UWP_FF_UIELEMENT;
+    else if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.Button" )) f |= UWP_FF_BUTTON;
+    else if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.ToggleMenuFlyoutItem" ) ||
+             !wcscmp( cls, L"Windows.UI.Xaml.Controls.Primitives.ToggleButton" ))
+        f |= UWP_FF_TOGGLE_BTN_OR_MENU;
+    return f;
+}
 
 struct xaml_static_factory
 {

@@ -373,10 +373,15 @@ static BOOL parse_schema( pri_index *idx )
         for (depth--; depth + 1; depth--)
         {
             const WCHAR *nm = chain[depth]->name;
+            SIZE_T nlen;
             if (!nm[0]) continue;
-            if (used) e->fullname[used++] = L'\\';
-            wcscpy( e->fullname + used, nm );
-            used += wcslen( nm );
+            nlen = wcslen( nm );
+            if (used && used + 1 < total) e->fullname[used++] = L'\\';
+            if (used + nlen < total)
+            {
+                memcpy( e->fullname + used, nm, (nlen + 1) * sizeof(WCHAR) );
+                used += nlen;
+            }
         }
     }
 

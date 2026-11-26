@@ -22,6 +22,7 @@
 
 #include "private.h"
 #include "app_private.h"
+#include "uwp_abi_vtbls.h"
 #include "weakreference.h"
 #include "wine/exception.h"
 
@@ -1868,9 +1869,9 @@ static HRESULT WINAPI xaml_window_add_Activated( IInspectable *iface, void *hand
     if (token) token->value = impl->activated_handler_count;
     if (impl->is_active && handler)
     {
-        HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, void *) = (*(void ***)handler)[3];
+        const struct abi_typed_event_handler *eh = (const struct abi_typed_event_handler *)handler;
         TRACE( "window already active: immediately invoking Window.Activated handler %p\n", handler );
-        invoke( handler, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
+        eh->lpVtbl->Invoke( handler, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
     }
     return S_OK;
 }
@@ -2018,11 +2019,11 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
         void *h = impl->visibility_handlers[i];
         if (h)
         {
-            HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, void *) = (*(void ***)h)[3];
+            const struct abi_typed_event_handler *eh = (const struct abi_typed_event_handler *)h;
             TRACE( "invoking Window.VisibilityChanged handler %p\n", h );
             __TRY
             {
-                invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_vis_obj );
+                eh->lpVtbl->Invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_vis_obj );
             }
             __EXCEPT_ALL
             {
@@ -2036,11 +2037,11 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
         void *h = impl->activated_handlers[i];
         if (h)
         {
-            HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, void *) = (*(void ***)h)[3];
+            const struct abi_typed_event_handler *eh = (const struct abi_typed_event_handler *)h;
             TRACE( "invoking Window.Activated handler %p\n", h );
             __TRY
             {
-                invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
+                eh->lpVtbl->Invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
             }
             __EXCEPT_ALL
             {
@@ -2229,9 +2230,8 @@ static HRESULT WINAPI xaml_window3_get_DispatcherQueue( void *iface, void **valu
     WindowsDeleteString( hstr );
     if (SUCCEEDED(hr) && af)
     {
-        void **vtbl = *(void ***)af;
-        HRESULT (WINAPI *pGetForCurrentThread)(void *, void **) = (void *)vtbl[6];
-        hr = pGetForCurrentThread( af, value );
+        const struct abi_dispatcher_queue_statics *dqs = (const struct abi_dispatcher_queue_statics *)af;
+        hr = dqs->lpVtbl->GetForCurrentThread( af, value );
         IActivationFactory_Release( af );
     }
     TRACE( "IWindow3::get_DispatcherQueue -> hr %#lx, value %p\n", hr, *value );
@@ -2388,9 +2388,8 @@ static HRESULT WINAPI ms_xaml_window_get_DispatcherQueue( void *iface, void **va
     WindowsDeleteString( hstr );
     if (SUCCEEDED(hr) && af)
     {
-        void **vtbl = *(void ***)af;
-        HRESULT (WINAPI *pGetForCurrentThread)(void *, void **) = (void *)vtbl[6];
-        hr = pGetForCurrentThread( af, value );
+        const struct abi_dispatcher_queue_statics *dqs = (const struct abi_dispatcher_queue_statics *)af;
+        hr = dqs->lpVtbl->GetForCurrentThread( af, value );
         IActivationFactory_Release( af );
     }
     TRACE( "get_DispatcherQueue -> hr %#lx, value %p\n", hr, *value );
@@ -2530,9 +2529,8 @@ static HRESULT WINAPI ms_xaml_window2_get_AppWindow( void *iface, void **value )
 
     /* GetFromWindowId is slot 9 on IAppWindowStatics */
     {
-        void **vtbl = *(void ***)statics;
-        HRESULT (WINAPI *pGetFromWindowId)(void *, UINT64, void **) = (void *)vtbl[9];
-        hr = pGetFromWindowId( statics, (UINT64)hwnd, value );
+        const struct abi_app_window_statics *aws = (const struct abi_app_window_statics *)statics;
+        hr = aws->lpVtbl->GetFromWindowId( statics, (UINT64)hwnd, value );
         IUnknown_Release( (IUnknown *)statics );
     }
 

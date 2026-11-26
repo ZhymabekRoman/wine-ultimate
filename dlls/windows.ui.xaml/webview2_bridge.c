@@ -170,8 +170,10 @@ const GUID IID_ICoreWebView2Settings_Manual =
 const GUID IID_ICoreWebView2Environment =
     { 0xd8cc7831, 0xb783, 0x556b, { 0xb9, 0xce, 0x89, 0x9c, 0x1e, 0x95, 0xd5, 0x85 } };
 
-static inline struct core_webview2 *impl_from_cwv2_3( void *iface ){    return CONTAINING_RECORD( iface, struct core_webview2, ICoreWebView2_3_iface );}
-
+static inline struct core_webview2 *impl_from_cwv2_3( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_webview2, ICoreWebView2_3_iface );
+}
 static inline struct core_webview2 *impl_from_cwv2_13( void *iface )
 {
     return CONTAINING_RECORD( iface, struct core_webview2, ICoreWebView2_13_iface );
@@ -309,14 +311,14 @@ static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
     s->ref = 1;
     s->owner = impl;
 
-    if (impl->loader_core && impl->real_loader && *(void ***)impl->loader_core)
+    if (impl->loader_core && impl->real_loader && ((const struct abi_wv2_core *)impl->loader_core)->lpVtbl)
     {
-        HRESULT (WINAPI *fn)( void *, void ** ) = (*(void ***)impl->loader_core)[3];
-        if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000)
+        const struct abi_wv2_core *core = (const struct abi_wv2_core *)impl->loader_core;
+        if (core->lpVtbl->get_Settings && (ULONG_PTR)core->lpVtbl->get_Settings < (ULONG_PTR)0x7ffc00000000)
         {
             __TRY
             {
-                HRESULT hr = fn( impl->loader_core, &com_settings );
+                HRESULT hr = core->lpVtbl->get_Settings( impl->loader_core, &com_settings );
                 if (SUCCEEDED( hr ) && com_settings)
                 {
                     s->loader_settings = com_settings;
@@ -341,9 +343,10 @@ static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
 
 void *wv2_slot_fn( void *obj, BOOL real_loader, int slot_real, int slot_builtin )
 {
+    const struct abi_slot_iface *iface = (const struct abi_slot_iface *)obj;
     int slot = real_loader ? slot_real : slot_builtin;
-    if (!obj || !*(void ***)obj || slot < 0) return NULL;
-    return (*(void ***)obj)[slot];
+    if (!iface || !iface->lpVtbl || slot < 0 || slot >= (int)ARRAY_SIZE(iface->lpVtbl->slots)) return NULL;
+    return iface->lpVtbl->slots[slot];
 }
 
 static HRESULT wv2_call_navigate( void *obj, BOOL real_loader, int slot_real, int slot_builtin, LPCWSTR uri )
@@ -1332,14 +1335,14 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                         {
                         case CWV2_OP_SETTING_BOOL:
                         case CWV2_OP_SETTING_UA:
-                            if (!ls && *(void ***)core)
+                            if (!ls && ((const struct abi_wv2_core *)core)->lpVtbl)
                             {
-                                HRESULT (WINAPI *get_set)( void *, void ** ) = (*(void ***)core)[3];
-                                if (get_set && (ULONG_PTR)get_set < (ULONG_PTR)0x7ffc00000000)
+                                const struct abi_wv2_core *ac = (const struct abi_wv2_core *)core;
+                                if (ac->lpVtbl->get_Settings && (ULONG_PTR)ac->lpVtbl->get_Settings < (ULONG_PTR)0x7ffc00000000)
                                 {
                                     __TRY
                                     {
-                                        if (SUCCEEDED( get_set( core, &ls ) ) && ls)
+                                        if (SUCCEEDED( ac->lpVtbl->get_Settings( core, &ls ) ) && ls)
                                             ((IUnknown *)ls)->lpVtbl->QueryInterface( ls, &IID_ICoreWebView2Settings2_com, &ls2 );
                                     }
                                     __EXCEPT_PAGE_FAULT
@@ -1350,15 +1353,17 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                                     __ENDTRY;
                                 }
                             }
-                            if (op->kind == CWV2_OP_SETTING_BOOL && ls && *(void ***)ls)
+                            if (op->kind == CWV2_OP_SETTING_BOOL && ls && ((const struct abi_slot_iface *)ls)->lpVtbl &&
+                                op->arg_int >= 0 && op->arg_int < (int)ARRAY_SIZE(((const struct abi_slot_iface *)ls)->lpVtbl->slots))
                             {
-                                HRESULT (WINAPI *fn)( void *, BOOL ) = (*(void ***)ls)[op->arg_int];
+                                HRESULT (WINAPI *fn)( void *, BOOL ) = ((const struct abi_slot_iface *)ls)->lpVtbl->slots[op->arg_int];
                                 if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000) fn( ls, op->arg_bool );
                             }
-                            else if (op->kind == CWV2_OP_SETTING_UA && ls2 && *(void ***)ls2)
+                            else if (op->kind == CWV2_OP_SETTING_UA && ls2 && ((const struct abi_wv2_settings2 *)ls2)->lpVtbl)
                             {
-                                HRESULT (WINAPI *fn)( void *, LPCWSTR ) = (*(void ***)ls2)[22];
-                                if (fn && (ULONG_PTR)fn < (ULONG_PTR)0x7ffc00000000) fn( ls2, op->str1 ? op->str1 : L"" );
+                                const struct abi_wv2_settings2 *as2 = (const struct abi_wv2_settings2 *)ls2;
+                                if (as2->lpVtbl->put_UserAgent && (ULONG_PTR)as2->lpVtbl->put_UserAgent < (ULONG_PTR)0x7ffc00000000)
+                                    as2->lpVtbl->put_UserAgent( ls2, op->str1 ? op->str1 : L"" );
                             }
                             break;
                         case CWV2_OP_ADD_HOST_OBJECT:
@@ -1552,20 +1557,19 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
         if (SUCCEEDED( ((IUnknown *)env)->lpVtbl->QueryInterface(
                 (IUnknown *)env, &IID_ICoreWebView2Environment3_g, &env3 ) ) && env3)
         {
-            HRESULT (WINAPI *create_comp_ctrl)( void *, HWND, void * ) =
-                (void *)(*(void ***)env3)[9];
+            const struct abi_wv2_env3 *aenv3 = (const struct abi_wv2_env3 *)env3;
             HRESULT hr_comp;
             TRACE( "wv2_env_handler_Invoke (real): calling CreateCoreWebView2CompositionController env3=%p slot9=%p hw=%p\n",
-                   env3, create_comp_ctrl, hw );
-            hr_comp = create_comp_ctrl( env3, hw, ch );
+                   env3, aenv3->lpVtbl->CreateCoreWebView2CompositionController, hw );
+            hr_comp = aenv3->lpVtbl->CreateCoreWebView2CompositionController( env3, hw, ch );
             TRACE( "wv2_env_handler_Invoke (real): CreateCoreWebView2CompositionController -> %#lx\n", hr_comp );
             ((IUnknown *)env3)->lpVtbl->Release( (IUnknown *)env3 );
             if (SUCCEEDED( hr_comp )) return hr_comp;
         }
     }
 
-    create_ctrl = (void *)(*(void ***)env)[3];  /* ICoreWebView2Environment::CreateCoreWebView2Controller */
-    TRACE( "wv2_env_handler_Invoke: env vtbl %p slot3 %p\n", *(void **)env, create_ctrl );
+    create_ctrl = ((const struct abi_wv2_env *)env)->lpVtbl->CreateCoreWebView2Controller;
+    TRACE( "wv2_env_handler_Invoke: env vtbl %p slot3 %p\n", ((const struct abi_wv2_env *)env)->lpVtbl, create_ctrl );
     {
         HRESULT hr_c;
         TRACE( "wv2_env_handler_Invoke: calling create_ctrl env=%p hw=%p vis=%d ch=%p\n",
@@ -1593,14 +1597,11 @@ static BOOL wv2_folder_has_runtime( const WCHAR *dir )
 {
     WCHAR path[1024];
     if (!dir || !*dir) return FALSE;
-    lstrcpynW( path, dir, ARRAY_SIZE(path) - 48 );
-    lstrcatW( path, L"\\msedgewebview2.exe" );
+    swprintf( path, ARRAY_SIZE(path), L"%.970s\\msedgewebview2.exe", dir );
     if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES) return FALSE;
-    lstrcpynW( path, dir, ARRAY_SIZE(path) - 48 );
-    lstrcatW( path, L"\\EBWebView\\x64\\EmbeddedBrowserWebView.dll" );
+    swprintf( path, ARRAY_SIZE(path), L"%.970s\\EBWebView\\x64\\EmbeddedBrowserWebView.dll", dir );
     if (GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES) return TRUE;
-    lstrcpynW( path, dir, ARRAY_SIZE(path) - 48 );
-    lstrcatW( path, L"\\EmbeddedBrowserWebView.dll" );
+    swprintf( path, ARRAY_SIZE(path), L"%.970s\\EmbeddedBrowserWebView.dll", dir );
     return GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -1688,8 +1689,7 @@ static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][1024], 
     HANDLE hfind;
 
     if (!base_dir || !*base_dir) return;
-    lstrcpynW( pattern, base_dir, ARRAY_SIZE(pattern) - 4 );
-    lstrcatW( pattern, L"\\*" );
+    swprintf( pattern, ARRAY_SIZE(pattern), L"%.1018s\\*", base_dir );
     hfind = FindFirstFileW( pattern, &fd );
     if (hfind == INVALID_HANDLE_VALUE) return;
     do
@@ -1698,9 +1698,7 @@ static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][1024], 
             fd.cFileName[0] >= L'0' && fd.cFileName[0] <= L'9')
         {
             WCHAR full[1024];
-            lstrcpynW( full, base_dir, ARRAY_SIZE(full) - 68 );
-            lstrcatW( full, L"\\" );
-            lstrcatW( full, fd.cFileName );
+            swprintf( full, ARRAY_SIZE(full), L"%.950s\\%.64s", base_dir, fd.cFileName );
             wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, full, fd.cFileName );
         }
     } while (FindNextFileW( hfind, &fd ));
@@ -1773,9 +1771,7 @@ static void wv2_discover_runtimes( WCHAR candidates[][1024], WCHAR versions[][64
                         wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, loc, pv );
                     if (pv[0] && pf86[0])
                     {
-                        lstrcpynW( app_dir, pf86, ARRAY_SIZE(app_dir) - 96 );
-                        lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application\\" );
-                        lstrcatW( app_dir, pv );
+                        swprintf( app_dir, ARRAY_SIZE(app_dir), L"%.920s\\Microsoft\\EdgeWebView\\Application\\%.63s", pf86, pv );
                         wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, app_dir, pv );
                     }
                     p_close( hk );
@@ -1786,15 +1782,13 @@ static void wv2_discover_runtimes( WCHAR candidates[][1024], WCHAR versions[][64
 
     if (pf86[0])
     {
-        lstrcpynW( app_dir, pf86, ARRAY_SIZE(app_dir) - 48 );
-        lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application" );
+        swprintf( app_dir, ARRAY_SIZE(app_dir), L"%.970s\\Microsoft\\EdgeWebView\\Application", pf86 );
         wv2_scan_app_base( app_dir, candidates, versions, ncand, max_cand );
     }
     if (ExpandEnvironmentStringsW( L"%ProgramFiles%", pf, ARRAY_SIZE(pf) ) > 0 && !wcschr( pf, L'%' ) &&
         (!pf86[0] || wcsicmp( pf, pf86 ) != 0))
     {
-        lstrcpynW( app_dir, pf, ARRAY_SIZE(app_dir) - 48 );
-        lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application" );
+        swprintf( app_dir, ARRAY_SIZE(app_dir), L"%.970s\\Microsoft\\EdgeWebView\\Application", pf );
         wv2_scan_app_base( app_dir, candidates, versions, ncand, max_cand );
     }
 
@@ -2049,8 +2043,8 @@ static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl
     if (env_args[0]) lstrcpynW( o->args, env_args, ARRAY_SIZE(o->args) );
     if (sf_arg[0])
     {
-        if (o->args[0]) lstrcatW( o->args, L" " );
-        lstrcatW( o->args, sf_arg );
+        size_t alen = wcslen( o->args );
+        swprintf( o->args + alen, ARRAY_SIZE(o->args) - alen, alen ? L" %s" : L"%s", sf_arg );
     }
     TRACE( "wv2_create_env_options: ver=%s args=%s dpi=%u cy=%ld desktop=%ld sf=%s\n",
            debugstr_w( o->target_version ), debugstr_w( o->args ), dpi, sz.cy, desktop_h,
@@ -2169,8 +2163,7 @@ void wv2_start_browser( struct xaml_element *impl )
                     WCHAR eb_path[1024];
                     HMODULE eb;
                     HRESULT (WINAPI *p_int)( BOOL, int, LPCWSTR, void *, void * );
-                    lstrcpynW( eb_path, candidates[ci], ARRAY_SIZE(eb_path) - 48 );
-                    lstrcatW( eb_path, rel_dlls[ri] );
+                    swprintf( eb_path, ARRAY_SIZE(eb_path), L"%.970s%s", candidates[ci], rel_dlls[ri] );
                     if (GetFileAttributesW( eb_path ) == INVALID_FILE_ATTRIBUTES) continue;
                     eb = LoadLibraryExW( eb_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
                     TRACE( "wv2_start_browser: LoadLibraryEx(%s) -> %p gle=%lu\n",

@@ -75,10 +75,10 @@ static HRESULT WINAPI xbh_ConvertValue( void *iface, TypeName *type, IInspectabl
             {
                 if (SUCCEEDED(RoGetActivationFactory( h_cls, &IID_IUriFactory_local, &ufac )) && ufac)
                 {
-                    HRESULT (WINAPI *create_uri)(void *, HSTRING, void **) = (void *)(*(void ***)ufac)[6];
-                    if (create_uri && SUCCEEDED(WindowsCreateString( str_buf, wcslen(str_buf), &h_uri )))
+                    const struct abi_uri_factory *auf = (const struct abi_uri_factory *)ufac;
+                    if (auf->lpVtbl->CreateUri && SUCCEEDED(WindowsCreateString( str_buf, wcslen(str_buf), &h_uri )))
                     {
-                        create_uri( ufac, h_uri, (void **)out );
+                        auf->lpVtbl->CreateUri( ufac, h_uri, (void **)out );
                         WindowsDeleteString( h_uri );
                     }
                     IUnknown_Release( (IUnknown *)ufac );

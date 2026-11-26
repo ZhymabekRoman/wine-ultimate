@@ -1159,7 +1159,7 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
                 DWORD xsid = x_sids[i];
                 const WCHAR *ns = (xsid < ctx.str_cnt && ctx.strs[xsid]) ? ctx.strs[xsid] : L"";
                 ctx.xmlns[i] = calloc( wcslen(ns) + 1, sizeof(WCHAR) );
-                if (ctx.xmlns[i]) lstrcpyW( ctx.xmlns[i], ns );
+                if (ctx.xmlns[i]) lstrcpynW( ctx.xmlns[i], ns, (int)(wcslen(ns) + 1) );
             }
         }
         else
@@ -1445,6 +1445,7 @@ void uwp_realize_deferred_entry( struct uwp_defer_entry *de )
                         }
                         __EXCEPT_ALL
                         {
+                            WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
                         }
                         __ENDTRY;
                     }
@@ -1524,17 +1525,17 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
     /* 1. Connect(1, component) and GetBindingConnector(1, component) first so root & {x:Bind} are wired */
     {
         struct uwp_element *comp_el = uwp_elem_from_any( component );
-        HRESULT (WINAPI *conn_fn)(void *, int, void *) = (void *)(*(void ***)conn)[6];
-        HRESULT chr = conn_fn( conn, 1, component );
+        const struct abi_component_connector *acc = (const struct abi_component_connector *)conn;
+        HRESULT chr = acc->lpVtbl->Connect( conn, 1, component );
         TRACE( "uwp_try_load_xbf_component: Connect(1,comp) -> %#lx\n", chr );
         if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
         {
-            HRESULT (WINAPI *get_bc)(void *, int, void *, void **) = (void *)(*(void ***)conn2)[6];
-            if (get_bc && SUCCEEDED(get_bc( conn2, 1, component, &binding )) && binding)
+            const struct abi_component_connector2 *acc2 = (const struct abi_component_connector2 *)conn2;
+            if (acc2->lpVtbl->GetBindingConnector && SUCCEEDED(acc2->lpVtbl->GetBindingConnector( conn2, 1, component, &binding )) && binding)
             {
-                HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)binding)[6];
+                const struct abi_component_connector *bcc = (const struct abi_component_connector *)binding;
                 if (comp_el) comp_el->binding_connector = binding;
-                if (b_conn) b_conn( binding, 1, component );
+                if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( binding, 1, component );
             }
             IUnknown_Release( (IUnknown *)conn2 );
         }

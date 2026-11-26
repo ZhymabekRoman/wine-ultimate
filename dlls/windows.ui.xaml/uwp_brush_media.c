@@ -420,7 +420,7 @@ static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
         struct uwp_element *p;
         for (p = impl->parent; p; p = p->parent)
         {
-            if (!wcscmp( p->class_name, L"Windows.UI.Xaml.VisualState" ) && p->name[0])
+            if ((p->class_flags2 & UWP_CF2_VISUAL_STATE) && p->name[0])
             {
                 struct uwp_element *scope = p->owner_component ? p->owner_component : impl->owner_component;
                 if (scope)
@@ -613,7 +613,7 @@ static HRESULT WINAPI uwp_xr_get_Content( void *iface, void **out )
     if (!impl) return S_OK;
     root = uwp_elem_find_top_root( impl );
     if (!root) root = impl;
-    if (wcsstr( root->class_name, L"DesktopWindowXamlSource" ) && root->content)
+    if ((root->class_flags2 & UWP_CF2_DWS_HOST) && root->content)
     {
         struct uwp_element *ce = uwp_elem_from_any( root->content );
         if (ce) target = ce;
@@ -745,10 +745,9 @@ static BOOL uwp_extract_comp_brush_image_src_depth( IInspectable *brush, WCHAR *
     if (!brush || !out_uri || cap == 0 || depth > 8) return FALSE;
     if (SUCCEEDED(IInspectable_QueryInterface( brush, &IID_ICompositionSurfaceBrush_UWP, &sb )) && sb)
     {
-        typedef HRESULT (WINAPI *get_surf_fn)( void *, IInspectable ** );
-        void **vtbl = *(void ***)sb;
+        const struct abi_comp_surface_brush *csb = (const struct abi_comp_surface_brush *)sb;
         IInspectable *surf = NULL;
-        if (vtbl && vtbl[12] && SUCCEEDED(((get_surf_fn)vtbl[12])( sb, &surf )) && surf)
+        if (csb->lpVtbl && csb->lpVtbl->get_Surface && SUCCEEDED(csb->lpVtbl->get_Surface( sb, &surf )) && surf)
         {
             struct uwp_element *surf_el = uwp_elem_from_any( surf );
             BOOL ok = FALSE;
@@ -765,10 +764,9 @@ static BOOL uwp_extract_comp_brush_image_src_depth( IInspectable *brush, WCHAR *
     }
     if (SUCCEEDED(IInspectable_QueryInterface( brush, &IID_ICompositionMaskBrush_UWP, &mb )) && mb)
     {
-        typedef HRESULT (WINAPI *get_brush_fn)( void *, IInspectable ** );
-        void **vtbl = *(void ***)mb;
+        const struct abi_comp_mask_brush *cmb = (const struct abi_comp_mask_brush *)mb;
         IInspectable *src_brush = NULL;
-        if (vtbl && vtbl[8] && SUCCEEDED(((get_brush_fn)vtbl[8])( mb, &src_brush )) && src_brush)
+        if (cmb->lpVtbl && cmb->lpVtbl->get_Source && SUCCEEDED(cmb->lpVtbl->get_Source( mb, &src_brush )) && src_brush)
         {
             BOOL ok = uwp_extract_comp_brush_image_src_depth( src_brush, out_uri, cap, depth + 1 );
             IInspectable_Release( src_brush );
@@ -796,18 +794,16 @@ void uwp_xcbb_ensure_connected( IInspectable *brush )
     if (!brush) return;
     b_el = uwp_elem_from_any( brush );
     if (b_el && (b_el->xcbb_connected || b_el->comp_brush)) return;
-    if (b_el && (!wcsncmp( b_el->class_name, L"Windows.UI.Xaml.", 16 ) ||
-                 !wcsncmp( b_el->class_name, L"Microsoft.UI.Xaml.", 18 )))
+    if (b_el && (b_el->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX)))
         return;
     target = (b_el && b_el->outer_unk) ? (IUnknown *)b_el->outer_unk : (IUnknown *)brush;
     if (SUCCEEDED(IUnknown_QueryInterface( target, &IID_IXamlCompositionBrushBaseOverrides_UWP, &ov )) && ov)
     {
-        typedef HRESULT (WINAPI *on_connected_fn)( void * );
-        void **vtbl = *(void ***)ov;
+        const struct abi_xcbb_overrides *xo = (const struct abi_xcbb_overrides *)ov;
         if (b_el) b_el->xcbb_connected = TRUE;
-        if (vtbl && vtbl[6])
+        if (xo->lpVtbl && xo->lpVtbl->OnConnected)
         {
-            HRESULT hr = ((on_connected_fn)vtbl[6])( ov );
+            HRESULT hr = xo->lpVtbl->OnConnected( ov );
             TRACE( "uwp_xcbb_ensure_connected(%s): OnConnected hr=%#lx\n",
                    b_el ? debugstr_w(b_el->class_name) : "?", hr );
         }
@@ -828,10 +824,9 @@ static BOOL uwp_extract_visual_image_src_depth( IInspectable *visual, WCHAR *out
     if (!visual || !out_uri || cap == 0 || depth > 8) return FALSE;
     if (SUCCEEDED(IInspectable_QueryInterface( visual, &IID_ISpriteVisual_UWP, &sv )) && sv)
     {
-        typedef HRESULT (WINAPI *get_brush_fn)( void *, IInspectable ** );
-        void **vtbl = *(void ***)sv;
+        const struct abi_sprite_visual *asv = (const struct abi_sprite_visual *)sv;
         IInspectable *brush = NULL;
-        if (vtbl && vtbl[6] && SUCCEEDED(((get_brush_fn)vtbl[6])( sv, &brush )) && brush)
+        if (asv->lpVtbl && asv->lpVtbl->get_Brush && SUCCEEDED(asv->lpVtbl->get_Brush( sv, &brush )) && brush)
         {
             BOOL ok = uwp_extract_comp_brush_image_src( brush, out_uri, cap );
             IInspectable_Release( brush );
@@ -845,39 +840,34 @@ static BOOL uwp_extract_visual_image_src_depth( IInspectable *visual, WCHAR *out
     }
     if (SUCCEEDED(IInspectable_QueryInterface( visual, &IID_IContainerVisual_UWP, &cv )) && cv)
     {
-        typedef HRESULT (WINAPI *get_children_fn)( void *, IInspectable ** );
-        void **vtbl = *(void ***)cv;
+        const struct abi_container_visual *acv = (const struct abi_container_visual *)cv;
         IInspectable *children = NULL;
         BOOL found = FALSE;
-        if (vtbl && vtbl[6] && SUCCEEDED(((get_children_fn)vtbl[6])( cv, &children )) && children)
+        if (acv->lpVtbl && acv->lpVtbl->get_Children && SUCCEEDED(acv->lpVtbl->get_Children( cv, &children )) && children)
         {
             void *iterable = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( children, &IID_IIterable_Visual_UWP, &iterable )) && iterable)
             {
-                typedef HRESULT (WINAPI *first_fn)( void *, void ** );
-                void **it_vtbl = *(void ***)iterable;
+                const struct abi_winrt_iterable *ait = (const struct abi_winrt_iterable *)iterable;
                 void *iter = NULL;
-                if (it_vtbl && it_vtbl[6] && SUCCEEDED(((first_fn)it_vtbl[6])( iterable, &iter )) && iter)
+                if (ait->lpVtbl && ait->lpVtbl->First && SUCCEEDED(ait->lpVtbl->First( iterable, &iter )) && iter)
                 {
-                    typedef HRESULT (WINAPI *get_cur_fn)( void *, IInspectable ** );
-                    typedef HRESULT (WINAPI *get_has_fn)( void *, boolean * );
-                    typedef HRESULT (WINAPI *move_next_fn)( void *, boolean * );
-                    void **iv = *(void ***)iter;
+                    const struct abi_winrt_iterator *aiv = (const struct abi_winrt_iterator *)iter;
                     boolean has = FALSE;
                     int guard = 0;
-                    if (iv && iv[7] && SUCCEEDED(((get_has_fn)iv[7])( iter, &has )))
+                    if (aiv->lpVtbl && aiv->lpVtbl->get_HasCurrent && SUCCEEDED(aiv->lpVtbl->get_HasCurrent( iter, &has )))
                     {
                         while (has && guard++ < 64)
                         {
-                            IInspectable *child = NULL;
-                            if (iv[6] && SUCCEEDED(((get_cur_fn)iv[6])( iter, &child )) && child)
+                            void *child = NULL;
+                            if (aiv->lpVtbl->get_Current && SUCCEEDED(aiv->lpVtbl->get_Current( iter, &child )) && child)
                             {
-                                found = uwp_extract_visual_image_src_depth( child, out_uri, cap, depth + 1 );
-                                IInspectable_Release( child );
+                                found = uwp_extract_visual_image_src_depth( (IInspectable *)child, out_uri, cap, depth + 1 );
+                                IInspectable_Release( (IInspectable *)child );
                                 if (found) break;
                             }
                             has = FALSE;
-                            if (!iv[8] || FAILED(((move_next_fn)iv[8])( iter, &has ))) break;
+                            if (!aiv->lpVtbl->MoveNext || FAILED(aiv->lpVtbl->MoveNext( iter, &has ))) break;
                         }
                     }
                     IUnknown_Release( (IUnknown *)iter );
@@ -1068,10 +1058,9 @@ static HRESULT WINAPI uwp_lis_add_LoadCompleted( void *iface, IInspectable *hand
     if (tok) tok->value = InterlockedIncrement( &next_tok );
     if (handler)
     {
-        typedef HRESULT (WINAPI *invoke_fn)( void *, void *, void * );
-        void **vtbl = *(void ***)handler;
-        if (vtbl && vtbl[3])
-            ((invoke_fn)vtbl[3])( handler, iface, (void *)&uwp_lis_args_obj );
+        const struct abi_typed_event_handler *eh = (const struct abi_typed_event_handler *)handler;
+        if (eh->lpVtbl && eh->lpVtbl->Invoke)
+            eh->lpVtbl->Invoke( handler, iface, (void *)&uwp_lis_args_obj );
     }
     return S_OK;
 }
@@ -1761,8 +1750,8 @@ static BOOL uwp_mpe_extract_uri( struct uwp_element *el, WCHAR *out, size_t cap 
         void *src2 = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( el->media_player, &IID_IMediaPlayerSource2_mpe, &src2 )) && src2)
         {
-            HRESULT (WINAPI *get_src)( void *, IInspectable ** ) = (void *)(*(void ***)src2)[6];
-            if (get_src && SUCCEEDED(get_src( src2, &src )) && src)
+            const struct abi_media_player_source2 *amps = (const struct abi_media_player_source2 *)src2;
+            if (amps->lpVtbl->get_Source && SUCCEEDED(amps->lpVtbl->get_Source( src2, &src )) && src)
                 release_src = TRUE;
             IUnknown_Release( (IUnknown *)src2 );
         }
@@ -1773,9 +1762,9 @@ static BOOL uwp_mpe_extract_uri( struct uwp_element *el, WCHAR *out, size_t cap 
         void *ms4 = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( src, &IID_IMediaSource4_mpe, &ms4 )) && ms4)
         {
-            HRESULT (WINAPI *get_uri)( void *, IInspectable ** ) = (void *)(*(void ***)ms4)[9];
+            const struct abi_media_source4 *ams4 = (const struct abi_media_source4 *)ms4;
             IInspectable *uri_obj = NULL;
-            if (get_uri && SUCCEEDED(get_uri( ms4, &uri_obj )) && uri_obj)
+            if (ams4->lpVtbl->get_Uri && SUCCEEDED(ams4->lpVtbl->get_Uri( ms4, &uri_obj )) && uri_obj)
             {
                 uwp_extract_uri_string( uri_obj, out, cap );
                 IInspectable_Release( uri_obj );

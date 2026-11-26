@@ -737,7 +737,7 @@ static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
         *out = impl->row_defs;
         if (*out) IInspectable_AddRef( (IInspectable *)*out );
     }
-    __EXCEPT_ALL { }
+    __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
     __ENDTRY;
     return S_OK;
 }
@@ -769,7 +769,7 @@ static HRESULT WINAPI element_grid_get_ColumnDefinitions( void *iface, void **ou
         *out = impl->col_defs;
         if (*out) IInspectable_AddRef( (IInspectable *)*out );
     }
-    __EXCEPT_ALL { }
+    __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
     __ENDTRY;
     return S_OK;
 }

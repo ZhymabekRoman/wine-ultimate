@@ -60,6 +60,7 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
 {
     const WCHAR *cls, *dsk;
     UINT64 flags = 0;
+    UINT64 flags2 = 0;
 
     if (!el) return;
     cls = el->class_name;
@@ -151,7 +152,52 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
     if (!wcsncmp( cls, L"Windows.UI.Xaml.", 16 )) flags |= UWP_CF_UWP_PREFIX;
     if (!wcscmp( cls, L"Windows.UI.Xaml.DataTemplate" )) flags |= UWP_CF_DATA_TEMPLATE;
 
+    if (wcsstr( cls, L"TemplateSelector" )) flags2 |= UWP_CF2_TEMPLATE_SELECTOR;
+    if (wcsstr( cls, L".Controls.Frame" ) || wcsstr( cls, L".Controls.ContentFrame" )) flags2 |= UWP_CF2_FRAME;
+    if (wcsstr( cls, L"NavigationTransitionInfo" )) flags2 |= UWP_CF2_NAV_TRANSITION;
+    if (wcsstr( cls, L"Image" )) flags2 |= UWP_CF2_IMAGE;
+    if (wcsstr( cls, L"Ease" ) || wcsstr( cls, L"EasingFunction" )) flags2 |= UWP_CF2_EASE;
+    if (!wcscmp( cls, L"Microsoft.UI.Xaml.Controls.NavigationView" )) flags2 |= UWP_CF2_NAVVIEW_WINUI;
+    if (!wcscmp( cls, L"Microsoft.UI.Xaml.Controls.NavigationViewItem" )) flags2 |= UWP_CF2_NAVVIEW_ITEM_WINUI;
+    if (wcsstr( cls, L"Grid" )) flags2 |= UWP_CF2_GRID;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.VisualState" )) flags2 |= UWP_CF2_VISUAL_STATE;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Data.Binding" )) flags2 |= UWP_CF2_BINDING;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Data.TemplateBinding" )) flags2 |= UWP_CF2_TEMPLATE_BINDING;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.NullExtension" )) flags2 |= UWP_CF2_NULL_EXT;
+    if (wcsstr( cls, L"GradientStop" )) flags2 |= UWP_CF2_GRADIENT_STOP;
+    if (wcsstr( cls, L"LinearGradientBrush" )) flags2 |= UWP_CF2_LINEAR_GRADIENT;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.Flyout" )) flags2 |= UWP_CF2_FLYOUT_EXACT;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.MenuFlyout" )) flags2 |= UWP_CF2_MENU_FLYOUT_EXACT;
+    if (!wcscmp( cls, L"Microsoft.UI.Xaml.Controls.CommandBarFlyout" )) flags2 |= UWP_CF2_CMDBAR_FLYOUT_EXACT;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Documents.Hyperlink" )) flags2 |= UWP_CF2_HYPERLINK_EXACT;
+    if (wcsstr( cls, L".Controls.NavigationViewItem" ) && !wcsstr( cls, L"ViewItemInvoked" ))
+        flags2 |= UWP_CF2_NAV_VIEW_ITEM_CTRL;
+    if (wcsstr( cls, L".Controls.NavigationView" )) flags2 |= UWP_CF2_NAV_VIEW_CTRL;
+    if (wcsstr( cls, L"DesktopWindowXamlSource" )) flags2 |= UWP_CF2_DWS_HOST;
+    if (wcsstr( cls, L"LoadedImageSurface" )) flags2 |= UWP_CF2_LOADED_IMAGE_SURF;
+    if (wcsstr( cls, L"Collection" )) flags2 |= UWP_CF2_COLLECTION;
+    if (wcsstr( cls, L"AnimationSet" )) flags2 |= UWP_CF2_ANIMATION_SET;
+    if (wcsstr( cls, L"HomepageSkeleton" )) flags2 |= UWP_CF2_HOMEPAGE_SKEL;
+    if (wcsstr( cls, L"SearchPageSkeleton" )) flags2 |= UWP_CF2_SEARCHPAGE_SKEL;
+    if (wcsstr( cls, L"ShimmerProductView" )) flags2 |= UWP_CF2_SHIMMER_PRODUCT;
+    if (wcsstr( cls, L".Controls.Card" )) flags2 |= UWP_CF2_DOT_CARD;
+    if (wcsstr( cls, L"XamlUICommand" )) flags2 |= UWP_CF2_XAML_UICOMMAND;
+    if (wcsstr( cls, L"FlyoutItem" )) flags2 |= UWP_CF2_FLYOUT_ITEM;
+    if (wcsstr( cls, L"ContentDialog" )) flags2 |= UWP_CF2_CONTENT_DIALOG;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.DispatcherTimer" )) flags2 |= UWP_CF2_DISPATCHER_TIMER;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Data.RelativeSource" )) flags2 |= UWP_CF2_REL_SOURCE;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" )) flags2 |= UWP_CF2_SYMBOL_ICON_EXACT;
+    if (wcsstr( cls, L"CircleEase" )) flags2 |= UWP_CF2_CIRCLE_EASE;
+    if (wcsstr( cls, L"ExponentialEase" )) flags2 |= UWP_CF2_EXP_EASE;
+    if (wcsstr( cls, L"PowerEase" )) flags2 |= UWP_CF2_POWER_EASE;
+    if (wcsstr( cls, L"SineEase" )) flags2 |= UWP_CF2_SINE_EASE;
+    if (wcsstr( cls, L"QuadraticEase" )) flags2 |= UWP_CF2_QUAD_EASE;
+    if (wcsstr( cls, L"CubicEase" )) flags2 |= UWP_CF2_CUBIC_EASE;
+    if (wcsstr( cls, L"QuarticEase" )) flags2 |= UWP_CF2_QUARTIC_EASE;
+    if (wcsstr( cls, L"QuinticEase" )) flags2 |= UWP_CF2_QUINTIC_EASE;
+
     el->class_flags = flags;
+    el->class_flags2 = flags2;
 }
 
 void uwp_elem_clear_text( struct uwp_element *el )
@@ -497,12 +543,10 @@ struct uwp_element *uwp_elem_from_any( void *ptr )
         }
         __TRY
         {
-            void **p_vtbl = *(void ***)ptr;
-            HRESULT (WINAPI *get_inner)(void *, void **) = (void *)p_vtbl[6];
-            HRESULT (WINAPI *get_inner_iu)(void *, void **) = (void *)p_vtbl[7];
-            if (get_inner && SUCCEEDED(get_inner( ptr, &cand )) && cand)
+            const struct abi_delegating_inner *di = (const struct abi_delegating_inner *)ptr;
+            if (di->lpVtbl->get_Inner && SUCCEEDED(di->lpVtbl->get_Inner( ptr, &cand )) && cand)
                 inner = cand;
-            else if (get_inner_iu && SUCCEEDED(get_inner_iu( ptr, &cand )) && cand)
+            else if (di->lpVtbl->get_InnerIU && SUCCEEDED(di->lpVtbl->get_InnerIU( ptr, &cand )) && cand)
                 inner = cand;
             else inner = NULL;
         }
@@ -1205,7 +1249,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                     ok = (impl->class_flags & (UWP_CF_TOGGLE_MENU_ITEM | UWP_CF_RADIO_MENU_ITEM)) != 0;
                     break;
                 case QI_GUARD_NOT_TEMPLATE_SELECTOR:
-                    ok = (wcsstr( impl->class_name, L"TemplateSelector" ) == NULL);
+                    ok = !(impl->class_flags2 & UWP_CF2_TEMPLATE_SELECTOR);
                     break;
                 case QI_GUARD_MENU_FLYOUT_SUB_ITEM:
                     ok = (impl->class_flags & UWP_CF_MENU_FLYOUT_SUB_ITEM) != 0;
@@ -1217,31 +1261,29 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                     if (!uwp_is_autosuggest( impl )) chosen_off = s->alt_off;
                     break;
                 case QI_GUARD_FRAME:
-                    ok = (wcsstr( impl->class_name, L".Controls.Frame" ) != NULL ||
-                          wcsstr( impl->class_name, L".Controls.ContentFrame" ) != NULL);
+                    ok = (impl->class_flags2 & UWP_CF2_FRAME) != 0;
                     break;
                 case QI_GUARD_MEDIA_PLAYER:
                     ok = (impl->class_flags & UWP_CF_MEDIA_PLAYER) != 0;
                     break;
                 case QI_GUARD_NAV_TRANSITION:
-                    ok = (wcsstr( impl->class_name, L"NavigationTransitionInfo" ) != NULL);
+                    ok = (impl->class_flags2 & UWP_CF2_NAV_TRANSITION) != 0;
                     break;
                 case QI_GUARD_FLYOUT_ALT:
                     if (!uwp_is_flyout( impl )) chosen_off = s->alt_off;
                     break;
                 case QI_GUARD_IMAGE:
-                    ok = (wcsstr( impl->class_name, L"Image" ) != NULL);
+                    ok = (impl->class_flags2 & UWP_CF2_IMAGE) != 0;
                     break;
                 case QI_GUARD_EASE:
-                    ok = (wcsstr( impl->class_name, L"Ease" ) != NULL ||
-                          wcsstr( impl->class_name, L"EasingFunction" ) != NULL);
+                    ok = (impl->class_flags2 & UWP_CF2_EASE) != 0;
                     break;
                 case QI_GUARD_NAVVIEW_ALT:
-                    if (wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ) != 0)
+                    if (!(impl->class_flags2 & UWP_CF2_NAVVIEW_WINUI))
                         chosen_off = s->alt_off;
                     break;
                 case QI_GUARD_NAVVIEW_ITEM:
-                    ok = (wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.NavigationViewItem" ) == 0);
+                    ok = (impl->class_flags2 & UWP_CF2_NAVVIEW_ITEM_WINUI) != 0;
                     break;
                 case QI_GUARD_SCROLL_VIEWER:
                     ok = (impl->kind == UWP_KIND_SCROLL_VIEWER || uwp_is_scroll_viewer( impl ));
@@ -1275,7 +1317,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (iid->Data1 != 0x11d3b13a && wcsstr( impl->class_name, L"Grid" ))
+    if (iid->Data1 != 0x11d3b13a && (impl->class_flags2 & UWP_CF2_GRID))
         WARN( "uwp_nondelegating_QI: %s not matched on %s\n", debugstr_guid(iid), debugstr_w(impl->class_name) );
     else
         TRACE( "uwp_nondelegating_QI: %s not matched on %s\n", debugstr_guid(iid), debugstr_w(impl->class_name) );
@@ -1410,7 +1452,7 @@ HRESULT WINAPI uwp_frame_GoBack( void *iface )
         if (page_el)
         {
             page_el->parent = impl;
-            if (!impl->parent || !wcsstr( page_el->class_name, L"Skeleton" ))
+            if (!impl->parent || !(page_el->class_flags & UWP_CF_SKELETON))
                 g_navigated_page_el = page_el;
         }
         if (page_el && page_el->outer && back_nea)
@@ -1418,9 +1460,9 @@ HRESULT WINAPI uwp_frame_GoBack( void *iface )
             void *page_ovr = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( page_el->outer, &IID_IPageOverrides_UWP, &page_ovr )) && page_ovr)
             {
-                HRESULT (WINAPI *on_nav)(void *, void *) = (void *)(*(void ***)page_ovr)[7];
-                __TRY { if (on_nav) on_nav( page_ovr, &back_nea->INavigationEventArgs_iface ); }
-                __EXCEPT_ALL { }
+                const struct abi_page_overrides *po = (const struct abi_page_overrides *)page_ovr;
+                __TRY { if (po->lpVtbl->OnNavigatedTo) po->lpVtbl->OnNavigatedTo( page_ovr, &back_nea->INavigationEventArgs_iface ); }
+                __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                 __ENDTRY;
                 IUnknown_Release( (IUnknown *)page_ovr );
             }
@@ -1435,7 +1477,7 @@ HRESULT WINAPI uwp_frame_GoBack( void *iface )
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
                 __TRY { h->lpVtbl->Invoke( h, sender, &back_nea->INavigationEventArgs_iface ); }
-                __EXCEPT_ALL { }
+                __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                 __ENDTRY;
                 IUnknown_Release( (IUnknown *)handlers[hi] );
             }
@@ -1545,23 +1587,24 @@ const struct uwp_rtt_target_vtbl uwp_rtt_vtbl =
     uwp_rtt_ReleaseToTracker,
     uwp_rtt_GetStrongValue,
 };
-static double uwp_ease_in_core( const WCHAR *cls, double t )
+static double uwp_ease_in_core( const struct uwp_element *el, double t )
 {
-    if (wcsstr( cls, L"SineEase" ))
+    UINT64 cf2 = el ? el->class_flags2 : 0;
+    if (cf2 & UWP_CF2_SINE_EASE)
         return 1.0 - sin( (1.0 - t) * 1.5707963267948966 );
-    if (wcsstr( cls, L"QuadraticEase" ))
+    if (cf2 & UWP_CF2_QUAD_EASE)
         return t * t;
-    if (wcsstr( cls, L"CubicEase" ))
+    if (cf2 & UWP_CF2_CUBIC_EASE)
         return t * t * t;
-    if (wcsstr( cls, L"QuarticEase" ))
+    if (cf2 & UWP_CF2_QUARTIC_EASE)
         return t * t * t * t;
-    if (wcsstr( cls, L"QuinticEase" ))
+    if (cf2 & UWP_CF2_QUINTIC_EASE)
         return t * t * t * t * t;
-    if (wcsstr( cls, L"CircleEase" ))
+    if (cf2 & UWP_CF2_CIRCLE_EASE)
         return 1.0 - sqrt( fmax( 0.0, 1.0 - t * t ) );
-    if (wcsstr( cls, L"ExponentialEase" ))
+    if (cf2 & UWP_CF2_EXP_EASE)
         return (t <= 0.0) ? 0.0 : (exp( 2.0 * t ) - 1.0) / (exp( 2.0 ) - 1.0);
-    if (wcsstr( cls, L"PowerEase" ))
+    if (cf2 & UWP_CF2_POWER_EASE)
         return t * t;
     return t;
 }
@@ -1589,12 +1632,12 @@ static HRESULT WINAPI uwp_ease_Ease( IInspectable *iface, double t, double *out 
     if (t > 1.0) t = 1.0;
     /* EasingMode: 0=EaseOut, 1=EaseIn, 2=EaseInOut */
     if (impl->easing_mode == 1)
-        *out = uwp_ease_in_core( impl->class_name, t );
+        *out = uwp_ease_in_core( impl, t );
     else if (impl->easing_mode == 2)
-        *out = (t < 0.5) ? (uwp_ease_in_core( impl->class_name, t * 2.0 ) * 0.5)
-                         : ((1.0 - uwp_ease_in_core( impl->class_name, (1.0 - t) * 2.0 )) * 0.5 + 0.5);
+        *out = (t < 0.5) ? (uwp_ease_in_core( impl, t * 2.0 ) * 0.5)
+                         : ((1.0 - uwp_ease_in_core( impl, (1.0 - t) * 2.0 )) * 0.5 + 0.5);
     else
-        *out = 1.0 - uwp_ease_in_core( impl->class_name, 1.0 - t );
+        *out = 1.0 - uwp_ease_in_core( impl, 1.0 - t );
     return S_OK;
 }
 
@@ -1831,15 +1874,14 @@ void uwp_ciis_dispatch_pointer_event( enum xaml_pointer_event_kind kind, const s
         LeaveCriticalSection( &g_ciis_cs );
         for (k = 0; k < n_h; k++)
         {
-            typedef HRESULT (WINAPI *invoke_fn)( void *iface, void *sender, void *args );
-            void ***vtbl = (void ***)handlers[k];
-            invoke_fn fn = (invoke_fn)((*vtbl)[3]);
+            struct abi_typed_event_handler *eh = (struct abi_typed_event_handler *)handlers[k];
             __TRY
             {
-                fn( handlers[k], &src->lpVtbl_ptr, args );
+                eh->lpVtbl->Invoke( eh, &src->lpVtbl_ptr, args );
             }
             __EXCEPT_ALL
             {
+                WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
             }
             __ENDTRY;
             IUnknown_Release( (IUnknown *)handlers[k] );
@@ -2424,17 +2466,15 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
         *instance = &impl->IContentControl_iface;
     else if (impl->kind == UWP_KIND_ACCELERATOR || uwp_is_accelerator( impl ))
         *instance = &impl->IKeyboardAccelerator_iface;
-    else if (impl->kind == UWP_KIND_XAML_COMMAND || wcsstr( impl->class_name, L"XamlUICommand" ))
+    else if (impl->kind == UWP_KIND_XAML_COMMAND || (impl->class_flags2 & UWP_CF2_XAML_UICOMMAND))
         *instance = &impl->IXamlUICommand_iface;
-    else if (wcsstr( impl->class_name, L"FlyoutItem" ))
+    else if (impl->class_flags2 & UWP_CF2_FLYOUT_ITEM)
         *instance = &impl->IMenuFlyoutItem_iface;
-    else if (wcsstr( impl->class_name, L"ContentDialog" ))
+    else if (impl->class_flags2 & UWP_CF2_CONTENT_DIALOG)
         *instance = &impl->IContentDialog_iface;
-    else if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.DispatcherTimer" ))
+    else if (impl->class_flags2 & UWP_CF2_DISPATCHER_TIMER)
         *instance = &impl->IInspectable_iface;
-    else if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.Data.Binding" ) ||
-             !wcscmp( impl->class_name, L"Windows.UI.Xaml.Data.RelativeSource" ) ||
-             !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.SymbolIcon" ))
+    else if (impl->class_flags2 & (UWP_CF2_BINDING | UWP_CF2_REL_SOURCE | UWP_CF2_SYMBOL_ICON_EXACT))
         *instance = &impl->IStyle_iface;
     else
         *instance = &impl->IFrameworkElement_iface;
@@ -2776,12 +2816,12 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                         TRACE( "uwp_frame_navigate_impl QI IPageOverrides -> hr %#lx ptr %p\n", qi_hr, page_ovr );
                         if (SUCCEEDED(qi_hr) && page_ovr)
                         {
-                            HRESULT (WINAPI *on_nav)(void *, void *) = (void *)(*(void ***)page_ovr)[7];
+                            const struct abi_page_overrides *po = (const struct abi_page_overrides *)page_ovr;
                             HRESULT nav_hr = S_OK;
                             IInspectable *fallback_args = nea ? NULL : (IInspectable *)g_routed_args();
                             __TRY
                             {
-                                nav_hr = on_nav ? on_nav( page_ovr, nea ? (void *)&nea->INavigationEventArgs_iface : (void *)fallback_args ) : S_OK;
+                                nav_hr = po->lpVtbl->OnNavigatedTo ? po->lpVtbl->OnNavigatedTo( page_ovr, nea ? (void *)&nea->INavigationEventArgs_iface : (void *)fallback_args ) : S_OK;
                             }
                             __EXCEPT_ALL { nav_hr = E_FAIL; }
                             __ENDTRY;

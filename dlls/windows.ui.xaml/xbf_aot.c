@@ -724,14 +724,14 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
             if (el) el->conn_id = op->cid;
             if (connector && raw && op->cid != 1)
             {
-                HRESULT (WINAPI *conn_fn)(void *, int, void *) = (void *)(*(void ***)connector)[6];
+                const struct abi_component_connector *acc = (const struct abi_component_connector *)connector;
                 TRACE( "AOT Connect(cid=%d, target=%p [%s %s])\n", op->cid, raw,
                        el ? debugstr_w( el->class_name ) : "?", el ? debugstr_w( el->name ) : "" );
-                conn_fn( connector, op->cid, raw );
+                acc->lpVtbl->Connect( connector, op->cid, raw );
                 if (root_el && root_el->binding_connector && !is_template)
                 {
-                    HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)root_el->binding_connector)[6];
-                    if (b_conn) b_conn( root_el->binding_connector, op->cid, raw );
+                    const struct abi_component_connector *bcc = (const struct abi_component_connector *)root_el->binding_connector;
+                    if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( root_el->binding_connector, op->cid, raw );
                 }
                 else if (out_created)
                 {
@@ -740,8 +740,8 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         void *conn2 = NULL, *bc = NULL;
                         if (SUCCEEDED(IInspectable_QueryInterface( component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
                         {
-                            HRESULT (WINAPI *get_bc)(void *, int, void *, void **) = (void *)(*(void ***)conn2)[6];
-                            if (get_bc && SUCCEEDED(get_bc( conn2, op->cid, raw, &bc )) && bc)
+                            const struct abi_component_connector2 *acc2 = (const struct abi_component_connector2 *)conn2;
+                            if (acc2->lpVtbl->GetBindingConnector && SUCCEEDED(acc2->lpVtbl->GetBindingConnector( conn2, op->cid, raw, &bc )) && bc)
                             {
                                 dt_binding = bc;
                                 if (el && !el->dt_binding_connector)
@@ -760,8 +760,8 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     }
                     if (dt_binding)
                     {
-                        HRESULT (WINAPI *b_conn)(void *, int, void *) = (void *)(*(void ***)dt_binding)[6];
-                        if (b_conn) b_conn( dt_binding, op->cid, raw );
+                        const struct abi_component_connector *bcc = (const struct abi_component_connector *)dt_binding;
+                        if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( dt_binding, op->cid, raw );
                     }
                 }
             }
@@ -813,7 +813,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 BOOL handled_custom = FALSE;
                 void *ao = app_outer ? app_outer : uwp_get_app_outer();
                 if (parent_el && (op->pid == XBF_PROP_KEYBOARD_ACCELERATORS || (child_el && (child_el->kind == UWP_KIND_ACCELERATOR ||
-                                                                              wcsstr( child_el->class_name, L"Accelerator" )))))
+                                                                              (child_el->class_flags & UWP_CF_ACCELERATOR)))))
                 {
                     if (!parent_el->accelerators_coll) uwp_vec_create( parent_el, &parent_el->accelerators_coll );
                     uwp_vec_Append( parent_el->accelerators_coll, child_raw );
@@ -837,7 +837,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     handled_custom = TRUE;
                 }
                 else if (parent_el && (op->pid == XBF_PROP_GRADIENTBRUSH_STOPS ||
-                                       (child_el && wcsstr( child_el->class_name, L"GradientStop" ))))
+                                       (child_el && (child_el->class_flags2 & UWP_CF2_GRADIENT_STOP))))
                 {
                     if (!parent_el->gradient_stops_coll)
                     {
@@ -978,7 +978,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         wcscmp( pi->name, L"Foreground" ) && wcscmp( pi->name, L"BorderBrush" ))
                     {
                         if (parent_el && child_el &&
-                            !wcscmp( child_el->class_name, L"Windows.UI.Xaml.Data.Binding" ))
+                            (child_el->class_flags2 & UWP_CF2_BINDING))
                         {
                             uwp_add_xaml_binding( parent_el, owner_cls, pi->name, child_el );
                             handled_custom_obj = TRUE;
@@ -1158,7 +1158,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
         {
             struct uwp_element *target_el = (op->node_idx < hdr->node_cnt) ? nodes_el[op->node_idx] : NULL;
             struct uwp_element *val_el = (op->child_idx < hdr->node_cnt) ? nodes_el[op->child_idx] : NULL;
-            if (target_el && val_el && !wcscmp( val_el->class_name, L"Windows.UI.Xaml.NullExtension" ))
+            if (target_el && val_el && (val_el->class_flags2 & UWP_CF2_NULL_EXT))
             {
                 if (uwp_is_fg_pid( op->pid ))
                 {
@@ -1171,7 +1171,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
             if (target_el && uwp_has_text( val_el ))
             {
                 WCHAR resolved[256] = {0};
-                if (!wcscmp( val_el->class_name, L"Windows.UI.Xaml.Data.TemplateBinding" ))
+                if (val_el->class_flags2 & UWP_CF2_TEMPLATE_BINDING)
                 {
                     target_el->tpl_bind_target_pid = op->pid;
                     lstrcpynW( target_el->tpl_bind_src_prop, uwp_elem_text( val_el ), ARRAY_SIZE(target_el->tpl_bind_src_prop) );
@@ -1327,7 +1327,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 struct uwp_element *p;
                 for (p = trig->parent; p; p = p->parent)
                 {
-                    if (!wcscmp( p->class_name, L"Windows.UI.Xaml.VisualState" ) && p->name[0])
+                    if ((p->class_flags2 & UWP_CF2_VISUAL_STATE) && p->name[0])
                     {
                         struct uwp_element *scope = p->owner_component ? p->owner_component : root_el;
                         if (scope)

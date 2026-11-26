@@ -25,6 +25,8 @@
 #include "private.h"
 #include "uwp_private.h"
 
+WINE_DEFAULT_DEBUG_CHANNEL(xaml);
+
 const void *uwp_grid_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -365,8 +367,7 @@ const void *uwp_rowcol_vtbl[32] =
 struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth )
 {
     if (!el || depth > 6) return NULL;
-    if (el->class_name[0] && wcsstr( el->class_name, L".Controls.NavigationViewItem" ) &&
-        !wcsstr( el->class_name, L"ViewItemInvoked" ))
+    if (el->class_flags2 & UWP_CF2_NAV_VIEW_ITEM_CTRL)
         return el;
     if (!wcscmp( el->name, L"MenuItemsHost" ) && el->children_coll)
     {
@@ -406,7 +407,7 @@ static void uwp_fire_flyout_closed( struct uwp_element *flyout )
             IInspectable *sender = flyout->outer ? flyout->outer : &flyout->IFlyout_iface;
             struct xaml_event_handler *h = (struct xaml_event_handler *)flyout->flyout_closed_handlers[i];
             __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
-            __EXCEPT_ALL {}
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
         }
     }
@@ -764,19 +765,18 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
         void *mbi = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( flyout->outer, &IID_IMenuBarItem_WinUI, &mbi )) && mbi)
         {
+            const struct abi_menu_bar_item *ambi = (const struct abi_menu_bar_item *)mbi;
             void *vec = NULL;
-            HRESULT (WINAPI *get_items)(void *, void **) = (void *)(*(void ***)mbi)[8];
-            if (get_items && SUCCEEDED(get_items( mbi, &vec )) && vec)
+            if (ambi->lpVtbl->get_Items && SUCCEEDED(ambi->lpVtbl->get_Items( mbi, &vec )) && vec)
             {
+                const struct abi_winrt_vector *avec = (const struct abi_winrt_vector *)vec;
                 UINT32 cnt = 0;
-                HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
-                HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
-                if (get_size && SUCCEEDED(get_size( vec, &cnt )))
+                if (avec->lpVtbl->get_Size && SUCCEEDED(avec->lpVtbl->get_Size( vec, &cnt )))
                 {
                     for (k = 0; k < cnt && raw_cnt < ARRAY_SIZE(raw_items); k++)
                     {
                         void *item = NULL;
-                        if (get_at && SUCCEEDED(get_at( vec, k, &item )) && item)
+                        if (avec->lpVtbl->GetAt && SUCCEEDED(avec->lpVtbl->GetAt( vec, k, &item )) && item)
                         {
                             struct uwp_element *ch = uwp_elem_from_any( item );
                             if (ch) raw_items[raw_cnt++] = ch;
@@ -859,9 +859,9 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
                         else if (ka->accel_key >= '0' && ka->accel_key <= '9')
                         { kname[0] = (WCHAR)ka->accel_key; kname[1] = 0; }
                         else if (ka->accel_key == VK_ADD || ka->accel_key == 0xbb)
-                            lstrcpyW( kname, L"Plus" );
+                            lstrcpynW( kname, L"Plus", ARRAY_SIZE(kname) );
                         else if (ka->accel_key == VK_SUBTRACT || ka->accel_key == 0xbd)
-                            lstrcpyW( kname, L"Minus" );
+                            lstrcpynW( kname, L"Minus", ARRAY_SIZE(kname) );
                         else if (ka->accel_key >= VK_F1 && ka->accel_key <= VK_F12)
                             swprintf( kname, ARRAY_SIZE(kname), L"F%u", ka->accel_key - VK_F1 + 1 );
                         if (kname[0])

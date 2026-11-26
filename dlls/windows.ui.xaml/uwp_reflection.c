@@ -369,7 +369,7 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
                     struct uwp_element *tel = uwp_elem_from_any( target_obj );
                     if (xm->lpVtbl->get_IsAttachable)
                         xm->lpVtbl->get_IsAttachable( xm, &is_attachable );
-                    if (is_attachable && (!tel || wcsstr( tel->class_name, L"Collection" ) || wcsstr( tel->class_name, L"AnimationSet" )))
+                    if (is_attachable && (!tel || (tel->class_flags2 & (UWP_CF2_COLLECTION | UWP_CF2_ANIMATION_SET))))
                         target_is_coll = TRUE;
                     if (SUCCEEDED(xm->lpVtbl->get_Type( xm, (struct xaml_type **)&member_type )) && member_type && !target_is_coll)
                     {
@@ -442,9 +442,9 @@ BOOL uwp_inspectable_to_string( IInspectable *obj, WCHAR *buf, int buf_cch )
 
     if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IStringable_UWP, &strable )) && strable)
     {
+        const struct abi_stringable *astr = (const struct abi_stringable *)strable;
         HSTRING hs = NULL;
-        HRESULT (WINAPI *to_str)(void *, HSTRING *) = (void *)(*(void ***)strable)[6];
-        if (to_str && SUCCEEDED(to_str( strable, &hs )) && hs)
+        if (astr->lpVtbl->ToString && SUCCEEDED(astr->lpVtbl->ToString( strable, &hs )) && hs)
         {
             const WCHAR *s = WindowsGetStringRawBuffer( hs, NULL );
             if (s && s[0]) lstrcpynW( buf, s, buf_cch );
@@ -471,12 +471,11 @@ static BOOL uwp_vm_extract_hstring_vec_first( IInspectable *pval, WCHAR *out, si
     if (SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVector_HSTRING_UWP, &svec )) ||
         SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IVectorView_HSTRING_UWP, &svec )))
     {
-        HRESULT (WINAPI *get_at)(void *, unsigned int, HSTRING *) = (void *)(*(void ***)svec)[6];
-        HRESULT (WINAPI *get_sz)(void *, unsigned int *) = (void *)(*(void ***)svec)[7];
+        const struct abi_winrt_hstring_vector *ahvec = (const struct abi_winrt_hstring_vector *)svec;
         unsigned int sz = 0;
         HSTRING hs = NULL;
-        if (get_sz && get_at && SUCCEEDED(get_sz( svec, &sz )) && sz > 0 &&
-            SUCCEEDED(get_at( svec, 0, &hs )) && hs)
+        if (ahvec->lpVtbl->get_Size && ahvec->lpVtbl->GetAt && SUCCEEDED(ahvec->lpVtbl->get_Size( svec, &sz )) && sz > 0 &&
+            SUCCEEDED(ahvec->lpVtbl->GetAt( svec, 0, &hs )) && hs)
         {
             const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
             if (raw && raw[0]) lstrcpynW( out, raw, (int)out_len );
@@ -487,16 +486,15 @@ static BOOL uwp_vm_extract_hstring_vec_first( IInspectable *pval, WCHAR *out, si
     }
     if (SUCCEEDED(IInspectable_QueryInterface( pval, &IID_IIterable_HSTRING_UWP, &svec )) && svec)
     {
-        HRESULT (WINAPI *first)(void *, void **) = (void *)(*(void ***)svec)[6];
+        const struct abi_winrt_iterable *ait = (const struct abi_winrt_iterable *)svec;
         void *iter = NULL;
-        if (first && SUCCEEDED(first( svec, &iter )) && iter)
+        if (ait->lpVtbl->First && SUCCEEDED(ait->lpVtbl->First( svec, &iter )) && iter)
         {
-            HRESULT (WINAPI *get_cur)(void *, HSTRING *) = (void *)(*(void ***)iter)[6];
-            HRESULT (WINAPI *has_cur)(void *, boolean *) = (void *)(*(void ***)iter)[7];
+            const struct abi_winrt_hstring_iterator *ahiter = (const struct abi_winrt_hstring_iterator *)iter;
             boolean has = FALSE;
             HSTRING hs = NULL;
-            if (has_cur && SUCCEEDED(has_cur( iter, &has )) && has &&
-                get_cur && SUCCEEDED(get_cur( iter, &hs )) && hs)
+            if (ahiter->lpVtbl->get_HasCurrent && SUCCEEDED(ahiter->lpVtbl->get_HasCurrent( iter, &has )) && has &&
+                ahiter->lpVtbl->get_Current && SUCCEEDED(ahiter->lpVtbl->get_Current( iter, &hs )) && hs)
             {
                 const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
                 if (raw && raw[0]) lstrcpynW( out, raw, (int)out_len );
@@ -560,12 +558,11 @@ BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props
     }
     if (!out[0] && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICustomPropertyProvider_UWP, &cpp )) && cpp)
     {
-        HRESULT (WINAPI *get_prop)(void *, HSTRING, void **) = (void *)(*(void ***)cpp)[6];
-        HRESULT (WINAPI *get_type)(void *, TypeName *) = (void *)(*(void ***)cpp)[9];
-        if (get_type)
+        const struct abi_custom_property_provider *acpp = (const struct abi_custom_property_provider *)cpp;
+        if (acpp->lpVtbl->get_Type)
         {
             TypeName tn = {0};
-            if (SUCCEEDED(get_type( cpp, &tn )) && tn.Name)
+            if (SUCCEEDED(acpp->lpVtbl->get_Type( cpp, &tn )) && tn.Name)
             {
                 WCHAR tcls[256] = {0};
                 WCHAR *comma;
@@ -581,13 +578,13 @@ BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props
         {
             HSTRING hp = NULL;
             void *cp = NULL;
-            if (get_prop && SUCCEEDED(WindowsCreateString( props[pi], wcslen(props[pi]), &hp )) && hp)
+            if (acpp->lpVtbl->GetCustomProperty && SUCCEEDED(WindowsCreateString( props[pi], wcslen(props[pi]), &hp )) && hp)
             {
-                if (SUCCEEDED(get_prop( cpp, hp, &cp )) && cp)
+                if (SUCCEEDED(acpp->lpVtbl->GetCustomProperty( cpp, hp, &cp )) && cp)
                 {
-                    HRESULT (WINAPI *get_val)(void *, IInspectable *, IInspectable **) = (void *)(*(void ***)cp)[8];
+                    const struct abi_custom_property *acp = (const struct abi_custom_property *)cp;
                     IInspectable *pval = NULL;
-                    if (get_val && SUCCEEDED(get_val( cp, vm, &pval )) && pval)
+                    if (acp->lpVtbl->GetValue && SUCCEEDED(acp->lpVtbl->GetValue( cp, vm, &pval )) && pval)
                     {
                         uwp_vm_extract_val_url( pval, props, count, out, out_len, depth );
                         IInspectable_Release( pval );

@@ -470,7 +470,7 @@ static HRESULT WINAPI uwp_mf2_ShowAt( void *iface, void *target, UINT64 pt_raw )
             IInspectable *sender = impl->outer ? impl->outer : &impl->IFlyout_iface;
             struct xaml_event_handler *h = (struct xaml_event_handler *)impl->flyout_opening_handlers[i];
             __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
-            __EXCEPT_ALL {}
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
         }
     }
@@ -584,7 +584,7 @@ static void uwp_cd_fire_closed( struct uwp_element *impl, int result )
         {
             struct xaml_event_handler *h = (struct xaml_event_handler *)impl->flyout_closed_handlers[i];
             __TRY { h->lpVtbl->Invoke( h, sender, args ); }
-            __EXCEPT_ALL {}
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
         }
     }
@@ -849,10 +849,9 @@ static HRESULT WINAPI cd_op_put_Completed( void *iface, void *handler )
     impl->handler = handler;
     if (handler)
     {
-        typedef HRESULT (WINAPI *invoke_fn)(void *, void *, UINT32);
-        void **vtbl = *(void ***)handler;
+        const struct abi_async_op_completed_handler *ah = (const struct abi_async_op_completed_handler *)handler;
         IUnknown_AddRef( (IUnknown *)handler );
-        ((invoke_fn)vtbl[3])( handler, &impl->lpVtbl_op, 1 /* Completed */ );
+        ah->lpVtbl->Invoke( handler, &impl->lpVtbl_op, 1 /* Completed */ );
     }
     return S_OK;
 }
@@ -1311,7 +1310,7 @@ void uwp_asb_fire_text_changed( struct uwp_element *el )
             void *dp_sender = el->outer ? (void *)el->outer : (void *)&el->IDependencyObject_iface;
             struct xaml_event_handler *h = cbs_snap[ci];
             __TRY { h->lpVtbl->Invoke( h, dp_sender, dps_snap[ci] ); }
-            __EXCEPT_ALL { }
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
             IUnknown_Release( (IUnknown *)h );
         }

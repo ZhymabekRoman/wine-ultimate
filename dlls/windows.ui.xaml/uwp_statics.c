@@ -575,7 +575,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         *out = (void *)&ecp_statics2_obj;
         return S_OK;
     }
-    if (f && !wcscmp( f->class_name, L"Windows.UI.Xaml.Media.CompositionTarget" ))
+    if (f && (f->factory_flags & UWP_FF_COMP_TARGET))
     {
         *out = (void *)&comp_target_statics_obj;
         return S_OK;
@@ -777,27 +777,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
         return S_OK;
     }
-    if (f && f->class_name &&
-        (wcsstr( f->class_name, L"Control" ) ||
-         wcsstr( f->class_name, L"Source" ) ||
-         wcsstr( f->class_name, L"Box" ) ||
-         wcsstr( f->class_name, L"Item" ) ||
-         wcsstr( f->class_name, L"View" ) ||
-         wcsstr( f->class_name, L"Panel" ) ||
-         wcsstr( f->class_name, L"Button" ) ||
-         wcsstr( f->class_name, L"Selector" ) ||
-         wcsstr( f->class_name, L"Flyout" ) ||
-         wcsstr( f->class_name, L"Separator" ) ||
-         wcsstr( f->class_name, L"Trigger" ) ||
-         wcsstr( f->class_name, L"Transition" ) ||
-         wcsstr( f->class_name, L"Extension" ) ||
-         wcsstr( f->class_name, L"BitmapSource" ) ||
-         wcsstr( f->class_name, L"Accelerator" ) ||
-         wcsstr( f->class_name, L"Command" ) ||
-         wcsstr( f->class_name, L"Timer" ) ||
-         wcsstr( f->class_name, L"Configuration" ) ||
-         wcsstr( f->class_name, L"Collection" ) ||
-         wcsstr( f->class_name, L"Shadow" )))
+    if (f && (f->factory_flags & UWP_FF_COMPOSABLE_FALLBACK))
     {
         WARN( "uwp_cf_QI(%s) unknown iid %s -> ComposableFactory fallback\n",
               debugstr_w(f->class_name), debugstr_guid(iid) );
@@ -859,13 +839,12 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
     /* IPropertyPathFactory::CreateInstance(HSTRING path, IPropertyPath **out)
      * and ISymbolIconFactory::CreateInstanceWithIcon(Symbol sym, ISymbolIcon **out)
      * take 2 args after iface, so the output pointer arrives in `inner`. */
-    if (!wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" ) ||
-        !wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" ))
+    if (f && (f->factory_flags & (UWP_FF_PROP_PATH | UWP_FF_SYMBOL_ICON)))
     {
         HRESULT hr;
         TRACE( "uwp_cf_CreateInstance(%s, arg1=%p, out=%p)\n", debugstr_w(cls), outer, inner );
         hr = uwp_element_create( cls, NULL, NULL, (void **)inner );
-        if (SUCCEEDED(hr) && inner && *(void **)inner && !wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" ) &&
+        if (SUCCEEDED(hr) && inner && *(void **)inner && (f->factory_flags & UWP_FF_PROP_PATH) &&
             (ULONG_PTR)outer >= 0x10000)
         {
             struct uwp_element *pp_el = uwp_elem_from_any( *(void **)inner );
@@ -874,7 +853,7 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
             if (pp_el && raw && len > 0)
                 uwp_elem_set_text_n( pp_el, raw, len );
         }
-        if (SUCCEEDED(hr) && inner && *(void **)inner && !wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" ))
+        if (SUCCEEDED(hr) && inner && *(void **)inner && (f->factory_flags & UWP_FF_SYMBOL_ICON))
         {
             struct uwp_element *sym_el = uwp_elem_from_any( *(void **)inner );
             UINT_PTR code = (UINT_PTR)outer;
@@ -919,14 +898,13 @@ static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
     const WCHAR *dp_name = NULL;
     HRESULT hr;
     if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
-    if (f && f->class_name)
+    if (f)
     {
-        if (!wcscmp( f->class_name, L"Windows.UI.Xaml.UIElement" ))
+        if (f->factory_flags & UWP_FF_UIELEMENT)
             return uwp_cf_routed_event_slot( &g_routed_event_other, out );
-        if (!wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.Button" ))
+        if (f->factory_flags & UWP_FF_BUTTON)
             dp_name = L"Flyout";
-        else if (!wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.ToggleMenuFlyoutItem" ) ||
-                 !wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.Primitives.ToggleButton" ))
+        else if (f->factory_flags & UWP_FF_TOGGLE_BTN_OR_MENU)
             dp_name = L"IsChecked";
     }
     hr = dependency_property_create( NULL, (IDependencyProperty **)out );
@@ -1034,7 +1012,7 @@ static const void *uwp_uielement_statics_obj = uwp_uielement_statics_vtbl;
 static HRESULT WINAPI uwp_cf_dp_prop_slot9( void *iface, void **out )
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
-    if (f && f->class_name && !wcscmp( f->class_name, L"Windows.UI.Xaml.UIElement" ))
+    if (f && (f->factory_flags & UWP_FF_UIELEMENT))
     {
         if (!out) return E_POINTER;
         if (!g_routed_event_ptr_pressed)
@@ -1218,6 +1196,7 @@ void uwp_fire_composition_target_rendering( void )
         }
         __EXCEPT_ALL
         {
+            WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
         }
         __ENDTRY;
         IInspectable_Release( snap[i] );

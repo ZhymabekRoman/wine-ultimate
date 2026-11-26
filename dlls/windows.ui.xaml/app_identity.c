@@ -24,6 +24,7 @@
 
 #include "private.h"
 #include "app_private.h"
+#include "uwp_abi_vtbls.h"
 #include "weakreference.h"
 #include "wine/exception.h"
 #include "windows.applicationmodel.activation.h"
@@ -110,8 +111,10 @@ static BOOL xaml_read_reg_str( HKEY root, const WCHAR *subkey, const WCHAR *valu
     DWORD type = 0, size;
     LONG ret;
 
-    lstrcpyW( path, xaml_appmodel_key );
-    if (subkey && subkey[0]) lstrcatW( path, L"\\" ), lstrcatW( path, subkey );
+    if (subkey && subkey[0])
+        swprintf( path, ARRAY_SIZE(path), L"%s\\%s", xaml_appmodel_key, subkey );
+    else
+        lstrcpynW( path, xaml_appmodel_key, ARRAY_SIZE(path) );
     if (RegOpenKeyExW( root, path, 0, KEY_READ, &hkey )) return FALSE;
     size = cch * sizeof(*buf);
     ret = RegQueryValueExW( hkey, value, NULL, &type, (BYTE *)buf, &size );
@@ -136,8 +139,7 @@ static void xaml_package_resolve_location( struct xaml_package *pkg )
     pkg->installed_location[0] = 0;
     if (!pkg->full_name[0]) return;
 
-    lstrcpyW( subkey, L"Packages\\" );
-    lstrcatW( subkey, pkg->full_name );
+    swprintf( subkey, ARRAY_SIZE(subkey), L"Packages\\%s", pkg->full_name );
     for (i = 0; i < ARRAY_SIZE( xaml_reg_roots ); i++)
     {
         static const WCHAR *const values[] = { L"PackagePath", L"PackageRootPath" };
@@ -182,8 +184,7 @@ static BOOL xaml_manifest_display_name( const WCHAR *dir, WCHAR *out, DWORD cch 
     BOOL ok = FALSE;
     UINT cp = CP_UTF8;
 
-    lstrcpyW( path, dir );
-    lstrcatW( path, manifest_name );
+    swprintf( path, ARRAY_SIZE(path), L"%.260s%s", dir, manifest_name );
     if ((file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL )) == INVALID_HANDLE_VALUE)
     {
         TRACE( "manifest open %s failed, err %u\n", debugstr_w( path ), (unsigned int)GetLastError() );
@@ -244,16 +245,14 @@ static pri_index *xaml_package_open_pri( struct xaml_package *pkg )
 
     if (pkg->installed_location[0])
     {
-        lstrcpyW( path, pkg->installed_location );
-        lstrcatW( path, pri_name );
+        swprintf( path, ARRAY_SIZE(path), L"%.260s%s", pkg->installed_location, pri_name );
         if ((xaml_package_pri = pri_load( path ))) return xaml_package_pri;
     }
     len = GetModuleFileNameW( NULL, dir, ARRAY_SIZE( dir ) );
     if (len && len < ARRAY_SIZE( dir ) && wcsrchr( dir, L'\\' ))
     {
         *wcsrchr( dir, L'\\' ) = 0;
-        lstrcpyW( path, dir );
-        lstrcatW( path, pri_name );
+        swprintf( path, ARRAY_SIZE(path), L"%.260s%s", dir, pri_name );
         xaml_package_pri = pri_load( path );
     }
     return xaml_package_pri;
@@ -272,17 +271,16 @@ static void xaml_package_resolve_ms_resource( struct xaml_package *pkg )
 
     if (wcsncmp( pkg->display_name, ms_resource, ARRAY_SIZE( ms_resource ) - 1 )) return;
 
-    lstrcpyW( key, pkg->display_name + ARRAY_SIZE( ms_resource ) - 1 );
-    if (key[0] == L'/' && key[1] == L'/') lstrcpyW( key, key + 2 );
-    if (key[0] == L'/') lstrcpyW( key, key + 1 );
+    lstrcpynW( key, pkg->display_name + ARRAY_SIZE( ms_resource ) - 1, ARRAY_SIZE( key ) );
+    if (key[0] == L'/' && key[1] == L'/') memmove( key, key + 2, (wcslen( key + 2 ) + 1) * sizeof(WCHAR) );
+    if (key[0] == L'/') memmove( key, key + 1, (wcslen( key + 1 ) + 1) * sizeof(WCHAR) );
     for (i = 0; key[i]; i++) if (key[i] == L'/') key[i] = L'\\';
 
     if (xaml_package_open_pri( pkg ))
     {
         for (i = 0; i < ARRAY_SIZE( scopes ); i++)
         {
-            lstrcpyW( full, scopes[i] );
-            lstrcatW( full, key );
+            swprintf( full, ARRAY_SIZE( full ), L"%s%s", scopes[i], key );
             if (pri_lookup( xaml_package_pri, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ),
                             &val, NULL, NULL ))
             {
@@ -332,8 +330,7 @@ static BOOL WINAPI xaml_package_init( INIT_ONCE *once, void *param, void **conte
      * packages shipping no manifest attribute. */
     if (pkg->full_name[0])
     {
-        lstrcpyW( subkey, L"Packages\\" );
-        lstrcatW( subkey, pkg->full_name );
+        swprintf( subkey, ARRAY_SIZE(subkey), L"Packages\\%s", pkg->full_name );
         for (i = 0; i < ARRAY_SIZE( xaml_reg_roots ); i++)
             if (xaml_read_reg_str( xaml_reg_roots[i], subkey, L"DisplayName",
                                    pkg->display_name, ARRAY_SIZE( pkg->display_name ) ))
@@ -351,9 +348,7 @@ static BOOL WINAPI xaml_package_init( INIT_ONCE *once, void *param, void **conte
     {
         WCHAR sub[640];
         HKEY hkey;
-        lstrcpyW( sub, xaml_appmodel_key );
-        lstrcatW( sub, L"\\Packages\\" );
-        lstrcatW( sub, pkg->full_name );
+        swprintf( sub, ARRAY_SIZE(sub), L"%s\\Packages\\%s", xaml_appmodel_key, pkg->full_name );
         if (RegCreateKeyExW( HKEY_CURRENT_USER, sub, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ) == ERROR_SUCCESS)
         {
             RegSetValueExW( hkey, L"ApplicationShortName", 0, REG_SZ, (const BYTE *)pkg->display_name,
@@ -423,9 +418,8 @@ static BOOL xaml_package_logo_path( WCHAR *out_path, DWORD cch )
     InitOnceExecuteOnce( &xaml_package_once, xaml_package_init, NULL, NULL );
     if (xaml_package.full_name[0])
     {
-        lstrcpyW( key, L"Software\\Classes\\AppModel\\Repository\\Packages\\" );
-        lstrcatW( key, xaml_package.full_name );
-        lstrcatW( key, L"\\VisualElements" );
+        swprintf( key, ARRAY_SIZE(key), L"Software\\Classes\\AppModel\\Repository\\Packages\\%s\\VisualElements",
+                  xaml_package.full_name );
         for (i = 0; i < ARRAY_SIZE( xaml_reg_roots ); i++)
         {
             HKEY hkey;
@@ -588,8 +582,8 @@ static BOOL g_caps_ready;
  * shared layout of the UWP and WinUI providers) whether a type is registered. */
 static BOOL caps_provider_has( void *provider, const WCHAR *full_name )
 {
-    void **vtbl = *(void ***)provider;
-    HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
+    const struct abi_xaml_metadata_provider *mp = (const struct abi_xaml_metadata_provider *)provider;
+    HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = mp->lpVtbl->GetXamlTypeByFullName;
     HRESULT hr = E_FAIL;
     HSTRING h = NULL;
     void *xt = NULL;

@@ -392,8 +392,7 @@ static HRESULT WINAPI uwp_flyout_slot6( void *iface, void **out )
         }
     }
     /* Only MenuFlyout / MenuBar / TabView use slot 6 for get_Items; IFlyoutBase::ShowAt passes a UIElement* */
-    if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Flyout" ) ||
-        !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.CommandBarFlyout" ))
+    if (impl->class_flags2 & (UWP_CF2_FLYOUT_EXACT | UWP_CF2_CMDBAR_FLYOUT_EXACT))
         return S_OK;
     return uwp_flyout_get_Items( iface, out );
 }
@@ -413,10 +412,8 @@ static HRESULT WINAPI uwp_flyout_slot8( void *iface, void *arg1, EventRegistrati
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
     if (!impl) return S_OK;
     /* IFlyoutBase::add_Opened(handler, token*) on Flyout / MenuFlyout / CommandBarFlyout */
-    if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Flyout" ) ||
-        !wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.MenuFlyout" ) ||
-        !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.CommandBarFlyout" ) ||
-        !wcscmp( impl->class_name, L"Windows.UI.Xaml.Documents.Hyperlink" ))
+    if (impl->class_flags2 & (UWP_CF2_FLYOUT_EXACT | UWP_CF2_MENU_FLYOUT_EXACT |
+                              UWP_CF2_CMDBAR_FLYOUT_EXACT | UWP_CF2_HYPERLINK_EXACT))
     {
         if (tok) tok->value = 1;
         return S_OK;
@@ -678,9 +675,9 @@ void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len )
         void *vm = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_ITabItemViewModel, &vm )) && vm)
         {
-            HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)vm)[6];
+            const struct abi_tab_item_vm *tvm = (const struct abi_tab_item_vm *)vm;
             HSTRING hname = NULL;
-            if (get_name && SUCCEEDED(get_name( vm, &hname )) && hname)
+            if (tvm->lpVtbl->get_Name && SUCCEEDED(tvm->lpVtbl->get_Name( vm, &hname )) && hname)
             {
                 const WCHAR *s = WindowsGetStringRawBuffer( hname, NULL );
                 if (s && s[0]) lstrcpynW( buf, s, buf_len );
@@ -925,7 +922,7 @@ static HRESULT WINAPI uwp_tabview_put_SelectedItem( void *iface, void *item )
         if (args)
         {
             __TRY { h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface ); }
-            __EXCEPT_ALL {}
+            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
             __ENDTRY;
             uwp_sel_args_Release( &args->IInspectable_iface );
         }
@@ -1145,11 +1142,7 @@ BOOL uwp_combobox_compute_popup_rect( struct uwp_element *cb, int item_cnt, int 
     if (cb->dropdown_scroll_offset < 0)
         cb->dropdown_scroll_offset = 0;
 
-    SetRect( &cb->dropdown_bounds, left, top, right, bottom );
-    cb->dropdown_item_h = item_h;
-    cb->dropdown_visible_cnt = max_vis;
-
-    if (out_rc) *out_rc = cb->dropdown_bounds;
+    if (out_rc) SetRect( out_rc, left, top, right, bottom );
     if (out_item_h) *out_item_h = item_h;
     if (out_vis_cnt) *out_vis_cnt = max_vis;
     if (out_pad_y) *out_pad_y = pad_y;
@@ -1169,7 +1162,7 @@ static void uwp_fire_cb_event( struct uwp_element *cb, struct xaml_event_registr
     {
         struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
         __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
-        __EXCEPT_ALL {}
+        __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
         __ENDTRY;
         IUnknown_Release( (IUnknown *)handlers[i] );
     }
@@ -1490,16 +1483,16 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
             void *dts = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector_UWP, &dts )) && dts)
             {
-                HRESULT (WINAPI *sel_fn)(void *, void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
-                __TRY { if (sel_fn) sel_fn( dts, item, &impl->IDependencyObject_iface, &tmpl ); }
+                const struct abi_data_template_selector *sdts = (const struct abi_data_template_selector *)dts;
+                __TRY { if (sdts->lpVtbl->SelectTemplate) sdts->lpVtbl->SelectTemplate( dts, item, &impl->IDependencyObject_iface, &tmpl ); }
                 __EXCEPT_ALL { tmpl = NULL; }
                 __ENDTRY;
                 IUnknown_Release( (IUnknown *)dts );
             }
             if (!tmpl && SUCCEEDED(IInspectable_QueryInterface( sel, &IID_IDataTemplateSelector2_UWP, &dts )) && dts)
             {
-                HRESULT (WINAPI *sel2_fn)(void *, void *, IInspectable **) = (void *)(*(void ***)dts)[6];
-                __TRY { if (sel2_fn) sel2_fn( dts, item, &tmpl ); }
+                const struct abi_data_template_selector2 *sdts2 = (const struct abi_data_template_selector2 *)dts;
+                __TRY { if (sdts2->lpVtbl->SelectTemplateForItem) sdts2->lpVtbl->SelectTemplateForItem( dts, item, &tmpl ); }
                 __EXCEPT_ALL { tmpl = NULL; }
                 __ENDTRY;
                 IUnknown_Release( (IUnknown *)dts );
@@ -1515,9 +1508,9 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
             void *dt = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( tmpl, &IID_IDataTemplate_UWP, &dt )) && dt)
             {
-                HRESULT (WINAPI *load_fn)(void *, void **) = (void *)(*(void ***)dt)[6];
+                const struct abi_data_template *adt = (const struct abi_data_template *)dt;
                 void *content = NULL;
-                if (load_fn && SUCCEEDED(load_fn( dt, &content )) && content)
+                if (adt->lpVtbl->LoadContent && SUCCEEDED(adt->lpVtbl->LoadContent( dt, &content )) && content)
                 {
                     struct uwp_element *cel = uwp_elem_from_any( content );
                     if (cel)

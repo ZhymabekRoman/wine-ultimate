@@ -83,9 +83,9 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
                     void *run_iface = NULL;
                     if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_IRun_g, &run_iface )) && run_iface)
                     {
+                        const struct abi_run *arun = (const struct abi_run *)run_iface;
                         HSTRING htxt = NULL;
-                        HRESULT (WINAPI *get_txt)(void *, HSTRING *) = (void *)(*(void ***)run_iface)[6];
-                        if (get_txt && SUCCEEDED(get_txt( run_iface, &htxt )) && htxt)
+                        if (arun->lpVtbl->get_Text && SUCCEEDED(arun->lpVtbl->get_Text( run_iface, &htxt )) && htxt)
                         {
                             const WCHAR *s = WindowsGetStringRawBuffer( htxt, NULL );
                             if (s && s[0])
@@ -107,9 +107,9 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
                         if ((SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_g, &span_iface )) && span_iface) ||
                             (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_uwp, &span_iface )) && span_iface))
                         {
+                            const struct abi_span *aspan = (const struct abi_span *)span_iface;
                             void *sub_inlines = NULL;
-                            HRESULT (WINAPI *get_inlines)(void *, void **) = (void *)(*(void ***)span_iface)[6];
-                            if (get_inlines && SUCCEEDED(get_inlines( span_iface, &sub_inlines )) && sub_inlines)
+                            if (aspan->lpVtbl->get_Inlines && SUCCEEDED(aspan->lpVtbl->get_Inlines( span_iface, &sub_inlines )) && sub_inlines)
                             {
                                 struct uwp_vec_view *sv = CONTAINING_RECORD( sub_inlines, struct uwp_vec_view, IInspectable_iface );
                                 unsigned int k;
@@ -153,12 +153,6 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
     return pos;
 }
 
-struct uwp_size_f
-{
-    float width;
-    float height;
-};
-
 static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int h )
 {
     void *fe_ovr = NULL;
@@ -181,8 +175,9 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
 
     if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_UWP, &fe_ovr )) && fe_ovr)
     {
-        HRESULT (WINAPI *measure_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = (void *)(*(void ***)fe_ovr)[6];
-        HRESULT (WINAPI *arrange_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = (void *)(*(void ***)fe_ovr)[7];
+        const struct abi_fe_overrides *afo = (const struct abi_fe_overrides *)fe_ovr;
+        HRESULT (WINAPI *measure_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = afo->lpVtbl->MeasureOverride;
+        HRESULT (WINAPI *arrange_ovr)(void *, struct uwp_size_f, struct uwp_size_f *) = afo->lpVtbl->ArrangeOverride;
         __TRY
         {
             if (measure_ovr)
@@ -1920,20 +1915,19 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             void *mb = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IMenuBar_WinUI, &mb )) && mb)
             {
+                const struct abi_menu_bar *amb = (const struct abi_menu_bar *)mb;
                 void *vec = NULL;
-                HRESULT (WINAPI *get_items)(void *, void **) = (void *)(*(void ***)mb)[6];
-                if (get_items && SUCCEEDED(get_items( mb, &vec )) && vec)
+                if (amb->lpVtbl->get_Items && SUCCEEDED(amb->lpVtbl->get_Items( mb, &vec )) && vec)
                 {
+                    const struct abi_winrt_vector *avec = (const struct abi_winrt_vector *)vec;
                     UINT32 cnt = 0, k;
-                    HRESULT (WINAPI *get_at)(void *, UINT32, void **) = (void *)(*(void ***)vec)[6];
-                    HRESULT (WINAPI *get_size)(void *, UINT32 *) = (void *)(*(void ***)vec)[7];
-                    if (get_size && SUCCEEDED(get_size( vec, &cnt )) && cnt > 0)
+                    if (avec->lpVtbl->get_Size && SUCCEEDED(avec->lpVtbl->get_Size( vec, &cnt )) && cnt > 0)
                     {
                         if (!el->children_coll) uwp_vec_create( el, &el->children_coll );
                         for (k = 0; k < cnt; k++)
                         {
                             void *item = NULL;
-                            if (get_at && SUCCEEDED(get_at( vec, k, &item )) && item)
+                            if (avec->lpVtbl->GetAt && SUCCEEDED(avec->lpVtbl->GetAt( vec, k, &item )) && item)
                             {
                                 if (el->children_coll) uwp_vec_Append( el->children_coll, item );
                                 IUnknown_Release( (IUnknown *)item );
