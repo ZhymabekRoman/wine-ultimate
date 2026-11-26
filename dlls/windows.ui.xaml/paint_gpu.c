@@ -481,8 +481,8 @@ static void paint_gpu_combobox( ID3D11DeviceContext *ctx, struct uwp_element *el
             uwp_combobox_get_item_label( el, items[el->selected_index], label, ARRAY_SIZE(label) );
         for (i = 0; i < cnt; i++) IInspectable_Release( items[i] );
     }
-    if (!label[0] && el->text[0])
-        lstrcpynW( label, el->text, ARRAY_SIZE(label) );
+    if (!label[0] && uwp_has_text( el ))
+        lstrcpynW( label, uwp_elem_text( el ), ARRAY_SIZE(label) );
     if (!label[0] && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -490,8 +490,8 @@ static void paint_gpu_combobox( ID3D11DeviceContext *ctx, struct uwp_element *el
         for (k = 0; k < children->count && !label[0]; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (ch && ch->text[0])
-                lstrcpynW( label, ch->text, ARRAY_SIZE(label) );
+            if (uwp_has_text( ch ))
+                lstrcpynW( label, uwp_elem_text( ch ), ARRAY_SIZE(label) );
         }
     }
 
@@ -547,7 +547,7 @@ static void paint_gpu_shape( ID3D11DeviceContext *ctx, struct uwp_element *el )
         {
             struct uwp_element *b_el = el->dp_store[di].value ? uwp_elem_from_any( el->dp_store[di].value ) : NULL;
             if (!b_el) continue;
-            if (wcsstr( b_el->class_name, L"Brush" ))
+            if (b_el->class_flags & UWP_CF_BRUSH)
             {
                 if (uwp_gpu_paint_brush_fill( ctx, el, el->dp_store[di].value, &el->bounds,
                                               (float)el->corner_radius, (float)el->opacity ))
@@ -613,7 +613,7 @@ static void paint_gpu_font_icon( ID3D11DeviceContext *ctx, struct uwp_element *e
         ? blend_argb_over( el->fg_argb, surface_bg )
         : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
                                    light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
-    xaml_gpu_push_text_font( ctx, el->text, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
+    xaml_gpu_push_text_font( ctx, uwp_elem_text( el ), uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
                              fh, (el->font_weight > 0) ? el->font_weight : FW_NORMAL,
                              DT_CENTER | DT_VCENTER | DT_SINGLELINE, &el->bounds, NULL, tfg, (float)el->opacity );
 }
@@ -682,9 +682,7 @@ static struct uwp_element *uwp_find_inner_search_textbox( struct uwp_element *el
             if (hit) return hit;
         }
     }
-    if (depth > 0 && (!wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.AutoSuggestBox" ) ||
-                      !wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.AutoSuggestBox" ) ||
-                      wcsstr( el->class_name, L"TextBox" )))
+    if (depth > 0 && (uwp_is_exact_autosuggest( el ) || uwp_is_textbox( el )))
         return el;
     return NULL;
 }
@@ -695,7 +693,7 @@ static void paint_gpu_searchbox( ID3D11DeviceContext *ctx, struct uwp_element *e
     int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
     int pill_w, pill_h, px0, py0;
     struct uwp_element *inner_tb = uwp_find_inner_search_textbox( el, 0 );
-    const WCHAR *cur_txt = el->text[0] ? el->text : (inner_tb ? inner_tb->text : L"");
+    const WCHAR *cur_txt = uwp_has_text( el ) ? uwp_elem_text( el ) : uwp_elem_text( inner_tb );
     BOOL focused = (g_focused_textbox == el) || (inner_tb && g_focused_textbox == inner_tb) ||
                    uwp_elem_is_descendant( el, g_focused_textbox );
     COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
@@ -766,14 +764,15 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
         {
             struct uwp_element *cur = stack[--sp];
             if (!cur) continue;
-            if (cur != el && wcsstr( cur->class_name, L"Card" ) && cur->text[0])
+            if (cur != el && uwp_is_card( cur ) && uwp_has_text( cur ))
             {
-                const WCHAR *nl = wcschr( cur->text, '\n' );
-                size_t tlen = nl ? (size_t)(nl - cur->text) : wcslen( cur->text );
+                const WCHAR *ctext = uwp_elem_text( cur );
+                const WCHAR *nl = wcschr( ctext, '\n' );
+                size_t tlen = nl ? (size_t)(nl - ctext) : wcslen( ctext );
                 int dup = 0, d;
                 WCHAR tbuf[128] = {0};
                 if (tlen >= ARRAY_SIZE(tbuf)) tlen = ARRAY_SIZE(tbuf) - 1;
-                memcpy( tbuf, cur->text, tlen * sizeof(WCHAR) );
+                memcpy( tbuf, ctext, tlen * sizeof(WCHAR) );
                 tbuf[tlen] = 0;
                 for (d = 0; d < entry_cnt; d++)
                     if (!wcscmp( entries[d].title, tbuf )) { dup = 1; break; }
@@ -965,13 +964,13 @@ static void paint_gpu_tabview( ID3D11DeviceContext *ctx, struct uwp_element *el 
     {
         RECT pill, close_rc, add_rc;
         uwp_tabview_compute_rects( &trc, 1, 0, &pill, &close_rc, &add_rc );
-        if (el->text[0])
+        if (uwp_has_text( el ))
         {
             xaml_gpu_push_rect( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
                                 0.0f, cr_to_argb( RGB( 44, 44, 44 ) ), 0, 0.0f, 1.0f );
             pill.left += 10;
             pill.right = max( pill.left, close_rc.left - 2 );
-            xaml_gpu_push_text( ctx, el->text, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, RGB( 255, 255, 255 ), 1.0f );
+            xaml_gpu_push_text( ctx, uwp_elem_text( el ), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, RGB( 255, 255, 255 ), 1.0f );
             xaml_gpu_push_text( ctx, L"\x00d7", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &close_rc, NULL, RGB( 185, 185, 185 ), 1.0f );
         }
         if (add_rc.right > add_rc.left + 12)
@@ -1007,7 +1006,7 @@ static void paint_gpu_pivot_item( ID3D11DeviceContext *ctx, struct uwp_element *
     COLORREF tfg = is_first
         ? uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg )
         : uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), surface_bg );
-    xaml_gpu_push_text( ctx, el->text, fh, is_first ? FW_SEMIBOLD : FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &trc, NULL, tfg, 1.0f );
+    xaml_gpu_push_text( ctx, uwp_elem_text( el ), fh, is_first ? FW_SEMIBOLD : FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &trc, NULL, tfg, 1.0f );
     if (is_first)
     {
         COLORREF acc = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
@@ -1022,7 +1021,7 @@ static BOOL paint_gpu_container( ID3D11DeviceContext *ctx, struct uwp_element *e
     BOOL skip_fullscreen_bg = xaml_has_active_swapchain_panel() &&
         (el->bounds.right - el->bounds.left) >= 1000 &&
         (el->bounds.bottom - el->bounds.top) >= 600;
-    BOOL is_ellipse = wcsstr( el->class_name, L"Ellipse" ) != NULL;
+    BOOL is_ellipse = (el->class_flags & UWP_CF_ELLIPSE) != 0;
     float rad = is_ellipse
         ? (float)min( el->bounds.right - el->bounds.left, el->bounds.bottom - el->bounds.top ) * 0.5f
         : ((el->corner_radius > 0.0) ? (float)el->corner_radius : 0.0f);
@@ -1074,12 +1073,12 @@ static BOOL paint_gpu_container( ID3D11DeviceContext *ctx, struct uwp_element *e
             }
         }
     }
-    if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
+    if (uwp_is_tabview( el ))
     {
         paint_gpu_tabview( ctx, el );
         return TRUE;
     }
-    if (wcsstr( el->class_name, L"PivotItem" ) && el->text[0])
+    if (uwp_is_pivot_item( el ) && uwp_has_text( el ))
     {
         paint_gpu_pivot_item( ctx, el, surface_bg );
         return TRUE;
@@ -1090,7 +1089,7 @@ static BOOL paint_gpu_container( ID3D11DeviceContext *ctx, struct uwp_element *e
 static BOOL uwp_btn_child_has_text( const struct uwp_element *el, int depth )
 {
     if (!el || depth > 8 || el->visibility != 0) return FALSE;
-    if (el->text[0] || el->inlines_coll) return TRUE;
+    if (uwp_has_text( el ) || el->inlines_coll) return TRUE;
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
@@ -1155,10 +1154,14 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             if (title_buf[0])
             {
                 if (uwp_vm_query_string_prop( target_vm, sub_props, ARRAY_SIZE(sub_props), sub_buf, ARRAY_SIZE(sub_buf) ))
-                    swprintf( el->text, ARRAY_SIZE(el->text), L"%.120s\n%.120s", title_buf, sub_buf );
+                {
+                    WCHAR combined[256];
+                    swprintf( combined, ARRAY_SIZE(combined), L"%.120s\n%.120s", title_buf, sub_buf );
+                    uwp_elem_set_text( el, combined );
+                }
                 else
-                    lstrcpynW( el->text, title_buf, ARRAY_SIZE(el->text) );
-                label = el->text;
+                    uwp_elem_set_text( el, title_buf );
+                label = uwp_elem_text( el );
             }
             else
             {
@@ -1175,8 +1178,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         int hop;
         for (hop = 0; anc && hop < 5; anc = anc->parent, hop++)
         {
-            if (wcsstr( anc->class_name, L"ListView" ) || wcsstr( anc->class_name, L"GridView" ) ||
-                wcsstr( anc->class_name, L"ItemsRepeater" ) || wcsstr( anc->class_name, L"FlipView" ))
+            if (anc->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW | UWP_CF_ITEMS_REPEATER | UWP_CF_FLIPVIEW))
             {
                 in_items_host = TRUE;
                 break;
@@ -1210,7 +1212,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         }
     }
 
-    if (label[0] && (wcschr( label, '\n' ) || wcsstr( el->class_name, L"Card" )) &&
+    if (label[0] && (wcschr( label, '\n' ) || uwp_is_card( el )) &&
         (brc.right - brc.left) >= 160 && (brc.bottom - brc.top) >= 60)
     {
         const WCHAR *nl = wcschr( label, '\n' );
@@ -1420,7 +1422,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             UINT dt_flags = DT_SINGLELINE;
             int hca = el->has_h_content_align ? el->h_content_align : 1; /* default Center */
             int vca = el->has_v_content_align ? el->v_content_align : 1; /* default Center */
-            if (wcsstr( el->class_name, L"DropDownButton" ) && (brc.right - brc.left) > 36)
+            if ((el->class_flags & UWP_CF_DROP_DOWN_BUTTON) && (brc.right - brc.left) > 36)
             {
                 RECT crc = { brc.right - 24, brc.top, brc.right - 4, brc.bottom };
                 WCHAR cff_buf[64];
@@ -1455,7 +1457,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
 static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     WCHAR rich_buf[2048];
-    const WCHAR *draw_txt = el->text;
+    const WCHAR *draw_txt = uwp_elem_text( el );
     BOOL is_rich = FALSE;
 
     if (el->has_fg && el->fg_alpha == 0)
@@ -1464,8 +1466,8 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
     if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
         el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
     {
-        if (el->text[0] && wcscmp( el->tpl_normal_output->text, el->text ) != 0)
-            lstrcpynW( el->tpl_normal_output->text, el->text, ARRAY_SIZE(el->tpl_normal_output->text) );
+        if (uwp_has_text( el ) && wcscmp( uwp_elem_text( el->tpl_normal_output ), uwp_elem_text( el ) ) != 0)
+            uwp_elem_set_text( el->tpl_normal_output, uwp_elem_text( el ) );
         uwp_gpu_paint_element( ctx, el->tpl_normal_output );
         return TRUE;
     }
@@ -1517,7 +1519,7 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                 struct uwp_element *sib = uwp_elem_from_any( pv->items[pk] );
                 if (sib == el) { seen_self = TRUE; continue; }
                 if (seen_self && sib && sib->kind == UWP_KIND_TEXT_BLOCK &&
-                    sib->visibility == 0 && sib->text[0] &&
+                    sib->visibility == 0 && uwp_has_text( sib ) &&
                     sib->grid_row == el->grid_row && sib->grid_col == el->grid_col)
                     return TRUE;
             }
@@ -1587,7 +1589,7 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
         else
             tfg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
                                            uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
-        if (wcsstr( el->class_name, L"MenuBarItem" ) &&
+        if (uwp_is_menubar_item( el ) &&
             (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
         {
             RECT hrc = trc;
@@ -1666,9 +1668,7 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
 static BOOL uwp_nav_tree_has_checked_item( const struct uwp_element *el, int depth )
 {
     if (!el || depth > 5) return FALSE;
-    if ((wcsstr( el->class_name, L"NavigationViewItem" ) ||
-         wcsstr( el->default_style_key_name, L"NavigationViewItem" )) &&
-        el->is_checked == 1)
+    if (uwp_is_nav_item( el ) && el->is_checked == 1)
         return TRUE;
     if (el->children_coll)
     {
@@ -1719,16 +1719,16 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
         return;
     }
 
-    if (el->text[0])
-        lstrcpynW( label, el->text, ARRAY_SIZE(label) );
+    if (uwp_has_text( el ))
+        lstrcpynW( label, uwp_elem_text( el ), ARRAY_SIZE(label) );
     if (!label[0] && el->content)
         uwp_combobox_get_item_label( NULL, el->content, label, ARRAY_SIZE(label) );
     if (!label[0] && el->data_context)
         uwp_combobox_get_item_label( NULL, el->data_context, label, ARRAY_SIZE(label) );
     if (!wcscmp( label, L"SettingsButtonName" ) || (!label[0] && !wcscmp( el->name, L"SettingsItem" )))
         lstrcpynW( label, L"Settings", ARRAY_SIZE(label) );
-    if (label[0] && !el->text[0])
-        lstrcpynW( el->text, label, ARRAY_SIZE(el->text) );
+    if (label[0] && !uwp_has_text( el ))
+        uwp_elem_set_text( el, label );
 
     if (uwp_is_nav_header( el ))
     {
@@ -1769,9 +1769,9 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
         if (el->nav_icon)
         {
             struct uwp_element *iel = uwp_elem_from_any( el->nav_icon );
-            if (iel && iel->text[0])
+            if (uwp_has_text( iel ))
             {
-                lstrcpynW( glyph, iel->text, ARRAY_SIZE(glyph) );
+                lstrcpynW( glyph, uwp_elem_text( iel ), ARRAY_SIZE(glyph) );
                 if (iel->font_family[0])
                     uwp_resolve_elem_font_family( iel, gfont, ARRAY_SIZE(gfont) );
             }
@@ -1785,9 +1785,9 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
                 if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Icon" ) && el->dp_store[di].value)
                 {
                     struct uwp_element *iel = uwp_elem_from_any( el->dp_store[di].value );
-                    if (iel && iel->text[0])
+                    if (uwp_has_text( iel ))
                     {
-                        lstrcpynW( glyph, iel->text, ARRAY_SIZE(glyph) );
+                        lstrcpynW( glyph, uwp_elem_text( iel ), ARRAY_SIZE(glyph) );
                         if (iel->font_family[0])
                             uwp_resolve_elem_font_family( iel, gfont, ARRAY_SIZE(gfont) );
                     }
@@ -1925,9 +1925,9 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
 {
     WCHAR label[128] = {0};
     if (!wcscmp( el->placeholder, L"-" )) return;
-    if (el->text[0])
+    if (uwp_has_text( el ))
     {
-        lstrcpynW( label, el->text, ARRAY_SIZE(label) );
+        lstrcpynW( label, uwp_elem_text( el ), ARRAY_SIZE(label) );
     }
     else if (!uwp_unbox_string( el->content, label, ARRAY_SIZE(label) ))
     {
@@ -1992,7 +1992,7 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
                 lstrcpynW( label, str_buf, ARRAY_SIZE(label) );
         }
         if (label[0])
-            lstrcpynW( el->text, label, ARRAY_SIZE(el->text) );
+            uwp_elem_set_text( el, label );
         else
             lstrcpynW( el->placeholder, L"-", ARRAY_SIZE(el->placeholder) );
     }
@@ -2082,8 +2082,9 @@ static IInspectable *uwp_vm_unwrap_one( IInspectable *vm, const WCHAR *const *pr
 static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     DWORD now_tick = GetTickCount();
-    BOOL incomplete = !el->text[0] || (!wcschr( el->text, L'\n' ) && !el->image_src[0]);
-    BOOL needs_hydrate = !el->text[0] ||
+    const WCHAR *cur_txt = uwp_elem_text( el );
+    BOOL incomplete = !cur_txt[0] || (!wcschr( cur_txt, L'\n' ) && !el->image_src[0]);
+    BOOL needs_hydrate = !cur_txt[0] ||
         (incomplete && el->hovered_dropdown_idx < 4 &&
          (el->dropdown_scroll_offset == 0 || (int)(now_tick - (DWORD)el->dropdown_scroll_offset) >= 900));
     if (needs_hydrate && wcscmp( el->placeholder, L"-no-card-" ) != 0)
@@ -2116,8 +2117,8 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
         el->dropdown_scroll_offset = (int)now_tick;
         el->hovered_dropdown_idx++;
 
-        if (el->text[0] && !wcschr( el->text, L'\n' ))
-            lstrcpynW( title_buf, el->text, ARRAY_SIZE(title_buf) );
+        if (cur_txt[0] && !wcschr( cur_txt, L'\n' ))
+            lstrcpynW( title_buf, cur_txt, ARRAY_SIZE(title_buf) );
         for (vi = 0; vi < ARRAY_SIZE(vms) && !title_buf[0]; vi++)
             if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf), 2 );
 
@@ -2145,9 +2146,13 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
                     if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], fallback_sub_props, ARRAY_SIZE(fallback_sub_props), cat_buf, ARRAY_SIZE(cat_buf), 1 );
             }
             if (cat_buf[0] || rating_buf[0] || price_buf[0])
-                swprintf( el->text, ARRAY_SIZE(el->text), L"%.110s\n%.60s\t%.16s\t%.32s", title_buf, cat_buf, rating_buf, price_buf );
+            {
+                WCHAR combined[256];
+                swprintf( combined, ARRAY_SIZE(combined), L"%.110s\n%.60s\t%.16s\t%.32s", title_buf, cat_buf, rating_buf, price_buf );
+                uwp_elem_set_text( el, combined );
+            }
             else
-                lstrcpynW( el->text, title_buf, ARRAY_SIZE(el->text) );
+                uwp_elem_set_text( el, title_buf );
 
             if (!el->image_src[0])
             {
@@ -2171,16 +2176,17 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
         if (vm2) IInspectable_Release( vm2 );
         if (vm1) IInspectable_Release( vm1 );
     }
-    if (el->text[0])
+    if (uwp_has_text( el ))
     {
         RECT brc = el->bounds, trc;
         int text_left;
         BOOL light = uwp_is_light_theme( el );
-        const WCHAR *nl = wcschr( el->text, '\n' );
+        const WCHAR *etext = uwp_elem_text( el );
+        const WCHAR *nl = wcschr( etext, '\n' );
         WCHAR tline[128] = {0}, cat_str[80] = {0}, rating_str[24] = {0}, price_str[48] = {0};
-        size_t tlen = nl ? (size_t)(nl - el->text) : wcslen( el->text );
+        size_t tlen = nl ? (size_t)(nl - etext) : wcslen( etext );
         if (tlen >= ARRAY_SIZE(tline)) tlen = ARRAY_SIZE(tline) - 1;
-        memcpy( tline, el->text, tlen * sizeof(WCHAR) );
+        memcpy( tline, etext, tlen * sizeof(WCHAR) );
         tline[tlen] = 0;
         if (nl)
         {
@@ -2223,7 +2229,7 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
             uwp_load_image_asset( el );
         if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
         {
-            if (!nl && el->parent && (wcsstr( el->parent->class_name, L"ListView" ) || wcsstr( el->parent->class_name, L"GridView" )))
+            if (!nl && el->parent && (el->parent->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)))
             {
                 RECT irc = brc;
                 InflateRect( &irc, -2, -2 );
@@ -2319,7 +2325,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
            el ? el->visibility : 0xffff,
            (void *)(el ? el->children_coll : NULL), (void *)(el ? el->content : NULL) );
     if (!el || !el->has_bounds || el->visibility != 0 || el->opacity <= 0.005) return;
-    if (wcsstr( el->class_name, L"InfoBadge" ) && !el->text[0]) return;
+    if ((el->class_flags & UWP_CF_INFO_BADGE) && !uwp_has_text( el )) return;
     if (el->evc_cnt > 0 && !el->evc_fired)
         uwp_fire_evc_if_needed( el );
     if (el->items_source && !uwp_panel_has_concrete_child( el ))
@@ -2338,7 +2344,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
-    if (wcsstr( el->class_name, L"MediaPlayerElement" ))
+    if (el->class_flags & UWP_CF_MEDIA_PLAYER)
     {
         paint_gpu_media( ctx, el );
         return;
@@ -2350,10 +2356,10 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
-    if (el->fill_brush || el->ecp_visual || wcsstr( el->class_name, L"Rectangle" ))
+    if (el->fill_brush || el->ecp_visual || (el->class_flags & UWP_CF_RECTANGLE))
         paint_gpu_shape( ctx, el );
 
-    if (wcsstr( el->class_name, L"FontIcon" ) && el->text[0])
+    if (uwp_is_font_icon( el ) && uwp_has_text( el ))
     {
         paint_gpu_font_icon( ctx, el, surface_bg );
         return;
@@ -2365,20 +2371,20 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
-    if (wcsstr( el->class_name, L"ProgressBar" ))
+    if (el->class_flags & UWP_CF_PROGRESS_BAR)
     {
         paint_gpu_progress_bar( el, surface_bg );
         return;
     }
 
-    if (wcsstr( el->class_name, L"AppTitleBar" ))
+    if (el->class_flags & UWP_CF_APP_TITLE_BAR)
     {
-        if (el->text[0])
+        if (uwp_has_text( el ))
         {
             RECT rc = el->bounds;
             COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg );
             RECT trc = { rc.left + 12, rc.top, rc.left + 200, rc.bottom };
-            xaml_gpu_push_text( ctx, el->text, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            xaml_gpu_push_text( ctx, uwp_elem_text( el ), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                                 &trc, NULL, tfg, 1.0f );
         }
     }
@@ -2389,18 +2395,17 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
                             0.0f, cr_to_argb( cbg ), 0, 0.0f, 1.0f );
     }
-    else if (wcsstr( el->name, L"SearchBox" ) || wcsstr( el->class_name, L"AutoSuggestBox" ) ||
-             wcsstr( el->name, L"SuggestBox" ))
+    else if (uwp_is_text_input( el ))
     {
         paint_gpu_searchbox( ctx, el, surface_bg );
         return;
     }
-    else if (wcsstr( el->class_name, L"DynamicSpotlightControl" ))
+    else if (el->class_flags & UWP_CF_SPOTLIGHT)
     {
         if (paint_gpu_spotlight( ctx, el ))
             return;
     }
-    else if (wcsstr( el->class_name, L"TeachingTip" ) && el->is_open)
+    else if (uwp_is_teaching_tip( el ) && el->is_open)
     {
         RECT rc = el->bounds;
         COLORREF tbg = (el->has_bg && el->bg_alpha > 0)
@@ -2480,7 +2485,7 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
     RECT prev_clip = { 0 };
 
     if (!el || g_paint_depth >= 48) return;
-    if (el->has_bounds && wcsstr( el->class_name, L"ScrollViewer" ) &&
+    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
         el->bounds.right > el->bounds.left && el->bounds.bottom > el->bounds.top)
     {
         RECT new_clip = el->bounds;
@@ -2607,7 +2612,7 @@ static void uwp_gpu_paint_asb_popup( ID3D11DeviceContext *ctx, int width, int he
     COLORREF fg_cr, sub_cr;
     int fh, sfh, icon_fh;
 
-    if (!asb || !wcsstr( asb->class_name, L"AutoSuggestBox" )) return;
+    if (!uwp_is_autosuggest( asb )) return;
     if (!asb->has_bounds || asb->visibility != 0) return;
     if (!asb->is_open) return;
     if (asb->items_source && !uwp_panel_has_concrete_child( asb ))
@@ -2727,13 +2732,13 @@ static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int
     for (i = 0; children && i < (int)children->count && item_cnt < (int)ARRAY_SIZE(items); i++)
     {
         struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
-        if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Accelerator" )) continue;
+        if (!ch || ch->visibility != 0 || uwp_is_accelerator( ch )) continue;
         items[item_cnt++] = ch;
-        if (wcsstr( ch->class_name, L"Separator" ))
+        if (uwp_is_separator( ch ))
             cur_y += 9;
         else
         {
-            int tw = (int)(wcslen( ch->text ) * 8 * g_layout_scale) + 56;
+            int tw = (int)(wcslen( uwp_elem_text( ch ) ) * 8 * g_layout_scale) + 56;
             if (tw > max_w) max_w = min( 340, tw );
             cur_y += 32;
         }
@@ -2744,14 +2749,14 @@ static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int
         BOOL grp_has_checked = FALSE;
         for (i = 0; i <= item_cnt; i++)
         {
-            if (i == item_cnt || wcsstr( items[i]->class_name, L"Separator" ))
+            if (i == item_cnt || uwp_is_separator( items[i] ))
             {
                 if (grp_first_radio >= 0 && !grp_has_checked)
                     items[grp_first_radio]->is_checked = 1;
                 grp_first_radio = -1;
                 grp_has_checked = FALSE;
             }
-            else if (wcsstr( items[i]->class_name, L"RadioMenuFlyoutItem" ))
+            else if (items[i]->class_flags & UWP_CF_RADIO_MENU_ITEM)
             {
                 if (grp_first_radio < 0) grp_first_radio = i;
                 if (items[i]->is_checked != 0) grp_has_checked = TRUE;
@@ -2788,7 +2793,7 @@ static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int
     for (i = 0; i < item_cnt; i++)
     {
         struct uwp_element *ch = items[i];
-        if (wcsstr( ch->class_name, L"Separator" ))
+        if (uwp_is_separator( ch ))
         {
             int sy = cur_y + 4;
             xaml_gpu_push_rect( (float)(prc.left + 10), (float)sy, (float)(prc.right - 10), (float)(sy + 1),
@@ -2808,7 +2813,7 @@ static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int
                                     &prc, 4.0f, hov_argb, 0, 0.0f, 1.0f );
             if (ch->is_checked != 0)
             {
-                if (wcsstr( ch->class_name, L"RadioMenuFlyoutItem" ))
+                if (ch->class_flags & UWP_CF_RADIO_MENU_ITEM)
                 {
                     int cx = prc.left + 19, cy = cur_y + 16;
                     xaml_gpu_push_rect( (float)(cx - 3), (float)(cy - 3), (float)(cx + 3), (float)(cy + 3),
@@ -2824,8 +2829,8 @@ static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int
                                              DT_CENTER | DT_VCENTER | DT_SINGLELINE, &crc, &prc, fg_cr, 1.0f );
                 }
             }
-            if (ch->text[0])
-                xaml_gpu_push_text( ctx, ch->text, fh, ch->is_checked ? FW_SEMIBOLD : FW_NORMAL,
+            if (uwp_has_text( ch ))
+                xaml_gpu_push_text( ctx, uwp_elem_text( ch ), fh, ch->is_checked ? FW_SEMIBOLD : FW_NORMAL,
                                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                                     &trc, &prc, fg_cr, 1.0f );
             cur_y += 32;

@@ -211,7 +211,7 @@ static HRESULT WINAPI calc_result_dp_cb_Invoke( void *iface, void *sender, void 
     {
         if (uwp_unbox_string( val, buf, ARRAY_SIZE(buf) ) && buf[0])
         {
-            lstrcpynW( res->text, buf, ARRAY_SIZE(res->text) );
+            uwp_elem_set_text( res, buf );
             if (res->tpl_normal_output)
             {
                 HSTRING htxt = NULL;
@@ -222,7 +222,7 @@ static HRESULT WINAPI calc_result_dp_cb_Invoke( void *iface, void *sender, void 
                 }
                 else
                 {
-                    lstrcpynW( res->tpl_normal_output->text, buf, ARRAY_SIZE(res->tpl_normal_output->text) );
+                    uwp_elem_set_text( res->tpl_normal_output, buf );
                     uwp_invalidate_window();
                 }
             }
@@ -249,7 +249,7 @@ BOOL uwp_is_display_result_element( const struct uwp_element *el )
     if (!el) return FALSE;
     if (!wcscmp( el->name, L"Results" ) || !wcscmp( el->name, L"NormalOutput" ))
         return TRUE;
-    if (wcsstr( el->class_name, L"CalculationResult" ) != NULL)
+    if (el->class_flags & UWP_CF_CALC_RESULT)
         return TRUE;
     return FALSE;
 }

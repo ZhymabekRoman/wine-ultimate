@@ -210,7 +210,7 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
 {
     struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
     struct uwp_element *child_el;
-    if (v->owner && wcsstr( v->owner->class_name, L"ItemsRepeater" ) && idx == 0)
+    if (v->owner && uwp_is_items_repeater( v->owner ) && idx == 0)
         idx = v->count;
     if (idx > v->count) return S_OK;
     if (!xaml_vec_grow( (void **)&v->items, &v->cap, (int)v->count + 1, sizeof(*v->items), 16 ))
@@ -221,7 +221,7 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
     v->count++;
     if ((child_el = uwp_elem_from_any( item )) != NULL && v->owner)
     {
-        if (child_el->kind == UWP_KIND_ACCELERATOR || wcsstr( child_el->class_name, L"Accelerator" ))
+        if (child_el->kind == UWP_KIND_ACCELERATOR || uwp_is_accelerator( child_el ))
         {
             child_el->accel_target = v->owner;
             uwp_accel_register( child_el, v->owner, child_el->accel_key, child_el->accel_mods, child_el->accel_enabled );

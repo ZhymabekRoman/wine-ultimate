@@ -1319,9 +1319,9 @@ const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *
         }
         if (cur->kind == UWP_KIND_PAGE || cur->kind == UWP_KIND_FRAME) break;
     }
-    if (el && (wcsstr( el->class_name, L"FontIcon" ) || wcsstr( el->class_name, L"SymbolIcon" ) ||
-               (el->text[0] >= 0xE700 && el->text[0] <= 0xF8FF && el->text[1] == 0 &&
-                xaml_gpu_font_has_glyphs( L"Segoe MDL2 Assets", el->text ))))
+    if (el && ((el->class_flags & (UWP_CF_FONT_ICON | UWP_CF_SYMBOL_ICON)) ||
+               (uwp_has_text( el ) && el->text[0] >= 0xE700 && el->text[0] <= 0xF8FF && el->text[1] == 0 &&
+                xaml_gpu_font_has_glyphs( L"Segoe MDL2 Assets", uwp_elem_text( el ) ))))
     {
         uwp_resolve_font_family( L"Segoe MDL2 Assets", buf, cap );
     }

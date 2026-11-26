@@ -1065,7 +1065,7 @@ BOOL uwp_panel_has_concrete_child( struct uwp_element *panel )
         struct uwp_element *ch = uwp_elem_from_any( panel->content );
         if (ch && ch->kind != UWP_KIND_DEFERRED && ch->kind != UWP_KIND_STYLE &&
             ch->kind != UWP_KIND_BRUSH && ch->kind != UWP_KIND_ACCELERATOR &&
-            ch->kind != UWP_KIND_XAML_COMMAND && !wcsstr( ch->class_name, L"Template" ) &&
+            ch->kind != UWP_KIND_XAML_COMMAND && !(ch->class_flags & UWP_CF_TEMPLATE) &&
             ch->visibility == 0) return TRUE;
     }
     if (!panel->children_coll) return FALSE;
@@ -1075,7 +1075,7 @@ BOOL uwp_panel_has_concrete_child( struct uwp_element *panel )
         struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
         if (ch && ch->kind != UWP_KIND_DEFERRED && ch->kind != UWP_KIND_STYLE &&
             ch->kind != UWP_KIND_BRUSH && ch->kind != UWP_KIND_ACCELERATOR &&
-            ch->kind != UWP_KIND_XAML_COMMAND && !wcsstr( ch->class_name, L"Template" ) &&
+            ch->kind != UWP_KIND_XAML_COMMAND && !(ch->class_flags & UWP_CF_TEMPLATE) &&
             ch->visibility == 0) return TRUE;
     }
     return FALSE;
@@ -1870,8 +1870,8 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_CONTROL_BORDER_THICKNESS: /* Control.BorderThickness */
         case XBF_PROP_BORDER_THICKNESS: /* Border.BorderThickness */
         case XBF_PROP_PANEL_CHILDREN_TRANSITIONS: /* Border.BorderThickness */
-        case 0x8696: /* Grid.BorderThickness */
-        case 0x869e: /* StackPanel.BorderThickness */
+        case XBF_PROP_GRID_BORDER_THICKNESS:
+        case XBF_PROP_STACKPANEL_BORDER_THICKNESS:
             if (vt == 0x06)
             {
                 el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
@@ -1889,9 +1889,9 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
             break;
         case XBF_PROP_BORDER_CORNER_RADIUS: /* Border.CornerRadius */
-        case 0x8697: /* Grid.CornerRadius */
-        case 0x869f: /* StackPanel.CornerRadius */
-        case 0x885f: /* Control.CornerRadius */
+        case XBF_PROP_GRID_CORNER_RADIUS:
+        case XBF_PROP_STACKPANEL_CORNER_RADIUS:
+        case XBF_PROP_CONTROL_CORNER_RADIUS:
             if (vt == 0x06)
                 el->corner_radius = max( max( vec4[0], vec4[1] ), max( vec4[2], vec4[3] ) );
             else if (vt == 0x03 || vt == 0x04)
@@ -1919,23 +1919,23 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE: /* FontIcon.Glyph */
         case XBF_PROP_FONTICON_GLYPH: /* FontIcon.Glyph */
         case XBF_PROP_TEXTBLOCK_TEXT: /* TextBlock.Text */
-        case 0x81e1: /* TemplateBinding.Property */
-        case 0x80fa: /* Run.Text */
-            if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && el->uid[0] && el->text[0]))
-                lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
+        case XBF_PROP_TEMPLATE_BINDING_PROPERTY:
+        case XBF_PROP_RUN_TEXT:
+            if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && el->uid[0] && uwp_has_text( el )))
+                uwp_elem_set_text( el, sval );
             break;
-        case 0x83a7: /* Rectangle.RadiusX */
-        case 0x83a8: /* Rectangle.RadiusY */
+        case XBF_PROP_RECTANGLE_RADIUS_X:
+        case XBF_PROP_RECTANGLE_RADIUS_Y:
             if (vt == 0x03 || vt == 0x04)
             {
                 if (num > el->corner_radius) el->corner_radius = num;
             }
             break;
-        case 0x8270: /* Control.HorizontalContentAlignment */
+        case XBF_PROP_CONTROL_HORIZONTAL_CONTENT_ALIGNMENT:
             el->h_content_align = (int)num;
             el->has_h_content_align = TRUE;
             break;
-        case 0x8271: /* Control.VerticalContentAlignment */
+        case XBF_PROP_CONTROL_VERTICAL_CONTENT_ALIGNMENT:
             el->v_content_align = (int)num;
             el->has_v_content_align = TRUE;
             break;
@@ -1943,7 +1943,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (sval && sval[0])
                 lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
             break;
-        case 0x824d: /* Image.Stretch */
+        case XBF_PROP_IMAGE_STRETCH:
         case XBF_PROP_TILEBRUSH_STRETCH:
             if (vt == 0x04 || vt == 0x0b)
                 el->media_stretch = (int)num;
@@ -1956,7 +1956,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (sval && sval[0])
             {
                 lstrcpynW( el->uid, sval, ARRAY_SIZE(el->uid) );
-                if (!el->text[0] || el->kind == UWP_KIND_USER_CONTROL || el->outer)
+                if (!uwp_has_text( el ) || el->kind == UWP_KIND_USER_CONTROL || el->outer)
                 {
                     WCHAR res_key[256], res_val[128];
                     static const WCHAR *std_props[] =
@@ -1971,13 +1971,13 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                         swprintf( res_key, ARRAY_SIZE(res_key), L"%s/%s", sval, std_props[sp] );
                         if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
                         {
-                            if (!el->text[0] && (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
-                                lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
-                            if (el->outer && ao && wcsncmp( el->class_name, L"Windows.UI.Xaml.", 16 ) != 0)
+                            if (!uwp_has_text( el ) && (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
+                                uwp_elem_set_text( el, res_val );
+                            if (el->outer && ao && !(el->class_flags & UWP_CF_UWP_PREFIX))
                                 uwp_set_custom_xaml_member( ao, el->class_name, std_props[sp], target, res_val );
                         }
                     }
-                    for (k = 0; ctx && k < ctx->prop_cnt && !el->text[0]; k++)
+                    for (k = 0; ctx && k < ctx->prop_cnt && !uwp_has_text( el ); k++)
                     {
                         const struct xbf_prop_info *kpi = &ctx->props[k];
                         if (kpi->owner_tid < ctx->type_cnt &&
@@ -1992,7 +1992,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                                       sval, ctx->types[kpi->owner_tid].xmlns,
                                       ctx->types[kpi->owner_tid].short_name, kpi->name );
                             if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
-                                lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
+                                uwp_elem_set_text( el, res_val );
                         }
                     }
                 }
@@ -2068,7 +2068,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             el->has_text_align = TRUE;
             break;
         case XBF_PROP_TEXTBLOCK_TEXT_WRAPPING: /* TextBlock.TextWrapping */
-        case 0x82cc: /* RichTextBlock.TextWrapping */
+        case XBF_PROP_RICHTEXTBLOCK_TEXT_WRAPPING:
             if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
             {
                 if (!wcsicmp( sval, L"NoWrap" )) el->text_wrapping = 1;
@@ -2078,8 +2078,8 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             else
                 el->text_wrapping = (int)num;
             break;
-        case 0x831b: /* TextBlock.MaxLines */
-        case 0x82c0: /* RichTextBlock.MaxLines */
+        case XBF_PROP_TEXTBLOCK_MAX_LINES:
+        case XBF_PROP_RICHTEXTBLOCK_MAX_LINES:
             if (vt == 0x03 || vt == 0x04)
                 el->max_lines = max( 0, (int)num );
             else if (sval && sval[0])
@@ -2154,7 +2154,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             else
                 el->visibility = (int)num;
             break;
-        case 0x812f: /* UIElement.Opacity */
+        case XBF_PROP_UIELEMENT_OPACITY:
             if (vt == 0x03 || vt == 0x04 || vt == 0x01 || vt == 0x02)
                 el->opacity = num;
             else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
@@ -2168,7 +2168,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (sval && sval[0])
                 vsm_clean_prop_name( sval, el->anim_target_prop, ARRAY_SIZE(el->anim_target_prop) );
             break;
-        case 0x816f: /* DoubleAnimation.To */
+        case XBF_PROP_DOUBLE_ANIMATION_TO:
         {
             double to_val = 0.0;
             if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &to_val ))
@@ -2190,21 +2190,21 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             el->accel_enabled = (num != 0.0);
             uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
             break;
-        case 0x8373: /* ItemsControl.DisplayMemberPath */
+        case XBF_PROP_ITEMS_CONTROL_DISPLAY_MEMBER_PATH:
             if (sval && sval[0])
                 lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
             break;
-        case 0x83ce: /* SymbolIcon.Symbol */
+        case XBF_PROP_SYMBOL_ICON_SYMBOL:
             if ((vt == 0x04 || vt == 0x0b) && (int)num >= 0xE000 && (int)num <= 0xFFFF)
             {
-                el->text[0] = (WCHAR)(int)num;
-                el->text[1] = 0;
+                WCHAR sym = (WCHAR)(int)num;
+                uwp_elem_set_text_n( el, &sym, 1 );
                 if (!el->font_family[0])
                     lstrcpynW( el->font_family, L"Segoe MDL2 Assets", ARRAY_SIZE(el->font_family) );
             }
             break;
-        case 0x83fd: /* ToggleButton.IsChecked */
-        case 0x862b: /* ToggleMenuFlyoutItem.IsChecked */
+        case XBF_PROP_TOGGLE_BUTTON_IS_CHECKED:
+        case XBF_PROP_TOGGLE_MENU_FLYOUT_ITEM_IS_CHECKED:
             if (vt == 0x01 || vt == 0x02) el->is_checked = (vt == 0x02) ? 1 : 0;
             else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
             else el->is_checked = (num != 0.0) ? 1 : 0;
@@ -2284,9 +2284,9 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             else if (sval && sval[0]) el->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
         }
         if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
-                 (el->kind == UWP_KIND_TEXT_BLOCK || wcsstr( el->class_name, L"Run" ) || wcsstr( el->class_name, L"Inline" )))
+                 (el->kind == UWP_KIND_TEXT_BLOCK || (el->class_flags & (UWP_CF_RUN | UWP_CF_INLINE))))
         {
-            lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
+            uwp_elem_set_text( el, sval );
         }
         else if ((!wcscmp( pi->name, L"Source" ) || !wcscmp( pi->name, L"UriSource" ) || !wcscmp( pi->name, L"ImageSource" )) &&
                  sval && sval[0] && !is_res_ref)
@@ -2337,32 +2337,43 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             if (owner_cls)
                 uwp_set_custom_xaml_member( ctx->app_outer, owner_cls, L"ButtonId", target, sval );
             /* Fallback label from ButtonId if button still has no text */
-            if (!el->text[0])
+            if (!uwp_has_text( el ))
             {
-                if (!wcscmp( sval, L"Zero" )) lstrcpyW( el->text, L"0" );
-                else if (!wcscmp( sval, L"One" )) lstrcpyW( el->text, L"1" );
-                else if (!wcscmp( sval, L"Two" )) lstrcpyW( el->text, L"2" );
-                else if (!wcscmp( sval, L"Three" )) lstrcpyW( el->text, L"3" );
-                else if (!wcscmp( sval, L"Four" )) lstrcpyW( el->text, L"4" );
-                else if (!wcscmp( sval, L"Five" )) lstrcpyW( el->text, L"5" );
-                else if (!wcscmp( sval, L"Six" )) lstrcpyW( el->text, L"6" );
-                else if (!wcscmp( sval, L"Seven" )) lstrcpyW( el->text, L"7" );
-                else if (!wcscmp( sval, L"Eight" )) lstrcpyW( el->text, L"8" );
-                else if (!wcscmp( sval, L"Nine" )) lstrcpyW( el->text, L"9" );
-                else if (!wcscmp( sval, L"Decimal" )) lstrcpyW( el->text, L"." );
-                else if (!wcscmp( sval, L"Add" )) lstrcpyW( el->text, L"+" );
-                else if (!wcscmp( sval, L"Subtract" )) lstrcpyW( el->text, L"-" );
-                else if (!wcscmp( sval, L"Multiply" )) lstrcpyW( el->text, L"\x00d7" );
-                else if (!wcscmp( sval, L"Divide" )) lstrcpyW( el->text, L"\x00f7" );
-                else if (!wcscmp( sval, L"Equals" )) lstrcpyW( el->text, L"=" );
-                else if (!wcscmp( sval, L"Clear" )) lstrcpyW( el->text, L"C" );
-                else if (!wcscmp( sval, L"ClearEntry" )) lstrcpyW( el->text, L"CE" );
-                else if (!wcscmp( sval, L"Backspace" )) lstrcpyW( el->text, L"\x232b" );
-                else if (!wcscmp( sval, L"Negate" )) lstrcpyW( el->text, L"+/-" );
-                else if (!wcscmp( sval, L"Percent" )) lstrcpyW( el->text, L"%" );
-                else if (!wcscmp( sval, L"Invert" )) lstrcpyW( el->text, L"1/x" );
-                else if (!wcscmp( sval, L"Power" )) lstrcpyW( el->text, L"x\x00b2" );
-                else if (!wcscmp( sval, L"Sqrt" )) lstrcpyW( el->text, L"\x221a" );
+                static const struct { const WCHAR *id; const WCHAR *label; } btn_id_map[] = {
+                    { L"Zero",       L"0" },
+                    { L"One",        L"1" },
+                    { L"Two",        L"2" },
+                    { L"Three",      L"3" },
+                    { L"Four",       L"4" },
+                    { L"Five",       L"5" },
+                    { L"Six",        L"6" },
+                    { L"Seven",      L"7" },
+                    { L"Eight",      L"8" },
+                    { L"Nine",       L"9" },
+                    { L"Decimal",    L"." },
+                    { L"Add",        L"+" },
+                    { L"Subtract",   L"-" },
+                    { L"Multiply",   L"\x00d7" },
+                    { L"Divide",     L"\x00f7" },
+                    { L"Equals",     L"=" },
+                    { L"Clear",      L"C" },
+                    { L"ClearEntry", L"CE" },
+                    { L"Backspace",  L"\x232b" },
+                    { L"Negate",     L"+/-" },
+                    { L"Percent",    L"%" },
+                    { L"Invert",     L"1/x" },
+                    { L"Power",      L"x\x00b2" },
+                    { L"Sqrt",       L"\x221a" },
+                };
+                unsigned int bi;
+                for (bi = 0; bi < ARRAY_SIZE(btn_id_map); bi++)
+                {
+                    if (!wcscmp( sval, btn_id_map[bi].id ))
+                    {
+                        uwp_elem_set_text( el, btn_id_map[bi].label );
+                        break;
+                    }
+                }
             }
         }
         else if (is_res_ref && sval && sval[0] && pi->name[0] &&
@@ -2422,37 +2433,33 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
         }
     }
-    if (el && is_res_ref && sval && sval[0] &&
-        (pid == 0x837c || pid == 0x837b ||
-         (!(pid & 0x8000) && ctx && pid < ctx->prop_cnt &&
-          (!wcscmp( ctx->props[pid].name, L"ItemTemplate" ) ||
-           !wcscmp( ctx->props[pid].name, L"ItemTemplateSelector" )))))
     {
-        struct uwp_rd_entry *re = NULL;
-        struct uwp_rd_bucket *found_b = NULL;
-        if (uwp_rd_find_entry( ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL,
-                               el, sval, 0, &re, &found_b ) && re)
+        BOOL is_sel = FALSE;
+        if (el && is_res_ref && sval && sval[0] && xbf_prop_is_item_template( pid, ctx, &is_sel ))
         {
-            IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
-            if (res_val)
+            struct uwp_rd_entry *re = NULL;
+            struct uwp_rd_bucket *found_b = NULL;
+            if (uwp_rd_find_entry( ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL,
+                                   el, sval, 0, &re, &found_b ) && re)
             {
-                BOOL is_sel = (pid == 0x837c ||
-                               (!(pid & 0x8000) && ctx && pid < ctx->prop_cnt &&
-                                !wcscmp( ctx->props[pid].name, L"ItemTemplateSelector" )));
-                if (is_sel)
+                IInspectable *res_val = uwp_rd_materialize_entry( found_b, re );
+                if (res_val)
                 {
-                    if (el->item_template_selector) IInspectable_Release( el->item_template_selector );
-                    el->item_template_selector = res_val;
-                    IInspectable_AddRef( res_val );
+                    if (is_sel)
+                    {
+                        if (el->item_template_selector) IInspectable_Release( el->item_template_selector );
+                        el->item_template_selector = res_val;
+                        IInspectable_AddRef( res_val );
+                    }
+                    else
+                    {
+                        if (el->item_template) IInspectable_Release( el->item_template );
+                        el->item_template = res_val;
+                        IInspectable_AddRef( res_val );
+                    }
+                    TRACE( "xbf_apply_property: %s (%s) pid=%#x -> res %s (%p)\n",
+                           debugstr_w(el->class_name), debugstr_w(el->name), pid, debugstr_w(sval), res_val );
                 }
-                else
-                {
-                    if (el->item_template) IInspectable_Release( el->item_template );
-                    el->item_template = res_val;
-                    IInspectable_AddRef( res_val );
-                }
-                TRACE( "xbf_apply_property: %s (%s) pid=%#x -> res %s (%p)\n",
-                       debugstr_w(el->class_name), debugstr_w(el->name), pid, debugstr_w(sval), res_val );
             }
         }
     }
@@ -2516,7 +2523,7 @@ static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD 
                     else if (sop == 0x11 && p + 2 <= end_p)
                     {
                         DWORD sub_i = 0, c1 = 0, c2 = 0;
-                        p += 2; /* pid (0x8075 FrameworkTemplate.Template) */
+                        p += 2; /* pid (XBF_PROP_FRAMEWORK_TEMPLATE_TEMPLATE) */
                         if (!xbf_read_uleb( ctx->nodes, &p, end_p, &sub_i )) break;
                         if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c1 )) break;
                         if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c2 )) break;

@@ -122,12 +122,12 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         return;
     }
 
-    if (wcsstr( el->class_name, L"AppTitleBar" ))
+    if (el->class_flags & UWP_CF_APP_TITLE_BAR)
     {
-        if (el->text[0])
+        if (uwp_has_text( el ))
         {
             RECT trc = { el->bounds.left + 12, el->bounds.top, el->bounds.left + 200, el->bounds.bottom };
-            uwp_paint_text( hdc, &trc, el->text, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            uwp_paint_text( hdc, &trc, uwp_elem_text( el ), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                             uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg ) );
         }
     }
@@ -141,18 +141,18 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         SelectObject( hdc, old_br );
         DeleteObject( br );
     }
-    else if (wcsstr( el->name, L"SearchBox" ) || wcsstr( el->class_name, L"AutoSuggestBox" ) ||
-             wcsstr( el->name, L"SuggestBox" ))
+    else if (uwp_is_text_input( el ))
     {
         RECT rc = el->bounds;
         BOOL focused = (g_focused_textbox == el);
+        const WCHAR *txt = uwp_elem_text( el );
         COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
             ? blend_argb_over( el->bg_argb, surface_bg )
             : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 42, 42, 42 ), surface_bg );
         COLORREF sbd = focused
             ? uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg )
             : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 90, 90, 90 ), surface_bg );
-        COLORREF sfg = el->text[0]
+        COLORREF sfg = txt[0]
             ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), sbg )
             : ((el->has_fg && el->fg_alpha > 0)
                 ? blend_argb_over( el->fg_argb, sbg )
@@ -169,8 +169,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         const WCHAR *fallback = wcsstr( el->name, L"SearchBox" )
             ? L"\x26b2  Search apps, games, movies and more"
             : L"Find";
-        if (el->text[0])
-            swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2  %s|" : L"\x26b2  %s", el->text );
+        if (txt[0])
+            swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2  %s|" : L"\x26b2  %s", txt );
         else if (focused)
             lstrcpynW( disp, L"\x26b2  |", ARRAY_SIZE(disp) );
         else
@@ -188,7 +188,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         DeleteObject( br );
         return;
     }
-    else if (wcsstr( el->class_name, L"TeachingTip" ) && el->is_open)
+    else if (uwp_is_teaching_tip( el ) && el->is_open)
     {
         RECT rc = el->bounds;
         COLORREF tbg = (el->has_bg && el->bg_alpha > 0)
@@ -222,7 +222,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             FrameRect( hdc, &el->bounds, br );
             DeleteObject( br );
         }
-        if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
+        if (uwp_is_tabview( el ))
         {
             RECT trc = el->bounds;
             IInspectable *items[64];
@@ -237,7 +237,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             {
                 RECT pill, close_rc, add_rc;
                 uwp_tabview_compute_rects( &trc, 1, 0, &pill, &close_rc, &add_rc );
-                if (el->text[0])
+                if (uwp_has_text( el ))
                 {
                     HBRUSH tbr = CreateSolidBrush( RGB( 44, 44, 44 ) );
                     FillRect( hdc, &pill, tbr );
@@ -245,7 +245,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                     SetTextColor( hdc, RGB( 255, 255, 255 ) );
                     pill.left += 10;
                     pill.right = max( pill.left, close_rc.left - 2 );
-                    DrawTextW( hdc, el->text, -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
+                    DrawTextW( hdc, uwp_elem_text( el ), -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
                     SetTextColor( hdc, RGB( 185, 185, 185 ) );
                     DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 }
@@ -282,7 +282,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             DeleteObject( font );
             return;
         }
-        if (wcsstr( el->class_name, L"PivotItem" ) && el->text[0])
+        if (uwp_is_pivot_item( el ) && uwp_has_text( el ))
         {
             RECT trc = el->bounds;
             BOOL is_first = (wcsstr( el->name, L"History" ) != NULL);
@@ -296,7 +296,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                 : uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), surface_bg );
             SetTextColor( hdc, tfg );
             SetBkMode( hdc, TRANSPARENT );
-            DrawTextW( hdc, el->text, -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+            DrawTextW( hdc, uwp_elem_text( el ), -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
             SelectObject( hdc, old_font );
             DeleteObject( font );
             if (is_first)
@@ -460,12 +460,12 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
             el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
         {
-            if (el->text[0] && wcscmp( el->tpl_normal_output->text, el->text ) != 0)
-                lstrcpynW( el->tpl_normal_output->text, el->text, ARRAY_SIZE(el->tpl_normal_output->text) );
+            if (uwp_has_text( el ) && wcscmp( uwp_elem_text( el->tpl_normal_output ), uwp_elem_text( el ) ) != 0)
+                uwp_elem_set_text( el->tpl_normal_output, uwp_elem_text( el ) );
             uwp_paint_element( hdc, el->tpl_normal_output );
             return;
         }
-        if (el->text[0])
+        if (uwp_has_text( el ))
         {
             RECT trc = el->bounds;
             BOOL is_result = uwp_is_display_result_element( el );
@@ -479,7 +479,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
                 ? blend_argb_over( el->fg_argb, surface_bg )
                 : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
-            if (wcsstr( el->class_name, L"MenuBarItem" ) &&
+            if (uwp_is_menubar_item( el ) &&
                 (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
             {
                 RECT hrc = trc;
@@ -491,7 +491,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             SetTextColor( hdc, tfg );
             SetBkMode( hdc, TRANSPARENT );
             InflateRect( &trc, -8, 0 );
-            DrawTextW( hdc, el->text, -1, &trc,
+            DrawTextW( hdc, uwp_elem_text( el ), -1, &trc,
                        (is_result ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE );
             SelectObject( hdc, old_font );
             DeleteObject( font );

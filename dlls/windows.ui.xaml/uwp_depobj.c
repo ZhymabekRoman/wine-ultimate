@@ -273,11 +273,10 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
                 }
             }
         }
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Text" ) && impl->text[0] &&
-            (wcsstr( impl->class_name, L"AutoSuggestBox" ) || wcsstr( impl->class_name, L"TextBox" ) ||
-             wcsstr( impl->name, L"SearchBox" ) || wcsstr( impl->name, L"SuggestBox" )))
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Text" ) && uwp_has_text( impl ) &&
+            uwp_is_text_input( impl ))
         {
-            *out = box_string_value( impl->text );
+            *out = box_string_value( uwp_elem_text( impl ) );
             if (*out) return S_OK;
         }
         if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Flyout" ) && impl->flyout)
@@ -380,7 +379,7 @@ static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uw
             WCHAR sbuf[256] = {0};
             if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
             {
-                lstrcpynW( node->text, sbuf, ARRAY_SIZE(node->text) );
+                uwp_elem_set_text( node, sbuf );
                 uwp_invalidate_window();
             }
         }
@@ -446,9 +445,9 @@ static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *
         struct uwp_element *rep;
         int j;
         if (wcscmp( dpname, repeater_forwards[k].dp )) continue;
-        if (!val || wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" )) return;
+        if (!val || (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST)) return;
         rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
-        if (!rep || rep == impl || !wcsstr( rep->class_name, L"ItemsRepeater" )) return;
+        if (!rep || rep == impl || !uwp_is_items_repeater( rep )) return;
         {
             void *target_dp = NULL;
             AcquireSRWLockShared( &rep->dp_lock );
@@ -500,7 +499,7 @@ static BOOL uwp_should_sync_display_text( const struct uwp_element *impl, const 
 
     if (uwp_wcs_in_table( dpn, meta_dps, ARRAY_SIZE(meta_dps) ))
         return FALSE;
-    if (wcsstr( impl->class_name, L"ToolTip" ) || !wcscmp( impl->name, L"SettingsItem" ))
+    if (uwp_is_tooltip( impl ) || !wcscmp( impl->name, L"SettingsItem" ))
         return FALSE;
     return uwp_is_display_result_element( impl ) ||
            uwp_substr_in_table( impl->class_name, text_class_substrs, ARRAY_SIZE(text_class_substrs) ) ||
@@ -571,8 +570,7 @@ static void uwp_nav_sync_selection_tree( struct uwp_element *el, struct uwp_elem
                                          IInspectable *selected_val, int depth )
 {
     if (!el || depth > 6) return;
-    if (wcsstr( el->class_name, L"NavigationViewItem" ) ||
-        wcsstr( el->default_style_key_name, L"NavigationViewItem" ))
+    if (uwp_is_nav_item( el ))
     {
         if (selected_nvi)
         {
@@ -665,9 +663,9 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         const WCHAR *dpn = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
         if (uwp_should_sync_display_text( impl, dpn ))
         {
-            lstrcpynW( impl->text, str_val, ARRAY_SIZE(impl->text) );
+            uwp_elem_set_text( impl, str_val );
             if (impl->tpl_normal_output)
-                lstrcpynW( impl->tpl_normal_output->text, str_val, ARRAY_SIZE(impl->tpl_normal_output->text) );
+                uwp_elem_set_text( impl->tpl_normal_output, str_val );
             TRACE( "SetValue updated display text on %s (%s) -> %s\n",
                    debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_val) );
             uwp_invalidate_window();
@@ -678,7 +676,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"DataContext" ))
             uwp_propagate_data_context( impl, val );
     }
-    if (wcsstr( impl->class_name, L"TabView" ) && !wcsstr( impl->class_name, L"TabViewItem" ))
+    if (uwp_is_tabview( impl ))
     {
         struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
         const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
@@ -755,8 +753,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 uwp_invalidate_window();
             }
         }
-        else if (dpname[0] && (wcsstr( impl->class_name, L"NavigationViewItem" ) ||
-                               wcsstr( impl->default_style_key_name, L"NavigationViewItem" )))
+        else if (dpname[0] && uwp_is_nav_item( impl ))
         {
             boolean bv = FALSE;
             if (!wcscmp( dpname, L"Icon" ))
@@ -953,7 +950,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 uwp_invalidate_window();
             }
         }
-        if (dpl && wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
+        if (dpl && (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST))
         {
             HSTRING hvc = NULL;
             if (val) IInspectable_GetRuntimeClassName( val, &hvc );
@@ -1042,7 +1039,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             __ENDTRY;
             TRACE( "uwp_do_SetValue dp_cb[%d] h=%p sender=%p (%s) dp=%p -> hr %#lx\n",
                    i, h, sender, debugstr_w(impl->class_name), dp, cb_hr );
-            if (wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
+            if (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST)
                 WARN( "TileList dp_cb[%d] dp=%p -> hr %#lx\n", i, dp, cb_hr );
             IUnknown_Release( (IUnknown *)h );
         }
@@ -1061,7 +1058,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         ReleaseSRWLockExclusive( &g_setval_lock );
     }
 
-    if (wcsstr( impl->class_name, L"ItemsRepeater" ))
+    if (uwp_is_items_repeater( impl ))
     {
         if (!impl->in_measure_arrange)
         {

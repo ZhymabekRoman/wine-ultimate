@@ -345,7 +345,7 @@ static HRESULT WINAPI uwp_flyout_put_Text( void *iface, HSTRING val )
     if ((ULONG_PTR)val < 0x10000) return S_OK;
     raw = WindowsGetStringRawBuffer( val, NULL );
     if (impl && raw)
-        lstrcpynW( impl->text, raw, ARRAY_SIZE(impl->text) );
+        uwp_elem_set_text( impl, raw );
     return S_OK;
 }
 
@@ -393,9 +393,7 @@ static HRESULT WINAPI uwp_flyout_slot7( void *iface, HSTRING val )
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
     if (!impl) return S_OK;
     /* IFlyoutBase::Hide() takes no args; only MenuBarItem / MenuFlyoutSubItem use slot 7 for put_Title/put_Text */
-    if (wcsstr( impl->class_name, L"MenuBarItem" ) == NULL &&
-        wcsstr( impl->class_name, L"MenuFlyoutSubItem" ) == NULL &&
-        wcsstr( impl->class_name, L"MenuFlyoutItem" ) == NULL)
+    if (!(impl->class_flags & (UWP_CF_MENUBAR_ITEM | UWP_CF_MENU_FLYOUT_SUB_ITEM | UWP_CF_MENU_FLYOUT_ITEM)))
         return S_OK;
     return uwp_flyout_put_Text( iface, val );
 }
@@ -413,8 +411,7 @@ static HRESULT WINAPI uwp_flyout_slot8( void *iface, void *arg1, EventRegistrati
         if (tok) tok->value = 1;
         return S_OK;
     }
-    if (wcsstr( impl->class_name, L"MenuBarItem" ) != NULL ||
-        wcsstr( impl->class_name, L"MenuFlyoutSubItem" ) != NULL)
+    if (impl->class_flags & (UWP_CF_MENUBAR_ITEM | UWP_CF_MENU_FLYOUT_SUB_ITEM))
         return uwp_flyout_get_Items( iface, (void **)arg1 );
     return S_OK;
 }
@@ -684,8 +681,8 @@ void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len )
         if (!buf[0])
         {
             struct uwp_element *el = uwp_elem_from_any( item );
-            if (el && el->text[0])
-                lstrcpynW( buf, el->text, buf_len );
+            if (uwp_has_text( el ))
+                lstrcpynW( buf, uwp_elem_text( el ), buf_len );
         }
     }
     if (!buf[0])
@@ -1066,17 +1063,17 @@ void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WC
         struct uwp_element *iel = uwp_elem_from_any( item );
         if (iel)
         {
-            if (iel->text[0])
+            if (uwp_has_text( iel ))
             {
-                lstrcpynW( buf, iel->text, buf_len );
+                lstrcpynW( buf, uwp_elem_text( iel ), buf_len );
                 return;
             }
             if (iel->content)
             {
                 struct uwp_element *cel = uwp_elem_from_any( iel->content );
-                if (cel && cel->text[0])
+                if (uwp_has_text( cel ))
                 {
-                    lstrcpynW( buf, cel->text, buf_len );
+                    lstrcpynW( buf, uwp_elem_text( cel ), buf_len );
                     return;
                 }
                 if (uwp_unbox_string( iel->content, buf, buf_len ) && buf[0])
@@ -1476,7 +1473,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
     {
         IInspectable *btn_inner = NULL;
         IInspectable *tmpl = NULL;
-        IInspectable *sel = (!wcsstr( impl->class_name, L"TileList" ) && !wcsstr( impl->class_name, L"ItemsRepeater" ))
+        IInspectable *sel = (!(impl->class_flags & (UWP_CF_TILE_LIST | UWP_CF_ITEMS_REPEATER)))
                                 ? (impl->item_template_selector ? impl->item_template_selector : impl->item_template) : NULL;
         if (sel)
         {
@@ -1529,7 +1526,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
             }
             IInspectable_Release( tmpl );
         }
-        if (SUCCEEDED(uwp_element_create( wcsstr( impl->class_name, L"RadioButtons" )
+        if (SUCCEEDED(uwp_element_create( (impl->class_flags & UWP_CF_RADIO_BUTTON)
                                               ? L"Windows.UI.Xaml.Controls.ToggleButton"
                                               : L"Windows.UI.Xaml.Controls.Button",
                                           NULL, NULL, (void **)&btn_inner )) && btn_inner)
@@ -1543,7 +1540,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                 bel->parent = impl;
                 bel->data_context = (IInspectable *)item;
                 IInspectable_AddRef( bel->data_context );
-                if (!wcsstr( impl->class_name, L"ListView" ) && !wcsstr( impl->class_name, L"GridView" ))
+                if (!(impl->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)))
                 {
                     bel->width = (impl->min_width > 44.0) ? impl->min_width : 44.0;
                     bel->height = (impl->min_width > 44.0) ? 40.0 : 36.0;
@@ -1552,23 +1549,27 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                 {
                     bel->is_accent_style = TRUE;
                 }
-                else if (!wcsstr( impl->class_name, L"RadioButtons" ))
+                else if (!(impl->class_flags & UWP_CF_RADIO_BUTTON))
                 {
                     bel->has_bg = TRUE;
                     bel->bg_argb = 0xE02A2A2A;
                     bel->bg_alpha = 224;
                 }
-                if (!uwp_vm_query_string_prop_depth( (IInspectable *)item, act_props, ARRAY_SIZE(act_props),
-                                                     bel->text, ARRAY_SIZE(bel->text), 2 ))
                 {
-                    uwp_inspectable_to_string( (IInspectable *)item, bel->text, ARRAY_SIZE(bel->text) );
+                    WCHAR tmp_txt[512] = {0};
+                    if (!uwp_vm_query_string_prop_depth( (IInspectable *)item, act_props, ARRAY_SIZE(act_props),
+                                                         tmp_txt, ARRAY_SIZE(tmp_txt), 2 ))
+                    {
+                        uwp_inspectable_to_string( (IInspectable *)item, tmp_txt, ARRAY_SIZE(tmp_txt) );
+                    }
+                    if ((!tmp_txt[0] || wcschr( tmp_txt, L'.' )) && impl->min_width >= 120.0)
+                        lstrcpynW( tmp_txt, L"Get", ARRAY_SIZE(tmp_txt) );
+                    uwp_elem_set_text( bel, tmp_txt );
                 }
-                if ((!bel->text[0] || wcschr( bel->text, L'.' )) && impl->min_width >= 120.0)
-                    lstrcpynW( bel->text, L"Get", ARRAY_SIZE(bel->text) );
-                if (bel->text[0] && impl->min_width <= 44.0 &&
-                    !wcsstr( impl->class_name, L"ListView" ) && !wcsstr( impl->class_name, L"GridView" ))
+                if (uwp_has_text( bel ) && impl->min_width <= 44.0 &&
+                    !(impl->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)))
                 {
-                    double tw = (double)wcslen( bel->text ) * 8.5 + 28.0;
+                    double tw = (double)wcslen( uwp_elem_text( bel ) ) * 8.5 + 28.0;
                     if (tw > bel->width) bel->width = tw;
                 }
                 uwp_vec_Append( impl->children_coll, &bel->IInspectable_iface );
@@ -1613,10 +1614,10 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemsSource( void *iface, void *src )
            debugstr_w(impl->class_name), debugstr_w(impl->name), src );
     if (impl->items_source && !uwp_is_combobox( impl ))
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
-    if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
+    if (uwp_is_autosuggest( impl ))
     {
         unsigned int cnt = impl->items_source ? uwp_winrt_vec_count( impl->items_source ) : 0;
-        impl->is_open = (cnt > 0 && impl == g_focused_textbox && impl->text[0] != 0);
+        impl->is_open = (cnt > 0 && impl == g_focused_textbox && uwp_has_text( impl ));
         impl->is_dropdown_open = impl->is_open;
         impl->hovered_dropdown_idx = -1;
         impl->dropdown_scroll_offset = 0;

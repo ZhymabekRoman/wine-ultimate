@@ -872,11 +872,7 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
             UINT32 len = 0;
             const WCHAR *raw = WindowsGetStringRawBuffer( (HSTRING)outer, &len );
             if (pp_el && raw && len > 0)
-            {
-                UINT32 cpy = len < ARRAY_SIZE(pp_el->text) - 1 ? len : ARRAY_SIZE(pp_el->text) - 1;
-                memcpy( pp_el->text, raw, cpy * sizeof(WCHAR) );
-                pp_el->text[cpy] = 0;
-            }
+                uwp_elem_set_text_n( pp_el, raw, len );
         }
         if (SUCCEEDED(hr) && inner && *(void **)inner && !wcscmp( cls, L"Windows.UI.Xaml.Controls.SymbolIcon" ))
         {
@@ -884,8 +880,8 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
             UINT_PTR code = (UINT_PTR)outer;
             if (sym_el && code >= 0xE000 && code <= 0xFFFF)
             {
-                sym_el->text[0] = (WCHAR)code;
-                sym_el->text[1] = 0;
+                WCHAR sym = (WCHAR)code;
+                uwp_elem_set_text_n( sym_el, &sym, 1 );
                 lstrcpynW( sym_el->font_family, L"Segoe MDL2 Assets", ARRAY_SIZE(sym_el->font_family) );
             }
         }

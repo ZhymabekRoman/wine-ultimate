@@ -228,12 +228,15 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 {
     int kids = 0;
     if (!el || depth > 48 || *rem <= 0) return;
-    if (wcsstr( el->class_name, L"HomepageSkeleton" ) ||
-        wcsstr( el->class_name, L"SearchPageSkeleton" ) ||
-        wcsstr( el->class_name, L"ShimmerProductView" ))
+    if (el->class_flags & (UWP_CF_SKELETON | UWP_CF_SHIMMER))
     {
-        ERR( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
-        return;
+        if (wcsstr( el->class_name, L"HomepageSkeleton" ) ||
+            wcsstr( el->class_name, L"SearchPageSkeleton" ) ||
+            wcsstr( el->class_name, L"ShimmerProductView" ))
+        {
+            ERR( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
+            return;
+        }
     }
     if (el->children_coll)
         kids = (int)CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count;
@@ -245,7 +248,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
          el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom,
          el->has_bounds, el->visibility, el->opacity, kids,
          el->width, el->height,
-         el->text[0] ? debugstr_w(el->text) : "\"\"",
+         uwp_has_text( el ) ? debugstr_w(uwp_elem_text( el )) : "\"\"",
          el->image_src[0] ? debugstr_w(el->image_src) : "\"\"" );
     if (wcsstr( el->class_name, L".Controls.Card" ))
         return;

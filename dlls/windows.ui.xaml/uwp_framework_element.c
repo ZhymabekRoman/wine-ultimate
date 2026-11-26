@@ -147,7 +147,7 @@ linkage HRESULT WINAPI uwp_ui_add_##name( void *iface, void *handler, EventRegis
 { \
     struct uwp_element *impl = uwp_elem_from_any( iface ); \
     if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; } \
-    if (wcsstr( impl->class_name, L"Card" )) \
+    if (uwp_is_card( impl )) \
         WARN( "add_" #name " on %s (%s) impl=%p handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( uwp_elem_name_w( impl ) ), impl, handler ); \
     TRACE( "add_" #name " on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( uwp_elem_name_w( impl ) ), handler ); \
     return xaml_event_registry_add( &impl->field, handler, tok ); \
@@ -352,7 +352,7 @@ HRESULT WINAPI uwp_fe_put_Style( void *iface, IInspectable *val )
     impl->style_obj = val;
     if (val) impl->is_accent_style = FALSE;
     st_el = uwp_elem_from_any( val );
-    if (wcsstr( impl->class_name, L"ResponsiveItemsRepeaterList" ))
+    if (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST)
         WARN( "uwp_fe_put_Style on %s (%s) val=%p st_el=%p name=%s based_on=%s cnt=%d\n",
               debugstr_w(impl->class_name), debugstr_w(impl->name), val, st_el,
               st_el ? debugstr_w(st_el->name) : "\"-\"",
@@ -969,6 +969,7 @@ HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val
             if (comma) *comma = 0;
         }
     }
+    uwp_elem_sync_class_flags( impl );
     TRACE( "IControlProtected::put_DefaultStyleKey on %s -> %s\n",
            debugstr_w(impl->class_name), debugstr_w(impl->default_style_key_name) );
     return S_OK;
@@ -1008,7 +1009,7 @@ static void uwp_collect_template_names( struct uwp_element *owner, struct uwp_el
 static struct uwp_element *uwp_find_content_presenter( struct uwp_element *node, int depth )
 {
     if (!node || depth > 16) return NULL;
-    if (wcsstr( node->class_name, L"ContentPresenter" )) return node;
+    if (node->class_flags & UWP_CF_CONTENT_PRESENTER) return node;
     if (node->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( node->content );
@@ -1037,8 +1038,7 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
     const WCHAR *key = NULL;
 
     if (!el || el->template_inflated) return el && el->template_root != NULL;
-    if (!wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.AutoSuggestBox" ) ||
-        !wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.AutoSuggestBox" ))
+    if (uwp_is_exact_autosuggest( el ))
         return FALSE;
     if (InterlockedIncrement( &inflate_depth ) > 8)
     {
@@ -1052,8 +1052,7 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
         if (el->default_style_key_name[0])
             key = el->default_style_key_name;
         else if (el->class_name[0] &&
-                 wcsncmp( el->class_name, L"Windows.UI.Xaml.", 16 ) != 0 &&
-                 wcsncmp( el->class_name, L"Microsoft.UI.Xaml.", 18 ) != 0)
+                 !(el->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX)))
             key = el->class_name;
 
         if (key && key[0])
@@ -1127,7 +1126,7 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
                         }
                     }
                 }
-                else if (!el->children_coll && !el->text[0] &&
+                else if (!el->children_coll && !uwp_has_text( el ) &&
                          el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON)
                 {
                     el->content = tpl_obj;
@@ -1301,7 +1300,7 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                 child->actual_h = 64.0;
                 child->font_size = 44.0;
                 lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-                if (impl->text[0]) lstrcpynW( child->text, impl->text, ARRAY_SIZE(child->text) );
+                if (uwp_has_text( impl )) uwp_elem_set_text( child, uwp_elem_text( impl ) );
                 impl->tpl_normal_output = child;
                 if (impl->tpl_text_container)
                     impl->tpl_text_container->content = &child->IInspectable_iface;
@@ -1396,7 +1395,11 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                 if (SUCCEEDED(uwp_create_instance_from_provider( part_cls, (void **)&raw )) && raw)
                 {
                     child = uwp_elem_from_any( raw );
-                    if (child) lstrcpynW( child->class_name, part_cls, ARRAY_SIZE(child->class_name) );
+                    if (child)
+                    {
+                        lstrcpynW( child->class_name, part_cls, ARRAY_SIZE(child->class_name) );
+                        uwp_elem_sync_class_flags( child );
+                    }
                     IInspectable_Release( raw );
                 }
             }
@@ -1423,7 +1426,7 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
         return hr_fn;
     }
 
-    if (child && wcsstr( impl->class_name, L"NavigationView" ) &&
+    if (child && (impl->class_flags & UWP_CF_NAV_VIEW_ANY) &&
         (!wcscmp( nm, L"TogglePaneButton" ) || !wcscmp( nm, L"MenuItemsHost" ) ||
          !wcscmp( nm, L"FooterMenuItemsHost" )))
     {
@@ -1433,8 +1436,8 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
         {
             child->width = 40.0;
             child->height = 36.0;
-            if (!child->text[0])
-                lstrcpynW( child->text, L"\x2630", ARRAY_SIZE(child->text) );
+            if (!uwp_has_text( child ))
+                uwp_elem_set_text( child, L"\x2630" );
         }
         if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
         if (impl->children_coll)
@@ -1913,7 +1916,7 @@ static HRESULT WINAPI uwp_fe_get_BaseUri( void *iface, void **uri )
 static HRESULT WINAPI uwp_fe_probe##n( void *iface, ... ) \
 { \
     struct uwp_element *impl = uwp_elem_from_any( iface ); \
-    if (impl && impl->class_name[0] && wcsstr( impl->class_name, L"NavigationView" )) \
+    if (impl && (impl->class_flags & UWP_CF_NAV_VIEW_ANY)) \
         TRACE( "fe-vtbl slot " #n " hit on NavView\n" ); \
     return S_OK; \
 }
@@ -2124,8 +2127,8 @@ void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
             IUnknown_Release( (IUnknown *)pp );
         }
     }
-    if (!path_buf[0] && bel && bel->text[0])
-        lstrcpynW( path_buf, bel->text, ARRAY_SIZE(path_buf) );
+    if (!path_buf[0] && uwp_has_text( bel ))
+        lstrcpynW( path_buf, uwp_elem_text( bel ), ARRAY_SIZE(path_buf) );
 
     if (bel && bel->data_context)
     {

@@ -52,7 +52,7 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
         impl->data_context = dc;
         if (dc) IInspectable_AddRef( dc );
     }
-    if (wcsstr( impl->class_name, L"Card" ))
+    if (uwp_is_card( impl ))
     {
         void *dte = NULL;
         if (impl->binding_connector &&
@@ -186,7 +186,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
     void *fe_ovr = NULL;
     BOOL has_children = FALSE;
     if (!el || el->template_applied || !el->outer) return;
-    if (el->parent && !wcsncmp( el->parent->class_name, L"Microsoft.UI.Xaml.", 18 ))
+    if (el->parent && (el->parent->class_flags & UWP_CF_WINUI_PREFIX))
         return;
     if (!el->template_inflated)
         uwp_inflate_control_template( el );
@@ -195,7 +195,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
     /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
      * has actually been inflated into the control's visual tree (except WinUI
      * builtin controls like NavigationView/ItemsRepeater that synthesize parts). */
-    if (!has_children && wcsncmp( el->class_name, L"Microsoft.UI.Xaml.", 18 ) != 0 &&
+    if (!has_children && !(el->class_flags & UWP_CF_WINUI_PREFIX) &&
         !uwp_is_display_result_element( el ))
         return;
     el->template_applied = TRUE;

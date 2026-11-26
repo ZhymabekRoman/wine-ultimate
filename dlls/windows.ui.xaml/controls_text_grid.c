@@ -93,7 +93,7 @@ static HRESULT WINAPI uwp_rtb2_get_MaxLines( void *iface, void *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    if (impl && wcsstr( impl->class_name, L"RichTextBlock" ))
+    if (uwp_is_rich_text_block( impl ))
         *(INT32 *)out = impl->max_lines;
     else
         *(void **)out = NULL;
@@ -102,7 +102,7 @@ static HRESULT WINAPI uwp_rtb2_get_MaxLines( void *iface, void *out )
 static HRESULT WINAPI uwp_rtb2_put_MaxLines( void *iface, ULONG_PTR val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl && (val < 0x10000 || wcsstr( impl->class_name, L"RichTextBlock" )))
+    if (impl && (val < 0x10000 || uwp_is_rich_text_block( impl )))
     {
         impl->max_lines = max( 0, (INT32)val );
         g_layout_dirty = TRUE;
@@ -119,7 +119,7 @@ static BOOL uwp_tb_is_trimmed_or_overflow( const struct uwp_element *impl )
     const WCHAR *p;
 
     if (!impl || impl->max_lines <= 0) return FALSE;
-    txt = impl->text;
+    txt = uwp_elem_text( impl );
     if (!txt[0] && impl->inlines_coll && uwp_flatten_inlines_text( impl, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
         txt = rich_buf;
     if (!txt[0]) return FALSE;
@@ -328,8 +328,11 @@ static HRESULT WINAPI uwp_pp_get_Path( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    if (impl && impl->text[0])
-        return WindowsCreateString( impl->text, wcslen( impl->text ), out );
+    if (uwp_has_text( impl ))
+    {
+        const WCHAR *path = uwp_elem_text( impl );
+        return WindowsCreateString( path, (UINT32)wcslen( path ), out );
+    }
     *out = NULL;
     return S_OK;
 }
@@ -547,13 +550,13 @@ static LRESULT CALLBACK uwp_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARA
             {
                 struct uwp_element *clicked_el = it->el;
                 HWND owner = st->owner_hwnd;
-                if (wcsstr( clicked_el->class_name, L"ToggleMenuFlyoutItem" ))
+                if (clicked_el->class_flags & UWP_CF_TOGGLE_MENU_ITEM)
                     clicked_el->is_checked = !clicked_el->is_checked;
-                else if (wcsstr( clicked_el->class_name, L"RadioMenuFlyoutItem" ))
+                else if (clicked_el->class_flags & UWP_CF_RADIO_MENU_ITEM)
                 {
                     int j;
                     for (j = 0; j < st->item_cnt; j++)
-                        if (st->items[j].el && wcsstr( st->items[j].el->class_name, L"RadioMenuFlyoutItem" ))
+                        if (st->items[j].el && (st->items[j].el->class_flags & UWP_CF_RADIO_MENU_ITEM))
                             st->items[j].el->is_checked = 0;
                     clicked_el->is_checked = 1;
                 }
@@ -628,13 +631,13 @@ static LRESULT CALLBACK uwp_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARA
                 {
                     struct uwp_element *clicked_el = st->items[i].el;
                     HWND owner = st->owner_hwnd;
-                    if (wcsstr( clicked_el->class_name, L"ToggleMenuFlyoutItem" ))
+                    if (clicked_el->class_flags & UWP_CF_TOGGLE_MENU_ITEM)
                         clicked_el->is_checked = !clicked_el->is_checked;
-                    else if (wcsstr( clicked_el->class_name, L"RadioMenuFlyoutItem" ))
+                    else if (clicked_el->class_flags & UWP_CF_RADIO_MENU_ITEM)
                     {
                         int j;
                         for (j = 0; j < st->item_cnt; j++)
-                            if (st->items[j].el && wcsstr( st->items[j].el->class_name, L"RadioMenuFlyoutItem" ))
+                            if (st->items[j].el && (st->items[j].el->class_flags & UWP_CF_RADIO_MENU_ITEM))
                                 st->items[j].el->is_checked = 0;
                         clicked_el->is_checked = 1;
                     }
@@ -821,12 +824,12 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
     {
         struct uwp_element *ch = raw_items[k];
         struct uwp_popup_item *it;
-        if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Accelerator" )) continue;
+        if (!ch || ch->visibility != 0 || uwp_is_accelerator( ch )) continue;
 
         it = &st->items[st->item_cnt++];
         it->el = ch;
         it->y = cur_y;
-        if (wcsstr( ch->class_name, L"Separator" ))
+        if (uwp_is_separator( ch ))
         {
             it->is_sep = TRUE;
             it->h = 9;
@@ -839,8 +842,8 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
             it->is_sep = FALSE;
             it->enabled = ch->is_enabled;
             it->checked = (ch->is_checked != 0);
-            it->has_sub = (wcsstr( ch->class_name, L"MenuFlyoutSubItem" ) != NULL);
-            lstrcpynW( it->text, ch->text, ARRAY_SIZE(it->text) );
+            it->has_sub = ((ch->class_flags & UWP_CF_MENU_FLYOUT_SUB_ITEM) != 0);
+            lstrcpynW( it->text, uwp_elem_text( ch ), ARRAY_SIZE(it->text) );
             lstrcpynW( it->accel, ch->accel_text, ARRAY_SIZE(it->accel) );
             if (!it->accel[0] && ch->accelerators_coll)
             {
@@ -936,7 +939,7 @@ void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int scr
 {
     uwp_close_flyout_popup( FALSE );
     g_popup_owner_el = flyout;
-    if (flyout && wcsstr( flyout->class_name, L"MenuBarItem" ))
+    if (uwp_is_menubar_item( flyout ))
         g_popup_hwnd = uwp_create_flyout_popup_internal( flyout, flyout, owner_hwnd, NULL, screen_x, screen_y );
     uwp_invalidate_window();
 }

@@ -43,7 +43,7 @@ BOOL uwp_is_border_pid( WORD pid )
 {
     return pid == XBF_PROP_CONTROL_BORDER_BRUSH || pid == XBF_PROP_BORDER_BRUSH ||
            pid == XBF_PROP_GRID_BORDER_BRUSH || pid == XBF_PROP_SHAPE_STROKE ||
-           pid == 0x869d; /* StackPanel.BorderBrush */
+           pid == XBF_PROP_STACKPANEL_BORDER_BRUSH;
 }
 
 size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, size_t out_cap )
@@ -62,12 +62,11 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
         struct uwp_element *blk = uwp_elem_from_any( v->items[i] );
         BOOL is_para;
         if (!blk) continue;
-        is_para = wcsstr( blk->class_name, L"Paragraph" ) != NULL ||
-                  wcsstr( blk->class_name, L"LineBreak" ) != NULL;
-        if (blk->text[0])
+        is_para = (blk->class_flags & (UWP_CF_PARAGRAPH | UWP_CF_LINE_BREAK)) != 0;
+        if (uwp_has_text( blk ))
         {
             if (is_para && pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
-            lstrcpynW( out_buf + pos, blk->text, (int)(out_cap - pos) );
+            lstrcpynW( out_buf + pos, uwp_elem_text( blk ), (int)(out_cap - pos) );
             pos += wcslen( out_buf + pos );
         }
         else if (blk->inlines_coll)
@@ -117,9 +116,9 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
                                 for (k = 0; sv && k < sv->count && pos + 2 < out_cap; k++)
                                 {
                                     struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
-                                    if (sub && sub->text[0])
+                                    if (uwp_has_text( sub ))
                                     {
-                                        lstrcpynW( out_buf + pos, sub->text, (int)(out_cap - pos) );
+                                        lstrcpynW( out_buf + pos, uwp_elem_text( sub ), (int)(out_cap - pos) );
                                         pos += wcslen( out_buf + pos );
                                     }
                                 }
@@ -129,9 +128,9 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
                         }
                     }
                 }
-                else if (inl && inl->text[0])
+                else if (uwp_has_text( inl ))
                 {
-                    lstrcpynW( out_buf + pos, inl->text, (int)(out_cap - pos) );
+                    lstrcpynW( out_buf + pos, uwp_elem_text( inl ), (int)(out_cap - pos) );
                     pos += wcslen( out_buf + pos );
                 }
                 else if (inl && inl->inlines_coll)
@@ -141,9 +140,9 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
                     for (k = 0; sv && k < sv->count && pos + 2 < out_cap; k++)
                     {
                         struct uwp_element *sub = uwp_elem_from_any( sv->items[k] );
-                        if (sub && sub->text[0])
+                        if (uwp_has_text( sub ))
                         {
-                            lstrcpynW( out_buf + pos, sub->text, (int)(out_cap - pos) );
+                            lstrcpynW( out_buf + pos, uwp_elem_text( sub ), (int)(out_cap - pos) );
                             pos += wcslen( out_buf + pos );
                         }
                     }
@@ -167,7 +166,7 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
     HRESULT hr;
 
     if (!el || !el->outer || el->in_measure_arrange || w <= 0) return;
-    if (!wcsstr( el->class_name, L"ItemsRepeater" )) return;
+    if (!uwp_is_items_repeater( el )) return;
     if (h <= 0) h = 204;
     if (el->last_measured_w == (float)w && el->last_measured_h == (float)h &&
         el->children_coll &&
@@ -259,7 +258,7 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
 static BOOL uwp_has_shimmer_descendant( struct uwp_element *el, int depth )
 {
     if (!el || depth > 8) return FALSE;
-    if (wcsstr( el->class_name, L"Shimmer" )) return TRUE;
+    if (uwp_is_shimmer( el )) return TRUE;
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
@@ -281,11 +280,7 @@ static BOOL uwp_has_shimmer_descendant( struct uwp_element *el, int depth )
 static BOOL uwp_has_spotlight_descendant( struct uwp_element *el, int depth )
 {
     if (!el || el->visibility != 0 || depth > 10) return FALSE;
-    if (wcsstr( el->class_name, L"DynamicSpotlightControl" ) ||
-        wcsstr( el->class_name, L"ScrollingSpotlightControl" ) ||
-        wcsstr( el->class_name, L"CarrouselSpotlightControl" ) ||
-        wcsstr( el->class_name, L"ScrollingPreviewListView" ) ||
-        wcsstr( el->class_name, L"SpotlightHeroImage" ))
+    if (el->class_flags & UWP_CF_SPOTLIGHT_DECOR)
         return TRUE;
     if (el->content)
     {
@@ -327,8 +322,8 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
     if (!el || el->visibility != 0 || depth > 14) return FALSE;
     if (uwp_has_spotlight_descendant( el, 0 )) return TRUE;
     if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
-    if (el->text[0] || el->inlines_coll || el->img_pixels || el->img_loaded) return TRUE;
-    if (wcsstr( el->class_name, L"ItemsRepeater" ))
+    if (uwp_has_text( el ) || el->inlines_coll || el->img_pixels || el->img_loaded) return TRUE;
+    if (uwp_is_items_repeater( el ))
     {
         int di;
         if (el->children_coll)
@@ -441,7 +436,7 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
         return el->height + uwp_clamp_top_margin( el->margin_t ) + max( 0.0, el->margin_b );
     if (el->min_height > 0.0 && !isnan( el->min_height ))
         best = el->min_height;
-    if (wcsstr( el->class_name, L"ItemsRepeater" ) &&
+    if (uwp_is_items_repeater( el ) &&
         !wcsstr( el->name, L"MenuItems" ) && !wcsstr( el->name, L"FooterMenuItems" ))
     {
         int aw = 960;
@@ -468,7 +463,7 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
             if (vis_cnt > 0)
             {
                 int cols = max( 1, (aw - 12) / 270 );
-                int rows_cnt = (ch0 && wcsstr( ch0->class_name, L"Card" )) ? 1 : (((int)vis_cnt + cols - 1) / cols);
+                int rows_cnt = uwp_is_card( ch0 ) ? 1 : (((int)vis_cnt + cols - 1) / cols);
                 double rh = (double)(24 + rows_cnt * 96 + max( 0, rows_cnt - 1 ) * 12) * g_layout_scale;
                 if (rh > best) best = rh;
             }
@@ -493,7 +488,7 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
         double line_h = max( 18.0 * g_layout_scale, fs * 1.42 );
         int lines = 1;
         WCHAR rich_buf[2048];
-        const WCHAR *txt = el->text;
+        const WCHAR *txt = uwp_elem_text( el );
         if (!txt[0] && el->inlines_coll && uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
             txt = rich_buf;
         if (txt[0])
@@ -606,7 +601,7 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k, vis = 0;
-        BOOL is_vert_list = (wcsstr( el->class_name, L"ListView" ) != NULL && !wcsstr( el->class_name, L"Item" ) &&
+        BOOL is_vert_list = ((el->class_flags & (UWP_CF_LISTVIEW | UWP_CF_HAS_ITEM)) == UWP_CF_LISTVIEW &&
                              el->orientation == 0 && el->item_template != NULL);
         double acc = 0.0;
         for (k = 0; k < children->count; k++)
@@ -659,31 +654,6 @@ static BOOL uwp_apply_margins_clamped( const struct uwp_element *el, RECT *rc )
     if (rc->right < rc->left) rc->right = rc->left;
     if (rc->bottom < rc->top) rc->bottom = rc->top;
     return clamped;
-}
-
-BOOL uwp_is_combobox( const struct uwp_element *el )
-{
-    return el && wcsstr( el->class_name, L"ComboBox" ) && !wcsstr( el->class_name, L"ComboBoxItem" );
-}
-
-BOOL uwp_is_nav_view( const struct uwp_element *el )
-{
-    return el && (!wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ) ||
-                  !wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.NavigationView" ) ||
-                  !wcscmp( el->default_style_key_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ) ||
-                  !wcscmp( el->default_style_key_name, L"Windows.UI.Xaml.Controls.NavigationView" ));
-}
-
-BOOL uwp_is_nav_header( const struct uwp_element *el )
-{
-    return el && (wcsstr( el->class_name, L"NavigationViewItemHeader" ) != NULL ||
-                  wcsstr( el->default_style_key_name, L"NavigationViewItemHeader" ) != NULL);
-}
-
-BOOL uwp_is_nav_separator( const struct uwp_element *el )
-{
-    return el && (wcsstr( el->class_name, L"NavigationViewItemSeparator" ) != NULL ||
-                  wcsstr( el->default_style_key_name, L"NavigationViewItemSeparator" ) != NULL);
 }
 
 int uwp_nav_effective_display_mode( const struct uwp_element *nav, int avail_w )
@@ -753,7 +723,7 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
     else if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
         WCHAR rich_buf[2048];
-        const WCHAR *txt = el->text;
+        const WCHAR *txt = uwp_elem_text( el );
         double raw_fs = (el->font_size > 0.0 ? el->font_size : 14.0);
         int eff_fw = el->font_weight;
         BOOL is_sec_hdr = (!wcscmp( el->name, L"SectionTitle" ));
@@ -817,7 +787,7 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         if (best <= 0.0)
         {
             double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
-            size_t len = wcslen( el->text );
+            size_t len = wcslen( uwp_elem_text( el ) );
             best = max( 80.0 * g_layout_scale, (double)len * fs * 0.64 + 32.0 + el->padding_l + el->padding_r );
         }
     }
@@ -859,7 +829,7 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         best = acc;
     }
     else if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL || el->kind == UWP_KIND_USER_CONTROL) &&
-             !wcsstr( el->class_name, L"RadioButtons" ))
+             !(el->class_flags & UWP_CF_RADIO_BUTTON))
     {
         if (el->content)
         {
@@ -870,10 +840,10 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
                 if (cw > 0.0) best = cw + el->padding_l + el->padding_r;
             }
         }
-        if (best <= 0.0 && el->text[0])
+        if (best <= 0.0 && uwp_has_text( el ))
         {
             double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
-            best = (double)wcslen( el->text ) * fs * 0.56 + 24.0 + el->padding_l + el->padding_r;
+            best = (double)wcslen( uwp_elem_text( el ) ) * fs * 0.56 + 24.0 + el->padding_l + el->padding_r;
         }
     }
     else if (el->kind == UWP_KIND_WRAP_PANEL && el->children_coll)
@@ -896,17 +866,15 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         if (vis > 1 && el->spacing > 0.0) acc += (double)(vis - 1) * el->spacing;
         best = acc;
     }
-    else if ((el->kind == UWP_KIND_GRID || el->kind == UWP_KIND_GENERIC || wcsstr( el->class_name, L"RadioButtons" )) && el->children_coll)
+    else if ((el->kind == UWP_KIND_GRID || el->kind == UWP_KIND_GENERIC || (el->class_flags & UWP_CF_RADIO_BUTTON)) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k, vis = 0;
-        BOOL sum_horiz = (wcsstr( el->class_name, L"ListBox" ) != NULL ||
-                          wcsstr( el->class_name, L"ItemsControl" ) != NULL ||
-                          wcsstr( el->class_name, L"RadioButtons" ) != NULL);
+        BOOL sum_horiz = (el->class_flags & (UWP_CF_LISTBOX | UWP_CF_ITEMS_CONTROL | UWP_CF_RADIO_BUTTON)) != 0;
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            double cw = (ch && ch != el && !wcsstr( ch->class_name, L"Template" )) ? uwp_measure_natural_width( ch, depth + 1 ) : 0.0;
+            double cw = (ch && ch != el && !(ch->class_flags & UWP_CF_TEMPLATE)) ? uwp_measure_natural_width( ch, depth + 1 ) : 0.0;
             if (cw > 0.0)
             {
                 cw += max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
@@ -919,7 +887,7 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
             }
         }
     }
-    else if (wcsstr( el->class_name, L"FontIcon" ))
+    else if (uwp_is_font_icon( el ))
     {
         double fs = (el->has_font_size ? el->font_size : 16.0) * g_layout_scale;
         best = max( 20.0 * g_layout_scale, fs + 8.0 );
@@ -940,9 +908,9 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
 static BOOL uwp_is_horiz_listview( const struct uwp_element *el )
 {
     if (!el) return FALSE;
-    if (wcsstr( el->class_name, L"GridView" ) && !wcsstr( el->class_name, L"Item" ))
+    if ((el->class_flags & (UWP_CF_GRIDVIEW | UWP_CF_HAS_ITEM)) == UWP_CF_GRIDVIEW)
         return TRUE;
-    if (wcsstr( el->class_name, L"ListView" ) && !wcsstr( el->class_name, L"Item" ))
+    if ((el->class_flags & (UWP_CF_LISTVIEW | UWP_CF_HAS_ITEM)) == UWP_CF_LISTVIEW)
     {
         if (el->orientation == 1) return TRUE;
         if (el->item_template) return FALSE;
@@ -953,7 +921,7 @@ static BOOL uwp_is_horiz_listview( const struct uwp_element *el )
             for (k = 0; v && k < v->count; k++)
             {
                 struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Template" )) continue;
+                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
                 if (ch->kind == UWP_KIND_USER_CONTROL)
                     return FALSE;
                 break;
@@ -994,7 +962,7 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
     if (el->kind == UWP_KIND_DEFERRED || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
         el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_RESOURCE_DICT ||
         el->kind == UWP_KIND_COLOR || el->kind == UWP_KIND_ACCELERATOR || el->kind == UWP_KIND_XAML_COMMAND ||
-        wcsstr( el->class_name, L"Template" ) != NULL)
+        (el->class_flags & UWP_CF_TEMPLATE) != 0)
         return 0.0;
     if (!el->template_inflated && !el->content && !el->children_coll)
         uwp_inflate_control_template( (struct uwp_element *)el );
@@ -1004,9 +972,9 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
         return 148.0 * g_layout_scale;
     if (el->height > 0.0 && !isnan( el->height ))
         return el->height;
-    if (wcsstr( el->class_name, L"ConstrainedBox" ) && avail_w > 0 && avail_w <= 320)
+    if ((el->class_flags & UWP_CF_CONSTRAINED_BOX) && avail_w > 0 && avail_w <= 320)
         return (double)avail_w;
-    if (wcsstr( el->class_name, L"ItemsRepeater" ) &&
+    if (uwp_is_items_repeater( el ) &&
         !wcsstr( el->name, L"MenuItems" ) && !wcsstr( el->name, L"FooterMenuItems" ))
     {
         if (!el->children_coll && avail_w >= 400)
@@ -1032,8 +1000,8 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
             if (vis_cnt > 0)
             {
                 int cols = max( 1, (avail_w - 12) / 270 );
-                int rows_cnt = (ch0 && wcsstr( ch0->class_name, L"Card" )) ? 1 : (((int)vis_cnt + cols - 1) / cols);
-                int row_h = (ch0 && !wcsstr( ch0->class_name, L"Card" )) ? 124 : 96;
+                int rows_cnt = uwp_is_card( ch0 ) ? 1 : (((int)vis_cnt + cols - 1) / cols);
+                int row_h = (ch0 && !uwp_is_card( ch0 )) ? 124 : 96;
                 return (double)(24 + rows_cnt * row_h + max( 0, rows_cnt - 1 ) * 12) * g_layout_scale;
             }
         }
@@ -1045,7 +1013,7 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
         double line_h = max( 20.0 * g_layout_scale, fs * 1.45 );
         int lines = 1;
         WCHAR rich_buf[2048];
-        const WCHAR *txt = el->text;
+        const WCHAR *txt = uwp_elem_text( el );
         if (!txt[0] && el->inlines_coll && uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
             txt = rich_buf;
         if (txt[0])
@@ -1131,7 +1099,7 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
             double ch_h;
             if (!ch || ch == el || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
                 ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
-                wcsstr( ch->class_name, L"TeachingTip" ) || !wcscmp( ch->name, L"TeachingTipTarget" ))
+                uwp_is_teaching_tip( ch ) || !wcscmp( ch->name, L"TeachingTipTarget" ))
                 continue;
             ch_h = uwp_measure_natural_height( ch, inner_w, depth + 1 );
             if (ch_h <= 0.0)
@@ -1250,11 +1218,11 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
                 if (ch_h > 0.0) best = ch_h + el->padding_t + el->padding_b;
             }
         }
-        if (best <= 0.0 && el->children_coll && !wcsstr( el->class_name, L"AutoSuggestBox" ))
+        if (best <= 0.0 && el->children_coll && !uwp_is_autosuggest( el ))
         {
             struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
             unsigned int k, vis = 0;
-            BOOL is_vert_list = (wcsstr( el->class_name, L"ListView" ) != NULL && !wcsstr( el->class_name, L"Item" ) &&
+            BOOL is_vert_list = ((el->class_flags & (UWP_CF_LISTVIEW | UWP_CF_HAS_ITEM)) == UWP_CF_LISTVIEW &&
                                  !uwp_is_horiz_listview( el ));
             double acc = 0.0;
             for (k = 0; k < children->count; k++)
@@ -1262,7 +1230,7 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 double ch_h;
                 if (!ch || ch == el || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
-                    wcsstr( ch->class_name, L"Template" )) continue;
+                    (ch->class_flags & UWP_CF_TEMPLATE)) continue;
                 ch_h = uwp_measure_natural_height( ch, avail_w, depth + 1 );
                 if (ch_h > 0.0)
                 {
@@ -1313,7 +1281,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_DEFERRED ||
         el->kind == UWP_KIND_RESOURCE_DICT || el->kind == UWP_KIND_COLOR ||
         el->kind == UWP_KIND_ACCELERATOR || el->kind == UWP_KIND_XAML_COMMAND ||
-        (wcsstr( el->class_name, L"TeachingTip" ) && !el->is_open) ||
+        (uwp_is_teaching_tip( el ) && !el->is_open) ||
         !wcscmp( el->name, L"TeachingTipTarget" ))
     {
         uwp_clear_bounds_tree( el );
@@ -1342,7 +1310,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
     eff_h = el->height;
     if (eff_h > 148.0 * g_layout_scale && w >= 480 && uwp_has_horiz_listview_child( el, 0 ))
         eff_h = 148.0 * g_layout_scale;
-    if ((eff_h <= 0.0 || isnan( eff_h )) && wcsstr( el->class_name, L"ConstrainedBox" ) && w > 0 && w < (rc.bottom - rc.top))
+    if ((eff_h <= 0.0 || isnan( eff_h )) && (el->class_flags & UWP_CF_CONSTRAINED_BOX) && w > 0 && w < (rc.bottom - rc.top))
     {
         eff_h = (double)w;
         rc.bottom = rc.top + w;
@@ -1566,11 +1534,10 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 BOOL is_skel;
                 if (!ch || ch->visibility != 0) continue;
-                if (wcsstr( ch->class_name, L"ScrollViewer" ))
+                if (uwp_is_scroll_viewer( ch ))
                     has_scroll_child = TRUE;
                 is_skel = (!wcscmp( ch->name, L"ShimmerContainer" ) ||
-                           wcsstr( ch->class_name, L"Shimmer" ) != NULL ||
-                           wcsstr( ch->class_name, L"Skeleton" ) != NULL);
+                           (ch->class_flags & (UWP_CF_SHIMMER | UWP_CF_SKELETON)) != 0);
                 if (!is_skel && uwp_scroll_child_has_content( ch, 0 ))
                     has_hydrated_child = TRUE;
             }
@@ -1587,8 +1554,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                     continue;
                 }
                 is_skel = (!wcscmp( ch->name, L"ShimmerContainer" ) ||
-                           wcsstr( ch->class_name, L"Shimmer" ) != NULL ||
-                           wcsstr( ch->class_name, L"Skeleton" ) != NULL);
+                           (ch->class_flags & (UWP_CF_SHIMMER | UWP_CF_SKELETON)) != 0);
                 if (has_hydrated_child && is_skel)
                 {
                     uwp_clear_bounds_tree( ch );
@@ -1617,7 +1583,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
             if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
                 ch->kind != UWP_KIND_ACCELERATOR && ch->kind != UWP_KIND_XAML_COMMAND &&
-                !wcsstr( ch->class_name, L"TeachingTip" ) &&
+                !uwp_is_teaching_tip( ch ) &&
                 wcscmp( ch->name, L"TeachingTipTarget" ) != 0)
             {
                 vis_cnt++;
@@ -1677,7 +1643,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 {
                     if (p->kind == UWP_KIND_STACK_PANEL && p->orientation == 0)
                         is_top_scroll_panel = FALSE;
-                    if (wcsstr( p->class_name, L"ScrollViewer" ))
+                    if (uwp_is_scroll_viewer( p ))
                     {
                         sv = p;
                         in_scroll = TRUE;
@@ -1698,7 +1664,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                     RECT crc = rc;
                     if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED ||
                         ch->kind == UWP_KIND_ACCELERATOR || ch->kind == UWP_KIND_XAML_COMMAND ||
-                        wcsstr( ch->class_name, L"TeachingTip" ) ||
+                        uwp_is_teaching_tip( ch ) ||
                         !wcscmp( ch->name, L"TeachingTipTarget" )) continue;
                     if (el->orientation == 1) /* Horizontal */
                     {
@@ -1796,12 +1762,12 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             for (k = 0; k < children->count; k++)
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                if (ch && ch->visibility == 0 && wcsstr( ch->class_name, L"TeachingTip" ) && ch->is_open)
+                if (ch && ch->visibility == 0 && uwp_is_teaching_tip( ch ) && ch->is_open)
                     uwp_arrange_element( ch, rc );
             }
         }
     }
-    else if (wcsstr( el->class_name, L"MenuBar" ) && !wcsstr( el->class_name, L"MenuBarItem" ))
+    else if (uwp_is_menubar( el ))
     {
         if (el->outer && (!el->children_coll ||
             CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
@@ -1843,24 +1809,27 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 RECT crc;
-                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Accelerator" )) continue;
+                if (!ch || ch->visibility != 0 || uwp_is_accelerator( ch )) continue;
                 ch->parent = el;
-                if (!wcsstr( ch->class_name, L"MenuBarItem" ))
+                if (!uwp_is_menubar_item( ch ))
+                {
                     lstrcpynW( ch->class_name, L"Microsoft.UI.Xaml.Controls.MenuBarItem", ARRAY_SIZE(ch->class_name) );
+                    uwp_elem_sync_class_flags( ch );
+                }
                 SetRect( &crc, rc.left + 8 + (int)idx * item_w, rc.top,
                          min( (int)rc.right, (int)rc.left + 8 + (int)(idx + 1) * item_w ), rc.bottom );
                 ch->bounds = crc;
                 ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
                 ch->actual_w = (double)(crc.right - crc.left);
                 ch->actual_h = (double)(crc.bottom - crc.top);
-                if (ch->kind == UWP_KIND_GENERIC && ch->text[0])
+                if (ch->kind == UWP_KIND_GENERIC && uwp_has_text( ch ))
                     ch->kind = UWP_KIND_TEXT_BLOCK;
                 idx++;
             }
         }
         return;
     }
-    else if (wcsstr( el->class_name, L"Pivot" ) && !wcsstr( el->class_name, L"PivotItem" ) && el->children_coll)
+    else if (uwp_is_pivot( el ) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k;
@@ -1924,7 +1893,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                         {
                             struct uwp_element *fch = uwp_elem_from_any( fv->items[fk] );
                             if (!fch) continue;
-                            if (!wcscmp( fch->name, L"SettingsItem" ) || !wcscmp( fch->text, L"SettingsButtonName" ))
+                            if (!wcscmp( fch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( fch ), L"SettingsButtonName" ))
                             {
                                 if (el->nav_is_settings_visible && wide_pane)
                                     footer_vis_cnt++;
@@ -2015,7 +1984,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         return;
     }
 
-    if (wcsstr( el->class_name, L"ItemsRepeater" ) && el->children_coll)
+    if (uwp_is_items_repeater( el ) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k;
@@ -2028,7 +1997,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             int pad = 12, gap = 12;
             int cols = max( 1, (avail_w - pad) / 270 );
             int card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
-            int card_h = (ch0_peek && !wcsstr( ch0_peek->class_name, L"Card" )) ? 124 : 96;
+            int card_h = (ch0_peek && !uwp_is_card( ch0_peek )) ? 124 : 96;
             int idx = 0;
 
             if (children->count >= 2 && wcscmp( el->placeholder, L"-dedup-" ) != 0)
@@ -2092,9 +2061,8 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                             while (qh < qt && !prev_rep)
                             {
                                 struct uwp_element *cur = stack_q[qh++];
-                                if (!cur || cur->visibility != 0 || wcsstr( cur->class_name, L"Shimmer" )) continue;
-                                if (wcsstr( cur->class_name, L"ItemsRepeater" ) &&
-                                    !wcsstr( cur->class_name, L"ResponsiveItemsRepeaterList" ))
+                                if (!cur || cur->visibility != 0 || uwp_is_shimmer( cur )) continue;
+                                if ((cur->class_flags & (UWP_CF_ITEMS_REPEATER | UWP_CF_RESP_ITEMS_REPEATER_LIST)) == UWP_CF_ITEMS_REPEATER)
                                 {
                                     if (cur->children_coll &&
                                         CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface )->count >= k_cnt)
@@ -2153,7 +2121,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                                                 ch->content = new_item;
                                                 IInspectable_AddRef( new_item );
                                             }
-                                            ch->text[0] = 0;
+                                            uwp_elem_clear_text( ch );
                                             ch->image_src[0] = 0;
                                             ch->dropdown_scroll_offset = 0;
                                             ch->hovered_dropdown_idx = 0;
@@ -2210,7 +2178,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             if (!is_footer && children->count > 1)
             {
                 struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
-                if (last_ch && !wcscmp( last_ch->text, L"Home" ))
+                if (last_ch && !wcscmp( uwp_elem_text( last_ch ), L"Home" ))
                     rev = TRUE;
             }
             for (k = 0; k < children->count; k++)
@@ -2221,7 +2189,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 int row_h;
                 RECT crc;
                 if (!ch) continue;
-                is_settings_item = (!wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( ch->text, L"SettingsButtonName" ));
+                is_settings_item = (!wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( ch ), L"SettingsButtonName" ));
                 if (is_settings_item)
                 {
                     if (!nav || !nav->nav_is_settings_visible)
@@ -2229,8 +2197,8 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                         uwp_clear_bounds_tree( ch );
                         continue;
                     }
-                    if (!ch->text[0] || !wcscmp( ch->text, L"SettingsButtonName" ))
-                        lstrcpynW( ch->text, L"Settings", ARRAY_SIZE(ch->text) );
+                    if (!uwp_has_text( ch ) || !wcscmp( uwp_elem_text( ch ), L"SettingsButtonName" ))
+                        uwp_elem_set_text( ch, L"Settings" );
                     ch->visibility = 0;
                 }
                 else if (ch->visibility != 0)
@@ -2282,7 +2250,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             if (is_nav_rail && children->count > 1)
             {
                 struct uwp_element *last_ch = uwp_elem_from_any( children->items[children->count - 1] );
-                if (last_ch && !wcscmp( last_ch->text, L"Home" ))
+                if (last_ch && !wcscmp( uwp_elem_text( last_ch ), L"Home" ))
                     rev = TRUE;
             }
             for (k = 0; k < children->count; k++)
@@ -2292,7 +2260,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 RECT crc;
                 if (!ch || ch->visibility != 0) continue;
                 if (is_nav_rail && (uwp_is_nav_header( ch ) || uwp_is_nav_separator( ch ) ||
-                                    !wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( ch->text, L"SettingsButtonName" )))
+                                    !wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( ch ), L"SettingsButtonName" )))
                 {
                     uwp_clear_bounds_tree( ch );
                     continue;
@@ -2305,7 +2273,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         }
     }
 
-    if ((wcsstr( el->class_name, L"ListView" ) || wcsstr( el->class_name, L"GridView" )) && el->children_coll)
+    if ((el->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k;
@@ -2321,7 +2289,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 double nh;
                 int item_h;
                 RECT crc;
-                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Template" )) continue;
+                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
                 nh = uwp_measure_natural_height( ch, avail_w, 0 );
                 if (nh <= 0.0) nh = uwp_estimate_auto_height( ch, 0 );
                 if (nh <= 0.0) nh = 110.0 * g_layout_scale;
@@ -2344,7 +2312,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 int x0;
                 RECT crc;
-                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Template" )) continue;
+                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
                 x0 = rc.left + pad + idx * (item_w + gap);
                 if (x0 >= rc.right)
                 {
@@ -2409,19 +2377,17 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
     }
 
     if (el->kind != UWP_KIND_GRID && el->kind != UWP_KIND_STACK_PANEL && el->kind != UWP_KIND_WRAP_PANEL &&
-        !uwp_is_combobox( el ) && !wcsstr( el->class_name, L"AutoSuggestBox" ) && el->children_coll)
+        !uwp_is_combobox( el ) && !uwp_is_autosuggest( el ) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k;
-        BOOL is_horiz_list = (wcsstr( el->class_name, L"ListBox" ) != NULL ||
-                              wcsstr( el->class_name, L"ItemsControl" ) != NULL ||
-                              wcsstr( el->class_name, L"RadioButtons" ) != NULL) &&
+        BOOL is_horiz_list = ((el->class_flags & (UWP_CF_LISTBOX | UWP_CF_ITEMS_CONTROL | UWP_CF_RADIO_BUTTON)) != 0) &&
                              (rc.bottom - rc.top) <= (int)(64 * g_layout_scale);
         int cur_x = rc.left;
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (!ch || ch == el || wcsstr( ch->class_name, L"Template" )) continue;
+            if (!ch || ch == el || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
             if (is_horiz_list && ch->visibility == 0)
             {
                 double nw = uwp_measure_natural_width( ch, 0 );

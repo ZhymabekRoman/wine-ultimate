@@ -104,6 +104,72 @@ enum uwp_elem_kind
     UWP_KIND_WRAP_PANEL,
 };
 
+/* Bitmask flags cached on struct uwp_element::class_flags via uwp_elem_sync_class_flags(). */
+#define UWP_CF_AUTO_SUGGEST_BOX_EXACT   (1ULL << 0)
+#define UWP_CF_AUTO_SUGGEST_BOX         (1ULL << 1)
+#define UWP_CF_TEXT_BOX                 (1ULL << 2)
+#define UWP_CF_ITEMS_REPEATER           (1ULL << 3)
+#define UWP_CF_RESP_ITEMS_REPEATER_LIST (1ULL << 4)
+#define UWP_CF_SCROLL_VIEWER            (1ULL << 5)
+#define UWP_CF_COMBOBOX                 (1ULL << 6)
+#define UWP_CF_NAV_VIEW                 (1ULL << 7)
+#define UWP_CF_NAV_VIEW_ANY             (1ULL << 8)
+#define UWP_CF_NAV_ITEM                 (1ULL << 9)
+#define UWP_CF_NAV_HEADER               (1ULL << 10)
+#define UWP_CF_NAV_SEPARATOR            (1ULL << 11)
+#define UWP_CF_CARD                     (1ULL << 12)
+#define UWP_CF_SHIMMER                  (1ULL << 13)
+#define UWP_CF_SKELETON                 (1ULL << 14)
+#define UWP_CF_SPOTLIGHT                (1ULL << 15)
+#define UWP_CF_SPOTLIGHT_DECOR          (1ULL << 16)
+#define UWP_CF_LISTVIEW                 (1ULL << 17)
+#define UWP_CF_GRIDVIEW                 (1ULL << 18)
+#define UWP_CF_HAS_ITEM                 (1ULL << 19)
+#define UWP_CF_TEACHING_TIP             (1ULL << 20)
+#define UWP_CF_MENUBAR                  (1ULL << 21)
+#define UWP_CF_MENUBAR_ITEM             (1ULL << 22)
+#define UWP_CF_FONT_ICON                (1ULL << 23)
+#define UWP_CF_SYMBOL_ICON              (1ULL << 24)
+#define UWP_CF_PIVOT                    (1ULL << 25)
+#define UWP_CF_PIVOT_ITEM               (1ULL << 26)
+#define UWP_CF_RADIO_BUTTON             (1ULL << 27)
+#define UWP_CF_TOGGLE_BUTTON            (1ULL << 28)
+#define UWP_CF_RADIO_MENU_ITEM          (1ULL << 29)
+#define UWP_CF_TOGGLE_MENU_ITEM         (1ULL << 30)
+#define UWP_CF_MENU_FLYOUT_ITEM         (1ULL << 31)
+#define UWP_CF_MENU_FLYOUT_SUB_ITEM     (1ULL << 32)
+#define UWP_CF_DROP_DOWN_BUTTON         (1ULL << 33)
+#define UWP_CF_INFO_BADGE               (1ULL << 34)
+#define UWP_CF_FLYOUT                   (1ULL << 35)
+#define UWP_CF_TABVIEW                  (1ULL << 36)
+#define UWP_CF_TOOLTIP                  (1ULL << 37)
+#define UWP_CF_SEPARATOR                (1ULL << 38)
+#define UWP_CF_ACCELERATOR              (1ULL << 39)
+#define UWP_CF_TEMPLATE                 (1ULL << 40)
+#define UWP_CF_RICH_TEXT_BLOCK          (1ULL << 41)
+#define UWP_CF_CONSTRAINED_BOX          (1ULL << 42)
+#define UWP_CF_LISTBOX                  (1ULL << 43)
+#define UWP_CF_ITEMS_CONTROL            (1ULL << 44)
+#define UWP_CF_PARAGRAPH                (1ULL << 45)
+#define UWP_CF_LINE_BREAK               (1ULL << 46)
+#define UWP_CF_RUN                      (1ULL << 47)
+#define UWP_CF_SPAN                     (1ULL << 48)
+#define UWP_CF_INLINE                   (1ULL << 49)
+#define UWP_CF_APP_TITLE_BAR            (1ULL << 50)
+#define UWP_CF_MEDIA_PLAYER             (1ULL << 51)
+#define UWP_CF_PROGRESS_BAR             (1ULL << 52)
+#define UWP_CF_RECTANGLE                (1ULL << 53)
+#define UWP_CF_ELLIPSE                  (1ULL << 54)
+#define UWP_CF_BRUSH                    (1ULL << 55)
+#define UWP_CF_FLIPVIEW                 (1ULL << 56)
+#define UWP_CF_TILE_LIST                (1ULL << 57)
+#define UWP_CF_CALC_RESULT              (1ULL << 58)
+#define UWP_CF_CONTENT_PRESENTER        (1ULL << 59)
+#define UWP_CF_STORYBOARD               (1ULL << 60)
+#define UWP_CF_WINUI_PREFIX             (1ULL << 61)
+#define UWP_CF_UWP_PREFIX               (1ULL << 62)
+#define UWP_CF_DATA_TEMPLATE            (1ULL << 63)
+
 enum uwp_rd_kind
 {
     UWP_RD_OBJ = 0,
@@ -367,11 +433,14 @@ struct uwp_element
     BOOL delegating;             /* outer is a real app-side element (answers IUIElement): refcounts delegate to it */
     BOOL outer_pinned;           /* visual tree holds an explicit AddRef on outer to prevent GC while live */
     enum uwp_elem_kind kind;
+    UINT64 class_flags;
     WCHAR class_name[128];
     WCHAR x_class[128];
     WCHAR name[64];
     WCHAR uid[64];
-    WCHAR text[2048];
+    WCHAR *text;
+    UINT32 text_len;
+    UINT32 text_cap;
     WCHAR accel_text[64];
     IInspectable *dialog_title_obj;
     WCHAR dialog_title[128];
@@ -903,6 +972,149 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
 
 /* Core element creation, classification, sub-interface & tree lifecycle */
 enum uwp_elem_kind classify_uwp_class( const WCHAR *cls );
+void uwp_elem_sync_class_flags( struct uwp_element *el );
+void uwp_elem_set_text( struct uwp_element *el, const WCHAR *s );
+void uwp_elem_set_text_n( struct uwp_element *el, const WCHAR *s, size_t n );
+void uwp_elem_append_text( struct uwp_element *el, const WCHAR *s );
+void uwp_elem_clear_text( struct uwp_element *el );
+
+static inline const WCHAR *uwp_elem_text( const struct uwp_element *el )
+{
+    return (el && el->text) ? el->text : L"";
+}
+
+static inline BOOL uwp_has_text( const struct uwp_element *el )
+{
+    return el && el->text && el->text[0] != 0;
+}
+
+static inline BOOL uwp_is_exact_autosuggest( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_AUTO_SUGGEST_BOX_EXACT) != 0;
+}
+
+static inline BOOL uwp_is_autosuggest( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_AUTO_SUGGEST_BOX) != 0;
+}
+
+static inline BOOL uwp_is_textbox( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_TEXT_BOX) != 0;
+}
+
+static inline BOOL uwp_is_text_input( const struct uwp_element *el )
+{
+    return el && ((el->class_flags & (UWP_CF_AUTO_SUGGEST_BOX | UWP_CF_TEXT_BOX)) != 0 ||
+                  wcsstr( el->name, L"SearchBox" ) != NULL ||
+                  wcsstr( el->name, L"SuggestBox" ) != NULL);
+}
+
+static inline BOOL uwp_is_combobox( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_COMBOBOX) != 0;
+}
+
+static inline BOOL uwp_is_nav_view( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_NAV_VIEW) != 0;
+}
+
+static inline BOOL uwp_is_nav_header( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_NAV_HEADER) != 0;
+}
+
+static inline BOOL uwp_is_nav_separator( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_NAV_SEPARATOR) != 0;
+}
+
+static inline BOOL uwp_is_nav_item( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_NAV_ITEM) != 0;
+}
+
+static inline BOOL uwp_is_items_repeater( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_ITEMS_REPEATER) != 0;
+}
+
+static inline BOOL uwp_is_scroll_viewer( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_SCROLL_VIEWER) != 0;
+}
+
+static inline BOOL uwp_is_card( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_CARD) != 0;
+}
+
+static inline BOOL uwp_is_shimmer( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_SHIMMER) != 0;
+}
+
+static inline BOOL uwp_is_teaching_tip( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_TEACHING_TIP) != 0;
+}
+
+static inline BOOL uwp_is_menubar( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_MENUBAR) != 0;
+}
+
+static inline BOOL uwp_is_menubar_item( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_MENUBAR_ITEM) != 0;
+}
+
+static inline BOOL uwp_is_font_icon( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_FONT_ICON) != 0;
+}
+
+static inline BOOL uwp_is_pivot( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_PIVOT) != 0;
+}
+
+static inline BOOL uwp_is_pivot_item( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_PIVOT_ITEM) != 0;
+}
+
+static inline BOOL uwp_is_tabview( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_TABVIEW) != 0;
+}
+
+static inline BOOL uwp_is_rich_text_block( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_RICH_TEXT_BLOCK) != 0;
+}
+
+static inline BOOL uwp_is_tooltip( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_TOOLTIP) != 0;
+}
+
+static inline BOOL uwp_is_separator( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_SEPARATOR) != 0;
+}
+
+static inline BOOL uwp_is_accelerator( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_ACCELERATOR) != 0;
+}
+
+static inline BOOL uwp_is_flyout( const struct uwp_element *el )
+{
+    return el && (el->class_flags & UWP_CF_FLYOUT) != 0;
+}
+
 const WCHAR *uwp_btype_to_class_name( WORD tid );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
 struct uwp_element *uwp_elem_from_any( void *ptr );

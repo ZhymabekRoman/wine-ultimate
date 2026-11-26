@@ -331,8 +331,9 @@ const void *uwp_icmd_vtbl[16] =
 static HRESULT WINAPI uwp_mfi_get_Text( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *txt = uwp_elem_text( impl );
     if (!out) return E_POINTER;
-    return WindowsCreateString( impl ? impl->text : L"", impl ? wcslen(impl->text) : 0, out );
+    return WindowsCreateString( txt, (UINT32)wcslen( txt ), out );
 }
 static HRESULT WINAPI uwp_mfi_put_Text( void *iface, HSTRING val )
 {
@@ -340,7 +341,7 @@ static HRESULT WINAPI uwp_mfi_put_Text( void *iface, HSTRING val )
     const WCHAR *raw;
     if ((ULONG_PTR)val < 0x10000) return S_OK;
     raw = WindowsGetStringRawBuffer( val, NULL );
-    if (impl && raw) lstrcpynW( impl->text, raw, ARRAY_SIZE(impl->text) );
+    if (impl && raw) uwp_elem_set_text( impl, raw );
     return S_OK;
 }
 const void *uwp_mfi_vtbl[32] =
@@ -680,7 +681,7 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
 
             SelectObject( hdc, f_body );
             SetRect( &brc, 20, 52, rc.right - 20, rc.bottom - 62 );
-            DrawTextW( hdc, impl->text, -1, &brc, DT_LEFT | DT_WORDBREAK );
+            DrawTextW( hdc, uwp_elem_text( impl ), -1, &brc, DT_LEFT | DT_WORDBREAK );
 
             btn_w = (rc.right - rc.left - 36) / 3;
             if (impl->dialog_primary_text[0])
@@ -1393,7 +1394,10 @@ void uwp_asb_fire_query_submitted_ex( struct uwp_element *el, IInspectable *chos
     }
     args->lpVtbl = asb_qs_vtbl;
     args->ref = 1;
-    WindowsCreateString( el->text, (UINT32)wcslen( el->text ), &args->query_text );
+    {
+        const WCHAR *qt = uwp_elem_text( el );
+        WindowsCreateString( qt, (UINT32)wcslen( qt ), &args->query_text );
+    }
     if (chosen)
     {
         args->chosen_suggestion = chosen;
@@ -1401,7 +1405,7 @@ void uwp_asb_fire_query_submitted_ex( struct uwp_element *el, IInspectable *chos
     }
     sender = el->outer ? el->outer : &el->IInspectable_iface;
     TRACE( "uwp_asb_fire_query_submitted on %s (%s) query=%s chosen=%p handlers=%u\n",
-           debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(el->text), chosen, cnt );
+           debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(uwp_elem_text( el )), chosen, cnt );
     for (i = 0; i < cnt; i++)
     {
         struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
@@ -1423,7 +1427,7 @@ int uwp_asb_get_suggestions( struct uwp_element *asb, IInspectable **out_items, 
 {
     int count = 0;
     if (!asb || !out_items || max_items <= 0) return 0;
-    if (!wcsstr( asb->class_name, L"AutoSuggestBox" )) return 0;
+    if (!uwp_is_autosuggest( asb )) return 0;
     if (asb->items_source)
         count = (int)uwp_winrt_vec_snapshot( asb->items_source, out_items, (unsigned int)max_items );
     if (count == 0 && asb->children_coll)
@@ -1482,12 +1486,12 @@ static void uwp_asb_collect_el_texts( const struct uwp_element *el, WCHAR *out_p
     WCHAR rich_buf[512];
     const WCHAR *txt;
     if (!el || depth > 8 || el->visibility != 0) return;
-    txt = el->text;
+    txt = uwp_elem_text( el );
     if (!txt[0] && el->inlines_coll && uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
         txt = rich_buf;
     if (!txt[0] && el->automation_name[0])
         txt = el->automation_name;
-    if (txt[0] && !wcsstr( el->class_name, L"FontIcon" ) && !(wcslen( txt ) == 1 && (UINT)txt[0] >= 0xE000))
+    if (txt[0] && !uwp_is_font_icon( el ) && !(wcslen( txt ) == 1 && (UINT)txt[0] >= 0xE000))
     {
         if (!out_p[0])
             lstrcpynW( out_p, txt, (int)max_p );
@@ -1793,7 +1797,7 @@ static HRESULT WINAPI uwp_tt_get_IsOpen( void *iface, boolean *out )
 BOOL uwp_has_open_teachingtip( struct uwp_element *el )
 {
     if (!el) return FALSE;
-    if (wcsstr( el->class_name, L"TeachingTip" ) && el->is_open) return TRUE;
+    if (uwp_is_teaching_tip( el ) && el->is_open) return TRUE;
     if (el->content && uwp_has_open_teachingtip( uwp_elem_from_any( el->content ) )) return TRUE;
     if (el->children_coll)
     {

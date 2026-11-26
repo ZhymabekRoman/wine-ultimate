@@ -1193,7 +1193,7 @@ IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_e
     if (!e) return NULL;
     if (e->value) return e->value;
     if (e->kind == UWP_RD_DOUBLE)
-        e->value = (e->tid == 0x804c) ? box_int32_value( (INT32)e->dval ) : box_double_value( e->dval );
+        e->value = (e->tid == XBF_TYPE_INT32) ? box_int32_value( (INT32)e->dval ) : box_double_value( e->dval );
     else if (e->kind == UWP_RD_THICKNESS)
         e->value = box_thickness_value( e->vec4 );
     else if (e->kind == UWP_RD_STRING)

@@ -53,14 +53,15 @@ static struct uwp_element *uwp_resolve_spotlight_card( struct uwp_element *spot_
     {
         struct uwp_element *cur = stack[--sp];
         if (!cur) continue;
-        if (cur != spot_el && wcsstr( cur->class_name, L"Card" ) && cur->text[0])
+        if (cur != spot_el && uwp_is_card( cur ) && uwp_has_text( cur ))
         {
-            const WCHAR *nl = wcschr( cur->text, '\n' );
-            size_t tlen = nl ? (size_t)(nl - cur->text) : wcslen( cur->text );
+            const WCHAR *ctext = uwp_elem_text( cur );
+            const WCHAR *nl = wcschr( ctext, '\n' );
+            size_t tlen = nl ? (size_t)(nl - ctext) : wcslen( ctext );
             int dup = 0, d;
             WCHAR tbuf[128] = {0};
             if (tlen >= ARRAY_SIZE(tbuf)) tlen = ARRAY_SIZE(tbuf) - 1;
-            memcpy( tbuf, cur->text, tlen * sizeof(WCHAR) );
+            memcpy( tbuf, ctext, tlen * sizeof(WCHAR) );
             tbuf[tlen] = 0;
             for (d = 0; d < cnt; d++)
                 if (!wcscmp( titles[d], tbuf )) { dup = 1; break; }
@@ -93,7 +94,7 @@ static struct uwp_element *uwp_resolve_spotlight_card( struct uwp_element *spot_
 static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && wcsstr( el->class_name, L"ScrollViewer" ) &&
+    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
         (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
         return NULL;
 
@@ -118,7 +119,7 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
     if (el->has_bounds && el->is_enabled &&
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
-        wcsstr( el->class_name, L"DynamicSpotlightControl" ))
+        (el->class_flags & UWP_CF_SPOTLIGHT))
     {
         RECT rc = el->bounds;
         int avail_w = rc.right - rc.left, avail_h = rc.bottom - rc.top;
@@ -139,7 +140,7 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
         y >= el->bounds.top && y < el->bounds.bottom &&
         (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
          el->click_cnt > 0 || el->command != NULL || el->flyout != NULL ||
-         wcsstr( el->class_name, L"MenuBarItem" )))
+         uwp_is_menubar_item( el )))
     {
         if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
             return NULL;
@@ -163,19 +164,24 @@ void uwp_keyboard_press_char( WCHAR ch )
 
     if (g_focused_textbox && g_focused_textbox->visibility == 0 && g_focused_textbox->is_enabled)
     {
-        size_t len = wcslen( g_focused_textbox->text );
+        const WCHAR *cur_txt = uwp_elem_text( g_focused_textbox );
+        size_t len = wcslen( cur_txt );
         BOOL changed = FALSE;
         TRACE( "uwp_keyboard_press_char: ch=%#x focused=%s cur=%s\n",
-               (unsigned)ch, debugstr_w(g_focused_textbox->name), debugstr_w(g_focused_textbox->text) );
+               (unsigned)ch, debugstr_w(g_focused_textbox->name), debugstr_w(cur_txt) );
         if (ch == L'\b')
         {
-            if (len > 0) { g_focused_textbox->text[len - 1] = 0; changed = TRUE; }
+            if (len > 0)
+            {
+                uwp_elem_set_text_n( g_focused_textbox, cur_txt, len - 1 );
+                changed = TRUE;
+            }
         }
         else if (ch == 27)
         {
             g_focused_textbox->is_open = FALSE;
             g_focused_textbox->is_dropdown_open = FALSE;
-            if (len > 0) { g_focused_textbox->text[0] = 0; changed = TRUE; }
+            if (len > 0) { uwp_elem_clear_text( g_focused_textbox ); changed = TRUE; }
             else
             {
                 struct uwp_element *prev = g_focused_textbox;
@@ -189,24 +195,24 @@ void uwp_keyboard_press_char( WCHAR ch )
             sub_tb->is_open = FALSE;
             sub_tb->is_dropdown_open = FALSE;
             g_focused_textbox = NULL;
-            uwp_fire_asb_recursive( sub_tb, sub_tb->text, TRUE );
+            uwp_fire_asb_recursive( sub_tb, uwp_elem_text( sub_tb ), TRUE );
             sub_tb->is_open = FALSE;
             sub_tb->is_dropdown_open = FALSE;
         }
-        else if (ch >= 0x20 && len + 1 < ARRAY_SIZE(g_focused_textbox->text))
+        else if (ch >= 0x20)
         {
-            g_focused_textbox->text[len] = ch;
-            g_focused_textbox->text[len + 1] = 0;
+            WCHAR add[2] = { ch, 0 };
+            uwp_elem_append_text( g_focused_textbox, add );
             changed = TRUE;
         }
         if (changed && g_focused_textbox)
         {
-            if (!g_focused_textbox->text[0])
+            if (!uwp_has_text( g_focused_textbox ))
             {
                 g_focused_textbox->is_open = FALSE;
                 g_focused_textbox->is_dropdown_open = FALSE;
             }
-            uwp_fire_asb_recursive( g_focused_textbox, g_focused_textbox->text, FALSE );
+            uwp_fire_asb_recursive( g_focused_textbox, uwp_elem_text( g_focused_textbox ), FALSE );
         }
         uwp_invalidate_window();
         return;
@@ -220,7 +226,7 @@ void uwp_keyboard_press_char( WCHAR ch )
 BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_routed_args *args )
 {
     if (!el || !args || el->visibility != 0) return FALSE;
-    if (wcsstr( el->class_name, L"TeachingTip" ) && !el->is_open) return FALSE;
+    if (uwp_is_teaching_tip( el ) && !el->is_open) return FALSE;
 
     {
         void **handlers = NULL;
@@ -321,7 +327,7 @@ void uwp_invoke_button( struct uwp_element *btn )
     if (!btn || !btn->is_enabled) return;
 
     WARN( "uwp_invoke_button: %s (%s, text=%s, cmd=%p, param=%p, dc=%p, clicks=%d, tapped=%d, ptrP=%d, ptrR=%d, dp=%d)\n",
-          debugstr_w(btn->class_name), debugstr_w(btn->name), debugstr_w(btn->text),
+          debugstr_w(btn->class_name), debugstr_w(btn->name), debugstr_w(uwp_elem_text( btn )),
           btn->command, btn->command_param, btn->data_context, btn->click_cnt,
           (int)btn->tapped_reg.next_token, (int)btn->ptr_pressed_reg.next_token,
           (int)btn->ptr_released_reg.next_token, btn->dp_cnt );
@@ -337,7 +343,7 @@ void uwp_invoke_button( struct uwp_element *btn )
     {
         uwp_toggle_button_set_checked( btn, (btn->is_checked == 1) ? 0 : 1, TRUE );
         if (btn->parent &&
-            (wcsstr( btn->parent->class_name, L"RadioButtons" ) || !wcscmp( btn->parent->name, L"ShortcutItems" )) &&
+            ((btn->parent->class_flags & UWP_CF_RADIO_BUTTON) || !wcscmp( btn->parent->name, L"ShortcutItems" )) &&
             btn->parent->children_coll)
         {
             struct uwp_element *rb = btn->parent;
@@ -367,7 +373,7 @@ void uwp_invoke_button( struct uwp_element *btn )
     }
 
     /* 0b. Open attached Flyout / MenuFlyout on Button / DropDownButton */
-    if (btn->flyout && !wcsstr( btn->class_name, L"MenuBarItem" ))
+    if (btn->flyout && !uwp_is_menubar_item( btn ))
         g_popup_owner_el = btn;
 
     /* 1. Invoke ICommand::Execute(CommandParameter) if Command is bound */
@@ -492,7 +498,7 @@ static BOOL uwp_fire_tapped( struct uwp_element *el, int x, int y )
     args->y = (float)y;
 
     TRACE( "uwp_fire_tapped on %s (%s / %s) handlers=%u\n",
-           debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(el->text), count );
+           debugstr_w(el->class_name), debugstr_w(el->name), debugstr_w(uwp_elem_text( el )), count );
     for (i = 0; i < count; i++)
     {
         struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
@@ -515,7 +521,7 @@ static BOOL g_cb_popup_down = FALSE;
 static struct uwp_element *uwp_hit_test_combobox( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && wcsstr( el->class_name, L"ScrollViewer" ) &&
+    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
         (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
         return NULL;
     if (el->children_coll)
@@ -616,7 +622,7 @@ static struct uwp_element *uwp_find_scroll_viewer_at( struct uwp_element *el, in
         struct uwp_element *r = (ch && ch != el) ? uwp_find_scroll_viewer_at( ch, x, y, depth + 1 ) : NULL;
         if (r) return r;
     }
-    if (el->has_bounds && wcsstr( el->class_name, L"ScrollViewer" ) &&
+    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
         el->scroll_extent_h > (el->bounds.bottom - el->bounds.top))
@@ -668,7 +674,7 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
                 BOOL hov;
-                if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Separator" )) continue;
+                if (!ch || ch->visibility != 0 || uwp_is_separator( ch )) continue;
                 hov = (ch->has_bounds && x >= ch->bounds.left && x < ch->bounds.right &&
                        y >= ch->bounds.top && y < ch->bounds.bottom);
                 if (ch->is_hovered != hov) { ch->is_hovered = hov; changed = TRUE; }
@@ -705,7 +711,7 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
                     for (i = 0; i < (int)children->count; i++)
                     {
                         struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
-                        if (!ch || ch->visibility != 0 || !ch->is_enabled || wcsstr( ch->class_name, L"Separator" )) continue;
+                        if (!ch || ch->visibility != 0 || !ch->is_enabled || uwp_is_separator( ch )) continue;
                         if (ch->has_bounds && x >= ch->bounds.left && x < ch->bounds.right &&
                             y >= ch->bounds.top && y < ch->bounds.bottom)
                         {
@@ -716,24 +722,24 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
                     if (hit_idx >= 0)
                     {
                         struct uwp_element *clicked_el = uwp_elem_from_any( children->items[hit_idx] );
-                        if (wcsstr( clicked_el->class_name, L"ToggleMenuFlyoutItem" ))
+                        if (clicked_el->class_flags & UWP_CF_TOGGLE_MENU_ITEM)
                             clicked_el->is_checked = !clicked_el->is_checked;
-                        else if (wcsstr( clicked_el->class_name, L"RadioMenuFlyoutItem" ))
+                        else if (clicked_el->class_flags & UWP_CF_RADIO_MENU_ITEM)
                         {
                             int j;
                             for (j = hit_idx - 1; j >= 0; j--)
                             {
                                 struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
                                 if (!sib) continue;
-                                if (wcsstr( sib->class_name, L"Separator" )) break;
-                                if (wcsstr( sib->class_name, L"RadioMenuFlyoutItem" )) sib->is_checked = 0;
+                                if (uwp_is_separator( sib )) break;
+                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM) sib->is_checked = 0;
                             }
                             for (j = hit_idx + 1; j < (int)children->count; j++)
                             {
                                 struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
                                 if (!sib) continue;
-                                if (wcsstr( sib->class_name, L"Separator" )) break;
-                                if (wcsstr( sib->class_name, L"RadioMenuFlyoutItem" )) sib->is_checked = 0;
+                                if (uwp_is_separator( sib )) break;
+                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM) sib->is_checked = 0;
                             }
                             clicked_el->is_checked = 1;
                         }
@@ -951,7 +957,7 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
         return handled;
     }
 
-    if (g_focused_textbox && wcsstr( g_focused_textbox->class_name, L"AutoSuggestBox" ) &&
+    if (uwp_is_autosuggest( g_focused_textbox ) &&
         g_focused_textbox->is_open)
     {
         static BOOL g_asb_popup_down = FALSE;
@@ -1000,7 +1006,7 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
                         WCHAR prim[128] = {0};
                         uwp_asb_get_item_label( asb, idx, items[idx], prim, ARRAY_SIZE(prim), NULL, 0 );
                         if (prim[0])
-                            lstrcpynW( asb->text, prim, ARRAY_SIZE(asb->text) );
+                            uwp_elem_set_text( asb, prim );
                         asb->is_open = FALSE;
                         asb->is_dropdown_open = FALSE;
                         uwp_asb_fire_suggestion_chosen( asb, items[idx] );
@@ -1131,7 +1137,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
         }
-        if (btn && wcsstr( btn->class_name, L"MenuBarItem" ))
+        if (uwp_is_menubar_item( btn ))
         {
             if (uwp_popup_is_open_for( btn ))
             {
@@ -1172,7 +1178,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             info.is_in_window = TRUE;
             uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
             TRACE( "uwp_handle_mouse_input: DOWN (%d,%d) -> %s (%s)\n",
-                   x, y, debugstr_w(btn->name), debugstr_w(btn->text) );
+                   x, y, debugstr_w(btn->name), debugstr_w(uwp_elem_text( btn )) );
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
             return TRUE;
@@ -1186,8 +1192,8 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
             g_hovered_elem = hit;
             if (hit) hit->is_hovered = TRUE;
-            if (hit && wcsstr( hit->class_name, L"MenuBarItem" ) &&
-                g_popup_owner_el && wcsstr( g_popup_owner_el->class_name, L"MenuBarItem" ) &&
+            if (uwp_is_menubar_item( hit ) &&
+                uwp_is_menubar_item( g_popup_owner_el ) &&
                 hit != g_popup_owner_el)
             {
                 struct xaml_pointer_info info = {0};
@@ -1379,7 +1385,7 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
 
     if (!target) return FALSE;
     WARN( "uwp_fire_tapped_bubble: target=%s (%s) txt=%s (%d,%d)\n",
-          debugstr_w(target->class_name), debugstr_w(target->name), debugstr_w(target->text), x, y );
+          debugstr_w(target->class_name), debugstr_w(target->name), debugstr_w(uwp_elem_text( target )), x, y );
     orig_sender = target->outer ? target->outer : &target->IInspectable_iface;
     args = calloc( 1, sizeof(*args) );
     if (!args) return FALSE;
@@ -1408,7 +1414,7 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
                     if (on_tapped)
                     {
                         WARN( "uwp_fire_tapped_bubble: IControlOverrides::OnTapped on %s (%s) txt=%s\n",
-                              debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(cur->text) );
+                              debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(uwp_elem_text( cur )) );
                         __TRY { on_tapped( ctrl_ovr, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
                         __EXCEPT_ALL {}
                         __ENDTRY;
@@ -1425,7 +1431,7 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
                 struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
                 HRESULT thr = S_OK;
                 WARN( "uwp_fire_tapped_bubble: invoking tapped_reg[%u/%u] on %s (%s) txt=%s handled=%d\n",
-                      i, count, debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(cur->text), args->handled );
+                      i, count, debugstr_w(cur->class_name), debugstr_w(cur->name), debugstr_w(uwp_elem_text( cur )), args->handled );
                 g_in_tap_diag = TRUE;
                 __TRY { thr = h->lpVtbl->Invoke( h, sender, &args->ITappedRoutedEventArgs_iface ); fired = TRUE; }
                 __EXCEPT_ALL { WARN( "uwp_fire_tapped_bubble: tapped_reg[%u] threw!\n", i ); }

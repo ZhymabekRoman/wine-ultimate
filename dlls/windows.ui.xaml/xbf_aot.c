@@ -584,6 +584,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         else if (!inst) inst = el->outer ? el->outer : &el->IInspectable_iface;
                         lstrcpynW( el->class_name, cls_name, ARRAY_SIZE(el->class_name) );
                         el->kind = classify_uwp_class( el->class_name );
+                        uwp_elem_sync_class_flags( el );
                     }
                     if (FAILED(phr) || !inst)
                     {
@@ -870,15 +871,9 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         handled_custom = uwp_add_custom_xaml_collection_item( ao, owner_cls, pi->name, target, child_raw );
                 }
                 if (!handled_custom && parent_el &&
-                    (op->pid == 0x8315 || parent_el->kind == UWP_KIND_TEXT_BLOCK ||
-                     wcsstr( parent_el->class_name, L"RichTextBlock" ) ||
-                     wcsstr( parent_el->class_name, L"Span" ) ||
-                     wcsstr( parent_el->class_name, L"Paragraph" )) &&
-                    child_el && (wcsstr( child_el->class_name, L"Run" ) ||
-                                 wcsstr( child_el->class_name, L"Span" ) ||
-                                 wcsstr( child_el->class_name, L"Inline" ) ||
-                                 wcsstr( child_el->class_name, L"Paragraph" ) ||
-                                 wcsstr( child_el->class_name, L"LineBreak" )))
+                    (op->pid == XBF_PROP_TEXTBLOCK_INLINES || parent_el->kind == UWP_KIND_TEXT_BLOCK ||
+                     (parent_el->class_flags & (UWP_CF_RICH_TEXT_BLOCK | UWP_CF_SPAN | UWP_CF_PARAGRAPH))) &&
+                    child_el && (child_el->class_flags & (UWP_CF_RUN | UWP_CF_SPAN | UWP_CF_INLINE | UWP_CF_PARAGRAPH | UWP_CF_LINE_BREAK)))
                 {
                     if (!parent_el->inlines_coll)
                     {
@@ -886,7 +881,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         if (parent_el->inlines_coll)
                         {
                             struct uwp_vec_view *iv = CONTAINING_RECORD( parent_el->inlines_coll, struct uwp_vec_view, IInspectable_iface );
-                            iv->runtime_class = wcsstr( parent_el->class_name, L"RichTextBlock" )
+                            iv->runtime_class = uwp_is_rich_text_block( parent_el )
                                 ? L"Windows.UI.Xaml.Documents.BlockCollection"
                                 : L"Windows.UI.Xaml.Documents.InlineCollection";
                         }
@@ -894,27 +889,21 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     if (parent_el->inlines_coll)
                         uwp_vec_Append( parent_el->inlines_coll, child_raw );
                     child_el->parent = parent_el;
-                    if (child_el->text[0])
-                    {
-                        size_t cur = wcslen( parent_el->text );
-                        if (cur + 1 < ARRAY_SIZE(parent_el->text))
-                            lstrcpynW( parent_el->text + cur, child_el->text, (int)(ARRAY_SIZE(parent_el->text) - cur) );
-                    }
+                    if (uwp_has_text( child_el ))
+                        uwp_elem_append_text( parent_el, uwp_elem_text( child_el ) );
                     handled_custom = TRUE;
                 }
                 if (!handled_custom && parent_el && parent_el->kind == UWP_KIND_TEXT_BLOCK &&
-                    child_el && child_el->text[0])
+                    uwp_has_text( child_el ))
                 {
-                    size_t cur = wcslen( parent_el->text );
-                    if (cur + 1 < ARRAY_SIZE(parent_el->text))
-                        lstrcpynW( parent_el->text + cur, child_el->text, (int)(ARRAY_SIZE(parent_el->text) - cur) );
+                    uwp_elem_append_text( parent_el, uwp_elem_text( child_el ) );
                     handled_custom = TRUE;
                 }
                 if (!handled_custom && parent_el &&
                     (op->pid == XBF_PROP_PANEL_CHILDREN || op->pid == XBF_PROP_ITEMS ||
                      parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL ||
                      parent_el->kind == UWP_KIND_WRAP_PANEL || parent_el->kind == UWP_KIND_FLYOUT ||
-                     wcsstr( parent_el->class_name, L"Storyboard" )))
+                     (parent_el->class_flags & UWP_CF_STORYBOARD)))
                 {
                     if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
                     uwp_vec_Append( parent_el->children_coll, child_raw );
@@ -955,6 +944,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
             else if (parent_el || parent_raw)
             {
                 BOOL handled_custom_obj = FALSE;
+                BOOL is_tpl_sel = FALSE;
                 if (child_raw && !(op->pid & 0x8000) && op->pid < hdr->prop_cnt &&
                     fake_ctx.props[op->pid].owner_tid < hdr->type_cnt &&
                     fake_ctx.props[op->pid].name[0])
@@ -1050,10 +1040,10 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         xbf_apply_property( &fake_ctx, parent_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
                     }
                 }
-                else if (op->pid == 0x000c && child_el && child_el->text[0])
+                else if (op->pid == 0x000c && uwp_has_text( child_el ))
                 {
-                    if (!parent_el->text[0])
-                        lstrcpynW( parent_el->text, child_el->text, ARRAY_SIZE(parent_el->text) );
+                    if (!uwp_has_text( parent_el ))
+                        uwp_elem_set_text( parent_el, uwp_elem_text( child_el ) );
                 }
                 else if (child_raw &&
                          (op->pid == XBF_PROP_DATACONTEXT ||
@@ -1071,7 +1061,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     if (child_el) child_el->parent = parent_el;
                 }
                 else if (child_raw &&
-                         (op->pid == 0x8484 ||
+                         (op->pid == XBF_PROP_BUTTON_FLYOUT ||
                           (op->pid < hdr->prop_cnt && !wcscmp( fake_ctx.props[op->pid].name, L"Flyout" )) ||
                           (child_el && child_el->kind == UWP_KIND_FLYOUT)))
                 {
@@ -1106,24 +1096,22 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     if (child_el) child_el->parent = parent_el;
                 }
                 else if (child_raw &&
-                         (op->pid == 0x837c ||
-                          (op->pid < hdr->prop_cnt && !wcscmp( fake_ctx.props[op->pid].name, L"ItemTemplateSelector" ))))
-                {
-                    if (parent_el->item_template_selector) IInspectable_Release( parent_el->item_template_selector );
-                    parent_el->item_template_selector = child_raw;
-                    IInspectable_AddRef( child_raw );
-                    if (parent_el->items_source && !uwp_is_combobox( parent_el ))
-                        uwp_items_ctrl_materialize_source( parent_el, parent_el->items_source );
-                }
-                else if (child_raw &&
-                         (op->pid == 0x837b ||
-                          (op->pid < hdr->prop_cnt && !wcscmp( fake_ctx.props[op->pid].name, L"ItemTemplate" )) ||
-                          (child_el && !wcscmp( child_el->class_name, L"Windows.UI.Xaml.DataTemplate" ) &&
+                         (xbf_prop_is_item_template( op->pid, &fake_ctx, &is_tpl_sel ) ||
+                          (child_el && (child_el->class_flags & UWP_CF_DATA_TEMPLATE) &&
                            op->pid != XBF_PROP_CONTENT && op->pid != XBF_PROP_USERCONTROL_CONTENT)))
                 {
-                    if (parent_el->item_template) IInspectable_Release( parent_el->item_template );
-                    parent_el->item_template = child_raw;
-                    IInspectable_AddRef( child_raw );
+                    if (is_tpl_sel)
+                    {
+                        if (parent_el->item_template_selector) IInspectable_Release( parent_el->item_template_selector );
+                        parent_el->item_template_selector = child_raw;
+                        IInspectable_AddRef( child_raw );
+                    }
+                    else
+                    {
+                        if (parent_el->item_template) IInspectable_Release( parent_el->item_template );
+                        parent_el->item_template = child_raw;
+                        IInspectable_AddRef( child_raw );
+                    }
                     if (parent_el->items_source && !uwp_is_combobox( parent_el ))
                         uwp_items_ctrl_materialize_source( parent_el, parent_el->items_source );
                 }
@@ -1132,7 +1120,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                                         child_el->kind != UWP_KIND_BRUSH &&
                                         child_el->kind != UWP_KIND_COLOR &&
                                         child_el->kind != UWP_KIND_FLYOUT &&
-                                        wcscmp( child_el->class_name, L"Windows.UI.Xaml.DataTemplate" ) != 0)) &&
+                                        !(child_el->class_flags & UWP_CF_DATA_TEMPLATE))) &&
                          (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_USERCONTROL_CONTENT ||
                           op->pid == XBF_PROP_BORDER_CHILD || op->pid == XBF_PROP_RENDER_TRANSFORM_ORIGIN ||
                           op->pid == XBF_PROP_POPUP_CHILD ||
@@ -1161,16 +1149,16 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 }
                 break;
             }
-            if (target_el && val_el && val_el->text[0])
+            if (target_el && uwp_has_text( val_el ))
             {
                 WCHAR resolved[256] = {0};
                 if (!wcscmp( val_el->class_name, L"Windows.UI.Xaml.Data.TemplateBinding" ))
                 {
                     target_el->tpl_bind_target_pid = op->pid;
-                    lstrcpynW( target_el->tpl_bind_src_prop, val_el->text, ARRAY_SIZE(target_el->tpl_bind_src_prop) );
+                    lstrcpynW( target_el->tpl_bind_src_prop, uwp_elem_text( val_el ), ARRAY_SIZE(target_el->tpl_bind_src_prop) );
                     break;
                 }
-                if (uwp_pri_lookup_string( val_el->text, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
+                if (uwp_pri_lookup_string( uwp_elem_text( val_el ), resolved, ARRAY_SIZE(resolved) ) && resolved[0])
                 {
                     const WCHAR *pname = (op->pid < hdr->prop_cnt) ? fake_ctx.props[op->pid].name : L"";
                     BOOL is_chord = (!wcscmp( pname, L"VirtualKeyControlChord" ) ||
@@ -1194,9 +1182,9 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         lstrcpynW( target_el->automation_name, resolved, ARRAY_SIZE(target_el->automation_name) );
                     else if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
                         op->pid == XBF_PROP_TEXTBLOCK_TEXT || op->pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
-                        op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == 0x80fa ||
-                        (op->pid != XBF_PROP_AUTOMATION_ID && !is_vk && is_text_prop && !target_el->text[0]))
-                        lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
+                        op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == XBF_PROP_RUN_TEXT ||
+                        (op->pid != XBF_PROP_AUTOMATION_ID && !is_vk && is_text_prop && !uwp_has_text( target_el )))
+                        uwp_elem_set_text( target_el, resolved );
                 }
             }
             break;

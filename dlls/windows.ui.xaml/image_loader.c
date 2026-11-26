@@ -145,7 +145,7 @@ void uwp_el_set_border_argb( struct uwp_element *el, UINT32 argb )
 /* Format Segoe MDL2 Assets / private use glyphs to readable symbols if font lacks them */
 const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp, size_t tmp_len )
 {
-    const WCHAR *s = el->text;
+    const WCHAR *s = uwp_elem_text( el );
     if (!s || !s[0]) return L"";
     if (!wcscmp( s, L"SettingsButtonName" ) || !wcscmp( el->name, L"SettingsItem" )) return L"";
     if (s[1] == 0)

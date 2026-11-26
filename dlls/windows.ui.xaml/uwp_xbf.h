@@ -21,6 +21,7 @@
 #define __WINE_WINDOWS_UI_XAML_UWP_XBF_H
 
 #include "uwp_types.h"
+#include "xbf_known_types.h"
 
 #define XAML_META_CACHE_SIZE 1024
 
@@ -221,5 +222,43 @@ void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
 struct xaml_type *uwp_provider_get_xaml_type_cached( struct xaml_metadata_provider *mp,
                                                      const WCHAR *owner_type_name );
 struct xaml_meta_cache_entry *xaml_meta_insert_locked( const WCHAR *full_name, WORD xbf_id );
+
+static inline const WCHAR *xbf_resolve_prop_name( WORD pid, const struct xbf_ctx *ctx )
+{
+    if (!(pid & 0x8000) && ctx && pid < ctx->prop_cnt)
+        return ctx->props[pid].name;
+    return NULL;
+}
+
+static inline BOOL xbf_prop_is_item_template( WORD pid, const struct xbf_ctx *ctx, BOOL *is_selector )
+{
+    if (pid == XBF_PROP_ITEMS_CONTROL_ITEM_TEMPLATE_SELECTOR)
+    {
+        if (is_selector) *is_selector = TRUE;
+        return TRUE;
+    }
+    if (pid == XBF_PROP_ITEMS_CONTROL_ITEM_TEMPLATE)
+    {
+        if (is_selector) *is_selector = FALSE;
+        return TRUE;
+    }
+    {
+        const WCHAR *pname = xbf_resolve_prop_name( pid, ctx );
+        if (pname)
+        {
+            if (!wcscmp( pname, L"ItemTemplateSelector" ))
+            {
+                if (is_selector) *is_selector = TRUE;
+                return TRUE;
+            }
+            if (!wcscmp( pname, L"ItemTemplate" ))
+            {
+                if (is_selector) *is_selector = FALSE;
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
 
 #endif /* __WINE_WINDOWS_UI_XAML_UWP_XBF_H */

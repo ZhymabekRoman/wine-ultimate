@@ -592,13 +592,13 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                         top_sv->vsm_is_res_ref = is_res_ref;
                         top_sv->vsm_has_val = TRUE;
                     }
-                    else if ((top_sv->tid == 0x80c8 || top_sv->tid == 0x80ca) && st) /* DoubleAnimation */
+                    else if ((top_sv->tid == XBF_TYPE_DOUBLE_ANIMATION || top_sv->tid == XBF_TYPE_DOUBLE_ANIMATION_B) && st) /* DoubleAnimation */
                     {
                         if (pid == XBF_PROP_STORYBOARD_TARGET_NAME && sbuf[0])
                             lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
                         else if (pid == XBF_PROP_STORYBOARD_TARGET_PROPERTY && sbuf[0])
                             vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
-                        else if (pid == 0x816f) /* DoubleAnimation.To */
+                        else if (pid == XBF_PROP_DOUBLE_ANIMATION_TO) /* DoubleAnimation.To */
                         {
                             lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
                             top_sv->vsm_vt = vt;
@@ -659,7 +659,7 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                                                   last_popped.vsm_val_str, last_popped.vsm_vt,
                                                   last_popped.vsm_num, last_popped.vsm_is_res_ref );
                     }
-                    else if ((last_popped.tid == 0x80c8 || last_popped.tid == 0x80ca) && st &&
+                    else if ((last_popped.tid == XBF_TYPE_DOUBLE_ANIMATION || last_popped.tid == XBF_TYPE_DOUBLE_ANIMATION_B) && st &&
                              last_popped.vsm_target[0] && last_popped.vsm_prop[0] && last_popped.vsm_has_val)
                     {
                         uwp_vsm_state_add_setter( st, last_popped.vsm_target, last_popped.vsm_prop,

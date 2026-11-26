@@ -56,6 +56,201 @@ struct command_iface;
 /* Generic event delegate: { QueryInterface, AddRef, Release, Invoke(sender, args) }. */
 struct xaml_event_handler;
 
+void uwp_elem_sync_class_flags( struct uwp_element *el )
+{
+    const WCHAR *cls, *dsk;
+    UINT64 flags = 0;
+
+    if (!el) return;
+    cls = el->class_name;
+    dsk = el->default_style_key_name;
+
+    if (wcsstr( cls, L"AutoSuggestBox" ))
+    {
+        flags |= UWP_CF_AUTO_SUGGEST_BOX;
+        if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.AutoSuggestBox" ) ||
+            !wcscmp( cls, L"Microsoft.UI.Xaml.Controls.AutoSuggestBox" ))
+            flags |= UWP_CF_AUTO_SUGGEST_BOX_EXACT;
+    }
+    if (wcsstr( cls, L"TextBox" )) flags |= UWP_CF_TEXT_BOX;
+    if (wcsstr( cls, L"ItemsRepeater" )) flags |= UWP_CF_ITEMS_REPEATER;
+    if (wcsstr( cls, L"ResponsiveItemsRepeaterList" )) flags |= UWP_CF_RESP_ITEMS_REPEATER_LIST;
+    if (wcsstr( cls, L"ScrollViewer" )) flags |= UWP_CF_SCROLL_VIEWER;
+    if (wcsstr( cls, L"ComboBox" ) && !wcsstr( cls, L"ComboBoxItem" )) flags |= UWP_CF_COMBOBOX;
+    if (!wcscmp( cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) ||
+        !wcscmp( cls, L"Windows.UI.Xaml.Controls.NavigationView" ) ||
+        !wcscmp( dsk, L"Microsoft.UI.Xaml.Controls.NavigationView" ) ||
+        !wcscmp( dsk, L"Windows.UI.Xaml.Controls.NavigationView" ))
+        flags |= UWP_CF_NAV_VIEW;
+    if (wcsstr( cls, L"NavigationView" )) flags |= UWP_CF_NAV_VIEW_ANY;
+    if (wcsstr( cls, L"NavigationViewItem" ) || wcsstr( dsk, L"NavigationViewItem" ))
+        flags |= UWP_CF_NAV_ITEM;
+    if (wcsstr( cls, L"NavigationViewItemHeader" ) || wcsstr( dsk, L"NavigationViewItemHeader" ))
+        flags |= UWP_CF_NAV_HEADER;
+    if (wcsstr( cls, L"NavigationViewItemSeparator" ) || wcsstr( dsk, L"NavigationViewItemSeparator" ))
+        flags |= UWP_CF_NAV_SEPARATOR;
+    if (wcsstr( cls, L"Card" )) flags |= UWP_CF_CARD;
+    if (wcsstr( cls, L"Shimmer" )) flags |= UWP_CF_SHIMMER;
+    if (wcsstr( cls, L"Skeleton" )) flags |= UWP_CF_SKELETON;
+    if (wcsstr( cls, L"DynamicSpotlightControl" ))
+        flags |= UWP_CF_SPOTLIGHT | UWP_CF_SPOTLIGHT_DECOR;
+    else if (wcsstr( cls, L"ScrollingSpotlightControl" ) ||
+             wcsstr( cls, L"CarrouselSpotlightControl" ) ||
+             wcsstr( cls, L"ScrollingPreviewListView" ) ||
+             wcsstr( cls, L"SpotlightHeroImage" ))
+        flags |= UWP_CF_SPOTLIGHT_DECOR;
+    if (wcsstr( cls, L"ListView" )) flags |= UWP_CF_LISTVIEW;
+    if (wcsstr( cls, L"GridView" )) flags |= UWP_CF_GRIDVIEW;
+    if (wcsstr( cls, L"Item" )) flags |= UWP_CF_HAS_ITEM;
+    if (wcsstr( cls, L"TeachingTip" )) flags |= UWP_CF_TEACHING_TIP;
+    if (wcsstr( cls, L"MenuBarItem" ))
+        flags |= UWP_CF_MENUBAR_ITEM;
+    else if (wcsstr( cls, L"MenuBar" ))
+        flags |= UWP_CF_MENUBAR;
+    if (wcsstr( cls, L"FontIcon" )) flags |= UWP_CF_FONT_ICON;
+    if (wcsstr( cls, L"SymbolIcon" )) flags |= UWP_CF_SYMBOL_ICON;
+    if (wcsstr( cls, L"PivotItem" ))
+        flags |= UWP_CF_PIVOT_ITEM;
+    else if (wcsstr( cls, L"Pivot" ))
+        flags |= UWP_CF_PIVOT;
+    if (wcsstr( cls, L"RadioButtons" )) flags |= UWP_CF_RADIO_BUTTON;
+    if (wcsstr( cls, L"ToggleButton" )) flags |= UWP_CF_TOGGLE_BUTTON;
+    if (wcsstr( cls, L"RadioMenuFlyoutItem" )) flags |= UWP_CF_RADIO_MENU_ITEM;
+    if (wcsstr( cls, L"ToggleMenuFlyoutItem" )) flags |= UWP_CF_TOGGLE_MENU_ITEM;
+    if (wcsstr( cls, L"MenuFlyoutItem" )) flags |= UWP_CF_MENU_FLYOUT_ITEM;
+    if (wcsstr( cls, L"MenuFlyoutSubItem" )) flags |= UWP_CF_MENU_FLYOUT_SUB_ITEM;
+    if (wcsstr( cls, L"DropDownButton" )) flags |= UWP_CF_DROP_DOWN_BUTTON;
+    if (wcsstr( cls, L"InfoBadge" )) flags |= UWP_CF_INFO_BADGE;
+    if (wcsstr( cls, L"Flyout" )) flags |= UWP_CF_FLYOUT;
+    if (wcsstr( cls, L"TabView" ) && !wcsstr( cls, L"TabViewItem" )) flags |= UWP_CF_TABVIEW;
+    if (wcsstr( cls, L"ToolTip" )) flags |= UWP_CF_TOOLTIP;
+    if (wcsstr( cls, L"Separator" )) flags |= UWP_CF_SEPARATOR;
+    if (wcsstr( cls, L"Accelerator" )) flags |= UWP_CF_ACCELERATOR;
+    if (wcsstr( cls, L"Template" )) flags |= UWP_CF_TEMPLATE;
+    if (wcsstr( cls, L"RichTextBlock" )) flags |= UWP_CF_RICH_TEXT_BLOCK;
+    if (wcsstr( cls, L"ConstrainedBox" )) flags |= UWP_CF_CONSTRAINED_BOX;
+    if (wcsstr( cls, L"ListBox" )) flags |= UWP_CF_LISTBOX;
+    if (wcsstr( cls, L"ItemsControl" )) flags |= UWP_CF_ITEMS_CONTROL;
+    if (wcsstr( cls, L"Paragraph" )) flags |= UWP_CF_PARAGRAPH;
+    if (wcsstr( cls, L"LineBreak" )) flags |= UWP_CF_LINE_BREAK;
+    if (wcsstr( cls, L"Run" )) flags |= UWP_CF_RUN;
+    if (wcsstr( cls, L"Span" )) flags |= UWP_CF_SPAN;
+    if (wcsstr( cls, L"Inline" )) flags |= UWP_CF_INLINE;
+    if (wcsstr( cls, L"AppTitleBar" )) flags |= UWP_CF_APP_TITLE_BAR;
+    if (wcsstr( cls, L"MediaPlayerElement" )) flags |= UWP_CF_MEDIA_PLAYER;
+    if (wcsstr( cls, L"ProgressBar" )) flags |= UWP_CF_PROGRESS_BAR;
+    if (wcsstr( cls, L"Rectangle" )) flags |= UWP_CF_RECTANGLE;
+    if (wcsstr( cls, L"Ellipse" )) flags |= UWP_CF_ELLIPSE;
+    if (wcsstr( cls, L"Brush" )) flags |= UWP_CF_BRUSH;
+    if (wcsstr( cls, L"FlipView" )) flags |= UWP_CF_FLIPVIEW;
+    if (wcsstr( cls, L"TileList" )) flags |= UWP_CF_TILE_LIST;
+    if (wcsstr( cls, L"CalculationResult" )) flags |= UWP_CF_CALC_RESULT;
+    if (wcsstr( cls, L"ContentPresenter" )) flags |= UWP_CF_CONTENT_PRESENTER;
+    if (wcsstr( cls, L"Storyboard" )) flags |= UWP_CF_STORYBOARD;
+    if (!wcsncmp( cls, L"Microsoft.UI.Xaml.", 18 )) flags |= UWP_CF_WINUI_PREFIX;
+    if (!wcsncmp( cls, L"Windows.UI.Xaml.", 16 )) flags |= UWP_CF_UWP_PREFIX;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.DataTemplate" )) flags |= UWP_CF_DATA_TEMPLATE;
+
+    el->class_flags = flags;
+}
+
+void uwp_elem_clear_text( struct uwp_element *el )
+{
+    if (!el) return;
+    if (el->text)
+    {
+        free( el->text );
+        el->text = NULL;
+    }
+    el->text_len = 0;
+    el->text_cap = 0;
+}
+
+void uwp_elem_set_text_n( struct uwp_element *el, const WCHAR *s, size_t n )
+{
+    size_t actual_n = 0;
+    size_t need;
+    WCHAR *buf;
+
+    if (!el) return;
+    if (!s || n == 0)
+    {
+        uwp_elem_clear_text( el );
+        return;
+    }
+    while (actual_n < n && s[actual_n]) actual_n++;
+    if (actual_n == 0)
+    {
+        uwp_elem_clear_text( el );
+        return;
+    }
+    if (el->text && s >= el->text && s < el->text + el->text_cap)
+    {
+        if (s != el->text) memmove( el->text, s, actual_n * sizeof(WCHAR) );
+        el->text[actual_n] = 0;
+        el->text_len = (UINT32)actual_n;
+        return;
+    }
+    need = actual_n + 1;
+    if (need > el->text_cap)
+    {
+        size_t new_cap = el->text_cap ? el->text_cap : 32;
+        while (new_cap < need) new_cap *= 2;
+        buf = realloc( el->text, new_cap * sizeof(WCHAR) );
+        if (!buf) return;
+        el->text = buf;
+        el->text_cap = (UINT32)new_cap;
+    }
+    memcpy( el->text, s, actual_n * sizeof(WCHAR) );
+    el->text[actual_n] = 0;
+    el->text_len = (UINT32)actual_n;
+}
+
+void uwp_elem_set_text( struct uwp_element *el, const WCHAR *s )
+{
+    if (!el) return;
+    if (!s || !s[0])
+    {
+        uwp_elem_clear_text( el );
+        return;
+    }
+    uwp_elem_set_text_n( el, s, wcslen( s ) );
+}
+
+void uwp_elem_append_text( struct uwp_element *el, const WCHAR *s )
+{
+    size_t cur_len, add_len, need;
+    size_t alias_off = 0;
+    BOOL is_alias = FALSE;
+
+    if (!el || !s || !s[0]) return;
+    cur_len = el->text ? wcslen( el->text ) : 0;
+    add_len = wcslen( s );
+    if (el->text && s >= el->text && s < el->text + el->text_cap)
+    {
+        is_alias = TRUE;
+        alias_off = (size_t)(s - el->text);
+    }
+    need = cur_len + add_len + 1;
+    if (need > el->text_cap)
+    {
+        size_t new_cap = el->text_cap ? el->text_cap : 32;
+        WCHAR *buf;
+        while (new_cap < need) new_cap *= 2;
+        buf = realloc( el->text, new_cap * sizeof(WCHAR) );
+        if (!buf) return;
+        el->text = buf;
+        el->text_cap = (UINT32)new_cap;
+        if (is_alias) s = el->text + alias_off;
+    }
+    if (is_alias)
+        memmove( el->text + cur_len, s, add_len * sizeof(WCHAR) );
+    else
+        memcpy( el->text + cur_len, s, add_len * sizeof(WCHAR) );
+    el->text[cur_len + add_len] = 0;
+    el->text_len = (UINT32)(cur_len + add_len);
+}
+
 static void register_uwp_elem( struct uwp_element *el )
 {
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
@@ -545,7 +740,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IToggleButton_iface;
     else if (IsEqualGUID( iid, &IID_IToggleMenuFlyoutItem_UWP ))
     {
-        if (wcsstr( impl->class_name, L"ToggleMenuFlyoutItem" ) || wcsstr( impl->class_name, L"RadioMenuFlyoutItem" ))
+        if (impl->class_flags & (UWP_CF_TOGGLE_MENU_ITEM | UWP_CF_RADIO_MENU_ITEM))
             *out = &impl->IToggleMenuFlyoutItem_iface;
     }
     else if (IsEqualGUID( iid, &IID_IRadioButtons_WinUI ))
@@ -565,7 +760,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IPanel_iface;
     else if (IsEqualGUID( iid, &IID_IMenuFlyoutSubItem_UWP ))
     {
-        if (wcsstr( impl->class_name, L"MenuFlyoutSubItem" ))
+        if (impl->class_flags & UWP_CF_MENU_FLYOUT_SUB_ITEM)
             *out = &impl->IMenuFlyoutSubItem_iface;
     }
     else if (IsEqualGUID( iid, &IID_IUIElement4_Real_UWP ) ||
@@ -588,12 +783,12 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->ICommand_iface;
     else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem_UWP ))
     {
-        if (wcsstr( impl->class_name, L"MenuFlyoutItem" ))
+        if (impl->class_flags & UWP_CF_MENU_FLYOUT_ITEM)
             *out = &impl->IMenuFlyoutItem_iface;
     }
     else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem3_UWP ))
     {
-        if (wcsstr( impl->class_name, L"MenuFlyoutItem" ))
+        if (impl->class_flags & UWP_CF_MENU_FLYOUT_ITEM)
             *out = &impl->IMenuFlyoutItem3_iface;
     }
     else if (IsEqualGUID( iid, &IID_IMenuFlyout2_Real_UWP ))
@@ -604,7 +799,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     }
     else if (IsEqualGUID( iid, &IID_IAutoSuggestBox2_Real_UWP ))
     {
-        if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
+        if (uwp_is_autosuggest( impl ))
             *out = &impl->IAutoSuggestBox2_iface;
         else
             *out = &impl->ITextBlock_iface;
@@ -612,7 +807,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IContentDialog_UWP ) ||
              IsEqualGUID( iid, &IID_IContentDialog_UWP_Alt ))
     {
-        if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
+        if (uwp_is_autosuggest( impl ))
             *out = &impl->IAutoSuggestBox_iface;
         else
             *out = &impl->IContentDialog_iface;
@@ -778,14 +973,14 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
               wcsstr( impl->class_name, L".Controls.ContentFrame" )))
         *out = &impl->IFrame5_iface;
     else if (IsEqualGUID( iid, &IID_IMediaPlayerElement_UWP ) &&
-             wcsstr( impl->class_name, L"MediaPlayerElement" ))
+             (impl->class_flags & UWP_CF_MEDIA_PLAYER))
         *out = &impl->IMediaPlayerElement_iface;
     else if ((IsEqualGUID( iid, &IID_INavigationTransitionInfo_UWP ) ||
               IsEqualGUID( iid, &IID_IEntranceNavigationTransitionInfo_UWP )) &&
              wcsstr( impl->class_name, L"NavigationTransitionInfo" ))
         *out = &impl->IStyle_iface; /* INavigationTransitionInfo / IEntranceNavigationTransitionInfo */
     else if (IsEqualGUID( iid, &IID_IFlyoutBase5_UWP ) &&
-             wcsstr( impl->class_name, L"Flyout" ))
+             uwp_is_flyout( impl ))
         *out = &impl->IStyle_iface; /* IFlyoutBase5 */
     else if (IsEqualGUID( iid, &IID_IImage2_UWP ) &&
              wcsstr( impl->class_name, L"Image" ))
@@ -862,7 +1057,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                  IsEqualGUID( iid, &IID_IListView_UWP ) ||
                  IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
                  (IsEqualGUID( iid, &IID_IScrollAnchorProvider_UWP ) &&
-                  (impl->kind == UWP_KIND_SCROLL_VIEWER || wcsstr( impl->class_name, L"ScrollViewer" ))) ||
+                  (impl->kind == UWP_KIND_SCROLL_VIEWER || uwp_is_scroll_viewer( impl ))) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
                  IsEqualGUID( iid, &IID_IBitmapImage3_UWP ) ||
@@ -1830,6 +2025,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->accel_enabled = TRUE;
     lstrcpynW( impl->class_name, class_name ? class_name : L"Windows.UI.Xaml.FrameworkElement", ARRAY_SIZE(impl->class_name) );
     impl->kind = classify_uwp_class( impl->class_name );
+    uwp_elem_sync_class_flags( impl );
     if (impl->kind == UWP_KIND_PAGE) g_last_created_page = impl;
     impl->grid_row_span = 1;
     impl->grid_col_span = 1;
@@ -1843,7 +2039,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->v_align = 3; /* Stretch */
     impl->font_size = 16.0;
     impl->text_align = 1; /* Left */
-    impl->text_wrapping = wcsstr( impl->class_name, L"RichTextBlock" ) ? 2 : 1; /* RichTextBlock defaults to Wrap */
+    impl->text_wrapping = uwp_is_rich_text_block( impl ) ? 2 : 1; /* RichTextBlock defaults to Wrap */
     impl->selected_index = -1;
     impl->hovered_dropdown_idx = -1;
     impl->nav_open_pane_length = 280.0;
@@ -1913,7 +2109,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
         *instance = &impl->IColumnDefinition_iface;
     else if (impl->kind == UWP_KIND_CONTENT_CONTROL || impl->kind == UWP_KIND_USER_CONTROL || impl->kind == UWP_KIND_PAGE)
         *instance = &impl->IContentControl_iface;
-    else if (impl->kind == UWP_KIND_ACCELERATOR || wcsstr( impl->class_name, L"Accelerator" ))
+    else if (impl->kind == UWP_KIND_ACCELERATOR || uwp_is_accelerator( impl ))
         *instance = &impl->IKeyboardAccelerator_iface;
     else if (impl->kind == UWP_KIND_XAML_COMMAND || wcsstr( impl->class_name, L"XamlUICommand" ))
         *instance = &impl->IXamlUICommand_iface;
@@ -2142,6 +2338,7 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                 {
                     lstrcpynW( page_el->class_name, name, (int)len + 1 );
                     page_el->class_name[len] = 0;
+                    uwp_elem_sync_class_flags( page_el );
                 }
                 new_content = page_el->outer ? page_el->outer : &page_el->IInspectable_iface;
                 IInspectable_AddRef( new_content );

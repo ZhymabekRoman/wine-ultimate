@@ -52,26 +52,26 @@ static HRESULT WINAPI uwp_cc_get_Content( void *iface, void **out )
             {
                 *out = ch->outer;
                 IInspectable_AddRef( (IInspectable *)*out );
-                if (g_in_tap_diag) WARN( "TAP uwp_cc_get_Content(%s) -> outer %p\n", debugstr_w(impl->text), *out );
+                if (g_in_tap_diag) WARN( "TAP uwp_cc_get_Content(%s) -> outer %p\n", debugstr_w(uwp_elem_text( impl )), *out );
                 return S_OK;
             }
         }
-        if (impl->text[0] && !uwp_elem_from_any( impl->content ))
+        if (uwp_has_text( impl ) && !uwp_elem_from_any( impl->content ))
         {
             WCHAR ub[8] = {0};
             if (!uwp_unbox_string( impl->content, ub, ARRAY_SIZE(ub) ))
             {
-                *out = box_string_value( impl->text );
+                *out = box_string_value( uwp_elem_text( impl ) );
                 return S_OK;
             }
         }
         *out = impl->content;
         IInspectable_AddRef( (IInspectable *)*out );
     }
-    else if (impl && impl->text[0])
+    else if (uwp_has_text( impl ))
     {
-        *out = box_string_value( impl->text );
-        if (g_in_tap_diag) WARN( "TAP uwp_cc_get_Content(%s) -> boxed %p\n", debugstr_w(impl->text), *out );
+        *out = box_string_value( uwp_elem_text( impl ) );
+        if (g_in_tap_diag) WARN( "TAP uwp_cc_get_Content(%s) -> boxed %p\n", debugstr_w(uwp_elem_text( impl )), *out );
     }
     return S_OK;
 }
@@ -93,11 +93,11 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     }
     else if (uwp_unbox_string( val, str_buf, ARRAY_SIZE(str_buf) ))
     {
-        if (wcsstr( impl->class_name, L"ToolTip" ))
+        if (uwp_is_tooltip( impl ))
             return S_OK;
         if (!wcscmp( str_buf, L"SettingsButtonName" ) || !wcscmp( impl->name, L"SettingsItem" ))
         {
-            impl->text[0] = 0;
+            uwp_elem_clear_text( impl );
             if (!wcscmp( impl->name, L"SettingsItem" ))
                 impl->visibility = 1;
             return S_OK;
@@ -105,7 +105,7 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
         impl->content_kind = UWP_CONTENT_TEXT;
         if (str_buf[0])
         {
-            lstrcpynW( impl->text, str_buf, ARRAY_SIZE(impl->text) );
+            uwp_elem_set_text( impl, str_buf );
             TRACE( "uwp_cc_put_Content string on %s (%s) -> %s\n",
                    debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_buf) );
         }
@@ -148,7 +148,7 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
                                             str_buf, ARRAY_SIZE(str_buf), 2 ) && str_buf[0])
         {
             impl->content_kind = UWP_CONTENT_TEXT;
-            lstrcpynW( impl->text, str_buf, ARRAY_SIZE(impl->text) );
+            uwp_elem_set_text( impl, str_buf );
             TRACE( "uwp_cc_put_Content vm-string on %s (%s) -> %s\n",
                    debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_buf) );
         }
@@ -171,7 +171,7 @@ HRESULT WINAPI uwp_btn_put_Command( void *iface, void *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return S_OK;
-    if (wcsstr( impl->class_name, L"Card" ))
+    if (uwp_is_card( impl ))
         WARN( "uwp_btn_put_Command on %s impl=%p val=%p\n", debugstr_w(impl->class_name), impl, val );
     if (impl->command) IInspectable_Release( impl->command );
     impl->command = (IInspectable *)val;
@@ -190,7 +190,7 @@ HRESULT WINAPI uwp_btn_put_CommandParameter( void *iface, void *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return S_OK;
-    if (wcsstr( impl->class_name, L"Card" ))
+    if (uwp_is_card( impl ))
         WARN( "uwp_btn_put_CommandParameter on %s impl=%p val=%p\n", debugstr_w(impl->class_name), impl, val );
     if (impl->command_param) IInspectable_Release( impl->command_param );
     impl->command_param = (IInspectable *)val;
@@ -202,7 +202,7 @@ HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationT
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (tok) tok->value = 1;
     if (!impl || !handler) return S_OK;
-    if (wcsstr( impl->class_name, L"Card" ))
+    if (uwp_is_card( impl ))
         WARN( "uwp_btn_add_Click on %s impl=%p handler=%p\n", debugstr_w(impl->class_name), impl, handler );
     if (xaml_vec_grow( (void **)&impl->click_handlers, &impl->click_cap, impl->click_cnt + 1, sizeof(*impl->click_handlers), 8 ))
     {
@@ -376,7 +376,7 @@ HRESULT WINAPI uwp_tb_get_Inlines( void *iface, void **out )
         if (impl->inlines_coll)
         {
             struct uwp_vec_view *v = CONTAINING_RECORD( impl->inlines_coll, struct uwp_vec_view, IInspectable_iface );
-            v->runtime_class = wcsstr( impl->class_name, L"RichTextBlock" )
+            v->runtime_class = uwp_is_rich_text_block( impl )
                 ? L"Windows.UI.Xaml.Documents.BlockCollection"
                 : L"Windows.UI.Xaml.Documents.InlineCollection";
         }
@@ -389,7 +389,7 @@ HRESULT WINAPI uwp_tb_get_Inlines( void *iface, void **out )
 HRESULT WINAPI uwp_tb_get_Text( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    const WCHAR *s = impl ? impl->text : L"";
+    const WCHAR *s = uwp_elem_text( impl );
     return WindowsCreateString( s, wcslen(s), out );
 }
 HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val )
@@ -399,11 +399,11 @@ HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val )
     if (impl)
     {
         if (s && wcsstr( s, L"Ln -" ))
-            lstrcpynW( impl->text, L"  Ln 1, Col 1", ARRAY_SIZE(impl->text) );
+            uwp_elem_set_text( impl, L"  Ln 1, Col 1" );
         else
-            lstrcpynW( impl->text, s ? s : L"", ARRAY_SIZE(impl->text) );
+            uwp_elem_set_text( impl, s );
         TRACE( "ITextBlock::put_Text on %s (%s) -> %s\n",
-               debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(impl->text) );
+               debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(uwp_elem_text( impl )) );
         {
             struct uwp_element *p;
             int hop;
@@ -1163,7 +1163,7 @@ static unsigned int uwp_sv_descendant_repeater_items_count( struct uwp_element *
     unsigned int best = 0, cnt;
     int i;
     if (!el || depth > 14) return 0;
-    if (wcsstr( el->class_name, L"ItemsRepeater" ) &&
+    if (uwp_is_items_repeater( el ) &&
         !wcsstr( el->name, L"MenuItems" ) && !wcsstr( el->name, L"FooterMenuItems" ))
     {
         for (i = 0; i < el->dp_cnt; i++)
@@ -1585,7 +1585,7 @@ static HRESULT WINAPI uwp_fe7_add_EffectiveViewportChanged( IInspectable *iface,
 static HRESULT WINAPI uwp_fe7_remove_EffectiveViewportChanged( IInspectable *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IFrameworkElement7_iface );
-    if (wcsstr( impl->class_name, L"ItemsRepeater" ))
+    if (uwp_is_items_repeater( impl ))
         WARN( "EVC_REM %s (%s) tok=%lld\n", debugstr_w(impl->class_name), debugstr_w(impl->name), (long long)tok.value );
     if (tok.value >= 1 && tok.value <= (INT64)impl->evc_cnt)
     {
@@ -1795,6 +1795,7 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
 
     if (inst) el->provider_inst = (IInspectable *)inst;
     lstrcpynW( el->class_name, full_name, ARRAY_SIZE(el->class_name) );
+    uwp_elem_sync_class_flags( el );
     if (!el->children_coll && !el->content)
         uwp_populate_element_from_pri_xbf( el, short_name );
 
@@ -2132,37 +2133,33 @@ struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR
         struct uwp_element *hit = uwp_find_button_by_text( uwp_elem_from_any( el->content ), text );
         if (hit) return hit;
     }
-    if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) && el->text[0])
+    if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) && uwp_has_text( el ))
     {
         WCHAR tmp[64];
         const WCHAR *disp = uwp_format_display_label( el, tmp, ARRAY_SIZE(tmp) );
-        if (!lstrcmpiW( el->text, text ) || (disp && disp[0] && !lstrcmpiW( disp, text )))
+        if (!lstrcmpiW( uwp_elem_text( el ), text ) || (disp && disp[0] && !lstrcmpiW( disp, text )))
             return el;
     }
     return NULL;
 }
 
-static BOOL uwp_is_textbox( const struct uwp_element *el )
+static BOOL uwp_is_focusable_textbox( const struct uwp_element *el )
 {
     if (!el || el->visibility != 0 || !el->is_enabled) return FALSE;
-    return wcsstr( el->class_name, L"TextBox" ) != NULL ||
-           wcsstr( el->class_name, L"AutoSuggestBox" ) != NULL ||
-           wcsstr( el->name, L"SearchBox" ) != NULL ||
-           wcsstr( el->name, L"SuggestBox" ) != NULL;
+    return uwp_is_text_input( el );
 }
 
 struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0) return NULL;
-    if (el->has_bounds && wcsstr( el->class_name, L"ScrollViewer" ) &&
+    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
         (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
         return NULL;
 
     if (el->has_bounds &&
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
-        (!wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.AutoSuggestBox" ) ||
-         !wcscmp( el->class_name, L"Microsoft.UI.Xaml.Controls.AutoSuggestBox" )) &&
+        uwp_is_exact_autosuggest( el ) &&
         el->is_enabled)
         return el;
 
@@ -2187,7 +2184,7 @@ struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
     if (el->has_bounds &&
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
-        uwp_is_textbox( el ))
+        uwp_is_focusable_textbox( el ))
         return el;
 
     return NULL;
@@ -2196,9 +2193,8 @@ struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
 void uwp_fire_asb_recursive( struct uwp_element *el, const WCHAR *text, BOOL is_submit )
 {
     if (!el) return;
-    if (text && el->text != text && (wcsstr( el->class_name, L"AutoSuggestBox" ) || wcsstr( el->class_name, L"TextBox" ) ||
-                                     wcsstr( el->name, L"SearchBox" ) || wcsstr( el->name, L"SuggestBox" )))
-        lstrcpynW( el->text, text, ARRAY_SIZE(el->text) );
+    if (text && el->text != text && uwp_is_text_input( el ))
+        uwp_elem_set_text( el, text );
     if (is_submit)
         uwp_asb_fire_query_submitted( el );
     else
@@ -2237,7 +2233,7 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y );
 struct uwp_element *uwp_hit_test_tabview( struct uwp_element *el, int x, int y )
 {
     if (!el || !el->has_bounds || el->visibility != 0) return NULL;
-    if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
+    if (uwp_is_tabview( el ))
     {
         if (x >= el->bounds.left && x < el->bounds.right &&
             y >= el->bounds.top && y < el->bounds.bottom)
