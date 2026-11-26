@@ -1428,28 +1428,10 @@ void uwp_realize_deferred_entry( struct uwp_defer_entry *de )
         uwp_vsm_invalidate_eval_chain( created );
         {
             struct uwp_element *root_el = uwp_elem_from_any( de->root_component );
-            if (root_el && root_el->loaded_fired && root_el->loading_cnt > 0)
+            if (root_el && root_el->loaded_fired && UWP_EV_CNT( root_el, loading_reg ) > 0)
             {
                 IInspectable *sender = root_el->outer ? root_el->outer : &root_el->IInspectable_iface;
-                int i;
-                for (i = 0; i < root_el->loading_cnt; i++)
-                {
-                    if (root_el->loading_handlers[i])
-                    {
-                        struct xaml_event_handler *h = (struct xaml_event_handler *)root_el->loading_handlers[i];
-                        TRACE( "Re-firing Loading handler[%d] on %s (%s) after deferred realize\n",
-                               i, debugstr_w(root_el->class_name), debugstr_w(root_el->name) );
-                        __TRY
-                        {
-                            h->lpVtbl->Invoke( h, sender, NULL );
-                        }
-                        __EXCEPT_ALL
-                        {
-                            WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
-                        }
-                        __ENDTRY;
-                    }
-                }
+                uwp_fire_event_registry( &root_el->events->loading_reg, sender, NULL, "Loading(defer)" );
             }
         }
         uwp_invalidate_window();

@@ -59,7 +59,8 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
             SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)impl->binding_connector, &IID_IDTE, &dte )) && dte)
             IUnknown_Release( (IUnknown *)dte );
         WARN( "Card DC(%p) dc=%p dc_cnt=%d bc=%p dte=%p clicks=%d cmd=%p\n",
-              impl, dc, impl->dc_cnt, impl->binding_connector, dte, impl->click_cnt, impl->command );
+              impl, dc, UWP_EV_CNT( impl, dc_reg ), impl->binding_connector, dte,
+              UWP_EV_CNT( impl, click_reg ), impl->command );
     }
 
     if (dc)
@@ -139,25 +140,18 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
                                    impl->xaml_bindings[i].path, dc );
     }
 
-    if (dc != old_dc)
+    if (dc != old_dc && UWP_EV_CNT( impl, dc_reg ) > 0)
     {
-        for (i = 0; i < impl->dc_cnt; i++)
+        struct uwp_dc_args *args = calloc( 1, sizeof(*args) );
+        if (args)
         {
-            if (impl->dc_handlers[i])
-            {
-                struct uwp_dc_args *args = calloc( 1, sizeof(*args) );
-                if (args)
-                {
-                    IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dc_handlers[i];
-                    args->vtbl = dc_args_vtbl;
-                    args->ref = 1;
-                    args->new_val = dc;
-                    if (dc) IInspectable_AddRef( dc );
-                    h->lpVtbl->Invoke( h, sender, args );
-                    dc_args_Release( args );
-                }
-            }
+            IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+            args->vtbl = dc_args_vtbl;
+            args->ref = 1;
+            args->new_val = dc;
+            if (dc) IInspectable_AddRef( dc );
+            uwp_fire_event_registry( &impl->events->dc_reg, sender, (IInspectable *)args, "DataContextChanged" );
+            dc_args_Release( args );
         }
     }
 
@@ -190,7 +184,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         return;
     if (!el->template_inflated)
         uwp_inflate_control_template( el );
-    if (el->named_cnt > 0 || el->size_changed_cnt > 0 || el->template_root != NULL)
+    if (el->named_cnt > 0 || UWP_EV_CNT( el, size_changed_reg ) > 0 || el->template_root != NULL)
         has_children = TRUE;
     /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
      * has actually been inflated into the control's visual tree (except WinUI
@@ -230,132 +224,82 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
 
 void uwp_fire_size_and_layout_changed( struct uwp_element *el )
 {
-    int i;
     float prev_w = 0.0f, prev_h = 0.0f;
     if (!el) return;
-    if (el->size_changed_cnt <= 0 && el->layout_updated_cnt <= 0) return;
+    if (UWP_EV_CNT( el, size_changed_reg ) == 0 && UWP_EV_CNT( el, layout_updated_reg ) == 0) return;
     if (el->actual_w <= 0.0 || el->actual_h <= 0.0) return;
     uwp_apply_template_if_needed( el );
-    if (el->size_changed_cnt > 0 && (el->actual_w != el->last_sc_w || el->actual_h != el->last_sc_h))
+    if (UWP_EV_CNT( el, size_changed_reg ) > 0 && (el->actual_w != el->last_sc_w || el->actual_h != el->last_sc_h))
     {
-        IInspectable * volatile sender = el->outer ? el->outer : &el->IInspectable_iface;
-        volatile int cnt = el->size_changed_cnt;
+        IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
         prev_w = g_sc_new_w;
         prev_h = g_sc_new_h;
         g_sc_new_w = (float)el->actual_w;
         g_sc_new_h = (float)el->actual_h;
         el->last_sc_w = el->actual_w;
         el->last_sc_h = el->actual_h;
-        for (i = 0; i < cnt && i < el->size_changed_cnt; i++)
-        {
-            struct xaml_event_handler * volatile h = (struct xaml_event_handler *)el->size_changed_handlers[i];
-            if (h)
-            {
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, sender, (IInspectable *)&uwp_sc_args_obj );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
-                }
-                __ENDTRY;
-            }
-        }
+        uwp_fire_event_registry( &el->events->size_changed_reg, sender, (IInspectable *)&uwp_sc_args_obj, "SizeChanged" );
         g_sc_new_w = prev_w;
         g_sc_new_h = prev_h;
     }
-    if (el->layout_updated_cnt > 0)
-    {
-        int cnt = el->layout_updated_cnt;
-        for (i = 0; i < cnt && i < el->layout_updated_cnt; i++)
-        {
-            if (el->layout_updated_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->layout_updated_handlers[i];
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, NULL, NULL );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
-                }
-                __ENDTRY;
-            }
-        }
-    }
-    g_sc_new_w = prev_w;
-    g_sc_new_h = prev_h;
+    if (UWP_EV_CNT( el, layout_updated_reg ) > 0)
+        uwp_fire_event_registry( &el->events->layout_updated_reg, NULL, NULL, "LayoutUpdated" );
 }
 
 void uwp_fire_loaded_tree( struct uwp_element *el )
 {
-    int i;
     if (!el) return;
 
     uwp_apply_template_if_needed( el );
 
-    if (!el->loaded_fired && el->loading_cnt > 0)
+    if (!el->loaded_fired && UWP_EV_CNT( el, loading_reg ) > 0)
     {
         IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
-        for (i = 0; i < el->loading_cnt; i++)
-        {
-            if (el->loading_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->loading_handlers[i];
-                TRACE( "Firing Loading handler[%d] on %s (%s)\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, sender, NULL );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "Loading handler[%d] on %s (%s) threw\n",
-                          i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                }
-                __ENDTRY;
-            }
-        }
+        uwp_fire_event_registry( &el->events->loading_reg, sender, NULL, "Loading" );
     }
 
     el->loaded_fired = TRUE;
-    if (el->loaded_fired_cnt < el->loaded_cnt)
+    if (el->events && el->events->loaded_reg.count > 0 &&
+        el->events->loaded_reg.next_token > el->events->loaded_fired_tok)
     {
-        IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
-        int start = el->loaded_fired_cnt;
-        el->loaded_fired_cnt = el->loaded_cnt;
-        for (i = start; i < el->loaded_cnt; i++)
+        void **handlers = NULL;
+        INT64 max_tok = el->events->loaded_fired_tok;
+        unsigned int hi, cnt = xaml_event_registry_snapshot_after(
+            &el->events->loaded_reg, el->events->loaded_fired_tok, &handlers, &max_tok );
+        el->events->loaded_fired_tok = max_tok;
+        if (cnt > 0)
         {
-            if (el->loaded_handlers[i])
+            IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
+            for (hi = 0; hi < cnt; hi++)
             {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->loaded_handlers[i];
+                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
                 IInspectable *args = (IInspectable *)g_routed_args();
-                TRACE( "Firing Loaded handler[%d] on %s (%s)\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name) );
+                TRACE( "Firing Loaded handler[%u] on %s (%s)\n",
+                       hi, debugstr_w(el->class_name), debugstr_w(el->name) );
                 __TRY
                 {
                     HRESULT lhr = h->lpVtbl->Invoke( h, sender, args );
                     if (FAILED(lhr))
-                        WARN( "Loaded handler[%d] on %s (%s) returned hr %#lx\n",
-                              i, debugstr_w(el->class_name), debugstr_w(el->name), lhr );
+                        WARN( "Loaded handler[%u] on %s (%s) returned hr %#lx\n",
+                              hi, debugstr_w(el->class_name), debugstr_w(el->name), lhr );
                 }
                 __EXCEPT_ALL
                 {
                     struct uwp_element *se = uwp_elem_from_any( sender );
-                    WARN( "Loaded handler[%d] on %s (%s) threw exception (sender=%s args=%s)\n",
-                          i, debugstr_w(el->class_name), debugstr_w(el->name),
+                    WARN( "Loaded handler[%u] on %s (%s) threw exception (sender=%s args=%s)\n",
+                          hi, debugstr_w(el->class_name), debugstr_w(el->name),
                           se ? debugstr_w( se->class_name ) : "\"?\"",
                           debugstr_w( g_routed_args_el ? g_routed_args_el->class_name : L"?" ) );
                 }
                 __ENDTRY;
                 if (args) IInspectable_Release( args );
+                IUnknown_Release( (IUnknown *)h );
             }
+            free( handlers );
         }
         /* EVC is fired during Arrange (uwp_fire_evc_if_needed) once Measure has run. */
     }
-    if (el->size_changed_cnt > 0 && el->actual_w > 0.0 && el->actual_h > 0.0 &&
+    if (UWP_EV_CNT( el, size_changed_reg ) > 0 && el->actual_w > 0.0 && el->actual_h > 0.0 &&
         (el->actual_w != el->last_sc_w || el->actual_h != el->last_sc_h))
     {
         IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
@@ -364,62 +308,24 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
         g_sc_new_h = (float)el->actual_h;
         el->last_sc_w = el->actual_w;
         el->last_sc_h = el->actual_h;
-        for (i = 0; i < el->size_changed_cnt; i++)
-        {
-            if (el->size_changed_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->size_changed_handlers[i];
-                TRACE( "Firing SizeChanged handler[%d] on %s (%s) w=%.0f h=%.0f\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name), el->actual_w, el->actual_h );
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, sender, (IInspectable *)&uwp_sc_args_obj );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "SizeChanged handler[%d] on %s threw exception\n", i, debugstr_w(el->class_name) );
-                }
-                __ENDTRY;
-            }
-        }
+        uwp_fire_event_registry( &el->events->size_changed_reg, sender, (IInspectable *)&uwp_sc_args_obj, "SizeChanged" );
         g_sc_new_w = prev_w;
         g_sc_new_h = prev_h;
     }
-    if (el->layout_updated_cnt > 0)
-    {
-        int cnt = el->layout_updated_cnt;
-        for (i = 0; i < cnt && i < el->layout_updated_cnt; i++)
-        {
-            if (el->layout_updated_handlers[i])
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)el->layout_updated_handlers[i];
-                TRACE( "Firing LayoutUpdated handler[%d] on %s (%s) w=%.0f h=%.0f\n",
-                       i, debugstr_w(el->class_name), debugstr_w(el->name), el->actual_w, el->actual_h );
-                IUnknown_AddRef( (IUnknown *)h );
-                __TRY
-                {
-                    h->lpVtbl->Invoke( h, NULL, NULL );
-                }
-                __EXCEPT_ALL
-                {
-                    WARN( "LayoutUpdated handler[%d] on %s threw exception\n", i, debugstr_w(el->class_name) );
-                }
-                __ENDTRY;
-                IUnknown_Release( (IUnknown *)h );
-            }
-        }
-    }
+    if (UWP_EV_CNT( el, layout_updated_reg ) > 0)
+        uwp_fire_event_registry( &el->events->layout_updated_reg, NULL, NULL, "LayoutUpdated" );
 
     /* NavigationView raises SelectionChanged/ItemInvoked once after its own
      * Loaded handlers so the app's navigation handler populates the content
      * Frame (ContentFrame1.Navigate in Clock's MainPage) before we recurse. */
-    if (!el->nav_fired && (el->class_flags2 & UWP_CF2_NAV_VIEW_CTRL))
+    if ((el->class_flags2 & UWP_CF2_NAV_VIEW_CTRL) && (!el->nav || !el->nav->nav_fired))
     {
+        struct uwp_nav_ext *nav = uwp_elem_ensure_nav( el );
         struct uwp_element *item = uwp_nav_find_item( el, 0 );
         IInspectable *item_obj = item ? (item->outer ? item->outer : &item->IInspectable_iface) : NULL;
-        el->nav_fired = TRUE;
-        uwp_nav_fire( el, &el->nav_sel_changed_reg, item_obj );
-        uwp_nav_fire( el, &el->nav_item_invoked_reg, item_obj );
+        if (nav) nav->nav_fired = TRUE;
+        uwp_nav_fire( el, UWP_EV_REG( el, nav_sel_changed_reg ), item_obj );
+        uwp_nav_fire( el, UWP_EV_REG( el, nav_item_invoked_reg ), item_obj );
     }
 
     if (el->content)

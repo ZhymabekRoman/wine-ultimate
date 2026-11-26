@@ -156,8 +156,28 @@ static ULONG WINAPI uwp_vec_Release( IInspectable *iface )
 {
     struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
     ULONG r = InterlockedDecrement( &v->ref );
-    if (!r) v->ref = 1;
+    if (!r)
+    {
+        unsigned int i;
+        if (v->owner)
+        {
+            v->ref = 1;
+            return 0;
+        }
+        for (i = 0; i < v->count; i++)
+            if (v->items[i]) IInspectable_Release( v->items[i] );
+        free( v->items );
+        free( v );
+    }
     return r;
+}
+
+void uwp_vec_detach_owner( IInspectable *vec, struct uwp_element *owner )
+{
+    struct uwp_vec_view *v;
+    if (!vec) return;
+    v = CONTAINING_RECORD( vec, struct uwp_vec_view, IInspectable_iface );
+    if (v->owner == owner) v->owner = NULL;
 }
 HRESULT WINAPI uwp_vec_GetAt( void *iface, unsigned int idx, void **item )
 {
@@ -221,6 +241,8 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
     v->count++;
     if ((child_el = uwp_elem_from_any( item )) != NULL && v->owner)
     {
+        v->owner->in_visual_tree = TRUE;
+        child_el->in_visual_tree = TRUE;
         if (child_el->kind == UWP_KIND_ACCELERATOR || uwp_is_accelerator( child_el ))
         {
             child_el->accel_target = v->owner;
@@ -583,8 +605,8 @@ static void uwp_el_fire_vector_changed( struct uwp_element *impl, int change, un
     unsigned int cnt, i;
     struct uwp_vec_changed_args *args;
     IInspectable *sender;
-    if (!impl) return;
-    cnt = xaml_event_registry_snapshot_alloc( &impl->obsvec_changed_reg, &handlers );
+    if (!impl || !impl->events) return;
+    cnt = xaml_event_registry_snapshot_alloc( &impl->events->obsvec_changed_reg, &handlers );
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
     if (!args)
@@ -621,15 +643,19 @@ static void uwp_el_fire_vector_changed( struct uwp_element *impl, int change, un
 static HRESULT WINAPI uwp_el_obsvec_add( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "uwp_el_obsvec_add on %s handler=%p\n", debugstr_w(impl->class_name), handler );
-    return xaml_event_registry_add( &impl->obsvec_changed_reg, handler, tok );
+    return xaml_event_registry_add( &ev->obsvec_changed_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_el_obsvec_rem( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->obsvec_changed_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->obsvec_changed_reg, tok );
 }
 const void *uwp_el_obsvec_vtbl[16] =
 {

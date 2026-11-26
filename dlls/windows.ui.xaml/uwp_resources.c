@@ -532,11 +532,12 @@ BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_i
 static void uwp_set_brush_element_argb( IInspectable *br, UINT32 argb )
 {
     struct uwp_element *el = uwp_elem_from_any( br );
-    if (el)
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+    if (sa)
     {
-        el->brush_argb = argb;
-        el->has_brush_argb = TRUE;
-        el->brush_opacity = (double)((argb >> 24) & 0xff) / 255.0;
+        sa->brush_argb = argb;
+        sa->has_brush_argb = TRUE;
+        sa->brush_opacity = (double)((argb >> 24) & 0xff) / 255.0;
     }
 }
 
@@ -1311,7 +1312,7 @@ IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_e
             if (ff_el && e->str_val[0])
             {
                 WCHAR face[64] = {0};
-                lstrcpynW( ff_el->font_family, e->str_val, ARRAY_SIZE(ff_el->font_family) );
+                uwp_elem_set_font_family( ff_el, e->str_val );
                 uwp_resolve_font_family( e->str_val, face, ARRAY_SIZE(face) );
             }
             e->value = (IInspectable *)ff;
@@ -1342,19 +1343,20 @@ IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_e
             struct uwp_element *st_el = uwp_elem_from_any( st );
             if (st_el)
             {
+                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( st_el );
                 lstrcpynW( st_el->name, e->key, ARRAY_SIZE(st_el->name) );
-                lstrcpynW( st_el->style_based_on, e->str_val, ARRAY_SIZE(st_el->style_based_on) );
+                if (sa) lstrcpynW( sa->style_based_on, e->str_val, ARRAY_SIZE(sa->style_based_on) );
                 st_el->template_xbf_data = e->template_xbf_data;
                 st_el->template_xbf_size = e->template_xbf_size;
                 st_el->template_sub_idx = e->template_sub_idx;
-                if (e->setter_cnt > 0 && e->setters)
+                if (sa && e->setter_cnt > 0 && e->setters)
                 {
-                    st_el->style_setters = malloc( (size_t)e->setter_cnt * sizeof(*e->setters) );
-                    if (st_el->style_setters)
+                    sa->style_setters = malloc( (size_t)e->setter_cnt * sizeof(*e->setters) );
+                    if (sa->style_setters)
                     {
-                        memcpy( st_el->style_setters, e->setters, (size_t)e->setter_cnt * sizeof(*e->setters) );
-                        st_el->style_setter_cnt = e->setter_cnt;
-                        st_el->style_setter_cap = e->setter_cnt;
+                        memcpy( sa->style_setters, e->setters, (size_t)e->setter_cnt * sizeof(*e->setters) );
+                        sa->style_setter_cnt = e->setter_cnt;
+                        sa->style_setter_cap = e->setter_cnt;
                     }
                 }
             }

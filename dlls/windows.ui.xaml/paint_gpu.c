@@ -50,16 +50,20 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
     if (!b_el) return FALSE;
 
     /* 1. LinearGradientBrush */
-    if (b_el->gradient_stops_coll || (b_el->class_flags2 & UWP_CF2_LINEAR_GRADIENT))
+    if ((b_el->style_anim && b_el->style_anim->gradient_stops_coll) || (b_el->class_flags2 & UWP_CF2_LINEAR_GRADIENT))
     {
         struct uwp_vec_view *gv = NULL;
         struct { double off; UINT32 argb; } stops[16];
         int scnt = 0, i, j;
-        float eff_op = (float)(opacity * b_el->brush_opacity);
+        float eff_op = (float)(opacity * uwp_elem_brush_opacity( b_el ));
+        float g_sx = b_el->style_anim ? b_el->style_anim->grad_start_x : 0.0f;
+        float g_sy = b_el->style_anim ? b_el->style_anim->grad_start_y : 0.0f;
+        float g_ex = b_el->style_anim ? b_el->style_anim->grad_end_x : 1.0f;
+        float g_ey = b_el->style_anim ? b_el->style_anim->grad_end_y : 1.0f;
 
-        if (b_el->gradient_stops_coll)
+        if (b_el->style_anim && b_el->style_anim->gradient_stops_coll)
         {
-            struct uwp_element *gsc_el = uwp_elem_from_any( b_el->gradient_stops_coll );
+            struct uwp_element *gsc_el = uwp_elem_from_any( b_el->style_anim->gradient_stops_coll );
             if (gsc_el)
             {
                 if (gsc_el->children_coll)
@@ -67,7 +71,7 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
             }
             else
             {
-                gv = CONTAINING_RECORD( b_el->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
+                gv = CONTAINING_RECORD( b_el->style_anim->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
             }
         }
         else if (b_el->children_coll)
@@ -82,8 +86,8 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
             {
                 struct uwp_element *gs = uwp_elem_from_any( gv->items[k] );
                 if (!gs) continue;
-                stops[scnt].off = gs->grad_stop_offset;
-                stops[scnt].argb = gs->has_brush_argb ? gs->brush_argb : 0;
+                stops[scnt].off = gs->style_anim ? gs->style_anim->grad_stop_offset : 0.0;
+                stops[scnt].argb = uwp_elem_has_brush_argb( gs ) ? uwp_elem_brush_argb( gs ) : 0;
                 scnt++;
             }
         }
@@ -111,18 +115,17 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
         {
             xaml_gpu_push_gradient_rect( (float)rc->left, (float)rc->top, (float)rc->right, (float)rc->bottom, NULL,
                                          rad, stops[0].argb, stops[1].argb,
-                                         b_el->grad_start_x, b_el->grad_start_y,
-                                         b_el->grad_end_x, b_el->grad_end_y,
+                                         g_sx, g_sy, g_ex, g_ey,
                                          (float)stops[0].off, (float)stops[1].off, eff_op );
             return TRUE;
         }
         /* Multi-stop vertical or horizontal gradient bands */
         {
-            float dx = b_el->grad_end_x - b_el->grad_start_x;
-            float dy = b_el->grad_end_y - b_el->grad_start_y;
+            float dx = g_ex - g_sx;
+            float dy = g_ey - g_sy;
             if (dx > -0.05f && dx < 0.05f && (dy > 0.05f || dy < -0.05f))
             {
-                float y_start = (float)rc->top + b_el->grad_start_y * (float)bh;
+                float y_start = (float)rc->top + g_sy * (float)bh;
                 float y_span = dy * (float)bh;
                 for (i = 0; i < scnt - 1; i++)
                 {
@@ -147,7 +150,7 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
             }
             if (dy > -0.05f && dy < 0.05f && (dx > 0.05f || dx < -0.05f))
             {
-                float x_start = (float)rc->left + b_el->grad_start_x * (float)bw;
+                float x_start = (float)rc->left + g_sx * (float)bw;
                 float x_span = dx * (float)bw;
                 for (i = 0; i < scnt - 1; i++)
                 {
@@ -168,8 +171,7 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
             }
             xaml_gpu_push_gradient_rect( (float)rc->left, (float)rc->top, (float)rc->right, (float)rc->bottom, NULL,
                                          rad, stops[0].argb, stops[scnt - 1].argb,
-                                         b_el->grad_start_x, b_el->grad_start_y,
-                                         b_el->grad_end_x, b_el->grad_end_y,
+                                         g_sx, g_sy, g_ex, g_ey,
                                          (float)stops[0].off, (float)stops[scnt - 1].off, eff_op );
             return TRUE;
         }
@@ -178,36 +180,38 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
     /* 2. ImageBrush (or CompositionSurfaceBrush) */
     {
         WCHAR uri[512] = {0};
-        if (b_el->img_source)
+        if (b_el->media && b_el->media->img_source)
         {
-            struct uwp_element *src_el = uwp_elem_from_any( b_el->img_source );
-            if (src_el && src_el->image_src[0])
-                lstrcpynW( uri, src_el->image_src, ARRAY_SIZE(uri) );
+            struct uwp_element *src_el = uwp_elem_from_any( b_el->media->img_source );
+            const WCHAR *src_s = uwp_elem_image_src( src_el );
+            if (src_s[0])
+                lstrcpynW( uri, src_s, ARRAY_SIZE(uri) );
             else
-                uwp_extract_uri_string( b_el->img_source, uri, ARRAY_SIZE(uri) );
+                uwp_extract_uri_string( b_el->media->img_source, uri, ARRAY_SIZE(uri) );
         }
-        if (!uri[0] && b_el->image_src[0])
-            lstrcpynW( uri, b_el->image_src, ARRAY_SIZE(uri) );
+        if (!uri[0] && uwp_elem_image_src( b_el )[0])
+            lstrcpynW( uri, uwp_elem_image_src( b_el ), ARRAY_SIZE(uri) );
         if (!uri[0] && b_el->comp_brush)
             uwp_extract_comp_brush_image_src( b_el->comp_brush, uri, ARRAY_SIZE(uri) );
 
         if (uri[0])
         {
-            if (wcscmp( b_el->image_src, uri ))
+            struct uwp_media_ext *bm = uwp_elem_ensure_media( b_el );
+            if (bm && wcscmp( bm->image_src, uri ))
             {
-                lstrcpynW( b_el->image_src, uri, ARRAY_SIZE(b_el->image_src) );
-                b_el->img_loaded = FALSE;
-                InterlockedExchange( &b_el->img_loading, 0 );
+                lstrcpynW( bm->image_src, uri, ARRAY_SIZE(bm->image_src) );
+                bm->img_loaded = FALSE;
+                InterlockedExchange( &bm->img_loading, 0 );
             }
             uwp_load_image_asset( b_el );
-            if (b_el->img_pixels && b_el->img_w > 0 && b_el->img_h > 0)
+            if (bm && bm->img_pixels && bm->img_w > 0 && bm->img_h > 0)
             {
                 RECT dst = *rc;
                 float uv_crop[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-                if (b_el->media_stretch == 3) /* UniformToFill */
+                if (bm->media_stretch == 3) /* UniformToFill */
                 {
                     double dst_ar = (double)bw / (double)bh;
-                    double src_ar = (double)b_el->img_w / (double)b_el->img_h;
+                    double src_ar = (double)bm->img_w / (double)bm->img_h;
                     if (src_ar > dst_ar)
                     {
                         float keep = (float)(dst_ar / src_ar);
@@ -221,18 +225,18 @@ static BOOL uwp_gpu_paint_brush_fill( ID3D11DeviceContext *ctx, struct uwp_eleme
                         uv_crop[3] = 1.0f - uv_crop[1];
                     }
                 }
-                else if (b_el->media_stretch == 2) /* Uniform */
+                else if (bm->media_stretch == 2) /* Uniform */
                 {
-                    int dw = (int)b_el->img_w, dh = (int)b_el->img_h, dx, dy;
+                    int dw = (int)bm->img_w, dh = (int)bm->img_h, dx, dy;
                     if (dw * bh > dh * bw) { dh = MulDiv( dh, bw, dw ); dw = bw; }
                     else { dw = MulDiv( dw, bh, dh ); dh = bh; }
                     dx = rc->left + (bw - dw) / 2;
                     dy = rc->top + (bh - dh) / 2;
                     SetRect( &dst, dx, dy, dx + dw, dy + dh );
                 }
-                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)b_el, b_el->img_pixels,
-                                                b_el->img_w, b_el->img_h, 0, &dst, uv_crop, rc,
-                                                rad, (float)(opacity * b_el->brush_opacity) );
+                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)b_el, bm->img_pixels,
+                                                bm->img_w, bm->img_h, 0, &dst, uv_crop, rc,
+                                                rad, (float)(opacity * uwp_elem_brush_opacity( b_el )) );
                 return TRUE;
             }
         }
@@ -268,21 +272,27 @@ static void uwp_compute_uniform_to_fill_uv( int dst_w, int dst_h, int src_w, int
 void uwp_resolve_and_load_image( struct uwp_element *el )
 {
     IInspectable *src_obj;
+    struct uwp_media_ext *m;
     if (!el) return;
-    src_obj = el->img_source ? el->img_source : el->content;
-    if (!el->image_src[0] && src_obj)
+    src_obj = (el->media && el->media->img_source) ? el->media->img_source : el->content;
+    if (!uwp_elem_image_src( el )[0] && src_obj)
     {
         struct uwp_element *src_el = uwp_elem_from_any( src_obj );
-        if (src_el && src_el->image_src[0])
+        const WCHAR *src_s = uwp_elem_image_src( src_el );
+        if (src_s[0])
         {
-            lstrcpynW( el->image_src, src_el->image_src, ARRAY_SIZE(el->image_src) );
-            el->img_loaded = FALSE;
-            InterlockedExchange( &el->img_loading, 0 );
+            m = uwp_elem_ensure_media( el );
+            if (m)
+            {
+                lstrcpynW( m->image_src, src_s, ARRAY_SIZE(m->image_src) );
+                m->img_loaded = FALSE;
+                InterlockedExchange( &m->img_loading, 0 );
+            }
         }
         else if (src_el && src_el->dp_cnt > 0 && src_el->dp_store)
         {
             int di;
-            for (di = 0; di < src_el->dp_cnt && !el->image_src[0]; di++)
+            for (di = 0; di < src_el->dp_cnt && !uwp_elem_image_src( el )[0]; di++)
             {
                 IInspectable *dv = src_el->dp_store[di].value;
                 WCHAR tmp[512] = {0};
@@ -291,9 +301,13 @@ void uwp_resolve_and_load_image( struct uwp_element *el )
                     uwp_extract_uri_string( dv, tmp, ARRAY_SIZE(tmp) );
                 if (tmp[0])
                 {
-                    lstrcpynW( el->image_src, tmp, ARRAY_SIZE(el->image_src) );
-                    el->img_loaded = FALSE;
-                    InterlockedExchange( &el->img_loading, 0 );
+                    m = uwp_elem_ensure_media( el );
+                    if (m)
+                    {
+                        lstrcpynW( m->image_src, tmp, ARRAY_SIZE(m->image_src) );
+                        m->img_loaded = FALSE;
+                        InterlockedExchange( &m->img_loading, 0 );
+                    }
                 }
             }
         }
@@ -304,32 +318,39 @@ void uwp_resolve_and_load_image( struct uwp_element *el )
                 uwp_extract_uri_string( src_obj, tmp, ARRAY_SIZE(tmp) );
             if (tmp[0])
             {
-                lstrcpynW( el->image_src, tmp, ARRAY_SIZE(el->image_src) );
-                el->img_loaded = FALSE;
-                InterlockedExchange( &el->img_loading, 0 );
+                m = uwp_elem_ensure_media( el );
+                if (m)
+                {
+                    lstrcpynW( m->image_src, tmp, ARRAY_SIZE(m->image_src) );
+                    m->img_loaded = FALSE;
+                    InterlockedExchange( &m->img_loading, 0 );
+                }
             }
         }
     }
-    if (!el->image_src[0] && wcscmp( el->placeholder, L"-no-img-" ) != 0)
+    if (!uwp_elem_image_src( el )[0] && wcscmp( uwp_elem_placeholder( el ), L"-no-img-" ) != 0)
     {
         static const WCHAR *const img_props[] =
             { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"Source", L"IconUrl", L"IconUri",
               L"TileImageUrl", L"BoxArtUrl", L"PosterUrl", L"ThumbnailUrl", L"Images", L"Image", L"Icon" };
         struct uwp_element *p;
         int hop;
-        for (p = el->parent, hop = 0; p && hop < 14 && !el->image_src[0]; p = p->parent, hop++)
+        for (p = el->parent, hop = 0; p && hop < 14 && !uwp_elem_image_src( el )[0]; p = p->parent, hop++)
         {
             int di;
             if (p->kind == UWP_KIND_PAGE || p->kind == UWP_KIND_FRAME) break;
-            for (di = 0; di < p->dp_cnt && p->dp_store && !el->image_src[0]; di++)
+            for (di = 0; di < p->dp_cnt && p->dp_store && !uwp_elem_image_src( el )[0]; di++)
             {
                 IInspectable *dv = p->dp_store[di].value;
                 struct uwp_element *bel;
                 WCHAR tmp[512] = {0};
                 if (!dv) continue;
                 bel = uwp_elem_from_any( dv );
-                if (bel && bel->image_src[0])
-                    lstrcpynW( el->image_src, bel->image_src, ARRAY_SIZE(el->image_src) );
+                if (uwp_elem_image_src( bel )[0])
+                {
+                    m = uwp_elem_ensure_media( el );
+                    if (m) lstrcpynW( m->image_src, uwp_elem_image_src( bel ), ARRAY_SIZE(m->image_src) );
+                }
                 else
                 {
                     if (!uwp_unbox_string( dv, tmp, ARRAY_SIZE(tmp) ))
@@ -337,19 +358,25 @@ void uwp_resolve_and_load_image( struct uwp_element *el )
                     if (!tmp[0])
                         uwp_vm_query_string_prop_depth( dv, img_props, ARRAY_SIZE(img_props), tmp, ARRAY_SIZE(tmp), 2 );
                     if (tmp[0] && (wcsstr( tmp, L"http://" ) || wcsstr( tmp, L"https://" ) || wcsstr( tmp, L"ms-appx://" )))
-                        lstrcpynW( el->image_src, tmp, ARRAY_SIZE(el->image_src) );
+                    {
+                        m = uwp_elem_ensure_media( el );
+                        if (m) lstrcpynW( m->image_src, tmp, ARRAY_SIZE(m->image_src) );
+                    }
                 }
             }
-            if (!el->image_src[0] && p->data_context)
+            if (!uwp_elem_image_src( el )[0] && p->data_context)
             {
                 WCHAR img_buf[512] = {0};
                 if (uwp_vm_query_string_prop_depth( p->data_context, img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
                     img_buf[0])
-                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                {
+                    m = uwp_elem_ensure_media( el );
+                    if (m) lstrcpynW( m->image_src, img_buf, ARRAY_SIZE(m->image_src) );
+                }
             }
         }
-        if (!el->image_src[0])
-            lstrcpynW( el->placeholder, L"-no-img-", ARRAY_SIZE(el->placeholder) );
+        if (!uwp_elem_image_src( el )[0])
+            uwp_elem_set_placeholder( el, L"-no-img-" );
     }
     uwp_load_image_asset( el );
 }
@@ -357,26 +384,27 @@ void uwp_resolve_and_load_image( struct uwp_element *el )
 static void paint_gpu_image( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     uwp_resolve_and_load_image( el );
-    if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+    if (el->media && el->media->img_pixels && el->media->img_w > 0 && el->media->img_h > 0)
     {
+        struct uwp_media_ext *m = el->media;
         RECT rc = el->bounds, dst = el->bounds;
         int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
-        int dw = (int)el->img_w, dh = (int)el->img_h;
+        int dw = (int)m->img_w, dh = (int)m->img_h;
         float rad = (el->corner_radius > 0.0) ? (float)el->corner_radius : 0.0f;
         float uv_crop[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         if (rad <= 0.0f && el->parent && el->parent->corner_radius > 0.0)
             rad = (float)el->parent->corner_radius;
-        if (el->media_stretch == 3) /* UniformToFill */
+        if (m->media_stretch == 3) /* UniformToFill */
         {
             uwp_compute_uniform_to_fill_uv( bw, bh, dw, dh, uv_crop );
-            xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels,
-                                            el->img_w, el->img_h, 0, &dst, uv_crop, &rc,
+            xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, m->img_pixels,
+                                            m->img_w, m->img_h, 0, &dst, uv_crop, &rc,
                                             rad, (float)el->opacity );
         }
         else
         {
             int dx, dy;
-            if (el->media_stretch != 1 && bw > 0 && bh > 0 && dw > 0 && dh > 0)
+            if (m->media_stretch != 1 && bw > 0 && bh > 0 && dw > 0 && dh > 0)
             {
                 if (dw * bh > dh * bw) { dh = MulDiv( dh, bw, dw ); dw = bw; }
                 else { dw = MulDiv( dw, bh, dh ); dh = bh; }
@@ -384,8 +412,8 @@ static void paint_gpu_image( ID3D11DeviceContext *ctx, struct uwp_element *el )
             dx = rc.left + (bw - dw) / 2;
             dy = rc.top + (bh - dh) / 2;
             SetRect( &dst, dx, dy, dx + dw, dy + dh );
-            xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels,
-                                            el->img_w, el->img_h, 0, &dst, NULL, &rc,
+            xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, m->img_pixels,
+                                            m->img_w, m->img_h, 0, &dst, NULL, &rc,
                                             rad, (float)el->opacity );
         }
     }
@@ -394,17 +422,20 @@ static void paint_gpu_image( ID3D11DeviceContext *ctx, struct uwp_element *el )
 static void paint_gpu_media( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     RECT rc = el->bounds;
+    struct uwp_media_ext *m;
     uwp_media_ensure_started( el );
-    AcquireSRWLockShared( &el->video_lock );
-    if (el->video_pixels && el->video_w > 0 && el->video_h > 0)
+    m = el->media;
+    if (!m) return;
+    AcquireSRWLockShared( &m->video_lock );
+    if (m->video_pixels && m->video_w > 0 && m->video_h > 0)
     {
         int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
-        int vw = (int)el->video_w, vh = (int)el->video_h;
+        int vw = (int)m->video_w, vh = (int)m->video_h;
         RECT dst = rc;
         float uv_crop[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
         if (bw > 0 && bh > 0 && vw > 0 && vh > 0)
         {
-            if (el->media_stretch == 3) /* UniformToFill */
+            if (m->media_stretch == 3) /* UniformToFill */
             {
                 double dst_ar = (double)bw / (double)bh;
                 double src_ar = (double)vw / (double)vh;
@@ -421,7 +452,7 @@ static void paint_gpu_media( ID3D11DeviceContext *ctx, struct uwp_element *el )
                     uv_crop[3] = 1.0f - uv_crop[1];
                 }
             }
-            else if (el->media_stretch == 2) /* Uniform */
+            else if (m->media_stretch == 2) /* Uniform */
             {
                 int dw = vw, dh = vh, dx, dy;
                 if (dw * bh > dh * bw) { dh = MulDiv( dh, bw, dw ); dw = bw; }
@@ -432,10 +463,10 @@ static void paint_gpu_media( ID3D11DeviceContext *ctx, struct uwp_element *el )
             }
         }
         xaml_gpu_push_image_uv( ctx, (UINT64)(ULONG_PTR)el | 0x4000000000000000ULL,
-                                el->video_pixels, el->video_w, el->video_h,
-                                el->video_frame_seq, &dst, uv_crop, &rc );
+                                m->video_pixels, m->video_w, m->video_h,
+                                m->video_frame_seq, &dst, uv_crop, &rc );
     }
-    ReleaseSRWLockShared( &el->video_lock );
+    ReleaseSRWLockShared( &m->video_lock );
 }
 
 static void paint_gpu_combobox( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
@@ -470,15 +501,15 @@ static void paint_gpu_combobox( ID3D11DeviceContext *ctx, struct uwp_element *el
     else if (!uwp_resolve_brush_or_color( NULL, el, L"ComboBoxForeground", 0, &fg_argb ))
         fg_argb = 0xffffffffu;
 
-    if (el->selected_item)
-        uwp_combobox_get_item_label( el, el->selected_item, label, ARRAY_SIZE(label) );
-    if (!label[0] && el->selected_index >= 0)
+    if (uwp_elem_selected_item( el ))
+        uwp_combobox_get_item_label( el, uwp_elem_selected_item( el ), label, ARRAY_SIZE(label) );
+    if (!label[0] && uwp_elem_selected_index( el ) >= 0)
     {
         IInspectable *items[256];
         int cnt = uwp_selector_get_items( el, items, ARRAY_SIZE(items) );
-        int i;
-        if (el->selected_index < cnt)
-            uwp_combobox_get_item_label( el, items[el->selected_index], label, ARRAY_SIZE(label) );
+        int i, sidx = uwp_elem_selected_index( el );
+        if (sidx < cnt)
+            uwp_combobox_get_item_label( el, items[sidx], label, ARRAY_SIZE(label) );
         for (i = 0; i < cnt; i++) IInspectable_Release( items[i] );
     }
     if (!label[0] && uwp_has_text( el ))
@@ -534,8 +565,9 @@ static void paint_gpu_shape( ID3D11DeviceContext *ctx, struct uwp_element *el )
         b_el = uwp_elem_from_any( el->fill_brush );
         if (b_el)
         {
-            if (b_el->image_src[0])
-                lstrcpynW( resolved_uri, b_el->image_src, ARRAY_SIZE(resolved_uri) );
+            const WCHAR *b_src = uwp_elem_image_src( b_el );
+            if (b_src[0])
+                lstrcpynW( resolved_uri, b_src, ARRAY_SIZE(resolved_uri) );
             else if (b_el->comp_brush)
                 uwp_extract_comp_brush_image_src( b_el->comp_brush, resolved_uri, ARRAY_SIZE(resolved_uri) );
         }
@@ -556,9 +588,9 @@ static void paint_gpu_shape( ID3D11DeviceContext *ctx, struct uwp_element *el )
                     break;
                 }
             }
-            if (b_el->image_src[0])
+            if (uwp_elem_image_src( b_el )[0])
             {
-                lstrcpynW( resolved_uri, b_el->image_src, ARRAY_SIZE(resolved_uri) );
+                lstrcpynW( resolved_uri, uwp_elem_image_src( b_el ), ARRAY_SIZE(resolved_uri) );
                 break;
             }
             if (b_el->comp_brush && uwp_extract_comp_brush_image_src( b_el->comp_brush, resolved_uri, ARRAY_SIZE(resolved_uri) ))
@@ -567,25 +599,30 @@ static void paint_gpu_shape( ID3D11DeviceContext *ctx, struct uwp_element *el )
     }
     if (!brush_painted && !resolved_uri[0] && el->ecp_visual)
         uwp_extract_visual_image_src( el->ecp_visual, resolved_uri, ARRAY_SIZE(resolved_uri) );
-    if (!brush_painted && resolved_uri[0] && wcscmp( el->image_src, resolved_uri ))
+    if (!brush_painted && resolved_uri[0] && wcscmp( uwp_elem_image_src( el ), resolved_uri ))
     {
-        lstrcpynW( el->image_src, resolved_uri, ARRAY_SIZE(el->image_src) );
-        el->img_loaded = FALSE;
-        InterlockedExchange( &el->img_loading, 0 );
+        struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+        if (m)
+        {
+            lstrcpynW( m->image_src, resolved_uri, ARRAY_SIZE(m->image_src) );
+            m->img_loaded = FALSE;
+            InterlockedExchange( &m->img_loading, 0 );
+        }
     }
-    if (!brush_painted && el->image_src[0])
+    if (!brush_painted && uwp_elem_image_src( el )[0])
     {
         uwp_load_image_asset( el );
-        if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+        if (el->media && el->media->img_pixels && el->media->img_w > 0 && el->media->img_h > 0)
         {
+            struct uwp_media_ext *m = el->media;
             RECT rc = el->bounds;
             int rw = rc.right - rc.left, rh = rc.bottom - rc.top;
             if (rw >= 600 && rh >= 120)
             {
                 float uv_crop[4];
-                uwp_compute_uniform_to_fill_uv( rw, rh, (int)el->img_w, (int)el->img_h, uv_crop );
-                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels,
-                                                el->img_w, el->img_h, 0, &rc, uv_crop, &rc,
+                uwp_compute_uniform_to_fill_uv( rw, rh, (int)m->img_w, (int)m->img_h, uv_crop );
+                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, m->img_pixels,
+                                                m->img_w, m->img_h, 0, &rc, uv_crop, &rc,
                                                 (float)el->corner_radius, (float)el->opacity );
                 xaml_gpu_push_gradient_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
                                              (float)el->corner_radius, 0xf20e1522u, 0x220e1522u,
@@ -596,7 +633,7 @@ static void paint_gpu_shape( ID3D11DeviceContext *ctx, struct uwp_element *el )
             }
             else
             {
-                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &rc, NULL );
+                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, m->img_pixels, m->img_w, m->img_h, &rc, NULL );
             }
         }
     }
@@ -780,29 +817,29 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
                 {
                     lstrcpynW( entries[entry_cnt].title, tbuf, ARRAY_SIZE(entries[0].title) );
                     entries[entry_cnt].sub[0] = 0;
-                    if (!cur->placeholder[0])
+                    if (!uwp_elem_placeholder( cur )[0])
                     {
                         static const WCHAR *const spot_desc_props[] =
                             { L"Description", L"ShortDescription", L"Subtitle", L"Content", L"CardModel", L"Product", L"Data" };
                         IInspectable *svm = (cur->content && !uwp_elem_from_any( cur->content )) ? cur->content : cur->data_context;
+                        WCHAR ph_buf[256] = {0};
                         if (svm)
                             uwp_vm_query_string_prop_depth( svm, spot_desc_props, ARRAY_SIZE(spot_desc_props),
-                                                            cur->placeholder, ARRAY_SIZE(cur->placeholder), 2 );
-                        if (!cur->placeholder[0] && nl && nl[1])
+                                                            ph_buf, ARRAY_SIZE(ph_buf), 2 );
+                        if (!ph_buf[0] && nl && nl[1])
                         {
                             const WCHAR *tab = wcschr( nl + 1, '\t' );
                             size_t slen = tab ? (size_t)(tab - (nl + 1)) : wcslen( nl + 1 );
-                            if (slen >= ARRAY_SIZE(cur->placeholder)) slen = ARRAY_SIZE(cur->placeholder) - 1;
-                            memcpy( cur->placeholder, nl + 1, slen * sizeof(WCHAR) );
-                            cur->placeholder[slen] = 0;
+                            if (slen >= ARRAY_SIZE(ph_buf)) slen = ARRAY_SIZE(ph_buf) - 1;
+                            memcpy( ph_buf, nl + 1, slen * sizeof(WCHAR) );
+                            ph_buf[slen] = 0;
                         }
-                        if (!cur->placeholder[0])
-                            lstrcpynW( cur->placeholder, L"-", ARRAY_SIZE(cur->placeholder) );
+                        uwp_elem_set_placeholder( cur, ph_buf[0] ? ph_buf : L"-" );
                     }
-                    if (wcscmp( cur->placeholder, L"-" ) != 0)
-                        lstrcpynW( entries[entry_cnt].sub, cur->placeholder, ARRAY_SIZE(entries[0].sub) );
+                    if (wcscmp( uwp_elem_placeholder( cur ), L"-" ) != 0)
+                        lstrcpynW( entries[entry_cnt].sub, uwp_elem_placeholder( cur ), ARRAY_SIZE(entries[0].sub) );
                     lstrcpynW( entries[entry_cnt].badge, entry_cnt == 0 ? L"FEATURED" : L"TRENDING", ARRAY_SIZE(entries[0].badge) );
-                    if (cur->image_src[0]) uwp_load_image_asset( cur );
+                    if (uwp_elem_image_src( cur )[0]) uwp_load_image_asset( cur );
                     entries[entry_cnt].img_el = cur;
                     entry_cnt++;
                 }
@@ -852,16 +889,17 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
             RECT hero_rc = { hx0, hy0, hx1, hy1 };
             xaml_gpu_push_rect( (float)hx0, (float)hy0, (float)hx1, (float)hy1, NULL,
                                 10.0f, cr_to_argb( RGB( 20, 28, 44 ) ), 0, 0.0f, 1.0f );
-            if (entries[0].img_el && entries[0].img_el->img_pixels &&
-                entries[0].img_el->img_w > 0 && entries[0].img_el->img_h > 0)
+            if (entries[0].img_el && entries[0].img_el->media && entries[0].img_el->media->img_pixels &&
+                entries[0].img_el->media->img_w > 0 && entries[0].img_el->media->img_h > 0)
             {
+                struct uwp_media_ext *hm = entries[0].img_el->media;
                 float uv_crop[4];
                 uwp_compute_uniform_to_fill_uv( hero_w, banner_h,
-                                                (int)entries[0].img_el->img_w,
-                                                (int)entries[0].img_el->img_h, uv_crop );
+                                                (int)hm->img_w,
+                                                (int)hm->img_h, uv_crop );
                 xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)entries[0].img_el,
-                                                entries[0].img_el->img_pixels, entries[0].img_el->img_w,
-                                                entries[0].img_el->img_h, 0, &hero_rc, uv_crop, &hero_rc,
+                                                hm->img_pixels, hm->img_w,
+                                                hm->img_h, 0, &hero_rc, uv_crop, &hero_rc,
                                                 10.0f, 1.0f );
             }
             /* Horizontal left-to-right scrim + bottom vignette scrim + subtle rounded border */
@@ -908,16 +946,17 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
             COLORREF pbg = (i == 0) ? RGB( 30, 40, 54 ) : RGB( 34, 34, 44 );
             xaml_gpu_push_rect( (float)px0, (float)hy0, (float)px1, (float)hy1, NULL,
                                 10.0f, cr_to_argb( pbg ), 0, 0.0f, 1.0f );
-            if (pe->img_el && pe->img_el->img_pixels &&
-                pe->img_el->img_w > 0 && pe->img_el->img_h > 0)
+            if (pe->img_el && pe->img_el->media && pe->img_el->media->img_pixels &&
+                pe->img_el->media->img_w > 0 && pe->img_el->media->img_h > 0)
             {
+                struct uwp_media_ext *pm = pe->img_el->media;
                 float uv_crop[4];
                 uwp_compute_uniform_to_fill_uv( prev_w, banner_h,
-                                                (int)pe->img_el->img_w,
-                                                (int)pe->img_el->img_h, uv_crop );
+                                                (int)pm->img_w,
+                                                (int)pm->img_h, uv_crop );
                 xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)pe->img_el,
-                                                pe->img_el->img_pixels, pe->img_el->img_w,
-                                                pe->img_el->img_h, 0, &card_rc, uv_crop, &card_rc,
+                                                pm->img_pixels, pm->img_w,
+                                                pm->img_h, 0, &card_rc, uv_crop, &card_rc,
                                                 10.0f, 1.0f );
             }
             xaml_gpu_push_gradient_rect( (float)px0, (float)hy0, (float)px1, (float)hy1, NULL,
@@ -981,7 +1020,8 @@ static void paint_gpu_tabview( ID3D11DeviceContext *ctx, struct uwp_element *el 
     {
         WCHAR tab_title[128] = {0};
         RECT pill, close_rc, add_rc;
-        BOOL is_sel = el->selected_item ? (items[i] == el->selected_item) : (i == 0);
+        IInspectable *sel = uwp_elem_selected_item( el );
+        BOOL is_sel = sel ? (items[i] == sel) : (i == 0);
         COLORREF bg = is_sel ? RGB( 44, 44, 44 ) : RGB( 28, 28, 28 );
         COLORREF fg = is_sel ? RGB( 255, 255, 255 ) : RGB( 195, 195, 195 );
         uwp_tabview_get_item_title( items[i], tab_title, ARRAY_SIZE(tab_title) );
@@ -1118,7 +1158,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
     int fh;
 
     if (!label[0] && (!el->content || !uwp_elem_from_any( el->content )) &&
-        wcscmp( el->placeholder, L"-no-btn-lbl-" ) != 0 && wcscmp( el->placeholder, L"-no-btn-img-" ) != 0)
+        wcscmp( uwp_elem_placeholder( el ), L"-no-btn-lbl-" ) != 0 && wcscmp( uwp_elem_placeholder( el ), L"-no-btn-img-" ) != 0)
     {
         IInspectable *vm = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
         if (vm)
@@ -1165,7 +1205,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             }
             else
             {
-                lstrcpynW( el->placeholder, L"-no-btn-lbl-", ARRAY_SIZE(el->placeholder) );
+                uwp_elem_set_placeholder( el, L"-no-btn-lbl-" );
             }
             if (nested_vm) IInspectable_Release( nested_vm );
         }
@@ -1186,19 +1226,22 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         }
         if (in_items_host && (!el->content || !uwp_elem_from_any( el->content )))
         {
-            if (!el->image_src[0] && wcscmp( el->placeholder, L"-no-btn-img-" ) != 0)
+            if (!uwp_elem_image_src( el )[0] && wcscmp( uwp_elem_placeholder( el ), L"-no-btn-img-" ) != 0)
             {
                 static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"ScreenshotUrl", L"Image", L"Images", L"Source", L"IconUrl", L"BoxArtUrl", L"PosterUrl" };
                 WCHAR img_buf[512] = {0};
                 if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
                     img_buf[0])
-                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                {
+                    struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+                    if (m) lstrcpynW( m->image_src, img_buf, ARRAY_SIZE(m->image_src) );
+                }
                 else
-                    lstrcpynW( el->placeholder, L"-no-btn-img-", ARRAY_SIZE(el->placeholder) );
+                    uwp_elem_set_placeholder( el, L"-no-btn-img-" );
             }
-            if (el->image_src[0])
+            if (uwp_elem_image_src( el )[0])
                 uwp_load_image_asset( el );
-            if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+            if (el->media && el->media->img_pixels && el->media->img_w > 0 && el->media->img_h > 0)
             {
                 BOOL light = uwp_is_light_theme( el );
                 RECT irc = brc;
@@ -1206,7 +1249,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
                 xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
                                     6.0f, cr_to_argb( light ? RGB( 240, 240, 240 ) : RGB( 32, 32, 32 ) ),
                                     cr_to_argb( light ? RGB( 218, 218, 218 ) : RGB( 68, 68, 68 ) ), 1.0f, 1.0f );
-                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &irc, NULL );
+                xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->media->img_pixels, el->media->img_w, el->media->img_h, &irc, NULL );
                 return;
             }
         }
@@ -1755,24 +1798,25 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
         BOOL is_sel = (el->is_checked == 1);
         COLORREF accent_cr = light ? RGB( 0, 103, 192 ) : RGB( 96, 205, 255 );
 
-        if (!is_sel && !any_checked && nav && uwp_is_nav_view( nav ) && nav->selected_item)
+        IInspectable *nav_sel = uwp_elem_selected_item( nav );
+        if (!is_sel && !any_checked && nav && uwp_is_nav_view( nav ) && nav_sel)
         {
-            if ((el->content && nav->selected_item == el->content) ||
-                (el->data_context && nav->selected_item == el->data_context) ||
-                (el->outer && nav->selected_item == el->outer) ||
-                nav->selected_item == &el->IInspectable_iface)
+            if ((el->content && nav_sel == el->content) ||
+                (el->data_context && nav_sel == el->data_context) ||
+                (el->outer && nav_sel == el->outer) ||
+                nav_sel == &el->IInspectable_iface)
                 is_sel = TRUE;
         }
-        if (!is_sel && !any_checked && (!nav || !nav->selected_item) && uwp_nav_is_first_selectable_item( el ))
+        if (!is_sel && !any_checked && (!nav || !nav_sel) && uwp_nav_is_first_selectable_item( el ))
             is_sel = TRUE;
 
-        if (el->nav_icon)
+        if (el->nav && el->nav->nav_icon)
         {
-            struct uwp_element *iel = uwp_elem_from_any( el->nav_icon );
+            struct uwp_element *iel = uwp_elem_from_any( el->nav->nav_icon );
             if (uwp_has_text( iel ))
             {
                 lstrcpynW( glyph, uwp_elem_text( iel ), ARRAY_SIZE(glyph) );
-                if (iel->font_family[0])
+                if (uwp_elem_font_family( iel )[0])
                     uwp_resolve_elem_font_family( iel, gfont, ARRAY_SIZE(gfont) );
             }
         }
@@ -1788,7 +1832,7 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
                     if (uwp_has_text( iel ))
                     {
                         lstrcpynW( glyph, uwp_elem_text( iel ), ARRAY_SIZE(glyph) );
-                        if (iel->font_family[0])
+                        if (uwp_elem_font_family( iel )[0])
                             uwp_resolve_elem_font_family( iel, gfont, ARRAY_SIZE(gfont) );
                     }
                     break;
@@ -1924,7 +1968,7 @@ static BOOL is_clr_type_name( const WCHAR *s )
 static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     WCHAR label[128] = {0};
-    if (!wcscmp( el->placeholder, L"-" )) return;
+    if (!wcscmp( uwp_elem_placeholder( el ), L"-" )) return;
     if (uwp_has_text( el ))
     {
         lstrcpynW( label, uwp_elem_text( el ), ARRAY_SIZE(label) );
@@ -1994,7 +2038,7 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
         if (label[0])
             uwp_elem_set_text( el, label );
         else
-            lstrcpynW( el->placeholder, L"-", ARRAY_SIZE(el->placeholder) );
+            uwp_elem_set_placeholder( el, L"-" );
     }
     if (label[0] && wcscmp( label, L"SettingsButtonName" ) != 0 && wcscmp( el->name, L"SettingsItem" ) != 0)
     {
@@ -2082,11 +2126,11 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
 {
     DWORD now_tick = GetTickCount();
     const WCHAR *cur_txt = uwp_elem_text( el );
-    BOOL incomplete = !cur_txt[0] || (!wcschr( cur_txt, L'\n' ) && !el->image_src[0]);
+    BOOL incomplete = !cur_txt[0] || (!wcschr( cur_txt, L'\n' ) && !uwp_elem_image_src( el )[0]);
     BOOL needs_hydrate = !cur_txt[0] ||
         (incomplete && el->hovered_dropdown_idx < 4 &&
          (el->dropdown_scroll_offset == 0 || (int)(now_tick - (DWORD)el->dropdown_scroll_offset) >= 900));
-    if (needs_hydrate && wcscmp( el->placeholder, L"-no-card-" ) != 0)
+    if (needs_hydrate && wcscmp( uwp_elem_placeholder( el ), L"-no-card-" ) != 0)
     {
         static const WCHAR *const title_props[] =
             { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
@@ -2153,24 +2197,30 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
             else
                 uwp_elem_set_text( el, title_buf );
 
-            if (!el->image_src[0])
+            if (!uwp_elem_image_src( el )[0])
             {
                 for (vi = 0; vi < ARRAY_SIZE(vms) && !img_buf[0]; vi++)
                     if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], img_props, ARRAY_SIZE(img_props), img_buf, ARRAY_SIZE(img_buf), 2 );
                 if (img_buf[0])
-                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                {
+                    struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+                    if (m) lstrcpynW( m->image_src, img_buf, ARRAY_SIZE(m->image_src) );
+                }
             }
-            if (!el->image_src[0] && el->data_context)
+            if (!uwp_elem_image_src( el )[0] && el->data_context)
             {
                 static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"Image", L"Images", L"Source" };
                 if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
                     img_buf[0])
-                    lstrcpynW( el->image_src, img_buf, ARRAY_SIZE(el->image_src) );
+                {
+                    struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+                    if (m) lstrcpynW( m->image_src, img_buf, ARRAY_SIZE(m->image_src) );
+                }
             }
         }
         else
         {
-            lstrcpynW( el->placeholder, L"-no-card-", ARRAY_SIZE(el->placeholder) );
+            uwp_elem_set_placeholder( el, L"-no-card-" );
         }
         if (vm2) IInspectable_Release( vm2 );
         if (vm1) IInspectable_Release( vm1 );
@@ -2224,15 +2274,16 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
                                 8.0f, cr_to_argb( cbg ), cr_to_argb( cbd ), 1.0f, 1.0f );
         }
         text_left = brc.left + 14;
-        if (el->image_src[0])
+        if (uwp_elem_image_src( el )[0])
             uwp_load_image_asset( el );
-        if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+        if (el->media && el->media->img_pixels && el->media->img_w > 0 && el->media->img_h > 0)
         {
+            struct uwp_media_ext *m = el->media;
             if (!nl && el->parent && (el->parent->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)))
             {
                 RECT irc = brc;
                 InflateRect( &irc, -2, -2 );
-                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h,
+                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, m->img_pixels, m->img_w, m->img_h,
                                                 0, &irc, NULL, &brc, 8.0f, 1.0f );
                 tline[0] = 0;
             }
@@ -2242,7 +2293,7 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
                 int isz = min( 64, max( 36, bh - 24 ) );
                 int iy = brc.top + (bh - isz) / 2;
                 RECT irc = { brc.left + 12, iy, brc.left + 12 + isz, iy + isz };
-                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h,
+                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)el, m->img_pixels, m->img_w, m->img_h,
                                                 0, &irc, NULL, &brc, 8.0f, 1.0f );
                 text_left = irc.right + 12;
             }
@@ -2329,7 +2380,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
            (void *)(el ? el->children_coll : NULL), (void *)(el ? el->content : NULL) );
     if (!el || !el->has_bounds || el->visibility != 0 || el->opacity <= 0.005) return;
     if ((el->class_flags & UWP_CF_INFO_BADGE) && !uwp_has_text( el )) return;
-    if (el->evc_cnt > 0 && !el->evc_fired)
+    if (UWP_EV_CNT( el, evc_reg ) > 0 && !el->evc_fired)
         uwp_fire_evc_if_needed( el );
     if (el->items_source && !uwp_panel_has_concrete_child( el ))
     {
@@ -2379,7 +2430,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
 
     if (el->kind == UWP_KIND_IMAGE)
     {
-        if (el->img_pixels) uwp_on_image_loaded( el );
+        if (el->media && el->media->img_pixels) uwp_on_image_loaded( el );
         paint_gpu_image( ctx, el );
         return;
     }
@@ -2497,9 +2548,9 @@ recurse_children:
     {
         paint_gpu_vm_card( ctx, el );
     }
-    if (!out_of_view && uwp_nav_is_overlay_open( el ) && el->nav_pane_bounds.right > el->nav_pane_bounds.left)
+    if (!out_of_view && uwp_nav_is_overlay_open( el ) && el->nav && el->nav->nav_pane_bounds.right > el->nav->nav_pane_bounds.left)
     {
-        RECT prc = el->nav_pane_bounds;
+        RECT prc = el->nav->nav_pane_bounds;
         BOOL light = uwp_is_light_theme( el );
         UINT32 pane_bg = light ? 0xfff3f3f3u : 0xff27272bu;
         UINT32 pane_bd = light ? 0xffd4d4d8u : 0xff44444cu;
@@ -2606,7 +2657,8 @@ static void uwp_gpu_paint_combobox_popup( ID3D11DeviceContext *ctx, int width, i
         int idx = cb->dropdown_scroll_offset + i;
         RECT rrc, trc;
         WCHAR label[128] = {0};
-        BOOL is_sel = (idx == cb->selected_index) || (cb->selected_item && items[idx] == cb->selected_item);
+        IInspectable *sel = uwp_elem_selected_item( cb );
+        BOOL is_sel = (idx == uwp_elem_selected_index( cb )) || (sel && items[idx] == sel);
         BOOL is_hov = (idx == cb->hovered_dropdown_idx);
 
         SetRect( &rrc, prc.left + 4, prc.top + pad_y + i * item_h, prc.right - 4, prc.top + pad_y + (i + 1) * item_h );

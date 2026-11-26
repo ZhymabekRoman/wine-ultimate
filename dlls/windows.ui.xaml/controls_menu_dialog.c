@@ -157,16 +157,18 @@ static HRESULT WINAPI uwp_ka_put_ScopeOwner( void *iface, void *val )
 static HRESULT WINAPI uwp_ka_add_Invoked( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
-    if (xaml_vec_grow( (void **)&impl->accel_invoked_handlers, &impl->accel_invoked_cap,
-                       impl->accel_invoked_cnt + 1, sizeof(*impl->accel_invoked_handlers), 4 ))
-    {
-        impl->accel_invoked_handlers[impl->accel_invoked_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-        if (tok) tok->value = impl->accel_invoked_cnt;
-    }
-    return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->accel_invoked_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_ka_remove_Invoked( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->accel_invoked_reg, tok );
 }
 const void *uwp_ka_vtbl[32] =
 {
@@ -185,7 +187,8 @@ const void *uwp_ka_vtbl[32] =
     [12] = uwp_ka_get_ScopeOwner,
     [13] = uwp_ka_put_ScopeOwner,
     [14] = uwp_ka_add_Invoked,
-    [15 ... 31] = uwp_generic_noop,
+    [15] = uwp_ka_remove_Invoked,
+    [16 ... 31] = uwp_generic_noop,
 };
 
 struct uwp_exec_req_args
@@ -245,16 +248,18 @@ static const void *uwp_exec_args_vtbl[16] =
 static HRESULT WINAPI uwp_xaml_cmd_add_ExecuteRequested( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
-    if (xaml_vec_grow( (void **)&impl->exec_req_handlers, &impl->exec_req_cap,
-                       impl->exec_req_cnt + 1, sizeof(*impl->exec_req_handlers), 4 ))
-    {
-        impl->exec_req_handlers[impl->exec_req_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-        if (tok) tok->value = impl->exec_req_cnt;
-    }
-    return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->exec_req_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_xaml_cmd_remove_ExecuteRequested( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->exec_req_reg, tok );
 }
 const void *uwp_xaml_cmd_vtbl[32] =
 {
@@ -270,7 +275,8 @@ const void *uwp_xaml_cmd_vtbl[32] =
     [15] = uwp_btn_get_Command,
     [16] = uwp_btn_put_Command,
     [17] = uwp_xaml_cmd_add_ExecuteRequested,
-    [18 ... 31] = uwp_generic_noop,
+    [18] = uwp_xaml_cmd_remove_ExecuteRequested,
+    [19 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_icmd_CanExecute( void *iface, void *param, boolean *out )
@@ -283,7 +289,6 @@ static HRESULT WINAPI uwp_icmd_Execute( void *iface, void *param )
     struct uwp_element *impl = uwp_elem_from_any( iface );
     struct uwp_exec_req_args *args;
     IInspectable *sender;
-    int i;
     if (!impl) return S_OK;
     if (impl->command)
     {
@@ -296,22 +301,18 @@ static HRESULT WINAPI uwp_icmd_Execute( void *iface, void *param )
             IUnknown_Release( (IUnknown *)sub_cmd );
         }
     }
-    args = calloc( 1, sizeof(*args) );
-    if (!args) return E_OUTOFMEMORY;
-    args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_exec_args_vtbl;
-    args->ref = 1;
-    args->param = (IInspectable *)param;
-    if (args->param) IInspectable_AddRef( args->param );
-    sender = impl->outer ? impl->outer : &impl->IXamlUICommand_iface;
-    for (i = 0; i < impl->exec_req_cnt; i++)
+    if (UWP_EV_CNT( impl, exec_req_reg ) > 0)
     {
-        if (impl->exec_req_handlers[i])
-        {
-            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->exec_req_handlers[i];
-            h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
-        }
+        args = calloc( 1, sizeof(*args) );
+        if (!args) return E_OUTOFMEMORY;
+        args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_exec_args_vtbl;
+        args->ref = 1;
+        args->param = (IInspectable *)param;
+        if (args->param) IInspectable_AddRef( args->param );
+        sender = impl->outer ? impl->outer : &impl->IXamlUICommand_iface;
+        uwp_fire_event_registry( &impl->events->exec_req_reg, sender, &args->IInspectable_iface, "ExecuteRequested" );
+        uwp_exec_args_Release( &args->IInspectable_iface );
     }
-    uwp_exec_args_Release( &args->IInspectable_iface );
     return S_OK;
 }
 const void *uwp_icmd_vtbl[16] =
@@ -359,14 +360,16 @@ const void *uwp_mfi_vtbl[32] =
     [10] = uwp_btn_get_CommandParameter,
     [11] = uwp_btn_put_CommandParameter,
     [12] = uwp_btn_add_Click,
-    [13 ... 31] = uwp_generic_noop,
+    [13] = uwp_btn_remove_Click,
+    [14 ... 31] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_mfi3_get_AccelText( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *txt = uwp_elem_accel_text( impl );
     if (!out) return E_POINTER;
-    return WindowsCreateString( impl ? impl->accel_text : L"", impl ? wcslen(impl->accel_text) : 0, out );
+    return WindowsCreateString( txt, wcslen( txt ), out );
 }
 static HRESULT WINAPI uwp_mfi3_put_AccelText( void *iface, HSTRING val )
 {
@@ -374,7 +377,7 @@ static HRESULT WINAPI uwp_mfi3_put_AccelText( void *iface, HSTRING val )
     const WCHAR *raw;
     if ((ULONG_PTR)val < 0x10000) return S_OK;
     raw = WindowsGetStringRawBuffer( val, NULL );
-    if (impl && raw) lstrcpynW( impl->accel_text, raw, ARRAY_SIZE(impl->accel_text) );
+    if (impl && raw) uwp_elem_set_accel_text( impl, raw );
     return S_OK;
 }
 const void *uwp_mfi3_vtbl[16] =
@@ -438,7 +441,6 @@ static HRESULT WINAPI uwp_mf2_ShowAt( void *iface, void *target, UINT64 pt_raw )
     HWND owner = NULL;
     POINT spt;
     UINT dpi;
-    int i;
 
     if (!impl) return S_OK;
     memcpy( &fx, &pt_raw, sizeof(float) );
@@ -463,16 +465,10 @@ static HRESULT WINAPI uwp_mf2_ShowAt( void *iface, void *target, UINT64 pt_raw )
     TRACE( "IMenuFlyout2::ShowAt(%s, pt=%.1f,%.1f -> screen=%ld,%ld, owner=%p)\n",
            debugstr_w(impl->class_name), fx, fy, spt.x, spt.y, owner );
 
-    for (i = 0; i < impl->flyout_opening_cnt; i++)
+    if (UWP_EV_CNT( impl, flyout_opening_reg ) > 0)
     {
-        if (impl->flyout_opening_handlers[i])
-        {
-            IInspectable *sender = impl->outer ? impl->outer : &impl->IFlyout_iface;
-            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->flyout_opening_handlers[i];
-            __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
-            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
-            __ENDTRY;
-        }
+        IInspectable *sender = impl->outer ? impl->outer : &impl->IFlyout_iface;
+        uwp_fire_event_registry( &impl->events->flyout_opening_reg, sender, NULL, "Flyout::Opening" );
     }
 
     uwp_show_flyout_popup( impl, owner, spt.x, spt.y );
@@ -564,31 +560,24 @@ static void uwp_cd_fire_closed( struct uwp_element *impl, int result )
 {
     struct uwp_cd_closed_args *args;
     IInspectable *sender;
-    int i;
     if (!impl) return;
-    if (impl->dialog_hwnd && IsWindow( impl->dialog_hwnd ))
+    if (impl->dialog && impl->dialog->dialog_hwnd && IsWindow( impl->dialog->dialog_hwnd ))
     {
-        HWND dh = impl->dialog_hwnd;
-        impl->dialog_hwnd = NULL;
+        HWND dh = impl->dialog->dialog_hwnd;
+        impl->dialog->dialog_hwnd = NULL;
         DestroyWindow( dh );
     }
-    args = calloc( 1, sizeof(*args) );
-    if (!args) return;
-    args->vtbl = uwp_cd_closed_args_vtbl;
-    args->ref = 1;
-    args->result = result;
-    sender = impl->outer ? impl->outer : &impl->IContentDialog_iface;
-    for (i = 0; i < impl->flyout_closed_cnt; i++)
+    if (UWP_EV_CNT( impl, flyout_closed_reg ) > 0)
     {
-        if (impl->flyout_closed_handlers[i])
-        {
-            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->flyout_closed_handlers[i];
-            __TRY { h->lpVtbl->Invoke( h, sender, args ); }
-            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
-            __ENDTRY;
-        }
+        args = calloc( 1, sizeof(*args) );
+        if (!args) return;
+        args->vtbl = uwp_cd_closed_args_vtbl;
+        args->ref = 1;
+        args->result = result;
+        sender = impl->outer ? impl->outer : &impl->IContentDialog_iface;
+        uwp_fire_event_registry( &impl->events->flyout_closed_reg, sender, (IInspectable *)args, "ContentDialog::Closed" );
+        cd_closed_args_Release( args );
     }
-    cd_closed_args_Release( args );
     if (g_island_hwnd_cnt > 0 && g_island_hwnds[0])
     {
         HWND root = GetAncestor( g_island_hwnds[0], GA_ROOT );
@@ -627,7 +616,8 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
         }
         if (wp == VK_RETURN)
         {
-            int res = (impl->dialog_default_btn == 1) ? 1 : ((impl->dialog_default_btn == 2) ? 2 : 0);
+            int def_btn = impl->dialog ? impl->dialog->dialog_default_btn : 0;
+            int res = (def_btn == 1) ? 1 : ((def_btn == 2) ? 2 : 0);
             uwp_cd_fire_closed( impl, res );
             return 0;
         }
@@ -640,9 +630,11 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
         if (my >= rc.bottom - 52 && my <= rc.bottom - 14)
         {
             int btn_w = (rc.right - rc.left - 36) / 3;
-            if (mx >= rc.left + 12 && mx < rc.left + 12 + btn_w && impl->dialog_primary_text[0])
+            const WCHAR *ptxt = impl->dialog ? impl->dialog->dialog_primary_text : L"";
+            const WCHAR *stxt = impl->dialog ? impl->dialog->dialog_secondary_text : L"";
+            if (mx >= rc.left + 12 && mx < rc.left + 12 + btn_w && ptxt[0])
                 uwp_cd_fire_closed( impl, 1 );
-            else if (mx >= rc.left + 18 + btn_w && mx < rc.left + 18 + 2 * btn_w && impl->dialog_secondary_text[0])
+            else if (mx >= rc.left + 18 + btn_w && mx < rc.left + 18 + 2 * btn_w && stxt[0])
                 uwp_cd_fire_closed( impl, 2 );
             else if (mx >= rc.left + 24 + 2 * btn_w)
                 uwp_cd_fire_closed( impl, 0 );
@@ -655,6 +647,10 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
         HDC hdc = BeginPaint( hwnd, &ps );
         if (hdc)
         {
+            const WCHAR *dtitle = impl->dialog ? impl->dialog->dialog_title : L"";
+            const WCHAR *ptxt = impl->dialog ? impl->dialog->dialog_primary_text : L"";
+            const WCHAR *stxt = impl->dialog ? impl->dialog->dialog_secondary_text : L"";
+            const WCHAR *ctxt = impl->dialog ? impl->dialog->dialog_close_text : L"";
             RECT rc, trc, brc;
             HBRUSH bg_br = CreateSolidBrush( RGB( 43, 43, 43 ) );
             HBRUSH bd_br = CreateSolidBrush( RGB( 80, 80, 80 ) );
@@ -676,7 +672,7 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
             SetTextColor( hdc, RGB( 255, 255, 255 ) );
 
             SetRect( &trc, 20, 16, rc.right - 20, 46 );
-            DrawTextW( hdc, impl->dialog_title[0] ? impl->dialog_title : L"Notepad", -1, &trc,
+            DrawTextW( hdc, dtitle[0] ? dtitle : L"Notepad", -1, &trc,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE );
 
             SelectObject( hdc, f_body );
@@ -684,22 +680,22 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
             DrawTextW( hdc, uwp_elem_text( impl ), -1, &brc, DT_LEFT | DT_WORDBREAK );
 
             btn_w = (rc.right - rc.left - 36) / 3;
-            if (impl->dialog_primary_text[0])
+            if (ptxt[0])
             {
                 RECT r1 = { 12, rc.bottom - 46, 12 + btn_w, rc.bottom - 14 };
                 FillRect( hdc, &r1, p_br );
-                DrawTextW( hdc, impl->dialog_primary_text, -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                DrawTextW( hdc, ptxt, -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
             }
-            if (impl->dialog_secondary_text[0])
+            if (stxt[0])
             {
                 RECT r2 = { 18 + btn_w, rc.bottom - 46, 18 + 2 * btn_w, rc.bottom - 14 };
                 FillRect( hdc, &r2, s_br );
-                DrawTextW( hdc, impl->dialog_secondary_text, -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                DrawTextW( hdc, stxt, -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
             }
             {
                 RECT r3 = { 24 + 2 * btn_w, rc.bottom - 46, rc.right - 12, rc.bottom - 14 };
                 FillRect( hdc, &r3, s_br );
-                DrawTextW( hdc, impl->dialog_close_text[0] ? impl->dialog_close_text : L"Cancel", -1, &r3,
+                DrawTextW( hdc, ctxt[0] ? ctxt : L"Cancel", -1, &r3,
                            DT_CENTER | DT_VCENTER | DT_SINGLELINE );
             }
 
@@ -721,20 +717,21 @@ static HRESULT WINAPI uwp_cd_get_Title( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    *out = impl ? impl->dialog_title_obj : NULL;
+    *out = (impl && impl->dialog) ? impl->dialog->dialog_title_obj : NULL;
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_cd_put_Title( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
-    if (impl->dialog_title_obj) IInspectable_Release( impl->dialog_title_obj );
-    impl->dialog_title_obj = val;
+    struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
+    if (!d) return S_OK;
+    if (d->dialog_title_obj) IInspectable_Release( d->dialog_title_obj );
+    d->dialog_title_obj = val;
     if (val)
     {
         IInspectable_AddRef( val );
-        uwp_unbox_string( val, impl->dialog_title, ARRAY_SIZE(impl->dialog_title) );
+        uwp_unbox_string( val, d->dialog_title, ARRAY_SIZE(d->dialog_title) );
     }
     return S_OK;
 }
@@ -756,29 +753,31 @@ static HRESULT WINAPI uwp_cd_get_BoolTrue( void *iface, boolean *out )
 static HRESULT WINAPI uwp_cd_get_PrimaryButtonText( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *txt = (impl && impl->dialog) ? impl->dialog->dialog_primary_text : L"";
     if (!out) return E_POINTER;
-    return WindowsCreateString( impl ? impl->dialog_primary_text : L"",
-                                impl ? wcslen(impl->dialog_primary_text) : 0, out );
+    return WindowsCreateString( txt, wcslen( txt ), out );
 }
 static HRESULT WINAPI uwp_cd_put_PrimaryButtonText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
-    if (impl) lstrcpynW( impl->dialog_primary_text, raw ? raw : L"", ARRAY_SIZE(impl->dialog_primary_text) );
+    struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
+    if (d) lstrcpynW( d->dialog_primary_text, raw ? raw : L"", ARRAY_SIZE(d->dialog_primary_text) );
     return S_OK;
 }
 static HRESULT WINAPI uwp_cd_get_SecondaryButtonText( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *txt = (impl && impl->dialog) ? impl->dialog->dialog_secondary_text : L"";
     if (!out) return E_POINTER;
-    return WindowsCreateString( impl ? impl->dialog_secondary_text : L"",
-                                impl ? wcslen(impl->dialog_secondary_text) : 0, out );
+    return WindowsCreateString( txt, wcslen( txt ), out );
 }
 static HRESULT WINAPI uwp_cd_put_SecondaryButtonText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
-    if (impl) lstrcpynW( impl->dialog_secondary_text, raw ? raw : L"", ARRAY_SIZE(impl->dialog_secondary_text) );
+    struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
+    if (d) lstrcpynW( d->dialog_secondary_text, raw ? raw : L"", ARRAY_SIZE(d->dialog_secondary_text) );
     return S_OK;
 }
 static HRESULT WINAPI uwp_cd_Hide( void *iface )
@@ -940,18 +939,24 @@ static HRESULT WINAPI uwp_cd_ShowAsync( void *iface, void **out )
         RegisterClassExW( &wc );
         cls_reg = TRUE;
     }
-    if (impl->dialog_hwnd && IsWindow( impl->dialog_hwnd ))
-        DestroyWindow( impl->dialog_hwnd );
-    impl->dialog_hwnd = CreateWindowExW( WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                                         L"WineUwpContentDialogPopup", L"",
-                                         WS_POPUP | WS_VISIBLE,
-                                         dx, dy, dw, dh,
-                                         owner, NULL, GetModuleHandleW( NULL ), impl );
-    if (impl->dialog_hwnd)
     {
-        InvalidateRect( impl->dialog_hwnd, NULL, FALSE );
-        UpdateWindow( impl->dialog_hwnd );
-        PostMessageW( impl->dialog_hwnd, WM_APP + 1, 0, 0 );
+        struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
+        if (d)
+        {
+            if (d->dialog_hwnd && IsWindow( d->dialog_hwnd ))
+                DestroyWindow( d->dialog_hwnd );
+            d->dialog_hwnd = CreateWindowExW( WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                                              L"WineUwpContentDialogPopup", L"",
+                                              WS_POPUP | WS_VISIBLE,
+                                              dx, dy, dw, dh,
+                                              owner, NULL, GetModuleHandleW( NULL ), impl );
+            if (d->dialog_hwnd)
+            {
+                InvalidateRect( d->dialog_hwnd, NULL, FALSE );
+                UpdateWindow( d->dialog_hwnd );
+                PostMessageW( d->dialog_hwnd, WM_APP + 1, 0, 0 );
+            }
+        }
     }
     return S_OK;
 }
@@ -989,7 +994,7 @@ const void *uwp_cd_vtbl[48] =
     [28] = uwp_ui_event_add,
     [29] = uwp_generic_noop,
     [30] = uwp_flyout_add_Closed,
-    [31] = uwp_generic_noop,
+    [31] = uwp_flyout_remove_Closed,
     [32] = uwp_ui_event_add,
     [33] = uwp_generic_noop,
     [34] = uwp_ui_event_add,
@@ -1242,40 +1247,52 @@ static const void *asb_sc_vtbl[] =
 static HRESULT WINAPI uwp_asb_add_SuggestionChosen( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_add( &impl->asb_suggestion_chosen_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->asb_suggestion_chosen_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_asb_remove_SuggestionChosen( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->asb_suggestion_chosen_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->asb_suggestion_chosen_reg, tok );
 }
 static HRESULT WINAPI uwp_asb_add_TextChanged( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "uwp_asb_add_TextChanged on %s (%s) handler=%p\n", debugstr_w(impl->class_name), debugstr_w(impl->name), handler );
-    return xaml_event_registry_add( &impl->asb_text_changed_reg, handler, tok );
+    return xaml_event_registry_add( &ev->asb_text_changed_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_asb_remove_TextChanged( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->asb_text_changed_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->asb_text_changed_reg, tok );
 }
 static HRESULT WINAPI uwp_asb_add_QuerySubmitted( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "uwp_asb_add_QuerySubmitted on %s (%s) handler=%p\n", debugstr_w(impl->class_name), debugstr_w(impl->name), handler );
-    return xaml_event_registry_add( &impl->asb_query_submitted_reg, handler, tok );
+    return xaml_event_registry_add( &ev->asb_query_submitted_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_asb_remove_QuerySubmitted( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->asb_query_submitted_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->asb_query_submitted_reg, tok );
 }
 
 void uwp_asb_fire_text_changed( struct uwp_element *el )
@@ -1315,7 +1332,7 @@ void uwp_asb_fire_text_changed( struct uwp_element *el )
             IUnknown_Release( (IUnknown *)h );
         }
     }
-    cnt = xaml_event_registry_snapshot_alloc( &el->asb_text_changed_reg, &handlers );
+    cnt = el->events ? xaml_event_registry_snapshot_alloc( &el->events->asb_text_changed_reg, &handlers ) : 0;
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
     if (!args)
@@ -1348,7 +1365,7 @@ void uwp_asb_fire_suggestion_chosen( struct uwp_element *el, IInspectable *chose
     IInspectable *sender;
 
     if (!el || !chosen) return;
-    cnt = xaml_event_registry_snapshot_alloc( &el->asb_suggestion_chosen_reg, &handlers );
+    cnt = el->events ? xaml_event_registry_snapshot_alloc( &el->events->asb_suggestion_chosen_reg, &handlers ) : 0;
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
     if (!args)
@@ -1382,7 +1399,7 @@ void uwp_asb_fire_query_submitted_ex( struct uwp_element *el, IInspectable *chos
     IInspectable *sender;
 
     if (!el) return;
-    cnt = xaml_event_registry_snapshot_alloc( &el->asb_query_submitted_reg, &handlers );
+    cnt = el->events ? xaml_event_registry_snapshot_alloc( &el->events->asb_query_submitted_reg, &handlers ) : 0;
     if (!cnt) return;
     args = calloc( 1, sizeof(*args) );
     if (!args)
@@ -1488,8 +1505,8 @@ static void uwp_asb_collect_el_texts( const struct uwp_element *el, WCHAR *out_p
     txt = uwp_elem_text( el );
     if (!txt[0] && el->inlines_coll && uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
         txt = rich_buf;
-    if (!txt[0] && el->automation_name[0])
-        txt = el->automation_name;
+    if (!txt[0] && uwp_elem_automation_name( el )[0])
+        txt = uwp_elem_automation_name( el );
     if (txt[0] && !uwp_is_font_icon( el ) && !(wcslen( txt ) == 1 && (UINT)txt[0] >= 0xE000))
     {
         if (!out_p[0])
@@ -1830,29 +1847,14 @@ static HRESULT WINAPI uwp_tt_put_IsOpen( void *iface, boolean val )
                 SetWindowPos( ih, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW );
         }
     }
-    if (prev && !impl->is_open)
+    if (prev && !impl->is_open && (UWP_EV_CNT( impl, tip_closing_reg ) > 0 || UWP_EV_CNT( impl, tip_closed_reg ) > 0))
     {
         IInspectable *sender = impl->outer ? impl->outer : &impl->ITeachingTip_iface;
         struct uwp_sel_changed_args *args = uwp_sel_args_create( NULL, NULL );
-        int i;
         if (args)
         {
-            for (i = 0; i < impl->tip_closing_cnt; i++)
-            {
-                if (impl->tip_closing_handlers[i])
-                {
-                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closing_handlers[i];
-                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
-                }
-            }
-            for (i = 0; i < impl->tip_closed_cnt; i++)
-            {
-                if (impl->tip_closed_handlers[i])
-                {
-                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->tip_closed_handlers[i];
-                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
-                }
-            }
+            uwp_fire_event_registry( &impl->events->tip_closing_reg, sender, &args->IInspectable_iface, "TeachingTip::Closing" );
+            uwp_fire_event_registry( &impl->events->tip_closed_reg, sender, &args->IInspectable_iface, "TeachingTip::Closed" );
             uwp_sel_args_Release( &args->IInspectable_iface );
         }
     }
@@ -1862,30 +1864,34 @@ static HRESULT WINAPI uwp_tt_put_IsOpen( void *iface, boolean val )
 static HRESULT WINAPI uwp_tt_add_Closing( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
-    if (xaml_vec_grow( (void **)&impl->tip_closing_handlers, &impl->tip_closing_cap,
-                       impl->tip_closing_cnt + 1, sizeof(*impl->tip_closing_handlers), 4 ))
-    {
-        impl->tip_closing_handlers[impl->tip_closing_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-        if (tok) tok->value = impl->tip_closing_cnt;
-    }
-    return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->tip_closing_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_tt_remove_Closing( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->tip_closing_reg, tok );
 }
 static HRESULT WINAPI uwp_tt_add_Closed( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
-    if (xaml_vec_grow( (void **)&impl->tip_closed_handlers, &impl->tip_closed_cap,
-                       impl->tip_closed_cnt + 1, sizeof(*impl->tip_closed_handlers), 4 ))
-    {
-        impl->tip_closed_handlers[impl->tip_closed_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-        if (tok) tok->value = impl->tip_closed_cnt;
-    }
-    return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->tip_closed_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_tt_remove_Closed( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->tip_closed_reg, tok );
 }
 const void *uwp_teachingtip_vtbl[64] =
 {
@@ -1900,7 +1906,8 @@ const void *uwp_teachingtip_vtbl[64] =
     [11] = uwp_tt_put_IsOpen,
     [12 ... 50] = uwp_generic_noop,
     [51] = uwp_tt_add_Closing,
-    [52] = uwp_generic_noop,
+    [52] = uwp_tt_remove_Closing,
     [53] = uwp_tt_add_Closed,
-    [54 ... 63] = uwp_generic_noop,
+    [54] = uwp_tt_remove_Closed,
+    [55 ... 63] = uwp_generic_noop,
 };

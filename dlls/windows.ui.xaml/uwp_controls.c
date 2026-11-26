@@ -83,7 +83,12 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     struct uwp_element *child_el;
 
     if (!impl) return S_OK;
-    if (impl->content) IInspectable_Release( impl->content );
+    if (impl->content)
+    {
+        struct uwp_element *old_ch = uwp_elem_from_any( impl->content );
+        if (old_ch && old_ch->parent == impl) old_ch->parent = NULL;
+        IInspectable_Release( impl->content );
+    }
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
 
@@ -113,7 +118,9 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     else if ((child_el = uwp_elem_from_any( val )) != NULL)
     {
         impl->content_kind = UWP_CONTENT_ELEMENT;
+        impl->in_visual_tree = TRUE;
         child_el->parent = impl;
+        child_el->in_visual_tree = TRUE;
         if (child_el->outer && !child_el->delegating && !child_el->outer_pinned)
         {
             child_el->outer_pinned = TRUE;
@@ -200,16 +207,20 @@ HRESULT WINAPI uwp_btn_put_CommandParameter( void *iface, void *val )
 HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     if (uwp_is_card( impl ))
         WARN( "uwp_btn_add_Click on %s impl=%p handler=%p\n", debugstr_w(impl->class_name), impl, handler );
-    if (xaml_vec_grow( (void **)&impl->click_handlers, &impl->click_cap, impl->click_cnt + 1, sizeof(*impl->click_handlers), 8 ))
-    {
-        impl->click_handlers[impl->click_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-    }
-    return S_OK;
+    return xaml_event_registry_add( &ev->click_reg, handler, tok );
+}
+HRESULT WINAPI uwp_btn_remove_Click( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->click_reg, tok );
 }
 
 BOOL uwp_unbox_bool( IInspectable *val, boolean *out );
@@ -282,9 +293,9 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
             }
         }
         /* 3. Fire Checked / Unchecked routed events if state changed */
-        if (prev != btn->is_checked)
+        if (prev != btn->is_checked && btn->events)
         {
-            struct xaml_event_registry *reg = (btn->is_checked == 1) ? &btn->tbtn_checked_reg : &btn->tbtn_unchecked_reg;
+            struct xaml_event_registry *reg = (btn->is_checked == 1) ? &btn->events->tbtn_checked_reg : &btn->events->tbtn_unchecked_reg;
             void **handlers = NULL;
             unsigned int count = xaml_event_registry_snapshot_alloc( reg, &handlers ), k;
             IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
@@ -343,26 +354,34 @@ static HRESULT WINAPI uwp_tbtn_put_IsChecked( void *iface, void *val )
 static HRESULT WINAPI uwp_tbtn_add_Checked( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_add( &impl->tbtn_checked_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->tbtn_checked_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_tbtn_remove_Checked( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->tbtn_checked_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->tbtn_checked_reg, tok );
 }
 static HRESULT WINAPI uwp_tbtn_add_Unchecked( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_add( &impl->tbtn_unchecked_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->tbtn_unchecked_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_tbtn_remove_Unchecked( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->tbtn_unchecked_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->tbtn_unchecked_reg, tok );
 }
 
 /* --- ITextBlock (slot 26=get_Text, slot 27=put_Text) --- */
@@ -520,13 +539,18 @@ static HRESULT WINAPI uwp_bg_put_Background( void *iface, IInspectable *val )
         struct uwp_element *b_el = uwp_elem_from_any( val );
         if (b_el)
         {
-            if (b_el->has_brush_argb)
-                uwp_el_set_bg_argb( impl, apply_opacity_to_argb( b_el->brush_argb, b_el->brush_opacity ) );
-            if (b_el->image_src[0])
+            const WCHAR *b_src = uwp_elem_image_src( b_el );
+            if (uwp_elem_has_brush_argb( b_el ))
+                uwp_el_set_bg_argb( impl, apply_opacity_to_argb( uwp_elem_brush_argb( b_el ), uwp_elem_brush_opacity( b_el ) ) );
+            if (b_src[0])
             {
-                lstrcpynW( impl->image_src, b_el->image_src, ARRAY_SIZE(impl->image_src) );
-                impl->img_loaded = FALSE;
-                InterlockedExchange( &impl->img_loading, 0 );
+                struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+                if (m)
+                {
+                    lstrcpynW( m->image_src, b_src, ARRAY_SIZE(m->image_src) );
+                    m->img_loaded = FALSE;
+                    InterlockedExchange( &m->img_loading, 0 );
+                }
             }
         }
     }
@@ -544,8 +568,8 @@ static HRESULT WINAPI uwp_border_put_BorderBrush( void *iface, IInspectable *val
     if (val)
     {
         struct uwp_element *b_el = uwp_elem_from_any( val );
-        if (b_el && b_el->has_brush_argb)
-            uwp_el_set_border_argb( impl, apply_opacity_to_argb( b_el->brush_argb, b_el->brush_opacity ) );
+        if (b_el && uwp_elem_has_brush_argb( b_el ))
+            uwp_el_set_border_argb( impl, apply_opacity_to_argb( uwp_elem_brush_argb( b_el ), uwp_elem_brush_opacity( b_el ) ) );
     }
     else
     {
@@ -610,7 +634,8 @@ const void *uwp_btn_vtbl[32] =
     [12] = uwp_btn_get_CommandParameter,
     [13] = uwp_btn_put_CommandParameter,
     [14] = uwp_btn_add_Click,
-    [15 ... 31] = uwp_generic_noop,
+    [15] = uwp_btn_remove_Click,
+    [16 ... 31] = uwp_generic_noop,
 };
 
 const void *uwp_tbtn_vtbl[32] =
@@ -668,6 +693,11 @@ static void uwp_open_popups_track( struct uwp_element *impl, BOOL open )
     ReleaseSRWLockExclusive( &g_open_popups_lock );
 }
 
+void uwp_open_popups_remove( struct uwp_element *impl )
+{
+    if (impl) uwp_open_popups_track( impl, FALSE );
+}
+
 void uwp_popup_set_open( struct uwp_element *impl, BOOL open )
 {
     BOOL prev;
@@ -691,9 +721,9 @@ void uwp_popup_set_open( struct uwp_element *impl, BOOL open )
             uwp_fire_loaded_tree( ch );
         }
     }
-    if (prev != impl->is_dropdown_open)
+    if (prev != impl->is_dropdown_open && impl->events)
     {
-        struct xaml_event_registry *reg = impl->is_dropdown_open ? &impl->popup_opened_reg : &impl->popup_closed_reg;
+        struct xaml_event_registry *reg = impl->is_dropdown_open ? &impl->events->popup_opened_reg : &impl->events->popup_closed_reg;
         void **handlers = NULL;
         unsigned int count = xaml_event_registry_snapshot_alloc( reg, &handlers ), i;
         IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
@@ -751,7 +781,12 @@ static HRESULT WINAPI uwp_popup_put_Child( void *iface, void *val )
     struct uwp_element *impl = uwp_elem_from_any( iface );
     struct uwp_element *ch;
     if (!impl) return S_OK;
-    if (impl->content) IInspectable_Release( impl->content );
+    if (impl->content)
+    {
+        struct uwp_element *old_ch = uwp_elem_from_any( impl->content );
+        if (old_ch && old_ch->parent == impl) old_ch->parent = NULL;
+        IInspectable_Release( impl->content );
+    }
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
     ch = uwp_elem_from_any( val );
@@ -818,26 +853,34 @@ static HRESULT WINAPI uwp_popup_put_IsLightDismissEnabled( void *iface, boolean 
 static HRESULT WINAPI uwp_popup_add_Opened( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_add( &impl->popup_opened_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->popup_opened_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_popup_remove_Opened( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->popup_opened_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->popup_opened_reg, tok );
 }
 static HRESULT WINAPI uwp_popup_add_Closed( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_add( &impl->popup_closed_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->popup_closed_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_popup_remove_Closed( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->popup_closed_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->popup_closed_reg, tok );
 }
 
 const void *uwp_popup_vtbl[32] =
@@ -915,14 +958,18 @@ HRESULT WINAPI uwp_ui7_get_KeyboardAccelerators( void *iface, void **out )
 HRESULT WINAPI uwp_ui7_add_PreviewKeyDown( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; }
-    return xaml_event_registry_add( &impl->preview_keydown_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->preview_keydown_reg, handler, tok );
 }
 HRESULT WINAPI uwp_ui7_remove_PreviewKeyDown( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_INVALIDARG;
-    return xaml_event_registry_remove( &impl->preview_keydown_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->preview_keydown_reg, tok );
 }
 const void *uwp_ui7_vtbl[32] =
 {
@@ -1025,45 +1072,50 @@ const void *uwp_button_flyout_vtbl[8] =
 HRESULT WINAPI uwp_cd2_get_CloseButtonText( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *txt = (impl && impl->dialog) ? impl->dialog->dialog_close_text : L"";
     if (!out) return E_POINTER;
-    return WindowsCreateString( impl ? impl->dialog_close_text : L"",
-                                impl ? wcslen(impl->dialog_close_text) : 0, out );
+    return WindowsCreateString( txt, wcslen( txt ), out );
 }
 HRESULT WINAPI uwp_cd2_put_CloseButtonText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
-    if (impl) lstrcpynW( impl->dialog_close_text, raw ? raw : L"", ARRAY_SIZE(impl->dialog_close_text) );
+    struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
+    if (d) lstrcpynW( d->dialog_close_text, raw ? raw : L"", ARRAY_SIZE(d->dialog_close_text) );
     return S_OK;
 }
 HRESULT WINAPI uwp_cd2_get_DefaultButton( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->dialog_default_btn : 0;
+    if (out) *out = (impl && impl->dialog) ? impl->dialog->dialog_default_btn : 0;
     return S_OK;
 }
 HRESULT WINAPI uwp_cd2_put_DefaultButton( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->dialog_default_btn = val;
+    struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
+    if (d) d->dialog_default_btn = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_frame2_get_BackStack( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_nav_ext *nav;
     if (!out) return E_POINTER;
     *out = NULL;
     if (!impl) return E_NOINTERFACE;
-    if (!impl->back_stack)
+    nav = uwp_elem_ensure_nav( impl );
+    if (!nav) return E_OUTOFMEMORY;
+    if (!nav->back_stack)
     {
-        uwp_vec_create( NULL, &impl->back_stack );
-        if (impl->back_stack)
-            CONTAINING_RECORD( impl->back_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+        uwp_vec_create( NULL, &nav->back_stack );
+        if (nav->back_stack)
+            CONTAINING_RECORD( nav->back_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
                 L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Navigation.PageStackEntry>";
     }
-    if (impl->back_stack)
+    if (nav->back_stack)
     {
-        *out = impl->back_stack;
+        *out = nav->back_stack;
         IInspectable_AddRef( *out );
     }
     return S_OK;
@@ -1071,19 +1123,22 @@ static HRESULT WINAPI uwp_frame2_get_BackStack( void *iface, IInspectable **out 
 static HRESULT WINAPI uwp_frame2_get_ForwardStack( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_nav_ext *nav;
     if (!out) return E_POINTER;
     *out = NULL;
     if (!impl) return E_NOINTERFACE;
-    if (!impl->forward_stack)
+    nav = uwp_elem_ensure_nav( impl );
+    if (!nav) return E_OUTOFMEMORY;
+    if (!nav->forward_stack)
     {
-        uwp_vec_create( NULL, &impl->forward_stack );
-        if (impl->forward_stack)
-            CONTAINING_RECORD( impl->forward_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+        uwp_vec_create( NULL, &nav->forward_stack );
+        if (nav->forward_stack)
+            CONTAINING_RECORD( nav->forward_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
                 L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Navigation.PageStackEntry>";
     }
-    if (impl->forward_stack)
+    if (nav->forward_stack)
     {
-        *out = impl->forward_stack;
+        *out = nav->forward_stack;
         IInspectable_AddRef( *out );
     }
     return S_OK;
@@ -1110,13 +1165,14 @@ const void *uwp_frame3_vtbl[16] =
 static HRESULT WINAPI uwp_frame5_get_IsNavigationStackEnabled( void *iface, boolean *value )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (value) *value = impl ? impl->nav_stack_enabled : TRUE;
+    if (value) *value = (impl && impl->nav) ? impl->nav->nav_stack_enabled : TRUE;
     return S_OK;
 }
 static HRESULT WINAPI uwp_frame5_put_IsNavigationStackEnabled( void *iface, boolean value )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->nav_stack_enabled = value;
+    struct uwp_nav_ext *nav = uwp_elem_ensure_nav( impl );
+    if (nav) nav->nav_stack_enabled = value;
     return S_OK;
 }
 static HRESULT WINAPI uwp_frame5_NavigateToType( void *iface, void *type_name_ptr, IInspectable *param,
@@ -1405,7 +1461,7 @@ static HRESULT WINAPI uwp_dt_LoadContent( IInspectable *iface, IInspectable **ou
             WARN( "uwp_dt_LoadContent(%p) sub=%u -> %p (%s bc=%p clicks=%d)\n",
                   impl, (unsigned)impl->template_sub_idx, *out,
                   ce ? debugstr_w(ce->class_name) : "?",
-                  ce ? ce->binding_connector : NULL, ce ? ce->click_cnt : -1 );
+                  ce ? ce->binding_connector : NULL, UWP_EV_CNT( ce, click_reg ) );
             return S_OK;
         }
     }
@@ -1592,11 +1648,17 @@ static void uwp_fire_evc_one( struct uwp_element *impl, IInspectable *handler )
 
 void uwp_fire_evc_if_needed( struct uwp_element *impl )
 {
-    int i;
-    if (!impl || impl->evc_cnt <= 0 || impl->evc_fired) return;
+    void **handlers = NULL;
+    unsigned int i, count;
+    if (!impl || UWP_EV_CNT( impl, evc_reg ) == 0 || impl->evc_fired) return;
     impl->evc_fired = TRUE;
-    for (i = 0; i < impl->evc_cnt; i++)
-        uwp_fire_evc_one( impl, impl->evc_handlers[i] );
+    count = xaml_event_registry_snapshot_alloc( &impl->events->evc_reg, &handlers );
+    for (i = 0; i < count; i++)
+    {
+        uwp_fire_evc_one( impl, (IInspectable *)handlers[i] );
+        IUnknown_Release( (IUnknown *)handlers[i] );
+    }
+    free( handlers );
 }
 
 static HRESULT WINAPI uwp_fe7_get_IsLoaded( IInspectable *iface, boolean *val )
@@ -1614,40 +1676,41 @@ static HRESULT WINAPI uwp_fe7_get_IsLoaded( IInspectable *iface, boolean *val )
 static HRESULT WINAPI uwp_fe7_add_EffectiveViewportChanged( IInspectable *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IFrameworkElement7_iface );
-    if (tok && (ULONG_PTR)tok > 0x10000 && !IsBadWritePtr( tok, sizeof(*tok) ))
-        tok->value = impl->evc_cnt + 1;
-    if (handler && impl->evc_cnt < (int)ARRAY_SIZE(impl->evc_handlers))
+    struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+    EventRegistrationToken *tok_ptr = (tok && (ULONG_PTR)tok > 0x10000 && !IsBadWritePtr( tok, sizeof(*tok) )) ? tok : NULL;
+    HRESULT hr;
+    if (!ev) return E_OUTOFMEMORY;
+    hr = xaml_event_registry_add( &ev->evc_reg, handler, tok_ptr );
+    if (SUCCEEDED(hr) && handler)
     {
-        WARN( "EVC_ADD %s (%s) h=%p tok=%d\n", debugstr_w(impl->class_name), debugstr_w(impl->name), handler, impl->evc_cnt + 1 );
-        impl->evc_handlers[impl->evc_cnt++] = (IInspectable *)handler;
-        IInspectable_AddRef( (IInspectable *)handler );
+        WARN( "EVC_ADD %s (%s) h=%p tok=%I64d\n", debugstr_w(impl->class_name), debugstr_w(impl->name),
+              handler, tok_ptr ? tok_ptr->value : 0 );
         impl->evc_fired = FALSE;
         uwp_invalidate_window();
     }
-    return S_OK;
+    return hr;
 }
 static HRESULT WINAPI uwp_fe7_remove_EffectiveViewportChanged( IInspectable *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IFrameworkElement7_iface );
     if (uwp_is_items_repeater( impl ))
         WARN( "EVC_REM %s (%s) tok=%lld\n", debugstr_w(impl->class_name), debugstr_w(impl->name), (long long)tok.value );
-    if (tok.value >= 1 && tok.value <= (INT64)impl->evc_cnt)
-    {
-        int idx = (int)(tok.value - 1);
-        if (impl->evc_handlers[idx])
-        {
-            IInspectable_Release( impl->evc_handlers[idx] );
-            impl->evc_handlers[idx] = NULL;
-        }
-    }
-    return S_OK;
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->evc_reg, tok );
 }
 static HRESULT WINAPI uwp_fe7_InvalidateViewport( IInspectable *iface )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IFrameworkElement7_iface );
-    int i;
-    for (i = 0; i < impl->evc_cnt; i++)
-        uwp_fire_evc_one( impl, impl->evc_handlers[i] );
+    void **handlers = NULL;
+    unsigned int i, count;
+    if (!impl || !impl->events) return S_OK;
+    count = xaml_event_registry_snapshot_alloc( &impl->events->evc_reg, &handlers );
+    for (i = 0; i < count; i++)
+    {
+        uwp_fire_evc_one( impl, (IInspectable *)handlers[i] );
+        IUnknown_Release( (IUnknown *)handlers[i] );
+    }
+    free( handlers );
     return S_OK;
 }
 const void *uwp_fe7_vtbl[32] =
@@ -1664,6 +1727,12 @@ const void *uwp_fe7_vtbl[32] =
     [9] = uwp_fe7_InvalidateViewport,              /* slot 9: InvalidateViewport */
     [10 ... 31] = uwp_generic_noop,
 };
+void uwp_mark_in_visual_tree( IInspectable *content )
+{
+    struct uwp_element *el = uwp_elem_from_any( content );
+    if (el) el->in_visual_tree = TRUE;
+}
+
 void uwp_fire_loaded_content( IInspectable *content )
 {
     struct uwp_element *el;
@@ -1713,7 +1782,7 @@ static BOOL uwp_tree_has_class( struct uwp_element *el, const WCHAR *full_name )
     const WCHAR *dot;
     if (!el || !full_name) return FALSE;
     if (el->class_name[0] && !wcscmp( el->class_name, full_name )) return TRUE;
-    if (el->default_style_key_name[0] && !wcscmp( el->default_style_key_name, full_name )) return TRUE;
+    if (uwp_elem_default_style_key_name( el )[0] && !wcscmp( uwp_elem_default_style_key_name( el ), full_name )) return TRUE;
     dot = wcsrchr( full_name, L'.' );
     if ((el->kind == UWP_KIND_USER_CONTROL || el->kind == UWP_KIND_PAGE) &&
         el->name[0] && !wcscmp( el->name, dot ? dot + 1 : full_name ))
@@ -1789,6 +1858,7 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
                                               const WCHAR *short_name )
 {
     void *inst = NULL;
+    IInspectable *hold_raw = NULL;
     struct uwp_element *el = NULL;
     struct uwp_element *prev_head;
     int gen;
@@ -1832,7 +1902,8 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
         if (SUCCEEDED(uwp_element_create( full_name, NULL, NULL, (void **)&raw )) && raw)
         {
             el = uwp_elem_from_any( raw );
-            IInspectable_Release( raw );
+            if (el) hold_raw = raw;
+            else IInspectable_Release( raw );
         }
     }
     if (!el) return FALSE;
@@ -1850,12 +1921,16 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
     if (!el->children_coll && !el->content)
     {
         TRACE( "uwp_instantiate_xbf_control_into: %s yielded empty tree\n", debugstr_w(full_name) );
+        if (hold_raw) IInspectable_Release( hold_raw );
         return FALSE;
     }
 
-    uwp_vec_create( holder, &holder->children_coll );
+    if (!holder->children_coll) uwp_vec_create( holder, &holder->children_coll );
     uwp_vec_Append( holder->children_coll, el->outer ? (void *)el->outer : (void *)&el->IInspectable_iface );
     el->parent = holder;
+    el->in_visual_tree = TRUE;
+    holder->in_visual_tree = TRUE;
+    if (hold_raw) IInspectable_Release( hold_raw );
     uwp_vsm_invalidate_eval_chain( el );
     uwp_realize_empty_panel_defers( el );
     uwp_fire_loaded_tree( el );
@@ -2334,7 +2409,7 @@ struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x, int y 
         struct uwp_element *hit = ch && ch != el ? uwp_hit_test_tappable( ch, x, y ) : NULL;
         if (hit) return hit;
     }
-    if (el->tapped_reg.next_token > 0) return el;
+    if (UWP_EV_ANY( el, tapped_reg )) return el;
     return NULL;
 }
 

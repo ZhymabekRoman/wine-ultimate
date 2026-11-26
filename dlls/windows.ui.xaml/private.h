@@ -180,6 +180,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
 ICoreWindow *get_current_core_window( void );
 BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz );
 void uwp_fire_loaded_content( IInspectable *content );
+void uwp_mark_in_visual_tree( IInspectable *content );
 void uwp_notify_swapchain_panel_resize( void *el, UINT w, UINT h );
 
 /* Shared token-based WinRT event registry (twinapi bg_events pattern) */
@@ -201,6 +202,8 @@ HRESULT xaml_event_registry_add( struct xaml_event_registry *reg, void *handler,
 HRESULT xaml_event_registry_remove( struct xaml_event_registry *reg, EventRegistrationToken token );
 unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void **out, unsigned int max_out );
 unsigned int xaml_event_registry_snapshot_alloc( struct xaml_event_registry *reg, void ***out_handlers );
+unsigned int xaml_event_registry_snapshot_after( struct xaml_event_registry *reg, INT64 after_tok,
+                                                 void ***out_handlers, INT64 *out_max_tok );
 void xaml_event_registry_clear( struct xaml_event_registry *reg );
 
 /* Realloc-backed growable vector helper (grows capacity x2) */

@@ -1453,6 +1453,183 @@ static void test_TruncatedXbfBounds( void )
     IUnknown_Release( (IUnknown *)xr_statics );
 }
 
+struct test_dummy_handler
+{
+    const void **lpVtbl;
+    LONG ref;
+    LONG invoke_cnt;
+};
+
+static HRESULT WINAPI test_dh_QI( void *iface, REFIID iid, void **out )
+{
+    struct test_dummy_handler *h = iface;
+    if (!out) return E_POINTER;
+    *out = iface;
+    InterlockedIncrement( &h->ref );
+    return S_OK;
+}
+static ULONG WINAPI test_dh_AddRef( void *iface )
+{
+    struct test_dummy_handler *h = iface;
+    return InterlockedIncrement( &h->ref );
+}
+static ULONG WINAPI test_dh_Release( void *iface )
+{
+    struct test_dummy_handler *h = iface;
+    return InterlockedDecrement( &h->ref );
+}
+static HRESULT WINAPI test_dh_Invoke( void *iface, void *sender, void *args )
+{
+    struct test_dummy_handler *h = iface;
+    InterlockedIncrement( &h->invoke_cnt );
+    return S_OK;
+}
+static const void *test_dh_vtbl[] = { test_dh_QI, test_dh_AddRef, test_dh_Release, test_dh_Invoke };
+
+struct test_wrs_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *GetWeakReference)(void *, void **);
+};
+struct test_wrs_iface { const struct test_wrs_vtbl *lpVtbl; };
+
+struct test_wr_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *Resolve)(void *, REFIID, IInspectable **);
+};
+struct test_wr_iface { const struct test_wr_vtbl *lpVtbl; };
+
+struct test_fe_ev_vtbl
+{
+    void *pad0_42[43];
+    HRESULT (WINAPI *add_Loaded)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Loaded)(void *, EventRegistrationToken);
+    void *pad45_46[2];
+    HRESULT (WINAPI *add_SizeChanged)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_SizeChanged)(void *, EventRegistrationToken);
+    HRESULT (WINAPI *add_LayoutUpdated)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_LayoutUpdated)(void *, EventRegistrationToken);
+};
+struct test_fe_ev_iface { const struct test_fe_ev_vtbl *lpVtbl; };
+
+struct test_btn_ev_vtbl
+{
+    void *pad0_13[14];
+    HRESULT (WINAPI *add_Click)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Click)(void *, EventRegistrationToken);
+};
+struct test_btn_ev_iface { const struct test_btn_ev_vtbl *lpVtbl; };
+
+struct test_fe7_ev_vtbl
+{
+    void *pad0_6[7];
+    HRESULT (WINAPI *add_EffectiveViewportChanged)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_EffectiveViewportChanged)(void *, EventRegistrationToken);
+};
+struct test_fe7_ev_iface { const struct test_fe7_ev_vtbl *lpVtbl; };
+
+static void test_EventRegistryAndTransientLifecycle(void)
+{
+    static const GUID IID_IFrameworkElement_t = { 0xa391d09b, 0x4a99, 0x4b7c, { 0x9d, 0x8d, 0x6f, 0xa5, 0xd0, 0x1f, 0x6f, 0xbf } };
+    static const GUID IID_IFrameworkElement7_t = { 0xc62080a9, 0x475e, 0x4b78, { 0x8a, 0xe8, 0x7c, 0x99, 0x46, 0x43, 0x1c, 0x45 } };
+    static const GUID IID_IButtonBase_t = { 0xfa002c1a, 0x494e, 0x46cf, { 0x91, 0xd4, 0xe1, 0x4a, 0x8d, 0x79, 0x86, 0x74 } };
+    static const GUID IID_IWeakReferenceSource_t = { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    HSTRING hcls;
+    IInspectable *btn = NULL, *resolved = NULL;
+    void *fe = NULL, *fe7 = NULL, *bb = NULL, *wrs = NULL, *wr = NULL;
+    struct test_dummy_handler h1 = { test_dh_vtbl, 1, 0 };
+    struct test_dummy_handler h2 = { test_dh_vtbl, 1, 0 };
+    EventRegistrationToken tok1 = {0}, tok2 = {0};
+    HRESULT hr;
+
+    hr = WindowsCreateString( L"Windows.UI.Xaml.Controls.Button", 31, &hcls );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoActivateInstance( hcls, &btn );
+    WindowsDeleteString( hcls );
+    if (FAILED(hr) || !btn)
+    {
+        win_skip( "Button activation unavailable (hr %#lx)\n", hr );
+        return;
+    }
+
+    /* 1. Test WeakReference before and after transient element destroy */
+    hr = IInspectable_QueryInterface( btn, &IID_IWeakReferenceSource_t, &wrs );
+    ok( hr == S_OK && wrs != NULL, "QI IWeakReferenceSource got hr %#lx wrs %p\n", hr, wrs );
+    if (wrs)
+    {
+        hr = ((const struct test_wrs_iface *)wrs)->lpVtbl->GetWeakReference( wrs, &wr );
+        ok( hr == S_OK && wr != NULL, "GetWeakReference got hr %#lx wr %p\n", hr, wr );
+        IUnknown_Release( (IUnknown *)wrs );
+    }
+    if (wr)
+    {
+        hr = ((const struct test_wr_iface *)wr)->lpVtbl->Resolve( wr, &IID_IInspectable, &resolved );
+        ok( hr == S_OK && resolved != NULL, "Resolve while alive got hr %#lx resolved %p\n", hr, resolved );
+        if (resolved) IInspectable_Release( resolved );
+    }
+
+    /* 2. Test add/remove on migrated event registries (Loaded, SizeChanged, LayoutUpdated, Click, EVC) */
+    if (SUCCEEDED(IInspectable_QueryInterface( btn, &IID_IFrameworkElement_t, &fe )) && fe)
+    {
+        const struct test_fe_ev_iface *f = (const struct test_fe_ev_iface *)fe;
+        hr = f->lpVtbl->add_Loaded( fe, &h1, &tok1 );
+        ok( hr == S_OK && tok1.value != 0, "add_Loaded hr %#lx tok %I64d\n", hr, tok1.value );
+        ok( h1.ref == 2, "add_Loaded should AddRef handler (ref=%ld)\n", h1.ref );
+        hr = f->lpVtbl->remove_Loaded( fe, tok1 );
+        ok( hr == S_OK && h1.ref == 1, "remove_Loaded should Release handler (hr=%#lx ref=%ld)\n", hr, h1.ref );
+
+        hr = f->lpVtbl->add_SizeChanged( fe, &h1, &tok1 );
+        ok( hr == S_OK && tok1.value != 0 && h1.ref == 2, "add_SizeChanged hr %#lx ref %ld\n", hr, h1.ref );
+        hr = f->lpVtbl->remove_SizeChanged( fe, tok1 );
+        ok( hr == S_OK && h1.ref == 1, "remove_SizeChanged hr %#lx ref %ld\n", hr, h1.ref );
+
+        hr = f->lpVtbl->add_LayoutUpdated( fe, &h1, &tok1 );
+        ok( hr == S_OK && tok1.value != 0 && h1.ref == 2, "add_LayoutUpdated hr %#lx ref %ld\n", hr, h1.ref );
+        hr = f->lpVtbl->remove_LayoutUpdated( fe, tok1 );
+        ok( hr == S_OK && h1.ref == 1, "remove_LayoutUpdated hr %#lx ref %ld\n", hr, h1.ref );
+        IUnknown_Release( (IUnknown *)fe );
+    }
+
+    if (SUCCEEDED(IInspectable_QueryInterface( btn, &IID_IButtonBase_t, &bb )) && bb)
+    {
+        const struct test_btn_ev_iface *b = (const struct test_btn_ev_iface *)bb;
+        hr = b->lpVtbl->add_Click( bb, &h1, &tok1 );
+        ok( hr == S_OK && tok1.value != 0 && h1.ref == 2, "add_Click hr %#lx ref %ld\n", hr, h1.ref );
+        hr = b->lpVtbl->remove_Click( bb, tok1 );
+        ok( hr == S_OK && h1.ref == 1, "remove_Click hr %#lx ref %ld\n", hr, h1.ref );
+        /* Also leave h2 registered so we verify uwp_element_destroy releases it */
+        hr = b->lpVtbl->add_Click( bb, &h2, &tok2 );
+        ok( hr == S_OK && h2.ref == 2, "add_Click(h2) hr %#lx ref %ld\n", hr, h2.ref );
+        IUnknown_Release( (IUnknown *)bb );
+    }
+
+    if (SUCCEEDED(IInspectable_QueryInterface( btn, &IID_IFrameworkElement7_t, &fe7 )) && fe7)
+    {
+        const struct test_fe7_ev_iface *f7 = (const struct test_fe7_ev_iface *)fe7;
+        hr = f7->lpVtbl->add_EffectiveViewportChanged( fe7, &h1, &tok1 );
+        ok( hr == S_OK && tok1.value != 0 && h1.ref == 2, "add_EVC hr %#lx ref %ld\n", hr, h1.ref );
+        hr = f7->lpVtbl->remove_EffectiveViewportChanged( fe7, tok1 );
+        ok( hr == S_OK && h1.ref == 1, "remove_EVC hr %#lx ref %ld\n", hr, h1.ref );
+        IUnknown_Release( (IUnknown *)fe7 );
+    }
+
+    /* 3. Final Release destroys transient Button, releases h2, and invalidates WeakReference */
+    IInspectable_Release( btn );
+    ok( h2.ref == 1, "destroying transient element should release remaining event handlers (h2.ref=%ld)\n", h2.ref );
+    if (wr)
+    {
+        resolved = (IInspectable *)0xdeadbeef;
+        hr = ((const struct test_wr_iface *)wr)->lpVtbl->Resolve( wr, &IID_IInspectable, &resolved );
+        ok( hr == S_OK && resolved == NULL, "Resolve after destroy should return NULL (hr=%#lx resolved=%p)\n", hr, resolved );
+        IUnknown_Release( (IUnknown *)wr );
+    }
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -1468,6 +1645,7 @@ START_TEST(xaml)
     test_VmDataContextBinding();
     test_VectorGrowthBeyondOldCaps();
     test_TruncatedXbfBounds();
+    test_EventRegistryAndTransientLifecycle();
 
     RoUninitialize();
 }

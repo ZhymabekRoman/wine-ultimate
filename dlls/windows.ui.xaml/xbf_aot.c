@@ -628,8 +628,12 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 if (root_el) el->owner_component = root_el;
                 if (nd->has_init_argb)
                 {
-                    el->brush_argb = nd->init_argb;
-                    el->has_brush_argb = TRUE;
+                    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                    if (sa)
+                    {
+                        sa->brush_argb = nd->init_argb;
+                        sa->has_brush_argb = TRUE;
+                    }
                 }
                 if (nd->template_sub_idx != 0xffffffffu && xbf && xbf_sz)
                 {
@@ -698,7 +702,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
         case XBF_AOT_OP_SET_XCLASS:
         {
             struct uwp_element *el = (op->node_idx < hdr->node_cnt) ? nodes_el[op->node_idx] : NULL;
-            if (el) lstrcpynW( el->x_class, xbf_aot_str( hdr, op->str_off ), ARRAY_SIZE(el->x_class) );
+            if (el) uwp_elem_set_x_class( el, xbf_aot_str( hdr, op->str_off ) );
             break;
         }
         case XBF_AOT_OP_SET_XNAME:
@@ -713,6 +717,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                                    root_el->named_cnt + 1, sizeof(*root_el->named_elems), 32 ))
                 {
                     root_el->named_elems[root_el->named_cnt++] = el;
+                    el->in_visual_tree = TRUE;
                 }
             }
             break;
@@ -839,16 +844,21 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 else if (parent_el && (op->pid == XBF_PROP_GRADIENTBRUSH_STOPS ||
                                        (child_el && (child_el->class_flags2 & UWP_CF2_GRADIENT_STOP))))
                 {
-                    if (!parent_el->gradient_stops_coll)
+                    struct uwp_style_anim_ext *psa = uwp_elem_ensure_style_anim( parent_el );
+                    if (psa)
                     {
-                        uwp_vec_create( parent_el, &parent_el->gradient_stops_coll );
-                        if (parent_el->gradient_stops_coll)
+                        if (!psa->gradient_stops_coll)
                         {
-                            struct uwp_vec_view *gv = CONTAINING_RECORD( parent_el->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
-                            gv->runtime_class = L"Windows.UI.Xaml.Media.GradientStopCollection";
+                            uwp_vec_create( parent_el, &psa->gradient_stops_coll );
+                            if (psa->gradient_stops_coll)
+                            {
+                                struct uwp_vec_view *gv = CONTAINING_RECORD( psa->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
+                                gv->runtime_class = L"Windows.UI.Xaml.Media.GradientStopCollection";
+                            }
                         }
+                        if (psa->gradient_stops_coll)
+                            uwp_vec_Append( psa->gradient_stops_coll, child_raw );
                     }
-                    uwp_vec_Append( parent_el->gradient_stops_coll, child_raw );
                     handled_custom = TRUE;
                 }
                 else if (parent_raw && ao &&
@@ -987,10 +997,11 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         {
                             if (parent_el && !wcscmp( pi->name, L"Icon" ))
                             {
-                                if (parent_el->nav_icon != child_raw)
+                                struct uwp_nav_ext *pne = uwp_elem_ensure_nav( parent_el );
+                                if (pne && pne->nav_icon != child_raw)
                                 {
-                                    if (parent_el->nav_icon) IInspectable_Release( parent_el->nav_icon );
-                                    parent_el->nav_icon = child_raw;
+                                    if (pne->nav_icon) IInspectable_Release( pne->nav_icon );
+                                    pne->nav_icon = child_raw;
                                     IInspectable_AddRef( child_raw );
                                 }
                             }
@@ -1036,9 +1047,9 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         argb = apply_opacity_to_argb( argb, op->num );
                         got = TRUE;
                     }
-                    else if (child_el && child_el->has_brush_argb)
+                    else if (child_el && uwp_elem_has_brush_argb( child_el ))
                     {
-                        argb = apply_opacity_to_argb( child_el->brush_argb, child_el->brush_opacity );
+                        argb = apply_opacity_to_argb( uwp_elem_brush_argb( child_el ), uwp_elem_brush_opacity( child_el ) );
                         got = TRUE;
                     }
                     if (got)
@@ -1104,14 +1115,15 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                            (!wcscmp( fake_ctx.props[op->pid].name, L"Source" ) ||
                             !wcscmp( fake_ctx.props[op->pid].name, L"ImageSource" )))))
                 {
-                    if (parent_el->img_source != child_raw)
+                    struct uwp_media_ext *pm = uwp_elem_ensure_media( parent_el );
+                    if (pm && pm->img_source != child_raw)
                     {
-                        if (parent_el->img_source) IInspectable_Release( parent_el->img_source );
-                        parent_el->img_source = child_raw;
+                        if (pm->img_source) IInspectable_Release( pm->img_source );
+                        pm->img_source = child_raw;
                         IInspectable_AddRef( child_raw );
                     }
-                    if (child_el && child_el->image_src[0] && !parent_el->image_src[0])
-                        lstrcpynW( parent_el->image_src, child_el->image_src, ARRAY_SIZE(parent_el->image_src) );
+                    if (pm && uwp_elem_image_src( child_el )[0] && !pm->image_src[0])
+                        lstrcpynW( pm->image_src, uwp_elem_image_src( child_el ), ARRAY_SIZE(pm->image_src) );
                     if (child_el) child_el->parent = parent_el;
                 }
                 else if (child_raw &&
@@ -1173,8 +1185,12 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 WCHAR resolved[256] = {0};
                 if (val_el->class_flags2 & UWP_CF2_TEMPLATE_BINDING)
                 {
-                    target_el->tpl_bind_target_pid = op->pid;
-                    lstrcpynW( target_el->tpl_bind_src_prop, uwp_elem_text( val_el ), ARRAY_SIZE(target_el->tpl_bind_src_prop) );
+                    struct uwp_style_anim_ext *tsa = uwp_elem_ensure_style_anim( target_el );
+                    if (tsa)
+                    {
+                        tsa->tpl_bind_target_pid = op->pid;
+                        lstrcpynW( tsa->tpl_bind_src_prop, uwp_elem_text( val_el ), ARRAY_SIZE(tsa->tpl_bind_src_prop) );
+                    }
                     break;
                 }
                 if (uwp_pri_lookup_string( uwp_elem_text( val_el ), resolved, ARRAY_SIZE(resolved) ) && resolved[0])
@@ -1198,7 +1214,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                         if (vk) uwp_accel_register( NULL, target_el, vk, mods, TRUE );
                     }
                     if (op->pid == XBF_PROP_AUTOMATION_NAME)
-                        lstrcpynW( target_el->automation_name, resolved, ARRAY_SIZE(target_el->automation_name) );
+                        uwp_elem_set_automation_name( target_el, resolved );
                     else if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
                         op->pid == XBF_PROP_TEXTBLOCK_TEXT || op->pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
                         op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == XBF_PROP_RUN_TEXT ||
@@ -1214,8 +1230,12 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
             const WCHAR *src_name = xbf_aot_str( hdr, op->str_off );
             if (target_el && src_name && src_name[0])
             {
-                target_el->tpl_bind_target_pid = op->pid;
-                lstrcpynW( target_el->tpl_bind_src_prop, src_name, ARRAY_SIZE(target_el->tpl_bind_src_prop) );
+                struct uwp_style_anim_ext *tsa = uwp_elem_ensure_style_anim( target_el );
+                if (tsa)
+                {
+                    tsa->tpl_bind_target_pid = op->pid;
+                    lstrcpynW( tsa->tpl_bind_src_prop, src_name, ARRAY_SIZE(tsa->tpl_bind_src_prop) );
+                }
                 if (op->pid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT || op->pid == XBF_PROP_FLOW_DIRECTION)
                     target_el->height = 0.1;
             }

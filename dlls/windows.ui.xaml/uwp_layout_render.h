@@ -274,6 +274,7 @@ void uwp_tabview_fire_add_tab( struct uwp_element *tv );
 void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item );
 void uwp_tabview_select_item( struct uwp_element *tv, IInspectable *item );
 HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationToken *tok );
+HRESULT WINAPI uwp_btn_remove_Click( void *iface, EventRegistrationToken tok );
 HRESULT WINAPI uwp_btn_get_Command( void *iface, void **out );
 HRESULT WINAPI uwp_btn_get_CommandParameter( void *iface, void **out );
 HRESULT WINAPI uwp_btn_put_Command( void *iface, void *val );
@@ -345,6 +346,7 @@ HRESULT WINAPI uwp_vec_Append( void *iface, void *item );
 HRESULT WINAPI uwp_vec_Clear( void *iface );
 HRESULT WINAPI uwp_vec_GetAt( void *iface, unsigned int idx, void **item );
 HRESULT WINAPI uwp_vec_get_Size( void *iface, unsigned int *sz );
+void uwp_vec_detach_owner( IInspectable *vec, struct uwp_element *owner );
 unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_items, unsigned int max_items );
 unsigned int uwp_winrt_vec_count( IInspectable *coll );
 

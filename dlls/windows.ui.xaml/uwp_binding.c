@@ -97,7 +97,10 @@ static HRESULT WINAPI xbh_ConvertValue( void *iface, TypeName *type, IInspectabl
             {
                 struct uwp_element *bi_el = uwp_elem_from_any( bi );
                 if (bi_el && str_buf[0])
-                    lstrcpynW( bi_el->image_src, str_buf, ARRAY_SIZE(bi_el->image_src) );
+                {
+                    struct uwp_media_ext *m = uwp_elem_ensure_media( bi_el );
+                    if (m) lstrcpynW( m->image_src, str_buf, ARRAY_SIZE(m->image_src) );
+                }
                 *out = (IInspectable *)bi;
                 return S_OK;
             }
@@ -114,9 +117,13 @@ static HRESULT WINAPI xbh_ConvertValue( void *iface, TypeName *type, IInspectabl
                 UINT32 argb = 0;
                 if (br_el && str_buf[0] && uwp_parse_color_string( str_buf, &argb ))
                 {
-                    br_el->brush_argb = argb;
-                    br_el->has_brush_argb = TRUE;
-                    br_el->brush_opacity = (double)((argb >> 24) & 0xff) / 255.0;
+                    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( br_el );
+                    if (sa)
+                    {
+                        sa->brush_argb = argb;
+                        sa->has_brush_argb = TRUE;
+                        sa->brush_opacity = (double)((argb >> 24) & 0xff) / 255.0;
+                    }
                 }
                 *out = (IInspectable *)br;
                 return S_OK;

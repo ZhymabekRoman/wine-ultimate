@@ -611,9 +611,9 @@ static void uwp_vm_extract_nested_url( IInspectable *pval, const WCHAR *const *p
     IInspectable *items[6];
     unsigned int cnt, i;
 
-    if (pel && pel->image_src[0])
+    if (uwp_elem_image_src( pel )[0])
     {
-        lstrcpynW( out, pel->image_src, out_len );
+        lstrcpynW( out, uwp_elem_image_src( pel ), out_len );
         return;
     }
     uwp_extract_uri_string( pval, out, out_len );

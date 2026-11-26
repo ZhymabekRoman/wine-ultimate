@@ -64,7 +64,7 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
 
     if (!el) return;
     cls = el->class_name;
-    dsk = el->default_style_key_name;
+    dsk = uwp_elem_default_style_key_name( el );
 
     if (wcsstr( cls, L"AutoSuggestBox" ))
     {
@@ -297,6 +297,158 @@ void uwp_elem_append_text( struct uwp_element *el, const WCHAR *s )
     el->text_len = (UINT32)(cur_len + add_len);
 }
 
+void uwp_elem_set_cold_str( WCHAR **dst, const WCHAR *src, size_t max_chars )
+{
+    size_t len = 0;
+    WCHAR *nbuf;
+
+    if (!dst) return;
+    if (!src || !src[0] || max_chars <= 1)
+    {
+        free( *dst );
+        *dst = NULL;
+        return;
+    }
+    while (len + 1 < max_chars && src[len]) len++;
+    if (len == 0)
+    {
+        free( *dst );
+        *dst = NULL;
+        return;
+    }
+    if (*dst && !wcsncmp( *dst, src, len ) && (*dst)[len] == 0)
+        return;
+    nbuf = malloc( (len + 1) * sizeof(WCHAR) );
+    if (!nbuf) return;
+    memcpy( nbuf, src, len * sizeof(WCHAR) );
+    nbuf[len] = 0;
+    free( *dst );
+    *dst = nbuf;
+}
+
+struct uwp_event_bag *uwp_elem_ensure_events( struct uwp_element *el )
+{
+    struct uwp_event_bag *bag, *prev;
+    if (!el) return NULL;
+    if (el->events) return el->events;
+    bag = calloc( 1, sizeof(*bag) );
+    if (!bag) return NULL;
+    prev = InterlockedCompareExchangePointer( (void **)&el->events, bag, NULL );
+    if (prev)
+    {
+        free( bag );
+        return prev;
+    }
+    return bag;
+}
+
+struct uwp_media_ext *uwp_elem_ensure_media( struct uwp_element *el )
+{
+    struct uwp_media_ext *m, *prev;
+    if (!el) return NULL;
+    if (el->media) return el->media;
+    m = calloc( 1, sizeof(*m) );
+    if (!m) return NULL;
+    m->media_stretch = 2; /* Uniform */
+    InitializeSRWLock( &m->video_lock );
+    prev = InterlockedCompareExchangePointer( (void **)&el->media, m, NULL );
+    if (prev)
+    {
+        free( m );
+        return prev;
+    }
+    return m;
+}
+
+struct uwp_dialog_ext *uwp_elem_ensure_dialog( struct uwp_element *el )
+{
+    struct uwp_dialog_ext *d, *prev;
+    if (!el) return NULL;
+    if (el->dialog) return el->dialog;
+    d = calloc( 1, sizeof(*d) );
+    if (!d) return NULL;
+    prev = InterlockedCompareExchangePointer( (void **)&el->dialog, d, NULL );
+    if (prev)
+    {
+        free( d );
+        return prev;
+    }
+    return d;
+}
+
+struct uwp_nav_ext *uwp_elem_ensure_nav( struct uwp_element *el )
+{
+    struct uwp_nav_ext *n, *prev;
+    if (!el) return NULL;
+    if (el->nav) return el->nav;
+    n = calloc( 1, sizeof(*n) );
+    if (!n) return NULL;
+    n->selected_index = -1;
+    n->nav_stack_enabled = TRUE;
+    n->nav_open_pane_length = 280.0;
+    n->nav_compact_pane_length = 68.0;
+    n->nav_compact_threshold = 641.0;
+    n->nav_expanded_threshold = 1008.0;
+    n->nav_is_settings_visible = TRUE;
+    n->nav_is_pane_toggle_visible = TRUE;
+    prev = InterlockedCompareExchangePointer( (void **)&el->nav, n, NULL );
+    if (prev)
+    {
+        free( n );
+        return prev;
+    }
+    return n;
+}
+
+struct uwp_style_anim_ext *uwp_elem_ensure_style_anim( struct uwp_element *el )
+{
+    struct uwp_style_anim_ext *sa, *prev;
+    if (!el) return NULL;
+    if (el->style_anim) return el->style_anim;
+    sa = calloc( 1, sizeof(*sa) );
+    if (!sa) return NULL;
+    sa->brush_opacity = 1.0;
+    sa->tile_align_x = 1; /* Center */
+    sa->tile_align_y = 1; /* Center */
+    sa->grad_end_x = 1.0f;
+    sa->grad_end_y = 1.0f;
+    sa->grad_mapping_mode = 1; /* RelativeToBoundingBox */
+    sa->grad_color_interp = 1; /* SRgbLinearInterpolation */
+    prev = InterlockedCompareExchangePointer( (void **)&el->style_anim, sa, NULL );
+    if (prev)
+    {
+        free( sa );
+        return prev;
+    }
+    return sa;
+}
+
+void uwp_fire_event_registry( struct xaml_event_registry *reg, IInspectable *sender,
+                              IInspectable *args, const char *tag )
+{
+    void **handlers = NULL;
+    unsigned int i, count;
+
+    if (!reg || reg->count == 0) return;
+    count = xaml_event_registry_snapshot_alloc( reg, &handlers );
+    for (i = 0; i < count; i++)
+    {
+        struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+        __TRY
+        {
+            h->lpVtbl->Invoke( h, sender, args );
+        }
+        __EXCEPT_ALL
+        {
+            WARN( "%s: handler[%u] threw exception 0x%08lx\n",
+                  tag ? tag : "event", i, (unsigned long)GetExceptionCode() );
+        }
+        __ENDTRY;
+        IUnknown_Release( (IUnknown *)h );
+    }
+    free( handlers );
+}
+
 struct uwp_ptr_slot
 {
     void *key;
@@ -311,10 +463,12 @@ struct uwp_neg_slot
 };
 
 #define UWP_NEG_CACHE_SIZE 512
+#define UWP_PTR_TOMBSTONE ((void *)(ULONG_PTR)1)
 
 static struct uwp_ptr_slot *g_elem_ptr_map = NULL;
 static UINT32 g_elem_ptr_cap = 0;
 static UINT32 g_elem_ptr_cnt = 0;
+static UINT32 g_elem_ptr_tombstones = 0;
 static ULONG_PTR g_elem_min_addr = 0;
 static ULONG_PTR g_elem_max_addr = 0;
 static struct uwp_neg_slot g_neg_ptr_cache[UWP_NEG_CACHE_SIZE];
@@ -329,9 +483,8 @@ static inline UINT32 uwp_hash_ptr( const void *p )
     return (UINT32)(v * 2654435761u);
 }
 
-static void uwp_ptr_map_grow_locked( void )
+static void uwp_ptr_map_rehash_locked( UINT32 new_cap )
 {
-    UINT32 new_cap = g_elem_ptr_cap ? g_elem_ptr_cap * 2 : 2048;
     struct uwp_ptr_slot *nt = calloc( new_cap, sizeof(*nt) );
     UINT32 mask = new_cap - 1, i;
     if (!nt) return;
@@ -339,7 +492,7 @@ static void uwp_ptr_map_grow_locked( void )
     {
         for (i = 0; i < g_elem_ptr_cap; i++)
         {
-            if (g_elem_ptr_map[i].key)
+            if (g_elem_ptr_map[i].key && g_elem_ptr_map[i].key != UWP_PTR_TOMBSTONE)
             {
                 UINT32 idx = uwp_hash_ptr( g_elem_ptr_map[i].key ) & mask;
                 while (nt[idx].key) idx = (idx + 1) & mask;
@@ -350,14 +503,27 @@ static void uwp_ptr_map_grow_locked( void )
     }
     g_elem_ptr_map = nt;
     g_elem_ptr_cap = new_cap;
+    g_elem_ptr_tombstones = 0;
+}
+
+static void uwp_ptr_map_grow_locked( void )
+{
+    UINT32 new_cap = g_elem_ptr_cap ? g_elem_ptr_cap * 2 : 2048;
+    uwp_ptr_map_rehash_locked( new_cap );
 }
 
 static void uwp_ptr_map_insert_locked( void *key, struct uwp_element *el )
 {
-    UINT32 mask, idx;
-    if (!key || !el) return;
-    if (!g_elem_ptr_map || (g_elem_ptr_cnt + 1) * 100 >= g_elem_ptr_cap * 65)
-        uwp_ptr_map_grow_locked();
+    UINT32 mask, idx, first_tomb = ~0u;
+    if (!key || key == UWP_PTR_TOMBSTONE || !el) return;
+    if (!g_elem_ptr_map || (g_elem_ptr_cnt + g_elem_ptr_tombstones + 1) * 100 >= g_elem_ptr_cap * 65)
+    {
+        if (g_elem_ptr_map && g_elem_ptr_tombstones > g_elem_ptr_cap / 4 &&
+            (g_elem_ptr_cnt + 1) * 100 < g_elem_ptr_cap * 50)
+            uwp_ptr_map_rehash_locked( g_elem_ptr_cap );
+        else
+            uwp_ptr_map_grow_locked();
+    }
     if (!g_elem_ptr_map) return;
     mask = g_elem_ptr_cap - 1;
     idx = uwp_hash_ptr( key ) & mask;
@@ -365,18 +531,43 @@ static void uwp_ptr_map_insert_locked( void *key, struct uwp_element *el )
     {
         if (!g_elem_ptr_map[idx].key)
         {
-            g_elem_ptr_map[idx].key = key;
-            g_elem_ptr_map[idx].el = el;
+            UINT32 dst = (first_tomb != ~0u) ? first_tomb : idx;
+            if (first_tomb != ~0u && g_elem_ptr_tombstones > 0) g_elem_ptr_tombstones--;
+            g_elem_ptr_map[dst].key = key;
+            g_elem_ptr_map[dst].el = el;
             g_elem_ptr_cnt++;
             return;
         }
-        if (g_elem_ptr_map[idx].key == key)
+        if (g_elem_ptr_map[idx].key == UWP_PTR_TOMBSTONE)
+        {
+            if (first_tomb == ~0u) first_tomb = idx;
+        }
+        else if (g_elem_ptr_map[idx].key == key)
         {
             g_elem_ptr_map[idx].el = el;
             return;
         }
         idx = (idx + 1) & mask;
     }
+}
+
+static void uwp_ptr_map_remove_el_locked( struct uwp_element *el )
+{
+    UINT32 i;
+    if (!g_elem_ptr_map || !el) return;
+    for (i = 0; i < g_elem_ptr_cap; i++)
+    {
+        if (g_elem_ptr_map[i].key && g_elem_ptr_map[i].key != UWP_PTR_TOMBSTONE &&
+            g_elem_ptr_map[i].el == el)
+        {
+            g_elem_ptr_map[i].key = UWP_PTR_TOMBSTONE;
+            g_elem_ptr_map[i].el = NULL;
+            if (g_elem_ptr_cnt > 0) g_elem_ptr_cnt--;
+            g_elem_ptr_tombstones++;
+        }
+    }
+    if (g_elem_ptr_cap && g_elem_ptr_tombstones > g_elem_ptr_cap / 4)
+        uwp_ptr_map_rehash_locked( g_elem_ptr_cap );
 }
 
 static struct uwp_element *uwp_ptr_map_lookup_locked( const void *ptr )
@@ -392,9 +583,10 @@ static struct uwp_element *uwp_ptr_map_lookup_locked( const void *ptr )
         if (k == ptr)
         {
             struct uwp_element *el = g_elem_ptr_map[idx].el;
-            if (el && ((void *)ptr == (void *)el->outer ||
-                       (void *)ptr == (void *)el->provider_inst ||
-                       ((const char *)ptr >= (const char *)el && (const char *)ptr < (const char *)(el + 1))))
+            if (el && el->magic == UWP_ELEM_MAGIC &&
+                ((void *)ptr == (void *)el->outer ||
+                 (void *)ptr == (void *)el->provider_inst ||
+                 ((const char *)ptr >= (const char *)el && (const char *)ptr < (const char *)(el + 1))))
                 return el;
             return NULL;
         }
@@ -647,8 +839,14 @@ struct uwp_weak_ref
 {
     IWeakReference IWeakReference_iface;
     LONG ref;
-    struct uwp_element *elem;
+    struct uwp_weak_ctrl *ctrl;
 };
+
+static void uwp_weak_ctrl_release( struct uwp_weak_ctrl *ctrl )
+{
+    if (ctrl && !InterlockedDecrement( &ctrl->ref ))
+        free( ctrl );
+}
 
 static HRESULT WINAPI uwp_wr_QI( IWeakReference *iface, REFIID iid, void **out )
 {
@@ -671,18 +869,61 @@ static ULONG WINAPI uwp_wr_Release( IWeakReference *iface )
 {
     struct uwp_weak_ref *wr = (struct uwp_weak_ref *)iface;
     ULONG r = InterlockedDecrement( &wr->ref );
-    if (!r) free( wr );
+    if (!r)
+    {
+        uwp_weak_ctrl_release( wr->ctrl );
+        free( wr );
+    }
     return r;
 }
 static HRESULT WINAPI uwp_wr_Resolve( IWeakReference *iface, REFIID iid, IInspectable **out )
 {
     struct uwp_weak_ref *wr = (struct uwp_weak_ref *)iface;
+    struct uwp_element *el = NULL;
+    IInspectable *outer = NULL;
+    HRESULT hr = S_OK;
     if (!out) return E_POINTER;
     *out = NULL;
-    if (!wr->elem) return S_OK;
-    if (wr->elem->outer)
-        return IInspectable_QueryInterface( wr->elem->outer, iid, (void **)out );
-    return IInspectable_QueryInterface( &wr->elem->IInspectable_iface, iid, (void **)out );
+    if (!wr->ctrl) return S_OK;
+
+    AcquireSRWLockShared( &g_all_uwp_elems_lock );
+    el = wr->ctrl->elem;
+    if (el && el->magic == UWP_ELEM_MAGIC)
+    {
+        LONG cur = el->ref;
+        while (cur > 0)
+        {
+            if (InterlockedCompareExchange( &el->ref, cur + 1, cur ) == cur)
+                break;
+            cur = el->ref;
+        }
+        if (cur <= 0) el = NULL;
+        else outer = el->outer;
+    }
+    else el = NULL;
+    ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+
+    if (!el) return S_OK;
+    if (outer)
+    {
+        __TRY
+        {
+            hr = IInspectable_QueryInterface( outer, iid, (void **)out );
+        }
+        __EXCEPT_ALL
+        {
+            WARN( "uwp_wr_Resolve: outer=%p faulted 0x%08lx\n", outer, (unsigned long)GetExceptionCode() );
+            hr = S_OK;
+            *out = NULL;
+        }
+        __ENDTRY;
+    }
+    else
+    {
+        hr = IInspectable_QueryInterface( &el->IInspectable_iface, iid, (void **)out );
+    }
+    uwp_nondelegating_Release( &el->nondelegating_iface );
+    return hr;
 }
 static const struct IWeakReferenceVtbl uwp_weak_ref_vtbl =
 {
@@ -710,13 +951,32 @@ static ULONG WINAPI uwp_wrs_Release( IWeakReferenceSource *iface )
 static HRESULT WINAPI uwp_wrs_GetWeakReference( IWeakReferenceSource *iface, IWeakReference **out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IWeakReferenceSource_iface );
+    struct uwp_weak_ctrl *ctrl;
     struct uwp_weak_ref *wr;
     if (!out) return E_POINTER;
+    *out = NULL;
+    ctrl = impl->weak_ctrl;
+    if (!ctrl)
+    {
+        struct uwp_weak_ctrl *nc = calloc( 1, sizeof(*nc) );
+        struct uwp_weak_ctrl *prev;
+        if (!nc) return E_OUTOFMEMORY;
+        nc->ref = 1;
+        nc->elem = impl;
+        prev = InterlockedCompareExchangePointer( (void **)&impl->weak_ctrl, nc, NULL );
+        if (prev)
+        {
+            free( nc );
+            ctrl = prev;
+        }
+        else ctrl = nc;
+    }
     wr = calloc( 1, sizeof(*wr) );
     if (!wr) return E_OUTOFMEMORY;
     wr->IWeakReference_iface.lpVtbl = &uwp_weak_ref_vtbl;
     wr->ref = 1;
-    wr->elem = impl;
+    wr->ctrl = ctrl;
+    InterlockedIncrement( &ctrl->ref );
     *out = &wr->IWeakReference_iface;
     return S_OK;
 }
@@ -1330,15 +1590,231 @@ static ULONG WINAPI uwp_nondelegating_AddRef( IInspectable *iface )
     return InterlockedIncrement( &impl->ref );
 }
 
+static void uwp_event_bag_destroy( struct uwp_event_bag *ev )
+{
+    if (!ev) return;
+    xaml_event_registry_clear( &ev->xaml_root_changed_reg );
+    xaml_event_registry_clear( &ev->tbtn_checked_reg );
+    xaml_event_registry_clear( &ev->tbtn_unchecked_reg );
+    xaml_event_registry_clear( &ev->popup_opened_reg );
+    xaml_event_registry_clear( &ev->popup_closed_reg );
+    xaml_event_registry_clear( &ev->sel_changed_reg );
+    xaml_event_registry_clear( &ev->cb_opened_reg );
+    xaml_event_registry_clear( &ev->cb_closed_reg );
+    xaml_event_registry_clear( &ev->ptr_pressed_reg );
+    xaml_event_registry_clear( &ev->ptr_moved_reg );
+    xaml_event_registry_clear( &ev->ptr_released_reg );
+    xaml_event_registry_clear( &ev->ptr_entered_reg );
+    xaml_event_registry_clear( &ev->ptr_exited_reg );
+    xaml_event_registry_clear( &ev->ptr_capture_lost_reg );
+    xaml_event_registry_clear( &ev->tapped_reg );
+    xaml_event_registry_clear( &ev->ptr_canceled_reg );
+    xaml_event_registry_clear( &ev->ptr_wheel_reg );
+    xaml_event_registry_clear( &ev->got_focus_reg );
+    xaml_event_registry_clear( &ev->lost_focus_reg );
+    xaml_event_registry_clear( &ev->nav_sel_changed_reg );
+    xaml_event_registry_clear( &ev->nav_item_invoked_reg );
+    xaml_event_registry_clear( &ev->frame_navigated_reg );
+    xaml_event_registry_clear( &ev->preview_keydown_reg );
+    xaml_event_registry_clear( &ev->asb_text_changed_reg );
+    xaml_event_registry_clear( &ev->asb_query_submitted_reg );
+    xaml_event_registry_clear( &ev->asb_suggestion_chosen_reg );
+    xaml_event_registry_clear( &ev->obsvec_changed_reg );
+    xaml_event_registry_clear( &ev->timer_tick_reg );
+    xaml_event_registry_clear( &ev->img_opened_reg );
+    xaml_event_registry_clear( &ev->loaded_reg );
+    xaml_event_registry_clear( &ev->evc_reg );
+    xaml_event_registry_clear( &ev->size_changed_reg );
+    xaml_event_registry_clear( &ev->layout_updated_reg );
+    xaml_event_registry_clear( &ev->click_reg );
+    xaml_event_registry_clear( &ev->dc_reg );
+    xaml_event_registry_clear( &ev->loading_reg );
+    xaml_event_registry_clear( &ev->tab_add_reg );
+    xaml_event_registry_clear( &ev->tab_close_reg );
+    xaml_event_registry_clear( &ev->accel_invoked_reg );
+    xaml_event_registry_clear( &ev->exec_req_reg );
+    xaml_event_registry_clear( &ev->tip_closing_reg );
+    xaml_event_registry_clear( &ev->tip_closed_reg );
+    xaml_event_registry_clear( &ev->flyout_opening_reg );
+    xaml_event_registry_clear( &ev->flyout_closed_reg );
+    free( ev );
+}
+
+static void uwp_element_destroy( struct uwp_element *impl )
+{
+    struct uwp_element **pp;
+    struct uwp_weak_ctrl *wc;
+    int i;
+
+    if (!impl) return;
+
+    uwp_clear_global_elem_refs( impl );
+
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    wc = impl->weak_ctrl;
+    if (wc) wc->elem = NULL;
+    for (pp = &g_all_uwp_elems_head; *pp; pp = &(*pp)->next_reg)
+    {
+        if (*pp == impl)
+        {
+            *pp = impl->next_reg;
+            if (g_all_uwp_elem_cnt > 0) g_all_uwp_elem_cnt--;
+            break;
+        }
+    }
+    impl->next_reg = NULL;
+    uwp_ptr_map_remove_el_locked( impl );
+    impl->magic = 0;
+    if (++g_neg_cache_gen == 0) g_neg_cache_gen = 1;
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+
+    if (wc) uwp_weak_ctrl_release( wc );
+
+    if (impl->rd_bucket && impl->rd_bucket->owner_el == impl)
+        impl->rd_bucket->owner_el = NULL;
+
+    uwp_elem_clear_text( impl );
+    free( impl->x_class );
+    free( impl->uid );
+    free( impl->accel_text );
+    free( impl->font_family );
+    free( impl->automation_name );
+    free( impl->default_style_key_name );
+    free( impl->placeholder );
+
+    uwp_event_bag_destroy( impl->events );
+
+    if (impl->media)
+    {
+        struct uwp_media_ext *m = impl->media;
+        if (m->media_source) IInspectable_Release( m->media_source );
+        if (m->media_transport_controls) IInspectable_Release( m->media_transport_controls );
+        if (m->media_poster_source) IInspectable_Release( m->media_poster_source );
+        if (m->media_player) IInspectable_Release( m->media_player );
+        if (m->img_source) IInspectable_Release( m->img_source );
+        free( m->video_pixels );
+        free( m );
+    }
+
+    if (impl->dialog)
+    {
+        if (impl->dialog->dialog_title_obj) IInspectable_Release( impl->dialog->dialog_title_obj );
+        free( impl->dialog );
+    }
+
+    if (impl->nav)
+    {
+        struct uwp_nav_ext *n = impl->nav;
+        if (n->selected_item) IInspectable_Release( n->selected_item );
+        if (n->sel_changed_handler) IInspectable_Release( n->sel_changed_handler );
+        if (n->tab_items_source) IInspectable_Release( n->tab_items_source );
+        if (n->tab_add_cmd) IInspectable_Release( n->tab_add_cmd );
+        if (n->tab_add_cmd_param) IInspectable_Release( n->tab_add_cmd_param );
+        if (n->back_stack) { uwp_vec_detach_owner( n->back_stack, impl ); IInspectable_Release( n->back_stack ); }
+        if (n->forward_stack) { uwp_vec_detach_owner( n->forward_stack, impl ); IInspectable_Release( n->forward_stack ); }
+        if (n->nav_args_item) uwp_nea_Release( n->nav_args_item );
+        if (n->nav_icon) IInspectable_Release( n->nav_icon );
+        free( n );
+    }
+
+    if (impl->style_anim)
+    {
+        struct uwp_style_anim_ext *sa = impl->style_anim;
+        free( sa->style_setters );
+        if (sa->style_obj) IInspectable_Release( sa->style_obj );
+        if (sa->gradient_stops_coll)
+        {
+            uwp_vec_detach_owner( sa->gradient_stops_coll, impl );
+            IInspectable_Release( sa->gradient_stops_coll );
+        }
+        if (sa->figures_coll)
+        {
+            uwp_vec_detach_owner( sa->figures_coll, impl );
+            IInspectable_Release( sa->figures_coll );
+        }
+        free( sa );
+    }
+
+    if (impl->xaml_root_shadow) IInspectable_Release( impl->xaml_root_shadow );
+    if (impl->xaml_root_override) IInspectable_Release( impl->xaml_root_override );
+    if (impl->scp_visual) IDCompositionVisual2_Release( impl->scp_visual );
+    if (impl->visual) IDCompositionVisual_Release( impl->visual );
+    if (impl->accelerators_coll) { uwp_vec_detach_owner( impl->accelerators_coll, impl ); IInspectable_Release( impl->accelerators_coll ); }
+    if (impl->row_defs_coll) { uwp_vec_detach_owner( impl->row_defs_coll, impl ); IInspectable_Release( impl->row_defs_coll ); }
+    if (impl->col_defs_coll) { uwp_vec_detach_owner( impl->col_defs_coll, impl ); IInspectable_Release( impl->col_defs_coll ); }
+    if (impl->resources_rd) IInspectable_Release( impl->resources_rd );
+    if (impl->data_context) IInspectable_Release( impl->data_context );
+    if (impl->command) IInspectable_Release( impl->command );
+    if (impl->command_param) IInspectable_Release( impl->command_param );
+    if (impl->tag) IInspectable_Release( impl->tag );
+    if (impl->default_style_key) IInspectable_Release( impl->default_style_key );
+    if (impl->items_source) IInspectable_Release( impl->items_source );
+    if (impl->item_template) IInspectable_Release( impl->item_template );
+    if (impl->item_template_selector) IInspectable_Release( impl->item_template_selector );
+    if (impl->bg_brush) IInspectable_Release( impl->bg_brush );
+    if (impl->fill_brush) IInspectable_Release( impl->fill_brush );
+    if (impl->comp_brush) IInspectable_Release( impl->comp_brush );
+    if (impl->ecp_visual) IInspectable_Release( impl->ecp_visual );
+    if (impl->binding_connector) IUnknown_Release( (IUnknown *)impl->binding_connector );
+    if (impl->dt_binding_connector && impl->dt_binding_connector != impl->binding_connector)
+        IUnknown_Release( (IUnknown *)impl->dt_binding_connector );
+    if (impl->accel_scope_owner) IInspectable_Release( impl->accel_scope_owner );
+    if (impl->template_owner_comp) IInspectable_Release( impl->template_owner_comp );
+
+    for (i = 0; i < impl->dp_cnt; i++)
+    {
+        if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
+        if ((ULONG_PTR)impl->dp_store[i].dp >= 0x10000) IUnknown_Release( (IUnknown *)impl->dp_store[i].dp );
+    }
+    free( impl->dp_store );
+
+    for (i = 0; i < impl->dp_cb_cnt; i++)
+    {
+        if (impl->dp_cbs[i].callback) IInspectable_Release( impl->dp_cbs[i].callback );
+        if ((ULONG_PTR)impl->dp_cbs[i].dp >= 0x10000) IUnknown_Release( (IUnknown *)impl->dp_cbs[i].dp );
+    }
+    free( impl->dp_cbs );
+
+    for (i = 0; i < impl->dc_bound_dp_cnt; i++)
+    {
+        if (impl->dc_bound_dps[i].binding) IInspectable_Release( &impl->dc_bound_dps[i].binding->IInspectable_iface );
+        if ((ULONG_PTR)impl->dc_bound_dps[i].dp >= 0x10000) IUnknown_Release( (IUnknown *)impl->dc_bound_dps[i].dp );
+    }
+    free( impl->dc_bound_dps );
+
+    for (i = 0; i < impl->xaml_binding_cnt; i++)
+    {
+        if (impl->xaml_bindings[i].source) IInspectable_Release( impl->xaml_bindings[i].source );
+    }
+    free( impl->xaml_bindings );
+
+    free( impl->named_elems );
+    free( impl->defer_entries );
+    free( impl->xbf_refs );
+    uwp_vsm_free_groups( impl );
+
+    free( impl );
+}
+
 static ULONG WINAPI uwp_nondelegating_Release( IInspectable *iface )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, nondelegating_iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
-        /* Keep registered elements alive for visual tree lifetime */
-        impl->outer = NULL;
-        impl->ref = 1;
+        if (impl->in_visual_tree || impl->parent || impl->children_coll || impl->inlines_coll ||
+            impl->content || impl->pane || impl->flyout || impl->context_flyout ||
+            impl->island_hwnd || (impl->dialog && impl->dialog->dialog_hwnd) ||
+            impl->timer_win32_id || (impl->media && (impl->media->video_thread || impl->media->img_loading)) ||
+            (impl->kind == UWP_KIND_RESOURCE_DICT && impl->rd_bucket) ||
+            impl->template_root || impl->named_cnt > 0 || impl->defer_cnt > 0)
+        {
+            /* Keep tree-rooted / active-host elements alive when external refs drop prematurely */
+            impl->outer = NULL;
+            impl->ref = 1;
+            return 0;
+        }
+        uwp_element_destroy( impl );
     }
     return ref;
 }
@@ -1370,16 +1846,20 @@ HRESULT WINAPI uwp_frame2_Navigate( void *iface, void *type_name_ptr, void *para
 static HRESULT WINAPI uwp_frame_add_Navigated( void *iface, void *handler, EventRegistrationToken *token )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "uwp_frame_add_Navigated on %s (%s) handler=%p\n",
            debugstr_w(impl->class_name), debugstr_w(impl->name), handler );
-    return xaml_event_registry_add( &impl->frame_navigated_reg, handler, token );
+    return xaml_event_registry_add( &ev->frame_navigated_reg, handler, token );
 }
 static HRESULT WINAPI uwp_frame_remove_Navigated( void *iface, EventRegistrationToken token )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->frame_navigated_reg, token );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->frame_navigated_reg, token );
 }
 
 static HRESULT WINAPI uwp_frame_get_CacheSize( void *iface, INT32 *out )
@@ -1391,7 +1871,7 @@ static HRESULT WINAPI uwp_frame_get_CanGoBack( void *iface, boolean *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     unsigned int sz = 0;
-    if (impl && impl->back_stack) uwp_vec_get_Size( impl->back_stack, &sz );
+    if (impl && impl->nav && impl->nav->back_stack) uwp_vec_get_Size( impl->nav->back_stack, &sz );
     if (out) *out = sz > 0 ? TRUE : FALSE;
     return S_OK;
 }
@@ -1399,7 +1879,7 @@ static HRESULT WINAPI uwp_frame_get_CanGoForward( void *iface, boolean *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     unsigned int sz = 0;
-    if (impl && impl->forward_stack) uwp_vec_get_Size( impl->forward_stack, &sz );
+    if (impl && impl->nav && impl->nav->forward_stack) uwp_vec_get_Size( impl->nav->forward_stack, &sz );
     if (out) *out = sz > 0 ? TRUE : FALSE;
     return S_OK;
 }
@@ -1412,7 +1892,7 @@ static HRESULT WINAPI uwp_frame_get_BackStackDepth( void *iface, INT32 *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     unsigned int sz = 0;
-    if (impl && impl->back_stack) uwp_vec_get_Size( impl->back_stack, &sz );
+    if (impl && impl->nav && impl->nav->back_stack) uwp_vec_get_Size( impl->nav->back_stack, &sz );
     if (out) *out = (INT32)sz;
     return S_OK;
 }
@@ -1426,8 +1906,8 @@ HRESULT WINAPI uwp_frame_GoBack( void *iface )
     IInspectable *prev_page = NULL;
     struct uwp_element *page_el;
 
-    if (!impl || !impl->back_stack) return S_OK;
-    v = CONTAINING_RECORD( impl->back_stack, struct uwp_vec_view, IInspectable_iface );
+    if (!impl || !impl->nav || !impl->nav->back_stack) return S_OK;
+    v = CONTAINING_RECORD( impl->nav->back_stack, struct uwp_vec_view, IInspectable_iface );
     TRACE( "uwp_frame_GoBack: impl=%p (%s) count=%u\n", impl, debugstr_w(impl->name), v->count );
     if (v->count == 0) return S_OK;
 
@@ -1442,16 +1922,18 @@ HRESULT WINAPI uwp_frame_GoBack( void *iface )
         struct uwp_nav_event_args *back_nea = uwp_nav_event_args_create(
             prev_nea->content, prev_nea->parameter, &prev_nea->source_page_type, prev_nea->transition_info );
         if (back_nea) back_nea->nav_mode = 1; /* NavigationMode_Back */
-        if (impl->nav_args_item) uwp_nea_Release( impl->nav_args_item );
-        impl->nav_args_item = back_nea ? &back_nea->INavigationEventArgs_iface : NULL;
-        if (impl->nav_args_item) IInspectable_AddRef( impl->nav_args_item );
+        if (impl->nav->nav_args_item) uwp_nea_Release( impl->nav->nav_args_item );
+        impl->nav->nav_args_item = back_nea ? &back_nea->INavigationEventArgs_iface : NULL;
+        if (impl->nav->nav_args_item) IInspectable_AddRef( impl->nav->nav_args_item );
         if (impl->content) IInspectable_Release( impl->content );
         impl->content = prev_page;
         IInspectable_AddRef( prev_page );
+        impl->in_visual_tree = TRUE;
         page_el = uwp_elem_from_any( prev_page );
         if (page_el)
         {
             page_el->parent = impl;
+            page_el->in_visual_tree = TRUE;
             if (!impl->parent || !(page_el->class_flags & UWP_CF_SKELETON))
                 g_navigated_page_el = page_el;
         }
@@ -1467,21 +1949,11 @@ HRESULT WINAPI uwp_frame_GoBack( void *iface )
                 IUnknown_Release( (IUnknown *)page_ovr );
             }
         }
-        if (impl->frame_navigated_reg.next_token > 0 && back_nea)
+        if (UWP_EV_ANY( impl, frame_navigated_reg ) && back_nea)
         {
-            void **handlers = NULL;
-            unsigned int cnt = xaml_event_registry_snapshot_alloc( &impl->frame_navigated_reg, &handlers );
             IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-            unsigned int hi;
-            for (hi = 0; hi < cnt; hi++)
-            {
-                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
-                __TRY { h->lpVtbl->Invoke( h, sender, &back_nea->INavigationEventArgs_iface ); }
-                __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
-                __ENDTRY;
-                IUnknown_Release( (IUnknown *)handlers[hi] );
-            }
-            free( handlers );
+            uwp_fire_event_registry( &impl->events->frame_navigated_reg, sender,
+                                     &back_nea->INavigationEventArgs_iface, "Frame::GoBack" );
         }
         if (back_nea) uwp_nea_Release( &back_nea->INavigationEventArgs_iface );
         g_layout_dirty = TRUE;
@@ -1613,27 +2085,29 @@ static HRESULT WINAPI uwp_ease_get_EasingMode( IInspectable *iface, INT32 *val )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IEasingFunctionBase_iface );
     if (!val) return E_POINTER;
-    *val = impl->easing_mode;
+    *val = impl->style_anim ? impl->style_anim->easing_mode : 0;
     return S_OK;
 }
 
 static HRESULT WINAPI uwp_ease_put_EasingMode( IInspectable *iface, INT32 val )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IEasingFunctionBase_iface );
-    impl->easing_mode = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->easing_mode = val;
     return S_OK;
 }
 
 static HRESULT WINAPI uwp_ease_Ease( IInspectable *iface, double t, double *out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IEasingFunctionBase_iface );
+    int mode = impl->style_anim ? impl->style_anim->easing_mode : 0;
     if (!out) return E_POINTER;
     if (t < 0.0) t = 0.0;
     if (t > 1.0) t = 1.0;
     /* EasingMode: 0=EaseOut, 1=EaseIn, 2=EaseInOut */
-    if (impl->easing_mode == 1)
+    if (mode == 1)
         *out = uwp_ease_in_core( impl, t );
-    else if (impl->easing_mode == 2)
+    else if (mode == 2)
         *out = (t < 0.5) ? (uwp_ease_in_core( impl, t * 2.0 ) * 0.5)
                          : ((1.0 - uwp_ease_in_core( impl, (1.0 - t) * 2.0 )) * 0.5 + 0.5);
     else
@@ -2044,7 +2518,7 @@ static HRESULT WINAPI uwp_scp_native_SetSwapChain( void *iface, void *sc )
             impl->actual_w = (double)w;
             impl->actual_h = (double)h;
             TRACE( "uwp_scp_native_SetSwapChain firing SizeChanged %ux%u (handlers=%d)\n",
-                   w, h, impl->size_changed_cnt );
+                   w, h, UWP_EV_CNT( impl, size_changed_reg ) );
             uwp_fire_size_and_layout_changed( impl );
         }
     }
@@ -2280,7 +2754,6 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IFrame2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_frame2_vtbl;
     impl->IFrame3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_frame3_vtbl;
     impl->IFrame5_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_frame5_vtbl;
-    impl->nav_stack_enabled = TRUE;
     impl->IButtonBase_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_btn_vtbl;
     impl->IToggleButton_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tbtn_vtbl;
     impl->IPanel_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_panel_vtbl;
@@ -2362,13 +2835,6 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IPopup2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_popup2_vtbl;
     impl->IPopup3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_popup3_vtbl;
     impl->IStoryboard_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_sb_vtbl;
-    impl->media_stretch = 2; /* Uniform */
-    impl->tile_align_x = 1; /* Center */
-    impl->tile_align_y = 1; /* Center */
-    impl->grad_end_x = 1.0f;
-    impl->grad_end_y = 1.0f;
-    impl->grad_mapping_mode = 1; /* RelativeToBoundingBox */
-    impl->grad_color_interp = 1; /* SRgbLinearInterpolation */
     impl->IWeakReferenceSource_iface.lpVtbl = &uwp_wrs_vtbl;
     impl->IDispatch_iface.lpVtbl = &uwp_disp_vtbl;
     impl->IReferenceTrackerTarget_iface.lpVtbl = (const IInspectableVtbl *)&uwp_rtt_vtbl;
@@ -2389,22 +2855,12 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->is_enabled = TRUE;
     impl->is_hit_test_visible = TRUE;
     impl->opacity = 1.0;
-    impl->brush_opacity = 1.0;
     impl->h_align = 3; /* Stretch */
     impl->v_align = 3; /* Stretch */
     impl->font_size = 16.0;
     impl->text_align = 1; /* Left */
     impl->text_wrapping = uwp_is_rich_text_block( impl ) ? 2 : 1; /* RichTextBlock defaults to Wrap */
-    impl->selected_index = -1;
     impl->hovered_dropdown_idx = -1;
-    impl->nav_open_pane_length = 280.0;
-    impl->nav_compact_pane_length = 68.0;
-    impl->nav_compact_threshold = 641.0;
-    impl->nav_expanded_threshold = 1008.0;
-    impl->nav_is_settings_visible = TRUE;
-    impl->nav_is_pane_toggle_visible = TRUE;
-    impl->nav_is_pane_open = FALSE;
-    InitializeSRWLock( &impl->video_lock );
     g_layout_dirty = TRUE;
     if (impl->kind != UWP_KIND_BRUSH && impl->kind != UWP_KIND_STYLE &&
         impl->kind != UWP_KIND_RESOURCE_DICT && impl->kind != UWP_KIND_COLOR &&
@@ -2772,41 +3228,50 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                 }
                 new_content = page_el->outer ? page_el->outer : &page_el->IInspectable_iface;
                 IInspectable_AddRef( new_content );
-                if (impl->content && impl->nav_stack_enabled)
                 {
-                    if (!impl->back_stack)
+                    struct uwp_nav_ext *nav = uwp_elem_ensure_nav( impl );
+                    if (impl->content && nav && nav->nav_stack_enabled)
                     {
-                        uwp_vec_create( NULL, &impl->back_stack );
-                        if (impl->back_stack)
-                            CONTAINING_RECORD( impl->back_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
-                                L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Navigation.PageStackEntry>";
-                    }
-                    if (impl->back_stack && impl->nav_args_item)
-                    {
-                        struct uwp_nav_event_args *prev_nea =
-                            CONTAINING_RECORD( impl->nav_args_item, struct uwp_nav_event_args, INavigationEventArgs_iface );
-                        struct uwp_nav_event_args *pse = uwp_page_stack_entry_create(
-                            prev_nea->content, prev_nea->parameter, &prev_nea->source_page_type, prev_nea->transition_info );
-                        if (pse)
+                        if (!nav->back_stack)
                         {
-                            uwp_vec_Append( impl->back_stack, &pse->INavigationEventArgs_iface );
-                            uwp_nea_Release( &pse->INavigationEventArgs_iface );
+                            uwp_vec_create( NULL, &nav->back_stack );
+                            if (nav->back_stack)
+                                CONTAINING_RECORD( nav->back_stack, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+                                    L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Navigation.PageStackEntry>";
+                        }
+                        if (nav->back_stack && nav->nav_args_item)
+                        {
+                            struct uwp_nav_event_args *prev_nea =
+                                CONTAINING_RECORD( nav->nav_args_item, struct uwp_nav_event_args, INavigationEventArgs_iface );
+                            struct uwp_nav_event_args *pse = uwp_page_stack_entry_create(
+                                prev_nea->content, prev_nea->parameter, &prev_nea->source_page_type, prev_nea->transition_info );
+                            if (pse)
+                            {
+                                uwp_vec_Append( nav->back_stack, &pse->INavigationEventArgs_iface );
+                                uwp_nea_Release( &pse->INavigationEventArgs_iface );
+                            }
                         }
                     }
                 }
                 if (impl->content) IInspectable_Release( impl->content );
                 impl->content = new_content;
+                impl->in_visual_tree = TRUE;
                 if ((!impl->parent && !wcsstr( name, L"Skeleton" )) || !g_navigated_page_el)
                     g_navigated_page_el = page_el;
                 page_el->parent = impl;
+                page_el->in_visual_tree = TRUE;
                 page_el->scroll_y = 0;
 
                 {
+                    struct uwp_nav_ext *nav = uwp_elem_ensure_nav( impl );
                     struct uwp_nav_event_args *nea = uwp_nav_event_args_create(
                         new_content, (IInspectable *)param, type, (IInspectable *)transition_info );
-                    if (impl->nav_args_item) uwp_nea_Release( impl->nav_args_item );
-                    impl->nav_args_item = nea ? &nea->INavigationEventArgs_iface : NULL;
-                    if (impl->nav_args_item) IInspectable_AddRef( impl->nav_args_item );
+                    if (nav)
+                    {
+                        if (nav->nav_args_item) uwp_nea_Release( nav->nav_args_item );
+                        nav->nav_args_item = nea ? &nea->INavigationEventArgs_iface : NULL;
+                        if (nav->nav_args_item) IInspectable_AddRef( nav->nav_args_item );
+                    }
 
                     /* Invoke IPageOverrides::OnNavigatedTo (slot 7) if implemented */
                     if (page_el->outer)
@@ -2832,10 +3297,10 @@ HRESULT uwp_frame_navigate_impl( void *iface, void *type_name_ptr, void *param, 
                     }
 
                     /* Fire Frame::Navigated handlers */
-                    if (impl->frame_navigated_reg.next_token > 0)
+                    if (UWP_EV_ANY( impl, frame_navigated_reg ))
                     {
                         void **handlers = NULL;
-                        unsigned int cnt = xaml_event_registry_snapshot_alloc( &impl->frame_navigated_reg, &handlers );
+                        unsigned int cnt = xaml_event_registry_snapshot_alloc( &impl->events->frame_navigated_reg, &handlers );
                         IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
                         unsigned int hi;
                         for (hi = 0; hi < cnt; hi++)
@@ -3232,16 +3697,16 @@ struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const struct xam
 
 struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el, enum xaml_pointer_event_kind kind )
 {
-    if (!el) return NULL;
+    if (!el || !el->events) return NULL;
     switch (kind)
     {
-    case XAML_PTR_PRESSED:      return &el->ptr_pressed_reg;
-    case XAML_PTR_MOVED:        return &el->ptr_moved_reg;
-    case XAML_PTR_RELEASED:     return &el->ptr_released_reg;
-    case XAML_PTR_WHEEL:        return &el->ptr_wheel_reg;
-    case XAML_PTR_ENTERED:      return &el->ptr_entered_reg;
-    case XAML_PTR_EXITED:       return &el->ptr_exited_reg;
-    case XAML_PTR_CAPTURE_LOST: return &el->ptr_capture_lost_reg;
+    case XAML_PTR_PRESSED:      return &el->events->ptr_pressed_reg;
+    case XAML_PTR_MOVED:        return &el->events->ptr_moved_reg;
+    case XAML_PTR_RELEASED:     return &el->events->ptr_released_reg;
+    case XAML_PTR_WHEEL:        return &el->events->ptr_wheel_reg;
+    case XAML_PTR_ENTERED:      return &el->events->ptr_entered_reg;
+    case XAML_PTR_EXITED:       return &el->events->ptr_exited_reg;
+    case XAML_PTR_CAPTURE_LOST: return &el->events->ptr_capture_lost_reg;
     }
     return NULL;
 }

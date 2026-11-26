@@ -146,17 +146,21 @@ static const WCHAR *uwp_elem_name_w( struct uwp_element *el ) { return el ? el->
 linkage HRESULT WINAPI uwp_ui_add_##name( void *iface, void *handler, EventRegistrationToken *tok ) \
 { \
     struct uwp_element *impl = uwp_elem_from_any( iface ); \
+    struct uwp_event_bag *ev; \
     if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; } \
+    ev = uwp_elem_ensure_events( impl ); \
+    if (!ev) { if (tok) tok->value = 0; return E_OUTOFMEMORY; } \
     if (uwp_is_card( impl )) \
         WARN( "add_" #name " on %s (%s) impl=%p handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( uwp_elem_name_w( impl ) ), impl, handler ); \
     TRACE( "add_" #name " on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( uwp_elem_name_w( impl ) ), handler ); \
-    return xaml_event_registry_add( &impl->field, handler, tok ); \
+    return xaml_event_registry_add( &ev->field, handler, tok ); \
 } \
 linkage HRESULT WINAPI uwp_ui_remove_##name( void *iface, EventRegistrationToken tok ) \
 { \
     struct uwp_element *impl = uwp_elem_from_any( iface ); \
     if (!impl) return E_INVALIDARG; \
-    return xaml_event_registry_remove( &impl->field, tok ); \
+    if (!impl->events) return S_OK; \
+    return xaml_event_registry_remove( &impl->events->field, tok ); \
 }
 
 #define UWP_UI_PTR_EVENT( name, field ) UWP_UI_PTR_EVENT_IMPL( , name, field )
@@ -265,7 +269,7 @@ static HRESULT WINAPI uwp_fe_get_Style( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    *out = impl ? impl->style_obj : NULL;
+    *out = (impl && impl->style_anim) ? impl->style_anim->style_obj : NULL;
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
@@ -346,32 +350,38 @@ HRESULT WINAPI uwp_fe_put_Style( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     struct uwp_element *st_el;
+    struct uwp_style_anim_ext *sa;
     if (!impl) return S_OK;
     if (val) IInspectable_AddRef( val );
-    if (impl->style_obj) IInspectable_Release( impl->style_obj );
-    impl->style_obj = val;
+    sa = uwp_elem_ensure_style_anim( impl );
+    if (sa)
+    {
+        if (sa->style_obj) IInspectable_Release( sa->style_obj );
+        sa->style_obj = val;
+    }
+    else if (val) IInspectable_Release( val );
     if (val) impl->is_accent_style = FALSE;
     st_el = uwp_elem_from_any( val );
     if (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST)
         WARN( "uwp_fe_put_Style on %s (%s) val=%p st_el=%p name=%s based_on=%s cnt=%d\n",
               debugstr_w(impl->class_name), debugstr_w(impl->name), val, st_el,
               st_el ? debugstr_w(st_el->name) : "\"-\"",
-              st_el ? debugstr_w(st_el->style_based_on) : "\"-\"",
-              st_el ? st_el->style_setter_cnt : -1 );
+              (st_el && st_el->style_anim) ? debugstr_w(st_el->style_anim->style_based_on) : "\"-\"",
+              (st_el && st_el->style_anim) ? st_el->style_anim->style_setter_cnt : -1 );
     if (st_el)
     {
         if (st_el->name[0] && uwp_style_is_accent_name( st_el->name ))
             impl->is_accent_style = TRUE;
-        if (st_el->style_based_on[0])
-            uwp_apply_runtime_style_by_name( impl, st_el->style_based_on, 0 );
+        if (st_el->style_anim && st_el->style_anim->style_based_on[0])
+            uwp_apply_runtime_style_by_name( impl, st_el->style_anim->style_based_on, 0 );
         if (st_el->template_xbf_data && st_el->template_xbf_size)
         {
             impl->template_xbf_data = st_el->template_xbf_data;
             impl->template_xbf_size = st_el->template_xbf_size;
             impl->template_sub_idx = st_el->template_sub_idx;
         }
-        if (st_el->style_setter_cnt > 0 && st_el->style_setters)
-            uwp_apply_runtime_style_setters( impl, st_el->style_setters, st_el->style_setter_cnt );
+        if (st_el->style_anim && st_el->style_anim->style_setter_cnt > 0 && st_el->style_anim->style_setters)
+            uwp_apply_runtime_style_setters( impl, st_el->style_anim->style_setters, st_el->style_anim->style_setter_cnt );
     }
     uwp_invalidate_window();
     return S_OK;
@@ -716,60 +726,59 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
 HRESULT WINAPI uwp_fe_add_Loaded( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "add_Loaded on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( impl->name ), handler );
-    if (xaml_vec_grow( (void **)&impl->loaded_handlers, &impl->loaded_cap, impl->loaded_cnt + 1, sizeof(*impl->loaded_handlers), 8 ))
-    {
-        impl->loaded_handlers[impl->loaded_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-    }
-    return S_OK;
+    return xaml_event_registry_add( &ev->loaded_reg, handler, tok );
+}
+
+HRESULT WINAPI uwp_fe_remove_Loaded( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->loaded_reg, tok );
 }
 
 static HRESULT WINAPI uwp_fe_add_SizeChanged( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "add_SizeChanged on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( impl->name ), handler );
-    if (xaml_vec_grow( (void **)&impl->size_changed_handlers, &impl->size_changed_cap, impl->size_changed_cnt + 1, sizeof(*impl->size_changed_handlers), 8 ))
-    {
-        impl->size_changed_handlers[impl->size_changed_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-    }
-    return S_OK;
+    return xaml_event_registry_add( &ev->size_changed_reg, handler, tok );
+}
+
+static HRESULT WINAPI uwp_fe_remove_SizeChanged( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->size_changed_reg, tok );
 }
 
 static HRESULT WINAPI uwp_fe_add_LayoutUpdated( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "add_LayoutUpdated on %s (%s) handler=%p\n", debugstr_w( impl->class_name ), debugstr_w( impl->name ), handler );
-    if (xaml_vec_grow( (void **)&impl->layout_updated_handlers, &impl->layout_updated_cap, impl->layout_updated_cnt + 1, sizeof(*impl->layout_updated_handlers), 8 ))
-    {
-        impl->layout_updated_handlers[impl->layout_updated_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-        if (tok) tok->value = impl->layout_updated_cnt;
-    }
-    return S_OK;
+    return xaml_event_registry_add( &ev->layout_updated_reg, handler, tok );
 }
 
 static HRESULT WINAPI uwp_fe_remove_LayoutUpdated( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     TRACE( "remove_LayoutUpdated on %s tok=%I64d\n", impl ? debugstr_w( impl->class_name ) : "?", tok.value );
-    if (impl && tok.value >= 1 && tok.value <= impl->layout_updated_cnt)
-    {
-        int idx = (int)tok.value - 1;
-        if (impl->layout_updated_handlers[idx])
-        {
-            IUnknown_Release( (IUnknown *)impl->layout_updated_handlers[idx] );
-            impl->layout_updated_handlers[idx] = NULL;
-        }
-    }
-    return S_OK;
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->layout_updated_reg, tok );
 }
 
 static HRESULT WINAPI uwp_fe_remove_Unloaded( void *iface, EventRegistrationToken tok )
@@ -780,47 +789,60 @@ static HRESULT WINAPI uwp_fe_remove_Unloaded( void *iface, EventRegistrationToke
 HRESULT WINAPI uwp_fe3_add_DataContextChanged( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    HRESULT hr;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
-    if (xaml_vec_grow( (void **)&impl->dc_handlers, &impl->dc_cap, impl->dc_cnt + 1, sizeof(*impl->dc_handlers), 8 ))
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    hr = xaml_event_registry_add( &ev->dc_reg, handler, tok );
+    if (SUCCEEDED(hr))
     {
-        impl->dc_handlers[impl->dc_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
         /* If DataContext is already available, fire immediately */
+        void *cur_dc = NULL;
+        uwp_fe_get_DataContext( iface, &cur_dc );
+        if (cur_dc)
         {
-            void *cur_dc = NULL;
-            uwp_fe_get_DataContext( iface, &cur_dc );
-            if (cur_dc)
+            struct uwp_dc_args *args = calloc( 1, sizeof(*args) );
+            if (args)
             {
-                struct uwp_dc_args *args = calloc( 1, sizeof(*args) );
-                if (args)
-                {
-                    IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-                    struct xaml_event_handler *h = (struct xaml_event_handler *)handler;
-                    args->vtbl = dc_args_vtbl;
-                    args->ref = 1;
-                    args->new_val = (IInspectable *)cur_dc;
-                    h->lpVtbl->Invoke( h, sender, args );
-                    dc_args_Release( args );
-                }
-                else IInspectable_Release( (IInspectable *)cur_dc );
+                IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+                struct xaml_event_handler *h = (struct xaml_event_handler *)handler;
+                args->vtbl = dc_args_vtbl;
+                args->ref = 1;
+                args->new_val = (IInspectable *)cur_dc;
+                h->lpVtbl->Invoke( h, sender, args );
+                dc_args_Release( args );
             }
+            else IInspectable_Release( (IInspectable *)cur_dc );
         }
     }
-    return S_OK;
+    return hr;
+}
+
+HRESULT WINAPI uwp_fe3_remove_DataContextChanged( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->dc_reg, tok );
 }
 
 HRESULT WINAPI uwp_fe3_add_Loading( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (tok) tok->value = 1;
+    struct uwp_event_bag *ev;
+    if (tok) tok->value = 0;
     if (!impl || !handler) return S_OK;
-    if (xaml_vec_grow( (void **)&impl->loading_handlers, &impl->loading_cap, impl->loading_cnt + 1, sizeof(*impl->loading_handlers), 8 ))
-    {
-        impl->loading_handlers[impl->loading_cnt++] = (IInspectable *)handler;
-        IUnknown_AddRef( (IUnknown *)handler );
-    }
-    return S_OK;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->loading_reg, handler, tok );
+}
+
+HRESULT WINAPI uwp_fe3_remove_Loading( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->loading_reg, tok );
 }
 
 /* --- IFrameworkElement2 RequestedTheme, IControl & IControlProtected --- */
@@ -851,8 +873,10 @@ HRESULT WINAPI uwp_ctrl_get_FontFamily( void *iface, void **out )
     {
         struct uwp_element *ff = uwp_elem_from_any( *out );
         if (ff)
-            lstrcpynW( ff->font_family, (impl && impl->font_family[0]) ? impl->font_family : L"Segoe UI",
-                       ARRAY_SIZE(ff->font_family) );
+        {
+            const WCHAR *src_ff = uwp_elem_font_family( impl );
+            uwp_elem_set_font_family( ff, src_ff[0] ? src_ff : L"Segoe UI" );
+        }
     }
     return hr;
 }
@@ -864,9 +888,10 @@ HRESULT WINAPI uwp_ctrl_put_FontFamily( void *iface, IInspectable *val )
     if (val)
     {
         struct uwp_element *ff = uwp_elem_from_any( val );
-        if (ff && ff->font_family[0])
+        const WCHAR *ff_str = uwp_elem_font_family( ff );
+        if (ff && ff_str[0])
         {
-            lstrcpynW( raw, ff->font_family, ARRAY_SIZE(raw) );
+            lstrcpynW( raw, ff_str, ARRAY_SIZE(raw) );
         }
         else
         {
@@ -889,7 +914,7 @@ HRESULT WINAPI uwp_ctrl_put_FontFamily( void *iface, IInspectable *val )
             }
         }
     }
-    lstrcpynW( impl->font_family, raw, ARRAY_SIZE(impl->font_family) );
+    uwp_elem_set_font_family( impl, raw );
     if (raw[0]) uwp_resolve_font_family( raw, face, ARRAY_SIZE(face) );
     uwp_invalidate_window();
     return S_OK;
@@ -940,38 +965,41 @@ HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val
         impl->default_style_key = val;
         if (val) IInspectable_AddRef( val );
     }
-    impl->default_style_key_name[0] = 0;
-    if (val)
     {
-        if (!uwp_unbox_string( val, impl->default_style_key_name, ARRAY_SIZE(impl->default_style_key_name) ))
+        WCHAR dsk_buf[128] = {0};
+        if (val)
         {
-            static const GUID IID_IReference_TypeName =
-                { 0x3830ad99, 0xd8da, 0x53f3, { 0x98, 0x9b, 0xfc, 0x92, 0xad, 0x22, 0x27, 0x78 } };
-            void *iref = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_TypeName, &iref )) && iref)
+            if (!uwp_unbox_string( val, dsk_buf, ARRAY_SIZE(dsk_buf) ))
             {
-                const struct abi_iref_typename *air = (const struct abi_iref_typename *)iref;
-                TypeName tn = { NULL, 0 };
-                if (air->lpVtbl->get_Value && SUCCEEDED(air->lpVtbl->get_Value( iref, &tn )) && tn.Name)
+                static const GUID IID_IReference_TypeName =
+                    { 0x3830ad99, 0xd8da, 0x53f3, { 0x98, 0x9b, 0xfc, 0x92, 0xad, 0x22, 0x27, 0x78 } };
+                void *iref = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_TypeName, &iref )) && iref)
                 {
-                    const WCHAR *s = WindowsGetStringRawBuffer( tn.Name, NULL );
-                    if (s) lstrcpynW( impl->default_style_key_name, s, ARRAY_SIZE(impl->default_style_key_name) );
-                    WindowsDeleteString( tn.Name );
+                    const struct abi_iref_typename *air = (const struct abi_iref_typename *)iref;
+                    TypeName tn = { NULL, 0 };
+                    if (air->lpVtbl->get_Value && SUCCEEDED(air->lpVtbl->get_Value( iref, &tn )) && tn.Name)
+                    {
+                        const WCHAR *s = WindowsGetStringRawBuffer( tn.Name, NULL );
+                        if (s) lstrcpynW( dsk_buf, s, ARRAY_SIZE(dsk_buf) );
+                        WindowsDeleteString( tn.Name );
+                    }
+                    IUnknown_Release( (IUnknown *)iref );
                 }
-                IUnknown_Release( (IUnknown *)iref );
+                else
+                    uwp_inspectable_to_string( val, dsk_buf, ARRAY_SIZE(dsk_buf) );
             }
-            else
-                uwp_inspectable_to_string( val, impl->default_style_key_name, ARRAY_SIZE(impl->default_style_key_name) );
+            /* Strip assembly-qualified suffix (e.g. "Ns.Type, Assembly, Version=...") */
+            {
+                WCHAR *comma = wcschr( dsk_buf, L',' );
+                if (comma) *comma = 0;
+            }
         }
-        /* Strip assembly-qualified suffix (e.g. "Ns.Type, Assembly, Version=...") */
-        {
-            WCHAR *comma = wcschr( impl->default_style_key_name, L',' );
-            if (comma) *comma = 0;
-        }
+        uwp_elem_set_default_style_key_name( impl, dsk_buf );
     }
     uwp_elem_sync_class_flags( impl );
     TRACE( "IControlProtected::put_DefaultStyleKey on %s -> %s\n",
-           debugstr_w(impl->class_name), debugstr_w(impl->default_style_key_name) );
+           debugstr_w(impl->class_name), debugstr_w(uwp_elem_default_style_key_name( impl )) );
     return S_OK;
 }
 
@@ -1049,8 +1077,8 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
     if (!el->template_xbf_data || !el->template_xbf_size)
     {
         uwp_ensure_app_resources_loaded();
-        if (el->default_style_key_name[0])
-            key = el->default_style_key_name;
+        if (uwp_elem_default_style_key_name( el )[0])
+            key = uwp_elem_default_style_key_name( el );
         else if (el->class_name[0] &&
                  !(el->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX)))
             key = el->class_name;
@@ -1111,7 +1139,9 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
             if (tpl_root)
             {
                 el->template_root = tpl_root;
+                el->in_visual_tree = TRUE;
                 tpl_root->parent = el;
+                tpl_root->in_visual_tree = TRUE;
                 uwp_collect_template_names( el, tpl_root, 0 );
                 if (el->content)
                 {
@@ -1270,15 +1300,16 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
             if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.ScrollViewer", NULL, NULL, (void **)&raw )) && raw)
             {
                 child = uwp_elem_from_any( raw );
+                if (child)
+                {
+                    child->parent = impl;
+                    child->in_visual_tree = TRUE;
+                    child->actual_w = 320.0;
+                    child->actual_h = 80.0;
+                    lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                    impl->tpl_text_container = child;
+                }
                 IInspectable_Release( raw );
-            }
-            if (child)
-            {
-                child->parent = impl;
-                child->actual_w = 320.0;
-                child->actual_h = 80.0;
-                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-                impl->tpl_text_container = child;
             }
         }
         child = impl->tpl_text_container;
@@ -1291,20 +1322,26 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
             if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&raw )) && raw)
             {
                 child = uwp_elem_from_any( raw );
+                if (child)
+                {
+                    child->parent = impl->tpl_text_container ? impl->tpl_text_container : impl;
+                    child->in_visual_tree = TRUE;
+                    child->actual_w = 300.0;
+                    child->actual_h = 64.0;
+                    child->font_size = 44.0;
+                    lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                    if (uwp_has_text( impl )) uwp_elem_set_text( child, uwp_elem_text( impl ) );
+                    impl->tpl_normal_output = child;
+                    if (impl->tpl_text_container)
+                    {
+                        impl->tpl_text_container->content = &child->IInspectable_iface;
+                        IInspectable_AddRef( &child->IInspectable_iface );
+                    }
+                    if (impl->content) IInspectable_Release( impl->content );
+                    impl->content = &child->IInspectable_iface;
+                    IInspectable_AddRef( &child->IInspectable_iface );
+                }
                 IInspectable_Release( raw );
-            }
-            if (child)
-            {
-                child->parent = impl->tpl_text_container ? impl->tpl_text_container : impl;
-                child->actual_w = 300.0;
-                child->actual_h = 64.0;
-                child->font_size = 44.0;
-                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-                if (uwp_has_text( impl )) uwp_elem_set_text( child, uwp_elem_text( impl ) );
-                impl->tpl_normal_output = child;
-                if (impl->tpl_text_container)
-                    impl->tpl_text_container->content = &child->IInspectable_iface;
-                impl->content = &child->IInspectable_iface;
             }
         }
         child = impl->tpl_normal_output;
@@ -1315,13 +1352,14 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
         if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.HyperlinkButton", NULL, NULL, (void **)&raw )) && raw)
         {
             child = uwp_elem_from_any( raw );
+            if (child)
+            {
+                child->parent = impl;
+                child->in_visual_tree = TRUE;
+                child->visibility = 1; /* Collapsed by default */
+                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+            }
             IInspectable_Release( raw );
-        }
-        if (child)
-        {
-            child->parent = impl;
-            child->visibility = 1; /* Collapsed by default */
-            lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
         }
     }
     else if (!wcscmp( nm, L"ContentRootGrid" ) || !wcscmp( nm, L"RootGrid" ) ||
@@ -1331,14 +1369,15 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
         if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&raw )) && raw)
         {
             child = uwp_elem_from_any( raw );
+            if (child)
+            {
+                child->parent = impl;
+                child->in_visual_tree = TRUE;
+                child->actual_w = 360.0;
+                child->actual_h = 180.0;
+                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+            }
             IInspectable_Release( raw );
-        }
-        if (child)
-        {
-            child->parent = impl;
-            child->actual_w = 360.0;
-            child->actual_h = 180.0;
-            lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
         }
     }
     else if (!wcscmp( nm, L"PrimaryButton" ) || !wcscmp( nm, L"SecondaryButton" ) ||
@@ -1348,12 +1387,13 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
         if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&raw )) && raw)
         {
             child = uwp_elem_from_any( raw );
+            if (child)
+            {
+                child->parent = impl;
+                child->in_visual_tree = TRUE;
+                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+            }
             IInspectable_Release( raw );
-        }
-        if (child)
-        {
-            child->parent = impl;
-            lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
         }
     }
     else if (!wcscmp( nm, L"TabListView" ))
@@ -1362,12 +1402,13 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
         if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.ListView", NULL, NULL, (void **)&raw )) && raw)
         {
             child = uwp_elem_from_any( raw );
-            IInspectable_Release( raw );
             if (child)
             {
                 child->parent = impl;
+                child->in_visual_tree = TRUE;
                 lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
             }
+            IInspectable_Release( raw );
         }
     }
     else if (uwp_tpl_part_class( nm ))
@@ -1389,6 +1430,7 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
         {
             const WCHAR *part_cls = uwp_tpl_part_class( nm );
             IInspectable *raw = NULL;
+            IInspectable *hold_raw = NULL;
             if (!wcscmp( part_cls, L"Microsoft.UI.Xaml.Controls.ItemsRepeater" ) &&
                 (!wcscmp( nm, L"MenuItemsHost" ) || !wcscmp( nm, L"FooterMenuItemsHost" )))
             {
@@ -1399,22 +1441,27 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                     {
                         lstrcpynW( child->class_name, part_cls, ARRAY_SIZE(child->class_name) );
                         uwp_elem_sync_class_flags( child );
+                        hold_raw = raw;
                     }
-                    IInspectable_Release( raw );
+                    else
+                        IInspectable_Release( raw );
                 }
             }
             if (!child && SUCCEEDED(uwp_element_create( part_cls, NULL, NULL, (void **)&raw )) && raw)
             {
                 child = uwp_elem_from_any( raw );
-                IInspectable_Release( raw );
+                if (child) hold_raw = raw;
+                else IInspectable_Release( raw );
             }
             if (child)
             {
                 child->parent = impl;
+                child->in_visual_tree = TRUE;
                 child->visibility = uwp_tpl_part_collapsed( nm ) ? 1 : 0;
                 lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
                 uwp_element_add_named( impl, child );
             }
+            if (hold_raw) IInspectable_Release( hold_raw );
         }
     }
     else
@@ -1453,7 +1500,11 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                 }
             }
             if (!already_attached)
+            {
                 uwp_vec_Append( impl->children_coll, child->outer ? child->outer : &child->IInspectable_iface );
+                impl->in_visual_tree = TRUE;
+                child->in_visual_tree = TRUE;
+            }
         }
     }
 
@@ -1511,12 +1562,19 @@ static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *
     WARN( "uwp_ui_AddHandler on %s (%s) ev=%p ptr_ev=%p handler=%p handled_too=%d\n",
           debugstr_w(impl->class_name), debugstr_w(impl->name), routed_event, g_routed_event_ptr_pressed, handler, handled_too );
     if (g_routed_event_ptr_pressed && routed_event == (void *)g_routed_event_ptr_pressed)
-        target_reg = &impl->ptr_pressed_reg;
+    {
+        struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+        target_reg = ev ? &ev->ptr_pressed_reg : NULL;
+    }
     else if (g_routed_event_ptr_released && routed_event == (void *)g_routed_event_ptr_released)
-        target_reg = &impl->ptr_released_reg;
+    {
+        struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+        target_reg = ev ? &ev->ptr_released_reg : NULL;
+    }
     else if (g_routed_event_tapped && routed_event == (void *)g_routed_event_tapped)
     {
-        target_reg = &impl->tapped_reg;
+        struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+        target_reg = ev ? &ev->tapped_reg : NULL;
         is_tapped = TRUE;
     }
 
@@ -1715,32 +1773,14 @@ static HRESULT WINAPI uwp_ui_UpdateLayout( void *iface )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     uwp_ui_InvalidateLayout( iface );
-    if (impl && impl->layout_updated_cnt > 0 && !impl->in_measure_arrange)
+    if (impl && UWP_EV_CNT( impl, layout_updated_reg ) > 0 && !impl->in_measure_arrange)
     {
         unsigned int realized = impl->children_coll
             ? CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface )->count : 0;
         if (realized < 24)
         {
-            int i, cnt = impl->layout_updated_cnt;
             impl->in_measure_arrange = TRUE;
-            for (i = 0; i < cnt && i < impl->layout_updated_cnt; i++)
-            {
-                if (impl->layout_updated_handlers[i])
-                {
-                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->layout_updated_handlers[i];
-                    IUnknown_AddRef( (IUnknown *)h );
-                    __TRY
-                    {
-                        h->lpVtbl->Invoke( h, NULL, NULL );
-                    }
-                    __EXCEPT_ALL
-                    {
-                        WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() );
-                    }
-                    __ENDTRY;
-                    IUnknown_Release( (IUnknown *)h );
-                }
-            }
+            uwp_fire_event_registry( &impl->events->layout_updated_reg, NULL, NULL, "UpdateLayout" );
             impl->in_measure_arrange = FALSE;
         }
     }
@@ -1772,26 +1812,34 @@ static HRESULT WINAPI uwp_ui_put_Opacity( void *iface, double val )
 static HRESULT WINAPI uwp_ui_add_GotFocus( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_add( &impl->got_focus_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->got_focus_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_ui_remove_GotFocus( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->got_focus_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->got_focus_reg, tok );
 }
 static HRESULT WINAPI uwp_ui_add_LostFocus( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_add( &impl->lost_focus_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->lost_focus_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_ui_remove_LostFocus( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->lost_focus_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->lost_focus_reg, tok );
 }
 
 void uwp_ui_fire_got_focus( struct uwp_element *el )
@@ -1800,7 +1848,7 @@ void uwp_ui_fire_got_focus( struct uwp_element *el )
     for (cur = el; cur; cur = cur->parent)
     {
         void **handlers = NULL;
-        unsigned int cnt = xaml_event_registry_snapshot_alloc( &cur->got_focus_reg, &handlers );
+        unsigned int cnt = cur->events ? xaml_event_registry_snapshot_alloc( &cur->events->got_focus_reg, &handlers ) : 0;
         unsigned int i;
         if (!cnt) continue;
         for (i = 0; i < cnt; i++)
@@ -1824,7 +1872,7 @@ void uwp_ui_fire_lost_focus( struct uwp_element *el )
     for (cur = el; cur; cur = cur->parent)
     {
         void **handlers = NULL;
-        unsigned int cnt = xaml_event_registry_snapshot_alloc( &cur->lost_focus_reg, &handlers );
+        unsigned int cnt = cur->events ? xaml_event_registry_snapshot_alloc( &cur->events->lost_focus_reg, &handlers ) : 0;
         unsigned int i;
         if (!cnt) continue;
         for (i = 0; i < cnt; i++)
@@ -1927,8 +1975,8 @@ static HRESULT WINAPI uwp_fe_probe##n( void *iface, ... ) \
 }
 
 DEFINE_FE_PROBE(6)   DEFINE_FE_PROBE(11)  DEFINE_FE_PROBE(12)  DEFINE_FE_PROBE(27)
-DEFINE_FE_PROBE(28)  DEFINE_FE_PROBE(29)  DEFINE_FE_PROBE(30)  DEFINE_FE_PROBE(44)
-DEFINE_FE_PROBE(48)  DEFINE_FE_PROBE(53)  DEFINE_FE_PROBE(54)  DEFINE_FE_PROBE(55)
+DEFINE_FE_PROBE(28)  DEFINE_FE_PROBE(29)  DEFINE_FE_PROBE(30)
+DEFINE_FE_PROBE(53)  DEFINE_FE_PROBE(54)  DEFINE_FE_PROBE(55)
 DEFINE_FE_PROBE(58)  DEFINE_FE_PROBE(59)  DEFINE_FE_PROBE(60)  DEFINE_FE_PROBE(61)
 DEFINE_FE_PROBE(63)  DEFINE_FE_PROBE(64)  DEFINE_FE_PROBE(65)  DEFINE_FE_PROBE(66)
 DEFINE_FE_PROBE(67)  DEFINE_FE_PROBE(68)  DEFINE_FE_PROBE(69)  DEFINE_FE_PROBE(70)
@@ -2257,8 +2305,8 @@ const void *uwp_fe_vtbl[112] =
     [30] = uwp_fe_probe30,
     [38] = uwp_fe_get_Style,
     [39] = uwp_fe_put_Style,
-    [44] = uwp_fe_probe44,
-    [48] = uwp_fe_probe48,
+    [44] = uwp_fe_remove_Loaded,
+    [48] = uwp_fe_remove_SizeChanged,
     [53] = uwp_fe_probe53,
     [54] = uwp_fe_probe54,
     [55] = uwp_fe_probe55,

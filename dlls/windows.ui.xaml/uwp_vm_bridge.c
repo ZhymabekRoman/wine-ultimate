@@ -493,14 +493,15 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
                 g_navigated_page_el->xbf_refs[r].full_name[0])
                 lstrcpynW( candidates[ncand++], g_navigated_page_el->xbf_refs[r].full_name, 128 );
         }
-        if (g_navigated_page_el->x_class[0] && ncand < (int)ARRAY_SIZE(candidates))
-            lstrcpynW( candidates[ncand++], g_navigated_page_el->x_class, 128 );
+        if (uwp_elem_x_class( g_navigated_page_el )[0] && ncand < (int)ARRAY_SIZE(candidates))
+            lstrcpynW( candidates[ncand++], uwp_elem_x_class( g_navigated_page_el ), 128 );
     }
     {
         struct uwp_element *scan;
         for (scan = g_all_uwp_elems_head; scan && ncand < (int)ARRAY_SIZE(candidates); scan = scan->next_reg)
         {
-            const WCHAR *cls = scan->x_class[0] ? scan->x_class : scan->class_name;
+            const WCHAR *xc = uwp_elem_x_class( scan );
+            const WCHAR *cls = xc[0] ? xc : scan->class_name;
             if ((scan->kind == UWP_KIND_USER_CONTROL || scan->kind == UWP_KIND_PAGE) &&
                 cls[0] && wcsncmp( cls, L"Windows.UI.Xaml.", 16 ) != 0 &&
                 wcsncmp( cls, L"Microsoft.UI.Xaml.", 18 ) != 0)

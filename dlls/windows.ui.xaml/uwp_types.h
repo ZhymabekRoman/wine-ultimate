@@ -354,6 +354,165 @@ struct xaml_event_handler_vtbl
     HRESULT (WINAPI *Invoke)( struct xaml_event_handler *This, void *sender, void *args );   /* slot 3 */
 };
 
+struct uwp_weak_ctrl
+{
+    LONG ref;
+    struct uwp_element *elem;
+};
+
+/* Lazy event-registry sidecar allocated on first add_* subscription. */
+struct uwp_event_bag
+{
+    struct xaml_event_registry xaml_root_changed_reg;
+    struct xaml_event_registry tbtn_checked_reg;
+    struct xaml_event_registry tbtn_unchecked_reg;
+    struct xaml_event_registry popup_opened_reg;
+    struct xaml_event_registry popup_closed_reg;
+    struct xaml_event_registry sel_changed_reg;
+    struct xaml_event_registry cb_opened_reg;
+    struct xaml_event_registry cb_closed_reg;
+    struct xaml_event_registry ptr_pressed_reg;
+    struct xaml_event_registry ptr_moved_reg;
+    struct xaml_event_registry ptr_released_reg;
+    struct xaml_event_registry ptr_entered_reg;
+    struct xaml_event_registry ptr_exited_reg;
+    struct xaml_event_registry ptr_capture_lost_reg;
+    struct xaml_event_registry tapped_reg;
+    struct xaml_event_registry ptr_canceled_reg;
+    struct xaml_event_registry ptr_wheel_reg;
+    struct xaml_event_registry got_focus_reg;
+    struct xaml_event_registry lost_focus_reg;
+    struct xaml_event_registry nav_sel_changed_reg;
+    struct xaml_event_registry nav_item_invoked_reg;
+    struct xaml_event_registry frame_navigated_reg;
+    struct xaml_event_registry preview_keydown_reg;
+    struct xaml_event_registry asb_text_changed_reg;
+    struct xaml_event_registry asb_query_submitted_reg;
+    struct xaml_event_registry asb_suggestion_chosen_reg;
+    struct xaml_event_registry obsvec_changed_reg;
+    struct xaml_event_registry timer_tick_reg;
+    struct xaml_event_registry img_opened_reg;
+    struct xaml_event_registry loaded_reg;
+    INT64 loaded_fired_tok;
+    struct xaml_event_registry evc_reg;
+    struct xaml_event_registry size_changed_reg;
+    struct xaml_event_registry layout_updated_reg;
+    struct xaml_event_registry click_reg;
+    struct xaml_event_registry dc_reg;
+    struct xaml_event_registry loading_reg;
+    struct xaml_event_registry tab_add_reg;
+    struct xaml_event_registry tab_close_reg;
+    struct xaml_event_registry accel_invoked_reg;
+    struct xaml_event_registry exec_req_reg;
+    struct xaml_event_registry tip_closing_reg;
+    struct xaml_event_registry tip_closed_reg;
+    struct xaml_event_registry flyout_opening_reg;
+    struct xaml_event_registry flyout_closed_reg;
+};
+
+/* Lazy sidecar for Image / BitmapImage / MediaPlayerElement state. */
+struct uwp_media_ext
+{
+    WCHAR image_src[512];
+    IInspectable *img_source;
+    BYTE *img_pixels;
+    UINT img_w, img_h;
+    BOOL img_loaded;
+    volatile LONG img_loading;
+    IInspectable *media_source;
+    IInspectable *media_transport_controls;
+    IInspectable *media_poster_source;
+    IInspectable *media_player;
+    boolean media_transport_enabled;
+    int media_stretch;
+    boolean media_auto_play;
+    boolean media_is_full_window;
+    SRWLOCK video_lock;
+    BYTE *video_pixels;
+    UINT video_w, video_h;
+    UINT video_frame_seq;
+    WCHAR video_uri[512];
+    HANDLE video_thread;
+    volatile LONG video_started;
+    volatile LONG video_stop;
+};
+
+/* Lazy sidecar for ContentDialog state. */
+struct uwp_dialog_ext
+{
+    HWND dialog_hwnd;
+    IInspectable *dialog_title_obj;
+    WCHAR dialog_title[128];
+    WCHAR dialog_primary_text[64];
+    WCHAR dialog_secondary_text[64];
+    WCHAR dialog_close_text[64];
+    int dialog_default_btn;
+};
+
+/* Lazy sidecar for NavigationView / Frame / TabView / ComboBox extras. */
+struct uwp_nav_ext
+{
+    WCHAR display_member_path[64];
+    IInspectable *selected_item;
+    INT32 selected_index;
+    IInspectable *sel_changed_handler;
+    IInspectable *tab_items_source;
+    IInspectable *tab_add_cmd;
+    IInspectable *tab_add_cmd_param;
+    IInspectable *back_stack;
+    IInspectable *forward_stack;
+    IInspectable *nav_args_item;
+    BOOL nav_fired;
+    boolean nav_stack_enabled;
+    int nav_pane_display_mode;       /* 0=Auto, 1=Left, 2=Top, 3=LeftCompact, 4=LeftMinimal */
+    BOOL nav_pane_display_mode_set;
+    int nav_display_mode;            /* 0=Minimal, 1=Compact, 2=Expanded */
+    BOOL nav_display_mode_set;
+    BOOL nav_is_pane_open;
+    double nav_open_pane_length;
+    double nav_compact_pane_length;
+    double nav_compact_threshold;
+    double nav_expanded_threshold;
+    BOOL nav_is_settings_visible;
+    BOOL nav_is_pane_toggle_visible;
+    int nav_scroll_y;
+    RECT nav_pane_bounds;
+    IInspectable *nav_icon;
+};
+
+/* Lazy sidecar for Style / Brush / Gradient / Storyboard / Animation / TemplateBinding state. */
+struct uwp_style_anim_ext
+{
+    int easing_mode;
+    UINT32 brush_argb;
+    BOOL has_brush_argb;
+    double brush_opacity;
+    WCHAR brush_color_ref[96];
+    WCHAR style_based_on[96];
+    struct uwp_style_setter *style_setters;
+    int style_setter_cnt;
+    int style_setter_cap;
+    IInspectable *style_obj;
+    IInspectable *gradient_stops_coll;
+    IInspectable *figures_coll;
+    float grad_start_x, grad_start_y;
+    float grad_end_x, grad_end_y;
+    int grad_spread_method;
+    int grad_mapping_mode;
+    int grad_color_interp;
+    double grad_stop_offset;
+    int tile_align_x, tile_align_y;
+    int fill_rule;
+    BOOL xcbb_connected;
+    WORD tpl_bind_target_pid;
+    WCHAR tpl_bind_src_prop[64];
+    WCHAR anim_target_name[96];
+    WCHAR anim_target_prop[96];
+    struct uwp_element *anim_target_el;
+    double anim_to;
+    BOOL anim_has_to;
+};
+
 struct uwp_element
 {
     IInspectable nondelegating_iface;
@@ -421,7 +580,6 @@ struct uwp_element
     IInspectable IXamlRoot_iface;
     IInspectable *xaml_root_shadow;
     IInspectable *xaml_root_override;
-    struct xaml_event_registry xaml_root_changed_reg;
     IInspectable IButtonWithFlyout_iface;
     IInspectable IContentDialog_iface;
     IInspectable IContentDialog2_iface;
@@ -462,38 +620,35 @@ struct uwp_element
     ITypeInfo ITypeInfo_iface;
     UINT32 magic;
     LONG ref;
-    int easing_mode;
-    IInspectable *media_source;
+    struct uwp_weak_ctrl *weak_ctrl;
     IDCompositionVisual2 *scp_visual;
-    IInspectable *media_transport_controls;
-    IInspectable *media_poster_source;
-    IInspectable *media_player;
-    boolean media_transport_enabled;
-    int media_stretch;
-    boolean media_auto_play;
-    boolean media_is_full_window;
     HWND island_hwnd;
-    HWND dialog_hwnd;
     IInspectable *outer;
     BOOL delegating;             /* outer is a real app-side element (answers IUIElement): refcounts delegate to it */
     BOOL outer_pinned;           /* visual tree holds an explicit AddRef on outer to prevent GC while live */
+    BOOL in_visual_tree;         /* attached to a live visual tree / window / island / named table */
     enum uwp_elem_kind kind;
     UINT64 class_flags;
     UINT64 class_flags2;
     WCHAR class_name[128];
-    WCHAR x_class[128];
     WCHAR name[64];
-    WCHAR uid[64];
     WCHAR *text;
     UINT32 text_len;
     UINT32 text_cap;
-    WCHAR accel_text[64];
-    IInspectable *dialog_title_obj;
-    WCHAR dialog_title[128];
-    WCHAR dialog_primary_text[64];
-    WCHAR dialog_secondary_text[64];
-    WCHAR dialog_close_text[64];
-    int dialog_default_btn;
+    /* Cold heap-allocated strings (NULL when empty; access via inline getters/setters) */
+    WCHAR *x_class;
+    WCHAR *uid;
+    WCHAR *accel_text;
+    WCHAR *font_family;
+    WCHAR *automation_name;
+    WCHAR *default_style_key_name;
+    WCHAR *placeholder;
+    /* Lazy on-demand heap sidecars */
+    struct uwp_event_bag *events;
+    struct uwp_media_ext *media;
+    struct uwp_dialog_ext *dialog;
+    struct uwp_nav_ext *nav;
+    struct uwp_style_anim_ext *style_anim;
     int conn_id;
     struct uwp_element *parent;
     struct uwp_element *owner_component;
@@ -537,13 +692,9 @@ struct uwp_element
     int visibility;    /* 0=Visible, 1=Collapsed */
     boolean is_enabled;
     int is_checked;    /* 0=Unchecked, 1=Checked, 2=Indeterminate */
-    struct xaml_event_registry tbtn_checked_reg;
-    struct xaml_event_registry tbtn_unchecked_reg;
     double popup_h_offset;
     double popup_v_offset;
     BOOL popup_light_dismiss;
-    struct xaml_event_registry popup_opened_reg;
-    struct xaml_event_registry popup_closed_reg;
     BOOL is_pressed;
     BOOL is_hovered;
     BOOL is_hit_test_visible;
@@ -566,11 +717,8 @@ struct uwp_element
     double font_size;
     BOOL has_font_size;
     int font_weight;   /* 0=default, else Win32 FW_* (100..900) */
-    WCHAR font_family[128];
-    WCHAR automation_name[128];
     int requested_theme; /* 0=Default, 1=Light, 2=Dark */
     IInspectable *default_style_key;
-    WCHAR default_style_key_name[128];
     int text_align;    /* 0=Center, 1=Left, 2=Right, 3=Justify */
     BOOL has_text_align;
     int text_wrapping; /* 1=NoWrap, 2=Wrap, 3=WrapWholeWords */
@@ -589,17 +737,6 @@ struct uwp_element
     BOOL has_border;
     double border_thick_l, border_thick_t, border_thick_r, border_thick_b;
     double corner_radius;
-    /* SolidColorBrush / Color fields */
-    UINT32 brush_argb;
-    BOOL has_brush_argb;
-    double brush_opacity;
-    WCHAR brush_color_ref[96];
-    /* Style / Setter fields */
-    WCHAR style_based_on[96];
-    struct uwp_style_setter *style_setters;
-    int style_setter_cnt;
-    int style_setter_cap;
-    IInspectable *style_obj;
     BOOL is_accent_style;
     enum {
         UWP_CONTENT_NONE = 0,
@@ -610,89 +747,18 @@ struct uwp_element
     /* Computed screen rectangle */
     RECT bounds;
     BOOL has_bounds;
-    /* Events & DependencyProperty store */
-    IInspectable **loaded_handlers;
-    int loaded_cnt;
-    int loaded_cap;
+    /* Lifecycle & interaction flags */
     BOOL loaded_fired;
-    IInspectable *evc_handlers[4];
-    int evc_cnt;
     BOOL evc_fired;
-    int loaded_fired_cnt;
-    IInspectable **size_changed_handlers;
-    int size_changed_cnt;
-    int size_changed_cap;
-    IInspectable **layout_updated_handlers;
-    int layout_updated_cnt;
-    int layout_updated_cap;
     BOOL template_applied;
-    IInspectable **click_handlers;
-    int click_cnt;
-    int click_cap;
-    IInspectable **dc_handlers;
-    int dc_cnt;
-    int dc_cap;
-    IInspectable **loading_handlers;
-    int loading_cnt;
-    int loading_cap;
     void *binding_connector;
     void *dt_binding_connector;
-    IInspectable *selected_item;
-    INT32 selected_index;
     BOOL is_dropdown_open;
     int hovered_dropdown_idx;
     int dropdown_scroll_offset;
-    WCHAR display_member_path[64];
-    struct xaml_event_registry sel_changed_reg;
-    struct xaml_event_registry cb_opened_reg;
-    struct xaml_event_registry cb_closed_reg;
     IInspectable *items_source;
     IInspectable *item_template;
     IInspectable *item_template_selector;
-    IInspectable *sel_changed_handler;
-    IInspectable *tab_items_source;
-    IInspectable *tab_add_cmd;
-    IInspectable *tab_add_cmd_param;
-    IInspectable **tab_add_handlers;
-    int tab_add_cnt;
-    int tab_add_cap;
-    IInspectable **tab_close_handlers;
-    int tab_close_cnt;
-    int tab_close_cap;
-    struct xaml_event_registry ptr_pressed_reg;
-    struct xaml_event_registry ptr_moved_reg;
-    struct xaml_event_registry ptr_released_reg;
-    struct xaml_event_registry ptr_entered_reg;
-    struct xaml_event_registry ptr_exited_reg;
-    struct xaml_event_registry ptr_capture_lost_reg;
-    struct xaml_event_registry tapped_reg;
-    struct xaml_event_registry ptr_canceled_reg;
-    struct xaml_event_registry ptr_wheel_reg;
-    struct xaml_event_registry got_focus_reg;
-    struct xaml_event_registry lost_focus_reg;
-    struct xaml_event_registry nav_sel_changed_reg;
-    struct xaml_event_registry nav_item_invoked_reg;
-    struct xaml_event_registry frame_navigated_reg;
-    IInspectable *back_stack;
-    IInspectable *forward_stack;
-    IInspectable *nav_args_item;
-    BOOL nav_fired;
-    boolean nav_stack_enabled;
-    /* NavigationView / NavigationViewItem state */
-    int nav_pane_display_mode;       /* 0=Auto, 1=Left, 2=Top, 3=LeftCompact, 4=LeftMinimal */
-    BOOL nav_pane_display_mode_set;
-    int nav_display_mode;            /* 0=Minimal, 1=Compact, 2=Expanded */
-    BOOL nav_display_mode_set;
-    BOOL nav_is_pane_open;
-    double nav_open_pane_length;
-    double nav_compact_pane_length;
-    double nav_compact_threshold;
-    double nav_expanded_threshold;
-    BOOL nav_is_settings_visible;
-    BOOL nav_is_pane_toggle_visible;
-    int nav_scroll_y;
-    RECT nav_pane_bounds;
-    IInspectable *nav_icon;
     SRWLOCK dp_lock;
     struct uwp_dp_entry *dp_store;
     int dp_cnt;
@@ -727,64 +793,18 @@ struct uwp_element
     double vsm_eval_width;
     double vsm_eval_height;
     BOOL vsm_eval_valid;
-    WCHAR image_src[512];
-    IInspectable *img_source;
     IInspectable *bg_brush;
     IInspectable *fill_brush;
     IInspectable *comp_brush;
     IInspectable *ecp_visual;
-    IInspectable *gradient_stops_coll;
-    IInspectable *figures_coll;
-    float grad_start_x, grad_start_y;
-    float grad_end_x, grad_end_y;
-    int grad_spread_method;
-    int grad_mapping_mode;
-    int grad_color_interp;
-    double grad_stop_offset;
-    int tile_align_x, tile_align_y;
-    int fill_rule;
-    BOOL xcbb_connected;
-    BYTE *img_pixels;
-    UINT img_w, img_h;
-    BOOL img_loaded;
-    volatile LONG img_loading;
-    /* MediaPlayerElement video frame decoding state */
-    SRWLOCK video_lock;
-    BYTE *video_pixels;
-    UINT video_w, video_h;
-    UINT video_frame_seq;
-    WCHAR video_uri[512];
-    HANDLE video_thread;
-    volatile LONG video_started;
-    volatile LONG video_stop;
     struct uwp_element *next_reg;
     IInspectable *provider_inst;
     void *outer_unk;
-    /* KeyboardAccelerator, XamlUICommand, PreviewKeyDown, TeachingTip state */
-    struct xaml_event_registry preview_keydown_reg;
     UINT accel_key;
     UINT accel_mods;
     BOOL accel_enabled;
     IInspectable *accel_scope_owner;
     struct uwp_element *accel_target;
-    IInspectable **accel_invoked_handlers;
-    int accel_invoked_cnt;
-    int accel_invoked_cap;
-    IInspectable **exec_req_handlers;
-    int exec_req_cnt;
-    int exec_req_cap;
-    IInspectable **tip_closing_handlers;
-    int tip_closing_cnt;
-    int tip_closing_cap;
-    IInspectable **tip_closed_handlers;
-    int tip_closed_cnt;
-    int tip_closed_cap;
-    IInspectable **flyout_opening_handlers;
-    int flyout_opening_cnt;
-    int flyout_opening_cap;
-    IInspectable **flyout_closed_handlers;
-    int flyout_closed_cnt;
-    int flyout_closed_cap;
     BOOL is_open;
     const BYTE *template_xbf_data;
     DWORD template_xbf_size;
@@ -793,30 +813,15 @@ struct uwp_element
     struct uwp_rd_bucket *template_rd_bucket;
     struct uwp_element *template_root;
     struct uwp_element *templated_parent;
-    WORD tpl_bind_target_pid;
-    WCHAR tpl_bind_src_prop[64];
     BOOL template_inflated;
-    /* Storyboard / DoubleAnimation target state */
-    WCHAR anim_target_name[96];
-    WCHAR anim_target_prop[96];
-    struct uwp_element *anim_target_el;
-    double anim_to;
-    BOOL anim_has_to;
-    struct xaml_event_registry asb_text_changed_reg;
-    struct xaml_event_registry asb_query_submitted_reg;
-    struct xaml_event_registry asb_suggestion_chosen_reg;
-    struct xaml_event_registry obsvec_changed_reg;
     INT64 timer_interval_100ns;
     UINT_PTR timer_win32_id;
     BOOL timer_enabled;
-    struct xaml_event_registry timer_tick_reg;
     float last_measured_w;
     float last_measured_h;
     BOOL in_measure_arrange;
     int scroll_y;
     int scroll_extent_h;
-    struct xaml_event_registry img_opened_reg;
-    WCHAR placeholder[256];
     /* Layout memoization (keyed on g_layout_gen) */
     UINT32 nat_w_gen;
     double cached_nat_w;
@@ -1030,6 +1035,31 @@ void uwp_elem_set_text( struct uwp_element *el, const WCHAR *s );
 void uwp_elem_set_text_n( struct uwp_element *el, const WCHAR *s, size_t n );
 void uwp_elem_append_text( struct uwp_element *el, const WCHAR *s );
 void uwp_elem_clear_text( struct uwp_element *el );
+void uwp_elem_set_cold_str( WCHAR **dst, const WCHAR *src, size_t max_chars );
+
+/* Lazy sidecar allocators (thread-safe via InterlockedCompareExchangePointer) */
+struct uwp_event_bag *uwp_elem_ensure_events( struct uwp_element *el );
+struct uwp_media_ext *uwp_elem_ensure_media( struct uwp_element *el );
+struct uwp_dialog_ext *uwp_elem_ensure_dialog( struct uwp_element *el );
+struct uwp_nav_ext *uwp_elem_ensure_nav( struct uwp_element *el );
+struct uwp_style_anim_ext *uwp_elem_ensure_style_anim( struct uwp_element *el );
+
+/* Shared event-registry firing helper */
+void uwp_fire_event_registry( struct xaml_event_registry *reg, IInspectable *sender,
+                              IInspectable *args, const char *tag );
+void uwp_clear_global_elem_refs( struct uwp_element *el );
+
+#define UWP_EV_REG(el, field) (((el) && (el)->events) ? &(el)->events->field : NULL)
+#define UWP_EV_CNT(el, field) (((el) && (el)->events) ? (el)->events->field.count : 0)
+#define UWP_EV_ANY(el, field) (((el) && (el)->events) ? ((el)->events->field.next_token > 0) : FALSE)
+
+static inline BOOL uwp_loaded_needs_fire( const struct uwp_element *el )
+{
+    if (!el) return FALSE;
+    if (!el->loaded_fired) return TRUE;
+    return el->events && el->events->loaded_reg.count > 0 &&
+           el->events->loaded_reg.next_token > el->events->loaded_fired_tok;
+}
 
 static inline const WCHAR *uwp_elem_text( const struct uwp_element *el )
 {
@@ -1039,6 +1069,124 @@ static inline const WCHAR *uwp_elem_text( const struct uwp_element *el )
 static inline BOOL uwp_has_text( const struct uwp_element *el )
 {
     return el && el->text && el->text[0] != 0;
+}
+
+static inline const WCHAR *uwp_elem_x_class( const struct uwp_element *el )
+{
+    return (el && el->x_class) ? el->x_class : L"";
+}
+static inline void uwp_elem_set_x_class( struct uwp_element *el, const WCHAR *s )
+{
+    if (el) uwp_elem_set_cold_str( &el->x_class, s, 128 );
+}
+
+static inline const WCHAR *uwp_elem_uid( const struct uwp_element *el )
+{
+    return (el && el->uid) ? el->uid : L"";
+}
+static inline void uwp_elem_set_uid( struct uwp_element *el, const WCHAR *s )
+{
+    if (el) uwp_elem_set_cold_str( &el->uid, s, 64 );
+}
+
+static inline const WCHAR *uwp_elem_accel_text( const struct uwp_element *el )
+{
+    return (el && el->accel_text) ? el->accel_text : L"";
+}
+static inline void uwp_elem_set_accel_text( struct uwp_element *el, const WCHAR *s )
+{
+    if (el) uwp_elem_set_cold_str( &el->accel_text, s, 64 );
+}
+
+static inline const WCHAR *uwp_elem_font_family( const struct uwp_element *el )
+{
+    return (el && el->font_family) ? el->font_family : L"";
+}
+static inline void uwp_elem_set_font_family( struct uwp_element *el, const WCHAR *s )
+{
+    if (el) uwp_elem_set_cold_str( &el->font_family, s, 128 );
+}
+
+static inline const WCHAR *uwp_elem_automation_name( const struct uwp_element *el )
+{
+    return (el && el->automation_name) ? el->automation_name : L"";
+}
+static inline void uwp_elem_set_automation_name( struct uwp_element *el, const WCHAR *s )
+{
+    if (el) uwp_elem_set_cold_str( &el->automation_name, s, 128 );
+}
+
+static inline const WCHAR *uwp_elem_default_style_key_name( const struct uwp_element *el )
+{
+    return (el && el->default_style_key_name) ? el->default_style_key_name : L"";
+}
+static inline void uwp_elem_set_default_style_key_name( struct uwp_element *el, const WCHAR *s )
+{
+    if (el) uwp_elem_set_cold_str( &el->default_style_key_name, s, 128 );
+}
+
+static inline const WCHAR *uwp_elem_placeholder( const struct uwp_element *el )
+{
+    return (el && el->placeholder) ? el->placeholder : L"";
+}
+static inline void uwp_elem_set_placeholder( struct uwp_element *el, const WCHAR *s )
+{
+    if (el) uwp_elem_set_cold_str( &el->placeholder, s, 256 );
+}
+
+static inline const WCHAR *uwp_elem_image_src( const struct uwp_element *el )
+{
+    return (el && el->media) ? el->media->image_src : L"";
+}
+
+static inline int uwp_elem_media_stretch( const struct uwp_element *el )
+{
+    return (el && el->media) ? el->media->media_stretch : 2; /* Uniform */
+}
+
+static inline const WCHAR *uwp_elem_display_member_path( const struct uwp_element *el )
+{
+    return (el && el->nav) ? el->nav->display_member_path : L"";
+}
+
+static inline IInspectable *uwp_elem_selected_item( const struct uwp_element *el )
+{
+    return (el && el->nav) ? el->nav->selected_item : NULL;
+}
+
+static inline INT32 uwp_elem_selected_index( const struct uwp_element *el )
+{
+    return (el && el->nav) ? el->nav->selected_index : -1;
+}
+
+static inline BOOL uwp_elem_nav_is_pane_open( const struct uwp_element *el )
+{
+    return (el && el->nav) ? el->nav->nav_is_pane_open : FALSE;
+}
+
+static inline BOOL uwp_elem_nav_is_settings_visible( const struct uwp_element *el )
+{
+    return (el && el->nav) ? el->nav->nav_is_settings_visible : TRUE;
+}
+
+static inline BOOL uwp_elem_nav_is_pane_toggle_visible( const struct uwp_element *el )
+{
+    return (el && el->nav) ? el->nav->nav_is_pane_toggle_visible : TRUE;
+}
+
+static inline double uwp_elem_brush_opacity( const struct uwp_element *el )
+{
+    return (el && el->style_anim) ? el->style_anim->brush_opacity : 1.0;
+}
+
+static inline BOOL uwp_elem_has_brush_argb( const struct uwp_element *el )
+{
+    return (el && el->style_anim) ? el->style_anim->has_brush_argb : FALSE;
+}
+
+static inline UINT32 uwp_elem_brush_argb( const struct uwp_element *el )
+{
+    return (el && el->style_anim) ? el->style_anim->brush_argb : 0;
 }
 
 static inline BOOL uwp_is_exact_autosuggest( const struct uwp_element *el )
@@ -1181,6 +1329,7 @@ void uwp_fire_size_and_layout_changed( struct uwp_element *el );
 void uwp_ui_fire_got_focus( struct uwp_element *el );
 void uwp_ui_fire_lost_focus( struct uwp_element *el );
 void uwp_popup_set_open( struct uwp_element *impl, BOOL open );
+void uwp_open_popups_remove( struct uwp_element *impl );
 int uwp_get_open_popups( struct uwp_element **out_list, int max_cnt );
 void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL fire_events );
 void uwp_update_binding_source( IInspectable *src, const WCHAR *path, IInspectable *new_val );
@@ -1213,6 +1362,7 @@ HRESULT WINAPI uwp_disp_Invoke( IDispatch *iface, DISPID id, REFIID riid, LCID l
 /* FrameworkElement / FrameworkElement2 / FrameworkElement3 core methods */
 HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out );
 HRESULT WINAPI uwp_fe_add_Loaded( void *iface, void *handler, EventRegistrationToken *tok );
+HRESULT WINAPI uwp_fe_remove_Loaded( void *iface, EventRegistrationToken tok );
 HRESULT WINAPI uwp_fe_get_ActualHeight( void *iface, double *val );
 HRESULT WINAPI uwp_fe_get_ActualWidth( void *iface, double *val );
 HRESULT WINAPI uwp_fe_get_DataContext( void *iface, void **out );
@@ -1234,7 +1384,9 @@ HRESULT WINAPI uwp_fe_put_Width( void *iface, double val );
 HRESULT WINAPI uwp_fe2_get_RequestedTheme( void *iface, int *out );
 HRESULT WINAPI uwp_fe2_put_RequestedTheme( void *iface, int val );
 HRESULT WINAPI uwp_fe3_add_DataContextChanged( void *iface, void *handler, EventRegistrationToken *tok );
+HRESULT WINAPI uwp_fe3_remove_DataContextChanged( void *iface, EventRegistrationToken tok );
 HRESULT WINAPI uwp_fe3_add_Loading( void *iface, void *handler, EventRegistrationToken *tok );
+HRESULT WINAPI uwp_fe3_remove_Loading( void *iface, EventRegistrationToken tok );
 
 /* Legacy xaml_element / WinUI element helpers */
 struct xaml_element *impl_from_element( void *iface );

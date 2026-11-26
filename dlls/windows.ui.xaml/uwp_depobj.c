@@ -151,6 +151,32 @@ void uwp_accel_register( struct uwp_element *accel_el, struct uwp_element *targe
     ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
 }
 
+void uwp_clear_global_elem_refs( struct uwp_element *el )
+{
+    int i;
+    if (!el) return;
+    uwp_open_popups_remove( el );
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    if (g_open_overlay_nav == el) g_open_overlay_nav = NULL;
+    if (g_captured_elem == el) g_captured_elem = NULL;
+    if (g_hovered_elem == el) g_hovered_elem = NULL;
+    if (g_focused_textbox == el) g_focused_textbox = NULL;
+    if (g_last_created_page == el) g_last_created_page = NULL;
+    if (g_navigated_page_el == el) g_navigated_page_el = NULL;
+    if (g_popup_owner_el == el) g_popup_owner_el = NULL;
+    if (g_last_closed_flyout == el) g_last_closed_flyout = NULL;
+    if (g_open_combobox == el) g_open_combobox = NULL;
+    if (g_routed_args_el == el) g_routed_args_el = NULL;
+    for (i = 0; i < g_accel_cnt; )
+    {
+        if (g_accel_entries[i].accel_el == el || g_accel_entries[i].target_el == el || g_accel_entries[i].page_el == el)
+            g_accel_entries[i] = g_accel_entries[--g_accel_cnt];
+        else
+            i++;
+    }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+}
+
 UINT uwp_parse_vk_string( const WCHAR *s )
 {
     if (!s || !s[0]) return 0;
@@ -372,12 +398,13 @@ static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uw
                                              const WCHAR *dpname, IInspectable *val, int depth )
 {
     if (!owner || !node || !dpname || !dpname[0] || depth > 16) return;
-    if (node->templated_parent == owner && node->tpl_bind_src_prop[0] &&
-        !wcscmp( node->tpl_bind_src_prop, dpname ))
+    if (node->templated_parent == owner && node->style_anim && node->style_anim->tpl_bind_src_prop[0] &&
+        !wcscmp( node->style_anim->tpl_bind_src_prop, dpname ))
     {
-        if (node->tpl_bind_target_pid == XBF_PROP_TEXTBLOCK_TEXT ||
-            node->tpl_bind_target_pid == XBF_PROP_CONTENT ||
-            node->tpl_bind_target_pid == XBF_PROP_FONTICON_GLYPH)
+        WORD tpid = node->style_anim->tpl_bind_target_pid;
+        if (tpid == XBF_PROP_TEXTBLOCK_TEXT ||
+            tpid == XBF_PROP_CONTENT ||
+            tpid == XBF_PROP_FONTICON_GLYPH)
         {
             WCHAR sbuf[256] = {0};
             if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
@@ -386,7 +413,7 @@ static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uw
                 uwp_invalidate_window();
             }
         }
-        else if (node->tpl_bind_target_pid == XBF_PROP_WIDTH)
+        else if (tpid == XBF_PROP_WIDTH)
         {
             double dv = 0.0;
             if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
@@ -396,8 +423,8 @@ static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uw
                 uwp_invalidate_window();
             }
         }
-        else if (node->tpl_bind_target_pid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT ||
-                 node->tpl_bind_target_pid == XBF_PROP_FLOW_DIRECTION)
+        else if (tpid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT ||
+                 tpid == XBF_PROP_FLOW_DIRECTION)
         {
             double dv = 0.0;
             if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
@@ -513,18 +540,20 @@ static BOOL uwp_should_sync_display_text( const struct uwp_element *impl, const 
 static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
 {
     static const struct { const WCHAR *dp; size_t off; BOOL invalidate; } tab_dps[] = {
-        { L"TabItemsSource",              offsetof(struct uwp_element, tab_items_source),  TRUE  },
-        { L"AddTabButtonCommand",         offsetof(struct uwp_element, tab_add_cmd),       FALSE },
-        { L"AddTabButtonCommandParameter",offsetof(struct uwp_element, tab_add_cmd_param), FALSE },
+        { L"TabItemsSource",              offsetof(struct uwp_nav_ext, tab_items_source),  TRUE  },
+        { L"AddTabButtonCommand",         offsetof(struct uwp_nav_ext, tab_add_cmd),       FALSE },
+        { L"AddTabButtonCommandParameter",offsetof(struct uwp_nav_ext, tab_add_cmd_param), FALSE },
     };
+    struct uwp_nav_ext *nav = uwp_elem_ensure_nav( impl );
     size_t k;
 
+    if (!nav) return;
     TRACE( "TabView SetValue dp=%s val=%p\n", debugstr_w(dpname), val );
     for (k = 0; k < ARRAY_SIZE(tab_dps); k++)
     {
         if (!wcscmp( dpname, tab_dps[k].dp ))
         {
-            IInspectable **slot = (IInspectable **)((char *)impl + tab_dps[k].off);
+            IInspectable **slot = (IInspectable **)((char *)nav + tab_dps[k].off);
             if (uwp_replace_iface( slot, val ) && tab_dps[k].invalidate)
                 uwp_invalidate_window();
             return;
@@ -536,7 +565,7 @@ static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname
         if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel, &vm )) && vm)
         {
             IUnknown_Release( (IUnknown *)vm );
-            if (uwp_replace_iface( &impl->selected_item, val ))
+            if (uwp_replace_iface( &nav->selected_item, val ))
                 uwp_invalidate_window();
         }
     }
@@ -617,7 +646,8 @@ void uwp_nav_select_item( struct uwp_element *nav, struct uwp_element *nvi )
              : (nvi->outer ? nvi->outer : &nvi->IInspectable_iface));
     if (nav)
     {
-        uwp_replace_iface( &nav->selected_item, item_val );
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( nav );
+        if (ne) uwp_replace_iface( &ne->selected_item, item_val );
         uwp_nav_sync_selection_tree( nav, nvi, NULL, 0 );
     }
     uwp_invalidate_window();
@@ -684,67 +714,69 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
         if (dpname[0] && uwp_is_nav_view( impl ))
         {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
             INT32 ev = 0;
             boolean bv = FALSE;
             double dv = 0.0;
-            if (!wcscmp( dpname, L"PaneDisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+            if (!ne) { }
+            else if (!wcscmp( dpname, L"PaneDisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
             {
-                impl->nav_pane_display_mode = ev;
-                impl->nav_pane_display_mode_set = TRUE;
+                ne->nav_pane_display_mode = ev;
+                ne->nav_pane_display_mode_set = TRUE;
                 TRACE( "NavView(%s) SetValue PaneDisplayMode=%d\n", debugstr_w(impl->name), ev );
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
             else if (!wcscmp( dpname, L"DisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
             {
-                impl->nav_display_mode = ev;
-                impl->nav_display_mode_set = TRUE;
+                ne->nav_display_mode = ev;
+                ne->nav_display_mode_set = TRUE;
                 TRACE( "NavView(%s) SetValue DisplayMode=%d\n", debugstr_w(impl->name), ev );
             }
             else if (!wcscmp( dpname, L"IsPaneOpen" ) && val && uwp_unbox_bool( val, &bv ))
             {
-                impl->nav_is_pane_open = (bv != 0);
+                ne->nav_is_pane_open = (bv != 0);
                 uwp_nav_track_open_state( impl );
-                if (!impl->nav_is_pane_open) impl->nav_scroll_y = 0;
-                TRACE( "NavView(%s) SetValue IsPaneOpen=%d\n", debugstr_w(impl->name), (int)impl->nav_is_pane_open );
+                if (!ne->nav_is_pane_open) ne->nav_scroll_y = 0;
+                TRACE( "NavView(%s) SetValue IsPaneOpen=%d\n", debugstr_w(impl->name), (int)ne->nav_is_pane_open );
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
             else if (!wcscmp( dpname, L"OpenPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
             {
-                impl->nav_open_pane_length = dv;
+                ne->nav_open_pane_length = dv;
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
             else if (!wcscmp( dpname, L"CompactPaneLength" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
             {
-                impl->nav_compact_pane_length = dv;
+                ne->nav_compact_pane_length = dv;
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
             else if (!wcscmp( dpname, L"CompactModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
             {
-                impl->nav_compact_threshold = dv;
+                ne->nav_compact_threshold = dv;
             }
             else if (!wcscmp( dpname, L"ExpandedModeThresholdWidth" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
             {
-                impl->nav_expanded_threshold = dv;
+                ne->nav_expanded_threshold = dv;
             }
             else if (!wcscmp( dpname, L"IsSettingsVisible" ) && val && uwp_unbox_bool( val, &bv ))
             {
-                impl->nav_is_settings_visible = (bv != 0);
+                ne->nav_is_settings_visible = (bv != 0);
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
             else if (!wcscmp( dpname, L"IsPaneToggleButtonVisible" ) && val && uwp_unbox_bool( val, &bv ))
             {
-                impl->nav_is_pane_toggle_visible = (bv != 0);
+                ne->nav_is_pane_toggle_visible = (bv != 0);
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
             else if (!wcscmp( dpname, L"SelectedItem" ))
             {
-                uwp_replace_iface( &impl->selected_item, val );
+                uwp_replace_iface( &ne->selected_item, val );
                 if (val)
                     uwp_nav_sync_selection_tree( impl, NULL, val, 0 );
                 uwp_invalidate_window();
@@ -755,7 +787,8 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             boolean bv = FALSE;
             if (!wcscmp( dpname, L"Icon" ))
             {
-                if (uwp_replace_iface( &impl->nav_icon, val ))
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+                if (ne && uwp_replace_iface( &ne->nav_icon, val ))
                     uwp_invalidate_window();
             }
             else if (!wcscmp( dpname, L"IsSelected" ) && val && uwp_unbox_bool( val, &bv ))
@@ -781,7 +814,10 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             else if (!wcscmp( dpname, L"IsDropDownOpen" ) && val && uwp_unbox_bool( val, &bv ))
                 uwp_combobox_set_open( impl, bv != 0 );
             else if (!wcscmp( dpname, L"DisplayMemberPath" ) && val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
-                lstrcpynW( impl->display_member_path, sbuf, ARRAY_SIZE(impl->display_member_path) );
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+                if (ne) lstrcpynW( ne->display_member_path, sbuf, ARRAY_SIZE(ne->display_member_path) );
+            }
         }
         if (dpname[0])
         {
@@ -908,39 +944,45 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             uwp_fe_put_Style( &impl->IInspectable_iface, val );
         if (dpl && (!wcscmp( dpl->name, L"Source" ) || !wcscmp( dpl->name, L"UriSource" ) || !wcscmp( dpl->name, L"ImageSource" )))
         {
-            if (impl->img_source != val)
+            struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+            if (m && m->img_source != val)
             {
-                if (impl->img_source) IInspectable_Release( impl->img_source );
-                impl->img_source = val;
-                if (impl->img_source) IInspectable_AddRef( impl->img_source );
+                if (m->img_source) IInspectable_Release( m->img_source );
+                m->img_source = val;
+                if (m->img_source) IInspectable_AddRef( m->img_source );
             }
-            if (val)
+            if (val && m)
             {
                 WCHAR resolved_src[512] = {0};
                 struct uwp_element *src_el = uwp_elem_from_any( val );
-                if (src_el && src_el->image_src[0])
-                    lstrcpynW( resolved_src, src_el->image_src, ARRAY_SIZE(resolved_src) );
+                const WCHAR *src_str = uwp_elem_image_src( src_el );
+                if (src_str[0])
+                    lstrcpynW( resolved_src, src_str, ARRAY_SIZE(resolved_src) );
                 else if (!uwp_unbox_string( val, resolved_src, ARRAY_SIZE(resolved_src) ))
                     uwp_extract_uri_string( val, resolved_src, ARRAY_SIZE(resolved_src) );
                 if (resolved_src[0])
                 {
-                    lstrcpynW( impl->image_src, resolved_src, ARRAY_SIZE(impl->image_src) );
-                    impl->img_loaded = FALSE;
-                    InterlockedExchange( &impl->img_loading, 0 );
+                    lstrcpynW( m->image_src, resolved_src, ARRAY_SIZE(m->image_src) );
+                    m->img_loaded = FALSE;
+                    InterlockedExchange( &m->img_loading, 0 );
                     if (impl->parent && impl->parent->kind == UWP_KIND_IMAGE)
                     {
-                        lstrcpynW( impl->parent->image_src, resolved_src, ARRAY_SIZE(impl->parent->image_src) );
-                        impl->parent->img_loaded = FALSE;
-                        InterlockedExchange( &impl->parent->img_loading, 0 );
+                        struct uwp_media_ext *pm = uwp_elem_ensure_media( impl->parent );
+                        if (pm)
+                        {
+                            lstrcpynW( pm->image_src, resolved_src, ARRAY_SIZE(pm->image_src) );
+                            pm->img_loaded = FALSE;
+                            InterlockedExchange( &pm->img_loading, 0 );
+                        }
                     }
                     uwp_invalidate_window();
                 }
             }
-            else if (impl->kind == UWP_KIND_IMAGE)
+            else if (impl->kind == UWP_KIND_IMAGE && m)
             {
-                impl->image_src[0] = 0;
-                impl->img_loaded = FALSE;
-                InterlockedExchange( &impl->img_loading, 0 );
+                m->image_src[0] = 0;
+                m->img_loaded = FALSE;
+                InterlockedExchange( &m->img_loading, 0 );
                 uwp_invalidate_window();
             }
         }
@@ -1057,13 +1099,13 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             struct uwp_element *rep;
             impl->last_measured_w = 0.0f;
             impl->last_measured_h = 0.0f;
-            impl->placeholder[0] = 0;
+            uwp_elem_set_placeholder( impl, NULL );
             rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
             if (rep && rep != impl && !rep->in_measure_arrange)
             {
                 rep->last_measured_w = 0.0f;
                 rep->last_measured_h = 0.0f;
-                rep->placeholder[0] = 0;
+                uwp_elem_set_placeholder( rep, NULL );
             }
             uwp_invalidate_window();
         }
@@ -1103,7 +1145,7 @@ HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp )
         }
         else if (!wcscmp( dpl->name, L"SelectedItem" ) && uwp_is_nav_view( impl ))
         {
-            uwp_replace_iface( &impl->selected_item, NULL );
+            if (impl->nav) uwp_replace_iface( &impl->nav->selected_item, NULL );
             uwp_invalidate_window();
         }
     }

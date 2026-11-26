@@ -183,8 +183,8 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
             if (measure_ovr)
             {
                 hr = measure_ovr( fe_ovr, avail, &desired );
-                if ((desired.width <= 1.5f && desired.height <= 1.5f && el->evc_cnt > 0) ||
-                    (el->evc_cnt > 0 && !el->evc_fired))
+                if ((desired.width <= 1.5f && desired.height <= 1.5f && UWP_EV_CNT( el, evc_reg ) > 0) ||
+                    (UWP_EV_CNT( el, evc_reg ) > 0 && !el->evc_fired))
                 {
                     el->evc_fired = FALSE;
                     if (el->actual_w <= 10.0) el->actual_w = (double)w;
@@ -244,7 +244,7 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (ch && ch != el && (!ch->loaded_fired || ch->loaded_fired_cnt < ch->loaded_cnt))
+            if (ch && ch != el && uwp_loaded_needs_fire( ch ))
                 uwp_fire_loaded_tree( ch );
         }
     }
@@ -366,7 +366,7 @@ static BOOL uwp_scroll_child_has_content_ex( struct uwp_element *el, int depth, 
         res = TRUE;
     else if (uwp_has_shimmer_descendant_ex( el, 0, &child_trunc ) && el->kind == UWP_KIND_BORDER)
         res = FALSE;
-    else if (uwp_has_text( el ) || el->inlines_coll || el->img_pixels || el->img_loaded)
+    else if (uwp_has_text( el ) || el->inlines_coll || (el->media && (el->media->img_pixels || el->media->img_loaded)))
         res = TRUE;
     else if (uwp_is_items_repeater( el ))
     {
@@ -750,8 +750,15 @@ static BOOL uwp_apply_margins_clamped( const struct uwp_element *el, RECT *rc )
 int uwp_nav_effective_display_mode( const struct uwp_element *nav, int avail_w )
 {
     double scale, w_dip;
+    int pmode;
+    double compact_th, expanded_th;
+    BOOL is_open;
     if (!nav) return 1;
-    switch (nav->nav_pane_display_mode)
+    pmode = nav->nav ? nav->nav->nav_pane_display_mode : 0;
+    compact_th = nav->nav ? nav->nav->nav_compact_threshold : 641.0;
+    expanded_th = nav->nav ? nav->nav->nav_expanded_threshold : 1008.0;
+    is_open = uwp_elem_nav_is_pane_open( nav );
+    switch (pmode)
     {
     case 4: /* LeftMinimal */
     case 2: /* Top */
@@ -761,21 +768,21 @@ int uwp_nav_effective_display_mode( const struct uwp_element *nav, int avail_w )
     case 1: /* Left */
         scale = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
         w_dip = (double)avail_w / scale;
-        return (w_dip >= nav->nav_expanded_threshold) ? 2 : 1;
+        return (w_dip >= expanded_th) ? 2 : 1;
     default: /* 0 = Auto */
         if (avail_w <= 0)
-            return nav->nav_display_mode_set ? nav->nav_display_mode : 1;
+            return (nav->nav && nav->nav->nav_display_mode_set) ? nav->nav->nav_display_mode : 1;
         scale = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
         w_dip = (double)avail_w / scale;
-        if (w_dip < nav->nav_compact_threshold) return 0;
-        if (w_dip < nav->nav_expanded_threshold) return 1;
-        return nav->nav_is_pane_open ? 2 : 1;
+        if (w_dip < compact_th) return 0;
+        if (w_dip < expanded_th) return 1;
+        return is_open ? 2 : 1;
     }
 }
 
 BOOL uwp_nav_is_overlay_open( const struct uwp_element *nav )
 {
-    if (!nav || !uwp_is_nav_view( nav ) || !nav->nav_is_pane_open) return FALSE;
+    if (!nav || !uwp_is_nav_view( nav ) || !uwp_elem_nav_is_pane_open( nav )) return FALSE;
     return uwp_nav_effective_display_mode( nav, nav->bounds.right - nav->bounds.left ) != 2;
 }
 
@@ -872,10 +879,10 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
                 if (cw > 0.0) best = cw + el->padding_l + el->padding_r + 16.0;
             }
         }
-        if (best <= 0.0 && el->img_w > 0 && el->img_h > 0)
+        if (best <= 0.0 && el->media && el->media->img_w > 0 && el->media->img_h > 0)
         {
-            double th = (el->height > 0.0 && !isnan( el->height )) ? el->height : min( 160.0 * g_layout_scale, (double)el->img_h );
-            best = max( 120.0 * g_layout_scale, min( 320.0 * g_layout_scale, th * (double)el->img_w / (double)el->img_h ) );
+            double th = (el->height > 0.0 && !isnan( el->height )) ? el->height : min( 160.0 * g_layout_scale, (double)el->media->img_h );
+            best = max( 120.0 * g_layout_scale, min( 320.0 * g_layout_scale, th * (double)el->media->img_w / (double)el->media->img_h ) );
         }
         if (best <= 0.0)
         {
@@ -890,7 +897,7 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
     }
     else if (el->kind == UWP_KIND_IMAGE)
     {
-        if (el->img_w > 0) best = (double)el->img_w;
+        if (el->media && el->media->img_w > 0) best = (double)el->media->img_w;
     }
     else if (el->kind == UWP_KIND_STACK_PANEL && el->children_coll)
     {
@@ -1095,7 +1102,7 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
     {
         if (!el->children_coll && avail_w >= 400)
         {
-            if (!el->loaded_fired || el->loaded_fired_cnt < el->loaded_cnt)
+            if (uwp_loaded_needs_fire( el ))
                 uwp_fire_loaded_tree( (struct uwp_element *)el );
             uwp_invoke_winui_measure_arrange( (struct uwp_element *)el, avail_w, 204 );
         }
@@ -1168,12 +1175,12 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
     }
     else if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
-        if (el->img_w > 0 && el->img_h > 0)
+        if (el->media && el->media->img_w > 0 && el->media->img_h > 0)
         {
             double aw = (avail_w > 0) ? (double)avail_w : 240.0 * g_layout_scale;
-            best = min( 180.0 * g_layout_scale, max( 96.0 * g_layout_scale, aw * (double)el->img_h / (double)el->img_w ) );
+            best = min( 180.0 * g_layout_scale, max( 96.0 * g_layout_scale, aw * (double)el->media->img_h / (double)el->media->img_w ) );
         }
-        else if (el->image_src[0])
+        else if (uwp_elem_image_src( el )[0])
         {
             best = 140.0 * g_layout_scale;
         }
@@ -1199,7 +1206,7 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
     }
     else if (el->kind == UWP_KIND_IMAGE)
     {
-        if (el->img_h > 0) best = (double)el->img_h;
+        if (el->media && el->media->img_h > 0) best = (double)el->media->img_h;
     }
     else if (el->kind == UWP_KIND_STACK_PANEL && el->children_coll)
     {
@@ -1475,10 +1482,10 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         el->has_bounds = (w > 0 && h > 0);
         el->actual_w = (double)w;
         el->actual_h = (double)h;
-        if (!el->loaded_fired || el->loaded_fired_cnt < el->loaded_cnt)
+        if (uwp_loaded_needs_fire( el ))
             uwp_fire_loaded_tree( el );
         if (!margin_clamped && w > 0 && h > 0 &&
-            (prev_w != el->actual_w || prev_h != el->actual_h || el->last_sc_w == 0.0f || el->layout_updated_cnt > 0))
+            (prev_w != el->actual_w || prev_h != el->actual_h || el->last_sc_w == 0.0f || UWP_EV_CNT( el, layout_updated_reg ) > 0))
             uwp_fire_size_and_layout_changed( el );
     }
 
@@ -1486,7 +1493,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
     uwp_fire_evc_if_needed( el );
     if (el->kind == UWP_KIND_IMAGE)
         uwp_resolve_and_load_image( el );
-    if (el->img_pixels)
+    if (el->media && el->media->img_pixels)
         uwp_on_image_loaded( el );
 
     if (el->items_source && !uwp_panel_has_concrete_child( el ))
@@ -1992,23 +1999,32 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 
     if (uwp_is_nav_view( el ))
     {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
         float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
         int avail_w = rc.right - rc.left;
         int eff_mode = uwp_nav_effective_display_mode( el, avail_w );
-        int closed_rail_w = (eff_mode == 1) ? (int)(max( 48.0, el->nav_compact_pane_length ) * sc + 0.5) : 0;
-        int open_pane_w = (int)(max( 48.0, min( 340.0, el->nav_open_pane_length > 0.0 ? el->nav_open_pane_length : 280.0 ) ) * sc + 0.5);
-        BOOL pane_visible = el->nav_is_pane_open || (eff_mode != 0);
-        int pane_w = el->nav_is_pane_open ? open_pane_w : closed_rail_w;
-        int content_left = rc.left + ((eff_mode == 2 && el->nav_is_pane_open) ? open_pane_w : closed_rail_w);
-        BOOL show_toggle = el->nav_is_pane_toggle_visible && (eff_mode != 2);
+        double compact_len = ne ? ne->nav_compact_pane_length : 68.0;
+        double open_len = ne ? ne->nav_open_pane_length : 280.0;
+        BOOL is_pane_open = ne ? ne->nav_is_pane_open : FALSE;
+        BOOL is_settings_vis = ne ? ne->nav_is_settings_visible : TRUE;
+        BOOL is_toggle_vis = ne ? ne->nav_is_pane_toggle_visible : TRUE;
+        int closed_rail_w = (eff_mode == 1) ? (int)(max( 48.0, compact_len ) * sc + 0.5) : 0;
+        int open_pane_w = (int)(max( 48.0, min( 340.0, open_len > 0.0 ? open_len : 280.0 ) ) * sc + 0.5);
+        BOOL pane_visible = is_pane_open || (eff_mode != 0);
+        int pane_w = is_pane_open ? open_pane_w : closed_rail_w;
+        int content_left = rc.left + ((eff_mode == 2 && is_pane_open) ? open_pane_w : closed_rail_w);
+        BOOL show_toggle = is_toggle_vis && (eff_mode != 2);
         int footer_vis_cnt = 0;
         BOOL has_footer_host = FALSE;
 
         if (pane_w > avail_w) pane_w = avail_w;
-        if (pane_visible && pane_w > 0)
-            SetRect( &el->nav_pane_bounds, rc.left, rc.top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom );
-        else
-            SetRectEmpty( &el->nav_pane_bounds );
+        if (ne)
+        {
+            if (pane_visible && pane_w > 0)
+                SetRect( &ne->nav_pane_bounds, rc.left, rc.top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom );
+            else
+                SetRectEmpty( &ne->nav_pane_bounds );
+        }
 
         if (el->children_coll)
         {
@@ -2034,7 +2050,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                             if (!fch) continue;
                             if (!wcscmp( fch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( fch ), L"SettingsButtonName" ))
                             {
-                                if (el->nav_is_settings_visible && wide_pane)
+                                if (is_settings_vis && wide_pane)
                                     footer_vis_cnt++;
                             }
                             else if (!wide_pane && (uwp_is_nav_header( fch ) || uwp_is_nav_separator( fch )))
@@ -2059,7 +2075,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             {
                 /* Reserve initial footer strip so WinUI ItemsRepeater runs Measure/Arrange and materializes footer items */
                 footer_h = wide_pane
-                    ? (el->nav_is_settings_visible ? (int)(46 * sc) : (int)(40 * sc))
+                    ? (is_settings_vis ? (int)(46 * sc) : (int)(40 * sc))
                     : (int)(124 * sc);
             }
             footer_top = max( menu_top + (int)(60 * sc), (int)rc.bottom - footer_h - 4 );
@@ -2139,7 +2155,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             int card_h = (ch0_peek && !uwp_is_card( ch0_peek )) ? 124 : 96;
             int idx = 0;
 
-            if (children->count >= 2 && wcscmp( el->placeholder, L"-dedup-" ) != 0)
+            if (children->count >= 2 && wcscmp( uwp_elem_placeholder( el ), L"-dedup-" ) != 0)
             {
                 static const WCHAR *const title_props[] =
                     { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header",
@@ -2152,7 +2168,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 
                 if (ch0 && (ch0->data_context || ch0->content))
                 {
-                    lstrcpynW( el->placeholder, L"-dedup-", ARRAY_SIZE(el->placeholder) );
+                    uwp_elem_set_placeholder( el, L"-dedup-" );
                     for (anc = el->parent, hop = 0; anc && hop < 5 && !full_src; anc = anc->parent, hop++)
                     {
                         for (di = 0; di < anc->dp_cnt; di++)
@@ -2261,16 +2277,19 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                                                 IInspectable_AddRef( new_item );
                                             }
                                             uwp_elem_clear_text( ch );
-                                            ch->image_src[0] = 0;
                                             ch->dropdown_scroll_offset = 0;
                                             ch->hovered_dropdown_idx = 0;
-                                            ch->img_loaded = FALSE;
-                                            InterlockedExchange( &ch->img_loading, 0 );
-                                            if (ch->img_pixels)
+                                            if (ch->media)
                                             {
-                                                ch->img_pixels = NULL;
-                                                ch->img_w = 0;
-                                                ch->img_h = 0;
+                                                ch->media->image_src[0] = 0;
+                                                ch->media->img_loaded = FALSE;
+                                                InterlockedExchange( &ch->media->img_loading, 0 );
+                                                if (ch->media->img_pixels)
+                                                {
+                                                    ch->media->img_pixels = NULL;
+                                                    ch->media->img_w = 0;
+                                                    ch->media->img_h = 0;
+                                                }
                                             }
                                         }
                                     }
@@ -2310,7 +2329,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
             float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
             struct uwp_element *nav = el->parent;
             BOOL is_footer = !wcscmp( el->name, L"FooterMenuItemsHost" );
-            int scroll_y = (!is_footer && nav && uwp_is_nav_view( nav )) ? nav->nav_scroll_y : 0;
+            int scroll_y = (!is_footer && nav && uwp_is_nav_view( nav ) && nav->nav) ? nav->nav->nav_scroll_y : 0;
             int cur_y = rc.top - scroll_y;
             BOOL rev = FALSE;
             if (!is_footer && children->count > 1)
@@ -2330,7 +2349,7 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                 is_settings_item = (!wcscmp( ch->name, L"SettingsItem" ) || !wcscmp( uwp_elem_text( ch ), L"SettingsButtonName" ));
                 if (is_settings_item)
                 {
-                    if (!nav || !nav->nav_is_settings_visible)
+                    if (!nav || !uwp_elem_nav_is_settings_visible( nav ))
                     {
                         uwp_clear_bounds_tree( ch );
                         continue;

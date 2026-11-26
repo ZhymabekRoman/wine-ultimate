@@ -1521,14 +1521,14 @@ void uwp_rd_store_stack_val( struct uwp_rd_bucket *b, const WCHAR *key, struct x
     }
     if (sv->el && sv->kind == UWP_RD_BRUSH)
     {
-        if (sv->el->has_brush_argb)
+        if (uwp_elem_has_brush_argb( sv->el ))
         {
-            e->argb = sv->el->brush_argb;
+            e->argb = uwp_elem_brush_argb( sv->el );
             e->has_argb = TRUE;
         }
-        e->opacity = sv->el->brush_opacity;
-        if (!e->str_val[0] && sv->el->brush_color_ref[0])
-            lstrcpynW( e->str_val, sv->el->brush_color_ref, ARRAY_SIZE(e->str_val) );
+        e->opacity = uwp_elem_brush_opacity( sv->el );
+        if (!e->str_val[0] && sv->el->style_anim && sv->el->style_anim->brush_color_ref[0])
+            lstrcpynW( e->str_val, sv->el->style_anim->brush_color_ref, ARRAY_SIZE(e->str_val) );
     }
     if (sv->kind == UWP_RD_OBJ && sv->raw)
     {
@@ -1749,7 +1749,8 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
     }
     if (!wcscmp( prop_name, L"DisplayMemberPath" ) && sval && sval[0])
     {
-        lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
     }
     else if (!wcscmp( prop_name, L"PaneDisplayMode" ) && uwp_is_nav_view( el ))
     {
@@ -1765,23 +1766,32 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
         }
         if (mode >= 0 && mode <= 4)
         {
-            el->nav_pane_display_mode = mode;
-            el->nav_pane_display_mode_set = TRUE;
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne)
+            {
+                ne->nav_pane_display_mode = mode;
+                ne->nav_pane_display_mode_set = TRUE;
+            }
             TRACE( "xbf_apply_named_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
                    debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
         }
     }
     else if (!wcscmp( prop_name, L"IsPaneOpen" ) && uwp_is_nav_view( el ))
     {
-        if (vt == 0x01 || vt == 0x02) el->nav_is_pane_open = (vt == 0x02);
-        else if (sval && sval[0]) el->nav_is_pane_open = !wcsicmp( sval, L"True" );
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne)
+        {
+            if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_open = (vt == 0x02);
+            else if (sval && sval[0]) ne->nav_is_pane_open = !wcsicmp( sval, L"True" );
+        }
         uwp_nav_track_open_state( el );
     }
     else if (!wcscmp( prop_name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
     {
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
         {
-            el->nav_open_pane_length = resolved_d;
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) ne->nav_open_pane_length = resolved_d;
             has_resolved_d = TRUE;
         }
     }
@@ -1789,7 +1799,8 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
     {
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
         {
-            el->nav_compact_pane_length = resolved_d;
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) ne->nav_compact_pane_length = resolved_d;
             has_resolved_d = TRUE;
         }
     }
@@ -1797,7 +1808,8 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
     {
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
         {
-            el->nav_compact_threshold = resolved_d;
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) ne->nav_compact_threshold = resolved_d;
             has_resolved_d = TRUE;
         }
     }
@@ -1805,19 +1817,28 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
     {
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
         {
-            el->nav_expanded_threshold = resolved_d;
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) ne->nav_expanded_threshold = resolved_d;
             has_resolved_d = TRUE;
         }
     }
     else if (!wcscmp( prop_name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
     {
-        if (vt == 0x01 || vt == 0x02) el->nav_is_settings_visible = (vt == 0x02);
-        else if (sval && sval[0]) el->nav_is_settings_visible = !wcsicmp( sval, L"True" );
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne)
+        {
+            if (vt == 0x01 || vt == 0x02) ne->nav_is_settings_visible = (vt == 0x02);
+            else if (sval && sval[0]) ne->nav_is_settings_visible = !wcsicmp( sval, L"True" );
+        }
     }
     else if (!wcscmp( prop_name, L"IsPaneToggleButtonVisible" ) && uwp_is_nav_view( el ))
     {
-        if (vt == 0x01 || vt == 0x02) el->nav_is_pane_toggle_visible = (vt == 0x02);
-        else if (sval && sval[0]) el->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne)
+        {
+            if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_toggle_visible = (vt == 0x02);
+            else if (sval && sval[0]) ne->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
+        }
     }
 
     if (owner_cls && owner_cls[0] &&
@@ -1873,7 +1894,7 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
     saved_fs = el->font_size;
     saved_has_fs = el->has_font_size;
     saved_fw = el->font_weight;
-    lstrcpynW( saved_ff, el->font_family, ARRAY_SIZE(saved_ff) );
+    lstrcpynW( saved_ff, uwp_elem_font_family( el ), ARRAY_SIZE(saved_ff) );
     if (uwp_style_is_accent_name( se->key ))
         el->is_accent_style = TRUE;
     if (se->str_val[0])
@@ -1909,7 +1930,7 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
     if (saved_fw > 0)
         el->font_weight = saved_fw;
     if (saved_ff[0])
-        lstrcpynW( el->font_family, saved_ff, ARRAY_SIZE(el->font_family) );
+        uwp_elem_set_font_family( el, saved_ff );
 }
 
 void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
@@ -2039,32 +2060,39 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
     {
         if (pid == XBF_PROP_SOLIDCOLORBRUSH_COLOR || pid == XBF_PROP_FALLBACK_COLOR)
         {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (!sa) return;
             if (vt == 0x08)
             {
-                el->brush_argb = (UINT32)num;
-                el->has_brush_argb = TRUE;
+                sa->brush_argb = (UINT32)num;
+                sa->has_brush_argb = TRUE;
             }
             else if (sval && sval[0])
             {
                 if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
                 {
-                    el->brush_argb = argb;
-                    el->has_brush_argb = TRUE;
+                    sa->brush_argb = argb;
+                    sa->has_brush_argb = TRUE;
                 }
                 else
                 {
-                    lstrcpynW( el->brush_color_ref, sval, ARRAY_SIZE(el->brush_color_ref) );
+                    lstrcpynW( sa->brush_color_ref, sval, ARRAY_SIZE(sa->brush_color_ref) );
                 }
             }
             return;
         }
         if (pid == XBF_PROP_BRUSH_OPACITY)
         {
-            if (vt == 0x03 || vt == 0x04) el->brush_opacity = num;
+            if (vt == 0x03 || vt == 0x04)
+            {
+                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                if (sa) sa->brush_opacity = num;
+            }
             return;
         }
         if ((pid == XBF_PROP_LGB_START_POINT || pid == XBF_PROP_LGB_END_POINT) && sval && sval[0])
         {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
             WCHAR *endp = NULL;
             float px = (float)wcstod( sval, &endp );
             float py = 0.0f;
@@ -2073,28 +2101,52 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                 while (*endp == L' ' || *endp == L',' || *endp == L';') endp++;
                 py = (float)wcstod( endp, NULL );
             }
-            if (pid == XBF_PROP_LGB_START_POINT) { el->grad_start_x = px; el->grad_start_y = py; }
-            else { el->grad_end_x = px; el->grad_end_y = py; }
+            if (sa)
+            {
+                if (pid == XBF_PROP_LGB_START_POINT) { sa->grad_start_x = px; sa->grad_start_y = py; }
+                else { sa->grad_end_x = px; sa->grad_end_y = py; }
+            }
             return;
         }
-        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_X) { el->tile_align_x = (int)num; return; }
-        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_Y) { el->tile_align_y = (int)num; return; }
-        if (pid == XBF_PROP_TILEBRUSH_STRETCH) { el->media_stretch = (int)num; return; }
+        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_X)
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa) sa->tile_align_x = (int)num;
+            return;
+        }
+        if (pid == XBF_PROP_TILEBRUSH_ALIGNMENT_Y)
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa) sa->tile_align_y = (int)num;
+            return;
+        }
+        if (pid == XBF_PROP_TILEBRUSH_STRETCH)
+        {
+            struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+            if (m) m->media_stretch = (int)num;
+            return;
+        }
     }
 
     if (pid == XBF_PROP_GRADIENTSTOP_COLOR)
     {
-        if (vt == 0x08) { el->brush_argb = (UINT32)num; el->has_brush_argb = TRUE; }
+        struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+        if (!sa) return;
+        if (vt == 0x08) { sa->brush_argb = (UINT32)num; sa->has_brush_argb = TRUE; }
         else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
         {
-            el->brush_argb = argb;
-            el->has_brush_argb = TRUE;
+            sa->brush_argb = argb;
+            sa->has_brush_argb = TRUE;
         }
         return;
     }
     if (pid == XBF_PROP_GRADIENTSTOP_OFFSET)
     {
-        if (vt == 0x03 || vt == 0x04) el->grad_stop_offset = num;
+        if (vt == 0x03 || vt == 0x04)
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa) sa->grad_stop_offset = num;
+        }
         return;
     }
 
@@ -2243,7 +2295,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_TEXTBLOCK_TEXT: /* TextBlock.Text */
         case XBF_PROP_TEMPLATE_BINDING_PROPERTY:
         case XBF_PROP_RUN_TEXT:
-            if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && el->uid[0] && uwp_has_text( el )))
+            if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && uwp_elem_uid( el )[0] && uwp_has_text( el )))
                 uwp_elem_set_text( el, sval );
             break;
         case XBF_PROP_RECTANGLE_RADIUS_X:
@@ -2263,21 +2315,27 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             break;
         case XBF_PROP_IMAGE_SOURCE: /* Image.Source */
             if (sval && sval[0])
-                lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
+            {
+                struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+                if (m) lstrcpynW( m->image_src, sval, ARRAY_SIZE(m->image_src) );
+            }
             break;
         case XBF_PROP_IMAGE_STRETCH:
         case XBF_PROP_TILEBRUSH_STRETCH:
             if (vt == 0x04 || vt == 0x0b)
-                el->media_stretch = (int)num;
+            {
+                struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+                if (m) m->media_stretch = (int)num;
+            }
             break;
         case XBF_PROP_AUTOMATION_NAME: /* AutomationProperties.Name - never leak into visible text */
             if (sval && sval[0])
-                lstrcpynW( el->automation_name, sval, ARRAY_SIZE(el->automation_name) );
+                uwp_elem_set_automation_name( el, sval );
             break;
         case XBF_PROP_AUTOMATION_ID: /* x:Uid or AutomationId */
             if (sval && sval[0])
             {
-                lstrcpynW( el->uid, sval, ARRAY_SIZE(el->uid) );
+                uwp_elem_set_uid( el, sval );
                 if (!uwp_has_text( el ) || el->kind == UWP_KIND_USER_CONTROL || el->outer)
                 {
                     WCHAR res_key[256], res_val[128];
@@ -2353,7 +2411,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                         fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
                         ff_spec = fe->str_val;
                 }
-                lstrcpynW( el->font_family, ff_spec, ARRAY_SIZE(el->font_family) );
+                uwp_elem_set_font_family( el, ff_spec );
                 uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
             }
             break;
@@ -2484,19 +2542,29 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             break;
         case XBF_PROP_STORYBOARD_TARGET_NAME: /* Storyboard.TargetName */
             if (sval && sval[0])
-                lstrcpynW( el->anim_target_name, sval, ARRAY_SIZE(el->anim_target_name) );
+            {
+                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                if (sa) lstrcpynW( sa->anim_target_name, sval, ARRAY_SIZE(sa->anim_target_name) );
+            }
             break;
         case XBF_PROP_STORYBOARD_TARGET_PROPERTY: /* Storyboard.TargetProperty */
             if (sval && sval[0])
-                vsm_clean_prop_name( sval, el->anim_target_prop, ARRAY_SIZE(el->anim_target_prop) );
+            {
+                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                if (sa) vsm_clean_prop_name( sval, sa->anim_target_prop, ARRAY_SIZE(sa->anim_target_prop) );
+            }
             break;
         case XBF_PROP_DOUBLE_ANIMATION_TO:
         {
             double to_val = 0.0;
             if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &to_val ))
             {
-                el->anim_to = to_val;
-                el->anim_has_to = TRUE;
+                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                if (sa)
+                {
+                    sa->anim_to = to_val;
+                    sa->anim_has_to = TRUE;
+                }
             }
             break;
         }
@@ -2514,15 +2582,18 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             break;
         case XBF_PROP_ITEMS_CONTROL_DISPLAY_MEMBER_PATH:
             if (sval && sval[0])
-                lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+                if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
+            }
             break;
         case XBF_PROP_SYMBOL_ICON_SYMBOL:
             if ((vt == 0x04 || vt == 0x0b) && (int)num >= 0xE000 && (int)num <= 0xFFFF)
             {
                 WCHAR sym = (WCHAR)(int)num;
                 uwp_elem_set_text_n( el, &sym, 1 );
-                if (!el->font_family[0])
-                    lstrcpynW( el->font_family, L"Segoe MDL2 Assets", ARRAY_SIZE(el->font_family) );
+                if (!uwp_elem_font_family( el )[0])
+                    uwp_elem_set_font_family( el, L"Segoe MDL2 Assets" );
             }
             break;
         case XBF_PROP_TOGGLE_BUTTON_IS_CHECKED:
@@ -2544,7 +2615,8 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         }
         if (!wcscmp( pi->name, L"DisplayMemberPath" ) && sval && sval[0])
         {
-            lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
         }
         else if (!wcscmp( pi->name, L"PaneDisplayMode" ) && uwp_is_nav_view( el ))
         {
@@ -2560,51 +2632,79 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
             if (mode >= 0 && mode <= 4)
             {
-                el->nav_pane_display_mode = mode;
-                el->nav_pane_display_mode_set = TRUE;
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+                if (ne)
+                {
+                    ne->nav_pane_display_mode = mode;
+                    ne->nav_pane_display_mode_set = TRUE;
+                }
                 TRACE( "xbf_apply_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
                        debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
             }
         }
         else if (!wcscmp( pi->name, L"IsPaneOpen" ) && uwp_is_nav_view( el ))
         {
-            if (vt == 0x01 || vt == 0x02) el->nav_is_pane_open = (vt == 0x02);
-            else if (sval && sval[0]) el->nav_is_pane_open = !wcsicmp( sval, L"True" );
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne)
+            {
+                if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_open = (vt == 0x02);
+                else if (sval && sval[0]) ne->nav_is_pane_open = !wcsicmp( sval, L"True" );
+            }
             uwp_nav_track_open_state( el );
         }
         else if (!wcscmp( pi->name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
         {
             double d = 0.0;
             if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-                el->nav_open_pane_length = d;
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+                if (ne) ne->nav_open_pane_length = d;
+            }
         }
         else if (!wcscmp( pi->name, L"CompactPaneLength" ) && uwp_is_nav_view( el ))
         {
             double d = 0.0;
             if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-                el->nav_compact_pane_length = d;
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+                if (ne) ne->nav_compact_pane_length = d;
+            }
         }
         else if (!wcscmp( pi->name, L"CompactModeThresholdWidth" ) && uwp_is_nav_view( el ))
         {
             double d = 0.0;
             if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-                el->nav_compact_threshold = d;
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+                if (ne) ne->nav_compact_threshold = d;
+            }
         }
         else if (!wcscmp( pi->name, L"ExpandedModeThresholdWidth" ) && uwp_is_nav_view( el ))
         {
             double d = 0.0;
             if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-                el->nav_expanded_threshold = d;
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+                if (ne) ne->nav_expanded_threshold = d;
+            }
         }
         else if (!wcscmp( pi->name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
         {
-            if (vt == 0x01 || vt == 0x02) el->nav_is_settings_visible = (vt == 0x02);
-            else if (sval && sval[0]) el->nav_is_settings_visible = !wcsicmp( sval, L"True" );
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne)
+            {
+                if (vt == 0x01 || vt == 0x02) ne->nav_is_settings_visible = (vt == 0x02);
+                else if (sval && sval[0]) ne->nav_is_settings_visible = !wcsicmp( sval, L"True" );
+            }
         }
         else if (!wcscmp( pi->name, L"IsPaneToggleButtonVisible" ) && uwp_is_nav_view( el ))
         {
-            if (vt == 0x01 || vt == 0x02) el->nav_is_pane_toggle_visible = (vt == 0x02);
-            else if (sval && sval[0]) el->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne)
+            {
+                if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_toggle_visible = (vt == 0x02);
+                else if (sval && sval[0]) ne->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
+            }
         }
         if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
                  (el->kind == UWP_KIND_TEXT_BLOCK || (el->class_flags & (UWP_CF_RUN | UWP_CF_INLINE))))
@@ -2614,17 +2714,22 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         else if ((!wcscmp( pi->name, L"Source" ) || !wcscmp( pi->name, L"UriSource" ) || !wcscmp( pi->name, L"ImageSource" )) &&
                  sval && sval[0] && !is_res_ref)
         {
-            lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
+            struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+            if (m) lstrcpynW( m->image_src, sval, ARRAY_SIZE(m->image_src) );
         }
         else if (!wcscmp( pi->name, L"Stretch" ))
         {
-            if (vt == 0x04 || vt == 0x0b) el->media_stretch = (int)num;
-            else if (sval && sval[0])
+            struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+            if (m)
             {
-                if (!wcsicmp( sval, L"None" )) el->media_stretch = 0;
-                else if (!wcsicmp( sval, L"Fill" )) el->media_stretch = 1;
-                else if (!wcsicmp( sval, L"Uniform" )) el->media_stretch = 2;
-                else if (!wcsicmp( sval, L"UniformToFill" )) el->media_stretch = 3;
+                if (vt == 0x04 || vt == 0x0b) m->media_stretch = (int)num;
+                else if (sval && sval[0])
+                {
+                    if (!wcsicmp( sval, L"None" )) m->media_stretch = 0;
+                    else if (!wcsicmp( sval, L"Fill" )) m->media_stretch = 1;
+                    else if (!wcsicmp( sval, L"Uniform" )) m->media_stretch = 2;
+                    else if (!wcsicmp( sval, L"UniformToFill" )) m->media_stretch = 3;
+                }
             }
         }
         else if (!wcscmp( pi->name, L"FontFamily" ) && sval && sval[0])
@@ -2636,7 +2741,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                 uwp_rd_find_entry( ctx->target_rd, el, sval, 0, &fe, NULL ) &&
                 fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
                 ff_spec = fe->str_val;
-            lstrcpynW( el->font_family, ff_spec, ARRAY_SIZE(el->font_family) );
+            uwp_elem_set_font_family( el, ff_spec );
             uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
         }
         else if ((!wcscmp( pi->name, L"VirtualKeyControlChord" ) ||

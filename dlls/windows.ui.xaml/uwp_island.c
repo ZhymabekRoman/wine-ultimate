@@ -244,7 +244,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
          el->has_bounds, el->visibility, el->opacity, kids,
          el->width, el->height,
          uwp_has_text( el ) ? debugstr_w(uwp_elem_text( el )) : "\"\"",
-         el->image_src[0] ? debugstr_w(el->image_src) : "\"\"" );
+         uwp_elem_image_src( el )[0] ? debugstr_w(uwp_elem_image_src( el )) : "\"\"" );
     if (el->class_flags2 & UWP_CF2_DOT_CARD)
         return;
     if (el->content)
@@ -483,6 +483,7 @@ static HRESULT WINAPI uwp_dwxs_AttachToWindow( void *iface, HWND parent_wnd )
         RegisterClassExW( &wc );
         cls_reg = TRUE;
     }
+    impl->in_visual_tree = TRUE;
     if (!impl->island_hwnd && parent_wnd)
     {
         impl->island_hwnd = CreateWindowExW( 0, L"DesktopWindowXamlSourceWindow", L"",
@@ -578,7 +579,7 @@ static void CALLBACK uwp_dispatcher_timer_proc( HWND hwnd, UINT msg, UINT_PTR id
     if (!impl || !impl->timer_enabled) return;
 
     uwp_sub_AddRef( &impl->IInspectable_iface );
-    count = xaml_event_registry_snapshot_alloc( &impl->timer_tick_reg, &handlers );
+    count = impl->events ? xaml_event_registry_snapshot_alloc( &impl->events->timer_tick_reg, &handlers ) : 0;
     TRACE( "uwp_dispatcher_timer_proc id=%Iu impl=%p handlers=%u\n", id, impl, count );
     for (i = 0; i < count; i++)
     {
@@ -618,15 +619,19 @@ static HRESULT WINAPI uwp_timer_get_IsEnabled( void *iface, boolean *value )
 static HRESULT WINAPI uwp_timer_add_Tick( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl) return E_NOINTERFACE;
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
     TRACE( "uwp_timer_add_Tick impl=%p handler=%p\n", impl, handler );
-    return xaml_event_registry_add( &impl->timer_tick_reg, handler, tok );
+    return xaml_event_registry_add( &ev->timer_tick_reg, handler, tok );
 }
 static HRESULT WINAPI uwp_timer_remove_Tick( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
-    return xaml_event_registry_remove( &impl->timer_tick_reg, tok );
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->timer_tick_reg, tok );
 }
 static HRESULT WINAPI uwp_timer_Start( void *iface )
 {

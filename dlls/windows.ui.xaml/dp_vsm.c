@@ -1061,7 +1061,10 @@ static HRESULT WINAPI sb_SetTargetProperty( void *iface, void *elem, HSTRING pat
     struct uwp_element *anim = uwp_elem_from_any( elem );
     const WCHAR *s = WindowsGetStringRawBuffer( path, NULL );
     if (anim && s && s[0])
-        vsm_clean_prop_name( s, anim->anim_target_prop, ARRAY_SIZE(anim->anim_target_prop) );
+    {
+        struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( anim );
+        if (sa) vsm_clean_prop_name( s, sa->anim_target_prop, ARRAY_SIZE(sa->anim_target_prop) );
+    }
     return S_OK;
 }
 static HRESULT WINAPI sb_SetTargetName( void *iface, void *elem, HSTRING name )
@@ -1069,7 +1072,10 @@ static HRESULT WINAPI sb_SetTargetName( void *iface, void *elem, HSTRING name )
     struct uwp_element *anim = uwp_elem_from_any( elem );
     const WCHAR *s = WindowsGetStringRawBuffer( name, NULL );
     if (anim && s && s[0])
-        lstrcpynW( anim->anim_target_name, s, ARRAY_SIZE(anim->anim_target_name) );
+    {
+        struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( anim );
+        if (sa) lstrcpynW( sa->anim_target_name, s, ARRAY_SIZE(sa->anim_target_name) );
+    }
     return S_OK;
 }
 static HRESULT WINAPI sb_SetTarget( void *iface, void *elem, void *target )
@@ -1077,7 +1083,10 @@ static HRESULT WINAPI sb_SetTarget( void *iface, void *elem, void *target )
     struct uwp_element *anim = uwp_elem_from_any( elem );
     struct uwp_element *tel = uwp_elem_from_any( target );
     if (anim && tel)
-        anim->anim_target_el = tel;
+    {
+        struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( anim );
+        if (sa) sa->anim_target_el = tel;
+    }
     return S_OK;
 }
 
@@ -1107,33 +1116,33 @@ static HRESULT WINAPI uwp_sb_Begin( void *iface )
         struct uwp_element *anim = uwp_elem_from_any( v->items[i] );
         struct uwp_element *target;
         const WCHAR *prop;
-        if (!anim || !anim->anim_has_to) continue;
-        target = anim->anim_target_el;
-        if (!target && anim->anim_target_name[0])
+        if (!anim || !anim->style_anim || !anim->style_anim->anim_has_to) continue;
+        target = anim->style_anim->anim_target_el;
+        if (!target && anim->style_anim->anim_target_name[0])
         {
             struct uwp_element *scope = anim->owner_component ? anim->owner_component : sb->owner_component;
-            target = uwp_vsm_find_target( scope, anim->anim_target_name );
+            target = uwp_vsm_find_target( scope, anim->style_anim->anim_target_name );
         }
         if (!target) continue;
-        prop = anim->anim_target_prop;
+        prop = anim->style_anim->anim_target_prop;
         if (!prop[0] || wcsstr( prop, L"Opacity" ))
         {
-            target->opacity = anim->anim_to;
+            target->opacity = anim->style_anim->anim_to;
             changed = TRUE;
         }
         else if (!wcscmp( prop, L"Width" ) || wcsstr( prop, L".Width" ))
         {
-            target->width = anim->anim_to;
+            target->width = anim->style_anim->anim_to;
             changed = TRUE;
         }
         else if (!wcscmp( prop, L"Height" ) || wcsstr( prop, L".Height" ))
         {
-            target->height = anim->anim_to;
+            target->height = anim->style_anim->anim_to;
             changed = TRUE;
         }
         TRACE( "IStoryboard::Begin applied %s.%s = %g\n",
                debugstr_w(target->name[0] ? target->name : target->class_name),
-               debugstr_w(prop), anim->anim_to );
+               debugstr_w(prop), anim->style_anim->anim_to );
     }
     if (changed)
     {
@@ -1368,9 +1377,10 @@ static HRESULT WINAPI attached_prop_get_dp( void *iface, void **out )
 static HRESULT WINAPI auto_props_GetName( void *iface, void *elem, HSTRING *out )
 {
     struct uwp_element *el = uwp_elem_from_any( elem );
+    const WCHAR *aname = uwp_elem_automation_name( el );
     if (!out) return E_POINTER;
-    if (el && el->automation_name[0])
-        return WindowsCreateString( el->automation_name, (UINT32)wcslen( el->automation_name ), out );
+    if (aname[0])
+        return WindowsCreateString( aname, (UINT32)wcslen( aname ), out );
     *out = NULL;
     return S_OK;
 }
@@ -1379,8 +1389,28 @@ static HRESULT WINAPI auto_props_SetName( void *iface, void *elem, HSTRING val )
     struct uwp_element *el = uwp_elem_from_any( elem );
     const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : NULL;
     if (el)
-        lstrcpynW( el->automation_name, raw ? raw : L"", ARRAY_SIZE(el->automation_name) );
+        uwp_elem_set_automation_name( el, raw ? raw : L"" );
     return S_OK;
+}
+
+void uwp_vsm_free_groups( struct uwp_element *el )
+{
+    int g, s, k;
+    if (!el || !el->vsm_groups) return;
+    for (g = 0; g < el->vsm_group_cnt; g++)
+    {
+        struct uwp_vsm_group *grp = &el->vsm_groups[g];
+        for (s = 0; s < grp->state_cnt; s++)
+            free( grp->states[s].setters );
+        free( grp->states );
+        for (k = 0; k < grp->snapshot_cnt; k++)
+            if (grp->snapshots[k].old_obj) IInspectable_Release( grp->snapshots[k].old_obj );
+        free( grp->snapshots );
+    }
+    free( el->vsm_groups );
+    el->vsm_groups = NULL;
+    el->vsm_group_cnt = 0;
+    el->vsm_group_cap = 0;
 }
 static const void *attached_statics_vtbl[64] =
 {

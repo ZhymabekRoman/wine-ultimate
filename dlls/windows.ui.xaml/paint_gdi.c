@@ -50,11 +50,12 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
     if (el->kind == UWP_KIND_IMAGE)
     {
         uwp_load_image_asset( el );
-        if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+        if (el->media && el->media->img_pixels && el->media->img_w > 0 && el->media->img_h > 0)
         {
+            struct uwp_media_ext *m = el->media;
             RECT rc = el->bounds;
             int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
-            int dw = (int)el->img_w, dh = (int)el->img_h;
+            int dw = (int)m->img_w, dh = (int)m->img_h;
             int dx, dy;
             BITMAPINFO bmi = {0};
             void *dib_bits = NULL;
@@ -66,8 +67,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             dx = rc.left + (bw - dw) / 2;
             dy = rc.top + (bh - dh) / 2;
             bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bmi.bmiHeader.biWidth = (LONG)el->img_w;
-            bmi.bmiHeader.biHeight = -(LONG)el->img_h;
+            bmi.bmiHeader.biWidth = (LONG)m->img_w;
+            bmi.bmiHeader.biHeight = -(LONG)m->img_h;
             bmi.bmiHeader.biPlanes = 1;
             bmi.bmiHeader.biBitCount = 32;
             bmi.bmiHeader.biCompression = BI_RGB;
@@ -76,16 +77,16 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             {
                 HGDIOBJ old_bm = SelectObject( memdc, hbm );
                 BOOL ok;
-                memcpy( dib_bits, el->img_pixels, (size_t)el->img_w * el->img_h * 4 );
-                if (dw == (int)el->img_w && dh == (int)el->img_h)
+                memcpy( dib_bits, m->img_pixels, (size_t)m->img_w * m->img_h * 4 );
+                if (dw == (int)m->img_w && dh == (int)m->img_h)
                     ok = BitBlt( hdc, dx, dy, dw, dh, memdc, 0, 0, SRCCOPY );
                 else
                 {
                     SetStretchBltMode( hdc, HALFTONE );
-                    ok = StretchBlt( hdc, dx, dy, dw, dh, memdc, 0, 0, el->img_w, el->img_h, SRCCOPY );
+                    ok = StretchBlt( hdc, dx, dy, dw, dh, memdc, 0, 0, m->img_w, m->img_h, SRCCOPY );
                 }
                 TRACE( "uwp_paint IMAGE (%dx%d -> %d,%d %dx%d) ok=%d center_px=%06lx\n",
-                       el->img_w, el->img_h, dx, dy, dw, dh, ok, GetPixel( hdc, dx + dw / 2, dy + dh / 2 ) );
+                       m->img_w, m->img_h, dx, dy, dw, dh, ok, GetPixel( hdc, dx + dw / 2, dy + dh / 2 ) );
                 SelectObject( memdc, old_bm );
             }
             if (hbm) DeleteObject( hbm );
@@ -259,7 +260,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             {
                 WCHAR tab_title[128] = {0};
                 RECT pill, close_rc, add_rc;
-                BOOL is_sel = el->selected_item ? (items[i] == el->selected_item) : (i == 0);
+                IInspectable *sel = uwp_elem_selected_item( el );
+                BOOL is_sel = sel ? (items[i] == sel) : (i == 0);
                 HBRUSH tbr = CreateSolidBrush( is_sel ? RGB( 44, 44, 44 ) : RGB( 28, 28, 28 ) );
                 uwp_tabview_get_item_title( items[i], tab_title, ARRAY_SIZE(tab_title) );
                 uwp_tabview_compute_rects( &trc, count, i, &pill, &close_rc, &add_rc );
@@ -503,15 +505,15 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el) uwp_paint_element( hdc, ch );
     }
-    if (uwp_nav_is_overlay_open( el ) && el->nav_pane_bounds.right > el->nav_pane_bounds.left)
+    if (uwp_nav_is_overlay_open( el ) && el->nav && el->nav->nav_pane_bounds.right > el->nav->nav_pane_bounds.left)
     {
         BOOL light = uwp_is_light_theme( el );
         HBRUSH pbr = CreateSolidBrush( light ? RGB( 243, 243, 243 ) : RGB( 39, 39, 43 ) );
         HPEN ppen = CreatePen( PS_SOLID, 1, light ? RGB( 212, 212, 212 ) : RGB( 68, 68, 74 ) );
         HPEN op = SelectObject( hdc, ppen );
-        FillRect( hdc, &el->nav_pane_bounds, pbr );
-        MoveToEx( hdc, el->nav_pane_bounds.right - 1, el->nav_pane_bounds.top, NULL );
-        LineTo( hdc, el->nav_pane_bounds.right - 1, el->nav_pane_bounds.bottom );
+        FillRect( hdc, &el->nav->nav_pane_bounds, pbr );
+        MoveToEx( hdc, el->nav->nav_pane_bounds.right - 1, el->nav->nav_pane_bounds.top, NULL );
+        LineTo( hdc, el->nav->nav_pane_bounds.right - 1, el->nav->nav_pane_bounds.bottom );
         SelectObject( hdc, op );
         DeleteObject( ppen );
         DeleteObject( pbr );
@@ -564,7 +566,8 @@ static void uwp_gdi_paint_combobox_popup( HDC hdc, int width, int height )
         int idx = cb->dropdown_scroll_offset + i;
         RECT rrc, trc;
         WCHAR label[128] = {0};
-        BOOL is_sel = (idx == cb->selected_index) || (cb->selected_item && items[idx] == cb->selected_item);
+        IInspectable *sel = uwp_elem_selected_item( cb );
+        BOOL is_sel = (idx == uwp_elem_selected_index( cb )) || (sel && items[idx] == sel);
         BOOL is_hov = (idx == cb->hovered_dropdown_idx);
         SetRect( &rrc, prc.left + 4, prc.top + pad_y + i * item_h, prc.right - 4, prc.top + pad_y + (i + 1) * item_h );
         if (is_sel || is_hov)

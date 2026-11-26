@@ -282,6 +282,7 @@ BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name
 BOOL uwp_vsm_leave_state_on_tree( struct uwp_element *el, const WCHAR *state_name );
 void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h );
 void uwp_vsm_invalidate_eval_chain( struct uwp_element *el );
+void uwp_vsm_free_groups( struct uwp_element *el );
 void uwp_vsm_state_add_setter( struct uwp_vsm_state *st, const WCHAR *target, const WCHAR *prop,
                                const WCHAR *val_str, int vt, double num, BOOL is_res_ref );
 void vsm_clean_prop_name( const WCHAR *raw, WCHAR *out_prop, size_t max_prop );

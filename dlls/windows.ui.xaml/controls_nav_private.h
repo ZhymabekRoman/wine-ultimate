@@ -33,5 +33,6 @@ struct uwp_sel_changed_args
 struct uwp_sel_changed_args *uwp_sel_args_create( IInspectable *old_item, IInspectable *new_item );
 ULONG WINAPI uwp_sel_args_Release( void *iface );
 HRESULT WINAPI uwp_flyout_add_Closed( void *iface, void *handler, EventRegistrationToken *tok );
+HRESULT WINAPI uwp_flyout_remove_Closed( void *iface, EventRegistrationToken tok );
 
 #endif /* CONTROLS_NAV_PRIVATE_H */

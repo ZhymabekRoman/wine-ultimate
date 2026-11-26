@@ -167,6 +167,49 @@ unsigned int xaml_event_registry_snapshot_alloc( struct xaml_event_registry *reg
     return idx;
 }
 
+unsigned int xaml_event_registry_snapshot_after( struct xaml_event_registry *reg, INT64 after_tok,
+                                                 void ***out_handlers, INT64 *out_max_tok )
+{
+    unsigned int i, count = 0, idx = 0;
+    void **buf;
+
+    if (out_handlers) *out_handlers = NULL;
+    if (out_max_tok) *out_max_tok = after_tok;
+    if (!reg || !out_handlers) return 0;
+    if (__atomic_load_n( &reg->count, __ATOMIC_ACQUIRE ) == 0) return 0;
+    EnterCriticalSection( &xaml_event_cs );
+    if (out_max_tok) *out_max_tok = reg->next_token;
+    if (!reg->entries || !reg->count)
+    {
+        LeaveCriticalSection( &xaml_event_cs );
+        return 0;
+    }
+    for (i = 0; i < reg->cap; i++)
+        if (reg->entries[i].handler && reg->entries[i].token > after_tok) count++;
+    if (!count)
+    {
+        LeaveCriticalSection( &xaml_event_cs );
+        return 0;
+    }
+    buf = malloc( count * sizeof(*buf) );
+    if (!buf)
+    {
+        LeaveCriticalSection( &xaml_event_cs );
+        return 0;
+    }
+    for (i = 0; i < reg->cap && idx < count; i++)
+    {
+        if (reg->entries[i].handler && reg->entries[i].token > after_tok)
+        {
+            IUnknown_AddRef( (IUnknown *)reg->entries[i].handler );
+            buf[idx++] = reg->entries[i].handler;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+    *out_handlers = buf;
+    return idx;
+}
+
 void xaml_event_registry_clear( struct xaml_event_registry *reg )
 {
     struct xaml_event_entry *entries;

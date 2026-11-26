@@ -139,7 +139,7 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
         (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
-         el->click_cnt > 0 || el->command != NULL || el->flyout != NULL ||
+         UWP_EV_CNT( el, click_reg ) > 0 || el->command != NULL || el->flyout != NULL ||
          uwp_is_menubar_item( el )))
     {
         if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
@@ -228,9 +228,10 @@ BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_route
     if (!el || !args || el->visibility != 0) return FALSE;
     if (uwp_is_teaching_tip( el ) && !el->is_open) return FALSE;
 
+    if (el->events)
     {
         void **handlers = NULL;
-        unsigned int hcnt = xaml_event_registry_snapshot_alloc( &el->preview_keydown_reg, &handlers );
+        unsigned int hcnt = xaml_event_registry_snapshot_alloc( &el->events->preview_keydown_reg, &handlers );
         if (hcnt > 0)
         {
             IInspectable *sender = el->outer ? el->outer : &el->IInspectable_iface;
@@ -273,7 +274,6 @@ BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e )
     struct uwp_element *accel = e->accel_el;
     struct uwp_element *target = e->target_el;
     UINT vk = e->vk, mods = e->mods;
-    int i;
 
     TRACE( "accelerator inv: %c%s%s%s (vk=%#x mods=%#x target=%s %s)\n",
            ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) ? (char)vk : '?',
@@ -284,7 +284,7 @@ BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e )
            target ? debugstr_w(target->class_name) : "?",
            target ? debugstr_w(target->name) : "" );
 
-    if (accel && accel->accel_invoked_cnt > 0)
+    if (accel && UWP_EV_CNT( accel, accel_invoked_reg ) > 0)
     {
         struct uwp_ka_invoked_args *args = calloc( 1, sizeof(*args) );
         if (args)
@@ -299,14 +299,8 @@ BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e )
                 args->element = target->outer ? target->outer : &target->IDependencyObject_iface;
                 IInspectable_AddRef( args->element );
             }
-            for (i = 0; i < accel->accel_invoked_cnt; i++)
-            {
-                if (accel->accel_invoked_handlers[i])
-                {
-                    struct xaml_event_handler *h = (struct xaml_event_handler *)accel->accel_invoked_handlers[i];
-                    h->lpVtbl->Invoke( h, sender, &args->IInspectable_iface );
-                }
-            }
+            uwp_fire_event_registry( &accel->events->accel_invoked_reg, sender,
+                                     &args->IInspectable_iface, "KeyboardAccelerator::Invoked" );
             handled = args->handled;
             uwp_ka_args_Release( &args->IInspectable_iface );
             if (handled) return TRUE;
@@ -326,11 +320,12 @@ void uwp_invoke_button( struct uwp_element *btn )
     int i;
     if (!btn || !btn->is_enabled) return;
 
-    WARN( "uwp_invoke_button: %s (%s, text=%s, cmd=%p, param=%p, dc=%p, clicks=%d, tapped=%d, ptrP=%d, ptrR=%d, dp=%d)\n",
+    WARN( "uwp_invoke_button: %s (%s, text=%s, cmd=%p, param=%p, dc=%p, clicks=%u, tapped=%d, ptrP=%d, ptrR=%d, dp=%d)\n",
           debugstr_w(btn->class_name), debugstr_w(btn->name), debugstr_w(uwp_elem_text( btn )),
-          btn->command, btn->command_param, btn->data_context, btn->click_cnt,
-          (int)btn->tapped_reg.next_token, (int)btn->ptr_pressed_reg.next_token,
-          (int)btn->ptr_released_reg.next_token, btn->dp_cnt );
+          btn->command, btn->command_param, btn->data_context, UWP_EV_CNT( btn, click_reg ),
+          btn->events ? (int)btn->events->tapped_reg.next_token : 0,
+          btn->events ? (int)btn->events->ptr_pressed_reg.next_token : 0,
+          btn->events ? (int)btn->events->ptr_released_reg.next_token : 0, btn->dp_cnt );
     for (i = 0; i < btn->dp_cnt; i++)
     {
         struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dp_store[i].dp;
@@ -410,14 +405,16 @@ void uwp_invoke_button( struct uwp_element *btn )
     }
 
     /* 2. Invoke registered Click handlers */
-    for (i = 0; i < btn->click_cnt; i++)
+    if (UWP_EV_CNT( btn, click_reg ) > 0)
     {
-        if (btn->click_handlers[i])
+        void **handlers = NULL;
+        unsigned int hi, cnt = xaml_event_registry_snapshot_alloc( &btn->events->click_reg, &handlers );
+        IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
+        for (hi = 0; hi < cnt; hi++)
         {
             __TRY
             {
-                IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
-                struct xaml_event_handler *h = (struct xaml_event_handler *)btn->click_handlers[i];
+                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
                 HMODULE mod = NULL;
                 void *inv = h->lpVtbl->Invoke;
                 HRESULT chr;
@@ -426,18 +423,20 @@ void uwp_invoke_button( struct uwp_element *btn )
                                     (LPCSTR)inv, &mod );
                 chr = h->lpVtbl->Invoke( h, sender, args );
                 if (args) IInspectable_Release( args );
-                WARN( "uwp_invoke_button: Click[%d] h=%p inv=%p (mod=%p +0x%lx) sender=%p -> hr=%#lx\n",
-                      i, h, inv, mod, mod ? (unsigned long)((const char *)inv - (const char *)mod) : 0ul,
+                WARN( "uwp_invoke_button: Click[%u] h=%p inv=%p (mod=%p +0x%lx) sender=%p -> hr=%#lx\n",
+                      hi, h, inv, mod, mod ? (unsigned long)((const char *)inv - (const char *)mod) : 0ul,
                       sender, (unsigned long)chr );
             }
             __EXCEPT_ALL
             {
-                WARN( "uwp_invoke_button: Click handler %d faulted\n", i );
+                WARN( "uwp_invoke_button: Click handler %u faulted\n", hi );
             }
             __ENDTRY;
+            IUnknown_Release( (IUnknown *)handlers[hi] );
         }
+        free( handlers );
     }
-    if (btn->tapped_reg.next_token > 0 && btn->click_cnt == 0 && !btn->command)
+    if (UWP_EV_ANY( btn, tapped_reg ) && UWP_EV_CNT( btn, click_reg ) == 0 && !btn->command)
         uwp_fire_tapped_bubble( btn, btn->bounds.left + 8, btn->bounds.top + 8 );
 
     /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
@@ -479,8 +478,8 @@ static BOOL uwp_fire_tapped( struct uwp_element *el, int x, int y )
     struct uwp_tapped_args *args;
     IInspectable *sender;
 
-    if (!el || el->tapped_reg.next_token == 0) return FALSE;
-    count = xaml_event_registry_snapshot_alloc( &el->tapped_reg, &handlers );
+    if (!UWP_EV_ANY( el, tapped_reg )) return FALSE;
+    count = xaml_event_registry_snapshot_alloc( &el->events->tapped_reg, &handlers );
     if (!count) return FALSE;
 
     sender = el->outer ? el->outer : &el->IInspectable_iface;
@@ -1013,15 +1012,15 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
     if (root_el)
     {
         struct uwp_element *nav = uwp_get_open_overlay_nav();
-        if (nav && nav->nav_pane_bounds.right > nav->nav_pane_bounds.left)
+        if (nav && nav->nav && nav->nav->nav_pane_bounds.right > nav->nav->nav_pane_bounds.left)
         {
-            RECT prc = nav->nav_pane_bounds;
+            RECT prc = nav->nav->nav_pane_bounds;
             BOOL in_pane = (x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom);
             if (msg == WM_MOUSEWHEEL && in_pane)
             {
-                int ns = nav->nav_scroll_y + ((wheel_delta > 0) ? -40 : 40);
+                int ns = nav->nav->nav_scroll_y + ((wheel_delta > 0) ? -40 : 40);
                 if (ns < 0) ns = 0;
-                nav->nav_scroll_y = ns;
+                nav->nav->nav_scroll_y = ns;
                 g_layout_dirty = TRUE;
                 if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
                 uwp_invalidate_window();
@@ -1267,7 +1266,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             {
                 struct uwp_element *nav = (!wcscmp( btn->name, L"TogglePaneButton" ) && btn->parent && uwp_is_nav_view( btn->parent ))
                     ? btn->parent : NULL;
-                BOOL prev_open = nav ? nav->nav_is_pane_open : FALSE;
+                BOOL prev_open = uwp_elem_nav_is_pane_open( nav );
                 struct xaml_pointer_info info = {0};
                 info.x = (float)x;
                 info.y = (float)y;
@@ -1277,7 +1276,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
                 info.is_in_window = TRUE;
                 uwp_fire_element_pointer( btn, XAML_PTR_RELEASED, &info, TRUE );
                 uwp_invoke_button( btn );
-                if (nav && nav->nav_is_pane_open == prev_open)
+                if (nav && uwp_elem_nav_is_pane_open( nav ) == prev_open)
                     uwp_nav_set_pane_open( nav, !prev_open );
             }
             else
@@ -1296,10 +1295,10 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
                     IInspectable *item_obj = nav_item->content ? nav_item->content
                         : (nav_item->outer ? nav_item->outer : &nav_item->IInspectable_iface);
                     uwp_nav_select_item( nav, nav_item );
-                    if (nav->nav_sel_changed_reg.next_token > 0)
-                        uwp_nav_fire( nav, &nav->nav_sel_changed_reg, item_obj );
-                    if (nav->nav_item_invoked_reg.next_token > 0)
-                        uwp_nav_fire( nav, &nav->nav_item_invoked_reg, item_obj );
+                    if (UWP_EV_ANY( nav, nav_sel_changed_reg ))
+                        uwp_nav_fire( nav, &nav->events->nav_sel_changed_reg, item_obj );
+                    if (UWP_EV_ANY( nav, nav_item_invoked_reg ))
+                        uwp_nav_fire( nav, &nav->events->nav_item_invoked_reg, item_obj );
                     uwp_nav_set_pane_open( nav, FALSE );
                     if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
                     uwp_invalidate_window();
@@ -1355,9 +1354,9 @@ struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, int y )
     if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_GRID ||
          el->kind == UWP_KIND_STACK_PANEL) &&
         !el->has_bg && !el->comp_brush && !el->fill_brush &&
-        el->tapped_reg.next_token == 0 &&
-        el->ptr_pressed_reg.next_token == 0 &&
-        el->ptr_released_reg.next_token == 0)
+        !UWP_EV_ANY( el, tapped_reg ) &&
+        !UWP_EV_ANY( el, ptr_pressed_reg ) &&
+        !UWP_EV_ANY( el, ptr_released_reg ))
         return NULL;
     return el;
 }
@@ -1409,9 +1408,9 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
                 IUnknown_Release( (IUnknown *)ctrl_ovr );
             }
         }
-        if (cur->tapped_reg.next_token > 0)
+        if (UWP_EV_ANY( cur, tapped_reg ))
         {
-            count = xaml_event_registry_snapshot_alloc( &cur->tapped_reg, &handlers );
+            count = xaml_event_registry_snapshot_alloc( &cur->events->tapped_reg, &handlers );
             for (i = 0; i < count; i++)
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];

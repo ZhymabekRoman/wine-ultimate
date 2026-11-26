@@ -44,18 +44,19 @@ static HRESULT WINAPI uwp_mpe_get_Source( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    *out = impl ? impl->media_source : NULL;
+    *out = (impl && impl->media) ? impl->media->media_source : NULL;
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_put_Source( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (!m) return S_OK;
     if (val) IInspectable_AddRef( val );
-    if (impl->media_source) IInspectable_Release( impl->media_source );
-    impl->media_source = val;
-    InterlockedExchange( &impl->video_started, 0 );
+    if (m->media_source) IInspectable_Release( m->media_source );
+    m->media_source = val;
+    InterlockedExchange( &m->video_started, 0 );
     uwp_invalidate_window();
     return S_OK;
 }
@@ -63,109 +64,118 @@ static HRESULT WINAPI uwp_mpe_get_TransportControls( void *iface, IInspectable *
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    *out = impl ? impl->media_transport_controls : NULL;
+    *out = (impl && impl->media) ? impl->media->media_transport_controls : NULL;
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_put_TransportControls( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (!m) return S_OK;
     if (val) IInspectable_AddRef( val );
-    if (impl->media_transport_controls) IInspectable_Release( impl->media_transport_controls );
-    impl->media_transport_controls = val;
+    if (m->media_transport_controls) IInspectable_Release( m->media_transport_controls );
+    m->media_transport_controls = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_get_AreTransportControlsEnabled( void *iface, boolean *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->media_transport_enabled : FALSE;
+    if (out) *out = (impl && impl->media) ? impl->media->media_transport_enabled : FALSE;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_put_AreTransportControlsEnabled( void *iface, boolean val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->media_transport_enabled = val;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (m) m->media_transport_enabled = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_get_PosterSource( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    *out = impl ? impl->media_poster_source : NULL;
+    *out = (impl && impl->media) ? impl->media->media_poster_source : NULL;
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_put_PosterSource( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (!m) return S_OK;
     if (val) IInspectable_AddRef( val );
-    if (impl->media_poster_source) IInspectable_Release( impl->media_poster_source );
-    impl->media_poster_source = val;
+    if (m->media_poster_source) IInspectable_Release( m->media_poster_source );
+    m->media_poster_source = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_get_Stretch( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->media_stretch : 2; /* Uniform */
+    if (out) *out = uwp_elem_media_stretch( impl );
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_put_Stretch( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->media_stretch = val;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (m) m->media_stretch = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_get_AutoPlay( void *iface, boolean *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->media_auto_play : FALSE;
+    if (out) *out = (impl && impl->media) ? impl->media->media_auto_play : FALSE;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_put_AutoPlay( void *iface, boolean val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->media_auto_play = val;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (m) m->media_auto_play = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_get_IsFullWindow( void *iface, boolean *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->media_is_full_window : FALSE;
+    if (out) *out = (impl && impl->media) ? impl->media->media_is_full_window : FALSE;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_put_IsFullWindow( void *iface, boolean val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->media_is_full_window = val;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (m) m->media_is_full_window = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_get_MediaPlayer( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_media_ext *m;
     if (!out) return E_POINTER;
-    if (impl && !impl->media_player)
+    m = uwp_elem_ensure_media( impl );
+    if (m && !m->media_player)
     {
         HSTRING hcls;
         if (SUCCEEDED(WindowsCreateString( L"Windows.Media.Playback.MediaPlayer", 34, &hcls )))
         {
-            RoActivateInstance( hcls, &impl->media_player );
+            RoActivateInstance( hcls, &m->media_player );
             WindowsDeleteString( hcls );
         }
     }
-    *out = impl ? impl->media_player : NULL;
+    *out = m ? m->media_player : NULL;
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_mpe_SetMediaPlayer( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (!m) return S_OK;
     if (val) IInspectable_AddRef( val );
-    if (impl->media_player) IInspectable_Release( impl->media_player );
-    impl->media_player = val;
-    InterlockedExchange( &impl->video_started, 0 );
+    if (m->media_player) IInspectable_Release( m->media_player );
+    m->media_player = val;
+    InterlockedExchange( &m->video_started, 0 );
     uwp_invalidate_window();
     return S_OK;
 }
@@ -226,11 +236,12 @@ static HRESULT WINAPI uwp_bitmap_image_factory_CreateInstanceWithUriSource( void
     if (SUCCEEDED(hr) && *value && uri_source)
     {
         struct uwp_element *bi_el = uwp_elem_from_any( *value );
-        if (bi_el)
+        struct uwp_media_ext *m = uwp_elem_ensure_media( bi_el );
+        if (m)
         {
-            uwp_extract_uri_string( uri_source, bi_el->image_src, ARRAY_SIZE(bi_el->image_src) );
+            uwp_extract_uri_string( uri_source, m->image_src, ARRAY_SIZE(m->image_src) );
             TRACE( "BitmapImage::CreateInstanceWithUriSource uri=%s -> %p\n",
-                   debugstr_w(bi_el->image_src), *value );
+                   debugstr_w(m->image_src), *value );
         }
     }
     return hr;
@@ -260,9 +271,10 @@ static HRESULT WINAPI uwp_bi_put_CreateOptions( void *iface, int val )
 static HRESULT WINAPI uwp_bi_get_UriSource( void *iface, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *img_src = uwp_elem_image_src( impl );
     if (!out) return E_POINTER;
     *out = NULL;
-    if (impl && impl->image_src[0])
+    if (img_src[0])
     {
         HSTRING h_cls = NULL;
         IActivationFactory *ufac = NULL;
@@ -271,7 +283,7 @@ static HRESULT WINAPI uwp_bi_get_UriSource( void *iface, void **out )
             if (SUCCEEDED(RoGetActivationFactory( h_cls, &IID_IUriRuntimeClassFactory, (void **)&ufac )) && ufac)
             {
                 HSTRING h_uri = NULL;
-                if (SUCCEEDED(WindowsCreateString( impl->image_src, wcslen(impl->image_src), &h_uri )) && h_uri)
+                if (SUCCEEDED(WindowsCreateString( img_src, wcslen(img_src), &h_uri )) && h_uri)
                 {
                     IUriRuntimeClassFactory_CreateUri( (IUriRuntimeClassFactory *)ufac, h_uri, (IUriRuntimeClass **)out );
                     WindowsDeleteString( h_uri );
@@ -286,13 +298,14 @@ static HRESULT WINAPI uwp_bi_get_UriSource( void *iface, void **out )
 static HRESULT WINAPI uwp_bi_put_UriSource( void *iface, IInspectable *uri )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (!m) return S_OK;
     if (uri)
-        uwp_extract_uri_string( uri, impl->image_src, ARRAY_SIZE(impl->image_src) );
+        uwp_extract_uri_string( uri, m->image_src, ARRAY_SIZE(m->image_src) );
     else
-        impl->image_src[0] = 0;
-    impl->img_loaded = FALSE;
-    InterlockedExchange( &impl->img_loading, 0 );
+        m->image_src[0] = 0;
+    m->img_loaded = FALSE;
+    InterlockedExchange( &m->img_loading, 0 );
     uwp_invalidate_window();
     return S_OK;
 }
@@ -335,13 +348,13 @@ const void *uwp_bi_vtbl[24] =
 static HRESULT WINAPI uwp_bs_get_PixelWidth( void *iface, INT32 *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? (INT32)impl->img_w : 0;
+    if (out) *out = (impl && impl->media) ? (INT32)impl->media->img_w : 0;
     return S_OK;
 }
 static HRESULT WINAPI uwp_bs_get_PixelHeight( void *iface, INT32 *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? (INT32)impl->img_h : 0;
+    if (out) *out = (impl && impl->media) ? (INT32)impl->media->img_h : 0;
     return S_OK;
 }
 static HRESULT WINAPI uwp_bs_SetSourceAsync( void *iface, void *stream, void **op )
@@ -368,44 +381,47 @@ static HRESULT WINAPI uwp_img_get_Source( void *iface, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    *out = impl ? impl->img_source : NULL;
+    *out = (impl && impl->media) ? impl->media->img_source : NULL;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_img_put_Source( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
-    if (impl->img_source != val)
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (!m) return S_OK;
+    if (m->img_source != val)
     {
-        if (impl->img_source) IInspectable_Release( impl->img_source );
-        impl->img_source = val;
-        if (impl->img_source) IInspectable_AddRef( impl->img_source );
+        if (m->img_source) IInspectable_Release( m->img_source );
+        m->img_source = val;
+        if (m->img_source) IInspectable_AddRef( m->img_source );
     }
-    impl->image_src[0] = 0;
+    m->image_src[0] = 0;
     if (val)
     {
         struct uwp_element *src_el = uwp_elem_from_any( val );
-        if (src_el && src_el->image_src[0])
-            lstrcpynW( impl->image_src, src_el->image_src, ARRAY_SIZE(impl->image_src) );
+        const WCHAR *src_str = uwp_elem_image_src( src_el );
+        if (src_str[0])
+            lstrcpynW( m->image_src, src_str, ARRAY_SIZE(m->image_src) );
         else
-            uwp_extract_uri_string( val, impl->image_src, ARRAY_SIZE(impl->image_src) );
+            uwp_extract_uri_string( val, m->image_src, ARRAY_SIZE(m->image_src) );
     }
-    impl->img_loaded = FALSE;
-    InterlockedExchange( &impl->img_loading, 0 );
+    m->img_loaded = FALSE;
+    InterlockedExchange( &m->img_loading, 0 );
     uwp_invalidate_window();
     return S_OK;
 }
 static HRESULT WINAPI uwp_img_get_Stretch( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->media_stretch : 2;
+    if (out) *out = uwp_elem_media_stretch( impl );
     return S_OK;
 }
 static HRESULT WINAPI uwp_img_put_Stretch( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->media_stretch = val;
+    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+    if (m) m->media_stretch = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_st_SetActive( void *iface, boolean is_active )
@@ -673,15 +689,18 @@ static HRESULT WINAPI uwp_xr_get_IsHostVisible( void *iface, boolean *out )
 static HRESULT WINAPI uwp_xr_add_Changed( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
-    return xaml_event_registry_add( &impl->xaml_root_changed_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->xaml_root_changed_reg, handler, tok );
 }
 
 static HRESULT WINAPI uwp_xr_remove_Changed( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
-    return xaml_event_registry_remove( &impl->xaml_root_changed_reg, tok );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->xaml_root_changed_reg, tok );
 }
 
 const void *uwp_xaml_root_vtbl[16] =
@@ -704,15 +723,18 @@ const void *uwp_xaml_root_vtbl[16] =
 static HRESULT WINAPI uwp_img_add_ImageOpened( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
     if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
-    return xaml_event_registry_add( &impl->img_opened_reg, handler, tok );
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->img_opened_reg, handler, tok );
 }
 
 static HRESULT WINAPI uwp_img_remove_ImageOpened( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
-    return xaml_event_registry_remove( &impl->img_opened_reg, tok );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->img_opened_reg, tok );
 }
 
 const void *uwp_img_vtbl[24] =
@@ -750,10 +772,11 @@ static BOOL uwp_extract_comp_brush_image_src_depth( IInspectable *brush, WCHAR *
         if (csb->lpVtbl && csb->lpVtbl->get_Surface && SUCCEEDED(csb->lpVtbl->get_Surface( sb, &surf )) && surf)
         {
             struct uwp_element *surf_el = uwp_elem_from_any( surf );
+            const WCHAR *surf_src = uwp_elem_image_src( surf_el );
             BOOL ok = FALSE;
-            if (surf_el && surf_el->image_src[0])
+            if (surf_src[0])
             {
-                lstrcpynW( out_uri, surf_el->image_src, cap );
+                lstrcpynW( out_uri, surf_src, cap );
                 ok = TRUE;
             }
             IInspectable_Release( surf );
@@ -793,14 +816,18 @@ void uwp_xcbb_ensure_connected( IInspectable *brush )
 
     if (!brush) return;
     b_el = uwp_elem_from_any( brush );
-    if (b_el && (b_el->xcbb_connected || b_el->comp_brush)) return;
+    if (b_el && ((b_el->style_anim && b_el->style_anim->xcbb_connected) || b_el->comp_brush)) return;
     if (b_el && (b_el->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX)))
         return;
     target = (b_el && b_el->outer_unk) ? (IUnknown *)b_el->outer_unk : (IUnknown *)brush;
     if (SUCCEEDED(IUnknown_QueryInterface( target, &IID_IXamlCompositionBrushBaseOverrides_UWP, &ov )) && ov)
     {
         const struct abi_xcbb_overrides *xo = (const struct abi_xcbb_overrides *)ov;
-        if (b_el) b_el->xcbb_connected = TRUE;
+        if (b_el)
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( b_el );
+            if (sa) sa->xcbb_connected = TRUE;
+        }
         if (xo->lpVtbl && xo->lpVtbl->OnConnected)
         {
             HRESULT hr = xo->lpVtbl->OnConnected( ov );
@@ -915,18 +942,32 @@ static HRESULT WINAPI uwp_shape_put_Fill( void *iface, IInspectable *val )
                    debugstr_w(impl->name), val, b_el, b_el ? debugstr_w(b_el->class_name) : "?" );
         if (b_el)
         {
-            if (b_el->image_src[0])
+            const WCHAR *b_src = uwp_elem_image_src( b_el );
+            if (b_src[0])
             {
-                lstrcpynW( impl->image_src, b_el->image_src, ARRAY_SIZE(impl->image_src) );
-                impl->img_loaded = FALSE;
-                InterlockedExchange( &impl->img_loading, 0 );
-                TRACE( "uwp_shape_put_Fill(%s %s): uri=%s\n", debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(impl->image_src) );
+                struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+                if (m)
+                {
+                    lstrcpynW( m->image_src, b_src, ARRAY_SIZE(m->image_src) );
+                    m->img_loaded = FALSE;
+                    InterlockedExchange( &m->img_loading, 0 );
+                    TRACE( "uwp_shape_put_Fill(%s %s): uri=%s\n", debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(m->image_src) );
+                }
             }
-            else if (b_el->comp_brush && uwp_extract_comp_brush_image_src( b_el->comp_brush, impl->image_src, ARRAY_SIZE(impl->image_src) ))
+            else if (b_el->comp_brush)
             {
-                impl->img_loaded = FALSE;
-                InterlockedExchange( &impl->img_loading, 0 );
-                TRACE( "uwp_shape_put_Fill(%s %s): comp_brush uri=%s\n", debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(impl->image_src) );
+                WCHAR tmp_uri[512] = {0};
+                if (uwp_extract_comp_brush_image_src( b_el->comp_brush, tmp_uri, ARRAY_SIZE(tmp_uri) ))
+                {
+                    struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+                    if (m)
+                    {
+                        lstrcpynW( m->image_src, tmp_uri, ARRAY_SIZE(m->image_src) );
+                        m->img_loaded = FALSE;
+                        InterlockedExchange( &m->img_loading, 0 );
+                        TRACE( "uwp_shape_put_Fill(%s %s): comp_brush uri=%s\n", debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(m->image_src) );
+                    }
+                }
             }
             if (b_el->has_bg)
             {
@@ -983,13 +1024,19 @@ static HRESULT WINAPI uwp_xcbb_put_CompositionBrush( void *iface, IInspectable *
     }
     if (val)
     {
-        if (uwp_extract_comp_brush_image_src( val, impl->image_src, ARRAY_SIZE(impl->image_src) ))
+        WCHAR tmp_uri[512] = {0};
+        if (uwp_extract_comp_brush_image_src( val, tmp_uri, ARRAY_SIZE(tmp_uri) ))
         {
-            TRACE( "uwp_xcbb_put_CompositionBrush(%s): extracted uri=%s\n",
-                   debugstr_w(impl->class_name), debugstr_w(impl->image_src) );
-            impl->img_loaded = FALSE;
-            InterlockedExchange( &impl->img_loading, 0 );
-            uwp_load_image_asset( impl );
+            struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+            if (m)
+            {
+                lstrcpynW( m->image_src, tmp_uri, ARRAY_SIZE(m->image_src) );
+                TRACE( "uwp_xcbb_put_CompositionBrush(%s): extracted uri=%s\n",
+                       debugstr_w(impl->class_name), debugstr_w(m->image_src) );
+                m->img_loaded = FALSE;
+                InterlockedExchange( &m->img_loading, 0 );
+                uwp_load_image_asset( impl );
+            }
         }
     }
     uwp_invalidate_window();
@@ -1069,8 +1116,8 @@ static HRESULT WINAPI uwp_lis_get_Size( void *iface, struct __x_ABI_CWindows_CFo
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    out->Width = (impl && impl->img_w) ? (float)impl->img_w : 0.0f;
-    out->Height = (impl && impl->img_h) ? (float)impl->img_h : 0.0f;
+    out->Width = (impl && impl->media && impl->media->img_w) ? (float)impl->media->img_w : 0.0f;
+    out->Height = (impl && impl->media && impl->media->img_h) ? (float)impl->media->img_h : 0.0f;
     return S_OK;
 }
 const void *uwp_lis_vtbl[16] =
@@ -1091,7 +1138,7 @@ const void *uwp_lis_vtbl[16] =
 static HRESULT WINAPI uwp_scb_get_Color( void *iface, Color *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    UINT32 argb = (impl && impl->has_brush_argb) ? impl->brush_argb : 0;
+    UINT32 argb = uwp_elem_has_brush_argb( impl ) ? uwp_elem_brush_argb( impl ) : 0;
     if (!out) return E_POINTER;
     out->A = (BYTE)((argb >> 24) & 0xff);
     out->R = (BYTE)((argb >> 16) & 0xff);
@@ -1102,10 +1149,11 @@ static HRESULT WINAPI uwp_scb_get_Color( void *iface, Color *out )
 static HRESULT WINAPI uwp_scb_put_Color( void *iface, Color val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl)
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa)
     {
-        impl->brush_argb = ((UINT32)val.A << 24) | ((UINT32)val.R << 16) | ((UINT32)val.G << 8) | val.B;
-        impl->has_brush_argb = TRUE;
+        sa->brush_argb = ((UINT32)val.A << 24) | ((UINT32)val.R << 16) | ((UINT32)val.G << 8) | val.B;
+        sa->has_brush_argb = TRUE;
     }
     return S_OK;
 }
@@ -1125,13 +1173,14 @@ const void *uwp_scb_vtbl[16] =
 static HRESULT WINAPI uwp_brush_get_Opacity( void *iface, double *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (val) *val = impl ? impl->brush_opacity : 1.0;
+    if (val) *val = uwp_elem_brush_opacity( impl );
     return S_OK;
 }
 static HRESULT WINAPI uwp_brush_put_Opacity( void *iface, double val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->brush_opacity = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->brush_opacity = val;
     return S_OK;
 }
 const void *uwp_brush_vtbl[16] =
@@ -1298,12 +1347,13 @@ const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *
     lstrcpynW( buf, L"Segoe UI", cap );
     for (cur = el; cur && hops < 6; cur = cur->parent, hops++)
     {
-        if (cur->font_family[0] && wcsicmp( cur->font_family, L"XamlAutoFontFamily" ))
+        const WCHAR *cur_ff = uwp_elem_font_family( cur );
+        if (cur_ff[0] && wcsicmp( cur_ff, L"XamlAutoFontFamily" ))
         {
-            if (!wcsicmp( cur->font_family, L"SymbolThemeFontFamily" ))
+            if (!wcsicmp( cur_ff, L"SymbolThemeFontFamily" ))
                 uwp_resolve_font_family( L"Segoe MDL2 Assets", buf, cap );
             else
-                uwp_resolve_font_family( cur->font_family, buf, cap );
+                uwp_resolve_font_family( cur_ff, buf, cap );
             return buf;
         }
         if (cur->kind == UWP_KIND_PAGE || cur->kind == UWP_KIND_FRAME) break;
@@ -1320,7 +1370,8 @@ const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *
 static HRESULT WINAPI uwp_ff_get_Source( void *iface, HSTRING *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    const WCHAR *src = (impl && impl->font_family[0]) ? impl->font_family : L"Segoe UI";
+    const WCHAR *ff = uwp_elem_font_family( impl );
+    const WCHAR *src = ff[0] ? ff : L"Segoe UI";
     if (!out) return E_POINTER;
     return WindowsCreateString( src, wcslen(src), out );
 }
@@ -1351,7 +1402,7 @@ static HRESULT WINAPI uwp_ff_factory_CreateInstanceWithName( void *iface, HSTRIN
         if (ff_el && raw && raw[0])
         {
             WCHAR face[64] = {0};
-            lstrcpynW( ff_el->font_family, raw, ARRAY_SIZE(ff_el->font_family) );
+            uwp_elem_set_font_family( ff_el, raw );
             uwp_resolve_font_family( raw, face, ARRAY_SIZE(face) );
             TRACE( "FontFamily::CreateInstanceWithName(%s) -> face=%s\n", debugstr_w(raw), debugstr_w(face) );
         }
@@ -1427,25 +1478,27 @@ const void *uwp_image_brush_vtbl[16] =
 static HRESULT WINAPI uwp_tile_get_AlignmentX( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->tile_align_x : 1; /* Center */
+    if (out) *out = (impl && impl->style_anim) ? impl->style_anim->tile_align_x : 1; /* Center */
     return S_OK;
 }
 static HRESULT WINAPI uwp_tile_put_AlignmentX( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->tile_align_x = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->tile_align_x = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_tile_get_AlignmentY( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->tile_align_y : 1; /* Center */
+    if (out) *out = (impl && impl->style_anim) ? impl->style_anim->tile_align_y : 1; /* Center */
     return S_OK;
 }
 static HRESULT WINAPI uwp_tile_put_AlignmentY( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->tile_align_y = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->tile_align_y = val;
     return S_OK;
 }
 const void *uwp_tile_brush_vtbl[16] =
@@ -1468,66 +1521,73 @@ const void *uwp_tile_brush_vtbl[16] =
 static HRESULT WINAPI uwp_gb_get_SpreadMethod( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->grad_spread_method : 0;
+    if (out) *out = (impl && impl->style_anim) ? impl->style_anim->grad_spread_method : 0;
     return S_OK;
 }
 static HRESULT WINAPI uwp_gb_put_SpreadMethod( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->grad_spread_method = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->grad_spread_method = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_gb_get_MappingMode( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->grad_mapping_mode : 1; /* RelativeToBoundingBox */
+    if (out) *out = (impl && impl->style_anim) ? impl->style_anim->grad_mapping_mode : 1; /* RelativeToBoundingBox */
     return S_OK;
 }
 static HRESULT WINAPI uwp_gb_put_MappingMode( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->grad_mapping_mode = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->grad_mapping_mode = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_gb_get_ColorInterpolationMode( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->grad_color_interp : 1; /* SRgbLinearInterpolation */
+    if (out) *out = (impl && impl->style_anim) ? impl->style_anim->grad_color_interp : 1; /* SRgbLinearInterpolation */
     return S_OK;
 }
 static HRESULT WINAPI uwp_gb_put_ColorInterpolationMode( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->grad_color_interp = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->grad_color_interp = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_gb_get_GradientStops( void *iface, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_style_anim_ext *sa;
     if (!out) return E_POINTER;
     *out = NULL;
     if (!impl) return S_OK;
-    if (!impl->gradient_stops_coll)
+    sa = uwp_elem_ensure_style_anim( impl );
+    if (!sa) return E_OUTOFMEMORY;
+    if (!sa->gradient_stops_coll)
     {
-        uwp_vec_create( impl, &impl->gradient_stops_coll );
-        if (impl->gradient_stops_coll)
+        uwp_vec_create( impl, &sa->gradient_stops_coll );
+        if (sa->gradient_stops_coll)
         {
-            struct uwp_vec_view *v = CONTAINING_RECORD( impl->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
+            struct uwp_vec_view *v = CONTAINING_RECORD( sa->gradient_stops_coll, struct uwp_vec_view, IInspectable_iface );
             v->runtime_class = L"Windows.UI.Xaml.Media.GradientStopCollection";
         }
     }
-    *out = impl->gradient_stops_coll;
+    *out = sa->gradient_stops_coll;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_gb_put_GradientStops( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
-    if (impl->gradient_stops_coll != val)
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (!sa) return S_OK;
+    if (sa->gradient_stops_coll != val)
     {
-        if (impl->gradient_stops_coll) IInspectable_Release( impl->gradient_stops_coll );
-        impl->gradient_stops_coll = val;
+        if (sa->gradient_stops_coll) IInspectable_Release( sa->gradient_stops_coll );
+        sa->gradient_stops_coll = val;
         if (val) IInspectable_AddRef( val );
     }
     uwp_invalidate_window();
@@ -1556,28 +1616,30 @@ static HRESULT WINAPI uwp_lgb_get_StartPoint( void *iface, struct __x_ABI_CWindo
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    out->X = impl ? impl->grad_start_x : 0.0f;
-    out->Y = impl ? impl->grad_start_y : 0.0f;
+    out->X = (impl && impl->style_anim) ? impl->style_anim->grad_start_x : 0.0f;
+    out->Y = (impl && impl->style_anim) ? impl->style_anim->grad_start_y : 0.0f;
     return S_OK;
 }
 static HRESULT WINAPI uwp_lgb_put_StartPoint( void *iface, struct __x_ABI_CWindows_CFoundation_CPoint val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) { impl->grad_start_x = val.X; impl->grad_start_y = val.Y; uwp_invalidate_window(); }
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) { sa->grad_start_x = val.X; sa->grad_start_y = val.Y; uwp_invalidate_window(); }
     return S_OK;
 }
 static HRESULT WINAPI uwp_lgb_get_EndPoint( void *iface, struct __x_ABI_CWindows_CFoundation_CPoint *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    out->X = impl ? impl->grad_end_x : 1.0f;
-    out->Y = impl ? impl->grad_end_y : 1.0f;
+    out->X = (impl && impl->style_anim) ? impl->style_anim->grad_end_x : 1.0f;
+    out->Y = (impl && impl->style_anim) ? impl->style_anim->grad_end_y : 1.0f;
     return S_OK;
 }
 static HRESULT WINAPI uwp_lgb_put_EndPoint( void *iface, struct __x_ABI_CWindows_CFoundation_CPoint val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) { impl->grad_end_x = val.X; impl->grad_end_y = val.Y; uwp_invalidate_window(); }
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) { sa->grad_end_x = val.X; sa->grad_end_y = val.Y; uwp_invalidate_window(); }
     return S_OK;
 }
 const void *uwp_lgb_vtbl[16] =
@@ -1598,13 +1660,14 @@ const void *uwp_lgb_vtbl[16] =
 static HRESULT WINAPI uwp_gs_get_Offset( void *iface, double *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->grad_stop_offset : 0.0;
+    if (out) *out = (impl && impl->style_anim) ? impl->style_anim->grad_stop_offset : 0.0;
     return S_OK;
 }
 static HRESULT WINAPI uwp_gs_put_Offset( void *iface, double val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) { impl->grad_stop_offset = val; uwp_invalidate_window(); }
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) { sa->grad_stop_offset = val; uwp_invalidate_window(); }
     return S_OK;
 }
 const void *uwp_grad_stop_vtbl[16] =
@@ -1625,42 +1688,47 @@ const void *uwp_grad_stop_vtbl[16] =
 static HRESULT WINAPI uwp_pg_get_FillRule( void *iface, int *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (out) *out = impl ? impl->fill_rule : 0;
+    if (out) *out = (impl && impl->style_anim) ? impl->style_anim->fill_rule : 0;
     return S_OK;
 }
 static HRESULT WINAPI uwp_pg_put_FillRule( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->fill_rule = val;
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->fill_rule = val;
     return S_OK;
 }
 static HRESULT WINAPI uwp_pg_get_Figures( void *iface, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_style_anim_ext *sa;
     if (!out) return E_POINTER;
     *out = NULL;
     if (!impl) return S_OK;
-    if (!impl->figures_coll)
+    sa = uwp_elem_ensure_style_anim( impl );
+    if (!sa) return E_OUTOFMEMORY;
+    if (!sa->figures_coll)
     {
-        uwp_vec_create( impl, &impl->figures_coll );
-        if (impl->figures_coll)
+        uwp_vec_create( impl, &sa->figures_coll );
+        if (sa->figures_coll)
         {
-            struct uwp_vec_view *v = CONTAINING_RECORD( impl->figures_coll, struct uwp_vec_view, IInspectable_iface );
+            struct uwp_vec_view *v = CONTAINING_RECORD( sa->figures_coll, struct uwp_vec_view, IInspectable_iface );
             v->runtime_class = L"Windows.UI.Xaml.Media.PathFigureCollection";
         }
     }
-    *out = impl->figures_coll;
+    *out = sa->figures_coll;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
 }
 static HRESULT WINAPI uwp_pg_put_Figures( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (!impl) return S_OK;
-    if (impl->figures_coll != val)
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (!sa) return S_OK;
+    if (sa->figures_coll != val)
     {
-        if (impl->figures_coll) IInspectable_Release( impl->figures_coll );
-        impl->figures_coll = val;
+        if (sa->figures_coll) IInspectable_Release( sa->figures_coll );
+        sa->figures_coll = val;
         if (val) IInspectable_AddRef( val );
     }
     return S_OK;
@@ -1741,14 +1809,14 @@ static BOOL uwp_mpe_extract_uri( struct uwp_element *el, WCHAR *out, size_t cap 
     if (!el || !out || !cap) return FALSE;
     out[0] = 0;
 
-    if (el->media_source)
+    if (el->media && el->media->media_source)
     {
-        src = el->media_source;
+        src = el->media->media_source;
     }
-    else if (el->media_player)
+    else if (el->media && el->media->media_player)
     {
         void *src2 = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( el->media_player, &IID_IMediaPlayerSource2_mpe, &src2 )) && src2)
+        if (SUCCEEDED(IInspectable_QueryInterface( el->media->media_player, &IID_IMediaPlayerSource2_mpe, &src2 )) && src2)
         {
             const struct abi_media_player_source2 *amps = (const struct abi_media_player_source2 *)src2;
             if (amps->lpVtbl->get_Source && SUCCEEDED(amps->lpVtbl->get_Source( src2, &src )) && src)
@@ -1841,9 +1909,9 @@ static DWORD WINAPI uwp_media_decode_worker( void *param )
     BOOL mf_started = FALSE, logged_first = FALSE;
     HRESULT hr;
 
-    if (!el || !uwp_resolve_media_path( el->video_uri, path, ARRAY_SIZE(path) ))
+    if (!el || !el->media || !uwp_resolve_media_path( el->media->video_uri, path, ARRAY_SIZE(path) ))
     {
-        WARN( "uwp_media_decode_worker: failed to resolve path for %s\n", el ? debugstr_w(el->video_uri) : "null" );
+        WARN( "uwp_media_decode_worker: failed to resolve path for %s\n", (el && el->media) ? debugstr_w(el->media->video_uri) : "null" );
         return 0;
     }
 
@@ -1930,7 +1998,7 @@ static DWORD WINAPI uwp_media_decode_worker( void *param )
     TRACE( "uwp_media_decode_worker: opened %s (%ux%u -> %ux%u, stride=%ld, subtype=%s)\n",
            debugstr_w(path), src_w, src_h, dst_w, dst_h, stride, debugstr_guid(&out_subtype) );
 
-    while (!InterlockedCompareExchange( &el->video_stop, 0, 0 ))
+    while (!InterlockedCompareExchange( &el->media->video_stop, 0, 0 ))
     {
         DWORD stream_idx = 0, flags = 0;
         LONGLONG ts = 0;
@@ -2085,20 +2153,20 @@ static DWORD WINAPI uwp_media_decode_worker( void *param )
 
                     if (decoded_ok)
                     {
-                        AcquireSRWLockExclusive( &el->video_lock );
-                        if (!el->video_pixels || el->video_w != dst_w || el->video_h != dst_h)
+                        AcquireSRWLockExclusive( &el->media->video_lock );
+                        if (!el->media->video_pixels || el->media->video_w != dst_w || el->media->video_h != dst_h)
                         {
-                            free( el->video_pixels );
-                            el->video_pixels = malloc( (size_t)dst_w * dst_h * 4 );
-                            el->video_w = dst_w;
-                            el->video_h = dst_h;
+                            free( el->media->video_pixels );
+                            el->media->video_pixels = malloc( (size_t)dst_w * dst_h * 4 );
+                            el->media->video_w = dst_w;
+                            el->media->video_h = dst_h;
                         }
-                        if (el->video_pixels)
+                        if (el->media->video_pixels)
                         {
-                            memcpy( el->video_pixels, work_buf, (size_t)dst_w * dst_h * 4 );
-                            el->video_frame_seq++;
+                            memcpy( el->media->video_pixels, work_buf, (size_t)dst_w * dst_h * 4 );
+                            el->media->video_frame_seq++;
                         }
-                        ReleaseSRWLockExclusive( &el->video_lock );
+                        ReleaseSRWLockExclusive( &el->media->video_lock );
                         uwp_invalidate_window();
                     }
                     IMFMediaBuffer_Unlock( buf );
@@ -2126,18 +2194,21 @@ done:
 void uwp_media_ensure_started( struct uwp_element *el )
 {
     WCHAR uri[512] = {0};
+    struct uwp_media_ext *m;
 
     if (!el) return;
-    if (InterlockedCompareExchange( &el->video_started, 0, 0 ) != 0)
+    m = uwp_elem_ensure_media( el );
+    if (!m) return;
+    if (InterlockedCompareExchange( &m->video_started, 0, 0 ) != 0)
         return;
     if (!uwp_mpe_extract_uri( el, uri, ARRAY_SIZE(uri) ))
         return;
-    if (InterlockedCompareExchange( &el->video_started, 1, 0 ) != 0)
+    if (InterlockedCompareExchange( &m->video_started, 1, 0 ) != 0)
         return;
 
-    lstrcpynW( el->video_uri, uri, ARRAY_SIZE(el->video_uri) );
-    InterlockedExchange( &el->video_stop, 0 );
-    el->video_thread = CreateThread( NULL, 0, uwp_media_decode_worker, el, 0, NULL );
-    if (!el->video_thread)
-        InterlockedExchange( &el->video_started, 0 );
+    lstrcpynW( m->video_uri, uri, ARRAY_SIZE(m->video_uri) );
+    InterlockedExchange( &m->video_stop, 0 );
+    m->video_thread = CreateThread( NULL, 0, uwp_media_decode_worker, el, 0, NULL );
+    if (!m->video_thread)
+        InterlockedExchange( &m->video_started, 0 );
 }

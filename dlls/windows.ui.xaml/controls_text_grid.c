@@ -25,8 +25,6 @@
 #include "private.h"
 #include "uwp_private.h"
 
-WINE_DEFAULT_DEBUG_CHANNEL(xaml);
-
 const void *uwp_grid_vtbl[32] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -398,19 +396,10 @@ struct uwp_element *uwp_nav_find_item( struct uwp_element *el, int depth )
 
 static void uwp_fire_flyout_closed( struct uwp_element *flyout )
 {
-    int i;
-    if (!flyout) return;
-    for (i = 0; i < flyout->flyout_closed_cnt; i++)
-    {
-        if (flyout->flyout_closed_handlers[i])
-        {
-            IInspectable *sender = flyout->outer ? flyout->outer : &flyout->IFlyout_iface;
-            struct xaml_event_handler *h = (struct xaml_event_handler *)flyout->flyout_closed_handlers[i];
-            __TRY { h->lpVtbl->Invoke( h, sender, NULL ); }
-            __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
-            __ENDTRY;
-        }
-    }
+    if (!flyout || UWP_EV_CNT( flyout, flyout_closed_reg ) == 0) return;
+    uwp_fire_event_registry( &flyout->events->flyout_closed_reg,
+                             flyout->outer ? flyout->outer : &flyout->IFlyout_iface,
+                             NULL, "Flyout::Closed" );
 }
 
 BOOL uwp_popup_is_open_for( struct uwp_element *flyout )
@@ -844,7 +833,7 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
             it->checked = (ch->is_checked != 0);
             it->has_sub = ((ch->class_flags & UWP_CF_MENU_FLYOUT_SUB_ITEM) != 0);
             lstrcpynW( it->text, uwp_elem_text( ch ), ARRAY_SIZE(it->text) );
-            lstrcpynW( it->accel, ch->accel_text, ARRAY_SIZE(it->accel) );
+            lstrcpynW( it->accel, uwp_elem_accel_text( ch ), ARRAY_SIZE(it->accel) );
             if (!it->accel[0] && ch->accelerators_coll)
             {
                 struct uwp_vec_view *av = CONTAINING_RECORD( ch->accelerators_coll, struct uwp_vec_view, IInspectable_iface );

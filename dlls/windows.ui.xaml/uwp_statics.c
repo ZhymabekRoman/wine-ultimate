@@ -238,14 +238,23 @@ static HRESULT WINAPI ecp_SetElementChildVisual( void *iface, void *elem, void *
             el->ecp_visual = (IInspectable *)visual;
             if (el->ecp_visual) IInspectable_AddRef( el->ecp_visual );
         }
-        if (visual && uwp_extract_visual_image_src( (IInspectable *)visual, el->image_src, ARRAY_SIZE(el->image_src) ))
+        if (visual)
         {
-            TRACE( "ecp_SetElementChildVisual(%s): extracted uri=%s\n",
-                   debugstr_w(el->name), debugstr_w(el->image_src) );
-            el->img_loaded = FALSE;
-            InterlockedExchange( &el->img_loading, 0 );
-            uwp_load_image_asset( el );
-            uwp_invalidate_window();
+            WCHAR tmp_uri[512] = {0};
+            if (uwp_extract_visual_image_src( (IInspectable *)visual, tmp_uri, ARRAY_SIZE(tmp_uri) ))
+            {
+                struct uwp_media_ext *m = uwp_elem_ensure_media( el );
+                if (m)
+                {
+                    lstrcpynW( m->image_src, tmp_uri, ARRAY_SIZE(m->image_src) );
+                    TRACE( "ecp_SetElementChildVisual(%s): extracted uri=%s\n",
+                           debugstr_w(el->name), debugstr_w(m->image_src) );
+                    m->img_loaded = FALSE;
+                    InterlockedExchange( &m->img_loading, 0 );
+                    uwp_load_image_asset( el );
+                    uwp_invalidate_window();
+                }
+            }
         }
     }
     if (visual)
@@ -488,9 +497,10 @@ static HRESULT WINAPI uwp_lis_StartLoadFromUriWithSize( void *iface, IInspectabl
     el = uwp_elem_from_any( inst );
     if (el)
     {
-        if (uri) uwp_extract_uri_string( uri, el->image_src, ARRAY_SIZE(el->image_src) );
-        TRACE( "LoadedImageSurface.StartLoadFromUriWithSize uri=%s\n", debugstr_w(el->image_src) );
-        if (el->image_src[0]) uwp_load_image_asset( el );
+        struct uwp_media_ext *m = uri ? uwp_elem_ensure_media( el ) : NULL;
+        if (uri && m) uwp_extract_uri_string( uri, m->image_src, ARRAY_SIZE(m->image_src) );
+        TRACE( "LoadedImageSurface.StartLoadFromUriWithSize uri=%s\n", debugstr_w(uwp_elem_image_src( el )) );
+        if (m && m->image_src[0]) uwp_load_image_asset( el );
         *out = &el->ILoadedImageSurface_iface;
     }
     else
@@ -861,7 +871,7 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
             {
                 WCHAR sym = (WCHAR)code;
                 uwp_elem_set_text_n( sym_el, &sym, 1 );
-                lstrcpynW( sym_el->font_family, L"Segoe MDL2 Assets", ARRAY_SIZE(sym_el->font_family) );
+                uwp_elem_set_font_family( sym_el, L"Segoe MDL2 Assets" );
             }
         }
         return hr;
@@ -1557,9 +1567,13 @@ static HRESULT WINAPI scb_factory_CreateInstanceWithColor( void *iface, Color co
         struct uwp_element *el = uwp_elem_from_any( *out );
         if (el)
         {
-            el->brush_argb = ((UINT32)color.A << 24) | ((UINT32)color.R << 16) | ((UINT32)color.G << 8) | color.B;
-            el->has_brush_argb = TRUE;
-            el->brush_opacity = 1.0;
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa)
+            {
+                sa->brush_argb = ((UINT32)color.A << 24) | ((UINT32)color.R << 16) | ((UINT32)color.G << 8) | color.B;
+                sa->has_brush_argb = TRUE;
+                sa->brush_opacity = 1.0;
+            }
         }
     }
     return hr;

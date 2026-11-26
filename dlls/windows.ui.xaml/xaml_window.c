@@ -1689,7 +1689,11 @@ static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, vo
     TRACE( "iface %p, content %p\n", iface, content );
     if (impl->content) IInspectable_Release( impl->content );
     impl->content = content;
-    if (impl->content) IInspectable_AddRef( impl->content );
+    if (impl->content)
+    {
+        uwp_mark_in_visual_tree( impl->content );
+        IInspectable_AddRef( impl->content );
+    }
     if (impl->is_active && impl->content) uwp_fire_loaded_content( impl->content );
     xaml_mark_window_dirty();
     xaml_window_present( impl );

@@ -453,10 +453,10 @@ static void uwp_fire_img_opened_reg( struct uwp_element *target )
     unsigned int cnt, i;
     IInspectable *sender, *args;
 
-    if (!target || target->img_opened_reg.next_token == 0) return;
-    cnt = xaml_event_registry_snapshot_alloc( &target->img_opened_reg, &handlers );
-    xaml_event_registry_clear( &target->img_opened_reg );
-    target->img_opened_reg.next_token = 0;
+    if (!UWP_EV_ANY( target, img_opened_reg )) return;
+    cnt = xaml_event_registry_snapshot_alloc( &target->events->img_opened_reg, &handlers );
+    xaml_event_registry_clear( &target->events->img_opened_reg );
+    target->events->img_opened_reg.next_token = 0;
     if (!cnt) return;
     sender = target->outer ? target->outer : &target->IInspectable_iface;
     args = (IInspectable *)g_routed_args();
@@ -481,15 +481,15 @@ void uwp_on_image_loaded( struct uwp_element *el )
     int hop;
     if (!el) return;
     uwp_fire_img_opened_reg( el );
-    if (el->img_source)
+    if (el->media && el->media->img_source)
     {
-        struct uwp_element *src_el = uwp_elem_from_any( el->img_source );
+        struct uwp_element *src_el = uwp_elem_from_any( el->media->img_source );
         if (src_el && src_el != el)
         {
             uwp_fire_img_opened_reg( src_el );
-            if (src_el->img_source)
+            if (src_el->media && src_el->media->img_source)
             {
-                struct uwp_element *src2_el = uwp_elem_from_any( src_el->img_source );
+                struct uwp_element *src2_el = uwp_elem_from_any( src_el->media->img_source );
                 if (src2_el && src2_el != src_el && src2_el != el)
                     uwp_fire_img_opened_reg( src2_el );
             }
@@ -501,9 +501,9 @@ void uwp_on_image_loaded( struct uwp_element *el )
         if (br_el && br_el != el)
         {
             uwp_fire_img_opened_reg( br_el );
-            if (br_el->img_source)
+            if (br_el->media && br_el->media->img_source)
             {
-                struct uwp_element *bi_el = uwp_elem_from_any( br_el->img_source );
+                struct uwp_element *bi_el = uwp_elem_from_any( br_el->media->img_source );
                 if (bi_el && bi_el != br_el && bi_el != el)
                     uwp_fire_img_opened_reg( bi_el );
             }
@@ -630,14 +630,16 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
     for (wi = 0; wi < waiter_cnt; wi++)
     {
         struct uwp_element *wel = waiters[wi];
-        if (!wel) continue;
-        if (px && !wcscmp( wel->image_src, url ))
+        struct uwp_media_ext *wm;
+        if (!wel || wel->magic != UWP_ELEM_MAGIC || !wel->media) continue;
+        wm = wel->media;
+        if (px && !wcscmp( wm->image_src, url ))
         {
             struct uwp_element *anc;
             int hop;
-            wel->img_pixels = px;
-            wel->img_w = pw;
-            wel->img_h = ph;
+            wm->img_pixels = px;
+            wm->img_w = pw;
+            wm->img_h = ph;
             for (anc = wel, hop = 0; anc && hop < 4; anc = anc->parent, hop++)
             {
                 if (anc->opacity <= 0.005)
@@ -646,7 +648,8 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
             if (!wel->has_bounds || wel->bounds.right <= wel->bounds.left || wel->bounds.bottom <= wel->bounds.top)
                 need_layout = TRUE;
         }
-        wel->img_loaded = TRUE;
+        wm->img_loaded = TRUE;
+        InterlockedExchange( &wm->img_loading, 0 );
     }
 
     CoUninitialize();
@@ -731,7 +734,8 @@ void uwp_load_image_asset( struct uwp_element *el )
 {
     WCHAR rel[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0}, candidate[MAX_PATH] = {0};
     WCHAR local_key[520];
-    const WCHAR *p = el->image_src;
+    const WCHAR *p;
+    struct uwp_media_ext *m;
     static const WCHAR *const scales_small[] = {
         L"", L".targetsize-24_altform-unplated", L".targetsize-24",
         L".targetsize-32_altform-unplated", L".targetsize-32",
@@ -753,7 +757,10 @@ void uwp_load_image_asset( struct uwp_element *el )
     IWICFormatConverter *conv = NULL;
     UINT w = 0, h = 0;
 
-    if (!el || el->img_loaded || !el->image_src[0]) return;
+    if (!el || !el->media) return;
+    m = el->media;
+    p = m->image_src;
+    if (m->img_loaded || !p[0]) return;
     prefer_small = (el->width > 0.0 && el->width <= 32.0) ||
                    (el->has_bounds && (el->bounds.right - el->bounds.left) > 0 && (el->bounds.right - el->bounds.left) <= 32);
     scales = prefer_small ? scales_small : scales_default;
@@ -774,17 +781,17 @@ void uwp_load_image_asset( struct uwp_element *el )
             e->lru_tick = ++g_http_img_lru_clock;
             if (e->state == HTTP_IMG_DONE)
             {
-                el->img_pixels = e->pixels;
-                el->img_w = e->w;
-                el->img_h = e->h;
-                el->img_loaded = TRUE;
+                m->img_pixels = e->pixels;
+                m->img_w = e->w;
+                m->img_h = e->h;
+                m->img_loaded = TRUE;
                 ReleaseSRWLockExclusive( &g_http_img_cache_lock );
                 uwp_on_image_loaded( el );
                 return;
             }
             if (e->state == HTTP_IMG_FAILED)
             {
-                el->img_loaded = TRUE;
+                m->img_loaded = TRUE;
                 ReleaseSRWLockExclusive( &g_http_img_cache_lock );
                 return;
             }
@@ -797,7 +804,7 @@ void uwp_load_image_asset( struct uwp_element *el )
                     if (e->waiters[wi] == el) { present = TRUE; break; }
                 if (!present && e->waiter_cnt < HTTP_IMG_MAX_WAITERS)
                     e->waiters[e->waiter_cnt++] = el;
-                InterlockedExchange( &el->img_loading, 1 );
+                InterlockedExchange( &m->img_loading, 1 );
                 ReleaseSRWLockExclusive( &g_http_img_cache_lock );
                 return;
             }
@@ -812,7 +819,7 @@ void uwp_load_image_asset( struct uwp_element *el )
             ReleaseSRWLockExclusive( &g_http_img_cache_lock );
             return;
         }
-        if (InterlockedCompareExchange( &el->img_loading, 1, 0 ) == 0)
+        if (InterlockedCompareExchange( &m->img_loading, 1, 0 ) == 0)
         {
             int slot = http_img_alloc_slot_locked( p );
             struct http_worker_ctx *wctx = (slot >= 0) ? malloc( sizeof(*wctx) ) : NULL;
@@ -844,18 +851,19 @@ void uwp_load_image_asset( struct uwp_element *el )
                         g_http_img_cache[slot].waiter_cnt = 0;
                     }
                     ReleaseSRWLockExclusive( &g_http_img_cache_lock );
-                    el->img_loaded = TRUE;
+                    m->img_loaded = TRUE;
+                    InterlockedExchange( &m->img_loading, 0 );
                 }
                 return;
             }
             free( wctx );
-            InterlockedExchange( &el->img_loading, 0 );
+            InterlockedExchange( &m->img_loading, 0 );
         }
         ReleaseSRWLockExclusive( &g_http_img_cache_lock );
         return;
     }
 
-    el->img_loaded = TRUE;
+    m->img_loaded = TRUE;
 
     /* Check local ms-appx:// decoded image cache */
     local_key[0] = prefer_small ? L'S' : L'D';
@@ -870,9 +878,9 @@ void uwp_load_image_asset( struct uwp_element *el )
             le->lru_tick = ++g_local_img_lru_clock;
             if (le->found && le->pixels)
             {
-                el->img_pixels = le->pixels;
-                el->img_w = le->w;
-                el->img_h = le->h;
+                m->img_pixels = le->pixels;
+                m->img_w = le->w;
+                m->img_h = le->h;
                 ReleaseSRWLockShared( &g_local_img_cache_lock );
                 uwp_on_image_loaded( el );
                 return;
@@ -939,9 +947,9 @@ void uwp_load_image_asset( struct uwp_element *el )
                             if (SUCCEEDED(IWICFormatConverter_CopyPixels( conv, NULL, w * 4, w * h * 4, buf )))
                             {
                                 local_img_store( local_key, buf, w, h, TRUE );
-                                el->img_pixels = buf;
-                                el->img_w = w;
-                                el->img_h = h;
+                                m->img_pixels = buf;
+                                m->img_w = w;
+                                m->img_h = h;
                                 uwp_on_image_loaded( el );
                                 TRACE( "uwp_load_image_asset: loaded %s (%ux%u)\n", debugstr_w(candidate), w, h );
                             }
