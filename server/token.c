@@ -1176,7 +1176,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
 DECL_HANDLER(create_token)
 {
     struct token *token;
-    struct object_attributes *objattr;
+    struct object_params params;
     struct sid *user;
     struct sid_attrs *groups;
     struct luid_attr *privs;
@@ -1187,8 +1187,10 @@ DECL_HANDLER(create_token)
     unsigned int *attrs;
     struct sid *sid;
 
-    objattr = (struct object_attributes *)get_req_data();
-    user = (struct sid *)get_req_data_after_objattr( objattr, &data_size );
+    if (!get_req_object_attributes( &params )) return;
+    if (params.root) release_object( params.root );  /* unused */
+
+    user = (struct sid *)get_req_data_after_objattr( &params, &data_size );
 
     if (!user || !sid_valid_size( user, data_size ))
     {
@@ -1262,7 +1264,7 @@ DECL_HANDLER(create_token)
                           privs, req->priv_count, dacl, NULL, req->primary_group, req->impersonation_level, 0 );
     if (token)
     {
-        reply->token = alloc_handle( current->process, token, req->access, objattr->attributes );
+        reply->token = alloc_handle( current->process, token, req->access, params.attr );
         release_object( token );
     }
     free( default_dacl );
@@ -1383,25 +1385,24 @@ DECL_HANDLER(get_token_privileges)
 DECL_HANDLER(duplicate_token)
 {
     struct token *src_token;
-    struct unicode_str name;
-    const struct security_descriptor *sd;
-    const struct object_attributes *objattr = get_req_object_attributes( &sd, &name, NULL );
+    struct object_params params;
 
-    if (!objattr) return;
+    if (!get_req_object_attributes( &params )) return;
 
     if ((src_token = (struct token *)get_handle_obj( current->process, req->handle,
                                                      TOKEN_DUPLICATE,
                                                      &token_ops )))
     {
-        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, sd, NULL, 0, NULL, 0, 0 );
+        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, params.sd, NULL, 0, NULL, 0, 0 );
         if (token)
         {
             unsigned int access = req->access ? req->access : get_handle_access( current->process, req->handle );
-            reply->new_handle = alloc_handle_no_access_check( current->process, token, access, objattr->attributes );
+            reply->new_handle = alloc_handle_no_access_check( current->process, token, access, params.attr );
             release_object( token );
         }
         release_object( src_token );
     }
+    if (params.root) release_object( params.root );
 }
 
 /* creates a restricted version of a token */
@@ -1720,21 +1721,22 @@ DECL_HANDLER(set_token_integrity)
 
 DECL_HANDLER(create_lowbox_token)
 {
-    const struct object_attributes *objattr;
+    struct object_params params;
     const struct sid *appcontainer, *sid;
     const unsigned int *attrs;
     struct token *token, *new_token;
     unsigned int i, cap_count;
     data_size_t data_size;
 
-    if (!(objattr = get_req_object_attributes( NULL, NULL, NULL ))) return;
+    if (!get_req_object_attributes( &params )) return;
+    if (params.root) release_object( params.root );
 
     if (!(token = (struct token *)get_handle_obj( current->process, req->handle,
                                                   TOKEN_DUPLICATE, &token_ops )))
         return;
 
     /* request data layout: appcontainer sid, capability attrs, capability sids */
-    appcontainer = (const struct sid *)get_req_data_after_objattr( objattr, &data_size );
+    appcontainer = (const struct sid *)get_req_data_after_objattr( &params, &data_size );
     if (!appcontainer || !sid_valid_size( appcontainer, data_size ))
     {
         set_error( STATUS_INVALID_PARAMETER );
@@ -1784,7 +1786,7 @@ DECL_HANDLER(create_lowbox_token)
                 capability_add( new_token, sid, attrs[i] );
                 sid = (const struct sid *)((const char *)sid + sid_len( sid ));
             }
-            reply->token = alloc_handle( current->process, new_token, req->access, objattr->attributes );
+            reply->token = alloc_handle( current->process, new_token, req->access, params.attr );
         }
         release_object( new_token );
     }

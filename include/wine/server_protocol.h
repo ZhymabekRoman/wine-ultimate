@@ -3546,6 +3546,8 @@ struct create_window_request
     unsigned int   style;
     unsigned int   ex_style;
     unsigned int   ansi;
+    struct ratio   dpi;
+    struct ratio   raw_dpi;
     /* VARARG(class,unicode_str); */
 };
 struct create_window_reply
@@ -7620,6 +7622,6 @@ union generic_reply
     struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 978
+#define SERVER_PROTOCOL_VERSION 979
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

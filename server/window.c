@@ -819,7 +819,8 @@ void post_desktop_message( struct desktop *desktop, unsigned int message,
 
 /* create a new window structure (note: the window is not linked in the window tree) */
 static struct window *create_window( struct window *parent, struct window *owner, atom_t atom,
-                                     mod_handle_t class_instance, bool ansi )
+                                     mod_handle_t class_instance, bool ansi, struct ratio dpi,
+                                     struct ratio raw_dpi )
 {
     data_size_t extra_size, private_size;
     struct window *win = NULL;
@@ -894,10 +895,8 @@ static struct window *create_window( struct window *parent, struct window *owner
         shared->dpi_context     = NTUSER_DPI_PER_MONITOR_AWARE;
         shared->fnid            = fnid;
         shared->private_size    = private_size;
-        shared->dpi.num         = USER_DEFAULT_SCREEN_DPI;
-        shared->dpi.den         = 1;
-        shared->raw_dpi.num     = USER_DEFAULT_SCREEN_DPI;
-        shared->raw_dpi.den     = 1;
+        shared->dpi             = dpi;
+        shared->raw_dpi         = raw_dpi;
         shared->extra_size      = extra_size;
         memset( (void *)&shared->info, 0, sizeof(shared->info) );
         memset( (void *)shared->extra, 0, extra_size );
@@ -2465,11 +2464,11 @@ DECL_HANDLER(create_window)
                 owner = owner->parent;
     }
 
-    if (!atom) atom = find_atom( table, &cls_name );
+    if (!atom) atom = find_atom( table, cls_name );
 
     fprintf( stderr, "CWQ atom=%x cls_len=%u parent=%p -> handle_pre=%p\n",
              atom, (unsigned int)cls_name.len, (void *)(ULONG_PTR)req->parent, (void *)(ULONG_PTR)reply->handle );
-    if (!(win = create_window( parent, owner, atom, req->class_instance, !!req->ansi )))
+    if (!(win = create_window( parent, owner, atom, req->class_instance, !!req->ansi, req->dpi, req->raw_dpi )))
     {
         fprintf( stderr, "CWQ create_window FAILED atom=%x\n", atom );
         return;
@@ -2570,13 +2569,18 @@ DECL_HANDLER(destroy_window)
 /* retrieve the desktop window for the current thread */
 DECL_HANDLER(get_desktop_window)
 {
+    static const struct monitor_info default_info = { .dpi = { USER_DEFAULT_SCREEN_DPI, 1 }, .raw_dpi = { USER_DEFAULT_SCREEN_DPI, 1 } };
+    static const struct rectangle desktop_rect = { 0, 0, 1, 1 };
+    const struct monitor_info *info = NULL;
+
     struct desktop *desktop = get_thread_desktop( current, 0 );
 
     if (!desktop) return;
 
     if (!desktop->top_window && req->force)  /* create it */
     {
-        if ((desktop->top_window = create_window( NULL, NULL, DESKTOP_ATOM, 0, false )))
+        if (!(info = get_monitor_from_rect( desktop->winstation, &desktop_rect, false ))) info = &default_info;
+        if ((desktop->top_window = create_window( NULL, NULL, DESKTOP_ATOM, 0, false, info->dpi, info->raw_dpi )))
         {
             detach_window_thread( desktop->top_window );
             desktop->top_window->style  = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
@@ -2588,8 +2592,10 @@ DECL_HANDLER(get_desktop_window)
         static const WCHAR messageW[] = {'M','e','s','s','a','g','e'};
         static const struct unicode_str name = { messageW, sizeof(messageW) };
         struct atom_table *table = get_user_atom_table();
-        atom_t atom = add_atom( table, &name );
-        if (atom && (desktop->msg_window = create_window( NULL, NULL, atom, 0, false )))
+        atom_t atom = add_atom( table, name );
+
+        if (!info && !(info = get_monitor_from_rect( desktop->winstation, &desktop_rect, false ))) info = &default_info;
+        if (atom && (desktop->msg_window = create_window( NULL, NULL, atom, 0, false, info->dpi, info->raw_dpi )))
         {
             detach_window_thread( desktop->msg_window );
             desktop->msg_window->style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
@@ -2811,7 +2817,7 @@ DECL_HANDLER(get_class_windows)
     user_handle_t *data;
     unsigned int count = 0, max_count = get_reply_max_size() / sizeof(*data);
 
-    if (!atom && cls_name.len && !(atom = find_atom( table, &cls_name ))) return;
+    if (!atom && cls_name.len && !(atom = find_atom( table, cls_name ))) return;
     if (req->parent && !(parent = get_window( req->parent ))) return;
 
     if (req->child)
@@ -3410,7 +3416,7 @@ DECL_HANDLER(set_window_property)
 
     if (name.len)
     {
-        atom_t atom = add_atom( table, &name );
+        atom_t atom = add_atom( table, name );
         if (atom)
         {
             set_property( win, atom, req->data, PROP_TYPE_STRING );
@@ -3430,7 +3436,7 @@ DECL_HANDLER(remove_window_property)
 
     if (win)
     {
-        atom_t atom = name.len ? find_atom( table, &name ) : req->atom;
+        atom_t atom = name.len ? find_atom( table, name ) : req->atom;
         if (atom) reply->data = remove_property( win, atom );
     }
 }
@@ -3445,7 +3451,7 @@ DECL_HANDLER(get_window_property)
 
     if (win)
     {
-        atom_t atom = name.len ? find_atom( table, &name ) : req->atom;
+        atom_t atom = name.len ? find_atom( table, name ) : req->atom;
         if (atom) reply->data = get_property( win, atom );
     }
 }

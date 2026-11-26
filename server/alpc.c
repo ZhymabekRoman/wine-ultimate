@@ -2201,15 +2201,13 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
 DECL_HANDLER(create_alpc_port)
 {
     struct alpc_port *port;
-    struct unicode_str name;
-    struct object *root;
-    const struct security_descriptor *sd;
-    const struct object_attributes *objattr = get_req_object_attributes( &sd, &name, &root );
+    struct object_params params = { .ops = &alpc_port_ops };
 
-    if (!objattr) return;
+    if (!get_req_object_attributes( &params )) return;
 
-    port = create_named_object( root, &alpc_port_ops, &name, objattr->attributes | OBJ_OPENIF, sd );
-    if (root) release_object( root );
+    params.attr |= OBJ_OPENIF;
+    port = create_named_object( &params );
+    if (params.root) release_object( params.root );
     if (!port) return;
 
     if (get_error() != STATUS_OBJECT_NAME_EXISTS)
@@ -2248,7 +2246,7 @@ DECL_HANDLER(create_alpc_port)
         alpc_shm_alloc_slot( port );
     }
 
-    reply->handle = alloc_handle( current->process, port, req->access, objattr->attributes );
+    reply->handle = alloc_handle( current->process, port, req->access, params.objattr->attributes );
     if (reply->handle) alpc_shm_register_handle( current->process, reply->handle, port );
     release_object( port );
 }
@@ -2258,17 +2256,13 @@ DECL_HANDLER(connect_alpc_port)
     struct alpc_port *server_port;
     struct alpc_port *client_port;
     struct alpc_pending_conn *pc;
-    struct unicode_str name;
-    struct object *root;
-    const struct security_descriptor *sd;
-    const struct object_attributes *objattr = get_req_object_attributes( &sd, &name, &root );
+    struct object_params params = { .ops = &alpc_port_ops };
 
-    if (!objattr) return;
+    if (!get_req_object_attributes( &params )) return;
 
     /* Look up the named server port */
-    server_port = (struct alpc_port *)open_named_object(
-                        root, &alpc_port_ops, &name, objattr->attributes );
-    if (root) release_object( root );
+    server_port = (struct alpc_port *)open_named_object( &params );
+    if (params.root) release_object( params.root );
 
     if (!server_port) return; /* set_error already set by open_named_object */
 
@@ -2318,7 +2312,7 @@ DECL_HANDLER(connect_alpc_port)
      * attributes), which the server validates before accepting. */
     {
         data_size_t cdata_size;
-        const void *cdata = get_req_data_after_objattr( objattr, &cdata_size );
+        const void *cdata = get_req_data_after_objattr( &params, &cdata_size );
         if (cdata && cdata_size)
         {
             if ((pc->conn_data = malloc( cdata_size )))
