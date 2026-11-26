@@ -19,6 +19,7 @@
 
 #include "initguid.h"
 #include "private.h"
+#include "wine/exception.h"
 #include "uwp_guids.h"
 #include "uwp_abi_vtbls.h"
 
@@ -141,6 +142,34 @@ static const struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataVtbl property_m
     property_metadata_get_DefaultValue,
     property_metadata_get_CreateDefaultValueCallback,
 };
+
+static BOOL xaml_is_builtin_pm( const void *pm )
+{
+    BOOL ok = FALSE;
+    if (!pm || (ULONG_PTR)pm < 0x10000) return FALSE;
+    __TRY
+    {
+        ok = (*(const void *const *)pm == &property_metadata_vtbl);
+    }
+    __EXCEPT_ALL
+    {
+        ok = FALSE;
+    }
+    __ENDTRY;
+    return ok;
+}
+
+IPropertyChangedCallback *xaml_pm_get_callback( IPropertyMetadata *pm )
+{
+    if (!xaml_is_builtin_pm( pm )) return NULL;
+    return impl_from_IPropertyMetadata( pm )->callback;
+}
+
+IInspectable *xaml_pm_get_default_value( IPropertyMetadata *pm )
+{
+    if (!xaml_is_builtin_pm( pm )) return NULL;
+    return impl_from_IPropertyMetadata( pm )->default_value;
+}
 
 static HRESULT property_metadata_create( IInspectable *default_value, IPropertyChangedCallback *callback, IPropertyMetadata **out )
 {
@@ -480,6 +509,42 @@ static const struct __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyVtbl dep_prop
     dep_prop_GetTrustLevel,
     dep_prop_GetMetadata,
 };
+
+BOOL xaml_is_builtin_dp( const void *dp )
+{
+    BOOL ok = FALSE;
+    if (!dp || (ULONG_PTR)dp < 0x10000) return FALSE;
+    __TRY
+    {
+        ok = (*(const void *const *)dp == &dep_prop_vtbl);
+    }
+    __EXCEPT_ALL
+    {
+        ok = FALSE;
+    }
+    __ENDTRY;
+    return ok;
+}
+
+const WCHAR *xaml_dp_get_name( const void *dp )
+{
+    if (!xaml_is_builtin_dp( dp )) return L"";
+    return impl_from_IDependencyProperty( (IDependencyProperty *)dp )->name;
+}
+
+void xaml_dp_set_name( void *dp, const WCHAR *name )
+{
+    struct dependency_property *impl;
+    if (!xaml_is_builtin_dp( dp ) || !name) return;
+    impl = impl_from_IDependencyProperty( (IDependencyProperty *)dp );
+    lstrcpynW( impl->name, name, ARRAY_SIZE(impl->name) );
+}
+
+IPropertyMetadata *xaml_dp_get_metadata( const void *dp )
+{
+    if (!xaml_is_builtin_dp( dp )) return NULL;
+    return impl_from_IDependencyProperty( (IDependencyProperty *)dp )->metadata;
+}
 
 HRESULT dependency_property_create( IPropertyMetadata *metadata, IDependencyProperty **out )
 {

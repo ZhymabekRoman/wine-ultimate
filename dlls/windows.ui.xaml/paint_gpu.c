@@ -328,7 +328,7 @@ void uwp_resolve_and_load_image( struct uwp_element *el )
             }
         }
     }
-    if (!uwp_elem_image_src( el )[0] && wcscmp( uwp_elem_placeholder( el ), L"-no-img-" ) != 0)
+    if (!uwp_elem_image_src( el )[0] && !(el->probe_flags & UWP_PF_NO_IMG))
     {
         static const WCHAR *const img_props[] =
             { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"Source", L"IconUrl", L"IconUri",
@@ -376,7 +376,7 @@ void uwp_resolve_and_load_image( struct uwp_element *el )
             }
         }
         if (!uwp_elem_image_src( el )[0])
-            uwp_elem_set_placeholder( el, L"-no-img-" );
+            el->probe_flags |= UWP_PF_NO_IMG;
     }
     uwp_load_image_asset( el );
 }
@@ -817,7 +817,7 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
                 {
                     lstrcpynW( entries[entry_cnt].title, tbuf, ARRAY_SIZE(entries[0].title) );
                     entries[entry_cnt].sub[0] = 0;
-                    if (!uwp_elem_placeholder( cur )[0])
+                    if (!uwp_elem_placeholder( cur )[0] && !(cur->probe_flags & UWP_PF_NO_SPOTLIGHT_PH))
                     {
                         static const WCHAR *const spot_desc_props[] =
                             { L"Description", L"ShortDescription", L"Subtitle", L"Content", L"CardModel", L"Product", L"Data" };
@@ -834,9 +834,12 @@ static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *e
                             memcpy( ph_buf, nl + 1, slen * sizeof(WCHAR) );
                             ph_buf[slen] = 0;
                         }
-                        uwp_elem_set_placeholder( cur, ph_buf[0] ? ph_buf : L"-" );
+                        if (ph_buf[0])
+                            uwp_elem_set_placeholder( cur, ph_buf );
+                        else
+                            cur->probe_flags |= UWP_PF_NO_SPOTLIGHT_PH;
                     }
-                    if (wcscmp( uwp_elem_placeholder( cur ), L"-" ) != 0)
+                    if (uwp_elem_placeholder( cur )[0])
                         lstrcpynW( entries[entry_cnt].sub, uwp_elem_placeholder( cur ), ARRAY_SIZE(entries[0].sub) );
                     lstrcpynW( entries[entry_cnt].badge, entry_cnt == 0 ? L"FEATURED" : L"TRENDING", ARRAY_SIZE(entries[0].badge) );
                     if (uwp_elem_image_src( cur )[0]) uwp_load_image_asset( cur );
@@ -1158,7 +1161,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
     int fh;
 
     if (!label[0] && (!el->content || !uwp_elem_from_any( el->content )) &&
-        wcscmp( uwp_elem_placeholder( el ), L"-no-btn-lbl-" ) != 0 && wcscmp( uwp_elem_placeholder( el ), L"-no-btn-img-" ) != 0)
+        !(el->probe_flags & (UWP_PF_NO_BTN_LBL | UWP_PF_NO_BTN_IMG)))
     {
         IInspectable *vm = (el->content && !uwp_elem_from_any( el->content )) ? el->content : el->data_context;
         if (vm)
@@ -1205,7 +1208,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             }
             else
             {
-                uwp_elem_set_placeholder( el, L"-no-btn-lbl-" );
+                el->probe_flags |= UWP_PF_NO_BTN_LBL;
             }
             if (nested_vm) IInspectable_Release( nested_vm );
         }
@@ -1226,7 +1229,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         }
         if (in_items_host && (!el->content || !uwp_elem_from_any( el->content )))
         {
-            if (!uwp_elem_image_src( el )[0] && wcscmp( uwp_elem_placeholder( el ), L"-no-btn-img-" ) != 0)
+            if (!uwp_elem_image_src( el )[0] && !(el->probe_flags & UWP_PF_NO_BTN_IMG))
             {
                 static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"ScreenshotUrl", L"Image", L"Images", L"Source", L"IconUrl", L"BoxArtUrl", L"PosterUrl" };
                 WCHAR img_buf[512] = {0};
@@ -1237,7 +1240,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
                     if (m) lstrcpynW( m->image_src, img_buf, ARRAY_SIZE(m->image_src) );
                 }
                 else
-                    uwp_elem_set_placeholder( el, L"-no-btn-img-" );
+                    el->probe_flags |= UWP_PF_NO_BTN_IMG;
             }
             if (uwp_elem_image_src( el )[0])
                 uwp_load_image_asset( el );
@@ -1825,8 +1828,7 @@ static void paint_gpu_nav_item( ID3D11DeviceContext *ctx, struct uwp_element *el
             int di;
             for (di = 0; di < el->dp_cnt; di++)
             {
-                struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)el->dp_store[di].dp;
-                if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Icon" ) && el->dp_store[di].value)
+                if (!wcscmp( xaml_dp_get_name( el->dp_store[di].dp ), L"Icon" ) && el->dp_store[di].value)
                 {
                     struct uwp_element *iel = uwp_elem_from_any( el->dp_store[di].value );
                     if (uwp_has_text( iel ))
@@ -1968,7 +1970,7 @@ static BOOL is_clr_type_name( const WCHAR *s )
 static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     WCHAR label[128] = {0};
-    if (!wcscmp( uwp_elem_placeholder( el ), L"-" )) return;
+    if (el->probe_flags & UWP_PF_NO_VM) return;
     if (uwp_has_text( el ))
     {
         lstrcpynW( label, uwp_elem_text( el ), ARRAY_SIZE(label) );
@@ -2038,7 +2040,7 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
         if (label[0])
             uwp_elem_set_text( el, label );
         else
-            uwp_elem_set_placeholder( el, L"-" );
+            el->probe_flags |= UWP_PF_NO_VM;
     }
     if (label[0] && wcscmp( label, L"SettingsButtonName" ) != 0 && wcscmp( el->name, L"SettingsItem" ) != 0)
     {
@@ -2130,7 +2132,7 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
     BOOL needs_hydrate = !cur_txt[0] ||
         (incomplete && el->hovered_dropdown_idx < 4 &&
          (el->dropdown_scroll_offset == 0 || (int)(now_tick - (DWORD)el->dropdown_scroll_offset) >= 900));
-    if (needs_hydrate && wcscmp( uwp_elem_placeholder( el ), L"-no-card-" ) != 0)
+    if (needs_hydrate && !(el->probe_flags & UWP_PF_NO_CARD))
     {
         static const WCHAR *const title_props[] =
             { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
@@ -2220,7 +2222,7 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
         }
         else
         {
-            uwp_elem_set_placeholder( el, L"-no-card-" );
+            el->probe_flags |= UWP_PF_NO_CARD;
         }
         if (vm2) IInspectable_Release( vm2 );
         if (vm1) IInspectable_Release( vm1 );

@@ -340,7 +340,11 @@ static HRESULT WINAPI uwp_mfi_put_Text( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     const WCHAR *raw;
-    if ((ULONG_PTR)val < 0x10000) return S_OK;
+    if ((ULONG_PTR)val < 0x10000)
+    {
+        if (val) WARN( "uwp_mfi_put_Text: non-pointer val=%p (possible vtable slot mismatch)\n", val );
+        return S_OK;
+    }
     raw = WindowsGetStringRawBuffer( val, NULL );
     if (impl && raw) uwp_elem_set_text( impl, raw );
     return S_OK;
@@ -375,7 +379,11 @@ static HRESULT WINAPI uwp_mfi3_put_AccelText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     const WCHAR *raw;
-    if ((ULONG_PTR)val < 0x10000) return S_OK;
+    if ((ULONG_PTR)val < 0x10000)
+    {
+        if (val) WARN( "uwp_mfi3_put_AccelText: non-pointer val=%p (possible vtable slot mismatch)\n", val );
+        return S_OK;
+    }
     raw = WindowsGetStringRawBuffer( val, NULL );
     if (impl && raw) uwp_elem_set_accel_text( impl, raw );
     return S_OK;
@@ -1705,6 +1713,7 @@ static HRESULT WINAPI uwp_sv_put_Content( void *iface, void *val )
     if (impl->content) IInspectable_Release( impl->content );
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
+    impl->probe_flags = 0;
     if (ch) ch->parent = impl;
     g_layout_dirty = TRUE;
     uwp_invalidate_window();

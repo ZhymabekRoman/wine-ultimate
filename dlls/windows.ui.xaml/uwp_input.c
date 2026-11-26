@@ -328,9 +328,9 @@ void uwp_invoke_button( struct uwp_element *btn )
           btn->events ? (int)btn->events->ptr_released_reg.next_token : 0, btn->dp_cnt );
     for (i = 0; i < btn->dp_cnt; i++)
     {
-        struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dp_store[i].dp;
+        const WCHAR *dpn = xaml_dp_get_name( btn->dp_store[i].dp );
         WARN( "  dp[%d] name=%s val=%p\n", i,
-              (dpl && (ULONG_PTR)dpl >= 0x10000) ? debugstr_w(dpl->name) : "?", btn->dp_store[i].value );
+              dpn[0] ? debugstr_w(dpn) : "?", btn->dp_store[i].value );
     }
 
     /* 0. Toggle IsChecked on ToggleButton before firing Click/Command */

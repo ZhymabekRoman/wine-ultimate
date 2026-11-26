@@ -250,29 +250,13 @@ const GUID IID_IDependencyPropertyChangedCallback_UWP =
     { 0x49c85e2a, 0xf407, 0x48e8, { 0x84, 0x54, 0x3e, 0x3f, 0x98, 0x31, 0xe9, 0xb9 } };
 
 
-/* Access metadata callback on our IDependencyProperty (from main.c) */
-struct dp_internal_layout
-{
-    IDependencyProperty IDependencyProperty_iface;
-    LONG ref;
-    IPropertyMetadata *metadata;
-    WCHAR name[64];
-};
-struct pm_internal_layout
-{
-    IPropertyMetadata IPropertyMetadata_iface;
-    LONG ref;
-    IInspectable *default_value;
-    IPropertyChangedCallback *callback;
-};
-
 HRESULT xaml_dp_get_default_value( void *dp, IInspectable **out )
 {
-    struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+    IPropertyMetadata *meta = xaml_dp_get_metadata( dp );
     if (!out) return E_POINTER;
     *out = NULL;
-    if (dpl && dpl->metadata)
-        return IPropertyMetadata_get_DefaultValue( dpl->metadata, out );
+    if (meta)
+        return IPropertyMetadata_get_DefaultValue( meta, out );
     return S_OK;
 }
 
@@ -288,8 +272,8 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
         WARN( "TAP GetValue on %s (%s) dp=%p\n", debugstr_w(impl->class_name), debugstr_w(impl->name), dp );
 
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"DataContext" ))
+        const WCHAR *dpn = xaml_dp_get_name( dp );
+        if (dpn[0] && !wcscmp( dpn, L"DataContext" ))
         {
             struct uwp_element *cur;
             for (cur = impl; cur; cur = cur->parent)
@@ -302,19 +286,19 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
                 }
             }
         }
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Text" ) && uwp_has_text( impl ) &&
+        if (dpn[0] && !wcscmp( dpn, L"Text" ) && uwp_has_text( impl ) &&
             uwp_is_text_input( impl ))
         {
             *out = box_string_value( uwp_elem_text( impl ) );
             if (*out) return S_OK;
         }
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Flyout" ) && impl->flyout)
+        if (dpn[0] && !wcscmp( dpn, L"Flyout" ) && impl->flyout)
         {
             *out = impl->flyout;
             IInspectable_AddRef( *out );
             return S_OK;
         }
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"IsChecked" ))
+        if (dpn[0] && !wcscmp( dpn, L"IsChecked" ))
         {
             *out = box_bool_value( impl->is_checked == 1 ? TRUE : FALSE );
             if (*out) return S_OK;
@@ -336,11 +320,9 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
 
     /* Fall back to IPropertyMetadata::get_DefaultValue if DP has metadata */
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        if (dpl && dpl->metadata)
-        {
-            IPropertyMetadata_get_DefaultValue( dpl->metadata, out );
-        }
+        IPropertyMetadata *meta = xaml_dp_get_metadata( dp );
+        if (meta)
+            IPropertyMetadata_get_DefaultValue( meta, out );
     }
     return S_OK;
 }
@@ -483,8 +465,8 @@ static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *
             AcquireSRWLockShared( &rep->dp_lock );
             for (j = 0; j < rep->dp_cnt; j++)
             {
-                struct dp_internal_layout *rdpl = (struct dp_internal_layout *)rep->dp_store[j].dp;
-                if (rdpl && (ULONG_PTR)rdpl >= 0x10000 && !wcscmp( rdpl->name, repeater_forwards[k].target ))
+                const WCHAR *rdpn = xaml_dp_get_name( rep->dp_store[j].dp );
+                if (rdpn[0] && !wcscmp( rdpn, repeater_forwards[k].target ))
                 {
                     if (rep->dp_store[j].value != val)
                     {
@@ -577,9 +559,9 @@ void uwp_sync_all_template_presenters( struct uwp_element *impl )
     if (!impl) return;
     for (i = 0; i < impl->dp_cnt; i++)
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)impl->dp_store[i].dp;
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0])
-            uwp_sync_template_presenter( impl, dpl->name, impl->dp_store[i].value );
+        const WCHAR *dpn = xaml_dp_get_name( impl->dp_store[i].dp );
+        if (dpn[0])
+            uwp_sync_template_presenter( impl, dpn, impl->dp_store[i].value );
     }
 }
 
@@ -680,8 +662,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
     /* Check if val is a string (e.g. CalculationResult.DisplayValue or Content) */
     if (val)
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        const WCHAR *dpn = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
+        const WCHAR *dpn = xaml_dp_get_name( dp );
         if (uwp_should_sync_display_text( impl, dpn ))
         {
             WCHAR str_val[2048];
@@ -697,21 +678,15 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             }
         }
     }
-    {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"DataContext" ))
-            uwp_propagate_data_context( impl, val );
-    }
+    if (!wcscmp( xaml_dp_get_name( dp ), L"DataContext" ))
+        uwp_propagate_data_context( impl, val );
     if (uwp_is_tabview( impl ))
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
-        uwp_tabview_handle_dp( impl, dpname, val );
+        uwp_tabview_handle_dp( impl, xaml_dp_get_name( dp ), val );
     }
     else
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        const WCHAR *dpname = (dpl && (ULONG_PTR)dpl >= 0x10000) ? dpl->name : L"";
+        const WCHAR *dpname = xaml_dp_get_name( dp );
         if (dpname[0] && uwp_is_nav_view( impl ))
         {
             struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
@@ -937,14 +912,16 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 
     /* Fire PropertyMetadata PropertyChangedCallback if present */
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        if (dpl && dpl->name[0])
-            uwp_sync_template_presenter( impl, dpl->name, val );
-        if (dpl && !wcscmp( dpl->name, L"Style" ))
+        const WCHAR *dpn = xaml_dp_get_name( dp );
+        IPropertyMetadata *meta = xaml_dp_get_metadata( dp );
+        if (dpn[0])
+            uwp_sync_template_presenter( impl, dpn, val );
+        if (!wcscmp( dpn, L"Style" ))
             uwp_fe_put_Style( &impl->IInspectable_iface, val );
-        if (dpl && (!wcscmp( dpl->name, L"Source" ) || !wcscmp( dpl->name, L"UriSource" ) || !wcscmp( dpl->name, L"ImageSource" )))
+        if (!wcscmp( dpn, L"Source" ) || !wcscmp( dpn, L"UriSource" ) || !wcscmp( dpn, L"ImageSource" ))
         {
             struct uwp_media_ext *m = uwp_elem_ensure_media( impl );
+            impl->probe_flags &= ~UWP_PF_NO_IMG;
             if (m && m->img_source != val)
             {
                 if (m->img_source) IInspectable_Release( m->img_source );
@@ -968,6 +945,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                     if (impl->parent && impl->parent->kind == UWP_KIND_IMAGE)
                     {
                         struct uwp_media_ext *pm = uwp_elem_ensure_media( impl->parent );
+                        impl->parent->probe_flags &= ~UWP_PF_NO_IMG;
                         if (pm)
                         {
                             lstrcpynW( pm->image_src, resolved_src, ARRAY_SIZE(pm->image_src) );
@@ -986,25 +964,26 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 uwp_invalidate_window();
             }
         }
-        if (dpl && (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST))
+        if (xaml_is_builtin_dp( dp ) && (impl->class_flags & UWP_CF_RESP_ITEMS_REPEATER_LIST))
         {
             HSTRING hvc = NULL;
             if (val) IInspectable_GetRuntimeClassName( val, &hvc );
             WARN( "TileList_SetValue (%s) dp=%s val=%p (%s) cb=%p\n",
-                  debugstr_w(impl->name), debugstr_w(dpl->name), val,
+                  debugstr_w(impl->name), debugstr_w(dpn), val,
                   hvc ? debugstr_w(WindowsGetStringRawBuffer(hvc, NULL)) : "\"null\"",
-                  dpl->metadata ? ((struct pm_internal_layout *)dpl->metadata)->callback : NULL );
+                  xaml_pm_get_callback( meta ) );
             if (hvc) WindowsDeleteString( hvc );
         }
-        if (dpl && dpl->metadata)
+        if (meta)
         {
-            struct pm_internal_layout *pml = (struct pm_internal_layout *)dpl->metadata;
-            if (!old_val && pml->default_value)
+            IInspectable *def_val = xaml_pm_get_default_value( meta );
+            IPropertyChangedCallback *cb = xaml_pm_get_callback( meta );
+            if (!old_val && def_val)
             {
-                old_val = pml->default_value;
+                old_val = def_val;
                 IInspectable_AddRef( old_val );
             }
-            if (pml->callback && (old_val || val))
+            if (cb && (old_val || val))
             {
                 struct uwp_dp_changed_args *args = calloc( 1, sizeof(*args) );
                 if (args)
@@ -1019,19 +998,19 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                     args->new_val = val;
                     if (val) IInspectable_AddRef( val );
                     TRACE( "uwp_do_SetValue invoking PropertyChangedCallback=%p sender=%p (%s) dp=%p old=%p new=%p\n",
-                           pml->callback, sender, debugstr_w(impl->class_name), dp, old_val, val );
+                           cb, sender, debugstr_w(impl->class_name), dp, old_val, val );
                     {
                         HRESULT cb_hr = S_OK;
                         __TRY
                         {
-                            cb_hr = IPropertyChangedCallback_Invoke( pml->callback, (IDependencyObject *)sender,
+                            cb_hr = IPropertyChangedCallback_Invoke( cb, (IDependencyObject *)sender,
                                                                      (IDependencyPropertyChangedEventArgs *)args );
                         }
                         __EXCEPT_ALL { cb_hr = E_FAIL; }
                         __ENDTRY;
                         if (FAILED(cb_hr))
                             WARN( "uwp_do_SetValue PropertyChangedCallback=%p sender=%p (%s) dp=%p -> FAILED hr %#lx\n",
-                                  pml->callback, sender, debugstr_w(impl->class_name), dp, cb_hr );
+                                  cb, sender, debugstr_w(impl->class_name), dp, cb_hr );
                     }
                     {
                         IInspectable *nv = NULL;
@@ -1099,25 +1078,31 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             struct uwp_element *rep;
             impl->last_measured_w = 0.0f;
             impl->last_measured_h = 0.0f;
-            uwp_elem_set_placeholder( impl, NULL );
+            impl->probe_flags = 0;
             rep = uwp_find_named_descendant( impl, L"Repeater", 0 );
             if (rep && rep != impl && !rep->in_measure_arrange)
             {
                 rep->last_measured_w = 0.0f;
                 rep->last_measured_h = 0.0f;
-                uwp_elem_set_placeholder( rep, NULL );
+                rep->probe_flags = 0;
             }
             uwp_invalidate_window();
         }
     }
     else
     {
-        struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0] &&
-            (!wcscmp( dpl->name, L"ItemsSource" ) || !wcscmp( dpl->name, L"Content" ) ||
-             !wcscmp( dpl->name, L"Text" ) || !wcscmp( dpl->name, L"Visibility" )))
+        const WCHAR *dpn = xaml_dp_get_name( dp );
+        if (dpn[0] &&
+            (!wcscmp( dpn, L"ItemsSource" ) || !wcscmp( dpn, L"Content" ) ||
+             !wcscmp( dpn, L"DataContext" ) ||
+             !wcscmp( dpn, L"Text" ) || !wcscmp( dpn, L"Visibility" )))
         {
-            if (!wcscmp( dpl->name, L"ItemsSource" ) && val)
+            if (!wcscmp( dpn, L"Content" ) || !wcscmp( dpn, L"DataContext" ))
+            {
+                impl->probe_flags = 0;
+                if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
+            }
+            if (!wcscmp( dpn, L"ItemsSource" ) && val)
                 uwp_items_ctrl_materialize_source( impl, val );
             uwp_invalidate_window();
         }
@@ -1131,19 +1116,19 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    struct dp_internal_layout *dpl = (struct dp_internal_layout *)dp;
+    const WCHAR *dpn = xaml_dp_get_name( dp );
     IInspectable *old_val = NULL;
     void *old_dp = NULL;
     int i;
     if (!impl || !dp) return S_OK;
-    if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0])
+    if (dpn[0])
     {
-        if (!wcscmp( dpl->name, L"IsSelected" ) || !wcscmp( dpl->name, L"IsChecked" ))
+        if (!wcscmp( dpn, L"IsSelected" ) || !wcscmp( dpn, L"IsChecked" ))
         {
             impl->is_checked = 0;
             uwp_invalidate_window();
         }
-        else if (!wcscmp( dpl->name, L"SelectedItem" ) && uwp_is_nav_view( impl ))
+        else if (!wcscmp( dpn, L"SelectedItem" ) && uwp_is_nav_view( impl ))
         {
             if (impl->nav) uwp_replace_iface( &impl->nav->selected_item, NULL );
             uwp_invalidate_window();

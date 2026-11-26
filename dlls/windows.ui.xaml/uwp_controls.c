@@ -91,6 +91,8 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     }
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
+    impl->probe_flags = 0;
+    if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
 
     if (!val)
     {
@@ -240,10 +242,9 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
         /* 1. Update any TwoWay binding on IsChecked / IsSelected */
         for (i = 0; i < btn->dc_bound_dp_cnt; i++)
         {
-            struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dc_bound_dps[i].dp;
+            const WCHAR *dpn = xaml_dp_get_name( btn->dc_bound_dps[i].dp );
             struct uwp_element *bel = btn->dc_bound_dps[i].binding;
-            if (dpl && (ULONG_PTR)dpl >= 0x10000 &&
-                (!wcscmp( dpl->name, L"IsChecked" ) || !wcscmp( dpl->name, L"IsSelected" )))
+            if (!wcscmp( dpn, L"IsChecked" ) || !wcscmp( dpn, L"IsSelected" ))
             {
                 IInspectable *src = (bel && bel->data_context) ? bel->data_context : btn->data_context;
                 HSTRING h_path = NULL;
@@ -272,9 +273,9 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
             AcquireSRWLockShared( &btn->dp_lock );
             for (i = 0; i < btn->dp_cb_cnt && cb_cnt < (int)ARRAY_SIZE(cbs); i++)
             {
-                struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dp_cbs[i].dp;
-                if (btn->dp_cbs[i].callback && dpl && (ULONG_PTR)dpl >= 0x10000 &&
-                    (!wcscmp( dpl->name, L"IsChecked" ) || !wcscmp( dpl->name, L"IsSelected" )))
+                const WCHAR *dpn = xaml_dp_get_name( btn->dp_cbs[i].dp );
+                if (btn->dp_cbs[i].callback &&
+                    (!wcscmp( dpn, L"IsChecked" ) || !wcscmp( dpn, L"IsSelected" )))
                 {
                     cbs[cb_cnt] = (struct xaml_event_handler *)btn->dp_cbs[i].callback;
                     cb_dps[cb_cnt] = btn->dp_cbs[i].dp;
@@ -789,6 +790,8 @@ static HRESULT WINAPI uwp_popup_put_Child( void *iface, void *val )
     }
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
+    impl->probe_flags = 0;
+    if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
     ch = uwp_elem_from_any( val );
     if (ch)
     {

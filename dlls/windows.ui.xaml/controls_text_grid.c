@@ -304,6 +304,7 @@ static HRESULT WINAPI uwp_binding_put_Source( void *iface, IInspectable *val )
         if (impl->data_context) IInspectable_Release( impl->data_context );
         impl->data_context = val;
         if (val) IInspectable_AddRef( val );
+        impl->probe_flags = 0;
     }
     return S_OK;
 }

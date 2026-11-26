@@ -155,6 +155,13 @@ struct xaml_app_caps
     WCHAR design_component[128]; /* Design-time panel registered in the app provider, empty = none */
 };
 
+BOOL xaml_is_builtin_dp( const void *dp );
+const WCHAR *xaml_dp_get_name( const void *dp );
+void xaml_dp_set_name( void *dp, const WCHAR *name );
+IPropertyMetadata *xaml_dp_get_metadata( const void *dp );
+IPropertyChangedCallback *xaml_pm_get_callback( IPropertyMetadata *pm );
+IInspectable *xaml_pm_get_default_value( IPropertyMetadata *pm );
+
 const struct xaml_app_caps *xaml_get_app_caps( void );
 HRESULT xaml_metadata_cache_get_type_hstring( HSTRING full_name, void **out );
 struct uwp_element;

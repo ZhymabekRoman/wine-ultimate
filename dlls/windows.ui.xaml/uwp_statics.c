@@ -80,31 +80,6 @@ static const GUID IID_IElementCompositionPreviewStatics_WinUI3_v2 =
     { 0x84da5a6c, 0x0cfa, 0x532b, { 0x9b, 0x15, 0xcc, 0xd9, 0x86, 0x37, 0x43, 0x42 } };
 
 static __x_ABI_CWindows_CUI_CComposition_CICompositor *g_ecp_compositor = NULL;
-static HRESULT (WINAPI *g_orig_visual_co4_slot6)( void *iface, HSTRING prop, void **out ) = NULL;
-
-struct ecp_comp5_stub_hdr
-{
-    const void *vtbl;
-    const void *co4_vtbl;
-    LONG ref;
-    const WCHAR *class_name;
-};
-
-static HRESULT WINAPI ecp_visual_co4_slot6_shim( void *iface, void *a1, void **a2 )
-{
-    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
-    if (!g_orig_visual_co4_slot6) return E_NOTIMPL;
-    if (tib && a1 >= tib->StackLimit && a1 < tib->StackBase && *(void **)a1 == NULL)
-    {
-        void *stub = NULL;
-        HRESULT hr = g_orig_visual_co4_slot6( iface, NULL, &stub );
-        if (SUCCEEDED(hr) && stub)
-            ((struct ecp_comp5_stub_hdr *)stub)->class_name = L"Windows.UI.Composition.CompositionShapeCollection";
-        *(void **)a1 = stub;
-        return hr;
-    }
-    return g_orig_visual_co4_slot6( iface, (HSTRING)a1, a2 );
-}
 
 static __x_ABI_CWindows_CUI_CComposition_CICompositor *ecp_get_compositor( void )
 {
@@ -125,30 +100,6 @@ static __x_ABI_CWindows_CUI_CComposition_CICompositor *ecp_get_compositor( void 
                 IActivationFactory_Release( af );
             }
             WindowsDeleteString( cls );
-        }
-        if (g_ecp_compositor && !g_orig_visual_co4_slot6)
-        {
-            static const GUID IID_IShapeVisual_co4 =
-                { 0xf2bd13c3, 0xba7e, 0x4b0f, { 0x91, 0x26, 0xff, 0xb7, 0x53, 0x6b, 0x81, 0x76 } };
-            __x_ABI_CWindows_CUI_CComposition_CIContainerVisual *cv = NULL;
-            if (SUCCEEDED(__x_ABI_CWindows_CUI_CComposition_CICompositor_CreateContainerVisual( g_ecp_compositor, &cv )) && cv)
-            {
-                void *co4 = NULL;
-                if (SUCCEEDED(__x_ABI_CWindows_CUI_CComposition_CIContainerVisual_QueryInterface( cv, &IID_IShapeVisual_co4, &co4 )) && co4)
-                {
-                    void **vtbl = *(void ***)co4;
-                    DWORD old_prot = 0;
-                    if (vtbl && vtbl[6] && vtbl[6] != (void *)ecp_visual_co4_slot6_shim &&
-                        VirtualProtect( &vtbl[6], sizeof(void *), PAGE_READWRITE, &old_prot ))
-                    {
-                        g_orig_visual_co4_slot6 = (void *)vtbl[6];
-                        vtbl[6] = (void *)ecp_visual_co4_slot6_shim;
-                        VirtualProtect( &vtbl[6], sizeof(void *), old_prot, &old_prot );
-                    }
-                    IUnknown_Release( (IUnknown *)co4 );
-                }
-                __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_Release( cv );
-            }
         }
     }
     return g_ecp_compositor;
@@ -888,13 +839,21 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
 
 static HRESULT WINAPI uwp_cf_dp_prop( void *iface, void **out )
 {
-    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (!out || (ULONG_PTR)out < 0x10000)
+    {
+        if (out) WARN( "uwp_cf_dp_prop: non-pointer out=%p (possible vtable slot mismatch)\n", out );
+        return S_OK;
+    }
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
 
 static HRESULT uwp_cf_routed_event_slot( IDependencyProperty **slot, void **out )
 {
-    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (!out || (ULONG_PTR)out < 0x10000)
+    {
+        if (out) WARN( "uwp_cf_routed_event_slot: non-pointer out=%p (possible vtable slot mismatch)\n", out );
+        return S_OK;
+    }
     if (!*slot)
         uwp_element_create( L"Windows.UI.Xaml.RoutedEvent", NULL, NULL, (void **)slot );
     *out = *slot;
@@ -907,7 +866,11 @@ static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
     const WCHAR *dp_name = NULL;
     HRESULT hr;
-    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (!out || (ULONG_PTR)out < 0x10000)
+    {
+        if (out) WARN( "uwp_cf_dp_prop_slot6: non-pointer out=%p (possible vtable slot mismatch)\n", out );
+        return S_OK;
+    }
     if (f)
     {
         if (f->factory_flags & UWP_FF_UIELEMENT)
@@ -919,10 +882,7 @@ static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
     }
     hr = dependency_property_create( NULL, (IDependencyProperty **)out );
     if (SUCCEEDED(hr) && *out && dp_name)
-    {
-        struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = *out;
-        lstrcpynW( dpl->name, dp_name, ARRAY_SIZE(dpl->name) );
-    }
+        xaml_dp_set_name( *out, dp_name );
     return hr;
 }
 
@@ -1031,7 +991,11 @@ static HRESULT WINAPI uwp_cf_dp_prop_slot9( void *iface, void **out )
         if (*out) IUnknown_AddRef( (IUnknown *)*out );
         return S_OK;
     }
-    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (!out || (ULONG_PTR)out < 0x10000)
+    {
+        if (out) WARN( "uwp_cf_dp_prop_slot16: non-pointer out=%p (possible vtable slot mismatch)\n", out );
+        return S_OK;
+    }
     return dependency_property_create( NULL, (IDependencyProperty **)out );
 }
 

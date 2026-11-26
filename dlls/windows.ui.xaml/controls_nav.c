@@ -125,8 +125,7 @@ void uwp_nav_set_pane_open( struct uwp_element *nav, BOOL open )
     AcquireSRWLockShared( &nav->dp_lock );
     for (i = 0; i < nav->dp_cnt; i++)
     {
-        struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)nav->dp_store[i].dp;
-        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"IsPaneOpen" ))
+        if (!wcscmp( xaml_dp_get_name( nav->dp_store[i].dp ), L"IsPaneOpen" ))
         {
             is_open_dp = nav->dp_store[i].dp;
             IUnknown_AddRef( (IUnknown *)is_open_dp );
@@ -358,7 +357,11 @@ static HRESULT WINAPI uwp_flyout_put_Text( void *iface, HSTRING val )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
     const WCHAR *raw;
-    if ((ULONG_PTR)val < 0x10000) return S_OK;
+    if ((ULONG_PTR)val < 0x10000)
+    {
+        if (val) WARN( "uwp_flyout_put_Text: non-pointer val=%p (possible vtable slot mismatch)\n", val );
+        return S_OK;
+    }
     raw = WindowsGetStringRawBuffer( val, NULL );
     if (impl && raw)
         uwp_elem_set_text( impl, raw );
@@ -1243,9 +1246,9 @@ void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspe
         AcquireSRWLockExclusive( &impl->dp_lock );
         for (i = 0; i < impl->dp_cnt; i++)
         {
-            struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)impl->dp_store[i].dp;
-            if (!dpl || (ULONG_PTR)dpl < 0x10000) continue;
-            if (!wcscmp( dpl->name, L"SelectedItem" ))
+            const WCHAR *dpn = xaml_dp_get_name( impl->dp_store[i].dp );
+            if (!dpn[0]) continue;
+            if (!wcscmp( dpn, L"SelectedItem" ))
             {
                 if (impl->dp_store[i].value != nav->selected_item)
                 {
@@ -1254,7 +1257,7 @@ void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspe
                     if (impl->dp_store[i].value) IInspectable_AddRef( impl->dp_store[i].value );
                 }
             }
-            else if (!wcscmp( dpl->name, L"SelectedIndex" ))
+            else if (!wcscmp( dpn, L"SelectedIndex" ))
             {
                 IInspectable *bi = box_int32_value( nav->selected_index );
                 if (bi)
@@ -1538,6 +1541,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                 bel->parent = impl;
                 bel->data_context = (IInspectable *)item;
                 IInspectable_AddRef( bel->data_context );
+                bel->probe_flags = 0;
                 if (!(impl->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)))
                 {
                     bel->width = (impl->min_width > 44.0) ? impl->min_width : 44.0;

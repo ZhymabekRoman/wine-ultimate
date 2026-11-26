@@ -650,6 +650,7 @@ struct uwp_element
     struct uwp_nav_ext *nav;
     struct uwp_style_anim_ext *style_anim;
     int conn_id;
+    UINT16 probe_flags;          /* UWP_PF_* negative-probe cache bits (cleared on DataContext/Content change) */
     struct uwp_element *parent;
     struct uwp_element *owner_component;
     IInspectable *content;       /* ContentControl/UserControl/Page/Border/ScrollViewer child */
@@ -1124,6 +1125,13 @@ static inline void uwp_elem_set_default_style_key_name( struct uwp_element *el, 
 {
     if (el) uwp_elem_set_cold_str( &el->default_style_key_name, s, 128 );
 }
+
+#define UWP_PF_NO_IMG           0x0001u
+#define UWP_PF_NO_BTN_LBL       0x0002u
+#define UWP_PF_NO_BTN_IMG       0x0004u
+#define UWP_PF_NO_CARD          0x0008u
+#define UWP_PF_NO_VM            0x0010u
+#define UWP_PF_NO_SPOTLIGHT_PH  0x0020u
 
 static inline const WCHAR *uwp_elem_placeholder( const struct uwp_element *el )
 {

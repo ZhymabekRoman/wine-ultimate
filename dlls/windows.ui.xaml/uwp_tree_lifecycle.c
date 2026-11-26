@@ -51,6 +51,8 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
         if (impl->data_context) IInspectable_Release( impl->data_context );
         impl->data_context = dc;
         if (dc) IInspectable_AddRef( dc );
+        impl->probe_flags = 0;
+        if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
     }
     if (uwp_is_card( impl ))
     {
