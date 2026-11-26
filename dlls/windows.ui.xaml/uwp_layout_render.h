@@ -366,6 +366,7 @@ BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_route
 BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int wheel_delta, int width, int height, IInspectable *root_content );
 /* Routed/pointer args helpers (uwp_xaml.c). */
 void *g_routed_args( void );
+void *g_routed_args_for( struct uwp_element *el );
 struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const struct xaml_pointer_info *info,
                                                                 IInspectable *orig_source );
 ULONG WINAPI pra_Release( void *iface );

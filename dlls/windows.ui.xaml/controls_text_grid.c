@@ -455,6 +455,11 @@ BOOL uwp_popup_handle_escape( void )
         uwp_close_flyout_popup( TRUE );
         return TRUE;
     }
+    if (g_open_combobox && g_open_combobox->is_dropdown_open)
+    {
+        uwp_combobox_set_open( g_open_combobox, FALSE );
+        return TRUE;
+    }
     {
         struct uwp_element *pops[16];
         int pcnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) );

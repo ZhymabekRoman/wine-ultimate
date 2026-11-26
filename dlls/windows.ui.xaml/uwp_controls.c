@@ -56,15 +56,6 @@ static HRESULT WINAPI uwp_cc_get_Content( void *iface, void **out )
                 return S_OK;
             }
         }
-        if (uwp_has_text( impl ) && !uwp_elem_from_any( impl->content ))
-        {
-            WCHAR ub[8] = {0};
-            if (!uwp_unbox_string( impl->content, ub, ARRAY_SIZE(ub) ))
-            {
-                *out = box_string_value( uwp_elem_text( impl ) );
-                return S_OK;
-            }
-        }
         *out = impl->content;
         IInspectable_AddRef( (IInspectable *)*out );
     }
@@ -303,7 +294,7 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
             for (k = 0; k < count; k++)
             {
                 struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[k];
-                IInspectable *args = (IInspectable *)g_routed_args();
+                IInspectable *args = (IInspectable *)g_routed_args_for( btn );
                 __TRY { h->lpVtbl->Invoke( h, sender, args ); }
                 __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
                 __ENDTRY;

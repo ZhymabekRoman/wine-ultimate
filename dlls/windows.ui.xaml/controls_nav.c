@@ -395,6 +395,11 @@ static HRESULT WINAPI uwp_flyout_slot6( void *iface, void **out )
                 IInspectable_AddRef( target_el->flyout );
             }
             if (!impl->parent) impl->parent = target_el;
+            if (UWP_EV_CNT( impl, flyout_opening_reg ) > 0)
+            {
+                IInspectable *sender = impl->outer ? impl->outer : &impl->IFlyout_iface;
+                uwp_fire_event_registry( &impl->events->flyout_opening_reg, sender, NULL, "Flyout::Opening" );
+            }
             g_popup_owner_el = target_el;
             uwp_invalidate_window();
             return S_OK;
@@ -1076,7 +1081,7 @@ void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WC
     if (uwp_unbox_string( item, buf, buf_len ) && buf[0])
         return;
     {
-        static const WCHAR *const cb_props[] = { L"DisplayName", L"Name", L"Title", L"Label", L"Text", L"Content" };
+        static const WCHAR *const cb_props[] = { L"DisplayName", L"Name", L"Title", L"Header", L"Label", L"Text", L"Content" };
         if (uwp_vm_query_string_prop( item, cb_props, ARRAY_SIZE(cb_props), buf, buf_len ) && buf[0])
             return;
     }
@@ -1185,26 +1190,32 @@ void uwp_combobox_set_open( struct uwp_element *cb, BOOL open )
 
 void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspectable *new_item, BOOL by_index, BOOL fire_event )
 {
+    static struct uwp_element *sel_sync_stack[16];
+    static int sel_sync_depth = 0;
     IInspectable *items[256];
-    int count, i;
+    int count, i, si;
     INT32 resolved_idx = -1;
     IInspectable *resolved_item = NULL;
     IInspectable *old_item = NULL;
     BOOL changed;
-
     struct uwp_nav_ext *nav;
 
     if (!impl) return;
+    for (si = 0; si < sel_sync_depth; si++)
+        if (sel_sync_stack[si] == impl) return;
     nav = uwp_elem_ensure_nav( impl );
     if (!nav) return;
+    if (sel_sync_depth < (int)ARRAY_SIZE(sel_sync_stack))
+        sel_sync_stack[sel_sync_depth++] = impl;
     count = uwp_selector_get_items( impl, items, ARRAY_SIZE(items) );
 
     if (by_index)
     {
         if (new_idx >= 0 && new_idx < count)
         {
+            struct uwp_element *iel = uwp_elem_from_any( items[new_idx] );
             resolved_idx = new_idx;
-            resolved_item = items[new_idx];
+            resolved_item = (new_item && iel && iel->data_context == new_item) ? new_item : items[new_idx];
         }
         else
         {
@@ -1219,7 +1230,9 @@ void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspe
         {
             for (i = 0; i < count; i++)
             {
-                if (uwp_items_equal( items[i], new_item ))
+                struct uwp_element *iel = uwp_elem_from_any( items[i] );
+                if (uwp_items_equal( items[i], new_item ) ||
+                    (iel && iel->data_context && uwp_items_equal( iel->data_context, new_item )))
                 {
                     resolved_idx = i;
                     break;
@@ -1240,34 +1253,139 @@ void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspe
         if (nav->selected_item) IInspectable_AddRef( nav->selected_item );
     }
 
-    /* Keep any stored SelectedIndex / SelectedItem DP entries synchronized */
-    if (impl->dp_cnt > 0 && impl->dp_store)
+    /* Synchronize SelectedItem / SelectedIndex DPs through SetValue when changed
+     * so PropertyChangedCallback (e.g. WinUI RadioButtons) and x:Bind TwoWay
+     * RegisterPropertyChangedCallback fire; also push TwoWay classic bindings. */
+    if (changed)
     {
-        AcquireSRWLockExclusive( &impl->dp_lock );
+        void *item_dps[8], *idx_dps[8];
+        int item_dp_cnt = 0, idx_dp_cnt = 0, k;
+
+        AcquireSRWLockShared( &impl->dp_lock );
         for (i = 0; i < impl->dp_cnt; i++)
         {
             const WCHAR *dpn = xaml_dp_get_name( impl->dp_store[i].dp );
             if (!dpn[0]) continue;
-            if (!wcscmp( dpn, L"SelectedItem" ))
+            if (!wcscmp( dpn, L"SelectedItem" ) && item_dp_cnt < (int)ARRAY_SIZE(item_dps))
             {
-                if (impl->dp_store[i].value != nav->selected_item)
-                {
-                    if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
-                    impl->dp_store[i].value = nav->selected_item;
-                    if (impl->dp_store[i].value) IInspectable_AddRef( impl->dp_store[i].value );
-                }
+                for (k = 0; k < item_dp_cnt; k++) if (item_dps[k] == impl->dp_store[i].dp) break;
+                if (k == item_dp_cnt) item_dps[item_dp_cnt++] = impl->dp_store[i].dp;
             }
-            else if (!wcscmp( dpn, L"SelectedIndex" ))
+            else if (!wcscmp( dpn, L"SelectedIndex" ) && idx_dp_cnt < (int)ARRAY_SIZE(idx_dps))
+            {
+                for (k = 0; k < idx_dp_cnt; k++) if (idx_dps[k] == impl->dp_store[i].dp) break;
+                if (k == idx_dp_cnt) idx_dps[idx_dp_cnt++] = impl->dp_store[i].dp;
+            }
+        }
+        for (i = 0; i < impl->dp_cb_cnt; i++)
+        {
+            const WCHAR *dpn = xaml_dp_get_name( impl->dp_cbs[i].dp );
+            if (!dpn[0]) continue;
+            if (!wcscmp( dpn, L"SelectedItem" ) && item_dp_cnt < (int)ARRAY_SIZE(item_dps))
+            {
+                for (k = 0; k < item_dp_cnt; k++) if (item_dps[k] == impl->dp_cbs[i].dp) break;
+                if (k == item_dp_cnt) item_dps[item_dp_cnt++] = impl->dp_cbs[i].dp;
+            }
+            else if (!wcscmp( dpn, L"SelectedIndex" ) && idx_dp_cnt < (int)ARRAY_SIZE(idx_dps))
+            {
+                for (k = 0; k < idx_dp_cnt; k++) if (idx_dps[k] == impl->dp_cbs[i].dp) break;
+                if (k == idx_dp_cnt) idx_dps[idx_dp_cnt++] = impl->dp_cbs[i].dp;
+            }
+        }
+        for (i = 0; i < item_dp_cnt; i++)
+            if ((ULONG_PTR)item_dps[i] >= 0x10000) IUnknown_AddRef( (IUnknown *)item_dps[i] );
+        for (i = 0; i < idx_dp_cnt; i++)
+            if ((ULONG_PTR)idx_dps[i] >= 0x10000) IUnknown_AddRef( (IUnknown *)idx_dps[i] );
+        ReleaseSRWLockShared( &impl->dp_lock );
+
+        if (fire_event)
+        {
+            for (i = 0; i < idx_dp_cnt; i++)
             {
                 IInspectable *bi = box_int32_value( nav->selected_index );
                 if (bi)
                 {
-                    if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
-                    impl->dp_store[i].value = bi;
+                    uwp_do_SetValue( &impl->IDependencyObject_iface, idx_dps[i], bi );
+                    IInspectable_Release( bi );
+                }
+            }
+            for (i = 0; i < item_dp_cnt; i++)
+                uwp_do_SetValue( &impl->IDependencyObject_iface, item_dps[i], nav->selected_item );
+
+            /* Update any TwoWay classic binding on SelectedItem / SelectedIndex */
+            for (i = 0; i < impl->dc_bound_dp_cnt; i++)
+            {
+                const WCHAR *dpn = xaml_dp_get_name( impl->dc_bound_dps[i].dp );
+                struct uwp_element *bel = impl->dc_bound_dps[i].binding;
+                if (!wcscmp( dpn, L"SelectedItem" ) || !wcscmp( dpn, L"SelectedIndex" ))
+                {
+                    IInspectable *src = (bel && bel->data_context) ? bel->data_context : impl->data_context;
+                    HSTRING h_path = NULL;
+                    const WCHAR *path_str = NULL;
+                    if (bel && bel->tag)
+                    {
+                        void *pp = NULL;
+                        if (SUCCEEDED(IInspectable_QueryInterface( bel->tag, &IID_IPropertyPath_UWP, &pp )) && pp)
+                        {
+                            const struct abi_property_path *app = (const struct abi_property_path *)pp;
+                            if (app->lpVtbl->get_Path && SUCCEEDED(app->lpVtbl->get_Path( pp, &h_path )) && h_path)
+                                path_str = WindowsGetStringRawBuffer( h_path, NULL );
+                            IUnknown_Release( (IUnknown *)pp );
+                        }
+                    }
+                    if ((!path_str || !path_str[0]) && uwp_has_text( bel ))
+                        path_str = uwp_elem_text( bel );
+                    if (src && path_str && path_str[0])
+                    {
+                        if (!wcscmp( dpn, L"SelectedItem" ))
+                            uwp_update_binding_source( src, path_str, nav->selected_item );
+                        else
+                        {
+                            IInspectable *bi = box_int32_value( nav->selected_index );
+                            if (bi)
+                            {
+                                uwp_update_binding_source( src, path_str, bi );
+                                IInspectable_Release( bi );
+                            }
+                        }
+                    }
+                    if (h_path) WindowsDeleteString( h_path );
                 }
             }
         }
-        ReleaseSRWLockExclusive( &impl->dp_lock );
+        else if (impl->dp_cnt > 0 && impl->dp_store)
+        {
+            AcquireSRWLockExclusive( &impl->dp_lock );
+            for (i = 0; i < impl->dp_cnt; i++)
+            {
+                const WCHAR *dpn = xaml_dp_get_name( impl->dp_store[i].dp );
+                if (!dpn[0]) continue;
+                if (!wcscmp( dpn, L"SelectedItem" ))
+                {
+                    if (impl->dp_store[i].value != nav->selected_item)
+                    {
+                        if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
+                        impl->dp_store[i].value = nav->selected_item;
+                        if (impl->dp_store[i].value) IInspectable_AddRef( impl->dp_store[i].value );
+                    }
+                }
+                else if (!wcscmp( dpn, L"SelectedIndex" ))
+                {
+                    IInspectable *bi = box_int32_value( nav->selected_index );
+                    if (bi)
+                    {
+                        if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
+                        impl->dp_store[i].value = bi;
+                    }
+                }
+            }
+            ReleaseSRWLockExclusive( &impl->dp_lock );
+        }
+
+        for (i = 0; i < item_dp_cnt; i++)
+            if ((ULONG_PTR)item_dps[i] >= 0x10000) IUnknown_Release( (IUnknown *)item_dps[i] );
+        for (i = 0; i < idx_dp_cnt; i++)
+            if ((ULONG_PTR)idx_dps[i] >= 0x10000) IUnknown_Release( (IUnknown *)idx_dps[i] );
     }
 
     TRACE( "uwp_selector_set_selection(%s): idx=%d item=%p changed=%d fire=%d count=%d\n",
@@ -1295,6 +1413,15 @@ void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspe
             }
             if (args) uwp_sel_args_Release( &args->IInspectable_iface );
             free( handlers );
+        }
+    }
+
+    for (si = sel_sync_depth - 1; si >= 0; si--)
+    {
+        if (sel_sync_stack[si] == impl)
+        {
+            sel_sync_stack[si] = sel_sync_stack[--sel_sync_depth];
+            break;
         }
     }
 

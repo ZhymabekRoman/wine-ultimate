@@ -411,7 +411,34 @@ static HRESULT WINAPI uwp_tmfi_get_IsChecked( void *iface, boolean *out )
 static HRESULT WINAPI uwp_tmfi_put_IsChecked( void *iface, boolean val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->is_checked = val ? 1 : 0;
+    if (impl)
+    {
+        impl->is_checked = val ? 1 : 0;
+        if (val && (impl->class_flags & UWP_CF_RADIO_MENU_ITEM) && impl->parent && impl->parent->children_coll)
+        {
+            struct uwp_vec_view *children = CONTAINING_RECORD( impl->parent->children_coll, struct uwp_vec_view, IInspectable_iface );
+            int idx = -1, j;
+            for (j = 0; j < (int)children->count; j++)
+                if (uwp_elem_from_any( children->items[j] ) == impl) { idx = j; break; }
+            if (idx >= 0)
+            {
+                for (j = idx - 1; j >= 0; j--)
+                {
+                    struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
+                    if (!sib) continue;
+                    if (uwp_is_separator( sib )) break;
+                    if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM) sib->is_checked = 0;
+                }
+                for (j = idx + 1; j < (int)children->count; j++)
+                {
+                    struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
+                    if (!sib) continue;
+                    if (uwp_is_separator( sib )) break;
+                    if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM) sib->is_checked = 0;
+                }
+            }
+        }
+    }
     return S_OK;
 }
 const void *uwp_tmfi_vtbl[16] =

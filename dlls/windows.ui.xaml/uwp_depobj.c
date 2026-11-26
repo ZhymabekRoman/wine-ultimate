@@ -777,6 +777,14 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 }
             }
         }
+        else if (dpname[0] && (impl->class_flags & UWP_CF_RADIO_BUTTON))
+        {
+            INT32 iv = -1;
+            if (!wcscmp( dpname, L"SelectedIndex" ) && val && uwp_unbox_int32( val, &iv ))
+                uwp_selector_set_selection( impl, iv, NULL, TRUE, FALSE );
+            else if (!wcscmp( dpname, L"SelectedItem" ))
+                uwp_selector_set_selection( impl, -1, val, FALSE, FALSE );
+        }
         else if (dpname[0] && uwp_is_combobox( impl ))
         {
             INT32 iv = -1;
@@ -1102,8 +1110,14 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 impl->probe_flags = 0;
                 if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
             }
-            if (!wcscmp( dpn, L"ItemsSource" ) && val)
-                uwp_items_ctrl_materialize_source( impl, val );
+            if (!wcscmp( dpn, L"ItemsSource" ))
+            {
+                uwp_replace_iface( &impl->items_source, val );
+                if (val && !uwp_is_combobox( impl ))
+                    uwp_items_ctrl_materialize_source( impl, val );
+                else if (uwp_is_combobox( impl ) && uwp_elem_selected_item( impl ))
+                    uwp_selector_set_selection( impl, -1, uwp_elem_selected_item( impl ), FALSE, FALSE );
+            }
             uwp_invalidate_window();
         }
     }

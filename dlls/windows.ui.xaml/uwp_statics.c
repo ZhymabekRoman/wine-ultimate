@@ -496,6 +496,7 @@ static const void *comp_target_statics_obj;
 static const void *binding_ops_statics_obj;
 static const void *thickness_helper_statics_obj;
 static const void *uwp_uielement_statics_obj;
+static const void *uwp_selector_statics_obj;
 static const void *uwp_uielement_routed_statics_obj;
 static const void *uwp_grid_statics_obj;
 static const GUID IID_IUIElementStatics4_UWP;
@@ -589,6 +590,11 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             *out = (void *)&thickness_helper_statics_obj;
             return S_OK;
         }
+        if (IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP )) /* ISelectorStatics {13300b06-...} */
+        {
+            *out = (void *)&uwp_selector_statics_obj;
+            return S_OK;
+        }
         if (IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ) ||
             IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
@@ -597,8 +603,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             IsEqualGUID( iid, &IID_IAutoSuggestBoxStatics_UWP ) ||
             IsEqualGUID( iid, &IID_ISplitViewStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IContentControlStatics_UWP ) ||
-            IsEqualGUID( iid, &IID_ISymbolIconStatics_UWP ) ||
-            IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP )) /* ISelectorStatics {13300b06-...} */
+            IsEqualGUID( iid, &IID_ISymbolIconStatics_UWP ))
         {
             *out = f && f->IDpStatics_iface.lpVtbl ? (void *)&f->IDpStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
@@ -656,7 +661,6 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
         (iid->Data1 == 0x90143898 && iid->Data2 == 0xa16c && iid->Data3 == 0x4759) || /* IButtonStaticsWithFlyout */
         (iid->Data1 == 0x16c724fb && iid->Data2 == 0x6c1a && iid->Data3 == 0x4852) || /* IToggleMenuFlyoutItemStatics */
-        (iid->Data1 == 0x1c781b6b && iid->Data2 == 0x37bf && iid->Data3 == 0x4ddc) || /* IFontIconStatics */
         (iid->Data1 == 0xe6080672 && iid->Data2 == 0x08f8 && iid->Data3 == 0x43d3))   /* IFontIconStatics2 */
     {
         *out = (void *)&f->IStatics_iface;
@@ -669,9 +673,12 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             { 0x77e525c3, 0xeb17, 0x4b8d, { 0x88, 0x9d, 0x1e, 0xa8, 0xab, 0xdb, 0xd4, 0xef } };
         static const GUID IID_ISwapChainPanelFactory_UWP =
             { 0xf38f8d7f, 0x1a48, 0x49cb, { 0x86, 0xd2, 0x10, 0xea, 0xaa, 0xf6, 0xfd, 0x70 } };
+        static const GUID IID_IFontIconFactory_UWP =
+            { 0x1c781b6b, 0x37bf, 0x4ddc, { 0xa1, 0xa8, 0x1b, 0x77, 0xdb, 0x3c, 0xf0, 0xea } };
         if (IsEqualGUID( iid, &IID_IRangeBaseFactory_UWP ) ||
             IsEqualGUID( iid, &IID_IMediaPlayerElementFactory_UWP ) ||
-            IsEqualGUID( iid, &IID_ISwapChainPanelFactory_UWP ))
+            IsEqualGUID( iid, &IID_ISwapChainPanelFactory_UWP ) ||
+            IsEqualGUID( iid, &IID_IFontIconFactory_UWP ))
         {
             *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
             return S_OK;
@@ -860,6 +867,66 @@ static HRESULT uwp_cf_routed_event_slot( IDependencyProperty **slot, void **out 
     if (*out) IUnknown_AddRef( (IUnknown *)*out );
     return S_OK;
 }
+
+static IDependencyProperty *g_sel_dp_index = NULL;
+static IDependencyProperty *g_sel_dp_item = NULL;
+static IDependencyProperty *g_sel_dp_value = NULL;
+static IDependencyProperty *g_sel_dp_value_path = NULL;
+static IDependencyProperty *g_sel_dp_sync_cur = NULL;
+
+static HRESULT uwp_get_named_singleton_dp( IDependencyProperty **slot, const WCHAR *name, void **out )
+{
+    if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
+    if (!*slot)
+    {
+        IDependencyProperty *dp = NULL;
+        HRESULT hr = dependency_property_create( NULL, &dp );
+        if (FAILED(hr) || !dp) return hr;
+        xaml_dp_set_name( dp, name );
+        if (InterlockedCompareExchangePointer( (void **)slot, dp, NULL ) != NULL)
+            IDependencyProperty_Release( dp );
+    }
+    *out = *slot;
+    IDependencyProperty_AddRef( *slot );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_sel_statics_SelectedIndex( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_sel_dp_index, L"SelectedIndex", out );
+}
+static HRESULT WINAPI uwp_sel_statics_SelectedItem( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_sel_dp_item, L"SelectedItem", out );
+}
+static HRESULT WINAPI uwp_sel_statics_SelectedValue( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_sel_dp_value, L"SelectedValue", out );
+}
+static HRESULT WINAPI uwp_sel_statics_SelectedValuePath( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_sel_dp_value_path, L"SelectedValuePath", out );
+}
+static HRESULT WINAPI uwp_sel_statics_IsSyncCur( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_sel_dp_sync_cur, L"IsSynchronizedWithCurrentItem", out );
+}
+static const void *uwp_selector_statics_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = uwp_sel_statics_SelectedIndex,
+    [7] = uwp_sel_statics_SelectedItem,
+    [8] = uwp_sel_statics_SelectedValue,
+    [9] = uwp_sel_statics_SelectedValuePath,
+    [10] = uwp_sel_statics_IsSyncCur,
+    [11 ... 15] = uwp_cf_dp_prop,
+};
+static const void *uwp_selector_statics_obj = uwp_selector_statics_vtbl;
 
 static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
 {

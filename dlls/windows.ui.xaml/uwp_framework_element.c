@@ -2030,9 +2030,63 @@ static IInspectable *uwp_resolve_binding_path( IInspectable *src, const WCHAR *p
                             IUnknown_Release( (IUnknown *)xm );
                         }
                         WindowsDeleteString( h_prop );
+                        h_prop = NULL;
                     }
                 }
                 WindowsDeleteString( h_cls );
+                h_cls = NULL;
+            }
+            if (!next && seg_len > 0)
+            {
+                void *cpp = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( cur, &IID_ICustomPropertyProvider_UWP, &cpp )) && cpp)
+                {
+                    const struct abi_custom_property_provider *acpp = (const struct abi_custom_property_provider *)cpp;
+                    if (acpp->lpVtbl->GetCustomProperty && SUCCEEDED(WindowsCreateString( p, (UINT32)seg_len, &h_prop )) && h_prop)
+                    {
+                        void *cp = NULL;
+                        if (SUCCEEDED(acpp->lpVtbl->GetCustomProperty( cpp, h_prop, &cp )) && cp)
+                        {
+                            const struct abi_custom_property *acp = (const struct abi_custom_property *)cp;
+                            if (acp->lpVtbl->GetValue)
+                                acp->lpVtbl->GetValue( cp, cur, &next );
+                            IUnknown_Release( (IUnknown *)cp );
+                        }
+                        WindowsDeleteString( h_prop );
+                        h_prop = NULL;
+                    }
+                    if (!next && acpp->lpVtbl->get_Type)
+                    {
+                        TypeName tn = {0};
+                        if (SUCCEEDED(acpp->lpVtbl->get_Type( cpp, &tn )) && tn.Name)
+                        {
+                            WCHAR tcls[256] = {0};
+                            WCHAR *comma;
+                            const WCHAR *raw = WindowsGetStringRawBuffer( tn.Name, NULL );
+                            if (raw) lstrcpynW( tcls, raw, ARRAY_SIZE(tcls) );
+                            comma = wcschr( tcls, ',' );
+                            if (comma) *comma = 0;
+                            if (tcls[0])
+                            {
+                                struct xaml_type *xt = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, tcls );
+                                if (xt && xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( p, (UINT32)seg_len, &h_prop )) && h_prop)
+                                {
+                                    struct xaml_member *xm = NULL;
+                                    if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, &xm )) && xm)
+                                    {
+                                        if (xm->lpVtbl->GetValue)
+                                            xm->lpVtbl->GetValue( xm, cur, &next );
+                                        IUnknown_Release( (IUnknown *)xm );
+                                    }
+                                    WindowsDeleteString( h_prop );
+                                    h_prop = NULL;
+                                }
+                            }
+                            WindowsDeleteString( tn.Name );
+                        }
+                    }
+                    IUnknown_Release( (IUnknown *)cpp );
+                }
             }
             if (cur_owned) IInspectable_Release( cur );
             cur = next;
@@ -2085,6 +2139,7 @@ void uwp_update_binding_source( IInspectable *src, const WCHAR *path, IInspectab
         __TRY
         {
             HSTRING h_cls = NULL, h_prop = NULL;
+            BOOL updated = FALSE;
             if (SUCCEEDED(IInspectable_GetRuntimeClassName( cur, &h_cls )) && h_cls)
             {
                 const WCHAR *cls_name = WindowsGetStringRawBuffer( h_cls, NULL );
@@ -2097,13 +2152,73 @@ void uwp_update_binding_source( IInspectable *src, const WCHAR *path, IInspectab
                         if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, &xm )) && xm)
                         {
                             if (xm->lpVtbl->SetValue)
+                            {
                                 xm->lpVtbl->SetValue( xm, cur, new_val );
+                                updated = TRUE;
+                            }
                             IUnknown_Release( (IUnknown *)xm );
                         }
                         WindowsDeleteString( h_prop );
+                        h_prop = NULL;
                     }
                 }
                 WindowsDeleteString( h_cls );
+                h_cls = NULL;
+            }
+            if (!updated)
+            {
+                void *cpp = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( cur, &IID_ICustomPropertyProvider_UWP, &cpp )) && cpp)
+                {
+                    const struct abi_custom_property_provider *acpp = (const struct abi_custom_property_provider *)cpp;
+                    if (acpp->lpVtbl->GetCustomProperty && SUCCEEDED(WindowsCreateString( leaf, (UINT32)wcslen( leaf ), &h_prop )) && h_prop)
+                    {
+                        void *cp = NULL;
+                        if (SUCCEEDED(acpp->lpVtbl->GetCustomProperty( cpp, h_prop, &cp )) && cp)
+                        {
+                            const struct abi_custom_property *acp = (const struct abi_custom_property *)cp;
+                            if (acp->lpVtbl->SetValue)
+                            {
+                                acp->lpVtbl->SetValue( cp, cur, new_val );
+                                updated = TRUE;
+                            }
+                            IUnknown_Release( (IUnknown *)cp );
+                        }
+                        WindowsDeleteString( h_prop );
+                        h_prop = NULL;
+                    }
+                    if (!updated && acpp->lpVtbl->get_Type)
+                    {
+                        TypeName tn = {0};
+                        if (SUCCEEDED(acpp->lpVtbl->get_Type( cpp, &tn )) && tn.Name)
+                        {
+                            WCHAR tcls[256] = {0};
+                            WCHAR *comma;
+                            const WCHAR *raw = WindowsGetStringRawBuffer( tn.Name, NULL );
+                            if (raw) lstrcpynW( tcls, raw, ARRAY_SIZE(tcls) );
+                            comma = wcschr( tcls, ',' );
+                            if (comma) *comma = 0;
+                            if (tcls[0])
+                            {
+                                struct xaml_type *xt = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, tcls );
+                                if (xt && xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( leaf, (UINT32)wcslen( leaf ), &h_prop )) && h_prop)
+                                {
+                                    struct xaml_member *xm = NULL;
+                                    if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, &xm )) && xm)
+                                    {
+                                        if (xm->lpVtbl->SetValue)
+                                            xm->lpVtbl->SetValue( xm, cur, new_val );
+                                        IUnknown_Release( (IUnknown *)xm );
+                                    }
+                                    WindowsDeleteString( h_prop );
+                                    h_prop = NULL;
+                                }
+                            }
+                            WindowsDeleteString( tn.Name );
+                        }
+                    }
+                    IUnknown_Release( (IUnknown *)cpp );
+                }
             }
         }
         __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
@@ -2227,6 +2342,8 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
             IUnknown_Release( (IUnknown *)pp );
         }
     }
+    if ((!path_str || !path_str[0]) && uwp_has_text( bel ))
+        path_str = uwp_elem_text( bel );
 
     for (i = 0; i < tel->dc_bound_dp_cnt; i++)
         if (tel->dc_bound_dps[i].dp == dp) break;

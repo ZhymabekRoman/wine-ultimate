@@ -336,9 +336,11 @@ void uwp_invoke_button( struct uwp_element *btn )
     /* 0. Toggle IsChecked on ToggleButton before firing Click/Command */
     if (btn->kind == UWP_KIND_TOGGLE_BUTTON)
     {
-        uwp_toggle_button_set_checked( btn, (btn->is_checked == 1) ? 0 : 1, TRUE );
+        BOOL is_radio = !wcscmp( btn->class_name, L"Windows.UI.Xaml.Controls.RadioButton" );
+        int target_chk = is_radio ? 1 : ((btn->is_checked == 1) ? 0 : 1);
+        uwp_toggle_button_set_checked( btn, target_chk, TRUE );
         if (btn->parent &&
-            ((btn->parent->class_flags & UWP_CF_RADIO_BUTTON) || !wcscmp( btn->parent->name, L"ShortcutItems" )) &&
+            ((btn->parent->class_flags & UWP_CF_RADIO_BUTTON) || is_radio || !wcscmp( btn->parent->name, L"ShortcutItems" )) &&
             btn->parent->children_coll)
         {
             struct uwp_element *rb = btn->parent;
@@ -369,7 +371,15 @@ void uwp_invoke_button( struct uwp_element *btn )
 
     /* 0b. Open attached Flyout / MenuFlyout on Button / DropDownButton */
     if (btn->flyout && !uwp_is_menubar_item( btn ))
+    {
+        struct uwp_element *flyout_el = uwp_elem_from_any( btn->flyout );
+        if (flyout_el && UWP_EV_CNT( flyout_el, flyout_opening_reg ) > 0)
+        {
+            IInspectable *fsender = flyout_el->outer ? flyout_el->outer : &flyout_el->IFlyout_iface;
+            uwp_fire_event_registry( &flyout_el->events->flyout_opening_reg, fsender, NULL, "Flyout::Opening" );
+        }
         g_popup_owner_el = btn;
+    }
 
     /* 1. Invoke ICommand::Execute(CommandParameter) if Command is bound */
     if (btn->command)
@@ -418,7 +428,7 @@ void uwp_invoke_button( struct uwp_element *btn )
                 HMODULE mod = NULL;
                 void *inv = h->lpVtbl->Invoke;
                 HRESULT chr;
-                IInspectable *args = (IInspectable *)g_routed_args();
+                IInspectable *args = (IInspectable *)g_routed_args_for( btn );
                 GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                     (LPCSTR)inv, &mod );
                 chr = h->lpVtbl->Invoke( h, sender, args );
@@ -708,7 +718,7 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
                     {
                         struct uwp_element *clicked_el = uwp_elem_from_any( children->items[hit_idx] );
                         if (clicked_el->class_flags & UWP_CF_TOGGLE_MENU_ITEM)
-                            clicked_el->is_checked = !clicked_el->is_checked;
+                            uwp_toggle_button_set_checked( clicked_el, clicked_el->is_checked ? 0 : 1, TRUE );
                         else if (clicked_el->class_flags & UWP_CF_RADIO_MENU_ITEM)
                         {
                             int j;
@@ -717,16 +727,18 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
                                 struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
                                 if (!sib) continue;
                                 if (uwp_is_separator( sib )) break;
-                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM) sib->is_checked = 0;
+                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM)
+                                    uwp_toggle_button_set_checked( sib, 0, FALSE );
                             }
                             for (j = hit_idx + 1; j < (int)children->count; j++)
                             {
                                 struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
                                 if (!sib) continue;
                                 if (uwp_is_separator( sib )) break;
-                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM) sib->is_checked = 0;
+                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM)
+                                    uwp_toggle_button_set_checked( sib, 0, FALSE );
                             }
-                            clicked_el->is_checked = 1;
+                            uwp_toggle_button_set_checked( clicked_el, 1, TRUE );
                         }
                         uwp_close_flyout_popup( TRUE );
                         uwp_invoke_button( clicked_el );

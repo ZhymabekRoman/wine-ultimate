@@ -3048,6 +3048,7 @@ struct uwp_routed_args
 {
     IInspectable IInspectable_iface;
     LONG ref;
+    IInspectable *orig_source;
 };
 
 static HRESULT WINAPI uwp_routed_args_QI( IInspectable *iface, REFIID iid, void **out )
@@ -3078,7 +3079,11 @@ static ULONG WINAPI uwp_routed_args_Release( IInspectable *iface )
 {
     struct uwp_routed_args *a = CONTAINING_RECORD( iface, struct uwp_routed_args, IInspectable_iface );
     ULONG r = InterlockedDecrement( &a->ref );
-    if (!r) free( a );
+    if (!r)
+    {
+        if (a->orig_source) IInspectable_Release( a->orig_source );
+        free( a );
+    }
     return r;
 }
 static HRESULT WINAPI uwp_routed_args_GetIids( IInspectable *iface, ULONG *c, IID **i )
@@ -3099,8 +3104,14 @@ static HRESULT WINAPI uwp_routed_args_GetTrustLevel( IInspectable *iface, TrustL
 }
 static HRESULT WINAPI uwp_routed_args_get_OriginalSource( void *iface, IInspectable **out )
 {
+    struct uwp_routed_args *a = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_routed_args, IInspectable_iface );
     if (!out) return E_POINTER;
-    if (g_routed_args_el)
+    if (a && a->orig_source)
+    {
+        IInspectable_AddRef( a->orig_source );
+        *out = a->orig_source;
+    }
+    else if (g_routed_args_el)
     {
         IInspectable *src = g_routed_args_el->outer ? g_routed_args_el->outer : &g_routed_args_el->IInspectable_iface;
         IInspectable_AddRef( src );
@@ -3128,13 +3139,24 @@ static const void *const uwp_routed_args_vtbl[16] =
  * interop type at the first crossing.  Handlers registered on one element
  * often use distinct delegate args types (RoutedEventArgs vs RoutedEventArgs2),
  * so each fire allocates its own lightweight args object to keep cached RCW types matching. */
-void *g_routed_args(void)
+void *g_routed_args_for( struct uwp_element *el )
 {
     struct uwp_routed_args *a = malloc( sizeof(*a) );
     if (!a) return &g_dp_routed_args;
     a->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_routed_args_vtbl;
     a->ref = 1;
+    a->orig_source = NULL;
+    if (el)
+    {
+        a->orig_source = el->outer ? el->outer : &el->IInspectable_iface;
+        if (a->orig_source) IInspectable_AddRef( a->orig_source );
+    }
     return &a->IInspectable_iface;
+}
+
+void *g_routed_args(void)
+{
+    return g_routed_args_for( g_routed_args_el );
 }
 #define g_dummy_routed_args g_routed_args()
 

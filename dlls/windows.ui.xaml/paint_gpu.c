@@ -469,6 +469,35 @@ static void paint_gpu_media( ID3D11DeviceContext *ctx, struct uwp_element *el )
     ReleaseSRWLockShared( &m->video_lock );
 }
 
+static void paint_gpu_first_subtree_text( const struct uwp_element *el, WCHAR *buf, size_t cap, int depth )
+{
+    if (!el || !buf || !cap || buf[0] || depth > 8 || el->visibility != 0) return;
+    if (!uwp_is_font_icon( el ) && uwp_has_text( el ))
+    {
+        const WCHAR *t = uwp_elem_text( el );
+        if (t[0] && !(t[0] >= 0xe000 && t[0] <= 0xf8ff))
+        {
+            lstrcpynW( buf, t, (int)cap );
+            return;
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el) paint_gpu_first_subtree_text( ch, buf, cap, depth + 1 );
+    }
+    if (!buf[0] && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count && !buf[0]; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el) paint_gpu_first_subtree_text( ch, buf, cap, depth + 1 );
+        }
+    }
+}
+
 static void paint_gpu_combobox( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
 {
     RECT rc = el->bounds, trc, chev_rc;
@@ -514,6 +543,21 @@ static void paint_gpu_combobox( ID3D11DeviceContext *ctx, struct uwp_element *el
     }
     if (!label[0] && uwp_has_text( el ))
         lstrcpynW( label, uwp_elem_text( el ), ARRAY_SIZE(label) );
+    if (!label[0] && uwp_elem_placeholder( el )[0])
+        lstrcpynW( label, uwp_elem_placeholder( el ), ARRAY_SIZE(label) );
+    if (!label[0] && el->dp_cnt > 0 && el->dp_store)
+    {
+        int di;
+        AcquireSRWLockShared( &el->dp_lock );
+        for (di = 0; di < el->dp_cnt && !label[0]; di++)
+        {
+            const WCHAR *dpn = xaml_dp_get_name( el->dp_store[di].dp );
+            if (el->dp_store[di].value &&
+                (!wcscmp( dpn, L"SelectionBoxItem" ) || !wcscmp( dpn, L"PlaceholderText" ) || !wcscmp( dpn, L"Header" )))
+                uwp_combobox_get_item_label( el, el->dp_store[di].value, label, ARRAY_SIZE(label) );
+        }
+        ReleaseSRWLockShared( &el->dp_lock );
+    }
     if (!label[0] && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -525,6 +569,13 @@ static void paint_gpu_combobox( ID3D11DeviceContext *ctx, struct uwp_element *el
                 lstrcpynW( label, uwp_elem_text( ch ), ARRAY_SIZE(label) );
         }
     }
+    if (!label[0] && el->content)
+    {
+        struct uwp_element *cel = uwp_elem_from_any( el->content );
+        if (cel) paint_gpu_first_subtree_text( cel, label, ARRAY_SIZE(label), 0 );
+    }
+    if (!label[0] && el->data_context)
+        uwp_combobox_get_item_label( el, el->data_context, label, ARRAY_SIZE(label) );
 
     xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
                         rad, bg_argb, bd_argb, 1.0f, 1.0f );
@@ -2828,7 +2879,22 @@ static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int
     {
         struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
         if (!ch || ch->visibility != 0 || uwp_is_accelerator( ch )) continue;
-        items[item_cnt++] = ch;
+        if (!wcscmp( ch->class_name, L"Windows.UI.Xaml.DeferredElement" )) continue;
+        if (uwp_is_separator( ch ))
+        {
+            if (item_cnt == 0 || uwp_is_separator( items[item_cnt - 1] )) continue;
+            items[item_cnt++] = ch;
+        }
+        else
+        {
+            items[item_cnt++] = ch;
+        }
+    }
+    while (item_cnt > 0 && uwp_is_separator( items[item_cnt - 1] ))
+        item_cnt--;
+    for (i = 0; i < item_cnt; i++)
+    {
+        struct uwp_element *ch = items[i];
         if (uwp_is_separator( ch ))
             cur_y += 9;
         else

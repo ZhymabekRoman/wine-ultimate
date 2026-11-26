@@ -2294,9 +2294,14 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         case XBF_PROP_FONTICON_GLYPH: /* FontIcon.Glyph */
         case XBF_PROP_TEXTBLOCK_TEXT: /* TextBlock.Text */
         case XBF_PROP_TEMPLATE_BINDING_PROPERTY:
+        case XBF_PROP_BINDING_PATH:
         case XBF_PROP_RUN_TEXT:
             if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && uwp_elem_uid( el )[0] && uwp_has_text( el )))
                 uwp_elem_set_text( el, sval );
+            break;
+        case XBF_PROP_BINDING_ELEMENT_NAME:
+            if (sval && sval[0])
+                uwp_elem_set_placeholder( el, sval );
             break;
         case XBF_PROP_RECTANGLE_RADIUS_X:
         case XBF_PROP_RECTANGLE_RADIUS_Y:

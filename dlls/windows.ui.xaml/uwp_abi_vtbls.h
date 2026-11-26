@@ -429,6 +429,7 @@ struct abi_custom_property_vtbl
     ULONG (WINAPI *Release)( void *This );
     void *pad3_7[5];
     HRESULT (WINAPI *GetValue)( void *This, IInspectable *target, IInspectable **out ); /* slot 8 */
+    HRESULT (WINAPI *SetValue)( void *This, IInspectable *target, IInspectable *val );  /* slot 9 */
 };
 struct abi_custom_property { const struct abi_custom_property_vtbl *lpVtbl; };
 

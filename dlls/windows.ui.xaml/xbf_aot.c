@@ -1180,6 +1180,47 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 }
                 break;
             }
+            if (target_el && val_el && !wcscmp( val_el->class_name, L"Windows.UI.Xaml.Data.Binding" ))
+            {
+                const WCHAR *dp_name = NULL;
+                switch (op->pid)
+                {
+                    case XBF_PROP_ITEMS_CONTROL_ITEMS_SOURCE: dp_name = L"ItemsSource"; break;
+                    case XBF_PROP_CONTENT: dp_name = L"Content"; break;
+                    case XBF_PROP_TEXTBLOCK_TEXT:
+                    case XBF_PROP_RUN_TEXT: dp_name = L"Text"; break;
+                    case XBF_PROP_UIELEMENT_VISIBILITY:
+                    case XBF_PROP_UIELEMENT_VISIBILITY_V2: dp_name = L"Visibility"; break;
+                    case XBF_PROP_TOGGLE_BUTTON_IS_CHECKED:
+                    case XBF_PROP_TOGGLE_MENU_FLYOUT_ITEM_IS_CHECKED: dp_name = L"IsChecked"; break;
+                    case XBF_PROP_ACCELERATOR_SCOPE_OWNER: dp_name = L"IsEnabled"; break;
+                    default:
+                        if (op->pid < hdr->prop_cnt && fake_ctx.props[op->pid].name[0])
+                            dp_name = fake_ctx.props[op->pid].name;
+                        break;
+                }
+                if (dp_name && dp_name[0])
+                {
+                    const WCHAR *owner_cls = NULL;
+                    if (op->pid < hdr->prop_cnt && fake_ctx.props[op->pid].owner_tid < hdr->type_cnt)
+                        owner_cls = fake_ctx.types[fake_ctx.props[op->pid].owner_tid].full_name;
+                    if (owner_cls && owner_cls[0] && wcsncmp( owner_cls, L"Windows.UI.Xaml.", 16 ))
+                    {
+                        uwp_add_xaml_binding( target_el, owner_cls, dp_name, val_el );
+                    }
+                    else
+                    {
+                        IDependencyProperty *bdp = NULL;
+                        if (SUCCEEDED(dependency_property_create( NULL, &bdp )) && bdp)
+                        {
+                            xaml_dp_set_name( bdp, dp_name );
+                            uwp_apply_binding( target_el, bdp, val_el );
+                            IDependencyProperty_Release( bdp );
+                        }
+                    }
+                }
+                break;
+            }
             if (target_el && uwp_has_text( val_el ))
             {
                 WCHAR resolved[256] = {0};
