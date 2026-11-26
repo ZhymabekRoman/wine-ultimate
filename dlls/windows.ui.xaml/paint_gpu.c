@@ -966,6 +966,12 @@ static BOOL paint_gpu_container( ID3D11DeviceContext *ctx, struct uwp_element *e
     if (uwp_is_pivot_item( el ) && uwp_has_text( el ))
     {
         paint_gpu_pivot_item( ctx, el, surface_bg );
+        if (uwp_paint_pivot_item_is_selected( el ) && el->content)
+        {
+            struct uwp_element *body = uwp_elem_from_any( el->content );
+            if (body && body != el)
+                uwp_gpu_paint_element( ctx, body );
+        }
         return TRUE;
     }
     return FALSE;
@@ -1113,6 +1119,36 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
 
     if (uwp_paint_is_invisible_shortcut_button( el ))
         return;
+
+    if (el->kind == UWP_KIND_TOGGLE_BUTTON && !wcscmp( el->class_name, L"Windows.UI.Xaml.Controls.RadioButton" ))
+    {
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        BOOL light = uwp_is_light_theme( el );
+        BOOL checked = (el->is_checked == 1);
+        int cy = (brc.top + brc.bottom) / 2;
+        int r_out = max( 8, (int)(9 * sc + 0.5f) );
+        int cx = brc.left + r_out + (int)(2 * sc);
+        UINT32 acc_c = light ? 0xff005fb8u : 0xff60cdffu;
+        UINT32 ring_bg = checked ? acc_c : (el->is_hovered ? (light ? 0x10000000u : 0x18ffffffu) : 0x00000000u);
+        UINT32 ring_bd = checked ? acc_c : (light ? 0x80000000u : 0x88ffffffu);
+        COLORREF fg_c = light ? RGB( 28, 28, 28 ) : RGB( 245, 245, 245 );
+        xaml_gpu_push_rect( (float)(cx - r_out), (float)(cy - r_out), (float)(cx + r_out), (float)(cy + r_out),
+                            NULL, (float)r_out, ring_bg, ring_bd, checked ? 1.5f : 1.2f, 1.0f );
+        if (checked)
+        {
+            int r_in = max( 3, (int)(4 * sc + 0.5f) );
+            UINT32 dot_c = light ? 0xffffffffu : 0xff000000u;
+            xaml_gpu_push_rect( (float)(cx - r_in), (float)(cy - r_in), (float)(cx + r_in), (float)(cy + r_in),
+                                NULL, (float)r_in, dot_c, 0, 0.0f, 1.0f );
+        }
+        if (label[0])
+        {
+            RECT trc = { cx + r_out + (int)(8 * sc), brc.top, brc.right, brc.bottom };
+            xaml_gpu_push_text( ctx, label, max( 12, (int)(13 * sc + 0.5f) ), FW_NORMAL,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE, &trc, NULL, fg_c, 1.0f );
+        }
+        return;
+    }
 
     if (uwp_paint_is_nav_toggle_item( el ))
     {
@@ -2026,6 +2062,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 el->kind == UWP_KIND_TEXT_BLOCK ||
                 el->kind == UWP_KIND_PROGRESS_RING ||
                 uwp_is_combobox( el ) ||
+                uwp_is_calendar_date_picker( el ) ||
+                uwp_is_expander( el ) ||
                 uwp_is_font_icon( el ) ||
                 uwp_is_text_input( el ) ||
                 uwp_is_card( el ) ||
@@ -2052,6 +2090,95 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
     if (uwp_is_combobox( el ))
     {
         paint_gpu_combobox( ctx, el, surface_bg );
+        return;
+    }
+
+    if (uwp_is_calendar_date_picker( el ))
+    {
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        BOOL light = uwp_is_light_theme( el );
+        RECT rc = el->bounds;
+        RECT box_rc = rc;
+        WCHAR date_buf[96] = {0};
+        WCHAR cff_buf[64];
+        UINT32 bg_c = light ? 0xf2ffffffu : 0x10ffffffu;
+        UINT32 bd_c = el->is_dropdown_open
+            ? cr_to_argb( uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 212 ), surface_bg ) )
+            : (light ? 0x26000000u : 0x26ffffffu);
+        COLORREF fg_c = light ? RGB( 28, 28, 28 ) : RGB( 245, 245, 245 );
+        int fh = max( 12, (int)(14 * sc + 0.5f) );
+
+        if (el->nav && el->nav->cdp_header[0])
+        {
+            RECT hrc = { rc.left, rc.top, rc.right, rc.top + (int)(22 * sc) };
+            xaml_gpu_push_text( ctx, el->nav->cdp_header, max( 12, (int)(13 * sc + 0.5f) ), FW_NORMAL,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE, &hrc, NULL, fg_c, 1.0f );
+            box_rc.top = min( rc.bottom - (int)(24 * sc), rc.top + (int)(24 * sc) );
+        }
+        xaml_gpu_push_rect( (float)box_rc.left, (float)box_rc.top, (float)box_rc.right, (float)box_rc.bottom,
+                            NULL, 4.0f * sc, bg_c, bd_c, 1.0f, 1.0f );
+        uwp_cdp_format_date( el, date_buf, ARRAY_SIZE(date_buf) );
+        {
+            RECT trc = { box_rc.left + (int)(10 * sc), box_rc.top, max( box_rc.left + (int)(10 * sc), box_rc.right - (int)(32 * sc) ), box_rc.bottom };
+            xaml_gpu_push_text( ctx, date_buf, fh, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                &trc, NULL, fg_c, 1.0f );
+        }
+        {
+            RECT irc = { max( box_rc.left, box_rc.right - (int)(30 * sc) ), box_rc.top, box_rc.right - (int)(6 * sc), box_rc.bottom };
+            uwp_resolve_font_family( L"Segoe MDL2 Assets", cff_buf, ARRAY_SIZE(cff_buf) );
+            xaml_gpu_push_text_font( ctx, L"\xE787", cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                     max( 12, (int)(14 * sc + 0.5f) ), FW_NORMAL,
+                                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, &irc, NULL, fg_c, 1.0f );
+        }
+        return;
+    }
+
+    if (uwp_is_expander( el ))
+    {
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        BOOL light = uwp_is_light_theme( el );
+        RECT rc = el->bounds;
+        int hdr_h = (int)(64 * sc + 0.5f);
+        struct uwp_element *he = el->pane ? uwp_elem_from_any( el->pane ) : NULL;
+        struct uwp_element *be = el->content ? uwp_elem_from_any( el->content ) : NULL;
+        UINT32 card_bg = light ? 0xb3ffffffu : 0x0dffffffu;
+        UINT32 card_bd = light ? 0x18000000u : 0x18ffffffu;
+        COLORREF fg_c = light ? RGB( 28, 28, 28 ) : RGB( 245, 245, 245 );
+        WCHAR cff_buf[64];
+
+        if (he && he != el && he->has_bounds && he->bounds.bottom + (int)(10 * sc) - rc.top > hdr_h)
+            hdr_h = he->bounds.bottom + (int)(10 * sc) - rc.top;
+        if (hdr_h > rc.bottom - rc.top) hdr_h = rc.bottom - rc.top;
+
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom,
+                            NULL, 4.0f * sc, card_bg, card_bd, 1.0f, 1.0f );
+        if (he && he != el)
+            uwp_gpu_paint_element( ctx, he );
+        else if (!uwp_has_text( el ) && be && be != el)
+        {
+            uwp_gpu_paint_element( ctx, be );
+            return;
+        }
+        else if (uwp_has_text( el ))
+        {
+            RECT trc = { rc.left + (int)(16 * sc), rc.top, rc.right - (int)(48 * sc), rc.top + hdr_h };
+            xaml_gpu_push_text( ctx, uwp_elem_text( el ), max( 13, (int)(14 * sc + 0.5f) ), FW_NORMAL,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE, &trc, NULL, fg_c, 1.0f );
+        }
+        {
+            RECT crc = { rc.right - (int)(40 * sc), rc.top, rc.right - (int)(12 * sc), rc.top + hdr_h };
+            uwp_resolve_font_family( L"Segoe MDL2 Assets", cff_buf, ARRAY_SIZE(cff_buf) );
+            xaml_gpu_push_text_font( ctx, el->is_open ? L"\xE70E" : L"\xE70D",
+                                     cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                     max( 11, (int)(12 * sc + 0.5f) ), FW_NORMAL,
+                                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, &crc, NULL, fg_c, 1.0f );
+        }
+        if (el->is_open && be && be != el)
+        {
+            xaml_gpu_push_rect( (float)rc.left, (float)(rc.top + hdr_h), (float)rc.right, (float)(rc.top + hdr_h + 1),
+                                NULL, 0.0f, card_bd, 0, 0.0f, 1.0f );
+            uwp_gpu_paint_element( ctx, be );
+        }
         return;
     }
 
@@ -2111,7 +2238,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             return;
     }
 
-    if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
+    if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) &&
+        !(el->kind == UWP_KIND_TOGGLE_BUTTON && (el->class_flags & UWP_CF_RADIO_BUTTON) && el->children_coll))
     {
         paint_gpu_button( ctx, el, surface_bg );
         return;
@@ -2211,6 +2339,102 @@ static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element 
                                 &el->bounds, 2.0f, thumb_argb, 0, 0.0f, 1.0f );
         }
         xaml_gpu_set_clip( prev_has_clip ? &prev_clip : NULL );
+    }
+}
+
+static void uwp_gpu_paint_cdp_popup( ID3D11DeviceContext *ctx, int width, int height )
+{
+    static const WCHAR * const months[12] = {
+        L"January", L"February", L"March", L"April", L"May", L"June",
+        L"July", L"August", L"September", L"October", L"November", L"December"
+    };
+    static const WCHAR * const dows[7] = { L"Su", L"Mo", L"Tu", L"We", L"Th", L"Fr", L"Sa" };
+    struct uwp_element *cdp = g_open_cdp;
+    struct uwp_nav_ext *ne;
+    RECT prc;
+    float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+    BOOL light;
+    UINT32 bg_c, bd_c, acc_c;
+    COLORREF fg_c, dim_c, acc_fg;
+    int vy, vm, sy = 0, sm = 0, sd = 0, fdow, dim, row, col, cell_w, cell_h, grid_top, hdr_h;
+    WCHAR hdr_buf[64], cff_buf[64];
+
+    if (!cdp || !cdp->is_dropdown_open || !cdp->has_bounds || cdp->visibility != 0) return;
+    if (!uwp_cdp_compute_popup_rect( cdp, width, height, &prc )) return;
+    ne = uwp_elem_ensure_nav( cdp );
+    if (!ne) return;
+
+    if (ne->cdp_has_date)
+        uwp_cdp_ticks_to_ymd( ne->cdp_date_ticks, &sy, &sm, &sd );
+    vy = (ne->cdp_view_year > 0) ? ne->cdp_view_year : (sy > 0 ? sy : 2026);
+    vm = (ne->cdp_view_month >= 1 && ne->cdp_view_month <= 12) ? ne->cdp_view_month : (sm > 0 ? sm : 11);
+
+    light = uwp_is_light_theme( cdp );
+    bg_c = light ? 0xfff9f9f9u : 0xff2c2c2cu;
+    bd_c = light ? 0x33000000u : 0x33ffffffu;
+    acc_c = cr_to_argb( uwp_paint_resolve_color( cdp, L"SystemAccentColor", RGB( 0, 120, 212 ),
+                                                 light ? RGB( 249, 249, 249 ) : RGB( 44, 44, 44 ) ) );
+    fg_c = light ? RGB( 24, 24, 24 ) : RGB( 248, 248, 248 );
+    dim_c = light ? RGB( 130, 130, 130 ) : RGB( 150, 150, 150 );
+    acc_fg = RGB( 255, 255, 255 );
+
+    xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom,
+                        NULL, 6.0f * sc, bg_c, bd_c, 1.0f, 1.0f );
+
+    hdr_h = (int)(36 * sc + 0.5f);
+    swprintf( hdr_buf, ARRAY_SIZE(hdr_buf), L"%s %d", months[vm - 1], vy );
+    {
+        RECT mrc = { prc.left + (int)(12 * sc), prc.top + (int)(4 * sc), prc.right - (int)(68 * sc), prc.top + hdr_h };
+        xaml_gpu_push_text( ctx, hdr_buf, max( 12, (int)(14 * sc + 0.5f) ), FW_SEMIBOLD,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE, &mrc, NULL, fg_c, 1.0f );
+    }
+    uwp_resolve_font_family( L"Segoe MDL2 Assets", cff_buf, ARRAY_SIZE(cff_buf) );
+    {
+        RECT prev_rc = { prc.right - (int)(64 * sc), prc.top + (int)(4 * sc), prc.right - (int)(34 * sc), prc.top + hdr_h };
+        RECT next_rc = { prc.right - (int)(34 * sc), prc.top + (int)(4 * sc), prc.right - (int)(4 * sc), prc.top + hdr_h };
+        xaml_gpu_push_text_font( ctx, L"\xE76B", cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                 max( 11, (int)(12 * sc + 0.5f) ), FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                 &prev_rc, NULL, fg_c, 1.0f );
+        xaml_gpu_push_text_font( ctx, L"\xE76C", cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                 max( 11, (int)(12 * sc + 0.5f) ), FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                 &next_rc, NULL, fg_c, 1.0f );
+    }
+
+    cell_w = (prc.right - prc.left - (int)(16 * sc)) / 7;
+    cell_h = (int)(34 * sc + 0.5f);
+    {
+        int dow_top = prc.top + hdr_h + (int)(4 * sc);
+        for (col = 0; col < 7; col++)
+        {
+            RECT drc = { prc.left + (int)(8 * sc) + col * cell_w, dow_top,
+                         prc.left + (int)(8 * sc) + (col + 1) * cell_w, dow_top + (int)(24 * sc) };
+            xaml_gpu_push_text( ctx, dows[col], max( 11, (int)(12 * sc + 0.5f) ), FW_SEMIBOLD,
+                                DT_CENTER | DT_VCENTER | DT_SINGLELINE, &drc, NULL, dim_c, 1.0f );
+        }
+        grid_top = dow_top + (int)(26 * sc);
+    }
+
+    fdow = uwp_cdp_first_dow( vy, vm );
+    dim = uwp_cdp_days_in_month( vy, vm );
+    for (row = 0; row < 6; row++)
+    {
+        for (col = 0; col < 7; col++)
+        {
+            int day = row * 7 + col - fdow + 1;
+            RECT crc;
+            WCHAR dbuf[8];
+            BOOL is_sel;
+            if (day < 1 || day > dim) continue;
+            SetRect( &crc, prc.left + (int)(8 * sc) + col * cell_w, grid_top + row * cell_h,
+                     prc.left + (int)(8 * sc) + (col + 1) * cell_w, grid_top + (row + 1) * cell_h );
+            is_sel = (ne->cdp_has_date && vy == sy && vm == sm && day == sd);
+            if (is_sel)
+                xaml_gpu_push_rect( (float)(crc.left + 2), (float)(crc.top + 2), (float)(crc.right - 2), (float)(crc.bottom - 2),
+                                    NULL, (float)(min( cell_w, cell_h ) / 2), acc_c, 0, 0.0f, 1.0f );
+            swprintf( dbuf, ARRAY_SIZE(dbuf), L"%d", day );
+            xaml_gpu_push_text( ctx, dbuf, max( 11, (int)(13 * sc + 0.5f) ), is_sel ? FW_SEMIBOLD : FW_NORMAL,
+                                DT_CENTER | DT_VCENTER | DT_SINGLELINE, &crc, NULL, is_sel ? acc_fg : fg_c, 1.0f );
+        }
     }
 }
 
@@ -2607,6 +2831,7 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
 
     uwp_gpu_paint_open_popups( ctx, width, height );
     uwp_gpu_paint_combobox_popup( ctx, width, height );
+    uwp_gpu_paint_cdp_popup( ctx, width, height );
     uwp_gpu_paint_asb_popup( ctx, width, height );
     uwp_gpu_paint_flyout_popup( ctx, width, height );
 

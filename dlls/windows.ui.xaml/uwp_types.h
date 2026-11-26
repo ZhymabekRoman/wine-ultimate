@@ -213,6 +213,8 @@ enum uwp_elem_kind
 #define UWP_CF2_CUBIC_EASE              (1ULL << 39)
 #define UWP_CF2_QUARTIC_EASE            (1ULL << 40)
 #define UWP_CF2_QUINTIC_EASE            (1ULL << 41)
+#define UWP_CF2_CALENDAR_DATE_PICKER    (1ULL << 42)
+#define UWP_CF2_EXPANDER                (1ULL << 43)
 
 enum uwp_rd_kind
 {
@@ -408,6 +410,9 @@ struct uwp_event_bag
     struct xaml_event_registry tip_closed_reg;
     struct xaml_event_registry flyout_opening_reg;
     struct xaml_event_registry flyout_closed_reg;
+    struct xaml_event_registry cdp_date_changed_reg;
+    struct xaml_event_registry pivot_item_loading_reg;
+    struct xaml_event_registry pivot_item_loaded_reg;
 };
 
 /* Lazy sidecar for Image / BitmapImage / MediaPlayerElement state. */
@@ -478,6 +483,15 @@ struct uwp_nav_ext
     int nav_scroll_y;
     RECT nav_pane_bounds;
     IInspectable *nav_icon;
+    INT64 cdp_date_ticks;
+    BOOL cdp_has_date;
+    INT64 cdp_min_ticks;
+    INT64 cdp_max_ticks;
+    int cdp_view_year;
+    int cdp_view_month;
+    WCHAR cdp_placeholder[64];
+    WCHAR cdp_header[128];
+    WCHAR cdp_date_format[64];
 };
 
 /* Lazy sidecar for Style / Brush / Gradient / Storyboard / Animation / TemplateBinding state. */
@@ -1297,6 +1311,16 @@ static inline BOOL uwp_is_pivot_item( const struct uwp_element *el )
 static inline BOOL uwp_is_tabview( const struct uwp_element *el )
 {
     return el && (el->class_flags & UWP_CF_TABVIEW) != 0;
+}
+
+static inline BOOL uwp_is_calendar_date_picker( const struct uwp_element *el )
+{
+    return el && (el->class_flags2 & UWP_CF2_CALENDAR_DATE_PICKER) != 0;
+}
+
+static inline BOOL uwp_is_expander( const struct uwp_element *el )
+{
+    return el && (el->class_flags2 & UWP_CF2_EXPANDER) != 0;
 }
 
 static inline BOOL uwp_is_rich_text_block( const struct uwp_element *el )

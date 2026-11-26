@@ -497,6 +497,7 @@ static const void *binding_ops_statics_obj;
 static const void *thickness_helper_statics_obj;
 static const void *uwp_uielement_statics_obj;
 static const void *uwp_selector_statics_obj;
+static const void *uwp_buttonbase_statics_obj;
 static const void *uwp_uielement_routed_statics_obj;
 static const void *uwp_grid_statics_obj;
 static const GUID IID_IUIElementStatics4_UWP;
@@ -596,8 +597,12 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             return S_OK;
         }
         if (IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP ) ||
-            IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ) ||
-            IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ))
+        {
+            *out = (void *)&uwp_buttonbase_statics_obj;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IControlStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IRangeBaseStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IAutoSuggestBoxStatics_UWP ) ||
@@ -927,6 +932,49 @@ static const void *uwp_selector_statics_vtbl[16] =
     [11 ... 15] = uwp_cf_dp_prop,
 };
 static const void *uwp_selector_statics_obj = uwp_selector_statics_vtbl;
+
+static IDependencyProperty *g_bb_dp_click_mode = NULL;
+static IDependencyProperty *g_bb_dp_is_ptr_over = NULL;
+static IDependencyProperty *g_bb_dp_is_pressed = NULL;
+static IDependencyProperty *g_bb_dp_command = NULL;
+static IDependencyProperty *g_bb_dp_command_param = NULL;
+
+static HRESULT WINAPI uwp_bb_statics_ClickMode( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_bb_dp_click_mode, L"ClickMode", out );
+}
+static HRESULT WINAPI uwp_bb_statics_IsPointerOver( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_bb_dp_is_ptr_over, L"IsPointerOver", out );
+}
+static HRESULT WINAPI uwp_bb_statics_IsPressed( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_bb_dp_is_pressed, L"IsPressed", out );
+}
+static HRESULT WINAPI uwp_bb_statics_Command( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_bb_dp_command, L"Command", out );
+}
+static HRESULT WINAPI uwp_bb_statics_CommandParameter( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_bb_dp_command_param, L"CommandParameter", out );
+}
+static const void *uwp_buttonbase_statics_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = uwp_bb_statics_ClickMode,
+    [7] = uwp_bb_statics_IsPointerOver,
+    [8] = uwp_bb_statics_IsPressed,
+    [9] = uwp_bb_statics_Command,
+    [10] = uwp_bb_statics_CommandParameter,
+    [11 ... 15] = uwp_cf_dp_prop,
+};
+static const void *uwp_buttonbase_statics_obj = uwp_buttonbase_statics_vtbl;
 
 static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
 {

@@ -1699,7 +1699,14 @@ static HRESULT WINAPI uwp_sv_get_IntZero( void *iface, INT32 *val )
 }
 static HRESULT WINAPI uwp_sv_get_DisplayMode( void *iface, INT32 *val )
 {
-    if (val) *val = 2; /* SplitViewDisplayMode_CompactInline */
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = (impl && impl->orientation >= 0) ? impl->orientation : 0; /* Overlay by default unless set */
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_put_DisplayMode( void *iface, INT32 val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->orientation = val;
     return S_OK;
 }
 
@@ -1789,7 +1796,7 @@ const void *uwp_splitview_vtbl[32] =
     [16] = uwp_sv_get_IntZero,       /* get_PanePlacement */
     [17] = uwp_generic_noop,         /* put_PanePlacement */
     [18] = uwp_sv_get_DisplayMode,   /* get_DisplayMode */
-    [19] = uwp_generic_noop,         /* put_DisplayMode */
+    [19] = uwp_sv_put_DisplayMode,   /* put_DisplayMode */
     [20] = uwp_cd_get_NullOut,       /* get_TemplateSettings */
     [21] = uwp_cd_get_NullOut,       /* get_PaneBackground */
     [22] = uwp_generic_noop,         /* put_PaneBackground */

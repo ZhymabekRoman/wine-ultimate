@@ -917,6 +917,10 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
     {
         best = 160.0 * g_layout_scale;
     }
+    else if (uwp_is_calendar_date_picker( el ))
+    {
+        best = 200.0 * g_layout_scale;
+    }
     else if (el->kind == UWP_KIND_IMAGE)
     {
         if (el->media && el->media->img_w > 0) best = (double)el->media->img_w;
@@ -1226,11 +1230,35 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
     {
         best = 36.0 * g_layout_scale;
     }
+    else if (uwp_is_calendar_date_picker( el ))
+    {
+        BOOL has_hdr = (el->nav && el->nav->cdp_header[0]);
+        best = (has_hdr ? 58.0 : 36.0) * g_layout_scale;
+    }
+    else if (uwp_is_expander( el ))
+    {
+        double hdr_h = 64.0 * g_layout_scale;
+        if (el->pane)
+        {
+            struct uwp_element *he = uwp_elem_from_any( el->pane );
+            double mh = (he && he != el) ? uwp_measure_natural_height( he, max( 120, avail_w - 64 ), depth + 1 ) : 0.0;
+            if (mh + 20.0 * g_layout_scale > hdr_h) hdr_h = mh + 20.0 * g_layout_scale;
+        }
+        best = hdr_h;
+        if (el->is_open && el->content)
+        {
+            struct uwp_element *be = uwp_elem_from_any( el->content );
+            double bh = (be && be != el) ? uwp_measure_natural_height( be, max( 120, avail_w - 32 ), depth + 1 ) : 0.0;
+            if (bh <= 0.0) bh = 80.0 * g_layout_scale;
+            best += bh + 20.0 * g_layout_scale;
+        }
+    }
     else if (el->kind == UWP_KIND_IMAGE)
     {
         if (el->media && el->media->img_h > 0) best = (double)el->media->img_h;
     }
-    else if (el->kind == UWP_KIND_STACK_PANEL && el->children_coll)
+    else if ((el->kind == UWP_KIND_STACK_PANEL ||
+              ((el->class_flags & UWP_CF_RADIO_BUTTON) && el->kind != UWP_KIND_TOGGLE_BUTTON)) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k, vis = 0;
@@ -1877,9 +1905,12 @@ static void arrange_pivot( struct uwp_element *el, RECT rc, int h )
     unsigned int k;
     int tab_w = (int)(84 * g_layout_scale);
     int tab_h = min( h, (int)(36 * g_layout_scale) );
+    RECT body_rc;
+    SetRect( &body_rc, rc.left, min( (int)rc.bottom, (int)rc.top + 8 + tab_h + 4 ), rc.right, rc.bottom );
     for (k = 0; k < children->count; k++)
     {
         struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+        struct uwp_element *body;
         RECT crc;
         if (!ch || ch->visibility != 0) continue;
         ch->margin_t = 0;
@@ -1889,6 +1920,14 @@ static void arrange_pivot( struct uwp_element *el, RECT rc, int h )
         ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
         ch->actual_w = (double)(crc.right - crc.left);
         ch->actual_h = (double)(crc.bottom - crc.top);
+        body = ch->content ? uwp_elem_from_any( ch->content ) : NULL;
+        if (body && body != ch)
+        {
+            if (uwp_paint_pivot_item_is_selected( ch ) && body_rc.bottom > body_rc.top && body_rc.right > body_rc.left)
+                uwp_arrange_element( body, body_rc );
+            else
+                uwp_clear_bounds_tree( body );
+        }
     }
 }
 
@@ -1978,14 +2017,47 @@ static void arrange_nav_view( struct uwp_element *el, RECT rc )
             }
             if (!wcscmp( ch->name, L"MenuItemsHost" ))
             {
-                if (!pane_visible || pane_w <= 0 || ch->visibility != 0) { uwp_clear_bounds_tree( ch ); continue; }
+                if (!pane_visible || pane_w <= 0 || ch->visibility != 0)
+                {
+                    unsigned int mcnt = ch->children_coll
+                        ? CONTAINING_RECORD( ch->children_coll, struct uwp_vec_view, IInspectable_iface )->count : 0;
+                    if (ch->visibility == 0 && mcnt == 0 && UWP_EV_CNT( ch, evc_reg ) > 0)
+                    {
+                        /* Pre-realize NavigationView ItemsRepeater while closed so first open does not auto-close. */
+                        RECT vrc;
+                        SetRect( &vrc, rc.left, menu_top, rc.left + max( 240, open_pane_w ), footer_top );
+                        ch->bounds = vrc;
+                        ch->actual_w = (double)(vrc.right - vrc.left);
+                        ch->actual_h = (double)(vrc.bottom - vrc.top);
+                        uwp_fire_evc_if_needed( ch );
+                        uwp_invoke_winui_measure_arrange( ch, vrc.right - vrc.left, vrc.bottom - vrc.top );
+                    }
+                    uwp_clear_bounds_tree( ch );
+                    continue;
+                }
                 SetRect( &crc, rc.left, menu_top, min( (int)rc.right, (int)rc.left + pane_w ), footer_top );
                 uwp_arrange_element( ch, crc );
                 continue;
             }
             if (!wcscmp( ch->name, L"FooterMenuItemsHost" ))
             {
-                if (!pane_visible || pane_w <= 0 || footer_h <= 0 || ch->visibility != 0) { uwp_clear_bounds_tree( ch ); continue; }
+                if (!pane_visible || pane_w <= 0 || footer_h <= 0 || ch->visibility != 0)
+                {
+                    unsigned int fcnt = ch->children_coll
+                        ? CONTAINING_RECORD( ch->children_coll, struct uwp_vec_view, IInspectable_iface )->count : 0;
+                    if (ch->visibility == 0 && fcnt == 0 && UWP_EV_CNT( ch, evc_reg ) > 0)
+                    {
+                        RECT vrc;
+                        SetRect( &vrc, rc.left, footer_top, rc.left + max( 240, open_pane_w ), rc.bottom - 4 );
+                        ch->bounds = vrc;
+                        ch->actual_w = (double)(vrc.right - vrc.left);
+                        ch->actual_h = (double)(vrc.bottom - vrc.top);
+                        uwp_fire_evc_if_needed( ch );
+                        uwp_invoke_winui_measure_arrange( ch, vrc.right - vrc.left, vrc.bottom - vrc.top );
+                    }
+                    uwp_clear_bounds_tree( ch );
+                    continue;
+                }
                 SetRect( &crc, rc.left, footer_top, min( (int)rc.right, (int)rc.left + pane_w ), rc.bottom - 4 );
                 uwp_arrange_element( ch, crc );
                 continue;
@@ -2200,9 +2272,10 @@ static void arrange_generic_children( struct uwp_element *el, RECT rc )
 {
     struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
     unsigned int k;
+    BOOL is_radio_group = ((el->class_flags & UWP_CF_RADIO_BUTTON) != 0) && el->kind != UWP_KIND_TOGGLE_BUTTON;
     BOOL is_horiz_list = ((el->class_flags & (UWP_CF_LISTBOX | UWP_CF_ITEMS_CONTROL | UWP_CF_RADIO_BUTTON)) != 0) &&
                          (rc.bottom - rc.top) <= (int)(64 * g_layout_scale);
-    int cur_x = rc.left;
+    int cur_x = rc.left, cur_y = rc.top;
     for (k = 0; k < children->count; k++)
     {
         struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
@@ -2214,6 +2287,14 @@ static void arrange_generic_children( struct uwp_element *el, RECT rc )
             RECT crc = { cur_x, rc.top, min( (int)rc.right, cur_x + cw ), rc.bottom };
             uwp_arrange_element( ch, crc );
             cur_x = crc.right + (int)(12 * g_layout_scale);
+        }
+        else if (is_radio_group && ch->visibility == 0)
+        {
+            double nh = uwp_measure_natural_height( ch, max( 80, (int)(rc.right - rc.left) ), 0 );
+            int ch_h = (nh > 0.0) ? (int)(nh + 0.5) : (int)(32 * g_layout_scale + 0.5f);
+            RECT crc = { rc.left, cur_y, rc.right, min( (int)rc.bottom, cur_y + ch_h ) };
+            uwp_arrange_element( ch, crc );
+            cur_y = crc.bottom + (int)(6 * g_layout_scale);
         }
         else
             uwp_arrange_element( ch, rc );
@@ -2300,6 +2381,50 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
     if (uwp_is_items_repeater( el ) && el->children_coll) { arrange_items_repeater( el, rc ); return; }
     if ((el->class_flags & (UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW)) && el->children_coll && arrange_list_or_grid_view( el, rc ))
         return;
+
+    if (uwp_is_expander( el ))
+    {
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        int hdr_h = (int)(64 * sc + 0.5f);
+        struct uwp_element *he = el->pane ? uwp_elem_from_any( el->pane ) : NULL;
+        struct uwp_element *be = el->content ? uwp_elem_from_any( el->content ) : NULL;
+        if (he && he != el)
+        {
+            RECT hrc;
+            double mh = uwp_measure_natural_height( he, max( 120, w - (int)(64 * sc) ), 0 );
+            if (mh + 20.0 * sc > hdr_h) hdr_h = (int)(mh + 20.0 * sc + 0.5f);
+            if (hdr_h > h && !el->is_open) hdr_h = h;
+            SetRect( &hrc, rc.left + (int)(16 * sc), rc.top + (int)(10 * sc),
+                     max( rc.left + (int)(16 * sc), rc.right - (int)(48 * sc) ),
+                     min( rc.bottom, rc.top + hdr_h - (int)(10 * sc) ) );
+            uwp_arrange_element( he, hrc );
+        }
+        else if (!uwp_has_text( el ) && be && be != el)
+        {
+            RECT hrc;
+            SetRect( &hrc, rc.left + (int)(16 * sc), rc.top + (int)(10 * sc),
+                     max( rc.left + (int)(16 * sc), rc.right - (int)(16 * sc) ),
+                     max( rc.top + (int)(10 * sc), rc.bottom - (int)(10 * sc) ) );
+            uwp_arrange_element( be, hrc );
+            return;
+        }
+        if (be && be != el)
+        {
+            if (el->is_open && rc.top + hdr_h < rc.bottom)
+            {
+                RECT brc;
+                SetRect( &brc, rc.left + (int)(16 * sc), rc.top + hdr_h + (int)(8 * sc),
+                         max( rc.left + (int)(16 * sc), rc.right - (int)(16 * sc) ),
+                         max( rc.top + hdr_h + (int)(8 * sc), rc.bottom - (int)(10 * sc) ) );
+                uwp_arrange_element( be, brc );
+            }
+            else
+            {
+                uwp_clear_bounds_tree( be );
+            }
+        }
+        return;
+    }
 
     if (el->content)
     {

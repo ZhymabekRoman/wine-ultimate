@@ -73,12 +73,38 @@ static HRESULT WINAPI cal_id_get_Persian( void *iface, HSTRING *value )
     return WindowsCreateString( L"PersianCalendar", 15, value );
 }
 
+static const GUID IID_ICalendarIdentifiersStatics_local =
+    { 0x80653f68, 0x2cb2, 0x4c1f, { 0xb5, 0x90, 0xf0, 0xf5, 0x2b, 0xf4, 0xfd, 0x1a } };
+static const GUID IID_ICalendarIdentifiersStatics2_local =
+    { 0x7df4d488, 0x5fd0, 0x42a7, { 0x95, 0xb5, 0x7d, 0x98, 0xd8, 0x23, 0x07, 0x5f } };
+static const GUID IID_ICalendarIdentifiersStatics3_local =
+    { 0x2c225423, 0x1fad, 0x40c0, { 0x93, 0x34, 0xa8, 0xeb, 0x90, 0xdb, 0x04, 0xf5 } };
+
+static const void *cal_id_factory_vtbl[];
+static const void *cal_id2_factory_vtbl[];
+static struct { const void **vtbl; const void **vtbl2; } cal_id_factory_obj = { cal_id_factory_vtbl, cal_id2_factory_vtbl };
+
 static HRESULT WINAPI cal_id_QueryInterface( void *iface, REFIID iid, void **out )
 {
     TRACE( "cal_id_QI: iid %s\n", debugstr_guid(iid) );
     if (!out) return E_POINTER;
-    *out = iface;
-    return S_OK;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_ICalendarIdentifiersStatics_local ) ||
+        IsEqualGUID( iid, &IID_ICalendarIdentifiersStatics3_local ))
+    {
+        *out = &cal_id_factory_obj.vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICalendarIdentifiersStatics2_local ))
+    {
+        *out = &cal_id_factory_obj.vtbl2;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI cal_id_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI cal_id_Release( void *iface ) { return 1; }
@@ -110,9 +136,18 @@ static const void *cal_id_factory_vtbl[] =
     cal_id_get_Gregorian,
     cal_id_get_Gregorian,
 };
-static struct { const void **vtbl; } cal_id_factory_obj = { cal_id_factory_vtbl };
+static const void *cal_id2_factory_vtbl[] =
+{
+    cal_id_QueryInterface,
+    cal_id_AddRef,
+    cal_id_Release,
+    cal_id_GetIids,
+    cal_id_GetRuntimeClassName,
+    cal_id_GetTrustLevel,
+    cal_id_get_Persian,
+};
 
-IActivationFactory *calendar_identifiers_factory = (IActivationFactory *)&cal_id_factory_obj;
+IActivationFactory *calendar_identifiers_factory = (IActivationFactory *)&cal_id_factory_obj.vtbl;
 
 /* Windows.Globalization.ClockIdentifiers */
 static HRESULT WINAPI clk_id_GetRuntimeClassName( void *iface, HSTRING *name )
@@ -180,15 +215,21 @@ static inline struct dt_formatter *dt_from_vtbl2( void *iface )
     return CONTAINING_RECORD( iface, struct dt_formatter, vtbl2 );
 }
 
+static const GUID IID_IDateTimeFormatter_local =
+    { 0x95eeca10, 0x73e0, 0x4e4b, { 0xa1, 0x83, 0x3d, 0x6a, 0xd0, 0xba, 0x35, 0xec } };
+
 static HRESULT WINAPI dt_fmt_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct dt_formatter *impl = iface;
     if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IReferenceTracker_glob ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_glob ))
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDateTimeFormatter_local ))
     {
-        *out = NULL;
-        return E_NOINTERFACE;
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->vtbl;
+        return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IDateTimeFormatter2_local ))
     {
@@ -196,9 +237,8 @@ static HRESULT WINAPI dt_fmt_QueryInterface( void *iface, REFIID iid, void **out
         *out = &impl->vtbl2;
         return S_OK;
     }
-    InterlockedIncrement( &impl->ref );
-    *out = &impl->vtbl;
-    return S_OK;
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 
 static HRESULT WINAPI dt_fmt2_QueryInterface( void *iface, REFIID iid, void **out )
@@ -438,11 +478,13 @@ static struct {
 static HRESULT WINAPI dt_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IReferenceTracker_glob ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_glob ))
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
     {
-        *out = NULL;
-        return E_NOINTERFACE;
+        *out = &dt_factory_obj.vtbl_act;
+        return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IDateTimeFormatterFactory_local ))
     {
@@ -454,8 +496,8 @@ static HRESULT WINAPI dt_factory_QueryInterface( void *iface, REFIID iid, void *
         *out = &dt_factory_obj.vtbl_stat;
         return S_OK;
     }
-    *out = &dt_factory_obj.vtbl_act;
-    return S_OK;
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 
 static HRESULT WINAPI dt_factory_ActivateInstance( void *iface, void **out )

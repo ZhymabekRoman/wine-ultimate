@@ -97,6 +97,7 @@ void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
 }
 
 struct uwp_element *g_open_combobox = NULL;
+struct uwp_element *g_open_cdp = NULL;
 
 void uwp_nav_track_open_state( struct uwp_element *nav )
 {
@@ -568,10 +569,25 @@ static HRESULT WINAPI uwp_tabview_put_TabItemsSource( void *iface, void *src )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
     struct uwp_nav_ext *nav = uwp_elem_ensure_nav( impl );
+    int ni;
     if (!nav) return S_OK;
     if (nav->tab_items_source) IInspectable_Release( nav->tab_items_source );
     nav->tab_items_source = (IInspectable *)src;
     if (nav->tab_items_source) IInspectable_AddRef( nav->tab_items_source );
+    for (ni = 0; ni < impl->named_cnt; ni++)
+    {
+        if (impl->named_elems[ni] && !wcscmp( impl->named_elems[ni]->name, L"TabListView" ))
+        {
+            struct uwp_element *tlv = impl->named_elems[ni];
+            if (tlv->items_source != (IInspectable *)src)
+            {
+                if (tlv->items_source) IInspectable_Release( tlv->items_source );
+                tlv->items_source = (IInspectable *)src;
+                if (tlv->items_source) IInspectable_AddRef( tlv->items_source );
+            }
+            break;
+        }
+    }
     TRACE( "ITabView::put_TabItemsSource -> %p\n", src );
     uwp_invalidate_window();
     return S_OK;
@@ -714,11 +730,31 @@ void uwp_tabview_compute_rects( const RECT *trc, int count, int idx, RECT *pill_
     }
 }
 
+static struct uwp_element *uwp_find_named_child( struct uwp_element *owner, const WCHAR *name )
+{
+    int i;
+    if (!owner || !name) return NULL;
+    for (i = 0; i < owner->named_cnt; i++)
+    {
+        if (owner->named_elems[i] && !wcscmp( owner->named_elems[i]->name, name ))
+            return owner->named_elems[i];
+    }
+    return NULL;
+}
+
 void uwp_tabview_fire_add_tab( struct uwp_element *tv )
 {
+    struct uwp_element *add_btn;
     if (!tv) return;
-    TRACE( "uwp_tabview_fire_add_tab: cnt=%u cmd=%p\n",
-           UWP_EV_CNT( tv, tab_add_reg ), tv->nav ? tv->nav->tab_add_cmd : NULL );
+    add_btn = uwp_find_named_child( tv, L"AddButton" );
+    TRACE( "uwp_tabview_fire_add_tab: cnt=%u cmd=%p add_btn=%p(clicks=%u)\n",
+           UWP_EV_CNT( tv, tab_add_reg ), tv->nav ? tv->nav->tab_add_cmd : NULL,
+           add_btn, add_btn ? UWP_EV_CNT( add_btn, click_reg ) : 0 );
+    if (add_btn && (UWP_EV_CNT( add_btn, click_reg ) > 0 || add_btn->command))
+    {
+        uwp_invoke_button( add_btn );
+        return;
+    }
     if (UWP_EV_CNT( tv, tab_add_reg ) > 0)
     {
         IInspectable *sender = tv->outer ? tv->outer : &tv->IInspectable_iface;
@@ -749,7 +785,18 @@ void uwp_tabview_fire_add_tab( struct uwp_element *tv )
 void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item )
 {
     struct uwp_tab_close_args *args;
+    struct uwp_element *item_el;
     if (!tv || !item) return;
+    item_el = uwp_elem_from_any( item );
+    if (item_el)
+    {
+        struct uwp_element *close_btn = uwp_find_named_child( item_el, L"CloseButton" );
+        if (close_btn && (UWP_EV_CNT( close_btn, click_reg ) > 0 || close_btn->command))
+        {
+            uwp_invoke_button( close_btn );
+            return;
+        }
+    }
     TRACE( "uwp_tabview_fire_close_tab: cnt=%u item=%p\n", UWP_EV_CNT( tv, tab_close_reg ), item );
     if (UWP_EV_CNT( tv, tab_close_reg ) > 0)
     {
@@ -769,8 +816,12 @@ void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item )
 
 void uwp_tabview_select_item( struct uwp_element *tv, IInspectable *item )
 {
+    struct uwp_element *tlv;
     if (!tv || !item) return;
     uwp_tabview_put_SelectedItem( &tv->IFlyout_iface, item );
+    tlv = uwp_find_named_child( tv, L"TabListView" );
+    if (tlv)
+        uwp_selector_set_selection( tlv, -1, item, FALSE, TRUE );
 }
 
 static HRESULT WINAPI uwp_sel_args_QI( void *iface, REFIID iid, void **out )
@@ -1578,6 +1629,837 @@ const void *uwp_combobox_vtbl[24] =
     [16] = uwp_cb_add_DropDownOpened,
     [17] = uwp_cb_remove_DropDownOpened,
     [18 ... 23] = uwp_generic_noop,
+};
+
+/* Windows.UI.Xaml.Controls.IComboBox6 ({61aad6a5-81fb-5f87-bae3-369fbe2ea1f3}) */
+static HRESULT WINAPI uwp_cb6_get_bool_false( void *iface, boolean *val )
+{
+    if (val) *val = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb6_get_Text( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISplitView2_iface );
+    WCHAR buf[256] = {0};
+    const WCHAR *txt = L"";
+    if (!out) return E_POINTER;
+    if (impl)
+    {
+        if (uwp_has_text( impl ))
+            txt = uwp_elem_text( impl );
+        else if (uwp_elem_selected_item( impl ))
+        {
+            uwp_combobox_get_item_label( impl, uwp_elem_selected_item( impl ), buf, ARRAY_SIZE(buf) );
+            txt = buf;
+        }
+    }
+    return WindowsCreateString( txt, wcslen(txt), out );
+}
+static HRESULT WINAPI uwp_cb6_put_Text( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, ISplitView2_iface );
+    const WCHAR *s = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (impl && s)
+    {
+        uwp_elem_set_text( impl, s );
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb6_get_NullOut( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cb6_add_event( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    if (tok) tok->value = 1;
+    return S_OK;
+}
+const void *uwp_combobox6_vtbl[24] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_cb6_get_bool_false,
+    [7] = uwp_cb6_get_Text,
+    [8] = uwp_cb6_put_Text,
+    [9] = uwp_cb6_get_NullOut,
+    [10] = uwp_generic_noop,
+    [11] = uwp_cb6_get_NullOut,
+    [12] = uwp_generic_noop,
+    [13] = uwp_cb6_add_event,
+    [14] = uwp_generic_noop,
+    [15 ... 23] = uwp_generic_noop,
+};
+
+/* Windows.UI.Xaml.Controls.IPivot ({103e9b13-3400-4a16-90b9-6912bf06974e}) */
+static HRESULT WINAPI uwp_pivot_get_NullOut( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pivot_get_SelectedIndex( void *iface, INT32 *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    INT32 idx = uwp_elem_selected_index( impl );
+    if (idx < 0 && impl && impl->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+        if (v && v->count > 0) idx = 0;
+    }
+    if (out) *out = idx;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pivot_put_SelectedIndex( void *iface, INT32 idx )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (impl)
+    {
+        uwp_selector_set_selection( impl, idx, NULL, TRUE, TRUE );
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pivot_get_SelectedItem( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    IInspectable *item;
+    if (!out) return E_POINTER;
+    item = uwp_elem_selected_item( impl );
+    if (!item && impl && impl->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+        INT32 idx = uwp_elem_selected_index( impl );
+        if (idx < 0) idx = 0;
+        if (v && (unsigned int)idx < v->count) item = v->items[idx];
+    }
+    *out = item;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pivot_put_SelectedItem( void *iface, void *item )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (impl)
+    {
+        uwp_selector_set_selection( impl, -1, (IInspectable *)item, FALSE, TRUE );
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pivot_get_IsLocked( void *iface, boolean *out )
+{
+    if (out) *out = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pivot_add_SelectionChanged( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_event_bag *ev;
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    TRACE( "IPivot::add_SelectionChanged(%p) on %s\n", handler, debugstr_w(impl->name) );
+    return xaml_event_registry_add( &ev->sel_changed_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_pivot_remove_SelectionChanged( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->sel_changed_reg, tok );
+}
+static HRESULT WINAPI uwp_pivot_add_PivotItemLoading( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_event_bag *ev;
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->pivot_item_loading_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_pivot_remove_PivotItemLoading( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->pivot_item_loading_reg, tok );
+}
+static HRESULT WINAPI uwp_pivot_add_PivotItemLoaded( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_event_bag *ev;
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->pivot_item_loaded_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_pivot_remove_PivotItemLoaded( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->pivot_item_loaded_reg, tok );
+}
+const void *uwp_pivot_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_pivot_get_NullOut,             /* get_Title */
+    [7] = uwp_generic_noop,                  /* put_Title */
+    [8] = uwp_pivot_get_NullOut,             /* get_TitleTemplate */
+    [9] = uwp_generic_noop,                  /* put_TitleTemplate */
+    [10] = uwp_pivot_get_NullOut,            /* get_HeaderTemplate */
+    [11] = uwp_generic_noop,                 /* put_HeaderTemplate */
+    [12] = uwp_pivot_get_SelectedIndex,      /* get_SelectedIndex */
+    [13] = uwp_pivot_put_SelectedIndex,      /* put_SelectedIndex */
+    [14] = uwp_pivot_get_SelectedItem,       /* get_SelectedItem */
+    [15] = uwp_pivot_put_SelectedItem,       /* put_SelectedItem */
+    [16] = uwp_pivot_get_IsLocked,           /* get_IsLocked */
+    [17] = uwp_generic_noop,                 /* put_IsLocked */
+    [18] = uwp_pivot_add_SelectionChanged,   /* add_SelectionChanged */
+    [19] = uwp_pivot_remove_SelectionChanged,/* remove_SelectionChanged */
+    [20] = uwp_pivot_add_PivotItemLoading,   /* add_PivotItemLoading */
+    [21] = uwp_pivot_remove_PivotItemLoading,/* remove_PivotItemLoading */
+    [22] = uwp_pivot_add_PivotItemLoaded,    /* add_PivotItemLoaded */
+    [23] = uwp_pivot_remove_PivotItemLoaded, /* remove_PivotItemLoaded */
+    [24] = uwp_cb6_add_event,                /* add_PivotItemUnloading */
+    [25] = uwp_generic_noop,                 /* remove_PivotItemUnloading */
+    [26] = uwp_cb6_add_event,                /* add_PivotItemUnloaded */
+    [27] = uwp_generic_noop,                 /* remove_PivotItemUnloaded */
+    [28 ... 31] = uwp_generic_noop,
+};
+
+/* Windows.UI.Xaml.Controls.IPivotItem ({2543d0bc-2620-4361-8272-d06443d89362}) */
+static HRESULT WINAPI uwp_pivot_item_get_Header( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!out) return E_POINTER;
+    if (impl && uwp_has_text( impl ))
+    {
+        *out = box_string_value( uwp_elem_text( impl ) );
+        return S_OK;
+    }
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_pivot_item_put_Header( void *iface, void *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    WCHAR buf[256] = {0};
+    if (impl && val && uwp_unbox_string( (IInspectable *)val, buf, ARRAY_SIZE(buf) ))
+    {
+        uwp_elem_set_text( impl, buf );
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+const void *uwp_pivot_item_vtbl[12] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_pivot_item_get_Header,
+    [7] = uwp_pivot_item_put_Header,
+    [8 ... 11] = uwp_generic_noop,
+};
+
+/* ============================================================================
+ * Windows.UI.Xaml.Controls.CalendarDatePicker ({63c9c16f-668c-4491-9444-d45d8bf4fa29})
+ * ============================================================================ */
+
+static IInspectable *uwp_box_datetime_ref( INT64 ticks )
+{
+    static const GUID IID_IPropertyValueStatics_local =
+        { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
+    HSTRING h_cls = NULL;
+    void *pvs = NULL;
+    IInspectable *res = NULL;
+
+    if (SUCCEEDED(WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &h_cls )) && h_cls)
+    {
+        if (SUCCEEDED(RoGetActivationFactory( h_cls, &IID_IPropertyValueStatics_local, &pvs )) && pvs)
+        {
+            /* IPropertyValueStatics slot 18 = CreateDateTime(DateTime, IInspectable**) */
+            typedef HRESULT (WINAPI *create_dt_fn)( void *, INT64, IInspectable ** );
+            create_dt_fn fn = (create_dt_fn)((void **)*(void **)pvs)[21];
+            if (fn) fn( pvs, ticks, &res );
+            IUnknown_Release( (IUnknown *)pvs );
+        }
+        WindowsDeleteString( h_cls );
+    }
+    return res;
+}
+
+static BOOL uwp_unbox_datetime_ref( IInspectable *val, INT64 *out_ticks )
+{
+    void *iref = NULL;
+    if (!val || !out_ticks) return FALSE;
+    if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_DateTime_UWP, &iref )) && iref)
+    {
+        typedef HRESULT (WINAPI *get_val_fn)( void *, INT64 * );
+        get_val_fn fn = (get_val_fn)((void **)*(void **)iref)[6];
+        HRESULT hr = fn ? fn( iref, out_ticks ) : E_FAIL;
+        IUnknown_Release( (IUnknown *)iref );
+        return SUCCEEDED(hr);
+    }
+    {
+        static const GUID IID_IPropertyValue_local =
+            { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
+        void *pv = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IPropertyValue_local, &pv )) && pv)
+        {
+            /* IPropertyValue slot 21 = GetDateTime(DateTime*) */
+            typedef HRESULT (WINAPI *get_dt_fn)( void *, INT64 * );
+            get_dt_fn fn = (get_dt_fn)((void **)*(void **)pv)[21];
+            HRESULT hr = fn ? fn( pv, out_ticks ) : E_FAIL;
+            IUnknown_Release( (IUnknown *)pv );
+            return SUCCEEDED(hr);
+        }
+    }
+    return FALSE;
+}
+
+static INT64 uwp_cdp_today_ticks( void )
+{
+    SYSTEMTIME st;
+    FILETIME ft;
+    GetLocalTime( &st );
+    st.wHour = 12; st.wMinute = 0; st.wSecond = 0; st.wMilliseconds = 0;
+    if (SystemTimeToFileTime( &st, &ft ))
+        return ((INT64)ft.dwHighDateTime << 32) | (INT64)ft.dwLowDateTime;
+    return 134139168000000000LL; /* 2026-11-26 12:00 UTC fallback */
+}
+
+void uwp_cdp_ticks_to_ymd( INT64 ticks, int *y, int *m, int *d )
+{
+    FILETIME ft;
+    SYSTEMTIME st;
+    if (ticks <= 0) ticks = uwp_cdp_today_ticks();
+    ft.dwLowDateTime = (DWORD)(ticks & 0xffffffff);
+    ft.dwHighDateTime = (DWORD)((UINT64)ticks >> 32);
+    if (FileTimeToSystemTime( &ft, &st ))
+    {
+        if (y) *y = st.wYear;
+        if (m) *m = st.wMonth;
+        if (d) *d = st.wDay;
+        return;
+    }
+    if (y) *y = 2026;
+    if (m) *m = 11;
+    if (d) *d = 26;
+}
+
+INT64 uwp_cdp_ymd_to_ticks( int y, int m, int d )
+{
+    SYSTEMTIME st = {0};
+    FILETIME ft = {0};
+    if (y < 1601) y = 1601;
+    if (y > 9999) y = 9999;
+    if (m < 1) m = 1;
+    if (m > 12) m = 12;
+    if (d < 1) d = 1;
+    if (d > uwp_cdp_days_in_month( y, m )) d = uwp_cdp_days_in_month( y, m );
+    st.wYear = (WORD)y;
+    st.wMonth = (WORD)m;
+    st.wDay = (WORD)d;
+    st.wHour = 12;
+    if (SystemTimeToFileTime( &st, &ft ))
+        return ((INT64)ft.dwHighDateTime << 32) | (INT64)ft.dwLowDateTime;
+    return uwp_cdp_today_ticks();
+}
+
+int uwp_cdp_days_in_month( int y, int m )
+{
+    static const int days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (m < 1 || m > 12) return 30;
+    if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0))) return 29;
+    return days[m - 1];
+}
+
+int uwp_cdp_first_dow( int y, int m )
+{
+    SYSTEMTIME st = {0};
+    FILETIME ft = {0};
+    st.wYear = (WORD)max( 1601, y );
+    st.wMonth = (WORD)max( 1, min( 12, m ) );
+    st.wDay = 1;
+    st.wHour = 12;
+    if (SystemTimeToFileTime( &st, &ft ) && FileTimeToSystemTime( &ft, &st ))
+        return st.wDayOfWeek; /* 0=Sun..6=Sat */
+    return 0;
+}
+
+void uwp_cdp_format_date( struct uwp_element *cdp, WCHAR *buf, int buf_len )
+{
+    static const WCHAR * const months[12] = {
+        L"January", L"February", L"March", L"April", L"May", L"June",
+        L"July", L"August", L"September", L"October", L"November", L"December"
+    };
+    struct uwp_nav_ext *ne = cdp ? cdp->nav : NULL;
+    int y, m, d;
+    if (!buf || buf_len <= 0) return;
+    buf[0] = 0;
+    if (!ne || !ne->cdp_has_date)
+    {
+        if (ne && ne->cdp_placeholder[0])
+            lstrcpynW( buf, ne->cdp_placeholder, buf_len );
+        else if (uwp_has_text( cdp ))
+            lstrcpynW( buf, uwp_elem_text( cdp ), buf_len );
+        else
+            lstrcpynW( buf, L"Select a date", buf_len );
+        return;
+    }
+    uwp_cdp_ticks_to_ymd( ne->cdp_date_ticks, &y, &m, &d );
+    if (m >= 1 && m <= 12)
+        swprintf( buf, buf_len, L"%s %d, %d", months[m - 1], d, y );
+    else
+        swprintf( buf, buf_len, L"%d/%d/%d", m, d, y );
+}
+
+BOOL uwp_cdp_compute_popup_rect( struct uwp_element *cdp, int win_w, int win_h, RECT *out_rc )
+{
+    float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+    int pw = (int)(280 * sc + 0.5f);
+    int ph = (int)(284 * sc + 0.5f);
+    int left, top;
+    if (!cdp || !cdp->has_bounds || !out_rc) return FALSE;
+    left = cdp->bounds.left;
+    if (left + pw > win_w - 8) left = max( 8, win_w - 8 - pw );
+    top = cdp->bounds.bottom + 4;
+    if (top + ph > win_h - 8) top = max( 8, cdp->bounds.top - ph - 4 );
+    SetRect( out_rc, left, top, left + pw, top + ph );
+    return TRUE;
+}
+
+struct uwp_cdp_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    IInspectable *new_date;
+    IInspectable *old_date;
+};
+
+static HRESULT WINAPI uwp_cdp_args_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_cdp_args *a = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ICalendarDatePickerDateChangedEventArgs_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &a->ref );
+        return S_OK;
+    }
+    TRACE( "uwp_cdp_args_QI: unmatched iid %s -> E_NOINTERFACE\n", debugstr_guid(iid) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_cdp_args_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_cdp_args *)iface)->ref );
+}
+static ULONG WINAPI uwp_cdp_args_Release( void *iface )
+{
+    struct uwp_cdp_args *a = iface;
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r)
+    {
+        if (a->new_date) IInspectable_Release( a->new_date );
+        if (a->old_date) IInspectable_Release( a->old_date );
+        free( a );
+    }
+    return r;
+}
+static HRESULT WINAPI uwp_cdp_args_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.UI.Xaml.Controls.CalendarDatePickerDateChangedEventArgs";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+static HRESULT WINAPI uwp_cdp_args_get_NewDate( void *iface, void **out )
+{
+    struct uwp_cdp_args *a = iface;
+    if (!out) return E_POINTER;
+    *out = a->new_date;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_args_get_OldDate( void *iface, void **out )
+{
+    struct uwp_cdp_args *a = iface;
+    if (!out) return E_POINTER;
+    *out = a->old_date;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static const void *uwp_cdp_args_vtbl[12] =
+{
+    [0] = uwp_cdp_args_QI,
+    [1] = uwp_cdp_args_AddRef,
+    [2] = uwp_cdp_args_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_cdp_args_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_cdp_args_get_NewDate,
+    [7] = uwp_cdp_args_get_OldDate,
+    [8 ... 11] = uwp_generic_noop,
+};
+
+void uwp_cdp_set_open( struct uwp_element *cdp, BOOL open )
+{
+    struct uwp_nav_ext *ne;
+    if (!cdp) return;
+    if (open && g_open_cdp && g_open_cdp != cdp)
+    {
+        struct uwp_element *prev = g_open_cdp;
+        prev->is_dropdown_open = FALSE;
+        g_open_cdp = NULL;
+        uwp_fire_cb_event( prev, UWP_EV_REG( prev, cb_closed_reg ) );
+    }
+    if (cdp->is_dropdown_open == open) return;
+    cdp->is_dropdown_open = open;
+    ne = uwp_elem_ensure_nav( cdp );
+    if (open)
+    {
+        if (ne)
+        {
+            INT64 ref_ticks = ne->cdp_has_date ? ne->cdp_date_ticks : uwp_cdp_today_ticks();
+            int y, m, d;
+            uwp_cdp_ticks_to_ymd( ref_ticks, &y, &m, &d );
+            if (ne->cdp_view_year <= 0 || ne->cdp_view_month <= 0)
+            {
+                ne->cdp_view_year = y;
+                ne->cdp_view_month = m;
+            }
+        }
+        g_open_cdp = cdp;
+        uwp_fire_cb_event( cdp, UWP_EV_REG( cdp, cb_opened_reg ) );
+    }
+    else
+    {
+        if (g_open_cdp == cdp) g_open_cdp = NULL;
+        uwp_fire_cb_event( cdp, UWP_EV_REG( cdp, cb_closed_reg ) );
+    }
+    TRACE( "uwp_cdp_set_open(%s) -> %d\n", debugstr_w(cdp->name), (int)open );
+    uwp_invalidate_window();
+}
+
+void uwp_cdp_set_date( struct uwp_element *cdp, INT64 ticks, BOOL has_date, BOOL fire_event )
+{
+    struct uwp_nav_ext *ne;
+    BOOL old_has;
+    INT64 old_ticks;
+    WCHAR fmt[96] = {0};
+
+    if (!cdp) return;
+    ne = uwp_elem_ensure_nav( cdp );
+    if (!ne) return;
+    old_has = ne->cdp_has_date;
+    old_ticks = ne->cdp_date_ticks;
+    ne->cdp_has_date = has_date;
+    ne->cdp_date_ticks = has_date ? ticks : 0;
+    if (has_date)
+    {
+        int y, m, d;
+        uwp_cdp_ticks_to_ymd( ticks, &y, &m, &d );
+        ne->cdp_view_year = y;
+        ne->cdp_view_month = m;
+    }
+    uwp_cdp_format_date( cdp, fmt, ARRAY_SIZE(fmt) );
+    uwp_elem_set_text( cdp, fmt );
+    TRACE( "uwp_cdp_set_date(%s): has=%d ticks=%I64d -> %s (fire=%d)\n",
+           debugstr_w(cdp->name), (int)has_date, ticks, debugstr_w(fmt), (int)fire_event );
+
+    if (fire_event && (old_has != has_date || old_ticks != ne->cdp_date_ticks) &&
+        UWP_EV_CNT( cdp, cdp_date_changed_reg ) > 0)
+    {
+        struct uwp_cdp_args *args = calloc( 1, sizeof(*args) );
+        if (args)
+        {
+            IInspectable *sender = cdp->outer ? cdp->outer : &cdp->IInspectable_iface;
+            args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cdp_args_vtbl;
+            args->ref = 1;
+            args->new_date = has_date ? uwp_box_datetime_ref( ticks ) : NULL;
+            args->old_date = old_has ? uwp_box_datetime_ref( old_ticks ) : NULL;
+            uwp_fire_event_registry( &cdp->events->cdp_date_changed_reg, sender,
+                                     &args->IInspectable_iface, "CalendarDatePicker::DateChanged" );
+            IInspectable_Release( &args->IInspectable_iface );
+        }
+    }
+    uwp_invalidate_window();
+}
+
+static HRESULT WINAPI uwp_cdp_get_Date( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!out) return E_POINTER;
+    if (impl && impl->nav && impl->nav->cdp_has_date)
+        *out = uwp_box_datetime_ref( impl->nav->cdp_date_ticks );
+    else
+        *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_put_Date( void *iface, void *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    INT64 ticks = 0;
+    if (!impl) return S_OK;
+    if (!val)
+        uwp_cdp_set_date( impl, 0, FALSE, TRUE );
+    else if (uwp_unbox_datetime_ref( (IInspectable *)val, &ticks ))
+        uwp_cdp_set_date( impl, ticks, TRUE, TRUE );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_IsCalendarOpen( void *iface, boolean *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (val) *val = impl ? (boolean)impl->is_dropdown_open : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_put_IsCalendarOpen( void *iface, boolean val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (impl) uwp_cdp_set_open( impl, val != 0 );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_DateFormat( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    const WCHAR *s = (impl && impl->nav) ? impl->nav->cdp_date_format : L"";
+    return out ? WindowsCreateString( s, wcslen(s), out ) : E_POINTER;
+}
+static HRESULT WINAPI uwp_cdp_put_DateFormat( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+    const WCHAR *s = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (ne && s) lstrcpynW( ne->cdp_date_format, s, ARRAY_SIZE(ne->cdp_date_format) );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_PlaceholderText( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    const WCHAR *s = (impl && impl->nav) ? impl->nav->cdp_placeholder : L"";
+    return out ? WindowsCreateString( s, wcslen(s), out ) : E_POINTER;
+}
+static HRESULT WINAPI uwp_cdp_put_PlaceholderText( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+    const WCHAR *s = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (ne && s)
+    {
+        lstrcpynW( ne->cdp_placeholder, s, ARRAY_SIZE(ne->cdp_placeholder) );
+        if (!ne->cdp_has_date && s[0]) uwp_elem_set_text( impl, s );
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_Header( void *iface, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!out) return E_POINTER;
+    if (impl && impl->nav && impl->nav->cdp_header[0])
+        *out = box_string_value( impl->nav->cdp_header );
+    else
+        *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_put_Header( void *iface, void *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+    WCHAR buf[128] = {0};
+    if (ne && val && uwp_unbox_string( (IInspectable *)val, buf, ARRAY_SIZE(buf) ))
+    {
+        lstrcpynW( ne->cdp_header, buf, ARRAY_SIZE(ne->cdp_header) );
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_MinDate( void *iface, INT64 *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (out) *out = (impl && impl->nav && impl->nav->cdp_min_ticks) ? impl->nav->cdp_min_ticks : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_put_MinDate( void *iface, INT64 val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+    if (ne) ne->cdp_min_ticks = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_MaxDate( void *iface, INT64 *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (out) *out = (impl && impl->nav && impl->nav->cdp_max_ticks) ? impl->nav->cdp_max_ticks : 2650467743990000000LL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_put_MaxDate( void *iface, INT64 val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+    if (ne) ne->cdp_max_ticks = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_BoolTrue( void *iface, boolean *val )
+{
+    if (val) *val = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_IntZero( void *iface, INT32 *val )
+{
+    if (val) *val = 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_cdp_get_CalendarId( void *iface, HSTRING *out )
+{
+    return out ? WindowsCreateString( L"GregorianCalendar", 17, out ) : E_POINTER;
+}
+static HRESULT WINAPI uwp_cdp_get_EmptyStr( void *iface, HSTRING *out )
+{
+    return out ? WindowsCreateString( L"", 0, out ) : E_POINTER;
+}
+static HRESULT WINAPI uwp_cdp_add_DateChanged( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_event_bag *ev;
+    if (!impl || !handler) { if (tok) tok->value = 1; return S_OK; }
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    TRACE( "ICalendarDatePicker::add_DateChanged(%p) on %s\n", handler, debugstr_w(impl->name) );
+    return xaml_event_registry_add( &ev->cdp_date_changed_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_cdp_remove_DateChanged( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->cdp_date_changed_reg, tok );
+}
+static HRESULT WINAPI uwp_cdp_SetDisplayDate( void *iface, INT64 ticks )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface );
+    struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+    if (ne && ticks > 0)
+    {
+        int y, m, d;
+        uwp_cdp_ticks_to_ymd( ticks, &y, &m, &d );
+        ne->cdp_view_year = y;
+        ne->cdp_view_month = m;
+    }
+    return S_OK;
+}
+#define CDP_SLOT_PROBE(N) \
+static HRESULT WINAPI uwp_cdp_slot_##N( void *iface, void *a1, void *a2 ) \
+{ \
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface ); \
+    TRACE( "ICalendarDatePicker::slot[%d] on %s a1=%p a2=%p\n", N, impl ? debugstr_w(impl->name) : "?", a1, a2 ); \
+    if ((N) == 48 && impl && a1 && (ULONG_PTR)a1 >= 0x10000) \
+    { \
+        struct uwp_event_bag *ev = uwp_elem_ensure_events( impl ); \
+        if (ev) return xaml_event_registry_add( &ev->cdp_date_changed_reg, a1, (EventRegistrationToken *)a2 ); \
+    } \
+    if ((N) >= 48 && a1 && (ULONG_PTR)a1 >= 0x10000 && a2 && (ULONG_PTR)a2 >= 0x10000) \
+        ((EventRegistrationToken *)a2)->value = 1; \
+    return S_OK; \
+}
+CDP_SLOT_PROBE(48)
+CDP_SLOT_PROBE(49)
+CDP_SLOT_PROBE(50)
+CDP_SLOT_PROBE(51)
+CDP_SLOT_PROBE(52)
+CDP_SLOT_PROBE(53)
+CDP_SLOT_PROBE(54)
+CDP_SLOT_PROBE(55)
+CDP_SLOT_PROBE(56)
+CDP_SLOT_PROBE(57)
+CDP_SLOT_PROBE(58)
+CDP_SLOT_PROBE(59)
+CDP_SLOT_PROBE(60)
+CDP_SLOT_PROBE(61)
+CDP_SLOT_PROBE(62)
+CDP_SLOT_PROBE(63)
+
+const void *uwp_cdp_vtbl[64] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_cdp_get_Date,
+    [7] = uwp_cdp_put_Date,
+    [8] = uwp_cdp_get_IsCalendarOpen,
+    [9] = uwp_cdp_put_IsCalendarOpen,
+    [10] = uwp_cdp_get_DateFormat,
+    [11] = uwp_cdp_put_DateFormat,
+    [12] = uwp_cdp_get_PlaceholderText,
+    [13] = uwp_cdp_put_PlaceholderText,
+    [14] = uwp_cdp_get_Header,
+    [15] = uwp_cdp_put_Header,
+    [16] = uwp_pivot_get_NullOut,        /* get_HeaderTemplate */
+    [17] = uwp_generic_noop,             /* put_HeaderTemplate */
+    [18] = uwp_pivot_get_NullOut,        /* get_CalendarViewStyle */
+    [19] = uwp_generic_noop,             /* put_CalendarViewStyle */
+    [20] = uwp_cdp_get_MinDate,
+    [21] = uwp_cdp_put_MinDate,
+    [22] = uwp_cdp_get_MaxDate,
+    [23] = uwp_cdp_put_MaxDate,
+    [24] = uwp_cdp_get_BoolTrue,         /* get_IsTodayHighlighted */
+    [25] = uwp_generic_noop,             /* put_IsTodayHighlighted */
+    [26] = uwp_cdp_get_IntZero,          /* get_DisplayMode */
+    [27] = uwp_generic_noop,             /* put_DisplayMode */
+    [28] = uwp_cdp_get_IntZero,          /* get_FirstDayOfWeek */
+    [29] = uwp_generic_noop,             /* put_FirstDayOfWeek */
+    [30] = uwp_cdp_get_EmptyStr,         /* get_DayOfWeekFormat */
+    [31] = uwp_generic_noop,             /* put_DayOfWeekFormat */
+    [32] = uwp_cdp_get_CalendarId,       /* get_CalendarIdentifier */
+    [33] = uwp_generic_noop,             /* put_CalendarIdentifier */
+    [34] = uwp_cdp_get_BoolTrue,         /* get_IsOutOfScopeEnabled */
+    [35] = uwp_generic_noop,             /* put_IsOutOfScopeEnabled */
+    [36] = uwp_cdp_get_BoolTrue,         /* get_IsGroupLabelVisible */
+    [37] = uwp_generic_noop,             /* put_IsGroupLabelVisible */
+    [38] = uwp_cb6_add_event,            /* add_CalendarViewDayItemChanging */
+    [39] = uwp_generic_noop,             /* remove_CalendarViewDayItemChanging */
+    [40] = uwp_cdp_add_DateChanged,
+    [41] = uwp_cdp_remove_DateChanged,
+    [42] = uwp_cb_add_DropDownOpened,    /* add_Opened */
+    [43] = uwp_cb_remove_DropDownOpened, /* remove_Opened */
+    [44] = uwp_cb_add_DropDownClosed,    /* add_Closed */
+    [45] = uwp_cb_remove_DropDownClosed, /* remove_Closed */
+    [46] = uwp_cdp_SetDisplayDate,
+    [47] = uwp_generic_noop,             /* SetYearDecadeDisplayDimensions */
+    [48] = uwp_cdp_slot_48,
+    [49] = uwp_cdp_slot_49,
+    [50] = uwp_cdp_slot_50,
+    [51] = uwp_cdp_slot_51,
+    [52] = uwp_cdp_slot_52,
+    [53] = uwp_cdp_slot_53,
+    [54] = uwp_cdp_slot_54,
+    [55] = uwp_cdp_slot_55,
+    [56] = uwp_cdp_slot_56,
+    [57] = uwp_cdp_slot_57,
+    [58] = uwp_cdp_slot_58,
+    [59] = uwp_cdp_slot_59,
+    [60] = uwp_cdp_slot_60,
+    [61] = uwp_cdp_slot_61,
+    [62] = uwp_cdp_slot_62,
+    [63] = uwp_cdp_slot_63,
 };
 
 static HRESULT WINAPI uwp_items_ctrl_get_ItemsSource( void *iface, void **out )

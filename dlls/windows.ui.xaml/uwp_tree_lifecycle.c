@@ -350,6 +350,17 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
             if (ch && ch != el) uwp_fire_loaded_tree( ch );
         }
     }
+    if (el->named_cnt > 0)
+    {
+        int ni;
+        for (ni = 0; ni < el->named_cnt; ni++)
+        {
+            struct uwp_element *ch = el->named_elems[ni];
+            if (ch && ch != el && ch->parent == el && !ch->loaded_fired &&
+                (UWP_EV_CNT( ch, loaded_reg ) > 0 || UWP_EV_CNT( ch, loading_reg ) > 0))
+                uwp_fire_loaded_tree( ch );
+        }
+    }
 }
 
 void uwp_realize_empty_panel_defers( struct uwp_element *root )

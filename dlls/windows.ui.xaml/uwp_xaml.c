@@ -114,7 +114,8 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
         flags |= UWP_CF_PIVOT_ITEM;
     else if (wcsstr( cls, L"Pivot" ))
         flags |= UWP_CF_PIVOT;
-    if (wcsstr( cls, L"RadioButtons" )) flags |= UWP_CF_RADIO_BUTTON;
+    if (wcsstr( cls, L"RadioButtons" ) || wcsstr( uwp_elem_default_style_key_name( el ), L"RadioButtons" ))
+        flags |= UWP_CF_RADIO_BUTTON;
     if (wcsstr( cls, L"ToggleButton" )) flags |= UWP_CF_TOGGLE_BUTTON;
     if (wcsstr( cls, L"RadioMenuFlyoutItem" )) flags |= UWP_CF_RADIO_MENU_ITEM;
     if (wcsstr( cls, L"ToggleMenuFlyoutItem" )) flags |= UWP_CF_TOGGLE_MENU_ITEM;
@@ -195,9 +196,29 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
     if (wcsstr( cls, L"CubicEase" )) flags2 |= UWP_CF2_CUBIC_EASE;
     if (wcsstr( cls, L"QuarticEase" )) flags2 |= UWP_CF2_QUARTIC_EASE;
     if (wcsstr( cls, L"QuinticEase" )) flags2 |= UWP_CF2_QUINTIC_EASE;
+    if (wcsstr( cls, L"CalendarDatePicker" ) && !wcsstr( cls, L"AutomationPeer" ) && !wcsstr( cls, L"EventArgs" ))
+        flags2 |= UWP_CF2_CALENDAR_DATE_PICKER;
+    if (wcsstr( cls, L"Expander" ) && !wcsstr( cls, L"Descriptor" ) && !wcsstr( cls, L"Wrapper" ) &&
+        !wcsstr( cls, L"MenuPanel" ) && !wcsstr( cls, L"Separator" ) && !wcsstr( cls, L"QuadratePanel" ) &&
+        !wcsstr( cls, L"TemplateSettings" ) && !wcsstr( cls, L"EventArgs" ) && !wcsstr( cls, L"AutomationPeer" ))
+        flags2 |= UWP_CF2_EXPANDER;
 
     el->class_flags = flags;
     el->class_flags2 = flags2;
+
+    if (uwp_is_pivot( el ))
+        el->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pivot_vtbl;
+    else if (uwp_is_pivot_item( el ))
+        el->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pivot_item_vtbl;
+    else if (uwp_is_calendar_date_picker( el ))
+        el->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cdp_vtbl;
+    else
+        el->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_combobox_vtbl;
+
+    if (wcsstr( cls, L"AdaptiveTrigger" ))
+        el->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_adaptive_trigger_vtbl;
+    else
+        el->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_pub_vtbl;
 }
 
 void uwp_elem_clear_text( struct uwp_element *el )
@@ -1181,6 +1202,8 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
         { 0x6ae99a0f, 0x478c, 0x5440, { 0xb2, 0xc6, 0xea, 0xd4, 0x37, 0x8e, 0xf8, 0xe4 } };
     static const GUID IID_IStateTrigger_UWP =
         { 0x67adef2e, 0xd8d9, 0x49f7, { 0xa1, 0xfd, 0x2e, 0x35, 0xee, 0xdd, 0x23, 0xcd } };
+    static const GUID IID_IAdaptiveTrigger_UWP =
+        { 0xa5f04119, 0x0cd9, 0x49f1, { 0xa2, 0x3f, 0x44, 0xe5, 0x47, 0xab, 0x9f, 0x1a } };
     static const GUID IID_IBitmapImage_UWP =
         { 0x31af3271, 0xe3b4, 0x442d, { 0xa3, 0x41, 0x4c, 0x02, 0x26, 0xb2, 0x72, 0x5b } };
     static const GUID IID_IBitmapImage2_UWP =
@@ -1396,6 +1419,7 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IBitmapImage_UWP, IBitmapImage_iface );
     QI_ADD( IID_IBitmapSource_UWP, IBitmapSource_iface );
     QI_ADD( IID_IStateTrigger_UWP, IStateTriggerPub_iface );
+    QI_ADD( IID_IAdaptiveTrigger_UWP, IStateTriggerPub_iface );
     QI_ADD( IID_IShape_UWP, IShape_iface );
     QI_ADD( IID_IListViewBase2_UWP, IStyle_iface );
     QI_ADD( IID_IListViewBase4_UWP, IStyle_iface );
@@ -1408,6 +1432,10 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IAnimatedVisualPlayer_WinUI, IStyle_iface );
     QI_ADD( IID_ISelector_UWP, ISelector_iface );
     QI_ADD( IID_IComboBox_UWP, IComboBox_iface );
+    QI_ADD( IID_IComboBox6_UWP, ISplitView2_iface );
+    QI_ADD( IID_IPivot_UWP, IComboBox_iface );
+    QI_ADD( IID_IPivotItem_UWP, IComboBox_iface );
+    QI_ADD( IID_ICalendarDatePicker_UWP, IComboBox_iface );
     QI_ADD( IID_IItemsControl_UWP, IItemsControl_iface );
     QI_ADD( IID_IItemsControl_UWP2, IItemsControl_iface );
 
@@ -1637,6 +1665,9 @@ static void uwp_event_bag_destroy( struct uwp_event_bag *ev )
     xaml_event_registry_clear( &ev->tip_closed_reg );
     xaml_event_registry_clear( &ev->flyout_opening_reg );
     xaml_event_registry_clear( &ev->flyout_closed_reg );
+    xaml_event_registry_clear( &ev->cdp_date_changed_reg );
+    xaml_event_registry_clear( &ev->pivot_item_loading_reg );
+    xaml_event_registry_clear( &ev->pivot_item_loaded_reg );
     free( ev );
 }
 
@@ -1775,6 +1806,7 @@ static void uwp_element_destroy( struct uwp_element *impl )
     }
     free( impl->dp_cbs );
 
+    uwp_binding_unsubscribe_element( impl );
     for (i = 0; i < impl->dc_bound_dp_cnt; i++)
     {
         if (impl->dc_bound_dps[i].binding) IInspectable_Release( &impl->dc_bound_dps[i].binding->IInspectable_iface );
@@ -2629,9 +2661,14 @@ static BOOL CALLBACK init_uwp_vtbl_map( INIT_ONCE *once, void *param, void **ctx
     VMAP( uwp_flyout_vtbl, IFlyout_iface );
     VMAP( uwp_selector_vtbl, ISelector_iface );
     VMAP( uwp_combobox_vtbl, IComboBox_iface );
+    VMAP( uwp_pivot_vtbl, IComboBox_iface );
+    VMAP( uwp_pivot_item_vtbl, IComboBox_iface );
+    VMAP( uwp_cdp_vtbl, IComboBox_iface );
+    VMAP( uwp_combobox6_vtbl, ISplitView2_iface );
     VMAP( uwp_items_ctrl_vtbl, IItemsControl_iface );
     VMAP( &uwp_state_trigger_vtbl, IStateTrigger_iface );
     VMAP( &uwp_state_trigger_pub_vtbl, IStateTriggerPub_iface );
+    VMAP( uwp_adaptive_trigger_vtbl, IStateTriggerPub_iface );
     VMAP( uwp_el_obsvec_vtbl, IObservableVector_iface );
     VMAP( uwp_el_vec_vtbl, IVector_iface );
     VMAP( uwp_el_iterable_vtbl, IIterable_iface );
@@ -2778,10 +2815,20 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->ISolidColorBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_scb_vtbl;
     impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_flyout_vtbl;
     impl->ISelector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_selector_vtbl;
-    impl->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_combobox_vtbl;
+    if (uwp_is_pivot( impl ))
+        impl->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pivot_vtbl;
+    else if (uwp_is_pivot_item( impl ))
+        impl->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pivot_item_vtbl;
+    else if (uwp_is_calendar_date_picker( impl ))
+        impl->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cdp_vtbl;
+    else
+        impl->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_combobox_vtbl;
     impl->IItemsControl_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_items_ctrl_vtbl;
     impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_vtbl;
-    impl->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_pub_vtbl;
+    if (wcsstr( impl->class_name, L"AdaptiveTrigger" ))
+        impl->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_adaptive_trigger_vtbl;
+    else
+        impl->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_pub_vtbl;
     impl->IObservableVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_obsvec_vtbl;
     impl->IVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_vec_vtbl;
     impl->IIterable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_iterable_vtbl;
@@ -2810,7 +2857,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IAutoSuggestBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_asb_vtbl;
     impl->IAutoSuggestBox2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_asb2_vtbl;
     impl->ISplitView_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_splitview_vtbl;
-    impl->ISplitView2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_splitview2_vtbl;
+    impl->ISplitView2_iface.lpVtbl = (const struct IInspectableVtbl *)(uwp_is_combobox( impl )
+        ? uwp_combobox6_vtbl : uwp_splitview2_vtbl);
     impl->IEasingFunctionBase_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ease_vtbl;
     impl->IMediaPlayerElement_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mpe_vtbl;
     impl->IBitmapImage_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bi_vtbl;

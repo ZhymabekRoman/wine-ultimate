@@ -163,7 +163,8 @@ BOOL uwp_paint_pivot_item_is_selected( const struct uwp_element *el )
         unsigned int k;
         if (sel_item)
         {
-            if (sel_item == &el->IInspectable_iface || (el->outer && sel_item == el->outer) ||
+            if (uwp_elem_from_any( sel_item ) == el ||
+                sel_item == &el->IInspectable_iface || (el->outer && sel_item == el->outer) ||
                 (el->content && sel_item == el->content))
                 return TRUE;
             return FALSE;

@@ -2598,6 +2598,10 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
     }
     xbf_apply_custom_nav_prop( ctx, el, pi, vt, num, sval, is_res_ref );
 
+    if (!wcscmp( pi->name, L"Name" ) && sval && sval[0] && !el->outer && !uwp_has_text( el ))
+    {
+        uwp_elem_set_text( el, sval );
+    }
     if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
         (el->kind == UWP_KIND_TEXT_BLOCK || (el->class_flags & (UWP_CF_RUN | UWP_CF_INLINE))))
     {

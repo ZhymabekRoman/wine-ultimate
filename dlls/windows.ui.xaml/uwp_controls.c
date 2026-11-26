@@ -1950,16 +1950,23 @@ BOOL uwp_populate_page_from_xbf_refs( struct uwp_element *page_el )
     for (i = 0; i < page_el->xbf_ref_cnt; i++)
     {
         struct uwp_xbf_ref *ref = &page_el->xbf_refs[i];
+        if (!ref->is_resource_path && uwp_tree_has_class( page_el, ref->full_name ))
+        {
+            ref->instantiated = TRUE;
+            return TRUE;
+        }
+    }
+
+    for (i = 0; i < page_el->xbf_ref_cnt; i++)
+    {
+        struct uwp_xbf_ref *ref = &page_el->xbf_refs[i];
         struct uwp_element *holder;
 
         if (ref->is_resource_path || ref->instantiated) continue;
-        if (uwp_tree_has_class( page_el, ref->full_name ))
-        {
-            ref->instantiated = TRUE;
-            continue;
-        }
         holder = uwp_find_empty_holder_border( page_el, ref->short_name, TRUE );
         if (!holder) holder = any_holder;
+        if (holder && holder->parent && uwp_is_pivot_item( holder->parent ))
+            continue;
         if (holder && uwp_instantiate_xbf_control_into( holder, ref->full_name, ref->short_name ))
         {
             ref->instantiated = TRUE;

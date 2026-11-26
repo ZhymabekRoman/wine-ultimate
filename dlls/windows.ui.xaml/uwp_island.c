@@ -504,18 +504,6 @@ static HRESULT WINAPI uwp_dwxs_get_WindowHandle( void *iface, HWND *out_hwnd )
     return S_OK;
 }
 
-static BOOL uwp_is_any_island_hwnd( HWND hwnd )
-{
-    int i;
-    if (!hwnd) return FALSE;
-    for (i = 0; i < g_island_hwnd_cnt; i++)
-    {
-        if (g_island_hwnds[i] == hwnd || (g_island_hwnds[i] && IsChild( g_island_hwnds[i], hwnd )))
-            return TRUE;
-    }
-    return FALSE;
-}
-
 static HRESULT WINAPI uwp_dwxs_PreTranslateMessage( void *iface, const MSG *msg, BOOL *result )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -530,9 +518,8 @@ static HRESULT WINAPI uwp_dwxs_PreTranslateMessage( void *iface, const MSG *msg,
 
     if (msg && (msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN) && impl && impl->content)
     {
-        if (!msg->hwnd || msg->hwnd == impl->island_hwnd ||
-            (impl->island_hwnd && IsChild( impl->island_hwnd, msg->hwnd )) ||
-            !uwp_is_any_island_hwnd( msg->hwnd ))
+        if (impl->island_hwnd &&
+            (msg->hwnd == impl->island_hwnd || IsChild( impl->island_hwnd, msg->hwnd )))
         {
             struct uwp_element *root_el = uwp_elem_from_any( impl->content );
             handled = uwp_dispatch_keydown( msg->hwnd ? msg->hwnd : impl->island_hwnd,

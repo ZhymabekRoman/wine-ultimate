@@ -460,6 +460,11 @@ BOOL uwp_popup_handle_escape( void )
         uwp_combobox_set_open( g_open_combobox, FALSE );
         return TRUE;
     }
+    if (g_open_cdp && g_open_cdp->is_dropdown_open)
+    {
+        uwp_cdp_set_open( g_open_cdp, FALSE );
+        return TRUE;
+    }
     {
         struct uwp_element *pops[16];
         int pcnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) );

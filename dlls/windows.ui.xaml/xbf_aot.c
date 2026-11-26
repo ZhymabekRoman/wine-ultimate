@@ -815,7 +815,8 @@ static void aot_exec_add_child( struct xbf_aot_exec_ctx *ec, const struct xbf_ao
              ec->fake_ctx.props[op->pid].owner_tid < ec->hdr->type_cnt &&
              ec->fake_ctx.props[op->pid].name[0] &&
              wcscmp( ec->fake_ctx.props[op->pid].name, L"Children" ) &&
-             wcscmp( ec->fake_ctx.props[op->pid].name, L"Items" ) &&
+             (wcscmp( ec->fake_ctx.props[op->pid].name, L"Items" ) ||
+              (parent_el && (parent_el->class_flags & UWP_CF_RADIO_BUTTON))) &&
              wcscmp( ec->fake_ctx.props[op->pid].name, L"MergedDictionaries" ) &&
              wcscmp( ec->fake_ctx.props[op->pid].name, L"RowDefinitions" ) &&
              wcscmp( ec->fake_ctx.props[op->pid].name, L"ColumnDefinitions" ) &&
@@ -826,6 +827,8 @@ static void aot_exec_add_child( struct xbf_aot_exec_ctx *ec, const struct xbf_ao
         IInspectable *target = parent_raw ? parent_raw : (parent_el ? (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface) : NULL);
         if (owner_cls[0] && target)
             handled_custom = uwp_add_custom_xaml_collection_item( ao, owner_cls, pi->name, target, child_raw );
+        if (parent_el && (parent_el->class_flags & UWP_CF_RADIO_BUTTON) && !wcscmp( pi->name, L"Items" ))
+            handled_custom = FALSE;
     }
 
     if (!handled_custom && parent_el &&
@@ -858,7 +861,7 @@ static void aot_exec_add_child( struct xbf_aot_exec_ctx *ec, const struct xbf_ao
         (op->pid == XBF_PROP_PANEL_CHILDREN || op->pid == XBF_PROP_ITEMS ||
          parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL ||
          parent_el->kind == UWP_KIND_WRAP_PANEL || parent_el->kind == UWP_KIND_FLYOUT ||
-         (parent_el->class_flags & UWP_CF_STORYBOARD)))
+         (parent_el->class_flags & (UWP_CF_STORYBOARD | UWP_CF_RADIO_BUTTON))))
     {
         if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
         uwp_vec_Append( parent_el->children_coll, child_raw );
@@ -925,6 +928,18 @@ static void aot_exec_set_obj_prop( struct xbf_aot_exec_ctx *ec, const struct xbf
                         pne->nav_icon = child_raw;
                         IInspectable_AddRef( child_raw );
                     }
+                }
+                else if (parent_el && uwp_is_expander( parent_el ) && !wcscmp( pi->name, L"Header" ) &&
+                         child_el && child_el != parent_el)
+                {
+                    if (parent_el->pane != child_raw)
+                    {
+                        if (parent_el->pane) IInspectable_Release( parent_el->pane );
+                        parent_el->pane = child_raw;
+                        IInspectable_AddRef( child_raw );
+                    }
+                    child_el->parent = parent_el;
+                    child_el->in_visual_tree = TRUE;
                 }
                 if (wcscmp( pi->name, L"Content" ) && wcscmp( pi->name, L"Child" ))
                     handled_custom_obj = TRUE;
@@ -1109,42 +1124,70 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
         }
         return;
     }
-    if (!uwp_has_text( val_el )) return;
-    if (val_el->class_flags2 & UWP_CF2_TEMPLATE_BINDING)
     {
-        struct uwp_style_anim_ext *tsa = uwp_elem_ensure_style_anim( target_el );
-        if (tsa)
+        const WCHAR *res_key = uwp_has_text( val_el ) ? uwp_elem_text( val_el ) : val_el->name;
+        if (!res_key || !res_key[0]) return;
+        if (val_el->class_flags2 & UWP_CF2_TEMPLATE_BINDING)
         {
-            tsa->tpl_bind_target_pid = op->pid;
-            lstrcpynW( tsa->tpl_bind_src_prop, uwp_elem_text( val_el ), ARRAY_SIZE(tsa->tpl_bind_src_prop) );
+            struct uwp_style_anim_ext *tsa = uwp_elem_ensure_style_anim( target_el );
+            if (tsa)
+            {
+                tsa->tpl_bind_target_pid = op->pid;
+                lstrcpynW( tsa->tpl_bind_src_prop, res_key, ARRAY_SIZE(tsa->tpl_bind_src_prop) );
+            }
+            return;
         }
-        return;
-    }
-    if (uwp_pri_lookup_string( uwp_elem_text( val_el ), resolved, ARRAY_SIZE(resolved) ) && resolved[0])
-    {
-        const WCHAR *pname = (op->pid < ec->hdr->prop_cnt) ? ec->fake_ctx.props[op->pid].name : L"";
-        BOOL is_chord = (!wcscmp( pname, L"VirtualKeyControlChord" ) || !wcscmp( pname, L"VirtualKeyAltChord" ) ||
-                         !wcscmp( pname, L"VirtualKeyShiftChord" ) || !wcscmp( pname, L"VirtualKeyControlShiftChord" ));
-        BOOL is_vk = (!wcscmp( pname, L"VirtualKey" ) || is_chord);
-        BOOL is_text_prop = (!wcscmp( pname, L"Text" ) || !wcscmp( pname, L"Content" ) ||
-                             !wcscmp( pname, L"Glyph" ) || !wcscmp( pname, L"Label" ) ||
-                             !wcscmp( pname, L"Header" ) || !wcscmp( pname, L"Title" ) ||
-                             !wcscmp( pname, L"PlaceholderText" ) || !wcscmp( pname, L"Character" ));
-        if (is_chord)
+        if (uwp_pri_lookup_string( res_key, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
         {
-            UINT vk = uwp_parse_vk_string( resolved );
-            UINT mods = !wcscmp( pname, L"VirtualKeyControlChord" ) ? 1 :
-                        (!wcscmp( pname, L"VirtualKeyAltChord" ) ? 2 :
-                         (!wcscmp( pname, L"VirtualKeyShiftChord" ) ? 4 : 5));
-            if (vk) uwp_accel_register( NULL, target_el, vk, mods, TRUE );
+            const WCHAR *pname = (op->pid < ec->hdr->prop_cnt) ? ec->fake_ctx.props[op->pid].name : L"";
+            BOOL is_chord = (!wcscmp( pname, L"VirtualKeyControlChord" ) || !wcscmp( pname, L"VirtualKeyAltChord" ) ||
+                             !wcscmp( pname, L"VirtualKeyShiftChord" ) || !wcscmp( pname, L"VirtualKeyControlShiftChord" ));
+            BOOL is_vk = (!wcscmp( pname, L"VirtualKey" ) || is_chord);
+            BOOL is_text_prop = (!wcscmp( pname, L"Text" ) || !wcscmp( pname, L"Content" ) ||
+                                 !wcscmp( pname, L"Glyph" ) || !wcscmp( pname, L"Label" ) ||
+                                 !wcscmp( pname, L"Header" ) || !wcscmp( pname, L"Title" ) ||
+                                 !wcscmp( pname, L"Description" ) ||
+                                 !wcscmp( pname, L"PlaceholderText" ) || !wcscmp( pname, L"Character" ));
+            if (is_chord)
+            {
+                UINT vk = uwp_parse_vk_string( resolved );
+                UINT mods = !wcscmp( pname, L"VirtualKeyControlChord" ) ? 1 :
+                            (!wcscmp( pname, L"VirtualKeyAltChord" ) ? 2 :
+                             (!wcscmp( pname, L"VirtualKeyShiftChord" ) ? 4 : 5));
+                if (vk) uwp_accel_register( NULL, target_el, vk, mods, TRUE );
+            }
+            if (op->pid == XBF_PROP_AUTOMATION_NAME)
+                uwp_elem_set_automation_name( target_el, resolved );
+            else if (uwp_is_calendar_date_picker( target_el ) && !wcscmp( pname, L"Header" ))
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( target_el );
+                if (ne) lstrcpynW( ne->cdp_header, resolved, ARRAY_SIZE(ne->cdp_header) );
+            }
+            else if (uwp_is_calendar_date_picker( target_el ) && !wcscmp( pname, L"PlaceholderText" ))
+            {
+                struct uwp_nav_ext *ne = uwp_elem_ensure_nav( target_el );
+                if (ne) lstrcpynW( ne->cdp_placeholder, resolved, ARRAY_SIZE(ne->cdp_placeholder) );
+                if (!ne || !ne->cdp_has_date) uwp_elem_set_text( target_el, resolved );
+            }
+            else if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
+                     op->pid == XBF_PROP_TEXTBLOCK_TEXT || op->pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
+                     op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == XBF_PROP_RUN_TEXT ||
+                     (op->pid != XBF_PROP_AUTOMATION_ID && !is_vk && is_text_prop && !uwp_has_text( target_el )))
+                uwp_elem_set_text( target_el, resolved );
+
+            if (pname[0] && op->pid < ec->hdr->prop_cnt && ec->fake_ctx.props[op->pid].owner_tid < ec->hdr->type_cnt)
+            {
+                const WCHAR *owner_cls = ec->fake_ctx.types[ec->fake_ctx.props[op->pid].owner_tid].full_name;
+                if (owner_cls[0] && wcsncmp( owner_cls, L"Windows.UI.Xaml.", 16 ))
+                {
+                    IInspectable *target = (op->node_idx < ec->hdr->node_cnt && ec->nodes_raw[op->node_idx])
+                        ? ec->nodes_raw[op->node_idx]
+                        : (target_el->outer ? target_el->outer : &target_el->IInspectable_iface);
+                    uwp_set_custom_xaml_member( ec->app_outer ? ec->app_outer : uwp_get_app_outer(),
+                                                owner_cls, pname, target, resolved );
+                }
+            }
         }
-        if (op->pid == XBF_PROP_AUTOMATION_NAME)
-            uwp_elem_set_automation_name( target_el, resolved );
-        else if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
-                 op->pid == XBF_PROP_TEXTBLOCK_TEXT || op->pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
-                 op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == XBF_PROP_RUN_TEXT ||
-                 (op->pid != XBF_PROP_AUTOMATION_ID && !is_vk && is_text_prop && !uwp_has_text( target_el )))
-            uwp_elem_set_text( target_el, resolved );
     }
 }
 

@@ -166,6 +166,7 @@ void uwp_clear_global_elem_refs( struct uwp_element *el )
     if (g_popup_owner_el == el) g_popup_owner_el = NULL;
     if (g_last_closed_flyout == el) g_last_closed_flyout = NULL;
     if (g_open_combobox == el) g_open_combobox = NULL;
+    if (g_open_cdp == el) g_open_cdp = NULL;
     if (g_routed_args_el == el) g_routed_args_el = NULL;
     for (i = 0; i < g_accel_cnt; )
     {
@@ -386,13 +387,32 @@ static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uw
         WORD tpid = node->style_anim->tpl_bind_target_pid;
         if (tpid == XBF_PROP_TEXTBLOCK_TEXT ||
             tpid == XBF_PROP_CONTENT ||
-            tpid == XBF_PROP_FONTICON_GLYPH)
+            tpid == XBF_PROP_FONTICON_GLYPH ||
+            !wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" ))
         {
-            WCHAR sbuf[256] = {0};
-            if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+            struct uwp_element *ve = ((tpid == XBF_PROP_CONTENT ||
+                                       !wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" )) && val)
+                                     ? uwp_elem_from_any( val ) : NULL;
+            if (ve && ve != node && ve != owner)
             {
-                uwp_elem_set_text( node, sbuf );
-                uwp_invalidate_window();
+                if (uwp_replace_iface( &node->content, val ))
+                {
+                    ve->parent = node;
+                    ve->in_visual_tree = TRUE;
+                    if (!ve->template_inflated || !ve->loaded_fired)
+                        uwp_fire_loaded_tree( ve );
+                    g_layout_dirty = TRUE;
+                    uwp_invalidate_window();
+                }
+            }
+            else if (tpid == XBF_PROP_TEXTBLOCK_TEXT || tpid == XBF_PROP_CONTENT || tpid == XBF_PROP_FONTICON_GLYPH)
+            {
+                WCHAR sbuf[256] = {0};
+                if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+                {
+                    uwp_elem_set_text( node, sbuf );
+                    uwp_invalidate_window();
+                }
             }
         }
         else if (tpid == XBF_PROP_WIDTH)
@@ -536,7 +556,20 @@ static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname
         if (!wcscmp( dpname, tab_dps[k].dp ))
         {
             IInspectable **slot = (IInspectable **)((char *)nav + tab_dps[k].off);
-            if (uwp_replace_iface( slot, val ) && tab_dps[k].invalidate)
+            BOOL changed = uwp_replace_iface( slot, val );
+            if (!wcscmp( dpname, L"TabItemsSource" ))
+            {
+                int ni;
+                for (ni = 0; ni < impl->named_cnt; ni++)
+                {
+                    if (impl->named_elems[ni] && !wcscmp( impl->named_elems[ni]->name, L"TabListView" ))
+                    {
+                        uwp_replace_iface( &impl->named_elems[ni]->items_source, val );
+                        break;
+                    }
+                }
+            }
+            if (changed && tab_dps[k].invalidate)
                 uwp_invalidate_window();
             return;
         }
@@ -676,7 +709,16 @@ static void uwp_setval_apply_nav_dp( struct uwp_element *impl, const WCHAR *dpna
         }
         else if (!wcscmp( dpname, L"IsPaneOpen" ) && val && uwp_unbox_bool( val, &bv ))
         {
+            int ni;
             ne->nav_is_pane_open = (bv != 0);
+            for (ni = 0; ni < impl->named_cnt; ni++)
+            {
+                if (impl->named_elems[ni] && !wcscmp( impl->named_elems[ni]->name, L"RootSplitView" ))
+                {
+                    impl->named_elems[ni]->is_open = ne->nav_is_pane_open;
+                    break;
+                }
+            }
             uwp_nav_track_open_state( impl );
             if (!ne->nav_is_pane_open) ne->nav_scroll_y = 0;
             TRACE( "NavView(%s) SetValue IsPaneOpen=%d\n", debugstr_w(impl->name), (int)ne->nav_is_pane_open );
@@ -770,7 +812,108 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
         }
     }
 
-    if (!wcscmp( dpname, L"Value" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+    else if (uwp_is_calendar_date_picker( impl ))
+    {
+        boolean bv = FALSE;
+        WCHAR sbuf[128] = {0};
+        if (!wcscmp( dpname, L"IsCalendarOpen" ) && val && uwp_unbox_bool( val, &bv ))
+            uwp_cdp_set_open( impl, bv != 0 );
+        else if (!wcscmp( dpname, L"Header" ) && val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+            if (ne) { lstrcpynW( ne->cdp_header, sbuf, ARRAY_SIZE(ne->cdp_header) ); g_layout_dirty = TRUE; uwp_invalidate_window(); }
+        }
+        else if (!wcscmp( dpname, L"PlaceholderText" ) && val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( impl );
+            if (ne)
+            {
+                lstrcpynW( ne->cdp_placeholder, sbuf, ARRAY_SIZE(ne->cdp_placeholder) );
+                if (!ne->cdp_has_date && sbuf[0]) uwp_elem_set_text( impl, sbuf );
+                uwp_invalidate_window();
+            }
+        }
+        else if (!wcscmp( dpname, L"Date" ))
+        {
+            if (!val)
+                uwp_cdp_set_date( impl, 0, FALSE, FALSE );
+            else
+            {
+                void *iref = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_DateTime_UWP, &iref )) && iref)
+                {
+                    typedef HRESULT (WINAPI *get_val_fn)( void *, INT64 * );
+                    get_val_fn fn = (get_val_fn)((void **)*(void **)iref)[6];
+                    INT64 ticks = 0;
+                    if (fn && SUCCEEDED(fn( iref, &ticks )))
+                        uwp_cdp_set_date( impl, ticks, TRUE, FALSE );
+                    IUnknown_Release( (IUnknown *)iref );
+                }
+            }
+        }
+    }
+    else if (uwp_is_expander( impl ))
+    {
+        boolean bv = FALSE;
+        if (!wcscmp( dpname, L"IsExpanded" ) && val && uwp_unbox_bool( val, &bv ))
+        {
+            impl->is_open = (bv != 0);
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        else if (!wcscmp( dpname, L"Header" ) && val)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( val );
+            if (ch && ch != impl)
+            {
+                uwp_replace_iface( &impl->pane, val );
+                ch->parent = impl;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+            else
+            {
+                WCHAR sbuf[256] = {0};
+                if (uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ) && sbuf[0])
+                {
+                    uwp_elem_set_text( impl, sbuf );
+                    uwp_invalidate_window();
+                }
+            }
+        }
+    }
+    else if (uwp_is_pivot( impl ))
+    {
+        INT32 iv = -1;
+        if (!wcscmp( dpname, L"SelectedIndex" ) && val && uwp_unbox_int32( val, &iv ))
+        {
+            uwp_selector_set_selection( impl, iv, NULL, TRUE, FALSE );
+            g_layout_dirty = TRUE;
+        }
+        else if (!wcscmp( dpname, L"SelectedItem" ))
+        {
+            uwp_selector_set_selection( impl, -1, val, FALSE, FALSE );
+            g_layout_dirty = TRUE;
+        }
+    }
+    else if (wcsstr( impl->class_name, L"SplitView" ))
+    {
+        boolean bv = FALSE;
+        if (!wcscmp( dpname, L"IsPaneOpen" ) && val && uwp_unbox_bool( val, &bv ))
+            impl->is_open = (bv != 0);
+        else if (!wcscmp( dpname, L"DisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+            impl->orientation = ev;
+    }
+
+    if (!wcscmp( dpname, L"Command" ))
+    {
+        uwp_replace_iface( &impl->command, val );
+    }
+    else if (!wcscmp( dpname, L"CommandParameter" ))
+    {
+        uwp_replace_iface( &impl->command_param, val );
+    }
+    else if (!wcscmp( dpname, L"Value" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
     {
         impl->range_val = dv;
         uwp_invalidate_window();

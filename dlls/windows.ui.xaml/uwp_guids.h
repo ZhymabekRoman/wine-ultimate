@@ -286,5 +286,11 @@ extern const GUID IID_IXamlLightFactory_UWP;
 extern const GUID IID_IXamlReaderStatics_UWP;
 extern const GUID IID_IXamlRoot_UWP;
 extern const GUID IID_IXamlUICommand_UWP;
+extern const GUID IID_IPivot_UWP;
+extern const GUID IID_IPivotItem_UWP;
+extern const GUID IID_IComboBox6_UWP;
+extern const GUID IID_ICalendarDatePicker_UWP;
+extern const GUID IID_ICalendarDatePickerDateChangedEventArgs_UWP;
+extern const GUID IID_IReference_DateTime_UWP;
 
 #endif /* __WINE_WINDOWS_UI_XAML_UWP_GUIDS_H */

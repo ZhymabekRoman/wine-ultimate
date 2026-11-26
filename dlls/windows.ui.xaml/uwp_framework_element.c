@@ -997,6 +997,8 @@ HRESULT WINAPI uwp_ctrl_prot_put_DefaultStyleKey( void *iface, IInspectable *val
         }
         uwp_elem_set_default_style_key_name( impl, dsk_buf );
     }
+    if (wcsstr( uwp_elem_default_style_key_name( impl ), L"RadioButtons" ))
+        impl->kind = UWP_KIND_CONTENT_CONTROL;
     uwp_elem_sync_class_flags( impl );
     TRACE( "IControlProtected::put_DefaultStyleKey on %s -> %s\n",
            debugstr_w(impl->class_name), debugstr_w(uwp_elem_default_style_key_name( impl )) );
@@ -1156,8 +1158,10 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
                         }
                     }
                 }
-                else if (!el->children_coll && !uwp_has_text( el ) &&
-                         el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON)
+                else if (!el->children_coll &&
+                         (!uwp_has_text( el ) || !(el->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX))) &&
+                         el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON &&
+                         el->kind != UWP_KIND_TEXT_BLOCK)
                 {
                     el->content = tpl_obj;
                     IInspectable_AddRef( tpl_obj );
@@ -1206,6 +1210,10 @@ static const WCHAR *uwp_tpl_part_class( const WCHAR *nm )
         { L"PaneAutoSuggestButton", L"Microsoft.UI.Xaml.Controls.Button" },
         { L"NavigationViewBackButton", L"Windows.UI.Xaml.Controls.Button" },
         { L"NavigationViewCloseButton", L"Windows.UI.Xaml.Controls.Button" },
+        { L"AddButton", L"Windows.UI.Xaml.Controls.Button" },
+        { L"TabContainerGrid", L"Windows.UI.Xaml.Controls.Grid" },
+        { L"TabContentPresenter", L"Windows.UI.Xaml.Controls.ContentPresenter" },
+        { L"RightContentPresenter", L"Windows.UI.Xaml.Controls.ContentPresenter" },
         { L"Popup", L"Windows.UI.Xaml.Controls.Primitives.Popup" },
         { L"PopupContent", L"Windows.UI.Xaml.Controls.Grid" },
         { L"ExpandCollapseButton", L"Windows.UI.Xaml.Controls.Primitives.ToggleButton" },
@@ -1383,32 +1391,53 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
     else if (!wcscmp( nm, L"PrimaryButton" ) || !wcscmp( nm, L"SecondaryButton" ) ||
              !wcscmp( nm, L"CloseButton" ))
     {
-        IInspectable *raw = NULL;
-        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&raw )) && raw)
+        int i;
+        for (i = 0; i < impl->named_cnt; i++)
+            if (impl->named_elems[i] && !wcscmp( impl->named_elems[i]->name, nm ))
+                { child = impl->named_elems[i]; break; }
+        if (!child)
         {
-            child = uwp_elem_from_any( raw );
-            if (child)
+            IInspectable *raw = NULL;
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&raw )) && raw)
             {
-                child->parent = impl;
-                child->in_visual_tree = TRUE;
-                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                child = uwp_elem_from_any( raw );
+                if (child)
+                {
+                    child->parent = impl;
+                    child->in_visual_tree = TRUE;
+                    lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                    uwp_element_add_named( impl, child );
+                }
+                IInspectable_Release( raw );
             }
-            IInspectable_Release( raw );
         }
     }
     else if (!wcscmp( nm, L"TabListView" ))
     {
-        IInspectable *raw = NULL;
-        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.ListView", NULL, NULL, (void **)&raw )) && raw)
+        int i;
+        for (i = 0; i < impl->named_cnt; i++)
+            if (impl->named_elems[i] && !wcscmp( impl->named_elems[i]->name, nm ))
+                { child = impl->named_elems[i]; break; }
+        if (!child)
         {
-            child = uwp_elem_from_any( raw );
-            if (child)
+            IInspectable *raw = NULL;
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.ListView", NULL, NULL, (void **)&raw )) && raw)
             {
-                child->parent = impl;
-                child->in_visual_tree = TRUE;
-                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                child = uwp_elem_from_any( raw );
+                if (child)
+                {
+                    child->parent = impl;
+                    child->in_visual_tree = TRUE;
+                    lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                    if (impl->nav && impl->nav->tab_items_source)
+                    {
+                        child->items_source = impl->nav->tab_items_source;
+                        IInspectable_AddRef( child->items_source );
+                    }
+                    uwp_element_add_named( impl, child );
+                }
+                IInspectable_Release( raw );
             }
-            IInspectable_Release( raw );
         }
     }
     else if (uwp_tpl_part_class( nm ))
@@ -2322,6 +2351,202 @@ void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
         uwp_eval_xaml_binding( tel, owner_cls, prop_name, path_buf, src );
 }
 
+struct uwp_binding_sub
+{
+    struct uwp_element *tel;
+    void *dp;
+    void *src_unk;
+    IInspectable *src;
+    WCHAR path[128];
+};
+
+struct uwp_npc_source
+{
+    void *src_unk;
+    IInspectable *npc;
+    EventRegistrationToken tok;
+};
+
+static struct uwp_binding_sub *g_binding_subs = NULL;
+static int g_binding_sub_cnt = 0, g_binding_sub_cap = 0;
+static struct uwp_npc_source *g_npc_sources = NULL;
+static int g_npc_src_cnt = 0, g_npc_src_cap = 0;
+static SRWLOCK g_binding_sub_lock = SRWLOCK_INIT;
+
+static void *uwp_canonical_unk( IInspectable *obj )
+{
+    IUnknown *u = NULL;
+    if (!obj) return NULL;
+    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IUnknown, (void **)&u )) && u)
+    {
+        IUnknown_Release( u );
+        return u;
+    }
+    return obj;
+}
+
+static HRESULT WINAPI binding_npc_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPropertyChangedEventHandler_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI binding_npc_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI binding_npc_Release( void *iface ) { return 1; }
+static HRESULT WINAPI binding_npc_Invoke( void *iface, void *sender, void *args )
+{
+    static int reenter = 0;
+    HSTRING hprop = NULL;
+    const WCHAR *pname = L"";
+    void *sender_unk;
+    struct { struct uwp_element *tel; void *dp; IInspectable *src; WCHAR path[128]; } hits[32];
+    int hit_cnt = 0, i;
+
+    if (!sender || reenter >= 4) return S_OK;
+    if (args)
+    {
+        void *pcea = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)args, &IID_IPropertyChangedEventArgs_UWP, &pcea )) && pcea)
+        {
+            struct property_changed_args *pca = (struct property_changed_args *)pcea;
+            if (pca->lpVtbl->get_PropertyName && SUCCEEDED(pca->lpVtbl->get_PropertyName( pca, &hprop )) && hprop)
+                pname = WindowsGetStringRawBuffer( hprop, NULL );
+            IUnknown_Release( (IUnknown *)pcea );
+        }
+    }
+    sender_unk = uwp_canonical_unk( (IInspectable *)sender );
+
+    AcquireSRWLockShared( &g_binding_sub_lock );
+    for (i = 0; i < g_binding_sub_cnt && hit_cnt < (int)ARRAY_SIZE(hits); i++)
+    {
+        struct uwp_binding_sub *s = &g_binding_subs[i];
+        if (s->src_unk != sender_unk) continue;
+        if (pname[0] && wcscmp( s->path, pname ) != 0 && !wcsstr( s->path, pname )) continue;
+        hits[hit_cnt].tel = s->tel;
+        hits[hit_cnt].dp = s->dp;
+        hits[hit_cnt].src = s->src;
+        lstrcpynW( hits[hit_cnt].path, s->path, ARRAY_SIZE(hits[hit_cnt].path) );
+        IInspectable_AddRef( &s->tel->IInspectable_iface );
+        hit_cnt++;
+    }
+    ReleaseSRWLockShared( &g_binding_sub_lock );
+
+    reenter++;
+    for (i = 0; i < hit_cnt; i++)
+    {
+        IInspectable *resolved = uwp_resolve_binding_path( hits[i].src, hits[i].path );
+        if (resolved)
+        {
+            TRACE( "binding_npc_Invoke: %s.%s -> updating %s (%s)\n",
+                   debugstr_w(pname), debugstr_w(hits[i].path),
+                   debugstr_w(hits[i].tel->class_name), debugstr_w(hits[i].tel->name) );
+            uwp_do_SetValue( &hits[i].tel->IDependencyObject_iface, hits[i].dp, resolved );
+            IInspectable_Release( resolved );
+        }
+        IInspectable_Release( &hits[i].tel->IInspectable_iface );
+    }
+    reenter--;
+    if (hprop) WindowsDeleteString( hprop );
+    return S_OK;
+}
+static const void *g_binding_npc_vtbl[] =
+{
+    binding_npc_QI,
+    binding_npc_AddRef,
+    binding_npc_Release,
+    binding_npc_Invoke,
+};
+static struct { const void *vtbl; } g_binding_npc_handler = { g_binding_npc_vtbl };
+
+static void uwp_binding_register_npc( struct uwp_element *tel, void *dp, IInspectable *src, const WCHAR *path )
+{
+    void *src_unk;
+    BOOL have_src = FALSE;
+    int i;
+    if (!tel || !dp || !src || !path || !path[0]) return;
+    src_unk = uwp_canonical_unk( src );
+
+    AcquireSRWLockExclusive( &g_binding_sub_lock );
+    for (i = 0; i < g_binding_sub_cnt; i++)
+    {
+        if (g_binding_subs[i].tel == tel && g_binding_subs[i].dp == dp)
+        {
+            g_binding_subs[i].src_unk = src_unk;
+            g_binding_subs[i].src = src;
+            lstrcpynW( g_binding_subs[i].path, path, ARRAY_SIZE(g_binding_subs[i].path) );
+            break;
+        }
+    }
+    if (i == g_binding_sub_cnt &&
+        xaml_vec_grow( (void **)&g_binding_subs, &g_binding_sub_cap,
+                       g_binding_sub_cnt + 1, sizeof(*g_binding_subs), 16 ))
+    {
+        struct uwp_binding_sub *s = &g_binding_subs[g_binding_sub_cnt++];
+        s->tel = tel;
+        s->dp = dp;
+        s->src_unk = src_unk;
+        s->src = src;
+        lstrcpynW( s->path, path, ARRAY_SIZE(s->path) );
+    }
+    for (i = 0; i < g_npc_src_cnt; i++)
+        if (g_npc_sources[i].src_unk == src_unk) { have_src = TRUE; break; }
+    ReleaseSRWLockExclusive( &g_binding_sub_lock );
+
+    if (!have_src)
+    {
+        void *npc = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( src, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
+        {
+            struct notify_property_changed *inpc = (struct notify_property_changed *)npc;
+            EventRegistrationToken tok = {0};
+            HRESULT hr = E_FAIL;
+            if (inpc->lpVtbl->add_PropertyChanged)
+            {
+                __TRY { hr = inpc->lpVtbl->add_PropertyChanged( inpc, &g_binding_npc_handler, &tok ); }
+                __EXCEPT_ALL { hr = E_FAIL; }
+                __ENDTRY;
+            }
+            if (SUCCEEDED(hr))
+            {
+                AcquireSRWLockExclusive( &g_binding_sub_lock );
+                if (xaml_vec_grow( (void **)&g_npc_sources, &g_npc_src_cap,
+                                   g_npc_src_cnt + 1, sizeof(*g_npc_sources), 8 ))
+                {
+                    g_npc_sources[g_npc_src_cnt].src_unk = src_unk;
+                    g_npc_sources[g_npc_src_cnt].npc = (IInspectable *)npc;
+                    g_npc_sources[g_npc_src_cnt].tok = tok;
+                    g_npc_src_cnt++;
+                    npc = NULL;
+                }
+                ReleaseSRWLockExclusive( &g_binding_sub_lock );
+            }
+            if (npc) IUnknown_Release( (IUnknown *)npc );
+        }
+    }
+}
+
+void uwp_binding_unsubscribe_element( struct uwp_element *el )
+{
+    int i = 0;
+    if (!el) return;
+    AcquireSRWLockExclusive( &g_binding_sub_lock );
+    while (i < g_binding_sub_cnt)
+    {
+        if (g_binding_subs[i].tel == el)
+            g_binding_subs[i] = g_binding_subs[--g_binding_sub_cnt];
+        else
+            i++;
+    }
+    ReleaseSRWLockExclusive( &g_binding_sub_lock );
+}
+
 void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel )
 {
     HSTRING h_path = NULL;
@@ -2385,6 +2610,7 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
         else
         {
             IInspectable *resolved = uwp_resolve_binding_path( src, path_str );
+            uwp_binding_register_npc( tel, dp, src, path_str );
             if (resolved)
             {
                 uwp_do_SetValue( &tel->IDependencyObject_iface, dp, resolved );

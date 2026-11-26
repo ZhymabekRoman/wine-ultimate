@@ -129,6 +129,10 @@ extern const void *uwp_navview_vtbl[112];
 extern const void *uwp_rowcol_vtbl[32];
 extern const void *uwp_selector_vtbl[20];
 extern const void *uwp_combobox_vtbl[24];
+extern const void *uwp_combobox6_vtbl[24];
+extern const void *uwp_pivot_vtbl[32];
+extern const void *uwp_pivot_item_vtbl[12];
+extern const void *uwp_cdp_vtbl[64];
 extern const void *uwp_uie10_vtbl[16];
 extern const void *uwp_xaml_root_vtbl[16];
 extern const void *uwp_tb_vtbl[64];
@@ -194,6 +198,7 @@ extern const void *uwp_lis_vtbl[16];
 extern const void *uwp_scb_vtbl[16];
 extern const struct uwp_state_trigger_vtbl uwp_state_trigger_vtbl;
 extern const struct uwp_state_trigger_pub_vtbl uwp_state_trigger_pub_vtbl;
+extern const void *uwp_adaptive_trigger_vtbl[16];
 
 /* WebView2 vtables */
 extern const void *wv22_vtbl[256];

@@ -490,6 +490,45 @@ const struct uwp_state_trigger_pub_vtbl uwp_state_trigger_pub_vtbl =
     { [0 ... 7] = uwp_generic_noop },
 };
 
+static HRESULT WINAPI uwp_at_get_MinWindowWidth( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->width == impl->width && impl->width >= 0.0) ? impl->width : -1.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_at_put_MinWindowWidth( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->width = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_at_get_MinWindowHeight( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->height == impl->height && impl->height >= 0.0) ? impl->height : -1.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_at_put_MinWindowHeight( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->height = val;
+    return S_OK;
+}
+const void *uwp_adaptive_trigger_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_at_get_MinWindowWidth,
+    [7] = uwp_at_put_MinWindowWidth,
+    [8] = uwp_at_get_MinWindowHeight,
+    [9] = uwp_at_put_MinWindowHeight,
+    [10 ... 15] = uwp_generic_noop,
+};
+
 static struct uwp_element *uwp_elem_find_top_root( struct uwp_element *el )
 {
     int guard = 0;

@@ -292,6 +292,7 @@ void vsm_split_setter_target( const WCHAR *spec, WCHAR *out_target, size_t max_t
 /* Binding & DataContext engine */
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc );
 void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel );
+void uwp_binding_unsubscribe_element( struct uwp_element *el );
 void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls, const WCHAR *prop_name, struct uwp_element *bel );
 void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
                             const WCHAR *prop_name, const WCHAR *path, IInspectable *src );

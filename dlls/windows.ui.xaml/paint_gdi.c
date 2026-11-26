@@ -287,6 +287,12 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                 HBRUSH abr = CreateSolidBrush( acc );
                 FillRect( hdc, &bar, abr );
                 DeleteObject( abr );
+                if (el->content)
+                {
+                    struct uwp_element *body = uwp_elem_from_any( el->content );
+                    if (body && body != el)
+                        uwp_paint_element( hdc, body );
+                }
             }
             return;
         }
