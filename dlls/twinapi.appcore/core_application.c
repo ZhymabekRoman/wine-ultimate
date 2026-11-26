@@ -2223,6 +2223,7 @@ static HSTRING core_properties_resolve_key( void *key, BOOL *allocated )
     }
     __EXCEPT_ALL
     {
+        WARN("callback faulted (code %#lx)\n", GetExceptionCode());
     }
     __ENDTRY
 

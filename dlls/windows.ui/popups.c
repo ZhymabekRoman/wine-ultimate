@@ -204,6 +204,7 @@ static HRESULT uicmd_create( HSTRING label, IUICommandInvokedHandler *invoked, I
     }
     __EXCEPT_ALL
     {
+        WARN("handler faulted (code %#lx)\n", GetExceptionCode());
     }
     __ENDTRY
     *out = &cmd->IUICommand_iface;

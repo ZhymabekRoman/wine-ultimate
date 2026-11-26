@@ -1840,19 +1840,28 @@ static void win32_pick_files( HWND owner, BOOL multi, BOOL save, PickerLocationI
             WCHAR **arr = calloc( cap, sizeof(*arr) );
             while (*p && arr)
             {
-                WCHAR *full = malloc( (dir_len + 1 + wcslen( p ) + 1) * sizeof(WCHAR) );
+                size_t name_len = wcslen( p );
+                WCHAR *full = malloc( (dir_len + 1 + name_len + 1) * sizeof(WCHAR) );
                 if (full)
                 {
-                    swprintf( full, dir_len + 1 + wcslen( p ) + 1, L"%s\\%s", buf, p );
+                    swprintf( full, dir_len + 1 + name_len + 1, L"%s\\%s", buf, p );
                     if (count == cap)
                     {
+                        WCHAR **tmp;
                         cap *= 2;
-                        arr = realloc( arr, cap * sizeof(*arr) );
+                        if (!(tmp = realloc( arr, cap * sizeof(*arr) )))
+                        {
+                            free( full );
+                            free_dos_paths( arr, count );
+                            arr = NULL;
+                            count = 0;
+                            break;
+                        }
+                        arr = tmp;
                     }
-                    if (arr) arr[count++] = full;
-                    else free( full );
+                    arr[count++] = full;
                 }
-                p += wcslen( p ) + 1;
+                p += name_len + 1;
             }
             *out_paths = arr;
             *out_count = count;

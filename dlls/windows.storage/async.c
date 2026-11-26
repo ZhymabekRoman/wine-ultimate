@@ -149,8 +149,6 @@ static HRESULT WINAPI async_op_GetTrustLevel( IInspectable *iface, TrustLevel *t
     return S_OK;
 }
 
-typedef HRESULT (WINAPI *pfn_async_completed_invoke)( IUnknown *this, void *sender, AsyncStatus status );
-
 static HRESULT WINAPI async_op_put_Completed( IInspectable *iface, void *handler )
 {
     struct async_op *impl = impl_from_IInspectable( iface );
@@ -171,15 +169,13 @@ static HRESULT WINAPI async_op_put_Completed( IInspectable *iface, void *handler
     }
     if (h && impl->status != Started)
     {
-        pfn_async_completed_invoke invoke;
-        void **vtbl = *(void ***)h;
+        IAsyncActionCompletedHandler *cb = (IAsyncActionCompletedHandler *)h;
         AsyncStatus status = impl->status;
 
-        invoke = (pfn_async_completed_invoke)vtbl[3];
         IUnknown_AddRef( h );
         async_op_AddRef( &impl->IInspectable_iface );
         LeaveCriticalSection( &impl->cs );
-        invoke( h, &impl->IInspectable_iface, status );
+        IAsyncActionCompletedHandler_Invoke( cb, (IAsyncAction *)&impl->IInspectable_iface, status );
         async_op_Release( &impl->IInspectable_iface );
         IUnknown_Release( h );
         return S_OK;

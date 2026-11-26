@@ -1597,7 +1597,14 @@ static HRESULT WINAPI storage_folder_GetFilesAsyncOverloadDefaultOptionsStartAnd
             {
                 IStorageFile **grown;
                 cap = cap ? cap * 2 : 16;
-                if (!(grown = realloc( files, cap * sizeof(*files) ))) { free( files ); return E_OUTOFMEMORY; }
+                if (!(grown = realloc( files, cap * sizeof(*files) )))
+                {
+                    UINT32 i;
+                    FindClose( find );
+                    for (i = 0; i < count; ++i) IStorageFile_Release( files[i] );
+                    free( files );
+                    return E_OUTOFMEMORY;
+                }
                 files = grown;
             }
             folder_join_path( impl->path, data.cFileName, path, ARRAY_SIZE(path) );
@@ -1758,7 +1765,14 @@ static HRESULT WINAPI storage_folder_GetFoldersAsyncOverloadDefaultOptionsStartA
             {
                 IStorageFolder **grown;
                 cap = cap ? cap * 2 : 16;
-                if (!(grown = realloc( folders, cap * sizeof(*folders) ))) { free( folders ); return E_OUTOFMEMORY; }
+                if (!(grown = realloc( folders, cap * sizeof(*folders) )))
+                {
+                    UINT32 i;
+                    FindClose( find );
+                    for (i = 0; i < count; ++i) IStorageFolder_Release( folders[i] );
+                    free( folders );
+                    return E_OUTOFMEMORY;
+                }
                 folders = grown;
             }
             folder_join_path( impl->path, data.cFileName, path, ARRAY_SIZE(path) );
@@ -1769,7 +1783,17 @@ static HRESULT WINAPI storage_folder_GetFoldersAsyncOverloadDefaultOptionsStartA
         FindClose( find );
     }
 
-    if (!(folders = realloc( folders, (count ? count : 1) * sizeof(*folders) ))) return E_OUTOFMEMORY;
+    {
+        IStorageFolder **tmp = realloc( folders, (count ? count : 1) * sizeof(*folders) );
+        if (!tmp)
+        {
+            UINT32 i;
+            for (i = 0; i < count; ++i) IStorageFolder_Release( folders[i] );
+            free( folders );
+            return E_OUTOFMEMORY;
+        }
+        folders = tmp;
+    }
 
     hr = folder_vector_view_create( folders, count, &view );
     if (FAILED(hr)) return hr;
@@ -2887,10 +2911,14 @@ static HRESULT app_data_paths_create_item( const WCHAR *env_var, const WCHAR *fa
     }
 
     if (!len || len >= STORAGE_MAX_PATH)
-        wcscpy( path, fallback );
+        lstrcpynW( path, fallback, ARRAY_SIZE(path) );
 
-    if (subdir && wcslen( path ) + wcslen( subdir ) + 1 < STORAGE_MAX_PATH)
-        wcscat( path, subdir );
+    if (subdir)
+    {
+        size_t cur_len = wcslen( path );
+        if (cur_len + wcslen( subdir ) + 1 < ARRAY_SIZE(path))
+            lstrcpynW( path + cur_len, subdir, ARRAY_SIZE(path) - cur_len );
+    }
 
     CreateDirectoryW( path, NULL );
 

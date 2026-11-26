@@ -1879,36 +1879,94 @@ HRESULT core_app_remove_resuming( EventRegistrationToken token )
 /* One registration per app: the id is stable for the process lifetime and
  * unique across processes (time + QPC + pid entropy), like a real TaskId. */
 static GUID bg_task_id;
+static INIT_ONCE bg_task_id_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK init_bg_task_id( INIT_ONCE *once, void *param, void **context )
+{
+    LARGE_INTEGER pc;
+    DWORD pid = GetCurrentProcessId();
+    DWORD tick = GetTickCount();
+
+    QueryPerformanceCounter( &pc );
+    bg_task_id.Data1 = pc.LowPart;
+    bg_task_id.Data2 = (USHORT)(pc.HighPart & 0xffff);
+    bg_task_id.Data3 = (USHORT)((pc.HighPart >> 16) ^ tick);
+    bg_task_id.Data4[0] = (BYTE)pid;
+    bg_task_id.Data4[1] = (BYTE)(pid >> 8);
+    bg_task_id.Data4[2] = (BYTE)(pid >> 16);
+    bg_task_id.Data4[3] = (BYTE)(pid >> 24);
+    bg_task_id.Data4[4] = (BYTE)GetCurrentThreadId();
+    bg_task_id.Data4[5] = (BYTE)(tick >> 8);
+    bg_task_id.Data4[6] = (BYTE)(tick >> 16);
+    bg_task_id.Data4[7] = (BYTE)(tick >> 24);
+    return TRUE;
+}
+
+struct bg_task_registration
+{
+    const void *vtbl;
+    LONG ref;
+    WCHAR name[256];
+};
+
+struct bg_task_builder
+{
+    const void *vtbl;
+    LONG ref;
+    WCHAR name[256];
+};
+
+static HRESULT WINAPI bg_obj_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = &dummy_weakref_source;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IStringable ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
+    *out = iface;
+    IUnknown_AddRef( (IUnknown *)iface );
+    return S_OK;
+}
+
+static ULONG WINAPI bg_task_reg_AddRef( void *iface )
+{
+    struct bg_task_registration *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI bg_task_reg_Release( void *iface )
+{
+    struct bg_task_registration *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
 
 static HRESULT WINAPI bg_task_reg_get_TaskId( void *iface, GUID *id )
 {
-    LARGE_INTEGER pc;
-
     if (!id) return E_POINTER;
-    if (!bg_task_id.Data1)
-    {
-        QueryPerformanceCounter( &pc );
-        bg_task_id.Data1 = pc.LowPart;
-        bg_task_id.Data2 = (USHORT)(pc.HighPart & 0xffff);
-        bg_task_id.Data3 = (USHORT)((pc.HighPart >> 16) ^ GetTickCount());
-        bg_task_id.Data4[0] = (BYTE)GetCurrentProcessId();
-        bg_task_id.Data4[1] = (BYTE)(GetCurrentProcessId() >> 8);
-        bg_task_id.Data4[2] = (BYTE)(GetCurrentProcessId() >> 16);
-        bg_task_id.Data4[3] = (BYTE)(GetCurrentProcessId() >> 24);
-        bg_task_id.Data4[4] = (BYTE)GetCurrentThreadId();
-        bg_task_id.Data4[5] = (BYTE)(GetTickCount() >> 8);
-        bg_task_id.Data4[6] = (BYTE)(GetTickCount() >> 16);
-        bg_task_id.Data4[7] = (BYTE)(GetTickCount() >> 24);
-    }
+    InitOnceExecuteOnce( &bg_task_id_once, init_bg_task_id, NULL, NULL );
     *id = bg_task_id;
     return S_OK;
 }
-static WCHAR bg_task_name[256];
-static WCHAR bg_builder_name[256];
 
 static HRESULT WINAPI bg_task_reg_get_Name( void *iface, HSTRING *name )
 {
-    const WCHAR *n = bg_task_name[0] ? bg_task_name : L"BackgroundTask";
+    struct bg_task_registration *impl = iface;
+    const WCHAR *n = impl->name[0] ? impl->name : L"BackgroundTask";
     if (!name) return E_POINTER;
     return WindowsCreateString( n, lstrlenW( n ), name );
 }
@@ -1931,9 +1989,9 @@ static HRESULT WINAPI bg_task_reg_get_Trigger( void *iface, void **trigger )
 
 static const void *bg_task_reg_vtbl[] =
 {
-    dummy_channel_QueryInterface,
-    dummy_async_AddRef,
-    dummy_async_Release,
+    bg_obj_QueryInterface,
+    bg_task_reg_AddRef,
+    bg_task_reg_Release,
     dummy_async_GetIids,
     dummy_async_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
@@ -1947,48 +2005,66 @@ static const void *bg_task_reg_vtbl[] =
     bg_task_reg_get_Trigger,   /* slot 13 */
     bg_task_reg_Cancel,        /* slot 14 */
 };
-static struct { const void *vtbl; } dummy_bg_task_reg = { bg_task_reg_vtbl };
+
+static HRESULT bg_task_reg_create( const WCHAR *name, void **out )
+{
+    struct bg_task_registration *impl;
+
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = bg_task_reg_vtbl;
+    impl->ref = 1;
+    if (name && name[0])
+        lstrcpynW( impl->name, name, ARRAY_SIZE( impl->name ) );
+    *out = impl;
+    return S_OK;
+}
+
+static ULONG WINAPI bg_builder_AddRef( void *iface )
+{
+    struct bg_task_builder *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI bg_builder_Release( void *iface )
+{
+    struct bg_task_builder *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
 
 static HRESULT WINAPI bg_builder_put_Name( void *iface, HSTRING name )
 {
+    struct bg_task_builder *impl = iface;
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     if (raw && raw[0])
-    {
-        lstrcpynW( bg_builder_name, raw, ARRAY_SIZE( bg_builder_name ) );
-        lstrcpynW( bg_task_name, raw, ARRAY_SIZE( bg_task_name ) );
-    }
+        lstrcpynW( impl->name, raw, ARRAY_SIZE( impl->name ) );
     else
-    {
-        bg_builder_name[0] = 0;
-        bg_task_name[0] = 0;
-    }
+        impl->name[0] = 0;
     return S_OK;
 }
 
 static HRESULT WINAPI bg_builder_get_Name( void *iface, HSTRING *name )
 {
+    struct bg_task_builder *impl = iface;
     if (!name) return E_POINTER;
-    return WindowsCreateString( bg_builder_name, lstrlenW( bg_builder_name ), name );
+    return WindowsCreateString( impl->name, lstrlenW( impl->name ), name );
 }
 
 static HRESULT WINAPI bg_builder_Register( void *iface, void **reg )
 {
+    struct bg_task_builder *impl = iface;
     if (!reg) return E_POINTER;
-    if (bg_builder_name[0])
-        lstrcpynW( bg_task_name, bg_builder_name, ARRAY_SIZE( bg_task_name ) );
-    *reg = &dummy_bg_task_reg;
-    return S_OK;
+    return bg_task_reg_create( impl->name[0] ? impl->name : NULL, reg );
 }
 static HRESULT WINAPI bg_builder_Register_name( void *iface, void *name, void **reg )
 {
+    struct bg_task_builder *impl = iface;
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( (HSTRING)name, NULL ) : NULL;
+    const WCHAR *task_name = (raw && raw[0]) ? raw : (impl->name[0] ? impl->name : NULL);
     if (!reg) return E_POINTER;
-    if (raw && raw[0])
-        lstrcpynW( bg_task_name, raw, ARRAY_SIZE( bg_task_name ) );
-    else if (bg_builder_name[0])
-        lstrcpynW( bg_task_name, bg_builder_name, ARRAY_SIZE( bg_task_name ) );
-    *reg = &dummy_bg_task_reg;
-    return S_OK;
+    return bg_task_reg_create( task_name, reg );
 }
 static HRESULT WINAPI bg_builder_Register_group( void *iface, void *name, const GUID *group, void **reg )
 {
@@ -2005,9 +2081,9 @@ static HRESULT WINAPI bg_builder_success( void *iface, void *a, void *b, void *c
 
 static const void *bg_builder_vtbl[] =
 {
-    dummy_channel_QueryInterface,
-    dummy_async_AddRef,
-    dummy_async_Release,
+    bg_obj_QueryInterface,
+    bg_builder_AddRef,
+    bg_builder_Release,
     dummy_async_GetIids,
     dummy_async_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
@@ -2022,12 +2098,15 @@ static const void *bg_builder_vtbl[] =
     bg_builder_Register_group, /* Register(name, group) */
     bg_builder_success,     /* SetTaskEntryPointClsid */
 };
-static struct { const void *vtbl; } dummy_bg_builder = { bg_builder_vtbl };
 
 static HRESULT WINAPI bg_builder_factory_ActivateInstance( void *iface, void **instance )
 {
+    struct bg_task_builder *impl;
     if (!instance) return E_POINTER;
-    *instance = &dummy_bg_builder;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = bg_builder_vtbl;
+    impl->ref = 1;
+    *instance = impl;
     return S_OK;
 }
 
@@ -2333,9 +2412,15 @@ static void package_installed_location( WCHAR *buf, DWORD cch )
     buf[0] = 0;
 }
 
-static WCHAR resource_loader_scope[256];    /* normalized loader scope, '\' separators */
-static WCHAR resource_loader_primary[256];  /* part before '/': secondary .pri name */
-static pri_index *scope_pri_index;          /* resources of the secondary .pri, if any */
+struct resource_loader_impl
+{
+    const void *vtbl_loader;
+    const void *vtbl_loader2;
+    LONG ref;
+    WCHAR scope[256];      /* normalized loader scope, '\' separators */
+    WCHAR primary[256];    /* part before '/': secondary .pri name */
+    pri_index *scope_pri_index; /* resources of the secondary .pri, if any */
+};
 
 static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **context )
 {
@@ -2348,22 +2433,19 @@ static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **conte
     if (len && len < ARRAY_SIZE( dir ) && wcsrchr( dir, '\\' ))
     {
         *wcsrchr( dir, '\\' ) = 0;
-        lstrcpyW( path, dir );
-        lstrcatW( path, pri_name );
-        if ((cached_pri_index = pri_load( path ))) return TRUE;
+        if (swprintf( path, ARRAY_SIZE( path ), L"%ls%ls", dir, pri_name ) > 0 &&
+            (cached_pri_index = pri_load( path )))
+            return TRUE;
 
-        lstrcatW( dir, L"\\.." );
-        lstrcpyW( path, dir );
-        lstrcatW( path, pri_name );
-        if ((cached_pri_index = pri_load( path ))) return TRUE;
+        if (swprintf( path, ARRAY_SIZE( path ), L"%ls\\..%ls", dir, pri_name ) > 0 &&
+            (cached_pri_index = pri_load( path )))
+            return TRUE;
     }
 
     /* 3) <Package.Current.InstalledLocation>\resources.pri */
     package_installed_location( dir, ARRAY_SIZE( dir ) );
-    if (dir[0])
+    if (dir[0] && swprintf( path, ARRAY_SIZE( path ), L"%ls%ls", dir, pri_name ) > 0)
     {
-        lstrcpyW( path, dir );
-        lstrcatW( path, pri_name );
         if ((cached_pri_index = pri_load( path ))) return TRUE;
     }
 
@@ -2387,50 +2469,15 @@ static pri_index *load_named_pri( const WCHAR *primary )
     if (len && len < ARRAY_SIZE( dir ) && wcsrchr( dir, '\\' ))
     {
         *wcsrchr( dir, '\\' ) = 0;
-        lstrcpyW( path, dir );
-        lstrcatW( path, L"\\" );
-        lstrcatW( path, primary );
-        lstrcatW( path, pri_ext );
-        if ((idx = pri_load( path ))) return idx;
+        if (swprintf( path, ARRAY_SIZE( path ), L"%ls\\%ls%ls", dir, primary, pri_ext ) > 0 &&
+            (idx = pri_load( path )))
+            return idx;
     }
 
     package_installed_location( dir, ARRAY_SIZE( dir ) );
-    if (dir[0])
-    {
-        lstrcpyW( path, dir );
-        lstrcatW( path, L"\\" );
-        lstrcatW( path, primary );
-        lstrcatW( path, pri_ext );
+    if (dir[0] && swprintf( path, ARRAY_SIZE( path ), L"%ls\\%ls%ls", dir, primary, pri_ext ) > 0)
         return pri_load( path );
-    }
     return NULL;
-}
-
-/* Store the loader scope from a factory entry point name.  WinRT spells the
- * scope with '/' separators ("Primary/ResourceName"); PRI full names join
- * their tree with '\', so normalize the separators.  When the name carries a
- * primary part, load the matching secondary .pri: its resources (top scope
- * "ResourceName") are not in the package resources.pri. */
-static void set_resource_loader_scope( const WCHAR *raw )
-{
-    WCHAR norm[256], *p;
-    const WCHAR *slash;
-
-    if (!raw || !raw[0]) return;
-    lstrcpynW( norm, raw, ARRAY_SIZE( norm ) );
-    for (p = norm; *p; p++) if (*p == L'/') *p = L'\\';
-    if (!lstrcmpW( norm, resource_loader_scope )) return;
-    lstrcpynW( resource_loader_scope, norm, ARRAY_SIZE( resource_loader_scope ) );
-    pri_release( scope_pri_index );
-    scope_pri_index = NULL;
-    resource_loader_primary[0] = 0;
-    if ((slash = wcschr( norm, L'\\' )) && slash != norm)
-    {
-        lstrcpynW( resource_loader_primary, norm, (INT)(slash - norm) + 1 );
-        scope_pri_index = load_named_pri( resource_loader_primary );
-        TRACE( "TWINAPI: loader scope %s, primary %s, secondary pri %s\n", debugstr_w( resource_loader_scope ),
-             debugstr_w( resource_loader_primary ), scope_pri_index ? "loaded" : "missing" );
-    }
 }
 
 /* Resolve a resource key against the cached index.  A bare key is tried in
@@ -2439,7 +2486,7 @@ static void set_resource_loader_scope( const WCHAR *raw )
  * the scope prefix is skipped when the key already carries one.  A named
  * loader scope with a secondary .pri ("Primary/ResourceName") searches that
  * file first.  On success *value holds the string. */
-static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
+static HRESULT pri_lookup_key( const struct resource_loader_impl *impl, const WCHAR *key, HSTRING *value )
 {
     static const WCHAR *const scopes[] = { L"", L"Resources\\", L"Files\\" };
     WCHAR full[1024], namebuf[1024], top[256];
@@ -2448,52 +2495,51 @@ static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
     SIZE_T i;
 
     if (!cached_pri_index || !key[0]) return E_FAIL;
-    if (resource_loader_scope[0])
+    if (impl && impl->scope[0])
     {
         /* Split-package pri files key candidates under the resource-map name
          * alone ("AppResources\\Key"), the primary package name is only the
          * .pri file selector.  Try <map>\<key> first, then the raw scope. */
-        const WCHAR *map = resource_loader_scope;
+        const WCHAR *map = impl->scope;
         WCHAR *slash = wcschr( map, L'\\' );
         if (slash) map = slash + 1;
-        lstrcpyW( full, map );
-        lstrcatW( full, L"\\" );
-        lstrcatW( full, key );
-        if (scope_pri_index
-            && pri_lookup( scope_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        if (swprintf( full, ARRAY_SIZE( full ), L"%ls\\%ls", map, key ) > 0)
         {
-            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
-            pri_free_result( val, NULL );
-            return hr;
+            if (impl->scope_pri_index
+                && pri_lookup( impl->scope_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+            {
+                HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+                pri_free_result( val, NULL );
+                return hr;
+            }
+            if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+            {
+                HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+                pri_free_result( val, NULL );
+                return hr;
+            }
         }
-        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        if (swprintf( full, ARRAY_SIZE( full ), L"%ls\\%ls", impl->scope, key ) > 0)
         {
-            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
-            pri_free_result( val, NULL );
-            return hr;
-        }
-        lstrcpyW( full, resource_loader_scope );
-        lstrcatW( full, L"\\" );
-        lstrcatW( full, key );
-        if (scope_pri_index
-            && pri_lookup( scope_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
-        {
-            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
-            pri_free_result( val, NULL );
-            return hr;
-        }
-        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
-        {
-            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
-            pri_free_result( val, NULL );
-            return hr;
+            if (impl->scope_pri_index
+                && pri_lookup( impl->scope_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+            {
+                HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+                pri_free_result( val, NULL );
+                return hr;
+            }
+            if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+            {
+                HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+                pri_free_result( val, NULL );
+                return hr;
+            }
         }
     }
     for (i = 0; i < ARRAY_SIZE( scopes ); i++)
     {
-        lstrcpyW( full, scopes[i] );
-        lstrcatW( full, key );
-        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        if (swprintf( full, ARRAY_SIZE( full ), L"%ls%ls", scopes[i], key ) > 0 &&
+            pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
         {
             HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
             pri_free_result( val, NULL );
@@ -2504,10 +2550,8 @@ static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
     for (t = 0; t < top_count; t++)
     {
         if (!pri_top_name( cached_pri_index, t, top, ARRAY_SIZE( top ) ) || !top[0]) continue;
-        lstrcpyW( full, top );
-        lstrcatW( full, L"\\" );
-        lstrcatW( full, key );
-        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        if (swprintf( full, ARRAY_SIZE( full ), L"%ls\\%ls", top, key ) > 0 &&
+            pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
         {
             HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
             pri_free_result( val, NULL );
@@ -2611,34 +2655,27 @@ static const void *language_vtbl[] =
     language_get_LayoutDirection,
 };
 
-struct resource_loader_impl
-{
-    const void *vtbl_loader;
-    const void *vtbl_loader2;
-};
-
 static const void *resource_loader_vtbl[];
 static const void *resource_loader2_vtbl[];
-static struct resource_loader_impl resource_loader_obj =
-{
-    resource_loader_vtbl,
-    resource_loader2_vtbl
-};
 
 static HRESULT WINAPI resource_loader_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader );
+
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IResourceLoader ))
     {
-        *out = &resource_loader_obj.vtbl_loader;
+        *out = &impl->vtbl_loader;
+        InterlockedIncrement( &impl->ref );
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IResourceLoader2 ))
     {
-        *out = &resource_loader_obj.vtbl_loader2;
+        *out = &impl->vtbl_loader2;
+        InterlockedIncrement( &impl->ref );
         return S_OK;
     }
     *out = NULL;
@@ -2647,7 +2684,38 @@ static HRESULT WINAPI resource_loader_QueryInterface( void *iface, REFIID iid, v
 
 static HRESULT WINAPI resource_loader2_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    return resource_loader_QueryInterface( iface, iid, out );
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader2 );
+    return resource_loader_QueryInterface( &impl->vtbl_loader, iid, out );
+}
+
+static ULONG WINAPI resource_loader_AddRef( void *iface )
+{
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI resource_loader_Release( void *iface )
+{
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        pri_release( impl->scope_pri_index );
+        free( impl );
+    }
+    return ref;
+}
+
+static ULONG WINAPI resource_loader2_AddRef( void *iface )
+{
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader2 );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI resource_loader2_Release( void *iface )
+{
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader2 );
+    return resource_loader_Release( &impl->vtbl_loader );
 }
 
 static HRESULT WINAPI resource_loader_GetIids( void *iface, ULONG *count, IID **iids )
@@ -2671,7 +2739,7 @@ static HRESULT WINAPI resource_loader_GetRuntimeClassName( void *iface, HSTRING 
     return WindowsCreateString( L"Windows.ApplicationModel.Resources.ResourceLoader", 47, name );
 }
 
-static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
+static HRESULT resource_loader_get_string_impl( const struct resource_loader_impl *impl, HSTRING resource, HSTRING *value )
 {
     const WCHAR *str = WindowsGetStringRawBuffer( resource, NULL );
 
@@ -2680,7 +2748,7 @@ static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, 
     if (!str) return E_POINTER;
 
     InitOnceExecuteOnce( &pri_init_once, init_cached_pri, NULL, NULL );
-    if (SUCCEEDED( pri_lookup_key( str, value ) )) return S_OK;
+    if (SUCCEEDED( pri_lookup_key( impl, str, value ) )) return S_OK;
 
     /* built-in overrides, kept for keys the app's resources.pri does not carry */
     if (!wcscmp( str, L"LocalizedFontFamilyOverride" ))
@@ -2697,8 +2765,20 @@ static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, 
     return WindowsDuplicateString( resource, value );
 }
 
+static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
+{
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader );
+    return resource_loader_get_string_impl( impl, resource, value );
+}
+
+static HRESULT WINAPI resource_loader_statics_GetString( void *iface, HSTRING resource, HSTRING *value )
+{
+    return resource_loader_get_string_impl( NULL, resource, value );
+}
+
 static HRESULT WINAPI resource_loader_GetStringForUri( void *iface, void *uri, HSTRING *value )
 {
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader );
     static const WCHAR ms_resource[] = L"ms-resource:";
     HRESULT (STDMETHODCALLTYPE *get_RawUri)( void *, HSTRING * );
     const WCHAR *raw;
@@ -2738,7 +2818,7 @@ static HRESULT WINAPI resource_loader_GetStringForUri( void *iface, void *uri, H
     key[i] = 0;
     WindowsDeleteString( hstr );
 
-    if (SUCCEEDED( pri_lookup_key( key, value ) )) return S_OK;
+    if (SUCCEEDED( pri_lookup_key( impl, key, value ) )) return S_OK;
     return WindowsCreateString( L"", 0, value );
 }
 
@@ -2762,7 +2842,8 @@ static HRESULT WINAPI resource_loader_put_Culture( void *iface, void *value )
  * constructor, ...), empty when the loader is the package's default one. */
 static HRESULT WINAPI resource_loader_get_PriName( void *iface, HSTRING *value )
 {
-    const WCHAR *name = resource_loader_primary[0] ? resource_loader_primary : resource_loader_scope;
+    struct resource_loader_impl *impl = CONTAINING_RECORD( iface, struct resource_loader_impl, vtbl_loader2 );
+    const WCHAR *name = impl->primary[0] ? impl->primary : impl->scope;
     if (!value) return E_POINTER;
     return WindowsCreateString( name, (UINT32)lstrlenW( name ), value );
 }
@@ -2771,8 +2852,8 @@ static HRESULT WINAPI resource_loader_get_PriName( void *iface, HSTRING *value )
 static const void *resource_loader_vtbl[] =
 {
     resource_loader_QueryInterface,
-    dummy_async_AddRef,
-    dummy_async_Release,
+    resource_loader_AddRef,
+    resource_loader_Release,
     resource_loader_GetIids,
     resource_loader_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
@@ -2786,8 +2867,8 @@ static const void *resource_loader_vtbl[] =
 static const void *resource_loader2_vtbl[] =
 {
     resource_loader2_QueryInterface,
-    dummy_async_AddRef,
-    dummy_async_Release,
+    resource_loader2_AddRef,
+    resource_loader2_Release,
     resource_loader_GetIids,
     resource_loader_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
@@ -2795,6 +2876,40 @@ static const void *resource_loader2_vtbl[] =
     resource_loader_put_Culture,
     resource_loader_get_PriName,
 };
+
+/* Store the loader scope from a factory entry point name.  WinRT spells the
+ * scope with '/' separators ("Primary/ResourceName"); PRI full names join
+ * their tree with '\', so normalize the separators.  When the name carries a
+ * primary part, load the matching secondary .pri: its resources (top scope
+ * "ResourceName") are not in the package resources.pri. */
+static HRESULT create_resource_loader( const WCHAR *raw_scope, void **out )
+{
+    struct resource_loader_impl *impl;
+    const WCHAR *slash;
+    WCHAR *p;
+
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl_loader = resource_loader_vtbl;
+    impl->vtbl_loader2 = resource_loader2_vtbl;
+    impl->ref = 1;
+
+    if (raw_scope && raw_scope[0])
+    {
+        lstrcpynW( impl->scope, raw_scope, ARRAY_SIZE( impl->scope ) );
+        for (p = impl->scope; *p; p++) if (*p == L'/') *p = L'\\';
+        if ((slash = wcschr( impl->scope, L'\\' )) && slash != impl->scope)
+        {
+            lstrcpynW( impl->primary, impl->scope, (INT)(slash - impl->scope) + 1 );
+            impl->scope_pri_index = load_named_pri( impl->primary );
+            TRACE( "TWINAPI: loader scope %s, primary %s, secondary pri %s\n", debugstr_w( impl->scope ),
+                 debugstr_w( impl->primary ), impl->scope_pri_index ? "loaded" : "missing" );
+        }
+    }
+
+    *out = &impl->vtbl_loader;
+    return S_OK;
+}
 
 struct resource_loader_factory_impl
 {
@@ -2858,19 +2973,14 @@ static HRESULT WINAPI resource_loader_factory_QueryInterface( void *iface, REFII
 
 static HRESULT WINAPI resource_loader_factory_ActivateInstance( void *iface, void **instance )
 {
-    if (!instance) return E_POINTER;
-    *instance = &resource_loader_obj.vtbl_loader;
-    return S_OK;
+    return create_resource_loader( NULL, instance );
 }
 
 static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *iface, HSTRING name, void **loader )
 {
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     TRACE( "TWINAPI: CreateResourceLoaderByName name %s\n", debugstr_hstring(name) );
-    if (!loader) return E_POINTER;
-    set_resource_loader_scope( raw );
-    *loader = &resource_loader_obj.vtbl_loader;
-    return S_OK;
+    return create_resource_loader( raw, loader );
 }
 
 static HRESULT WINAPI resource_loader_statics_GetStringForReference( void *iface, void *uri, HSTRING *value )
@@ -2883,42 +2993,30 @@ static HRESULT WINAPI resource_loader_statics_GetStringForReference( void *iface
 static HRESULT WINAPI resource_loader_statics2_GetForCurrentView( void *iface, void **loader )
 {
     TRACE( "TWINAPI: GetForCurrentView\n" );
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj.vtbl_loader;
-    return S_OK;
+    return create_resource_loader( NULL, loader );
 }
 static HRESULT WINAPI resource_loader_statics2_GetForCurrentViewWithName( void *iface, HSTRING name, void **loader )
 {
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     TRACE( "TWINAPI: GetForCurrentViewWithName name %s\n", debugstr_hstring(name) );
-    if (!loader) return E_POINTER;
-    set_resource_loader_scope( raw );
-    *loader = &resource_loader_obj.vtbl_loader;
-    return S_OK;
+    return create_resource_loader( raw, loader );
 }
 static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUse( void *iface, void **loader )
 {
     TRACE( "TWINAPI: GetForViewIndependentUse\n" );
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj.vtbl_loader;
-    return S_OK;
+    return create_resource_loader( NULL, loader );
 }
 static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUseWithName( void *iface, HSTRING name, void **loader )
 {
     const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
     TRACE( "TWINAPI: GetForViewIndependentUseWithName name %s\n", debugstr_hstring(name) );
-    if (!loader) return E_POINTER;
-    set_resource_loader_scope( raw );
-    *loader = &resource_loader_obj.vtbl_loader;
-    return S_OK;
+    return create_resource_loader( raw, loader );
 }
 
 static HRESULT WINAPI resource_loader_statics3_GetForUIContext( void *iface, void *context, void **loader )
 {
     TRACE( "TWINAPI: GetForUIContext context %p\n", context );
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj.vtbl_loader;
-    return S_OK;
+    return create_resource_loader( NULL, loader );
 }
 
 static const void *resource_loader_activation_vtbl[] =
@@ -2951,7 +3049,7 @@ static const void *resource_loader_statics_vtbl[] =
     resource_loader_GetIids,
     resource_loader_GetRuntimeClassName,
     push_notification_factory_GetTrustLevel,
-    resource_loader_GetString,
+    resource_loader_statics_GetString,
     resource_loader_statics2_GetForCurrentView,
     resource_loader_statics_GetStringForReference,
 };
