@@ -545,7 +545,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IToggleButton_iface;
     else if (IsEqualGUID( iid, &IID_IToggleMenuFlyoutItem_UWP ))
     {
-        if (wcsstr( impl->class_name, L"ToggleMenuFlyoutItem" ))
+        if (wcsstr( impl->class_name, L"ToggleMenuFlyoutItem" ) || wcsstr( impl->class_name, L"RadioMenuFlyoutItem" ))
             *out = &impl->IToggleMenuFlyoutItem_iface;
     }
     else if (IsEqualGUID( iid, &IID_IRadioButtons_WinUI ))
@@ -689,24 +689,26 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IContentControlOvr_Calc ) ||
              IsEqualGUID( iid, &IID_IPageOverrides_UWP ) ||
              IsEqualGUID( iid, &IID_IButton_UWP ) ||
-             IsEqualGUID( iid, &IID_IButtonWithFlyout_UWP ) ||
              IsEqualGUID( iid, &IID_IToggleButtonOverrides_UWP ) ||
              IsEqualGUID( iid, &IID_ITextBlock3_UWP ) ||
              IsEqualGUID( iid, &IID_ITextBlock_Calc2 ) ||
              IsEqualGUID( iid, &IID_ITextBlock_Calc3 ) ||
              IsEqualGUID( iid, &IID_ITextBlock_Calc4 ) ||
-             IsEqualGUID( iid, &IID_IPopup_UWP ) ||
-             IsEqualGUID( iid, &IID_IPopup2_UWP ) ||
-             IsEqualGUID( iid, &IID_IPopup3_UWP ) ||
-             IsEqualGUID( iid, &IID_IPopup_WinUI ) ||
-             IsEqualGUID( iid, &IID_IPopup2_WinUI ) ||
-             IsEqualGUID( iid, &IID_IPopup3_WinUI ) ||
              IsEqualGUID( iid, &IID_IStyle_UWP ) ||
              IsEqualGUID( iid, &IID_ISetter_UWP ) ||
              IsEqualGUID( iid, &IID_ISetterBase_UWP ) ||
              IsEqualGUID( iid, &IID_IVisualStateGroup_UWP ) ||
              IsEqualGUID( iid, &IID_IVisualState_UWP ))
         *out = &impl->IStyle_iface;
+    else if (IsEqualGUID( iid, &IID_IPopup_UWP ) ||
+             IsEqualGUID( iid, &IID_IPopup_WinUI ))
+        *out = &impl->IPopup_iface;
+    else if (IsEqualGUID( iid, &IID_IPopup2_UWP ) ||
+             IsEqualGUID( iid, &IID_IPopup2_WinUI ))
+        *out = &impl->IPopup2_iface;
+    else if (IsEqualGUID( iid, &IID_IPopup3_UWP ) ||
+             IsEqualGUID( iid, &IID_IPopup3_WinUI ))
+        *out = &impl->IPopup3_iface;
     else if (IsEqualGUID( iid, &IID_IBrush_UWP ))
         *out = &impl->IBrush_iface;
     else if (IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ))
@@ -799,6 +801,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IStyle_iface;
     else if (IsEqualGUID( iid, &IID_IFlyoutBase_UWP ) ||
              IsEqualGUID( iid, &IID_IFlyoutBase3_UWP ) ||
+             IsEqualGUID( iid, &IID_IFlyoutBase5_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyout_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyout_UWP2 ) ||
              IsEqualGUID( iid, &IID_IMenuFlyoutItemBase_UWP ) ||
@@ -1806,6 +1809,9 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IRichTextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rtb_vtbl;
     impl->ITextBlock2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb2_vtbl;
     impl->ITextBlock6_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb6_vtbl;
+    impl->IPopup_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_popup_vtbl;
+    impl->IPopup2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_popup2_vtbl;
+    impl->IPopup3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_popup3_vtbl;
     impl->IStoryboard_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_sb_vtbl;
     impl->media_stretch = 2; /* Uniform */
     impl->tile_align_x = 1; /* Center */

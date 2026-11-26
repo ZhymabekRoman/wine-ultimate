@@ -89,12 +89,33 @@ static HRESULT WINAPI uwp_tb_put_MaxLines( void *iface, INT32 val )
     }
     return S_OK;
 }
+static HRESULT WINAPI uwp_rtb2_get_MaxLines( void *iface, void *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    if (impl && wcsstr( impl->class_name, L"RichTextBlock" ))
+        *(INT32 *)out = impl->max_lines;
+    else
+        *(void **)out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_rtb2_put_MaxLines( void *iface, ULONG_PTR val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl && (val < 0x10000 || wcsstr( impl->class_name, L"RichTextBlock" )))
+    {
+        impl->max_lines = max( 0, (INT32)val );
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
 static BOOL uwp_tb_is_trimmed_or_overflow( const struct uwp_element *impl )
 {
     WCHAR rich_buf[2048];
     const WCHAR *txt;
-    double fs, max_w, est_w;
-    int lines = 1, nl_lines = 1;
+    double fs, eff_w, max_w;
+    int lines = 0;
     const WCHAR *p;
 
     if (!impl || impl->max_lines <= 0) return FALSE;
@@ -102,16 +123,24 @@ static BOOL uwp_tb_is_trimmed_or_overflow( const struct uwp_element *impl )
     if (!txt[0] && impl->inlines_coll && uwp_flatten_inlines_text( impl, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
         txt = rich_buf;
     if (!txt[0]) return FALSE;
-    for (p = txt; *p; p++) if (*p == L'\n') nl_lines++;
-    lines = nl_lines;
     fs = (impl->font_size > 0.0 ? impl->font_size : 14.0);
-    max_w = (impl->actual_w > 32.0) ? (impl->actual_w - 16.0) : 600.0;
+    eff_w = (impl->actual_w > 32.0) ? impl->actual_w : ((impl->width > 32.0) ? impl->width : 600.0);
+    max_w = (eff_w > 48.0) ? (eff_w - 16.0) : eff_w;
     if (impl->max_width > 0.0 && impl->max_width < max_w) max_w = impl->max_width;
-    est_w = (double)wcslen( txt ) * fs * 0.56;
-    if (max_w > 32.0 && est_w > max_w)
+    p = txt;
+    while (*p)
     {
-        int wrap_lines = (int)((est_w + max_w - 1.0) / max_w);
-        if (wrap_lines > lines) lines = wrap_lines;
+        const WCHAR *eol = p;
+        double seg_w;
+        int seg_lines = 1;
+        while (*eol && *eol != L'\n' && *eol != L'\r') eol++;
+        seg_w = (double)(eol - p) * fs * 0.56;
+        if (max_w > 32.0 && seg_w > max_w)
+            seg_lines = (int)((seg_w + max_w - 1.0) / max_w);
+        lines += seg_lines;
+        p = eol;
+        if (*p == L'\r') p++;
+        if (*p == L'\n') p++;
     }
     return lines > impl->max_lines;
 }
@@ -174,7 +203,9 @@ const void *uwp_rtb_vtbl[64] =
     [25 ... 33] = uwp_generic_noop,
     [34] = uwp_tb_get_Inlines,            /* get_Blocks */
     [35] = uwp_rtb_get_HasOverflowContent,/* get_HasOverflowContent */
-    [36 ... 63] = uwp_generic_noop,
+    [36] = uwp_generic_noop,
+    [37] = uwp_rtb_get_HasOverflowContent,/* IRichTextBlock::get_HasOverflowContent (slot 0x25) */
+    [38 ... 63] = uwp_generic_noop,
 };
 
 const void *uwp_tb2_vtbl[24] =
@@ -185,9 +216,10 @@ const void *uwp_tb2_vtbl[24] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 7] = uwp_generic_noop,
-    [8] = uwp_tb_get_MaxLines,            /* get_MaxLines */
-    [9] = uwp_tb_put_MaxLines,            /* put_MaxLines */
+    [6] = uwp_rtb2_get_MaxLines,          /* IRichTextBlock2::get_MaxLines */
+    [7] = uwp_rtb2_put_MaxLines,          /* IRichTextBlock2::put_MaxLines */
+    [8] = uwp_tb_get_MaxLines,            /* ITextBlock2::get_MaxLines */
+    [9] = uwp_tb_put_MaxLines,            /* ITextBlock2::put_MaxLines */
     [10 ... 23] = uwp_generic_noop,
 };
 
@@ -286,10 +318,10 @@ const struct uwp_binding_vtbl uwp_binding_vtbl =
     uwp_sub_GetTrustLevel,
     uwp_binding_get_Path,
     uwp_binding_put_Path,
-    { [0 ... 5] = uwp_generic_noop },
+    { [0 ... 1] = uwp_generic_noop },
     uwp_binding_get_Source,
     uwp_binding_put_Source,
-    { [0 ... 15] = uwp_generic_noop },
+    { [0 ... 19] = uwp_generic_noop },
 };
 
 static HRESULT WINAPI uwp_pp_get_Path( void *iface, HSTRING *out )
@@ -424,6 +456,20 @@ BOOL uwp_popup_handle_escape( void )
             SetFocus( owner );
         return TRUE;
     }
+    if (g_popup_owner_el)
+    {
+        uwp_close_flyout_popup( TRUE );
+        return TRUE;
+    }
+    {
+        struct uwp_element *pops[16];
+        int pcnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) );
+        if (pcnt > 0)
+        {
+            uwp_popup_set_open( pops[pcnt - 1], FALSE );
+            return TRUE;
+        }
+    }
     return FALSE;
 }
 
@@ -503,6 +549,14 @@ static LRESULT CALLBACK uwp_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARA
                 HWND owner = st->owner_hwnd;
                 if (wcsstr( clicked_el->class_name, L"ToggleMenuFlyoutItem" ))
                     clicked_el->is_checked = !clicked_el->is_checked;
+                else if (wcsstr( clicked_el->class_name, L"RadioMenuFlyoutItem" ))
+                {
+                    int j;
+                    for (j = 0; j < st->item_cnt; j++)
+                        if (st->items[j].el && wcsstr( st->items[j].el->class_name, L"RadioMenuFlyoutItem" ))
+                            st->items[j].el->is_checked = 0;
+                    clicked_el->is_checked = 1;
+                }
                 uwp_invoke_button( clicked_el );
                 uwp_close_flyout_popup( TRUE );
                 if (owner && IsWindow( owner )) SetFocus( owner );
@@ -576,6 +630,14 @@ static LRESULT CALLBACK uwp_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARA
                     HWND owner = st->owner_hwnd;
                     if (wcsstr( clicked_el->class_name, L"ToggleMenuFlyoutItem" ))
                         clicked_el->is_checked = !clicked_el->is_checked;
+                    else if (wcsstr( clicked_el->class_name, L"RadioMenuFlyoutItem" ))
+                    {
+                        int j;
+                        for (j = 0; j < st->item_cnt; j++)
+                            if (st->items[j].el && wcsstr( st->items[j].el->class_name, L"RadioMenuFlyoutItem" ))
+                                st->items[j].el->is_checked = 0;
+                        clicked_el->is_checked = 1;
+                    }
                     uwp_invoke_button( clicked_el );
                     uwp_close_flyout_popup( TRUE );
                     if (owner && IsWindow( owner )) SetFocus( owner );
@@ -680,6 +742,11 @@ static HWND uwp_create_flyout_popup_internal( struct uwp_element *flyout, struct
     HWND hwnd;
 
     if (!flyout) return NULL;
+    if (!flyout->children_coll && flyout->flyout)
+    {
+        struct uwp_element *inner_fl = uwp_elem_from_any( flyout->flyout );
+        if (inner_fl) flyout = inner_fl;
+    }
     if (flyout->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -869,7 +936,8 @@ void uwp_show_flyout_popup( struct uwp_element *flyout, HWND owner_hwnd, int scr
 {
     uwp_close_flyout_popup( FALSE );
     g_popup_owner_el = flyout;
-    g_popup_hwnd = uwp_create_flyout_popup_internal( flyout, flyout, owner_hwnd, NULL, screen_x, screen_y );
+    if (flyout && wcsstr( flyout->class_name, L"MenuBarItem" ))
+        g_popup_hwnd = uwp_create_flyout_popup_internal( flyout, flyout, owner_hwnd, NULL, screen_x, screen_y );
     uwp_invalidate_window();
 }
 

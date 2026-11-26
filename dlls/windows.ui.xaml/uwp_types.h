@@ -342,6 +342,9 @@ struct uwp_element
     IInspectable IRichTextBlock_iface;
     IInspectable ITextBlock2_iface;
     IInspectable ITextBlock6_iface;
+    IInspectable IPopup_iface;
+    IInspectable IPopup2_iface;
+    IInspectable IPopup3_iface;
     IInspectable IStoryboard_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
     IDispatch IDispatch_iface;
@@ -368,7 +371,7 @@ struct uwp_element
     WCHAR x_class[128];
     WCHAR name[64];
     WCHAR uid[64];
-    WCHAR text[256];
+    WCHAR text[2048];
     WCHAR accel_text[64];
     IInspectable *dialog_title_obj;
     WCHAR dialog_title[128];
@@ -419,6 +422,13 @@ struct uwp_element
     int visibility;    /* 0=Visible, 1=Collapsed */
     boolean is_enabled;
     int is_checked;    /* 0=Unchecked, 1=Checked, 2=Indeterminate */
+    struct xaml_event_registry tbtn_checked_reg;
+    struct xaml_event_registry tbtn_unchecked_reg;
+    double popup_h_offset;
+    double popup_v_offset;
+    BOOL popup_light_dismiss;
+    struct xaml_event_registry popup_opened_reg;
+    struct xaml_event_registry popup_closed_reg;
     BOOL is_pressed;
     BOOL is_hovered;
     BOOL is_hit_test_visible;
@@ -904,6 +914,11 @@ void uwp_fire_evc_if_needed( struct uwp_element *el );
 void uwp_fire_size_and_layout_changed( struct uwp_element *el );
 void uwp_ui_fire_got_focus( struct uwp_element *el );
 void uwp_ui_fire_lost_focus( struct uwp_element *el );
+void uwp_popup_set_open( struct uwp_element *impl, BOOL open );
+int uwp_get_open_popups( struct uwp_element **out_list, int max_cnt );
+void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL fire_events );
+void uwp_update_binding_source( IInspectable *src, const WCHAR *path, IInspectable *new_val );
+void uwp_refresh_element_bindings( struct uwp_element *el );
 HANDLE get_xaml_window_ready_event( void );
 HRESULT xaml_async_action_create( IAsyncAction **out );
 void **vtbl_dup( const void *src );

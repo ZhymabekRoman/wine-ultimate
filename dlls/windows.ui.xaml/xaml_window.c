@@ -975,6 +975,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         BOOL accel_handled = FALSE;
         if (msg == WM_KEYDOWN && wparam == VK_F12)
         {
+            xaml_mark_window_dirty();
+            xaml_window_present( &global_xaml_window );
             uwp_debug_dump_root( global_xaml_window.content );
             return 0;
         }

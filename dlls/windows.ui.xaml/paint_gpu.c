@@ -1298,14 +1298,15 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         UINT32 bg_argb = 0, bd_argb = 0, res_argb = 0;
         float rad = (el->corner_radius > 0.0) ? (float)el->corner_radius : 4.0f;
         int fw = (el->font_weight > 0) ? el->font_weight : FW_SEMIBOLD;
+        BOOL is_accent_or_checked = el->is_accent_style || (el->kind == UWP_KIND_TOGGLE_BUTTON && el->is_checked == 1);
 
-        if (!label[0] && !el->has_bg && !el->is_accent_style && !el->is_hovered && !el->is_pressed)
+        if (!label[0] && !el->has_bg && !is_accent_or_checked && !el->is_hovered && !el->is_pressed)
         {
             draw_bg = FALSE;
             draw_bd = FALSE;
             bg = surface_bg;
         }
-        else if (el->has_bg)
+        else if (el->has_bg && !(el->kind == UWP_KIND_TOGGLE_BUTTON && el->is_checked == 1))
         {
             if (el->bg_alpha == 0)
             {
@@ -1324,7 +1325,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
                 }
             }
         }
-        else if (el->is_accent_style)
+        else if (is_accent_or_checked)
         {
             if (uwp_resolve_brush_or_color( NULL, el, L"AccentButtonBackground", 0, &res_argb ) && ((res_argb >> 24) & 0xff))
                 bg_argb = apply_opacity_to_argb( res_argb, el->opacity );
@@ -1357,13 +1358,13 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             }
         }
 
-        if (el->has_border)
+        if (el->has_border && !(el->kind == UWP_KIND_TOGGLE_BUTTON && el->is_checked == 1))
         {
             draw_bd = (el->border_alpha > 0);
             bd_argb = apply_opacity_to_argb( el->border_argb, el->opacity );
             bd = blend_argb_over( bd_argb, surface_bg );
         }
-        else if (!draw_bg || el->is_accent_style)
+        else if (!draw_bg || is_accent_or_checked)
         {
             draw_bd = FALSE;
             bd = surface_bg;
@@ -1380,9 +1381,9 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         if (!el->is_enabled)
             fg = uwp_paint_resolve_color( el, L"TextFillColorDisabledBrush",
                                           uwp_is_light_theme( el ) ? RGB( 150, 150, 150 ) : RGB( 120, 120, 120 ), bg );
-        else if (el->has_fg && el->fg_alpha > 0)
+        else if (el->has_fg && el->fg_alpha > 0 && !(el->kind == UWP_KIND_TOGGLE_BUTTON && el->is_checked == 1))
             fg = blend_argb_over( el->fg_argb, bg );
-        else if (el->is_accent_style)
+        else if (is_accent_or_checked)
             fg = uwp_paint_resolve_color( el, L"AccentButtonForeground", RGB( 255, 255, 255 ), bg );
         else
             fg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush",
@@ -1419,6 +1420,16 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             UINT dt_flags = DT_SINGLELINE;
             int hca = el->has_h_content_align ? el->h_content_align : 1; /* default Center */
             int vca = el->has_v_content_align ? el->v_content_align : 1; /* default Center */
+            if (wcsstr( el->class_name, L"DropDownButton" ) && (brc.right - brc.left) > 36)
+            {
+                RECT crc = { brc.right - 24, brc.top, brc.right - 4, brc.bottom };
+                WCHAR cff_buf[64];
+                uwp_resolve_font_family( L"Segoe MDL2 Assets", cff_buf, ARRAY_SIZE(cff_buf) );
+                xaml_gpu_push_text_font( ctx, L"\xE70D", cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                         max( 11, (int)(11 * g_layout_scale + 0.5f) ), FW_NORMAL,
+                                         DT_CENTER | DT_VCENTER | DT_SINGLELINE, &crc, NULL, fg, 1.0f );
+                trc.right -= 18;
+            }
             if (hca == 0) { dt_flags |= DT_LEFT; trc.left += max( 4, (int)el->padding_l ); }
             else if (hca == 2) { dt_flags |= DT_RIGHT; trc.right -= max( 4, (int)el->padding_r ); }
             else dt_flags |= DT_CENTER;
@@ -1427,6 +1438,15 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             else dt_flags |= DT_VCENTER;
             xaml_gpu_push_text_font( ctx, label, uwp_resolve_elem_font_family( el, ff_buf, ARRAY_SIZE(ff_buf) ),
                                      fh, fw, dt_flags, &trc, NULL, fg, 1.0f );
+        }
+        else if (!wcscmp( el->name, L"CloseButton" ))
+        {
+            WCHAR cff_buf[64];
+            RECT trc = brc;
+            uwp_resolve_font_family( L"Segoe MDL2 Assets", cff_buf, ARRAY_SIZE(cff_buf) );
+            xaml_gpu_push_text_font( ctx, L"\xE711", cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                     max( 12, (int)(12 * g_layout_scale + 0.5f) ), FW_NORMAL,
+                                     DT_SINGLELINE | DT_CENTER | DT_VCENTER, &trc, NULL, fg, 1.0f );
         }
         (void)bd;
     }
@@ -1517,7 +1537,7 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                     anc_fg = blend_argb_over( anc->fg_argb, surface_bg );
                     has_anc_fg = TRUE;
                 }
-                else if (!el->has_fg && anc->is_accent_style)
+                else if (!el->has_fg && (anc->is_accent_style || (anc->kind == UWP_KIND_TOGGLE_BUTTON && anc->is_checked == 1)))
                 {
                     anc_fg = uwp_paint_resolve_color( anc, L"AccentButtonForeground", RGB( 255, 255, 255 ), surface_bg );
                     has_anc_fg = TRUE;
@@ -1601,7 +1621,15 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                 hflag = DT_LEFT;
 
             if (!parent_btn && (el->text_wrapping >= 2 || wcschr( draw_txt, L'\n' ) != NULL))
-                dt = hflag | DT_TOP | DT_WORDBREAK;
+            {
+                dt = hflag | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL;
+                if (el->max_lines > 0)
+                {
+                    int max_bh = (int)(el->max_lines * fh * 1.32f + 2.0f);
+                    if (trc.bottom - trc.top > max_bh)
+                        trc.bottom = trc.top + max_bh;
+                }
+            }
             else
             {
                 int box_h = trc.bottom - trc.top;
@@ -2053,7 +2081,12 @@ static IInspectable *uwp_vm_unwrap_one( IInspectable *vm, const WCHAR *const *pr
 
 static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
-    if (!el->text[0] && wcscmp( el->placeholder, L"-no-card-" ) != 0)
+    DWORD now_tick = GetTickCount();
+    BOOL incomplete = !el->text[0] || (!wcschr( el->text, L'\n' ) && !el->image_src[0]);
+    BOOL needs_hydrate = !el->text[0] ||
+        (incomplete && el->hovered_dropdown_idx < 4 &&
+         (el->dropdown_scroll_offset == 0 || (int)(now_tick - (DWORD)el->dropdown_scroll_offset) >= 900));
+    if (needs_hydrate && wcscmp( el->placeholder, L"-no-card-" ) != 0)
     {
         static const WCHAR *const title_props[] =
             { L"Title", L"ProductTitle", L"DisplayTitle", L"Name", L"Label", L"DisplayName", L"Header", L"Text", L"ShortTitle" };
@@ -2080,7 +2113,11 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
         IInspectable *vm2 = (vm1 && vm1 != vm0) ? uwp_vm_unwrap_one( vm1, nested_props, ARRAY_SIZE(nested_props) ) : NULL;
         IInspectable *vms[3] = { vm1 ? vm1 : vm0, vm2, vm0 };
         unsigned int vi;
+        el->dropdown_scroll_offset = (int)now_tick;
+        el->hovered_dropdown_idx++;
 
+        if (el->text[0] && !wcschr( el->text, L'\n' ))
+            lstrcpynW( title_buf, el->text, ARRAY_SIZE(title_buf) );
         for (vi = 0; vi < ARRAY_SIZE(vms) && !title_buf[0]; vi++)
             if (vms[vi]) uwp_vm_query_string_prop_depth( vms[vi], title_props, ARRAY_SIZE(title_props), title_buf, ARRAY_SIZE(title_buf), 2 );
 
@@ -2641,6 +2678,161 @@ static void uwp_gpu_paint_asb_popup( ID3D11DeviceContext *ctx, int width, int he
     for (i = 0; i < count; i++) IInspectable_Release( items[i] );
 }
 
+static void uwp_gpu_paint_open_popups( ID3D11DeviceContext *ctx, int width, int height )
+{
+    struct uwp_element *pops[16];
+    int pcnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) ), pi;
+    for (pi = 0; pi < pcnt; pi++)
+    {
+        struct uwp_element *pop = pops[pi];
+        struct uwp_element *ch = uwp_elem_from_any( pop->content );
+        RECT prc;
+        BOOL light;
+        UINT32 bg_argb, bd_argb;
+        if (!ch || !pop->has_bounds) continue;
+        prc = pop->bounds;
+        light = uwp_is_light_theme( ch );
+        bg_argb = light ? 0xfffcfcfcu : 0xff2b2b30u;
+        bd_argb = light ? 0xffceced4u : 0xff52525au;
+        xaml_gpu_push_rect( 0.0f, 0.0f, (float)width, (float)height, NULL, 0.0f, 0x66000000u, 0, 0.0f, 1.0f );
+        xaml_gpu_push_rect( (float)(prc.left - 3), (float)(prc.top + 3), (float)(prc.right + 3), (float)(prc.bottom + 5),
+                            NULL, 10.0f, 0x55000000u, 0, 0.0f, 1.0f );
+        xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom,
+                            NULL, 8.0f, bg_argb, bd_argb, 1.0f, 1.0f );
+        uwp_gpu_paint_element( ctx, ch );
+    }
+}
+
+static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int height )
+{
+    struct uwp_element *owner = g_popup_owner_el;
+    struct uwp_element *anchor;
+    struct uwp_element *flyout;
+    struct uwp_vec_view *children;
+    struct uwp_element *items[32];
+    int item_cnt = 0, i, cur_y = 6, max_w = 180;
+    RECT orc, prc;
+    BOOL light;
+    UINT32 bg_argb, bd_argb, hov_argb, sep_argb;
+    COLORREF fg_cr, accent_cr;
+    int fh;
+
+    if (!owner) return;
+    if (g_popup_hwnd && IsWindow( g_popup_hwnd )) return;
+    anchor = owner->has_bounds ? owner : owner->parent;
+    if (!anchor || !anchor->has_bounds || anchor->visibility != 0) return;
+    flyout = owner->flyout ? uwp_elem_from_any( owner->flyout ) : owner;
+    if (!flyout || !flyout->children_coll) return;
+    children = CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface );
+    for (i = 0; children && i < (int)children->count && item_cnt < (int)ARRAY_SIZE(items); i++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
+        if (!ch || ch->visibility != 0 || wcsstr( ch->class_name, L"Accelerator" )) continue;
+        items[item_cnt++] = ch;
+        if (wcsstr( ch->class_name, L"Separator" ))
+            cur_y += 9;
+        else
+        {
+            int tw = (int)(wcslen( ch->text ) * 8 * g_layout_scale) + 56;
+            if (tw > max_w) max_w = min( 340, tw );
+            cur_y += 32;
+        }
+    }
+    if (item_cnt == 0) return;
+    {
+        int grp_first_radio = -1;
+        BOOL grp_has_checked = FALSE;
+        for (i = 0; i <= item_cnt; i++)
+        {
+            if (i == item_cnt || wcsstr( items[i]->class_name, L"Separator" ))
+            {
+                if (grp_first_radio >= 0 && !grp_has_checked)
+                    items[grp_first_radio]->is_checked = 1;
+                grp_first_radio = -1;
+                grp_has_checked = FALSE;
+            }
+            else if (wcsstr( items[i]->class_name, L"RadioMenuFlyoutItem" ))
+            {
+                if (grp_first_radio < 0) grp_first_radio = i;
+                if (items[i]->is_checked != 0) grp_has_checked = TRUE;
+            }
+        }
+    }
+
+    orc = anchor->bounds;
+    prc.left = orc.right - max_w;
+    if (prc.left < 8) prc.left = orc.left;
+    if (prc.left + max_w > width - 8) prc.left = max( 8, width - max_w - 8 );
+    prc.right = prc.left + max_w;
+    prc.top = orc.bottom + 4;
+    if (prc.top + cur_y + 6 > height - 8) prc.top = max( 8, orc.top - (cur_y + 6) - 4 );
+    prc.bottom = prc.top + cur_y + 6;
+    flyout->bounds = prc;
+    flyout->has_bounds = TRUE;
+
+    light = uwp_is_light_theme( owner );
+    bg_argb = light ? 0xfffcfcfcu : 0xff2c2c30u;
+    bd_argb = light ? 0xffceced4u : 0xff52525au;
+    hov_argb = light ? 0xffededf2u : 0xff3b3b42u;
+    sep_argb = light ? 0xffdcdce2u : 0xff46464eu;
+    fg_cr = light ? RGB( 24, 24, 28 ) : RGB( 245, 245, 248 );
+    accent_cr = light ? RGB( 0, 103, 192 ) : RGB( 96, 205, 255 );
+    fh = max( 12, (int)(13.0f * g_layout_scale + 0.5f) );
+
+    xaml_gpu_push_rect( (float)(prc.left - 2), (float)(prc.top + 2), (float)(prc.right + 2), (float)(prc.bottom + 4),
+                        NULL, 8.0f, 0x48000000u, 0, 0.0f, 1.0f );
+    xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom,
+                        NULL, 6.0f, bg_argb, bd_argb, 1.0f, 1.0f );
+
+    cur_y = prc.top + 6;
+    for (i = 0; i < item_cnt; i++)
+    {
+        struct uwp_element *ch = items[i];
+        if (wcsstr( ch->class_name, L"Separator" ))
+        {
+            int sy = cur_y + 4;
+            xaml_gpu_push_rect( (float)(prc.left + 10), (float)sy, (float)(prc.right - 10), (float)(sy + 1),
+                                &prc, 0.0f, sep_argb, 0, 0.0f, 1.0f );
+            SetRect( &ch->bounds, prc.left, cur_y, prc.right, cur_y + 9 );
+            ch->has_bounds = TRUE;
+            cur_y += 9;
+        }
+        else
+        {
+            RECT rrc = { prc.left + 4, cur_y, prc.right - 4, cur_y + 32 };
+            RECT trc = { prc.left + 34, cur_y, prc.right - 12, cur_y + 32 };
+            ch->bounds = rrc;
+            ch->has_bounds = TRUE;
+            if (ch->is_hovered)
+                xaml_gpu_push_rect( (float)rrc.left, (float)rrc.top, (float)rrc.right, (float)rrc.bottom,
+                                    &prc, 4.0f, hov_argb, 0, 0.0f, 1.0f );
+            if (ch->is_checked != 0)
+            {
+                if (wcsstr( ch->class_name, L"RadioMenuFlyoutItem" ))
+                {
+                    int cx = prc.left + 19, cy = cur_y + 16;
+                    xaml_gpu_push_rect( (float)(cx - 3), (float)(cy - 3), (float)(cx + 3), (float)(cy + 3),
+                                        &prc, 3.0f, cr_to_argb( accent_cr ), 0, 0.0f, 1.0f );
+                }
+                else
+                {
+                    RECT crc = { prc.left + 8, cur_y, prc.left + 30, cur_y + 32 };
+                    WCHAR cff_buf[64];
+                    uwp_resolve_font_family( L"Segoe MDL2 Assets", cff_buf, ARRAY_SIZE(cff_buf) );
+                    xaml_gpu_push_text_font( ctx, L"\xE73E", cff_buf[0] ? cff_buf : L"Segoe MDL2 Assets",
+                                             max( 11, (int)(12 * g_layout_scale + 0.5f) ), FW_NORMAL,
+                                             DT_CENTER | DT_VCENTER | DT_SINGLELINE, &crc, &prc, fg_cr, 1.0f );
+                }
+            }
+            if (ch->text[0])
+                xaml_gpu_push_text( ctx, ch->text, fh, ch->is_checked ? FW_SEMIBOLD : FW_NORMAL,
+                                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                    &trc, &prc, fg_cr, 1.0f );
+            cur_y += 32;
+        }
+    }
+}
+
 static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IInspectable *content,
                                            ID3D11Device *dev, ID3D11DeviceContext *ctx,
                                            IDXGISwapChain1 *swapchain, ID3D11RenderTargetView *rtv )
@@ -2703,8 +2895,10 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
         uwp_gpu_paint_element( ctx, root_el );
     }
 
+    uwp_gpu_paint_open_popups( ctx, width, height );
     uwp_gpu_paint_combobox_popup( ctx, width, height );
     uwp_gpu_paint_asb_popup( ctx, width, height );
+    uwp_gpu_paint_flyout_popup( ctx, width, height );
 
     if (rtv ? !xaml_gpu_end_frame_rtv( ctx, &inst_cnt, &hits, &misses )
             : !xaml_gpu_end_frame( ctx, swapchain, &inst_cnt, &hits, &misses ))

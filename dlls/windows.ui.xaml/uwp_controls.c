@@ -129,6 +129,8 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
             for (dp_anc = impl; dp_anc; dp_anc = dp_anc->parent)
                 if (dp_anc->data_context) { uwp_propagate_data_context( child_el, dp_anc->data_context ); break; }
         }
+        if (impl->has_bounds && impl->bounds.right > impl->bounds.left && impl->bounds.bottom > impl->bounds.top)
+            uwp_arrange_element( child_el, impl->bounds );
         {
             BOOL tree_loaded = FALSE;
             struct uwp_element *p;
@@ -210,18 +212,155 @@ HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationT
     return S_OK;
 }
 
+BOOL uwp_unbox_bool( IInspectable *val, boolean *out );
+
+void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL fire_events )
+{
+    int prev, i;
+    IInspectable *boxed = NULL;
+
+    if (!btn) return;
+    prev = btn->is_checked;
+    btn->is_checked = checked ? 1 : 0;
+
+    if (fire_events)
+    {
+        boxed = box_bool_value( btn->is_checked == 1 ? TRUE : FALSE );
+        /* 1. Update any TwoWay binding on IsChecked / IsSelected */
+        for (i = 0; i < btn->dc_bound_dp_cnt; i++)
+        {
+            struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dc_bound_dps[i].dp;
+            struct uwp_element *bel = btn->dc_bound_dps[i].binding;
+            if (dpl && (ULONG_PTR)dpl >= 0x10000 &&
+                (!wcscmp( dpl->name, L"IsChecked" ) || !wcscmp( dpl->name, L"IsSelected" )))
+            {
+                IInspectable *src = (bel && bel->data_context) ? bel->data_context : btn->data_context;
+                HSTRING h_path = NULL;
+                const WCHAR *path_str = NULL;
+                if (bel && bel->tag)
+                {
+                    void *pp = NULL;
+                    if (SUCCEEDED(IInspectable_QueryInterface( bel->tag, &IID_IPropertyPath_UWP, &pp )) && pp)
+                    {
+                        HRESULT (WINAPI *get_path)(void *, HSTRING *) = (void *)(*(void ***)pp)[6];
+                        if (get_path && SUCCEEDED(get_path( pp, &h_path )) && h_path)
+                            path_str = WindowsGetStringRawBuffer( h_path, NULL );
+                        IUnknown_Release( (IUnknown *)pp );
+                    }
+                }
+                if (src && path_str && path_str[0] && boxed)
+                    uwp_update_binding_source( src, path_str, boxed );
+                if (h_path) WindowsDeleteString( h_path );
+            }
+        }
+        /* 2. Fire any DependencyPropertyChangedCallbacks registered for IsChecked / IsSelected */
+        {
+            struct xaml_event_handler *cbs[16];
+            void *cb_dps[16];
+            int cb_cnt = 0;
+            AcquireSRWLockShared( &btn->dp_lock );
+            for (i = 0; i < btn->dp_cb_cnt && cb_cnt < (int)ARRAY_SIZE(cbs); i++)
+            {
+                struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = (void *)btn->dp_cbs[i].dp;
+                if (btn->dp_cbs[i].callback && dpl && (ULONG_PTR)dpl >= 0x10000 &&
+                    (!wcscmp( dpl->name, L"IsChecked" ) || !wcscmp( dpl->name, L"IsSelected" )))
+                {
+                    cbs[cb_cnt] = (struct xaml_event_handler *)btn->dp_cbs[i].callback;
+                    cb_dps[cb_cnt] = btn->dp_cbs[i].dp;
+                    IUnknown_AddRef( (IUnknown *)cbs[cb_cnt] );
+                    cb_cnt++;
+                }
+            }
+            ReleaseSRWLockShared( &btn->dp_lock );
+            for (i = 0; i < cb_cnt; i++)
+            {
+                void *sender = btn->outer ? (void *)btn->outer : (void *)&btn->IDependencyObject_iface;
+                __TRY { cbs[i]->lpVtbl->Invoke( cbs[i], sender, cb_dps[i] ); }
+                __EXCEPT_ALL {}
+                __ENDTRY;
+                IUnknown_Release( (IUnknown *)cbs[i] );
+            }
+        }
+        /* 3. Fire Checked / Unchecked routed events if state changed */
+        if (prev != btn->is_checked)
+        {
+            struct xaml_event_registry *reg = (btn->is_checked == 1) ? &btn->tbtn_checked_reg : &btn->tbtn_unchecked_reg;
+            void **handlers = NULL;
+            unsigned int count = xaml_event_registry_snapshot_alloc( reg, &handlers ), k;
+            IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
+            for (k = 0; k < count; k++)
+            {
+                struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[k];
+                __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+                __EXCEPT_ALL {}
+                __ENDTRY;
+                IUnknown_Release( (IUnknown *)handlers[k] );
+            }
+            free( handlers );
+        }
+        if (boxed) IInspectable_Release( boxed );
+    }
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+}
+
 static HRESULT WINAPI uwp_tbtn_get_IsChecked( void *iface, void **out )
 {
+    static const GUID IID_IReference_Boolean =
+        { 0x3c00fd60, 0x2950, 0x5939, { 0xa2, 0x1a, 0x2d, 0x12, 0xc5, 0xa0, 0x1b, 0x8a } };
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    IInspectable *boxed;
     if (!out) return E_POINTER;
-    *out = box_bool_value( (impl && impl->is_checked == 1) ? TRUE : FALSE );
+    *out = NULL;
+    boxed = box_bool_value( (impl && impl->is_checked == 1) ? TRUE : FALSE );
+    if (boxed)
+    {
+        if (FAILED(IInspectable_QueryInterface( boxed, &IID_IReference_Boolean, out )) || !*out)
+        {
+            *out = boxed;
+            return S_OK;
+        }
+        IInspectable_Release( boxed );
+    }
     return S_OK;
 }
 static HRESULT WINAPI uwp_tbtn_put_IsChecked( void *iface, void *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->is_checked = val ? 1 : 0;
+    if (impl)
+    {
+        boolean bv = FALSE;
+        int new_chk = 0;
+        if (!val) new_chk = 0;
+        else if (uwp_unbox_bool( (IInspectable *)val, &bv )) new_chk = bv ? 1 : 0;
+        else new_chk = 1;
+        uwp_toggle_button_set_checked( impl, new_chk, FALSE );
+    }
     return S_OK;
+}
+static HRESULT WINAPI uwp_tbtn_add_Checked( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_add( &impl->tbtn_checked_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_tbtn_remove_Checked( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_remove( &impl->tbtn_checked_reg, tok );
+}
+static HRESULT WINAPI uwp_tbtn_add_Unchecked( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_add( &impl->tbtn_unchecked_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_tbtn_remove_Unchecked( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_remove( &impl->tbtn_unchecked_reg, tok );
 }
 
 /* --- ITextBlock (slot 26=get_Text, slot 27=put_Text) --- */
@@ -265,6 +404,16 @@ HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val )
             lstrcpynW( impl->text, s ? s : L"", ARRAY_SIZE(impl->text) );
         TRACE( "ITextBlock::put_Text on %s (%s) -> %s\n",
                debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(impl->text) );
+        {
+            struct uwp_element *p;
+            int hop;
+            for (p = impl, hop = 0; p && hop < 4; p = p->parent, hop++)
+            {
+                p->last_sc_w = 0.0f;
+                p->last_sc_h = 0.0f;
+            }
+        }
+        g_layout_dirty = TRUE;
         uwp_invalidate_window();
     }
     return S_OK;
@@ -473,12 +622,226 @@ const void *uwp_tbtn_vtbl[32] =
     [6] = uwp_tbtn_get_IsChecked,
     [7] = uwp_tbtn_put_IsChecked,
     [8 ... 9] = uwp_generic_noop,
-    [10] = uwp_ui_event_add,
-    [11] = uwp_generic_noop,
-    [12] = uwp_ui_event_add,
-    [13] = uwp_generic_noop,
+    [10] = uwp_tbtn_add_Checked,
+    [11] = uwp_tbtn_remove_Checked,
+    [12] = uwp_tbtn_add_Unchecked,
+    [13] = uwp_tbtn_remove_Unchecked,
     [14] = uwp_ui_event_add,
     [15 ... 31] = uwp_generic_noop,
+};
+
+void uwp_popup_set_open( struct uwp_element *impl, BOOL open )
+{
+    BOOL prev;
+    if (!impl) return;
+    prev = impl->is_dropdown_open;
+    impl->is_dropdown_open = (open != 0);
+    if (impl->is_dropdown_open && impl->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( impl->content );
+        if (ch)
+        {
+            ch->parent = impl;
+            if (!ch->data_context)
+            {
+                struct uwp_element *anc;
+                for (anc = impl; anc; anc = anc->parent)
+                    if (anc->data_context) { uwp_propagate_data_context( ch, anc->data_context ); break; }
+            }
+            uwp_fire_loaded_tree( ch );
+        }
+    }
+    if (prev != impl->is_dropdown_open)
+    {
+        struct xaml_event_registry *reg = impl->is_dropdown_open ? &impl->popup_opened_reg : &impl->popup_closed_reg;
+        void **handlers = NULL;
+        unsigned int count = xaml_event_registry_snapshot_alloc( reg, &handlers ), i;
+        IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
+        for (i = 0; i < count; i++)
+        {
+            struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+            __TRY { h->lpVtbl->Invoke( h, sender, g_routed_args() ); }
+            __EXCEPT_ALL {}
+            __ENDTRY;
+            IUnknown_Release( (IUnknown *)handlers[i] );
+        }
+        free( handlers );
+    }
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+}
+
+int uwp_get_open_popups( struct uwp_element **out_list, int max_cnt )
+{
+    struct uwp_element *el;
+    int cnt = 0;
+    AcquireSRWLockShared( &g_all_uwp_elems_lock );
+    for (el = g_all_uwp_elems_head; el; el = el->next_reg)
+    {
+        if (el->kind == UWP_KIND_POPUP && el->is_dropdown_open && el->content && el->visibility == 0)
+        {
+            if (out_list && cnt < max_cnt)
+                out_list[cnt] = el;
+            cnt++;
+        }
+    }
+    ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+    return out_list ? min( cnt, max_cnt ) : cnt;
+}
+
+static HRESULT WINAPI uwp_popup_get_Child( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (impl && impl->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( impl->content );
+        *out = (ch && ch->outer) ? (void *)ch->outer : (void *)impl->content;
+        IInspectable_AddRef( (IInspectable *)*out );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_put_Child( void *iface, void *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_element *ch;
+    if (!impl) return S_OK;
+    if (impl->content) IInspectable_Release( impl->content );
+    impl->content = (IInspectable *)val;
+    if (impl->content) IInspectable_AddRef( impl->content );
+    ch = uwp_elem_from_any( val );
+    if (ch)
+    {
+        ch->parent = impl;
+        impl->content_kind = UWP_CONTENT_ELEMENT;
+        if (impl->is_dropdown_open)
+            uwp_fire_loaded_tree( ch );
+    }
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_get_IsOpen( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = (impl && impl->is_dropdown_open) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_put_IsOpen( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) uwp_popup_set_open( impl, val != 0 );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_get_HorizontalOffset( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->popup_h_offset : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_put_HorizontalOffset( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->popup_h_offset = val; g_layout_dirty = TRUE; uwp_invalidate_window(); }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_get_VerticalOffset( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = impl ? impl->popup_v_offset : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_put_VerticalOffset( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->popup_v_offset = val; g_layout_dirty = TRUE; uwp_invalidate_window(); }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_get_IsLightDismissEnabled( void *iface, boolean *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (out) *out = (impl && impl->popup_light_dismiss) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_put_IsLightDismissEnabled( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->popup_light_dismiss = (val != 0);
+    return S_OK;
+}
+static HRESULT WINAPI uwp_popup_add_Opened( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_add( &impl->popup_opened_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_popup_remove_Opened( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_remove( &impl->popup_opened_reg, tok );
+}
+static HRESULT WINAPI uwp_popup_add_Closed( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_add( &impl->popup_closed_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_popup_remove_Closed( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    return xaml_event_registry_remove( &impl->popup_closed_reg, tok );
+}
+
+const void *uwp_popup_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_popup_get_Child,
+    [7] = uwp_popup_put_Child,
+    [8] = uwp_popup_get_IsOpen,
+    [9] = uwp_popup_put_IsOpen,
+    [10] = uwp_popup_get_HorizontalOffset,
+    [11] = uwp_popup_put_HorizontalOffset,
+    [12] = uwp_popup_get_VerticalOffset,
+    [13] = uwp_popup_put_VerticalOffset,
+    [14 ... 15] = uwp_generic_noop,
+    [16] = uwp_popup_get_IsLightDismissEnabled,
+    [17] = uwp_popup_put_IsLightDismissEnabled,
+    [18] = uwp_popup_add_Opened,
+    [19] = uwp_popup_remove_Opened,
+    [20] = uwp_popup_add_Closed,
+    [21] = uwp_popup_remove_Closed,
+    [22 ... 31] = uwp_generic_noop,
+};
+
+const void *uwp_popup2_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 15] = uwp_generic_noop,
+};
+
+const void *uwp_popup3_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 15] = uwp_generic_noop,
 };
 
 const void *uwp_panel_vtbl[32] =
@@ -505,13 +868,13 @@ HRESULT WINAPI uwp_ui7_get_KeyboardAccelerators( void *iface, void **out )
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
 }
-static HRESULT WINAPI uwp_ui7_add_PreviewKeyDown( void *iface, void *handler, EventRegistrationToken *tok )
+HRESULT WINAPI uwp_ui7_add_PreviewKeyDown( void *iface, void *handler, EventRegistrationToken *tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; }
     return xaml_event_registry_add( &impl->preview_keydown_reg, handler, tok );
 }
-static HRESULT WINAPI uwp_ui7_remove_PreviewKeyDown( void *iface, EventRegistrationToken tok )
+HRESULT WINAPI uwp_ui7_remove_PreviewKeyDown( void *iface, EventRegistrationToken tok )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_INVALIDARG;
@@ -795,6 +1158,60 @@ const void *uwp_page_vtbl[16] =
     [12 ... 15] = uwp_generic_noop,
 };
 
+static unsigned int uwp_sv_descendant_repeater_items_count( struct uwp_element *el, int depth )
+{
+    unsigned int best = 0, cnt;
+    int i;
+    if (!el || depth > 14) return 0;
+    if (wcsstr( el->class_name, L"ItemsRepeater" ) &&
+        !wcsstr( el->name, L"MenuItems" ) && !wcsstr( el->name, L"FooterMenuItems" ))
+    {
+        for (i = 0; i < el->dp_cnt; i++)
+        {
+            if (el->dp_store[i].value)
+            {
+                cnt = uwp_winrt_vec_count( el->dp_store[i].value );
+                if (cnt > 0)
+                {
+                    if (!el->children_coll ||
+                        CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0)
+                    {
+                        el->last_measured_w = 0.0f;
+                        el->last_measured_h = 0.0f;
+                        g_layout_dirty = TRUE;
+                        uwp_invalidate_window();
+                    }
+                    if (cnt > best) best = cnt;
+                }
+            }
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el)
+        {
+            cnt = uwp_sv_descendant_repeater_items_count( ch, depth + 1 );
+            if (cnt > best) best = cnt;
+        }
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; v && k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != el)
+            {
+                cnt = uwp_sv_descendant_repeater_items_count( ch, depth + 1 );
+                if (cnt > best) best = cnt;
+            }
+        }
+    }
+    return best;
+}
+
 static HRESULT WINAPI uwp_sv_get_zero_double( void *iface, double *out )
 {
     if (out) *out = 0.0;
@@ -812,6 +1229,21 @@ static HRESULT WINAPI uwp_sv_get_viewport_h( void *iface, double *out )
     if (out) *out = (impl && impl->actual_h > 0.0) ? impl->actual_h : 0.0;
     return S_OK;
 }
+static HRESULT WINAPI uwp_sv_get_scrollable_h( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    unsigned int rep_cnt = impl ? uwp_sv_descendant_repeater_items_count( impl, 0 ) : 0;
+    if (out) *out = (rep_cnt >= 12) ? 500.0 : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_get_extent_h( void *iface, double *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    double vh = (impl && impl->actual_h > 0.0) ? impl->actual_h : 0.0;
+    unsigned int rep_cnt = impl ? uwp_sv_descendant_repeater_items_count( impl, 0 ) : 0;
+    if (out) *out = (rep_cnt >= 12) ? (vh + 500.0) : vh;
+    return S_OK;
+}
 static HRESULT WINAPI uwp_sv_get_zoom( void *iface, float *out )
 {
     if (out) *out = 1.0f;
@@ -819,7 +1251,7 @@ static HRESULT WINAPI uwp_sv_get_zoom( void *iface, float *out )
 }
 static HRESULT WINAPI uwp_sv_get_collapsed( void *iface, int *out )
 {
-    if (out) *out = 1; /* Collapsed */
+    if (out) *out = 1; /* Collapsed / Auto / Enabled */
     return S_OK;
 }
 
@@ -831,25 +1263,33 @@ const void *uwp_sv_vtbl[72] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 40] = uwp_generic_noop,
-    [41] = uwp_sv_get_zero_double,  /* get_HorizontalOffset */
-    [42] = uwp_sv_get_viewport_w,   /* get_ViewportWidth */
-    [43] = uwp_sv_get_zero_double,  /* get_ScrollableWidth */
-    [44] = uwp_sv_get_zero_double,  /* get_VerticalOffset */
-    [45] = uwp_sv_get_viewport_h,   /* get_ViewportHeight */
-    [46] = uwp_sv_get_zero_double,  /* get_ScrollableHeight */
-    [47] = uwp_sv_get_viewport_w,   /* get_ExtentWidth */
-    [48] = uwp_sv_get_viewport_h,   /* get_ExtentHeight */
-    [49] = uwp_sv_get_zoom,         /* get_ZoomFactor */
+    [6] = uwp_sv_get_collapsed,     /* get_HorizontalScrollMode (1 = Enabled) */
+    [7] = uwp_generic_noop,         /* put_HorizontalScrollMode */
+    [8] = uwp_sv_get_collapsed,     /* get_VerticalScrollMode (1 = Enabled) */
+    [9 ... 23] = uwp_generic_noop,
+    [24] = uwp_sv_get_collapsed,    /* get_HorizontalScrollBarVisibility (1 = Auto) */
+    [25] = uwp_generic_noop,
+    [26] = uwp_sv_get_collapsed,    /* get_VerticalScrollBarVisibility (1 = Auto) */
+    [27 ... 39] = uwp_generic_noop,
+    [40] = uwp_sv_get_zero_double,  /* get_HorizontalOffset */
+    [41] = uwp_sv_get_viewport_w,   /* get_ViewportWidth */
+    [42] = uwp_sv_get_zero_double,  /* get_ScrollableWidth */
+    [43] = uwp_sv_get_collapsed,    /* get_ComputedHorizontalScrollBarVisibility */
+    [44] = uwp_sv_get_viewport_w,   /* get_ExtentWidth */
+    [45] = uwp_sv_get_zero_double,  /* get_VerticalOffset */
+    [46] = uwp_sv_get_viewport_h,   /* get_ViewportHeight */
+    [47] = uwp_sv_get_scrollable_h, /* get_ScrollableHeight */
+    [48] = uwp_sv_get_collapsed,    /* get_ComputedVerticalScrollBarVisibility */
+    [49] = uwp_sv_get_extent_h,     /* get_ExtentHeight */
     [50] = uwp_sv_get_zoom,         /* get_MinZoomFactor */
-    [51] = uwp_generic_noop,
+    [51] = uwp_generic_noop,        /* put_MinZoomFactor */
     [52] = uwp_sv_get_zoom,         /* get_MaxZoomFactor */
-    [53 ... 57] = uwp_generic_noop,
-    [58] = uwp_sv_get_collapsed,    /* get_ComputedHorizontalScrollBarVisibility */
-    [59] = uwp_sv_get_collapsed,    /* get_ComputedVerticalScrollBarVisibility */
-    [60] = uwp_ui_event_add,        /* add_ViewChanged */
-    [61] = uwp_generic_noop,        /* remove_ViewChanged */
-    [62 ... 71] = uwp_generic_noop,
+    [53] = uwp_generic_noop,        /* put_MaxZoomFactor */
+    [54] = uwp_sv_get_zoom,         /* get_ZoomFactor */
+    [55] = uwp_generic_noop,        /* get_ZoomSnapPoints */
+    [56] = uwp_ui_event_add,        /* add_ViewChanged */
+    [57] = uwp_generic_noop,        /* remove_ViewChanged */
+    [58 ... 71] = uwp_generic_noop,
 };
 
 enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
@@ -882,8 +1322,15 @@ enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
     if (!wcscmp( cls, L"Windows.UI.Color" )) return UWP_KIND_COLOR;
     if (wcsstr( cls, L"Style" ) || wcsstr( cls, L"Setter" ) || wcsstr( cls, L"VisualState" )) return UWP_KIND_STYLE;
     if (wcsstr( cls, L"Brush" )) return UWP_KIND_BRUSH;
-    if (wcsstr( cls, L"Flyout" )) return UWP_KIND_FLYOUT;
-    if (wcsstr( cls, L"Popup" )) return UWP_KIND_POPUP;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.Flyout" ) ||
+        !wcscmp( cls, L"Windows.UI.Xaml.Controls.MenuFlyout" ) ||
+        !wcscmp( cls, L"Microsoft.UI.Xaml.Controls.CommandBarFlyout" ) ||
+        !wcscmp( cls, L"Windows.UI.Xaml.Controls.Primitives.FlyoutBase" ) ||
+        !wcscmp( cls, L"Flyout" ) || !wcscmp( cls, L"MenuFlyout" ))
+        return UWP_KIND_FLYOUT;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.Primitives.Popup" ) ||
+        !wcscmp( cls, L"Microsoft.UI.Xaml.Controls.Primitives.Popup" ))
+        return UWP_KIND_POPUP;
     if (wcsstr( cls, L"Accelerator" )) return UWP_KIND_ACCELERATOR;
     if (wcsstr( cls, L"XamlUICommand" )) return UWP_KIND_XAML_COMMAND;
     return UWP_KIND_GENERIC;

@@ -280,6 +280,17 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
             *out = box_string_value( impl->text );
             if (*out) return S_OK;
         }
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"Flyout" ) && impl->flyout)
+        {
+            *out = impl->flyout;
+            IInspectable_AddRef( *out );
+            return S_OK;
+        }
+        if (dpl && (ULONG_PTR)dpl >= 0x10000 && !wcscmp( dpl->name, L"IsChecked" ))
+        {
+            *out = box_bool_value( impl->is_checked == 1 ? TRUE : FALSE );
+            if (*out) return S_OK;
+        }
     }
 
     AcquireSRWLockShared( &impl->dp_lock );
@@ -617,7 +628,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     IInspectable *old_val = NULL;
-    WCHAR str_val[256] = {0};
+    WCHAR str_val[2048] = {0};
     int i;
     static struct { DWORD tid; struct uwp_element *el; void *dp; IInspectable *val; } setval_stack[64];
     static int setval_depth = 0;
@@ -808,6 +819,40 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
                 impl->v_content_align = ev;
                 impl->has_v_content_align = TRUE;
                 uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"Flyout" ))
+            {
+                uwp_replace_iface( &impl->flyout, val );
+                uwp_invalidate_window();
+            }
+            else if (!wcscmp( dpname, L"IsChecked" ) || !wcscmp( dpname, L"IsSelected" ))
+            {
+                boolean bv = FALSE;
+                if (!val)
+                    impl->is_checked = 0;
+                else if (uwp_unbox_bool( val, &bv ))
+                    impl->is_checked = bv ? 1 : 0;
+                uwp_invalidate_window();
+            }
+            else if (impl->kind == UWP_KIND_POPUP)
+            {
+                boolean bv = FALSE;
+                if (!wcscmp( dpname, L"IsOpen" ) && val && uwp_unbox_bool( val, &bv ))
+                    uwp_popup_set_open( impl, bv != 0 );
+                else if (!wcscmp( dpname, L"HorizontalOffset" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+                {
+                    impl->popup_h_offset = dv;
+                    g_layout_dirty = TRUE;
+                    uwp_invalidate_window();
+                }
+                else if (!wcscmp( dpname, L"VerticalOffset" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
+                {
+                    impl->popup_v_offset = dv;
+                    g_layout_dirty = TRUE;
+                    uwp_invalidate_window();
+                }
+                else if (!wcscmp( dpname, L"IsLightDismissEnabled" ) && val && uwp_unbox_bool( val, &bv ))
+                    impl->popup_light_dismiss = (bv != 0);
             }
         }
     }
@@ -1062,7 +1107,7 @@ HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp )
     if (!impl || !dp) return S_OK;
     if (dpl && (ULONG_PTR)dpl >= 0x10000 && dpl->name[0])
     {
-        if (!wcscmp( dpl->name, L"IsSelected" ))
+        if (!wcscmp( dpl->name, L"IsSelected" ) || !wcscmp( dpl->name, L"IsChecked" ))
         {
             impl->is_checked = 0;
             uwp_invalidate_window();

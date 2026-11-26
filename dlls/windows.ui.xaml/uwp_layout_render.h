@@ -355,6 +355,8 @@ BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e );
 ULONG WINAPI uwp_ka_args_Release( void *iface );
 ULONG WINAPI uwp_key_args_Release( void *iface );
 HRESULT WINAPI uwp_ui7_get_KeyboardAccelerators( void *iface, void **out );
+HRESULT WINAPI uwp_ui7_add_PreviewKeyDown( void *iface, void *handler, EventRegistrationToken *tok );
+HRESULT WINAPI uwp_ui7_remove_PreviewKeyDown( void *iface, EventRegistrationToken tok );
 UINT uwp_parse_vk_string( const WCHAR *s );
 void uwp_keyboard_press_char( WCHAR ch );
 BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr );

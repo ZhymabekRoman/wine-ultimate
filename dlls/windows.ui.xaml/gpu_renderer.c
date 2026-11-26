@@ -937,7 +937,7 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
     if (wcsicmp( face, L"Segoe UI" ) != 0 && !xaml_gpu_font_has_glyphs( face, text ))
         lstrcpynW( face, L"Segoe UI", ARRAY_SIZE(face) );
 
-    align_flags = (dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_WORDBREAK)) | DT_NOPREFIX;
+    align_flags = (dt_flags & (DT_LEFT | DT_CENTER | DT_RIGHT | DT_TOP | DT_VCENTER | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_WORDBREAK | DT_EDITCONTROL)) | DT_NOPREFIX;
     h = fnv1a_bytes( &font_height, sizeof(font_height), 0 );
     h = fnv1a_bytes( &font_weight, sizeof(font_weight), h );
     h = fnv1a_bytes( face, wcslen(face) * sizeof(WCHAR), h );

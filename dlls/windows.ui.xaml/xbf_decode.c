@@ -1915,13 +1915,13 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
             }
             break;
         case XBF_PROP_CONTENT: /* ContentControl.Content */
-        case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV: /* TextBlock.Text */
+        case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV: /* TextBlock.Text / MenuFlyoutItem.Text */
         case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE: /* FontIcon.Glyph */
         case XBF_PROP_FONTICON_GLYPH: /* FontIcon.Glyph */
         case XBF_PROP_TEXTBLOCK_TEXT: /* TextBlock.Text */
         case 0x81e1: /* TemplateBinding.Property */
         case 0x80fa: /* Run.Text */
-            if (sval && sval[0])
+            if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && el->uid[0] && el->text[0]))
                 lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
             break;
         case 0x83a7: /* Rectangle.RadiusX */
@@ -2203,11 +2203,23 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
                     lstrcpynW( el->font_family, L"Segoe MDL2 Assets", ARRAY_SIZE(el->font_family) );
             }
             break;
+        case 0x83fd: /* ToggleButton.IsChecked */
+        case 0x862b: /* ToggleMenuFlyoutItem.IsChecked */
+            if (vt == 0x01 || vt == 0x02) el->is_checked = (vt == 0x02) ? 1 : 0;
+            else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
+            else el->is_checked = (num != 0.0) ? 1 : 0;
+            break;
         }
     }
     else if (ctx && pid < ctx->prop_cnt)
     {
         const struct xbf_prop_info *pi = &ctx->props[pid];
+        if (!wcscmp( pi->name, L"IsChecked" ) || !wcscmp( pi->name, L"IsSelected" ))
+        {
+            if (vt == 0x01 || vt == 0x02) el->is_checked = (vt == 0x02) ? 1 : 0;
+            else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
+            else el->is_checked = (num != 0.0) ? 1 : 0;
+        }
         if (!wcscmp( pi->name, L"DisplayMemberPath" ) && sval && sval[0])
         {
             lstrcpynW( el->display_member_path, sval, ARRAY_SIZE(el->display_member_path) );

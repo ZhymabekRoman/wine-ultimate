@@ -80,6 +80,31 @@ static const GUID IID_IElementCompositionPreviewStatics_WinUI3_v2 =
     { 0x84da5a6c, 0x0cfa, 0x532b, { 0x9b, 0x15, 0xcc, 0xd9, 0x86, 0x37, 0x43, 0x42 } };
 
 static __x_ABI_CWindows_CUI_CComposition_CICompositor *g_ecp_compositor = NULL;
+static HRESULT (WINAPI *g_orig_visual_co4_slot6)( void *iface, HSTRING prop, void **out ) = NULL;
+
+struct ecp_comp5_stub_hdr
+{
+    const void *vtbl;
+    const void *co4_vtbl;
+    LONG ref;
+    const WCHAR *class_name;
+};
+
+static HRESULT WINAPI ecp_visual_co4_slot6_shim( void *iface, void *a1, void **a2 )
+{
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+    if (!g_orig_visual_co4_slot6) return E_NOTIMPL;
+    if (tib && a1 >= tib->StackLimit && a1 < tib->StackBase && *(void **)a1 == NULL)
+    {
+        void *stub = NULL;
+        HRESULT hr = g_orig_visual_co4_slot6( iface, NULL, &stub );
+        if (SUCCEEDED(hr) && stub)
+            ((struct ecp_comp5_stub_hdr *)stub)->class_name = L"Windows.UI.Composition.CompositionShapeCollection";
+        *(void **)a1 = stub;
+        return hr;
+    }
+    return g_orig_visual_co4_slot6( iface, (HSTRING)a1, a2 );
+}
 
 static __x_ABI_CWindows_CUI_CComposition_CICompositor *ecp_get_compositor( void )
 {
@@ -100,6 +125,30 @@ static __x_ABI_CWindows_CUI_CComposition_CICompositor *ecp_get_compositor( void 
                 IActivationFactory_Release( af );
             }
             WindowsDeleteString( cls );
+        }
+        if (g_ecp_compositor && !g_orig_visual_co4_slot6)
+        {
+            static const GUID IID_IShapeVisual_co4 =
+                { 0xf2bd13c3, 0xba7e, 0x4b0f, { 0x91, 0x26, 0xff, 0xb7, 0x53, 0x6b, 0x81, 0x76 } };
+            __x_ABI_CWindows_CUI_CComposition_CIContainerVisual *cv = NULL;
+            if (SUCCEEDED(__x_ABI_CWindows_CUI_CComposition_CICompositor_CreateContainerVisual( g_ecp_compositor, &cv )) && cv)
+            {
+                void *co4 = NULL;
+                if (SUCCEEDED(__x_ABI_CWindows_CUI_CComposition_CIContainerVisual_QueryInterface( cv, &IID_IShapeVisual_co4, &co4 )) && co4)
+                {
+                    void **vtbl = *(void ***)co4;
+                    DWORD old_prot = 0;
+                    if (vtbl && vtbl[6] && vtbl[6] != (void *)ecp_visual_co4_slot6_shim &&
+                        VirtualProtect( &vtbl[6], sizeof(void *), PAGE_READWRITE, &old_prot ))
+                    {
+                        g_orig_visual_co4_slot6 = (void *)vtbl[6];
+                        vtbl[6] = (void *)ecp_visual_co4_slot6_shim;
+                        VirtualProtect( &vtbl[6], sizeof(void *), old_prot, &old_prot );
+                    }
+                    IUnknown_Release( (IUnknown *)co4 );
+                }
+                __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_Release( cv );
+            }
         }
     }
     return g_ecp_compositor;
@@ -642,7 +691,12 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_ICanvasStatics_UWP ) ||
         IsEqualGUID( iid, &IID_IScrollViewerStatics_local ) ||
         IsEqualGUID( iid, &IID_IVisualTreeHelperStatics_UWP ) ||
-        IsEqualGUID( iid, &IID_IFrameworkElementStatics_UWP ))
+        IsEqualGUID( iid, &IID_IFrameworkElementStatics_UWP ) ||
+        IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
+        (iid->Data1 == 0x90143898 && iid->Data2 == 0xa16c && iid->Data3 == 0x4759) || /* IButtonStaticsWithFlyout */
+        (iid->Data1 == 0x16c724fb && iid->Data2 == 0x6c1a && iid->Data3 == 0x4852) || /* IToggleMenuFlyoutItemStatics */
+        (iid->Data1 == 0x1c781b6b && iid->Data2 == 0x37bf && iid->Data3 == 0x4ddc) || /* IFontIconStatics */
+        (iid->Data1 == 0xe6080672 && iid->Data2 == 0x08f8 && iid->Data3 == 0x43d3))   /* IFontIconStatics2 */
     {
         *out = (void *)&f->IStatics_iface;
         return S_OK;
@@ -866,10 +920,26 @@ static HRESULT uwp_cf_routed_event_slot( IDependencyProperty **slot, void **out 
 static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
+    const WCHAR *dp_name = NULL;
+    HRESULT hr;
     if (!out || (ULONG_PTR)out < 0x10000) return S_OK;
-    if (f && f->class_name && !wcscmp( f->class_name, L"Windows.UI.Xaml.UIElement" ))
-        return uwp_cf_routed_event_slot( &g_routed_event_other, out );
-    return dependency_property_create( NULL, (IDependencyProperty **)out );
+    if (f && f->class_name)
+    {
+        if (!wcscmp( f->class_name, L"Windows.UI.Xaml.UIElement" ))
+            return uwp_cf_routed_event_slot( &g_routed_event_other, out );
+        if (!wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.Button" ))
+            dp_name = L"Flyout";
+        else if (!wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.ToggleMenuFlyoutItem" ) ||
+                 !wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.Primitives.ToggleButton" ))
+            dp_name = L"IsChecked";
+    }
+    hr = dependency_property_create( NULL, (IDependencyProperty **)out );
+    if (SUCCEEDED(hr) && *out && dp_name)
+    {
+        struct { IDependencyProperty iface; LONG ref; void *meta; WCHAR name[64]; } *dpl = *out;
+        lstrcpynW( dpl->name, dp_name, ARRAY_SIZE(dpl->name) );
+    }
+    return hr;
 }
 
 static HRESULT WINAPI uwp_cf_routed_event_other( void *iface, void **out )
@@ -1429,7 +1499,13 @@ static const void *thickness_helper_statics_obj = thickness_helper_statics_vtbl;
 static HRESULT WINAPI xaml_markup_helper_UnloadObject( void *iface, void *element )
 {
     struct uwp_element *el = uwp_elem_from_any( element );
-    if (el) el->visibility = 1; /* Collapsed */
+    if (el)
+    {
+        el->visibility = 1; /* Collapsed */
+        el->has_bounds = FALSE;
+        g_layout_dirty = TRUE;
+        uwp_invalidate_window();
+    }
     return S_OK;
 }
 static const void *xaml_markup_helper_statics_vtbl[16] =

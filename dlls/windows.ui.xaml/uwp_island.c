@@ -228,7 +228,9 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 {
     int kids = 0;
     if (!el || depth > 48 || *rem <= 0) return;
-    if (wcsstr( el->class_name, L"HomepageSkeleton" ))
+    if (wcsstr( el->class_name, L"HomepageSkeleton" ) ||
+        wcsstr( el->class_name, L"SearchPageSkeleton" ) ||
+        wcsstr( el->class_name, L"ShimmerProductView" ))
     {
         ERR( "%*s%s (skipped)\n", depth * 2, "", debugstr_w(el->class_name) );
         return;
@@ -245,6 +247,8 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
          el->width, el->height,
          el->text[0] ? debugstr_w(el->text) : "\"\"",
          el->image_src[0] ? debugstr_w(el->image_src) : "\"\"" );
+    if (wcsstr( el->class_name, L".Controls.Card" ))
+        return;
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
@@ -264,7 +268,7 @@ static void uwp_debug_dump_tree( struct uwp_element *el, int depth, int *rem )
 
 void uwp_debug_dump_root( IInspectable *root )
 {
-    int rem = 1500;
+    int rem = 2500;
     if (root) uwp_debug_dump_tree( uwp_elem_from_any( root ), 0, &rem );
 }
 
@@ -422,7 +426,16 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_F12 && impl && impl->content)
     {
         int rem = 500;
-        uwp_debug_dump_tree( uwp_elem_from_any( impl->content ), 0, &rem );
+        struct uwp_element *root_el = uwp_elem_from_any( impl->content );
+        RECT rc;
+        if (root_el && GetClientRect( hwnd, &rc ) && rc.right > rc.left && rc.bottom > rc.top &&
+            (g_layout_dirty || !root_el->has_bounds))
+        {
+            g_layout_dirty = FALSE;
+            uwp_arrange_element( root_el, rc );
+            InvalidateRect( hwnd, NULL, FALSE );
+        }
+        uwp_debug_dump_tree( root_el, 0, &rem );
         return 0;
     }
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_ESCAPE && uwp_popup_handle_escape())
@@ -803,7 +816,7 @@ ULONG WINAPI uwp_disp_Release( IDispatch *iface )
 
 BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr )
 {
-    struct uwp_element *island_root = (struct uwp_element *)island_root_ptr;
+    struct uwp_element *island_root = island_root_ptr ? uwp_elem_from_any( island_root_ptr ) : NULL;
     struct uwp_element *active_page = NULL;
     UINT mods = 0;
     int pass, i;

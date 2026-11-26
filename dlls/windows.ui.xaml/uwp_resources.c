@@ -432,8 +432,18 @@ BOOL uwp_unbox_int32( void *obj, INT32 *out_val )
 
 BOOL uwp_unbox_bool( void *obj, boolean *out_val )
 {
+    static const GUID IID_IReference_Boolean =
+        { 0x3c00fd60, 0x2950, 0x5939, { 0xa2, 0x1a, 0x2d, 0x12, 0xc5, 0xa0, 0x1b, 0x8a } };
     IPropertyValue *pv = NULL;
+    void *iref = NULL;
     if (!obj || !out_val) return FALSE;
+    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)obj, &IID_IReference_Boolean, &iref )) && iref)
+    {
+        HRESULT (WINAPI *get_val)(void *, boolean *) = (void *)(*(void ***)iref)[6];
+        HRESULT hr = get_val ? get_val( iref, out_val ) : E_FAIL;
+        IUnknown_Release( (IUnknown *)iref );
+        if (SUCCEEDED(hr)) return TRUE;
+    }
     if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)obj, &IID_IPropertyValue, (void **)&pv )) && pv)
     {
         HRESULT hr = IPropertyValue_GetBoolean( pv, out_val );
@@ -1136,6 +1146,16 @@ BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_
     if (!key[0]) return FALSE;
     if (uwp_parse_color_string( key, out_argb )) return TRUE;
 
+    if (!scope_el || !scope_el->is_accent_style)
+    {
+        if (!wcscmp( key, L"ButtonBackground" ) || !wcscmp( key, L"DropDownButtonBackground" ))
+            lstrcpyW( key, L"ControlFillColorDefaultBrush" );
+        else if (!wcscmp( key, L"ButtonForeground" ) || !wcscmp( key, L"DropDownButtonForeground" ))
+            lstrcpyW( key, L"TextFillColorPrimaryBrush" );
+        else if (!wcscmp( key, L"ButtonBorderBrush" ) || !wcscmp( key, L"DropDownButtonBorderBrush" ))
+            lstrcpyW( key, L"ControlStrokeColorDefaultBrush" );
+    }
+
     uwp_ensure_app_resources_loaded();
     if (uwp_rd_find_entry( start_bucket, scope_el, key, depth, &e, &found_b ) && e)
     {
@@ -1339,17 +1359,7 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
         }
     }
 
-    /* Synthesize MenuFlyout / Style / Brush if requested by name from Resources */
-    if (wcsstr( key_str, L"ContextMenu" ) || wcsstr( key_str, L"Flyout" ))
-    {
-        IInspectable *flyout = NULL;
-        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Controls.MenuFlyout", (void **)&flyout )) && flyout)
-        {
-            uwp_rd_insert( rd_key, key_str, flyout );
-            *out_val = flyout;
-            return S_OK;
-        }
-    }
+    /* Synthesize Style / Brush / MenuFlyout if requested by name from Resources */
     if (wcsstr( key_str, L"Style" ))
     {
         void *st = NULL;
@@ -1359,6 +1369,16 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
             if (st_el) lstrcpynW( st_el->name, key_str, ARRAY_SIZE(st_el->name) );
             uwp_rd_insert( rd_key, key_str, (IInspectable *)st );
             *out_val = st;
+            return S_OK;
+        }
+    }
+    if (wcsstr( key_str, L"ContextMenu" ) || wcsstr( key_str, L"Flyout" ))
+    {
+        IInspectable *flyout = NULL;
+        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Controls.MenuFlyout", (void **)&flyout )) && flyout)
+        {
+            uwp_rd_insert( rd_key, key_str, flyout );
+            *out_val = flyout;
             return S_OK;
         }
     }

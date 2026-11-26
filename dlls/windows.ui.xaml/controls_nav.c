@@ -302,12 +302,12 @@ const void *uwp_ctrl_vtbl[64] =
     [10 ... 21] = uwp_generic_noop,
     [22] = uwp_ctrl_get_IsEnabled,
     [23] = uwp_ctrl_put_IsEnabled,
-    [24 ... 37] = uwp_generic_noop,
-    [38] = uwp_ctrl_get_HorizontalContentAlignment,
-    [39] = uwp_ctrl_put_HorizontalContentAlignment,
-    [40] = uwp_ctrl_get_VerticalContentAlignment,
-    [41] = uwp_ctrl_put_VerticalContentAlignment,
-    [42 ... 43] = uwp_generic_noop,
+    [24 ... 31] = uwp_generic_noop,
+    [32] = uwp_ctrl_get_HorizontalContentAlignment,
+    [33] = uwp_ctrl_put_HorizontalContentAlignment,
+    [34] = uwp_ctrl_get_VerticalContentAlignment,
+    [35] = uwp_ctrl_put_VerticalContentAlignment,
+    [36 ... 43] = uwp_generic_noop,
     [44] = uwp_ctrl_ApplyTemplate,
     [45] = uwp_generic_noop,
     [46] = uwp_ctrl_Focus,
@@ -353,6 +353,34 @@ static HRESULT WINAPI uwp_flyout_slot6( void *iface, void **out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
     if (!impl) return E_NOINTERFACE;
+    if (out)
+    {
+        struct uwp_element *el, *target_el = NULL;
+        AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+        for (el = g_all_uwp_elems_head; el; el = el->next_reg)
+        {
+            if ((void *)out == (void *)el->outer ||
+                (void *)out == (void *)el->provider_inst ||
+                ((char *)out >= (char *)el && (char *)out < (char *)(el + 1)))
+            {
+                target_el = el;
+                break;
+            }
+        }
+        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+        if (target_el)
+        {
+            if (!target_el->flyout)
+            {
+                target_el->flyout = &impl->IInspectable_iface;
+                IInspectable_AddRef( target_el->flyout );
+            }
+            if (!impl->parent) impl->parent = target_el;
+            g_popup_owner_el = target_el;
+            uwp_invalidate_window();
+            return S_OK;
+        }
+    }
     /* Only MenuFlyout / MenuBar / TabView use slot 6 for get_Items; IFlyoutBase::ShowAt passes a UIElement* */
     if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.Controls.Flyout" ) ||
         !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.CommandBarFlyout" ))
@@ -812,7 +840,10 @@ static HRESULT WINAPI uwp_sel_args_get_RemovedItems( void *iface, void **out )
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    return uwp_vec_create( NULL, (IInspectable **)out );
+    if (SUCCEEDED(uwp_vec_create( NULL, (IInspectable **)out )) && *out)
+        CONTAINING_RECORD( (IInspectable *)*out, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+            L"Windows.Foundation.Collections.IVector`1<Object>";
+    return S_OK;
 }
 static HRESULT WINAPI uwp_sel_args_get_AddedItems( void *iface, void **out )
 {
@@ -824,7 +855,10 @@ static HRESULT WINAPI uwp_sel_args_get_AddedItems( void *iface, void **out )
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    return uwp_vec_create( NULL, (IInspectable **)out );
+    if (SUCCEEDED(uwp_vec_create( NULL, (IInspectable **)out )) && *out)
+        CONTAINING_RECORD( (IInspectable *)*out, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+            L"Windows.Foundation.Collections.IVector`1<Object>";
+    return S_OK;
 }
 static const void *uwp_sel_args_vtbl[16] =
 {
@@ -847,6 +881,12 @@ struct uwp_sel_changed_args *uwp_sel_args_create( IInspectable *old_item, IInspe
     a->ref = 1;
     uwp_vec_create( NULL, &a->removed_items );
     uwp_vec_create( NULL, &a->added_items );
+    if (a->removed_items)
+        CONTAINING_RECORD( a->removed_items, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+            L"Windows.Foundation.Collections.IVector`1<Object>";
+    if (a->added_items)
+        CONTAINING_RECORD( a->added_items, struct uwp_vec_view, IInspectable_iface )->runtime_class =
+            L"Windows.Foundation.Collections.IVector`1<Object>";
     if (old_item && a->removed_items) uwp_vec_Append( a->removed_items, old_item );
     if (new_item && a->added_items) uwp_vec_Append( a->added_items, new_item );
     return a;
@@ -1476,8 +1516,6 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                     if (cel)
                     {
                         cel->parent = impl;
-                        if (cel->kind == UWP_KIND_BUTTON && impl->min_width >= 120.0 && !cel->has_bg)
-                            cel->is_accent_style = TRUE;
                         uwp_vec_Append( impl->children_coll, &cel->IInspectable_iface );
                         uwp_fe_put_DataContext( &cel->IInspectable_iface, item );
                         IUnknown_Release( (IUnknown *)content );
@@ -1491,7 +1529,10 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
             }
             IInspectable_Release( tmpl );
         }
-        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_inner )) && btn_inner)
+        if (SUCCEEDED(uwp_element_create( wcsstr( impl->class_name, L"RadioButtons" )
+                                              ? L"Windows.UI.Xaml.Controls.ToggleButton"
+                                              : L"Windows.UI.Xaml.Controls.Button",
+                                          NULL, NULL, (void **)&btn_inner )) && btn_inner)
         {
             struct uwp_element *bel = uwp_elem_from_any( btn_inner );
             if (bel)
@@ -1511,7 +1552,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                 {
                     bel->is_accent_style = TRUE;
                 }
-                else
+                else if (!wcsstr( impl->class_name, L"RadioButtons" ))
                 {
                     bel->has_bg = TRUE;
                     bel->bg_argb = 0xE02A2A2A;
@@ -1575,7 +1616,7 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemsSource( void *iface, void *src )
     if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
     {
         unsigned int cnt = impl->items_source ? uwp_winrt_vec_count( impl->items_source ) : 0;
-        impl->is_open = (cnt > 0 && (impl == g_focused_textbox || impl->text[0] != 0));
+        impl->is_open = (cnt > 0 && impl == g_focused_textbox && impl->text[0] != 0);
         impl->is_dropdown_open = impl->is_open;
         impl->hovered_dropdown_idx = -1;
         impl->dropdown_scroll_offset = 0;
@@ -1735,14 +1776,29 @@ static HRESULT WINAPI uwp_key_args_put_Handled( void *iface, boolean val )
     a->handled = val ? TRUE : FALSE;
     return S_OK;
 }
+static HRESULT WINAPI uwp_key_args_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_key_args_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Input.KeyRoutedEventArgs", 40, name );
+}
+static HRESULT WINAPI uwp_key_args_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
 const void *uwp_key_args_vtbl[16] =
 {
     [0] = uwp_key_args_QI,
     [1] = uwp_key_args_AddRef,
     [2] = uwp_key_args_Release,
-    [3] = uwp_sub_GetIids,
-    [4] = uwp_sub_GetRuntimeClassName,
-    [5] = uwp_sub_GetTrustLevel,
+    [3] = uwp_key_args_GetIids,
+    [4] = uwp_key_args_GetRuntimeClassName,
+    [5] = uwp_key_args_GetTrustLevel,
     [6] = uwp_key_args_get_Key,
     [7] = uwp_key_args_get_KeyStatus,
     [8] = uwp_key_args_get_Handled,

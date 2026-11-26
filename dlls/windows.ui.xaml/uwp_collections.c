@@ -79,9 +79,34 @@ static const GUID IID_IIterator_StateTriggerBase_UWP =
 static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 {
     struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
+    BOOL is_obj_only = (v && v->runtime_class && wcsstr( v->runtime_class, L"<Object>" ) != NULL);
     static const GUID IID_IReferenceTracker_vec =
         { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
     if (!out) return E_POINTER;
+    if (is_obj_only)
+    {
+        if (IsEqualGUID( iid, &IID_IIterable_IInspectable_UWP ) ||
+            IsEqualGUID( iid, &IID_IBindableIterable_UWP ))
+        {
+            *out = &v->IIterable_iface;
+            IInspectable_AddRef( iface );
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IUnknown ) ||
+            IsEqualGUID( iid, &IID_IInspectable ) ||
+            IsEqualGUID( iid, &IID_IAgileObject ) ||
+            IsEqualGUID( iid, &IID_IVector_IInspectable_UWP ) ||
+            IsEqualGUID( iid, &IID_IVectorView_Object_UWP ) ||
+            IsEqualGUID( iid, &IID_IVectorView_IInspectable_WinUI ) ||
+            IsEqualGUID( iid, &IID_IBindableVector_UWP ))
+        {
+            *out = iface;
+            IInspectable_AddRef( iface );
+            return S_OK;
+        }
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     if (IsEqualGUID( iid, &IID_IIterable_PageStackEntry_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_IInspectable_UWP ) ||
         IsEqualGUID( iid, &IID_IIterable_UIElement_UWP ) ||
@@ -226,6 +251,16 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
             }
         }
     }
+    if (v->owner)
+    {
+        struct uwp_element *p;
+        int hop;
+        for (p = v->owner, hop = 0; p && hop < 4; p = p->parent, hop++)
+        {
+            p->last_sc_w = 0.0f;
+            p->last_sc_h = 0.0f;
+        }
+    }
     g_layout_dirty = TRUE;
     uwp_invalidate_window();
     return S_OK;
@@ -308,7 +343,23 @@ struct uwp_vec_iter
 
 static HRESULT WINAPI uwp_viter_QI( IInspectable *iface, REFIID iid, void **out )
 {
+    struct uwp_vec_iter *it = CONTAINING_RECORD( iface, struct uwp_vec_iter, IIterator_iface );
+    BOOL is_obj_only = (it->vec && it->vec->runtime_class && wcsstr( it->vec->runtime_class, L"<Object>" ) != NULL);
     if (!out) return E_POINTER;
+    if (is_obj_only)
+    {
+        if (IsEqualGUID( iid, &IID_IUnknown ) ||
+            IsEqualGUID( iid, &IID_IInspectable ) ||
+            IsEqualGUID( iid, &IID_IAgileObject ) ||
+            IsEqualGUID( iid, &IID_IIterator_IInspectable_UWP ))
+        {
+            *out = iface;
+            IInspectable_AddRef( iface );
+            return S_OK;
+        }
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -429,10 +480,15 @@ static HRESULT WINAPI uwp_vec_iter_First( IInspectable *iface, IInspectable **ou
     *out = &it->IIterator_iface;
     return S_OK;
 }
+static HRESULT WINAPI uwp_vec_iter_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IIterable_iface );
+    return uwp_vec_GetRuntimeClassName( &v->IInspectable_iface, name );
+}
 static const void *uwp_vec_iterable_vtbl[] =
 {
     uwp_vec_iter_QI, uwp_vec_iter_AddRef, uwp_vec_iter_Release,
-    uwp_sub_GetIids, uwp_vec_GetRuntimeClassName, uwp_sub_GetTrustLevel,
+    uwp_sub_GetIids, uwp_vec_iter_GetRuntimeClassName, uwp_sub_GetTrustLevel,
     uwp_vec_iter_First,
 };
 

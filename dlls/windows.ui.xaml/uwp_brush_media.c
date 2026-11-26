@@ -482,6 +482,59 @@ static struct uwp_element *uwp_elem_find_top_root( struct uwp_element *el )
     return el;
 }
 
+static HRESULT WINAPI uwp_uie10_get_ActualOffset( void *iface, void *out_ptr )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    float *out = (float *)out_ptr;
+    if (!out) return E_POINTER;
+    if (impl && impl->has_bounds)
+    {
+        int px = (impl->parent && impl->parent->has_bounds) ? impl->parent->bounds.left : 0;
+        int py = (impl->parent && impl->parent->has_bounds) ? impl->parent->bounds.top : 0;
+        out[0] = (float)(impl->bounds.left - px);
+        out[1] = (float)(impl->bounds.top - py);
+        out[2] = 0.0f;
+    }
+    else
+    {
+        out[0] = 0.0f;
+        out[1] = 0.0f;
+        out[2] = 0.0f;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_uie10_get_ActualSize( void *iface, void *out_ptr )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    float *out = (float *)out_ptr;
+    if (!out) return E_POINTER;
+    if (impl && impl->has_bounds)
+    {
+        out[0] = (float)(impl->bounds.right - impl->bounds.left);
+        out[1] = (float)(impl->bounds.bottom - impl->bounds.top);
+    }
+    else if (impl)
+    {
+        out[0] = (float)((impl->actual_w > 0) ? impl->actual_w : ((impl->width > 0 && impl->width == impl->width) ? impl->width : 0.0));
+        out[1] = (float)((impl->actual_h > 0) ? impl->actual_h : ((impl->height > 0 && impl->height == impl->height) ? impl->height : 0.0));
+    }
+    else
+    {
+        out[0] = 0.0f;
+        out[1] = 0.0f;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_uie10_get_UIContext( void *iface, void **out )
+{
+    (void)iface;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_uie10_get_Shadow( void *iface, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -541,11 +594,14 @@ const void *uwp_uie10_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_uie10_get_Shadow,
-    [7] = uwp_uie10_put_Shadow,
+    [6] = uwp_uie10_get_ActualOffset,
+    [7] = uwp_uie10_get_ActualSize,
     [8] = uwp_uie10_get_XamlRoot,
     [9] = uwp_uie10_put_XamlRoot,
-    [10 ... 15] = uwp_generic_noop,
+    [10] = uwp_uie10_get_UIContext,
+    [11] = uwp_uie10_get_Shadow,
+    [12] = uwp_uie10_put_Shadow,
+    [13 ... 15] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_xr_get_Content( void *iface, void **out )
@@ -640,9 +696,10 @@ const void *uwp_xaml_root_vtbl[16] =
     [7] = uwp_xr_get_Size,
     [8] = uwp_xr_get_RasterizationScale,
     [9] = uwp_xr_get_IsHostVisible,
-    [10] = uwp_xr_add_Changed,
-    [11] = uwp_xr_remove_Changed,
-    [12 ... 15] = uwp_generic_noop,
+    [10] = uwp_uie10_get_UIContext,
+    [11] = uwp_xr_add_Changed,
+    [12] = uwp_xr_remove_Changed,
+    [13 ... 15] = uwp_generic_noop,
 };
 static HRESULT WINAPI uwp_img_add_ImageOpened( void *iface, void *handler, EventRegistrationToken *tok )
 {

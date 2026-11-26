@@ -1217,8 +1217,19 @@ static HRESULT WINAPI vth_FindRectSub( void *iface, const Rect *rc, void *subtre
 }
 static HRESULT WINAPI vth2_GetOpenPopups( void *iface, void *window, void **out )
 {
+    IInspectable *vec = NULL;
+    struct uwp_element *pops[32];
+    int cnt, i;
+    HRESULT hr;
     (void)window;
-    return uwp_vec_create( NULL, (IInspectable **)out );
+    if (!out) return E_POINTER;
+    hr = uwp_vec_create( NULL, &vec );
+    if (FAILED(hr) || !vec) { *out = NULL; return hr; }
+    cnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) );
+    for (i = 0; i < cnt; i++)
+        uwp_vec_Append( vec, pops[i]->outer ? pops[i]->outer : &pops[i]->IInspectable_iface );
+    *out = vec;
+    return S_OK;
 }
 static HRESULT WINAPI vth_GetChild( void *iface, void *ref, INT32 idx, void **out )
 {

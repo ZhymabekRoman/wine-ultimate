@@ -102,8 +102,11 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
                     {
                         static const GUID IID_ISpan_g =
                             { 0x54f03373, 0xc273, 0x4f3b, { 0xb3, 0x71, 0x6e, 0x2b, 0x4b, 0x2a, 0x96, 0x91 } };
+                        static const GUID IID_ISpan_uwp =
+                            { 0x9839d4a9, 0x02af, 0x4811, { 0xaa, 0x1d, 0x69, 0x6a, 0x68, 0x2a, 0x45, 0x26 } };
                         void *span_iface = NULL;
-                        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_g, &span_iface )) && span_iface)
+                        if ((SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_g, &span_iface )) && span_iface) ||
+                            (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)iv->items[j], &IID_ISpan_uwp, &span_iface )) && span_iface))
                         {
                             void *sub_inlines = NULL;
                             HRESULT (WINAPI *get_inlines)(void *, void **) = (void *)(*(void ***)span_iface)[6];
@@ -166,7 +169,9 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
     if (!el || !el->outer || el->in_measure_arrange || w <= 0) return;
     if (!wcsstr( el->class_name, L"ItemsRepeater" )) return;
     if (h <= 0) h = 204;
-    if (el->last_measured_w == (float)w && el->last_measured_h == (float)h)
+    if (el->last_measured_w == (float)w && el->last_measured_h == (float)h &&
+        el->children_coll &&
+        CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count > 0)
         return;
 
     el->in_measure_arrange = TRUE;
@@ -357,6 +362,7 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
 }
 
 static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc );
+static double uwp_measure_natural_height( const struct uwp_element *el, int avail_w, int depth );
 
 void uwp_arrange_element( struct uwp_element *el, RECT rc )
 {
@@ -365,6 +371,55 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
     depth++;
     uwp_arrange_element_inner( el, rc );
     depth--;
+    if (depth == 0)
+    {
+        struct uwp_element *pops[16];
+        int pcnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) ), pi;
+        int root_w = rc.right - rc.left;
+        int root_h = rc.bottom - rc.top;
+        for (pi = 0; pi < pcnt && root_w > 64 && root_h > 64; pi++)
+        {
+            struct uwp_element *pop = pops[pi];
+            struct uwp_element *ch = uwp_elem_from_any( pop->content );
+            if (!ch) continue;
+            {
+                double sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0;
+                double cw = (ch->width > 40.0) ? ch->width * sc
+                          : ((ch->max_width > 40.0) ? min( (double)root_w - 64.0, ch->max_width * sc )
+                          : min( 760.0 * sc, (double)root_w - 96.0 ));
+                double nat_h = uwp_measure_natural_height( ch, (int)cw, 0 );
+                double ch_h = (ch->height > 40.0) ? ch->height * sc
+                            : ((nat_h > 40.0) ? min( (double)root_h - 80.0, nat_h + 32.0 * sc )
+                            : min( 540.0 * sc, (double)root_h - 96.0 ));
+                int pw, ph, px, py;
+                RECT prc;
+                if (ch->max_height > 40.0 && ch_h > ch->max_height * sc)
+                    ch_h = ch->max_height * sc;
+                pw = max( 160, min( root_w - 32, (int)(cw + 0.5) ) );
+                ph = max( 100, min( root_h - 32, (int)(ch_h + 0.5) ) );
+                if (pop->popup_h_offset > 0.0 || pop->popup_v_offset > 0.0)
+                {
+                    px = (int)(pop->popup_h_offset * sc + 0.5);
+                    py = (int)(pop->popup_v_offset * sc + 0.5);
+                    if (px + pw > rc.right - 16) px = max( (int)rc.left + 16, (int)rc.right - pw - 16 );
+                    if (py + ph > rc.bottom - 16) py = max( (int)rc.top + 40, (int)rc.bottom - ph - 16 );
+                    if (px < rc.left + 16) px = rc.left + 16;
+                    if (py < rc.top + 40) py = rc.top + 40;
+                }
+                else
+                {
+                    px = rc.left + (root_w - pw) / 2;
+                    py = rc.top + (root_h - ph) / 2;
+                }
+                SetRect( &prc, px, py, px + pw, py + ph );
+                pop->bounds = prc;
+                pop->has_bounds = TRUE;
+                depth++;
+                uwp_arrange_element_inner( ch, prc );
+                depth--;
+            }
+        }
+    }
 }
 
 static inline double uwp_clamp_top_margin( double mt )
@@ -478,7 +533,7 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
         }
         if (el->max_lines > 0 && lines > el->max_lines)
             lines = el->max_lines;
-        if (lines > 24) lines = 24;
+        if (lines > 120) lines = 120;
         {
             double th = line_h * lines + 4.0;
             if (th > best) best = th;
@@ -803,7 +858,8 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         }
         best = acc;
     }
-    else if (el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL || el->kind == UWP_KIND_USER_CONTROL)
+    else if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL || el->kind == UWP_KIND_USER_CONTROL) &&
+             !wcsstr( el->class_name, L"RadioButtons" ))
     {
         if (el->content)
         {
@@ -840,7 +896,7 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
         if (vis > 1 && el->spacing > 0.0) acc += (double)(vis - 1) * el->spacing;
         best = acc;
     }
-    else if ((el->kind == UWP_KIND_GRID || el->kind == UWP_KIND_GENERIC) && el->children_coll)
+    else if ((el->kind == UWP_KIND_GRID || el->kind == UWP_KIND_GENERIC || wcsstr( el->class_name, L"RadioButtons" )) && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k, vis = 0;
@@ -953,6 +1009,12 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
     if (wcsstr( el->class_name, L"ItemsRepeater" ) &&
         !wcsstr( el->name, L"MenuItems" ) && !wcsstr( el->name, L"FooterMenuItems" ))
     {
+        if (!el->children_coll && avail_w >= 400)
+        {
+            if (!el->loaded_fired || el->loaded_fired_cnt < el->loaded_cnt)
+                uwp_fire_loaded_tree( (struct uwp_element *)el );
+            uwp_invoke_winui_measure_arrange( (struct uwp_element *)el, avail_w, 204 );
+        }
         if (el->children_coll && avail_w >= 400)
         {
             struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -971,7 +1033,8 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
             {
                 int cols = max( 1, (avail_w - 12) / 270 );
                 int rows_cnt = (ch0 && wcsstr( ch0->class_name, L"Card" )) ? 1 : (((int)vis_cnt + cols - 1) / cols);
-                return (double)(24 + rows_cnt * 96 + max( 0, rows_cnt - 1 ) * 12) * g_layout_scale;
+                int row_h = (ch0 && !wcsstr( ch0->class_name, L"Card" )) ? 124 : 96;
+                return (double)(24 + rows_cnt * row_h + max( 0, rows_cnt - 1 ) * 12) * g_layout_scale;
             }
         }
         return 0.0;
@@ -1016,7 +1079,7 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
         }
         if (el->max_lines > 0 && lines > el->max_lines)
             lines = el->max_lines;
-        if (lines > 24) lines = 24;
+        if (lines > 120) lines = 120;
         best = line_h * lines + 4.0;
     }
     else if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
@@ -1306,7 +1369,8 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         el->actual_h = (double)h;
         if (!el->loaded_fired || el->loaded_fired_cnt < el->loaded_cnt)
             uwp_fire_loaded_tree( el );
-        if (!margin_clamped && w > 0 && h > 0 && (prev_w != el->actual_w || prev_h != el->actual_h))
+        if (!margin_clamped && w > 0 && h > 0 &&
+            (prev_w != el->actual_w || prev_h != el->actual_h || el->last_sc_w == 0.0f || el->layout_updated_cnt > 0))
             uwp_fire_size_and_layout_changed( el );
     }
 
@@ -1960,10 +2024,11 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
 
         if (!is_nav_rail && avail_w >= 480)
         {
+            struct uwp_element *ch0_peek = (children->count > 0) ? uwp_elem_from_any( children->items[0] ) : NULL;
             int pad = 12, gap = 12;
             int cols = max( 1, (avail_w - pad) / 270 );
             int card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
-            int card_h = 96;
+            int card_h = (ch0_peek && !wcsstr( ch0_peek->class_name, L"Card" )) ? 124 : 96;
             int idx = 0;
 
             if (children->count >= 2 && wcscmp( el->placeholder, L"-dedup-" ) != 0)
@@ -2090,6 +2155,8 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                                             }
                                             ch->text[0] = 0;
                                             ch->image_src[0] = 0;
+                                            ch->dropdown_scroll_offset = 0;
+                                            ch->hovered_dropdown_idx = 0;
                                             ch->img_loaded = FALSE;
                                             InterlockedExchange( &ch->img_loading, 0 );
                                             if (ch->img_pixels)

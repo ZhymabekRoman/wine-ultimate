@@ -634,44 +634,67 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
            debugstr_w(want), debugstr_w(impl->class_name), debugstr_w(root->class_name) );
 
     /* 1. Check deferred entries on root and impl */
-    if (root->defer_entries)
     {
-        for (i = 0; i < root->defer_cnt; i++)
+        BOOL is_defer = FALSE;
+        if (root->defer_entries)
         {
-            if (!wcscmp( root->defer_entries[i].name, want ) && !root->defer_entries[i].realized)
-                uwp_realize_deferred_entry( &root->defer_entries[i] );
+            for (i = 0; i < root->defer_cnt; i++)
+            {
+                if (!wcscmp( root->defer_entries[i].name, want ))
+                {
+                    is_defer = TRUE;
+                    if (!root->defer_entries[i].realized)
+                        uwp_realize_deferred_entry( &root->defer_entries[i] );
+                }
+            }
         }
-    }
-    if (impl != root && impl->defer_entries)
-    {
-        for (i = 0; i < impl->defer_cnt; i++)
+        if (impl != root && impl->defer_entries)
         {
-            if (!wcscmp( impl->defer_entries[i].name, want ) && !impl->defer_entries[i].realized)
-                uwp_realize_deferred_entry( &impl->defer_entries[i] );
+            for (i = 0; i < impl->defer_cnt; i++)
+            {
+                if (!wcscmp( impl->defer_entries[i].name, want ))
+                {
+                    is_defer = TRUE;
+                    if (!impl->defer_entries[i].realized)
+                        uwp_realize_deferred_entry( &impl->defer_entries[i] );
+                }
+            }
         }
-    }
 
-    /* 2. Search named elements in impl, root, and global list */
-    for (i = 0; i < impl->named_cnt; i++)
-    {
-        struct uwp_element *nel = impl->named_elems[i];
-        if (nel && !wcscmp( nel->name, want ))
+        /* 2. Search named elements in impl, root, and global list */
+        for (i = 0; i < impl->named_cnt; i++)
         {
-            *out = nel->outer ? nel->outer : &nel->IInspectable_iface;
-            IInspectable_AddRef( (IInspectable *)*out );
-            return S_OK;
-        }
-    }
-    if (root != impl)
-    {
-        for (i = 0; i < root->named_cnt; i++)
-        {
-            struct uwp_element *nel = root->named_elems[i];
+            struct uwp_element *nel = impl->named_elems[i];
             if (nel && !wcscmp( nel->name, want ))
             {
+                if (is_defer && nel->visibility == 1)
+                {
+                    nel->visibility = 0;
+                    g_layout_dirty = TRUE;
+                    uwp_invalidate_window();
+                }
                 *out = nel->outer ? nel->outer : &nel->IInspectable_iface;
                 IInspectable_AddRef( (IInspectable *)*out );
                 return S_OK;
+            }
+        }
+        if (root != impl)
+        {
+            for (i = 0; i < root->named_cnt; i++)
+            {
+                struct uwp_element *nel = root->named_elems[i];
+                if (nel && !wcscmp( nel->name, want ))
+                {
+                    if (is_defer && nel->visibility == 1)
+                    {
+                        nel->visibility = 0;
+                        g_layout_dirty = TRUE;
+                        uwp_invalidate_window();
+                    }
+                    *out = nel->outer ? nel->outer : &nel->IInspectable_iface;
+                    IInspectable_AddRef( (IInspectable *)*out );
+                    return S_OK;
+                }
             }
         }
     }
@@ -1685,6 +1708,41 @@ static HRESULT WINAPI uwp_ui_InvalidateLayout( void *iface )
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_ui_UpdateLayout( void *iface )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    uwp_ui_InvalidateLayout( iface );
+    if (impl && impl->layout_updated_cnt > 0 && !impl->in_measure_arrange)
+    {
+        unsigned int realized = impl->children_coll
+            ? CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface )->count : 0;
+        if (realized < 24)
+        {
+            int i, cnt = impl->layout_updated_cnt;
+            impl->in_measure_arrange = TRUE;
+            for (i = 0; i < cnt && i < impl->layout_updated_cnt; i++)
+            {
+                if (impl->layout_updated_handlers[i])
+                {
+                    struct xaml_event_handler *h = (struct xaml_event_handler *)impl->layout_updated_handlers[i];
+                    IUnknown_AddRef( (IUnknown *)h );
+                    __TRY
+                    {
+                        h->lpVtbl->Invoke( h, NULL, NULL );
+                    }
+                    __EXCEPT_ALL
+                    {
+                    }
+                    __ENDTRY;
+                    IUnknown_Release( (IUnknown *)h );
+                }
+            }
+            impl->in_measure_arrange = FALSE;
+        }
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_ui_get_Opacity( void *iface, double *out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -1829,7 +1887,7 @@ const void *uwp_ui_vtbl[128] =
     [98] = uwp_ui_TransformToVisual,
     [99] = uwp_ui_InvalidateLayout,  /* InvalidateMeasure */
     [100] = uwp_ui_InvalidateLayout, /* InvalidateArrange */
-    [101] = uwp_ui_InvalidateLayout, /* UpdateLayout */
+    [101] = uwp_ui_UpdateLayout,     /* UpdateLayout */
     [102 ... 127] = uwp_generic_noop,
 };
 
@@ -1938,6 +1996,89 @@ static IInspectable *uwp_resolve_binding_path( IInspectable *src, const WCHAR *p
     return cur_owned ? cur : NULL;
 }
 
+void uwp_update_binding_source( IInspectable *src, const WCHAR *path, IInspectable *new_val )
+{
+    void *app_outer = uwp_get_app_outer();
+    void *provider = NULL;
+    IInspectable *cur = src;
+    BOOL cur_owned = FALSE;
+    const WCHAR *last_dot;
+    const WCHAR *leaf = path;
+
+    if (!src || !path || !path[0] || !app_outer) return;
+    last_dot = wcsrchr( path, L'.' );
+    if (last_dot)
+    {
+        WCHAR prefix[128] = {0};
+        size_t plen = (size_t)(last_dot - path);
+        if (plen >= ARRAY_SIZE(prefix)) plen = ARRAY_SIZE(prefix) - 1;
+        memcpy( prefix, path, plen * sizeof(WCHAR) );
+        prefix[plen] = 0;
+        cur = uwp_resolve_binding_path( src, prefix );
+        if (!cur) return;
+        cur_owned = TRUE;
+        leaf = last_dot + 1;
+    }
+    if (!leaf[0])
+    {
+        if (cur_owned && cur) IInspectable_Release( cur );
+        return;
+    }
+    if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP, &provider )) && provider)
+    {
+        __TRY
+        {
+            HSTRING h_cls = NULL, h_prop = NULL;
+            if (SUCCEEDED(IInspectable_GetRuntimeClassName( cur, &h_cls )) && h_cls)
+            {
+                const WCHAR *cls_name = WindowsGetStringRawBuffer( h_cls, NULL );
+                if (cls_name && cls_name[0])
+                {
+                    struct xaml_type *xt = uwp_provider_get_xaml_type_cached( (struct xaml_metadata_provider *)provider, cls_name );
+                    if (xt && xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( leaf, (UINT32)wcslen( leaf ), &h_prop )))
+                    {
+                        struct xaml_member *xm = NULL;
+                        if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, &xm )) && xm)
+                        {
+                            if (xm->lpVtbl->SetValue)
+                                xm->lpVtbl->SetValue( xm, cur, new_val );
+                            IUnknown_Release( (IUnknown *)xm );
+                        }
+                        WindowsDeleteString( h_prop );
+                    }
+                }
+                WindowsDeleteString( h_cls );
+            }
+        }
+        __EXCEPT_ALL {}
+        __ENDTRY;
+        IUnknown_Release( (IUnknown *)provider );
+    }
+    if (cur_owned && cur) IInspectable_Release( cur );
+}
+
+void uwp_refresh_element_bindings( struct uwp_element *el )
+{
+    int i;
+    if (!el) return;
+    for (i = 0; i < el->dc_bound_dp_cnt; i++)
+    {
+        if (el->dc_bound_dps[i].dp)
+            uwp_apply_binding( el, el->dc_bound_dps[i].dp, el->dc_bound_dps[i].binding );
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; v && k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != el)
+                uwp_refresh_element_bindings( ch );
+        }
+    }
+}
+
 void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
                                    const WCHAR *prop_name, const WCHAR *path, IInspectable *src )
 {
@@ -2031,6 +2172,26 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
         }
     }
 
+    for (i = 0; i < tel->dc_bound_dp_cnt; i++)
+        if (tel->dc_bound_dps[i].dp == dp) break;
+    if (i == tel->dc_bound_dp_cnt &&
+        xaml_vec_grow( (void **)&tel->dc_bound_dps, &tel->dc_bound_dp_cap,
+                       tel->dc_bound_dp_cnt + 1, sizeof(*tel->dc_bound_dps), 8 ))
+    {
+        tel->dc_bound_dps[tel->dc_bound_dp_cnt].dp = dp;
+        if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
+        tel->dc_bound_dps[tel->dc_bound_dp_cnt].binding = bel;
+        if (bel) IInspectable_AddRef( &bel->IInspectable_iface );
+        tel->dc_bound_dp_cnt++;
+    }
+    else if (i < tel->dc_bound_dp_cnt && bel && tel->dc_bound_dps[i].binding != bel)
+    {
+        if (tel->dc_bound_dps[i].binding)
+            IInspectable_Release( &tel->dc_bound_dps[i].binding->IInspectable_iface );
+        tel->dc_bound_dps[i].binding = bel;
+        IInspectable_AddRef( &bel->IInspectable_iface );
+    }
+
     if (bel && bel->data_context)
     {
         src = bel->data_context;
@@ -2038,18 +2199,6 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
     else
     {
         struct uwp_element *anc;
-        for (i = 0; i < tel->dc_bound_dp_cnt; i++)
-            if (tel->dc_bound_dps[i].dp == dp) break;
-        if (i == tel->dc_bound_dp_cnt &&
-            xaml_vec_grow( (void **)&tel->dc_bound_dps, &tel->dc_bound_dp_cap,
-                           tel->dc_bound_dp_cnt + 1, sizeof(*tel->dc_bound_dps), 8 ))
-        {
-            tel->dc_bound_dps[tel->dc_bound_dp_cnt].dp = dp;
-            if ((ULONG_PTR)dp >= 0x10000) IUnknown_AddRef( (IUnknown *)dp );
-            tel->dc_bound_dps[tel->dc_bound_dp_cnt].binding = bel;
-            if (bel) IInspectable_AddRef( &bel->IInspectable_iface );
-            tel->dc_bound_dp_cnt++;
-        }
         for (anc = tel; anc; anc = anc->parent)
             if (anc->data_context) { src = anc->data_context; break; }
     }

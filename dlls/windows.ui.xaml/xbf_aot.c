@@ -913,7 +913,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 if (!handled_custom && parent_el &&
                     (op->pid == XBF_PROP_PANEL_CHILDREN || op->pid == XBF_PROP_ITEMS ||
                      parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL ||
-                     parent_el->kind == UWP_KIND_WRAP_PANEL ||
+                     parent_el->kind == UWP_KIND_WRAP_PANEL || parent_el->kind == UWP_KIND_FLYOUT ||
                      wcsstr( parent_el->class_name, L"Storyboard" )))
                 {
                     if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
@@ -1070,6 +1070,16 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     IInspectable_AddRef( child_raw );
                     if (child_el) child_el->parent = parent_el;
                 }
+                else if (child_raw &&
+                         (op->pid == 0x8484 ||
+                          (op->pid < hdr->prop_cnt && !wcscmp( fake_ctx.props[op->pid].name, L"Flyout" )) ||
+                          (child_el && child_el->kind == UWP_KIND_FLYOUT)))
+                {
+                    if (parent_el->flyout) IInspectable_Release( parent_el->flyout );
+                    parent_el->flyout = child_raw;
+                    IInspectable_AddRef( child_raw );
+                    if (child_el) child_el->parent = parent_el;
+                }
                 else if (child_raw && op->sv_kind == UWP_RD_OBJ &&
                          op->pid < hdr->prop_cnt &&
                          !wcscmp( fake_ctx.props[op->pid].name, L"Pane" ))
@@ -1121,6 +1131,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                          (!child_el || (child_el->kind != UWP_KIND_STYLE &&
                                         child_el->kind != UWP_KIND_BRUSH &&
                                         child_el->kind != UWP_KIND_COLOR &&
+                                        child_el->kind != UWP_KIND_FLYOUT &&
                                         wcscmp( child_el->class_name, L"Windows.UI.Xaml.DataTemplate" ) != 0)) &&
                          (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_USERCONTROL_CONTENT ||
                           op->pid == XBF_PROP_BORDER_CHILD || op->pid == XBF_PROP_RENDER_TRANSFORM_ORIGIN ||

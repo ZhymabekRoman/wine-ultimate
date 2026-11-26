@@ -684,20 +684,6 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                     }
                 }
 
-                /* Implicit Style (TargetType without explicit x:Key) inside a ResourceDictionary */
-                if (last_popped.kind == UWP_RD_STYLE && last_popped.target_type[0] &&
-                    (ctx->rd_only || (obj_sp > 0 && is_rd_stack[obj_sp - 1])))
-                {
-                    BYTE next_op = (p < end_p) ? ctx->nodes[p] : 0xff;
-                    if (next_op != 0x0a && next_op != 0x07 && next_op != 0x08 && next_op != 0x09 && next_op != 0x20)
-                    {
-                        UINT32 rd_parent_idx = (obj_sp > 0 && is_rd_stack[obj_sp - 1])
-                            ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
-                        xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, last_popped_node_idx,
-                                                   last_popped.target_type, &last_popped );
-                    }
-                }
-
                 /* Indexed ResourceDictionary entry without trailing 0x0a AddToDictionary (e.g. Dark.xbf, TileDataTemplates.xbf) */
                 if (rd_tbl &&
                     (obj_sp == base_sp || (obj_sp == base_sp + 1 && is_rd_stack[obj_sp - 1])))
@@ -708,6 +694,7 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                         UINT32 rd_parent_idx = (obj_sp > 0 && is_rd_stack[obj_sp - 1])
                             ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
                         int k;
+                        BOOL matched_key = FALSE;
                         for (k = 0; k < rd_tbl->count; k++)
                         {
                             if (rd_tbl->items[k].sub_off == last_popped_off &&
@@ -715,13 +702,31 @@ static void xbf_compile_substream( struct xbf_ctx *ctx, int sub_idx, BOOL has_in
                             {
                                 xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, last_popped_node_idx,
                                                            ctx->strs[rd_tbl->items[k].key_sid], &last_popped );
+                                matched_key = TRUE;
                             }
                         }
-                        free( last_popped.setters );
-                        memset( &last_popped, 0, sizeof(last_popped) );
-                        last_popped_node_idx = (~0u);
-                        last_popped_is_rd = FALSE;
-                        has_last_popped = FALSE;
+                        if (matched_key)
+                        {
+                            free( last_popped.setters );
+                            memset( &last_popped, 0, sizeof(last_popped) );
+                            last_popped_node_idx = (~0u);
+                            last_popped_is_rd = FALSE;
+                            has_last_popped = FALSE;
+                        }
+                    }
+                }
+
+                /* Implicit Style (TargetType without explicit x:Key) inside a ResourceDictionary */
+                if (has_last_popped && last_popped.kind == UWP_RD_STYLE && last_popped.target_type[0] &&
+                    (ctx->rd_only || (obj_sp > 0 && is_rd_stack[obj_sp - 1])))
+                {
+                    BYTE next_op = (p < end_p) ? ctx->nodes[p] : 0xff;
+                    if (next_op != 0x0a && next_op != 0x07 && next_op != 0x08 && next_op != 0x09 && next_op != 0x20)
+                    {
+                        UINT32 rd_parent_idx = (obj_sp > 0 && is_rd_stack[obj_sp - 1])
+                            ? node_idx_stack[obj_sp - 1] : active_rd_node_idx;
+                        xbf_compile_emit_rd_store( ctx->aot, rd_parent_idx, last_popped_node_idx,
+                                                   last_popped.target_type, &last_popped );
                     }
                 }
             }

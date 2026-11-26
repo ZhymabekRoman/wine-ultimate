@@ -36,10 +36,10 @@ struct uwp_binding_vtbl
     HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
     HRESULT (WINAPI *get_Path)( void *iface, IInspectable **out );
     HRESULT (WINAPI *put_Path)( void *iface, IInspectable *val );
-    HRESULT (WINAPI *pad8_13[6])( void *iface, ... );
+    HRESULT (WINAPI *pad8_9[2])( void *iface, ... );
     HRESULT (WINAPI *get_Source)( void *iface, IInspectable **out );
     HRESULT (WINAPI *put_Source)( void *iface, IInspectable *val );
-    HRESULT (WINAPI *pad16_31[16])( void *iface, ... );
+    HRESULT (WINAPI *pad12_31[20])( void *iface, ... );
 };
 
 struct uwp_pp_vtbl
@@ -146,6 +146,9 @@ extern const void *uwp_cc_vtbl[128];
 extern const void *uwp_border_vtbl[32];
 extern const void *uwp_btn_vtbl[32];
 extern const void *uwp_tbtn_vtbl[32];
+extern const void *uwp_popup_vtbl[32];
+extern const void *uwp_popup2_vtbl[16];
+extern const void *uwp_popup3_vtbl[16];
 extern const void *uwp_panel_vtbl[32];
 extern const void *uwp_ui7_vtbl[32];
 extern const void *uwp_ui4_vtbl[32];
