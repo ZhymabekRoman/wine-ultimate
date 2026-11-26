@@ -1128,8 +1128,13 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
 
         if (btn_handled || (tree_routed && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)))
         {
-            xaml_mark_window_dirty();
-            xaml_window_present( &global_xaml_window );
+            if (msg == WM_MOUSEMOVE)
+                uwp_invalidate_paint_only();
+            else
+            {
+                xaml_mark_window_dirty();
+                xaml_window_present( &global_xaml_window );
+            }
             return 0;
         }
         return 0;

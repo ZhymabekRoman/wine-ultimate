@@ -97,6 +97,8 @@ struct uwp_rd_bucket
     struct uwp_rd_entry *entries;
     int count;
     int cap;
+    int *hash_slots;
+    int hash_mask;
     struct uwp_rd_bucket **merged;
     int merged_cnt;
     int merged_cap;

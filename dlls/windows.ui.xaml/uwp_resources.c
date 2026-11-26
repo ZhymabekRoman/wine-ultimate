@@ -577,29 +577,145 @@ BOOL uwp_extract_resource_key( const WCHAR *in, WCHAR *out, size_t out_chars )
     return FALSE;
 }
 
+struct uwp_rd_bmap_slot
+{
+    void *key;
+    struct uwp_rd_bucket *b;
+};
+
+static struct uwp_rd_bmap_slot *g_rd_bmap = NULL;
+static UINT32 g_rd_bmap_cap = 0;
+static UINT32 g_rd_bmap_cnt = 0;
+
+static inline UINT32 rd_hash_ptr( const void *p )
+{
+    ULONG_PTR v = (ULONG_PTR)p;
+    v = (v >> 3) ^ (v >> 17);
+    return (UINT32)(v * 2654435761u);
+}
+
+static inline UINT32 rd_hash_wstr( const WCHAR *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        h ^= (UINT32)*s;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void rd_bmap_grow( void )
+{
+    UINT32 ncap = g_rd_bmap_cap ? g_rd_bmap_cap * 2 : 256;
+    struct uwp_rd_bmap_slot *nt = calloc( ncap, sizeof(*nt) );
+    UINT32 mask = ncap - 1, i;
+    if (!nt) return;
+    if (g_rd_bmap)
+    {
+        for (i = 0; i < g_rd_bmap_cap; i++)
+        {
+            if (g_rd_bmap[i].key)
+            {
+                UINT32 idx = rd_hash_ptr( g_rd_bmap[i].key ) & mask;
+                while (nt[idx].key) idx = (idx + 1) & mask;
+                nt[idx] = g_rd_bmap[i];
+            }
+        }
+        free( g_rd_bmap );
+    }
+    g_rd_bmap = nt;
+    g_rd_bmap_cap = ncap;
+}
+
+static void rd_bmap_insert( void *key, struct uwp_rd_bucket *b )
+{
+    UINT32 mask, idx;
+    if (!g_rd_bmap || (g_rd_bmap_cnt + 1) * 100 >= g_rd_bmap_cap * 65)
+        rd_bmap_grow();
+    if (!g_rd_bmap) return;
+    mask = g_rd_bmap_cap - 1;
+    idx = rd_hash_ptr( key ) & mask;
+    while (g_rd_bmap[idx].key && g_rd_bmap[idx].key != key)
+        idx = (idx + 1) & mask;
+    if (!g_rd_bmap[idx].key) g_rd_bmap_cnt++;
+    g_rd_bmap[idx].key = key;
+    g_rd_bmap[idx].b = b;
+}
+
 struct uwp_rd_bucket *get_rd_bucket( void *rd_key, BOOL create )
 {
-    struct uwp_rd_bucket *b;
-    for (b = g_rd_buckets_head; b; b = b->next)
-        if (b->rd_key == rd_key) return b;
-    if (!create || !rd_key) return NULL;
+    struct uwp_rd_bucket *b = NULL;
+    if (!rd_key) return NULL;
+    if (g_rd_bmap && g_rd_bmap_cap)
+    {
+        UINT32 mask = g_rd_bmap_cap - 1;
+        UINT32 idx = rd_hash_ptr( rd_key ) & mask;
+        while (g_rd_bmap[idx].key)
+        {
+            if (g_rd_bmap[idx].key == rd_key) return g_rd_bmap[idx].b;
+            idx = (idx + 1) & mask;
+        }
+    }
+    if (!create) return NULL;
     b = calloc( 1, sizeof(*b) );
     if (!b) return NULL;
     b->rd_key = rd_key;
     b->next = g_rd_buckets_head;
     g_rd_buckets_head = b;
+    rd_bmap_insert( rd_key, b );
     return b;
+}
+
+static void rd_bucket_rehash( struct uwp_rd_bucket *b, int new_size )
+{
+    int *ns = calloc( (size_t)new_size, sizeof(*ns) );
+    int mask = new_size - 1, i;
+    if (!ns) return;
+    for (i = 0; i < b->count; i++)
+    {
+        UINT32 idx = rd_hash_wstr( b->entries[i].key ) & (UINT32)mask;
+        while (ns[idx]) idx = (idx + 1) & (UINT32)mask;
+        ns[idx] = i + 1;
+    }
+    free( b->hash_slots );
+    b->hash_slots = ns;
+    b->hash_mask = mask;
+}
+
+static struct uwp_rd_entry *rd_bucket_find_local( struct uwp_rd_bucket *b, const WCHAR *key )
+{
+    if (!b || b->count <= 0) return NULL;
+    if (b->hash_slots)
+    {
+        UINT32 mask = (UINT32)b->hash_mask;
+        UINT32 idx = rd_hash_wstr( key ) & mask;
+        int slot;
+        while ((slot = b->hash_slots[idx]) != 0)
+        {
+            if (!wcscmp( b->entries[slot - 1].key, key ))
+                return &b->entries[slot - 1];
+            idx = (idx + 1) & mask;
+        }
+        return NULL;
+    }
+    {
+        int i;
+        for (i = 0; i < b->count; i++)
+            if (!wcscmp( b->entries[i].key, key ))
+                return &b->entries[i];
+    }
+    return NULL;
 }
 
 struct uwp_rd_entry *rd_bucket_upsert( struct uwp_rd_bucket *b, const WCHAR *key )
 {
-    int i;
+    WCHAR kbuf[96];
+    struct uwp_rd_entry *existing;
     if (!b || !key || !key[0]) return NULL;
-    for (i = 0; i < b->count; i++)
-    {
-        if (!wcscmp( b->entries[i].key, key ))
-            return &b->entries[i];
-    }
+    lstrcpynW( kbuf, key, ARRAY_SIZE(kbuf) );
+    existing = rd_bucket_find_local( b, kbuf );
+    if (existing) return existing;
     if (b->count >= b->cap)
     {
         int ncap = b->cap ? b->cap * 2 : 32;
@@ -609,9 +725,23 @@ struct uwp_rd_entry *rd_bucket_upsert( struct uwp_rd_bucket *b, const WCHAR *key
         b->cap = ncap;
     }
     memset( &b->entries[b->count], 0, sizeof(b->entries[0]) );
-    lstrcpynW( b->entries[b->count].key, key, 96 );
+    lstrcpynW( b->entries[b->count].key, kbuf, 96 );
     b->entries[b->count].opacity = 1.0;
-    return &b->entries[b->count++];
+    b->count++;
+    if (!b->hash_slots || b->count * 10 >= (b->hash_mask + 1) * 6)
+    {
+        int nsz = b->hash_slots ? (b->hash_mask + 1) * 2 : 64;
+        while (b->count * 10 >= nsz * 6) nsz *= 2;
+        rd_bucket_rehash( b, nsz );
+    }
+    else
+    {
+        UINT32 mask = (UINT32)b->hash_mask;
+        UINT32 idx = rd_hash_wstr( kbuf ) & mask;
+        while (b->hash_slots[idx]) idx = (idx + 1) & mask;
+        b->hash_slots[idx] = b->count;
+    }
+    return &b->entries[b->count - 1];
 }
 
 void uwp_rd_link_merged( struct uwp_rd_bucket *parent, struct uwp_rd_bucket *child )
@@ -876,11 +1006,11 @@ static BOOL uwp_lookup_in_bucket( struct uwp_rd_bucket *b, const WCHAR *key, BOO
     TRACE( "uwp_lookup_in_bucket: b=%p count=%d merged_cnt=%d light=%d key=%s\n",
            b, b->count, b->merged_cnt, prefer_light, debugstr_w(key) );
 
-    for (i = 0; i < b->count; i++)
     {
-        if (!wcscmp( b->entries[i].key, key ))
+        struct uwp_rd_entry *hit = rd_bucket_find_local( b, key );
+        if (hit)
         {
-            *out_entry = &b->entries[i];
+            *out_entry = hit;
             if (out_bucket) *out_bucket = b;
             return TRUE;
         }

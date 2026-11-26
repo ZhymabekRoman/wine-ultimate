@@ -351,10 +351,19 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
                     is_child = st->is_child;
                     if (!is_child)
                     {
-                        gpu_ok = xaml_layout_render_gpu( hwnd, w, h, impl->content,
-                                                         g_island_d3d11_dev, g_island_d3d11_ctx, st->swapchain );
+                        if (g_layout_dirty || g_paint_dirty || !st->valid || w != st->w || h != st->h)
+                        {
+                            gpu_ok = xaml_layout_render_gpu( hwnd, w, h, impl->content,
+                                                             g_island_d3d11_dev, g_island_d3d11_ctx, st->swapchain );
+                            if (gpu_ok) { st->w = w; st->h = h; }
+                        }
+                        else
+                        {
+                            /* Swapchain front buffer is unchanged: skip redundant GPU render. */
+                            gpu_ok = TRUE;
+                        }
                     }
-                    else if (g_layout_dirty || !st->valid || w != st->w || h != st->h)
+                    else if (g_layout_dirty || g_paint_dirty || !st->valid || w != st->w || h != st->h)
                     {
                         /* Offscreen GPU frame -> staging -> DIB -> BitBlt below. */
                         gpu_ok = xaml_layout_render_gpu_rtv( hwnd, w, h, impl->content,
@@ -368,7 +377,6 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
                     }
                     if (gpu_ok)
                     {
-                        g_layout_dirty = FALSE;
                         st->valid = TRUE;
                         if (is_child && st->dc)
                             BitBlt( hdc, 0, 0, w, h, st->dc, 0, 0, SRCCOPY );
@@ -380,12 +388,13 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
                 }
                 if (!gpu_ok)
                 {
-                    if (st && (g_layout_dirty || !st->valid || w != st->w || h != st->h))
+                    if (st && (g_layout_dirty || g_paint_dirty || !st->valid || w != st->w || h != st->h))
                     {
                         if (uwp_island_ensure_dib( st, hdc, w, h ))
                         {
-                            xaml_layout_render( hwnd, st->dc, w, h, impl->content );
                             g_layout_dirty = FALSE;
+                            g_paint_dirty = FALSE;
+                            xaml_layout_render( hwnd, st->dc, w, h, impl->content );
                             st->valid = TRUE;
                         }
                     }
@@ -405,6 +414,7 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
         {
             g_hovered_elem->is_hovered = FALSE;
             g_hovered_elem = NULL;
+            g_paint_dirty = TRUE;
             InvalidateRect( hwnd, NULL, FALSE );
         }
         return 0;
@@ -436,6 +446,7 @@ static LRESULT CALLBACK uwp_island_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPAR
         {
             g_layout_dirty = FALSE;
             uwp_arrange_element( root_el, rc );
+            g_paint_dirty = TRUE;
             InvalidateRect( hwnd, NULL, FALSE );
         }
         uwp_debug_dump_tree( root_el, 0, &rem );

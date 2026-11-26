@@ -2313,9 +2313,13 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
     }
 }
 
+static int g_paint_win_w = 0;
+static int g_paint_win_h = 0;
+
 static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     COLORREF surface_bg = g_paint_page_bg;
+    BOOL out_of_view = FALSE;
     TRACE( "paint-enter %s (%s) bounds=%d (%ld,%ld-%ld,%ld) bg=%d:%08x vis=%u kids=%p content=%p\n",
            debugstr_w(el ? el->class_name : L"?"), debugstr_w(el ? el->name : L"?"),
            el ? el->has_bounds : 0,
@@ -2338,8 +2342,45 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         }
     }
 
+    if (g_paint_win_w > 0 && g_paint_win_h > 0 &&
+        el->bounds.right > el->bounds.left && el->bounds.bottom > el->bounds.top)
+    {
+        BOOL has_clip = FALSE;
+        RECT vis_rc = { 0, 0, g_paint_win_w, g_paint_win_h }, clip_rc = { 0 };
+        xaml_gpu_get_clip( &has_clip, &clip_rc );
+        if (has_clip)
+        {
+            if (clip_rc.left > vis_rc.left) vis_rc.left = clip_rc.left;
+            if (clip_rc.top > vis_rc.top) vis_rc.top = clip_rc.top;
+            if (clip_rc.right < vis_rc.right) vis_rc.right = clip_rc.right;
+            if (clip_rc.bottom < vis_rc.bottom) vis_rc.bottom = clip_rc.bottom;
+        }
+        if (el->bounds.right <= vis_rc.left || el->bounds.left >= vis_rc.right ||
+            el->bounds.bottom <= vis_rc.top || el->bounds.top >= vis_rc.bottom)
+        {
+            out_of_view = TRUE;
+            /* Leaf widgets, clipping ScrollViewers, and self-contained cards/buttons skip recursion too. */
+            if ((!el->content && !el->children_coll) ||
+                uwp_is_scroll_viewer( el ) ||
+                el->kind == UWP_KIND_IMAGE ||
+                el->kind == UWP_KIND_BUTTON ||
+                el->kind == UWP_KIND_TOGGLE_BUTTON ||
+                el->kind == UWP_KIND_TEXT_BLOCK ||
+                el->kind == UWP_KIND_PROGRESS_RING ||
+                uwp_is_combobox( el ) ||
+                uwp_is_font_icon( el ) ||
+                uwp_is_text_input( el ) ||
+                uwp_is_card( el ) ||
+                (el->class_flags & (UWP_CF_MEDIA_PLAYER | UWP_CF_PROGRESS_BAR | UWP_CF_SPOTLIGHT)) != 0)
+                return;
+        }
+    }
+
+    if (out_of_view) goto recurse_children;
+
     if (el->kind == UWP_KIND_IMAGE)
     {
+        if (el->img_pixels) uwp_on_image_loaded( el );
         paint_gpu_image( ctx, el );
         return;
     }
@@ -2440,23 +2481,24 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
+recurse_children:
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el)
             uwp_gpu_paint_element( ctx, ch );
-        else if (el->kind == UWP_KIND_CONTENT_CONTROL &&
+        else if (!out_of_view && el->kind == UWP_KIND_CONTENT_CONTROL &&
                  (!el->children_coll || CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
             paint_gpu_content_control_vm( ctx, el, surface_bg );
     }
-    if (!el->children_coll && (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
+    if (!out_of_view && !el->children_coll && (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
         !(el->content && uwp_elem_from_any( el->content )) &&
         el->kind != UWP_KIND_CONTENT_CONTROL &&
         (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56)
     {
         paint_gpu_vm_card( ctx, el );
     }
-    if (uwp_nav_is_overlay_open( el ) && el->nav_pane_bounds.right > el->nav_pane_bounds.left)
+    if (!out_of_view && uwp_nav_is_overlay_open( el ) && el->nav_pane_bounds.right > el->nav_pane_bounds.left)
     {
         RECT prc = el->nav_pane_bounds;
         BOOL light = uwp_is_light_theme( el );
@@ -2879,25 +2921,46 @@ static BOOL xaml_layout_render_gpu_target( HWND hwnd, int width, int height, IIn
                                                def_bg, def_bg );
     }
     g_paint_page_bg = page_bg;
+    g_paint_win_w = width;
+    g_paint_win_h = height;
 
     if (rtv ? !xaml_gpu_begin_frame_rtv( dev, ctx, rtv, (UINT)width, (UINT)height, page_bg )
             : !xaml_gpu_begin_frame( dev, ctx, swapchain, (UINT)width, (UINT)height, page_bg ))
         return FALSE;
 
-    if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
-        !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
     {
-        uwp_vsm_evaluate_tree( g_navigated_page_el, eval_w, eval_h );
-        g_layout_dirty = FALSE;
-        uwp_arrange_element( g_navigated_page_el, rc );
-        uwp_gpu_paint_element( ctx, g_navigated_page_el );
-    }
-    else if (root_el && (root_el->content || root_el->children_coll || root_el->xbf_parsed))
-    {
-        uwp_vsm_evaluate_tree( root_el, eval_w, eval_h );
-        g_layout_dirty = FALSE;
-        uwp_arrange_element( root_el, rc );
-        uwp_gpu_paint_element( ctx, root_el );
+        static struct uwp_element *s_last_layout_root = NULL;
+        static int s_last_layout_w = 0, s_last_layout_h = 0;
+        static double s_last_eval_w = 0.0, s_last_eval_h = 0.0;
+        struct uwp_element *target_el = NULL;
+
+        if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
+            !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
+            target_el = g_navigated_page_el;
+        else if (root_el && (root_el->content || root_el->children_coll || root_el->xbf_parsed))
+            target_el = root_el;
+
+        g_paint_dirty = FALSE;
+        if (target_el)
+        {
+            BOOL need_layout = g_layout_dirty || !target_el->has_bounds ||
+                               target_el != s_last_layout_root ||
+                               width != s_last_layout_w || height != s_last_layout_h ||
+                               (eval_w - s_last_eval_w > 0.5) || (s_last_eval_w - eval_w > 0.5) ||
+                               (eval_h - s_last_eval_h > 0.5) || (s_last_eval_h - eval_h > 0.5);
+            if (need_layout)
+            {
+                uwp_vsm_evaluate_tree( target_el, eval_w, eval_h );
+                g_layout_dirty = FALSE;
+                uwp_arrange_element( target_el, rc );
+                s_last_layout_root = target_el;
+                s_last_layout_w = width;
+                s_last_layout_h = height;
+                s_last_eval_w = eval_w;
+                s_last_eval_h = eval_h;
+            }
+            uwp_gpu_paint_element( ctx, target_el );
+        }
     }
 
     uwp_gpu_paint_open_popups( ctx, width, height );

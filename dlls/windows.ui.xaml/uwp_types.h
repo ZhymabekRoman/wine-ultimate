@@ -416,6 +416,7 @@ struct uwp_element
     IDispatch IDispatch_iface;
     IInspectable IReferenceTrackerTarget_iface;
     ITypeInfo ITypeInfo_iface;
+    UINT32 magic;
     LONG ref;
     int easing_mode;
     IInspectable *media_source;
@@ -779,7 +780,21 @@ struct uwp_element
     int scroll_extent_h;
     struct xaml_event_registry img_opened_reg;
     WCHAR placeholder[256];
+    /* Layout memoization (keyed on g_layout_gen) */
+    UINT32 nat_w_gen;
+    double cached_nat_w;
+    UINT32 nat_h_gen;
+    int cached_nat_h_avail_w;
+    double cached_nat_h;
+    UINT32 auto_h_gen;
+    double cached_auto_h;
+    UINT32 content_flags_gen;
+    BYTE cached_content_flags;
+    /* Tri-state cache for QI(outer, IID_IControlOverrides_UWP): 0=unknown, 1=yes, -1=no */
+    signed char has_ctrl_overrides;
 };
+
+#define UWP_ELEM_MAGIC 0x55575045u
 
 struct xaml_frame_prop
 {
@@ -1119,6 +1134,7 @@ static inline BOOL uwp_is_flyout( const struct uwp_element *el )
 const WCHAR *uwp_btype_to_class_name( WORD tid );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
 struct uwp_element *uwp_elem_from_any( void *ptr );
+void uwp_elem_register_alias( struct uwp_element *el, void *alias_ptr );
 BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *node );
 struct uwp_element *uwp_find_owning_page( struct uwp_element *el );
 BOOL uwp_panel_has_concrete_child( struct uwp_element *panel );

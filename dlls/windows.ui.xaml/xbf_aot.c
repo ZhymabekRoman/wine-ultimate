@@ -595,7 +595,11 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                     }
                     if (el)
                     {
-                        if (inst && !el->provider_inst) el->provider_inst = inst;
+                        if (inst && !el->provider_inst)
+                        {
+                            el->provider_inst = inst;
+                            uwp_elem_register_alias( el, inst );
+                        }
                         else if (!inst) inst = el->outer ? el->outer : &el->IInspectable_iface;
                         lstrcpynW( el->class_name, cls_name, ARRAY_SIZE(el->class_name) );
                         el->kind = classify_uwp_class( el->class_name );

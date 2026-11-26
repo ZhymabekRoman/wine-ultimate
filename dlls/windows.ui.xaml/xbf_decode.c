@@ -282,28 +282,59 @@ static BOOL pri_resolve_item_data( const BYTE *pri, DWORD pri_sz, const BYTE *rm
     return pri_get_data_item( pri, pri_sz, sec_idx, data_idx, out_ptr, out_sz );
 }
 
-static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffix,
-                                   const BYTE **out_ptr, DWORD *out_sz, BYTE *out_vti )
+static inline UINT32 pri_hash_str_ci( const char *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        unsigned char c = (unsigned char)*s;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        h ^= (UINT32)c;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+struct pri_item_index
+{
+    BOOL valid;
+    const BYTE *pri;
+    DWORD pri_sz;
+    const BYTE *rm;
+    DWORD rm_sz;
+    DWORD count1, extra_sz, map_off, cand_off;
+    DWORD num_items;
+    char **paths;
+    const char **leaves;
+    const char **seg2s;
+    UINT32 *full_slots;
+    UINT32 *leaf_slots;
+    UINT32 *seg2_slots;
+    UINT32 hash_mask;
+};
+
+static struct pri_item_index g_pri_item_idx = {0};
+static INIT_ONCE g_pri_item_idx_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK init_pri_item_index( INIT_ONCE *once, void *param, void **ctx )
 {
     DWORD pri_sz = 0, hs_sz = 0, rm_sz = 0;
     const BYTE *pri = pri_get_data( &pri_sz );
     const BYTE *hs = NULL, *rm = NULL;
     DWORD num_nodes, num_scopes, num_items;
     DWORD node_off, scope_off, item_off, pool_off, map_off, cand_off;
-    DWORD count1, extra_sz;
+    DWORD count1, extra_sz, hs_base, iid;
     WORD l1, l2, num_env;
-    DWORD hs_base;
-    int matched_item = -1, fallback_item = -1;
-    DWORD iid;
+    UINT32 cap = 64, mask;
 
-    if (!pri) return FALSE;
-    if (!pri_get_section( pri, pri_sz, 2, &hs, &hs_sz ) || hs_sz < 0xd8) return FALSE;
-    if (!pri_get_section( pri, pri_sz, 3, &rm, &rm_sz ) || rm_sz < 0x80) return FALSE;
+    if (!pri) return TRUE;
+    if (!pri_get_section( pri, pri_sz, 2, &hs, &hs_sz ) || hs_sz < 0xd8) return TRUE;
+    if (!pri_get_section( pri, pri_sz, 3, &rm, &rm_sz ) || rm_sz < 0x80) return TRUE;
 
     l1 = *(const WORD *)(hs + 0x22);
     l2 = *(const WORD *)(hs + 0x24);
     hs_base = ((0x48 + ((DWORD)l1 + (DWORD)l2) * 2 + 3) & ~3u) + 8;
-    if (hs_base + 0x18 > hs_sz) return FALSE;
+    if (hs_base + 0x18 > hs_sz) return TRUE;
 
     num_nodes = *(const DWORD *)(hs + hs_base);
     num_scopes = *(const DWORD *)(hs + hs_base + 4);
@@ -312,40 +343,179 @@ static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffi
     scope_off = node_off + num_nodes * 12;
     item_off = scope_off + num_scopes * 8;
     pool_off = item_off + num_items * 2 + *(const DWORD *)(hs + hs_base + 12) * 2;
-    if (pool_off >= hs_sz) return FALSE;
+    if (pool_off >= hs_sz || num_items == 0) return TRUE;
 
     num_env = *(const WORD *)(rm + 0x2a);
     count1 = *(const DWORD *)(rm + 0x30);
     extra_sz = *(const DWORD *)(rm + 0x3c);
     map_off = 0x40 + (DWORD)num_env * 8 + 8;
     cand_off = map_off + count1 * 4 + extra_sz;
-    if (cand_off >= rm_sz) return FALSE;
+    if (cand_off >= rm_sz) return TRUE;
+
+    while (cap < num_items * 2) cap *= 2;
+    mask = cap - 1;
+    g_pri_item_idx.paths = calloc( num_items, sizeof(char *) );
+    g_pri_item_idx.leaves = calloc( num_items, sizeof(const char *) );
+    g_pri_item_idx.seg2s = calloc( num_items, sizeof(const char *) );
+    g_pri_item_idx.full_slots = calloc( cap, sizeof(UINT32) );
+    g_pri_item_idx.leaf_slots = calloc( cap, sizeof(UINT32) );
+    g_pri_item_idx.seg2_slots = calloc( cap, sizeof(UINT32) );
+    if (!g_pri_item_idx.paths || !g_pri_item_idx.leaves || !g_pri_item_idx.seg2s ||
+        !g_pri_item_idx.full_slots || !g_pri_item_idx.leaf_slots || !g_pri_item_idx.seg2_slots)
+        return TRUE;
+
+    g_pri_item_idx.pri = pri;
+    g_pri_item_idx.pri_sz = pri_sz;
+    g_pri_item_idx.rm = rm;
+    g_pri_item_idx.rm_sz = rm_sz;
+    g_pri_item_idx.count1 = count1;
+    g_pri_item_idx.extra_sz = extra_sz;
+    g_pri_item_idx.map_off = map_off;
+    g_pri_item_idx.cand_off = cand_off;
+    g_pri_item_idx.num_items = num_items;
+    g_pri_item_idx.hash_mask = mask;
 
     for (iid = 0; iid < num_items; iid++)
     {
         WORD nid = *(const WORD *)(hs + item_off + iid * 2);
         char path[256];
+        char *dup;
+        const char *slash, *leaf, *seg2 = NULL;
+        UINT32 slot;
+
         pri_build_node_path( hs, hs_sz, node_off, num_nodes, pool_off, nid, path, sizeof(path) );
-        if (want_path && !strcasecmp( path, want_path ))
+        dup = strdup( path );
+        if (!dup) continue;
+        g_pri_item_idx.paths[iid] = dup;
+        slash = strrchr( dup, '/' );
+        leaf = slash ? slash + 1 : dup;
+        g_pri_item_idx.leaves[iid] = leaf;
+        if (slash && slash > dup)
         {
-            matched_item = (int)iid;
-            break;
+            const char *p2 = slash - 1;
+            while (p2 > dup && *p2 != '/') p2--;
+            seg2 = (*p2 == '/') ? (p2 + 1) : dup;
+            g_pri_item_idx.seg2s[iid] = seg2;
         }
-        if (want_suffix && fallback_item < 0)
+
+        slot = pri_hash_str_ci( dup ) & mask;
+        while (g_pri_item_idx.full_slots[slot])
         {
-            size_t plen = strlen( path ), slen = strlen( want_suffix );
-            if (plen >= slen && !strcasecmp( path + plen - slen, want_suffix ) &&
-                (plen == slen || path[plen - slen - 1] == '/'))
+            if (!strcasecmp( g_pri_item_idx.paths[g_pri_item_idx.full_slots[slot] - 1], dup ))
+                break;
+            slot = (slot + 1) & mask;
+        }
+        if (!g_pri_item_idx.full_slots[slot])
+            g_pri_item_idx.full_slots[slot] = iid + 1;
+
+        slot = pri_hash_str_ci( leaf ) & mask;
+        while (g_pri_item_idx.leaf_slots[slot])
+        {
+            if (!strcasecmp( g_pri_item_idx.leaves[g_pri_item_idx.leaf_slots[slot] - 1], leaf ))
+                break;
+            slot = (slot + 1) & mask;
+        }
+        if (!g_pri_item_idx.leaf_slots[slot])
+            g_pri_item_idx.leaf_slots[slot] = iid + 1;
+
+        if (seg2)
+        {
+            slot = pri_hash_str_ci( seg2 ) & mask;
+            while (g_pri_item_idx.seg2_slots[slot])
             {
-                fallback_item = (int)iid;
+                if (!strcasecmp( g_pri_item_idx.seg2s[g_pri_item_idx.seg2_slots[slot] - 1], seg2 ))
+                    break;
+                slot = (slot + 1) & mask;
+            }
+            if (!g_pri_item_idx.seg2_slots[slot])
+                g_pri_item_idx.seg2_slots[slot] = iid + 1;
+        }
+    }
+    g_pri_item_idx.valid = TRUE;
+    return TRUE;
+}
+
+static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffix,
+                                   const BYTE **out_ptr, DWORD *out_sz, BYTE *out_vti )
+{
+    int matched_item = -1;
+    UINT32 mask;
+
+    InitOnceExecuteOnce( &g_pri_item_idx_once, init_pri_item_index, NULL, NULL );
+    if (!g_pri_item_idx.valid) return FALSE;
+    mask = g_pri_item_idx.hash_mask;
+
+    if (want_path && want_path[0])
+    {
+        UINT32 slot = pri_hash_str_ci( want_path ) & mask;
+        UINT32 v;
+        while ((v = g_pri_item_idx.full_slots[slot]) != 0)
+        {
+            if (!strcasecmp( g_pri_item_idx.paths[v - 1], want_path ))
+            {
+                matched_item = (int)(v - 1);
+                break;
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+    if (matched_item < 0 && want_suffix && want_suffix[0])
+    {
+        const char *slash = strchr( want_suffix, '/' );
+        if (!slash)
+        {
+            UINT32 slot = pri_hash_str_ci( want_suffix ) & mask;
+            UINT32 v;
+            while ((v = g_pri_item_idx.leaf_slots[slot]) != 0)
+            {
+                if (!strcasecmp( g_pri_item_idx.leaves[v - 1], want_suffix ))
+                {
+                    matched_item = (int)(v - 1);
+                    break;
+                }
+                slot = (slot + 1) & mask;
+            }
+        }
+        else if (!strchr( slash + 1, '/' ))
+        {
+            UINT32 slot = pri_hash_str_ci( want_suffix ) & mask;
+            UINT32 v;
+            while ((v = g_pri_item_idx.seg2_slots[slot]) != 0)
+            {
+                if (!strcasecmp( g_pri_item_idx.seg2s[v - 1], want_suffix ))
+                {
+                    matched_item = (int)(v - 1);
+                    break;
+                }
+                slot = (slot + 1) & mask;
+            }
+        }
+        else
+        {
+            size_t slen = strlen( want_suffix );
+            DWORD iid;
+            for (iid = 0; iid < g_pri_item_idx.num_items; iid++)
+            {
+                const char *p = g_pri_item_idx.paths[iid];
+                size_t plen;
+                if (!p) continue;
+                plen = strlen( p );
+                if (plen >= slen && !strcasecmp( p + plen - slen, want_suffix ) &&
+                    (plen == slen || p[plen - slen - 1] == '/'))
+                {
+                    matched_item = (int)iid;
+                    break;
+                }
             }
         }
     }
 
-    if (matched_item < 0) matched_item = fallback_item;
     if (matched_item < 0) return FALSE;
 
-    return pri_resolve_item_data( pri, pri_sz, rm, rm_sz, count1, extra_sz, map_off, cand_off,
+    return pri_resolve_item_data( g_pri_item_idx.pri, g_pri_item_idx.pri_sz,
+                                  g_pri_item_idx.rm, g_pri_item_idx.rm_sz,
+                                  g_pri_item_idx.count1, g_pri_item_idx.extra_sz,
+                                  g_pri_item_idx.map_off, g_pri_item_idx.cand_off,
                                   (DWORD)matched_item, out_ptr, out_sz, out_vti );
 }
 
@@ -446,17 +616,70 @@ BOOL xbf_is_immutable_pri_blob( const BYTE *xbf, DWORD xbf_sz )
     return FALSE;
 }
 
+static void pri_cat_rehash( struct pri_xbf_catalog *cat, DWORD new_size )
+{
+    int *ps = calloc( new_size, sizeof(int) );
+    int *bs = calloc( new_size, sizeof(int) );
+    DWORD mask = new_size - 1, k;
+    if (!ps || !bs)
+    {
+        free( ps );
+        free( bs );
+        return;
+    }
+    for (k = 0; k < cat->cnt; k++)
+    {
+        UINT32 slot;
+        const char *slash = strrchr( cat->entries[k].path, '/' );
+        cat->entries[k].base = slash ? slash + 1 : cat->entries[k].path;
+
+        slot = pri_hash_str_ci( cat->entries[k].path ) & mask;
+        while (ps[slot])
+        {
+            if (!strcasecmp( cat->entries[ps[slot] - 1].path, cat->entries[k].path ))
+                break;
+            slot = (slot + 1) & mask;
+        }
+        if (!ps[slot]) ps[slot] = (int)(k + 1);
+
+        slot = pri_hash_str_ci( cat->entries[k].base ) & mask;
+        while (bs[slot])
+        {
+            if (!strcasecmp( cat->entries[bs[slot] - 1].base, cat->entries[k].base ))
+                break;
+            slot = (slot + 1) & mask;
+        }
+        if (!bs[slot]) bs[slot] = (int)(k + 1);
+    }
+    free( cat->path_slots );
+    free( cat->base_slots );
+    cat->path_slots = ps;
+    cat->base_slots = bs;
+    cat->hash_mask = mask;
+}
+
 BOOL pri_xbf_collect_cb( const char *path, const BYTE *xbf, DWORD sz, void *ctx )
 {
     struct pri_xbf_catalog *cat = ctx;
     const char *slash;
+    BOOL moved = FALSE;
     if (cat->cnt >= cat->cap)
     {
         DWORD ncap = cat->cap ? cat->cap * 2 : 64;
         struct pri_xbf_entry *ne = realloc( cat->entries, ncap * sizeof(*ne) );
         if (!ne) return FALSE;
+        moved = (ne != cat->entries);
         cat->entries = ne;
         cat->cap = ncap;
+        if (moved)
+        {
+            DWORD k;
+            for (k = 0; k < cat->cnt; k++)
+            {
+                const char *sl = strrchr( cat->entries[k].path, '/' );
+                cat->entries[k].base = sl ? sl + 1 : cat->entries[k].path;
+            }
+        }
     }
     snprintf( cat->entries[cat->cnt].path, sizeof(cat->entries[0].path), "%s", path );
     slash = strrchr( cat->entries[cat->cnt].path, '/' );
@@ -464,6 +687,34 @@ BOOL pri_xbf_collect_cb( const char *path, const BYTE *xbf, DWORD sz, void *ctx 
     cat->entries[cat->cnt].data = xbf;
     cat->entries[cat->cnt].size = sz;
     cat->cnt++;
+    if (!cat->path_slots || cat->cnt * 10 >= (cat->hash_mask + 1) * 6)
+    {
+        DWORD nsz = cat->path_slots ? (cat->hash_mask + 1) * 2 : 128;
+        while (cat->cnt * 10 >= nsz * 6) nsz *= 2;
+        pri_cat_rehash( cat, nsz );
+    }
+    else
+    {
+        DWORD k = cat->cnt - 1;
+        DWORD mask = cat->hash_mask;
+        UINT32 slot = pri_hash_str_ci( cat->entries[k].path ) & mask;
+        while (cat->path_slots[slot])
+        {
+            if (!strcasecmp( cat->entries[cat->path_slots[slot] - 1].path, cat->entries[k].path ))
+                break;
+            slot = (slot + 1) & mask;
+        }
+        if (!cat->path_slots[slot]) cat->path_slots[slot] = (int)(k + 1);
+
+        slot = pri_hash_str_ci( cat->entries[k].base ) & mask;
+        while (cat->base_slots[slot])
+        {
+            if (!strcasecmp( cat->entries[cat->base_slots[slot] - 1].base, cat->entries[k].base ))
+                break;
+            slot = (slot + 1) & mask;
+        }
+        if (!cat->base_slots[slot]) cat->base_slots[slot] = (int)(k + 1);
+    }
     return TRUE;
 }
 
@@ -516,6 +767,58 @@ void scan_disk_xbfs_in_dir( const WCHAR *dir_path, const char *rel_prefix, struc
     FindClose( hfind );
 }
 
+static int pri_cat_lookup_path( const struct pri_xbf_catalog *cat, const char *path )
+{
+    if (!cat || !cat->cnt || !path || !path[0]) return -1;
+    if (cat->path_slots)
+    {
+        DWORD mask = cat->hash_mask;
+        UINT32 slot = pri_hash_str_ci( path ) & mask;
+        int v;
+        while ((v = cat->path_slots[slot]) != 0)
+        {
+            if (!strcasecmp( cat->entries[v - 1].path, path ))
+                return v - 1;
+            slot = (slot + 1) & mask;
+        }
+        return -1;
+    }
+    {
+        DWORD k;
+        for (k = 0; k < cat->cnt; k++)
+            if (!strcasecmp( cat->entries[k].path, path )) return (int)k;
+    }
+    return -1;
+}
+
+static int pri_cat_lookup_base( const struct pri_xbf_catalog *cat, const char *base )
+{
+    if (!cat || !cat->cnt || !base || !base[0]) return -1;
+    if (cat->base_slots)
+    {
+        DWORD mask = cat->hash_mask;
+        UINT32 slot = pri_hash_str_ci( base ) & mask;
+        int v;
+        while ((v = cat->base_slots[slot]) != 0)
+        {
+            if (!strcasecmp( cat->entries[v - 1].base, base ))
+                return v - 1;
+            slot = (slot + 1) & mask;
+        }
+        return -1;
+    }
+    {
+        DWORD k;
+        for (k = 0; k < cat->cnt; k++)
+        {
+            const char *slash = strrchr( cat->entries[k].path, '/' );
+            const char *b = slash ? slash + 1 : cat->entries[k].path;
+            if (!strcasecmp( b, base )) return (int)k;
+        }
+    }
+    return -1;
+}
+
 static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_dir,
                               const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz,
                               char *out_resolved, size_t out_resolved_sz )
@@ -525,8 +828,7 @@ static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_
     char suffix[256] = {0};
     const WCHAR *p = uri_or_name;
     size_t i, len;
-    DWORD k;
-    int fallback = -1;
+    int hit;
     BOOL is_appx = FALSE;
 
     if (!cat || !uri_or_name || !out_ptr || !out_sz) return FALSE;
@@ -553,18 +855,16 @@ static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_
     if (!is_appx && base_xbf_dir && base_xbf_dir[0])
     {
         snprintf( rel_path, sizeof(rel_path), "%s%s", base_xbf_dir, full_path + 6 );
-        for (k = 0; k < cat->cnt; k++)
+        hit = pri_cat_lookup_path( cat, rel_path );
+        if (hit >= 0)
         {
-            if (!strcasecmp( cat->entries[k].path, rel_path ))
-            {
-                *out_ptr = cat->entries[k].data;
-                *out_sz = cat->entries[k].size;
-                if (out_resolved && out_resolved_sz)
-                    snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[k].path );
-                TRACE( "Resolved PRI XBF rel '%s' -> %p (%lu bytes)\n",
-                       cat->entries[k].path, *out_ptr, (unsigned long)*out_sz );
-                return TRUE;
-            }
+            *out_ptr = cat->entries[hit].data;
+            *out_sz = cat->entries[hit].size;
+            if (out_resolved && out_resolved_sz)
+                snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[hit].path );
+            TRACE( "Resolved PRI XBF rel '%s' -> %p (%lu bytes)\n",
+                   cat->entries[hit].path, *out_ptr, (unsigned long)*out_sz );
+            return TRUE;
         }
     }
 
@@ -573,34 +873,27 @@ static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_
         snprintf( suffix, sizeof(suffix), "%s", slash ? slash + 1 : full_path );
     }
 
-    for (k = 0; k < cat->cnt; k++)
+    hit = pri_cat_lookup_path( cat, full_path );
+    if (hit >= 0)
     {
-        if (!strcasecmp( cat->entries[k].path, full_path ))
-        {
-            *out_ptr = cat->entries[k].data;
-            *out_sz = cat->entries[k].size;
-            if (out_resolved && out_resolved_sz)
-                snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[k].path );
-            TRACE( "Resolved PRI XBF '%s' (suffix '%s') -> %p (%lu bytes)\n",
-                   full_path, suffix, *out_ptr, (unsigned long)*out_sz );
-            return TRUE;
-        }
-        if (fallback < 0)
-        {
-            const char *slash = strrchr( cat->entries[k].path, '/' );
-            const char *base = slash ? slash + 1 : cat->entries[k].path;
-            if (!strcasecmp( base, suffix ))
-                fallback = (int)k;
-        }
-    }
-    if (fallback >= 0)
-    {
-        *out_ptr = cat->entries[fallback].data;
-        *out_sz = cat->entries[fallback].size;
+        *out_ptr = cat->entries[hit].data;
+        *out_sz = cat->entries[hit].size;
         if (out_resolved && out_resolved_sz)
-            snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[fallback].path );
+            snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[hit].path );
         TRACE( "Resolved PRI XBF '%s' (suffix '%s') -> %p (%lu bytes)\n",
-               cat->entries[fallback].path, suffix, *out_ptr, (unsigned long)*out_sz );
+               full_path, suffix, *out_ptr, (unsigned long)*out_sz );
+        return TRUE;
+    }
+
+    hit = pri_cat_lookup_base( cat, suffix );
+    if (hit >= 0)
+    {
+        *out_ptr = cat->entries[hit].data;
+        *out_sz = cat->entries[hit].size;
+        if (out_resolved && out_resolved_sz)
+            snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[hit].path );
+        TRACE( "Resolved PRI XBF '%s' (suffix '%s') -> %p (%lu bytes)\n",
+               cat->entries[hit].path, suffix, *out_ptr, (unsigned long)*out_sz );
         return TRUE;
     }
     return FALSE;
@@ -1481,6 +1774,7 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
     {
         if (vt == 0x01 || vt == 0x02) el->nav_is_pane_open = (vt == 0x02);
         else if (sval && sval[0]) el->nav_is_pane_open = !wcsicmp( sval, L"True" );
+        uwp_nav_track_open_state( el );
     }
     else if (!wcscmp( prop_name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
     {
@@ -2275,6 +2569,7 @@ void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf
         {
             if (vt == 0x01 || vt == 0x02) el->nav_is_pane_open = (vt == 0x02);
             else if (sval && sval[0]) el->nav_is_pane_open = !wcsicmp( sval, L"True" );
+            uwp_nav_track_open_state( el );
         }
         else if (!wcscmp( pi->name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
         {

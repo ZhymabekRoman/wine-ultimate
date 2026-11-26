@@ -1837,7 +1837,11 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
     }
     if (!el) return FALSE;
 
-    if (inst) el->provider_inst = (IInspectable *)inst;
+    if (inst)
+    {
+        el->provider_inst = (IInspectable *)inst;
+        uwp_elem_register_alias( el, inst );
+    }
     lstrcpynW( el->class_name, full_name, ARRAY_SIZE(el->class_name) );
     uwp_elem_sync_class_flags( el );
     if (!el->children_coll && !el->content)

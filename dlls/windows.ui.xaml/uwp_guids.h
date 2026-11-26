@@ -258,7 +258,7 @@ extern const GUID IID_IToggleButtonOverrides_UWP;
 extern const GUID IID_IToggleButtonStatics_UWP;
 extern const GUID IID_IToggleButton_UWP;
 extern const GUID IID_IToggleMenuFlyoutItem_UWP;
-extern const GUID IID_IUIE_Extra[107];
+extern const GUID IID_IUIE_Extra[105];
 extern const GUID IID_IUIElement10_UWP;
 extern const GUID IID_IUIElement2_UWP;
 extern const GUID IID_IUIElement3_UWP;

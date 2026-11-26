@@ -42,6 +42,9 @@ struct uwp_element *g_all_uwp_elems_head = NULL;
 int g_all_uwp_elem_cnt = 0;
 SRWLOCK g_all_uwp_elems_lock = SRWLOCK_INIT;
 BOOL g_layout_dirty = TRUE;
+BOOL g_paint_dirty = TRUE;
+UINT32 g_layout_gen = 1;
+struct uwp_element *g_open_overlay_nav = NULL;
 struct uwp_element *g_captured_elem = NULL;
 struct uwp_element *g_hovered_elem = NULL;
 /* Last PAGE-kind element created (set by uwp_element_create). Navigate uses it
@@ -701,6 +704,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
             else if (!wcscmp( dpname, L"IsPaneOpen" ) && val && uwp_unbox_bool( val, &bv ))
             {
                 impl->nav_is_pane_open = (bv != 0);
+                uwp_nav_track_open_state( impl );
                 if (!impl->nav_is_pane_open) impl->nav_scroll_y = 0;
                 TRACE( "NavView(%s) SetValue IsPaneOpen=%d\n", debugstr_w(impl->name), (int)impl->nav_is_pane_open );
                 g_layout_dirty = TRUE;

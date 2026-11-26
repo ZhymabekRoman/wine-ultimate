@@ -136,6 +136,8 @@ struct pri_index
     WORD *qset_first, *qset_n, qset_count;   /* qualifier set -> idx_tbl range */
     WORD *dec_first, *dec_n, dec_count;      /* decision -> idx_tbl range (qset indices) */
     WORD *idx_tbl;
+    UINT32 *name_hash;                       /* open-addressed case-folded fullname -> item_idx + 1 */
+    UINT32 name_hash_mask;
 };
 
 /* ------------------------------------------------------------------ */
@@ -615,6 +617,47 @@ fail:
     return NULL;
 }
 
+static UINT32 pri_hash_wstr_ci( const WCHAR *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        WCHAR c = *s;
+        if (c >= L'A' && c <= L'Z') c += 32;
+        h ^= (UINT32)c;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void pri_build_name_hash( pri_index *idx )
+{
+    UINT32 cap = 64, i, mask;
+    UINT32 *tbl;
+
+    if (!idx || !idx->item_count) return;
+    while (cap < idx->item_count * 2) cap *= 2;
+    tbl = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, cap * sizeof(*tbl) );
+    if (!tbl) return;
+    mask = cap - 1;
+    for (i = 0; i < idx->item_count; i++)
+    {
+        const WCHAR *name = idx->items[i] ? idx->items[i]->fullname : NULL;
+        UINT32 slot;
+        if (!name) continue;
+        slot = pri_hash_wstr_ci( name ) & mask;
+        while (tbl[slot])
+        {
+            if (!wcsicmp( idx->items[tbl[slot] - 1]->fullname, name ))
+                break; /* first match wins */
+            slot = (slot + 1) & mask;
+        }
+        if (!tbl[slot]) tbl[slot] = i + 1;
+    }
+    idx->name_hash = tbl;
+    idx->name_hash_mask = mask;
+}
+
 pri_index *pri_load( const WCHAR *path )
 {
     pri_index *idx;
@@ -642,6 +685,7 @@ pri_index *pri_load( const WCHAR *path )
     else if (!parse_resmap( idx )) WARN( "parse_resmap failed\n" );
     else
     {
+        pri_build_name_hash( idx );
         TRACE( "loaded: %u sections, %u items, %u tops, %u candidates\n",
                idx->sec_count, idx->item_count, idx->top_count, idx->cand_count );
         return idx;
@@ -680,6 +724,7 @@ void pri_release( pri_index *index )
     HeapFree( GetProcessHeap(), 0, index->qset_first );
     HeapFree( GetProcessHeap(), 0, index->qset_n );
     HeapFree( GetProcessHeap(), 0, index->idx_tbl );
+    HeapFree( GetProcessHeap(), 0, index->name_hash );
     HeapFree( GetProcessHeap(), 0, index->secs );
     if (index->map) UnmapViewOfFile( index->map );
     if (index->mapping) CloseHandle( index->mapping );
@@ -901,6 +946,19 @@ static WORD find_item_by_name( pri_index *idx, const WCHAR *key )
 {
     UINT32 i;
 
+    if (idx->name_hash)
+    {
+        UINT32 mask = idx->name_hash_mask;
+        UINT32 slot = pri_hash_wstr_ci( key ) & mask;
+        UINT32 v;
+        while ((v = idx->name_hash[slot]) != 0)
+        {
+            if (!wcsicmp( idx->items[v - 1]->fullname, key ))
+                return (WORD)(v - 1);
+            slot = (slot + 1) & mask;
+        }
+        return 0xffff;
+    }
     for (i = 0; i < idx->item_count; i++)
         if (!wcsicmp( idx->items[i]->fullname, key )) return (WORD)i;
     return 0xffff;

@@ -25,12 +25,16 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-#define MAX_GPU_INSTANCES 4096
-#define ATLAS_SIZE        2048
-#define ATLAS_HASH_SIZE   2048
-#define FONT_CACHE_SIZE   64
-#define SCRATCH_MAX_W     2560
-#define SCRATCH_MAX_H     1024
+#define MAX_GPU_INSTANCES   4096
+#define ATLAS_SIZE          4096
+#define ATLAS_TEXT_Y_END    1536
+#define ATLAS_IMG_Y_START   1536
+#define ATLAS_IMG_Y_END     4096
+#define ATLAS_HASH_SIZE     2048
+#define ATLAS_IMG_HASH_SIZE 1024
+#define FONT_CACHE_SIZE     64
+#define SCRATCH_MAX_W       2560
+#define SCRATCH_MAX_H       1024
 
 struct xaml_gpu_instance
 {
@@ -65,6 +69,18 @@ struct atlas_entry
     UINT box_h;
     UINT frame_seq;
     WCHAR text[512];
+    float uv[4];
+};
+
+struct atlas_img_entry
+{
+    BOOL occupied;
+    UINT64 img_key;
+    UINT box_x;
+    UINT box_y;
+    UINT box_w;
+    UINT box_h;
+    UINT frame_seq;
     float uv[4];
 };
 
@@ -103,10 +119,15 @@ static struct
     UINT rtv_width;
     UINT rtv_height;
 
-    UINT shelf_x;
-    UINT shelf_y;
-    UINT shelf_h;
+    UINT text_shelf_x;
+    UINT text_shelf_y;
+    UINT text_shelf_h;
+    UINT img_shelf_x;
+    UINT img_shelf_y;
+    UINT img_shelf_h;
+    UINT atlas_resets;
     struct atlas_entry hash_table[ATLAS_HASH_SIZE];
+    struct atlas_img_entry img_hash_table[ATLAS_IMG_HASH_SIZE];
 
     HDC scratch_dc;
     HBITMAP scratch_bmp;
@@ -348,6 +369,14 @@ void xaml_gpu_shutdown( void )
             g_gpu.fonts[i].hfont = NULL;
         }
     }
+    g_gpu.text_shelf_x = 0;
+    g_gpu.text_shelf_y = 0;
+    g_gpu.text_shelf_h = 0;
+    g_gpu.img_shelf_x = 0;
+    g_gpu.img_shelf_y = ATLAS_IMG_Y_START;
+    g_gpu.img_shelf_h = 0;
+    memset( g_gpu.hash_table, 0, sizeof(g_gpu.hash_table) );
+    memset( g_gpu.img_hash_table, 0, sizeof(g_gpu.img_hash_table) );
     g_gpu.dev = NULL;
     g_gpu.initialized = FALSE;
     g_gpu.init_failed = FALSE;
@@ -528,8 +557,9 @@ static BOOL xaml_gpu_init( ID3D11Device *dev )
         return FALSE;
     }
 
+    g_gpu.img_shelf_y = ATLAS_IMG_Y_START;
     g_gpu.initialized = TRUE;
-    TRACE( "xaml_gpu_init: initialized SDF + %ux%u atlas renderer\n", ATLAS_SIZE, ATLAS_SIZE );
+    TRACE( "xaml_gpu_init: initialized SDF + %ux%u split text/image atlas renderer\n", ATLAS_SIZE, ATLAS_SIZE );
     return TRUE;
 }
 
@@ -606,34 +636,72 @@ BOOL xaml_gpu_font_has_glyphs( const WCHAR *font_family, const WCHAR *text )
 
 static BOOL xaml_gpu_draw_batch( ID3D11DeviceContext *ctx );
 
-static BOOL atlas_alloc_rect( ID3D11DeviceContext *ctx, UINT w, UINT h, UINT *out_x, UINT *out_y )
+static BOOL atlas_alloc_text_rect( ID3D11DeviceContext *ctx, UINT w, UINT h, UINT *out_x, UINT *out_y, BOOL *was_reset )
 {
-    if (w == 0 || h == 0 || w + 1 > ATLAS_SIZE || h + 1 > ATLAS_SIZE)
+    if (was_reset) *was_reset = FALSE;
+    if (w == 0 || h == 0 || w + 1 > ATLAS_SIZE || h + 1 > ATLAS_TEXT_Y_END)
         return FALSE;
-    if (g_gpu.shelf_x + w + 1 > ATLAS_SIZE)
+    if (g_gpu.text_shelf_x + w + 1 > ATLAS_SIZE)
     {
-        g_gpu.shelf_y += g_gpu.shelf_h + 1;
-        g_gpu.shelf_x = 0;
-        g_gpu.shelf_h = 0;
+        g_gpu.text_shelf_y += g_gpu.text_shelf_h + 1;
+        g_gpu.text_shelf_x = 0;
+        g_gpu.text_shelf_h = 0;
     }
-    if (g_gpu.shelf_y + h + 1 > ATLAS_SIZE)
+    if (g_gpu.text_shelf_y + h + 1 > ATLAS_TEXT_Y_END)
     {
-        /* Flush queued quads before overwriting atlas coordinates mid-frame */
         if (ctx && g_gpu.instance_count > 0)
         {
             xaml_gpu_draw_batch( ctx );
             g_gpu.instance_count = 0;
         }
-        /* Atlas full: reset shelf allocator and hash table */
-        g_gpu.shelf_x = 0;
-        g_gpu.shelf_y = 0;
-        g_gpu.shelf_h = 0;
+        g_gpu.text_shelf_x = 0;
+        g_gpu.text_shelf_y = 0;
+        g_gpu.text_shelf_h = 0;
+        g_gpu.atlas_resets++;
         memset( g_gpu.hash_table, 0, sizeof(g_gpu.hash_table) );
+        if (was_reset) *was_reset = TRUE;
+        TRACE( "atlas_alloc_text_rect: text region reset #%u\n", g_gpu.atlas_resets );
     }
-    *out_x = g_gpu.shelf_x;
-    *out_y = g_gpu.shelf_y;
-    g_gpu.shelf_x += w + 1;
-    if (h > g_gpu.shelf_h) g_gpu.shelf_h = h;
+    *out_x = g_gpu.text_shelf_x;
+    *out_y = g_gpu.text_shelf_y;
+    g_gpu.text_shelf_x += w + 1;
+    if (h > g_gpu.text_shelf_h) g_gpu.text_shelf_h = h;
+    return TRUE;
+}
+
+static BOOL atlas_alloc_img_rect( ID3D11DeviceContext *ctx, UINT w, UINT h, UINT *out_x, UINT *out_y, BOOL *was_reset )
+{
+    UINT img_region_h = ATLAS_IMG_Y_END - ATLAS_IMG_Y_START;
+    if (was_reset) *was_reset = FALSE;
+    if (w == 0 || h == 0 || w + 1 > ATLAS_SIZE || h + 1 > img_region_h)
+        return FALSE;
+    if (g_gpu.img_shelf_y < ATLAS_IMG_Y_START)
+        g_gpu.img_shelf_y = ATLAS_IMG_Y_START;
+    if (g_gpu.img_shelf_x + w + 1 > ATLAS_SIZE)
+    {
+        g_gpu.img_shelf_y += g_gpu.img_shelf_h + 1;
+        g_gpu.img_shelf_x = 0;
+        g_gpu.img_shelf_h = 0;
+    }
+    if (g_gpu.img_shelf_y + h + 1 > ATLAS_IMG_Y_END)
+    {
+        if (ctx && g_gpu.instance_count > 0)
+        {
+            xaml_gpu_draw_batch( ctx );
+            g_gpu.instance_count = 0;
+        }
+        g_gpu.img_shelf_x = 0;
+        g_gpu.img_shelf_y = ATLAS_IMG_Y_START;
+        g_gpu.img_shelf_h = 0;
+        g_gpu.atlas_resets++;
+        memset( g_gpu.img_hash_table, 0, sizeof(g_gpu.img_hash_table) );
+        if (was_reset) *was_reset = TRUE;
+        TRACE( "atlas_alloc_img_rect: image region reset #%u\n", g_gpu.atlas_resets );
+    }
+    *out_x = g_gpu.img_shelf_x;
+    *out_y = g_gpu.img_shelf_y;
+    g_gpu.img_shelf_x += w + 1;
+    if (h > g_gpu.img_shelf_h) g_gpu.img_shelf_h = h;
     return TRUE;
 }
 
@@ -976,6 +1044,7 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
     if (!entry->occupied || entry->is_image || entry->hash != h)
     {
         UINT ax = 0, ay = 0, y, x;
+        BOOL was_reset = FALSE;
         RECT local_rc = { 0, 0, (LONG)bw, (LONG)bh };
         const WCHAR *render_face = face;
         HFONT hf;
@@ -986,8 +1055,9 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
             render_face = L"Segoe UI";
         hf = xaml_gpu_get_font( render_face, font_height, font_weight );
 
-        if (!atlas_alloc_rect( ctx, bw, bh, &ax, &ay ))
+        if (!atlas_alloc_text_rect( ctx, bw, bh, &ax, &ay, &was_reset ))
             return;
+        if (was_reset) entry = &g_gpu.hash_table[idx];
 
         g_gpu.atlas_misses++;
         for (y = 0; y < bh; y++)
@@ -1091,39 +1161,41 @@ void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, c
                                      const float uv_crop[4], const RECT *clip_rc, float radius, float opacity )
 {
     UINT idx, probe;
-    struct atlas_entry *entry = NULL;
+    struct atlas_img_entry *entry = NULL;
     struct xaml_gpu_instance *inst;
     float clip[4];
 
     if (!g_gpu.initialized || !bgra_pixels || img_w == 0 || img_h == 0 || !dst_rc) return;
     if (g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
-    if (img_w > ATLAS_SIZE - 2 || img_h > ATLAS_SIZE - 2) return;
+    if (img_w > ATLAS_SIZE - 2 || img_h > (ATLAS_IMG_Y_END - ATLAS_IMG_Y_START) - 2) return;
     if (dst_rc->right <= dst_rc->left || dst_rc->bottom <= dst_rc->top) return;
     xaml_gpu_apply_clip( clip, clip_rc );
     if ((float)dst_rc->right <= clip[0] || (float)dst_rc->left >= clip[2] ||
         (float)dst_rc->bottom <= clip[1] || (float)dst_rc->top >= clip[3])
         return;
 
-    idx = (UINT)(img_key % ATLAS_HASH_SIZE);
+    idx = (UINT)((img_key ^ (img_key >> 16)) % ATLAS_IMG_HASH_SIZE);
     for (probe = 0; probe < 32; probe++)
     {
-        struct atlas_entry *e = &g_gpu.hash_table[(idx + probe) % ATLAS_HASH_SIZE];
+        struct atlas_img_entry *e = &g_gpu.img_hash_table[(idx + probe) % ATLAS_IMG_HASH_SIZE];
         if (!e->occupied) { entry = e; break; }
-        if (e->is_image && e->img_key == img_key && e->box_w == img_w && e->box_h == img_h)
+        if (e->img_key == img_key && e->box_w == img_w && e->box_h == img_h)
         {
             entry = e;
             g_gpu.atlas_hits++;
             break;
         }
     }
-    if (!entry) entry = &g_gpu.hash_table[idx];
+    if (!entry) entry = &g_gpu.img_hash_table[idx];
 
-    if (!entry->occupied || !entry->is_image || entry->img_key != img_key ||
+    if (!entry->occupied || entry->img_key != img_key ||
         entry->box_w != img_w || entry->box_h != img_h)
     {
         UINT ax = 0, ay = 0;
+        BOOL was_reset = FALSE;
         D3D11_BOX dst_box;
-        if (!atlas_alloc_rect( ctx, img_w, img_h, &ax, &ay )) return;
+        if (!atlas_alloc_img_rect( ctx, img_w, img_h, &ax, &ay, &was_reset )) return;
+        if (was_reset) entry = &g_gpu.img_hash_table[idx];
         g_gpu.atlas_misses++;
         dst_box.left = ax;
         dst_box.top = ay;
@@ -1134,7 +1206,6 @@ void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, c
         ID3D11DeviceContext_UpdateSubresource( ctx, (ID3D11Resource *)g_gpu.atlas_tex, 0, &dst_box,
                                                bgra_pixels, img_w * 4, 0 );
         entry->occupied = TRUE;
-        entry->is_image = TRUE;
         entry->img_key = img_key;
         entry->box_x = ax;
         entry->box_y = ay;

@@ -161,6 +161,7 @@ struct uwp_element;
 HRESULT uwp_vec_create( struct uwp_element *owner, IInspectable **out );
 BOOL uwp_is_light_theme( struct uwp_element *scope_el );
 void uwp_invalidate_window( void );
+void uwp_invalidate_paint_only( void );
 void uwp_debug_dump_root( IInspectable *root );
 void *uwp_get_app_outer( void );
 HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );

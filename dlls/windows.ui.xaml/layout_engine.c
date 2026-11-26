@@ -255,49 +255,92 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
     }
 }
 
-static BOOL uwp_has_shimmer_descendant( struct uwp_element *el, int depth )
+#define UWP_MEMO_SHIMMER_VALID   0x01
+#define UWP_MEMO_SHIMMER_VAL     0x02
+#define UWP_MEMO_SPOTLIGHT_VALID 0x04
+#define UWP_MEMO_SPOTLIGHT_VAL   0x08
+#define UWP_MEMO_SCROLL_VALID    0x10
+#define UWP_MEMO_SCROLL_VAL      0x20
+
+static BOOL uwp_has_shimmer_descendant_ex( struct uwp_element *el, int depth, BOOL *trunc )
 {
-    if (!el || depth > 8) return FALSE;
-    if (uwp_is_shimmer( el )) return TRUE;
-    if (el->content)
+    BOOL res = FALSE, child_trunc = FALSE;
+    if (!el) return FALSE;
+    if (depth > 8) { if (trunc) *trunc = TRUE; return FALSE; }
+    if (el->content_flags_gen == g_layout_gen && (el->cached_content_flags & UWP_MEMO_SHIMMER_VALID))
+        return (el->cached_content_flags & UWP_MEMO_SHIMMER_VAL) != 0;
+    if (uwp_is_shimmer( el ))
+        res = TRUE;
+    if (!res && el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el && uwp_has_shimmer_descendant( ch, depth + 1 )) return TRUE;
+        if (ch && ch != el && uwp_has_shimmer_descendant_ex( ch, depth + 1, &child_trunc )) res = TRUE;
     }
-    if (el->children_coll)
+    if (!res && el->children_coll)
     {
         struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int i;
         for (i = 0; i < v->count; i++)
         {
             struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
-            if (ch && ch != el && uwp_has_shimmer_descendant( ch, depth + 1 )) return TRUE;
+            if (ch && ch != el && uwp_has_shimmer_descendant_ex( ch, depth + 1, &child_trunc )) { res = TRUE; break; }
         }
     }
-    return FALSE;
+    if (res || !child_trunc)
+    {
+        if (el->content_flags_gen != g_layout_gen)
+        {
+            el->content_flags_gen = g_layout_gen;
+            el->cached_content_flags = 0;
+        }
+        el->cached_content_flags |= UWP_MEMO_SHIMMER_VALID | (res ? UWP_MEMO_SHIMMER_VAL : 0);
+    }
+    else if (trunc)
+        *trunc = TRUE;
+    return res;
+}
+
+static BOOL uwp_has_spotlight_descendant_ex( struct uwp_element *el, int depth, BOOL *trunc )
+{
+    BOOL res = FALSE, child_trunc = FALSE;
+    if (!el || el->visibility != 0) return FALSE;
+    if (depth > 10) { if (trunc) *trunc = TRUE; return FALSE; }
+    if (el->content_flags_gen == g_layout_gen && (el->cached_content_flags & UWP_MEMO_SPOTLIGHT_VALID))
+        return (el->cached_content_flags & UWP_MEMO_SPOTLIGHT_VAL) != 0;
+    if (el->class_flags & UWP_CF_SPOTLIGHT_DECOR)
+        res = TRUE;
+    if (!res && el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_has_spotlight_descendant_ex( ch, depth + 1, &child_trunc )) res = TRUE;
+    }
+    if (!res && el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int i;
+        for (i = 0; i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el && uwp_has_spotlight_descendant_ex( ch, depth + 1, &child_trunc )) { res = TRUE; break; }
+        }
+    }
+    if (res || !child_trunc)
+    {
+        if (el->content_flags_gen != g_layout_gen)
+        {
+            el->content_flags_gen = g_layout_gen;
+            el->cached_content_flags = 0;
+        }
+        el->cached_content_flags |= UWP_MEMO_SPOTLIGHT_VALID | (res ? UWP_MEMO_SPOTLIGHT_VAL : 0);
+    }
+    else if (trunc)
+        *trunc = TRUE;
+    return res;
 }
 
 static BOOL uwp_has_spotlight_descendant( struct uwp_element *el, int depth )
 {
-    if (!el || el->visibility != 0 || depth > 10) return FALSE;
-    if (el->class_flags & UWP_CF_SPOTLIGHT_DECOR)
-        return TRUE;
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el && uwp_has_spotlight_descendant( ch, depth + 1 )) return TRUE;
-    }
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int i;
-        for (i = 0; i < v->count; i++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
-            if (ch && ch != el && uwp_has_spotlight_descendant( ch, depth + 1 )) return TRUE;
-        }
-    }
-    return FALSE;
+    return uwp_has_spotlight_descendant_ex( el, depth, NULL );
 }
 
 static BOOL uwp_is_home_title_panel( struct uwp_element *el, int depth )
@@ -317,43 +360,68 @@ static BOOL uwp_is_home_title_panel( struct uwp_element *el, int depth )
     return FALSE;
 }
 
-static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
+static BOOL uwp_scroll_child_has_content_ex( struct uwp_element *el, int depth, BOOL *trunc )
 {
-    if (!el || el->visibility != 0 || depth > 14) return FALSE;
-    if (uwp_has_spotlight_descendant( el, 0 )) return TRUE;
-    if (uwp_has_shimmer_descendant( el, 0 ) && el->kind == UWP_KIND_BORDER) return FALSE;
-    if (uwp_has_text( el ) || el->inlines_coll || el->img_pixels || el->img_loaded) return TRUE;
-    if (uwp_is_items_repeater( el ))
+    BOOL res = FALSE, child_trunc = FALSE;
+    if (!el || el->visibility != 0) return FALSE;
+    if (depth > 14) { if (trunc) *trunc = TRUE; return FALSE; }
+    if (el->content_flags_gen == g_layout_gen && (el->cached_content_flags & UWP_MEMO_SCROLL_VALID))
+        return (el->cached_content_flags & UWP_MEMO_SCROLL_VAL) != 0;
+    if (uwp_has_spotlight_descendant_ex( el, 0, &child_trunc ))
+        res = TRUE;
+    else if (uwp_has_shimmer_descendant_ex( el, 0, &child_trunc ) && el->kind == UWP_KIND_BORDER)
+        res = FALSE;
+    else if (uwp_has_text( el ) || el->inlines_coll || el->img_pixels || el->img_loaded)
+        res = TRUE;
+    else if (uwp_is_items_repeater( el ))
     {
         int di;
         if (el->children_coll)
         {
             struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-            if (v->count > 0) return TRUE;
+            if (v->count > 0) res = TRUE;
         }
-        for (di = 0; di < el->dp_cnt; di++)
+        for (di = 0; !res && di < el->dp_cnt; di++)
         {
             if (el->dp_store[di].value && uwp_winrt_vec_count( el->dp_store[di].value ) > 0)
-                return TRUE;
+                res = TRUE;
         }
-        return FALSE;
     }
-    if (el->content)
+    else
     {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el && uwp_scroll_child_has_content( ch, depth + 1 )) return TRUE;
-    }
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int i;
-        for (i = 0; i < v->count; i++)
+        if (el->content)
         {
-            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
-            if (ch && ch != el && uwp_scroll_child_has_content( ch, depth + 1 )) return TRUE;
+            struct uwp_element *ch = uwp_elem_from_any( el->content );
+            if (ch && ch != el && uwp_scroll_child_has_content_ex( ch, depth + 1, &child_trunc )) res = TRUE;
+        }
+        if (!res && el->children_coll)
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int i;
+            for (i = 0; i < v->count; i++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+                if (ch && ch != el && uwp_scroll_child_has_content_ex( ch, depth + 1, &child_trunc )) { res = TRUE; break; }
+            }
         }
     }
-    return FALSE;
+    if (res || !child_trunc)
+    {
+        if (el->content_flags_gen != g_layout_gen)
+        {
+            el->content_flags_gen = g_layout_gen;
+            el->cached_content_flags = 0;
+        }
+        el->cached_content_flags |= UWP_MEMO_SCROLL_VALID | (res ? UWP_MEMO_SCROLL_VAL : 0);
+    }
+    else if (trunc)
+        *trunc = TRUE;
+    return res;
+}
+
+static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
+{
+    return uwp_scroll_child_has_content_ex( el, depth, NULL );
 }
 
 static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc );
@@ -363,6 +431,10 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
 {
     static int depth = 0;
     if (!el || depth >= 48) return;
+    if (depth == 0)
+    {
+        if (++g_layout_gen == 0) g_layout_gen = 1;
+    }
     depth++;
     uwp_arrange_element_inner( el, rc );
     depth--;
@@ -424,7 +496,9 @@ static inline double uwp_clamp_top_margin( double mt )
     return max( 0.0, mt );
 }
 
-static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
+static double uwp_estimate_auto_height( struct uwp_element *el, int depth );
+
+static double uwp_estimate_auto_height_uncached( struct uwp_element *el, int depth )
 {
     double best = 0.0;
     if (!el || depth > 24 || el->visibility != 0) return 0.0;
@@ -630,6 +704,28 @@ static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
     return best;
 }
 
+static BOOL g_auto_h_trunc = FALSE;
+
+static double uwp_estimate_auto_height( struct uwp_element *el, int depth )
+{
+    double res;
+    BOOL saved_trunc;
+    if (!el || el->visibility != 0) return 0.0;
+    if (depth > 24) { g_auto_h_trunc = TRUE; return 0.0; }
+    if (el->auto_h_gen == g_layout_gen)
+        return el->cached_auto_h;
+    saved_trunc = g_auto_h_trunc;
+    g_auto_h_trunc = FALSE;
+    res = uwp_estimate_auto_height_uncached( el, depth );
+    if (!g_auto_h_trunc)
+    {
+        el->cached_auto_h = res;
+        el->auto_h_gen = g_layout_gen;
+    }
+    g_auto_h_trunc = saved_trunc || g_auto_h_trunc;
+    return res;
+}
+
 static BOOL uwp_apply_margins_clamped( const struct uwp_element *el, RECT *rc )
 {
     int orig_h = rc->bottom - rc->top;
@@ -710,7 +806,9 @@ static void uwp_clear_bounds_tree( struct uwp_element *el )
     }
 }
 
-static double uwp_measure_natural_width( const struct uwp_element *el, int depth )
+static double uwp_measure_natural_width( const struct uwp_element *el, int depth );
+
+static double uwp_measure_natural_width_uncached( const struct uwp_element *el, int depth )
 {
     double best = 0.0;
     if (!el || depth > 10 || el->visibility != 0) return 0.0;
@@ -905,6 +1003,29 @@ static double uwp_measure_natural_width( const struct uwp_element *el, int depth
     return best;
 }
 
+static BOOL g_nat_w_trunc = FALSE;
+
+static double uwp_measure_natural_width( const struct uwp_element *el, int depth )
+{
+    struct uwp_element *mel = (struct uwp_element *)el;
+    double res;
+    BOOL saved_trunc;
+    if (!el || el->visibility != 0) return 0.0;
+    if (depth > 10) { g_nat_w_trunc = TRUE; return 0.0; }
+    if (mel->nat_w_gen == g_layout_gen)
+        return mel->cached_nat_w;
+    saved_trunc = g_nat_w_trunc;
+    g_nat_w_trunc = FALSE;
+    res = uwp_measure_natural_width_uncached( el, depth );
+    if (!g_nat_w_trunc)
+    {
+        mel->cached_nat_w = res;
+        mel->nat_w_gen = g_layout_gen;
+    }
+    g_nat_w_trunc = saved_trunc || g_nat_w_trunc;
+    return res;
+}
+
 static BOOL uwp_is_horiz_listview( const struct uwp_element *el )
 {
     if (!el) return FALSE;
@@ -955,7 +1076,7 @@ static BOOL uwp_has_horiz_listview_child( const struct uwp_element *el, int dept
     return FALSE;
 }
 
-static double uwp_measure_natural_height( const struct uwp_element *el, int avail_w, int depth )
+static double uwp_measure_natural_height_uncached( const struct uwp_element *el, int avail_w, int depth )
 {
     double best = 0.0;
     if (!el || depth > 28 || el->visibility != 0) return 0.0;
@@ -1252,6 +1373,30 @@ static double uwp_measure_natural_height( const struct uwp_element *el, int avai
     if (el->max_height > 0.0 && !isnan( el->max_height ) && best > el->max_height)
         best = el->max_height;
     return best;
+}
+
+static BOOL g_nat_h_trunc = FALSE;
+
+static double uwp_measure_natural_height( const struct uwp_element *el, int avail_w, int depth )
+{
+    struct uwp_element *mel = (struct uwp_element *)el;
+    double res;
+    BOOL saved_trunc;
+    if (!el || el->visibility != 0) return 0.0;
+    if (depth > 28) { g_nat_h_trunc = TRUE; return 0.0; }
+    if (mel->nat_h_gen == g_layout_gen && mel->cached_nat_h_avail_w == avail_w)
+        return mel->cached_nat_h;
+    saved_trunc = g_nat_h_trunc;
+    g_nat_h_trunc = FALSE;
+    res = uwp_measure_natural_height_uncached( el, avail_w, depth );
+    if (!g_nat_h_trunc)
+    {
+        mel->cached_nat_h = res;
+        mel->cached_nat_h_avail_w = avail_w;
+        mel->nat_h_gen = g_layout_gen;
+    }
+    g_nat_h_trunc = saved_trunc || g_nat_h_trunc;
+    return res;
 }
 
 static int uwp_align_axis( LONG *start, LONG *end, double explicit_size, int align )
@@ -2129,7 +2274,6 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
                                             InterlockedExchange( &ch->img_loading, 0 );
                                             if (ch->img_pixels)
                                             {
-                                                free( ch->img_pixels );
                                                 ch->img_pixels = NULL;
                                                 ch->img_w = 0;
                                                 ch->img_h = 0;

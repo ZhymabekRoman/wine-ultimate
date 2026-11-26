@@ -94,7 +94,7 @@ static struct uwp_element *uwp_resolve_spotlight_card( struct uwp_element *spot_
 static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
+    if (el->has_bounds && el->kind != UWP_KIND_POPUP &&
         (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
         return NULL;
 
@@ -523,7 +523,7 @@ static BOOL g_cb_popup_down = FALSE;
 static struct uwp_element *uwp_hit_test_combobox( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
+    if (el->has_bounds && el->kind != UWP_KIND_POPUP &&
         (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
         return NULL;
     if (el->children_coll)
@@ -550,27 +550,11 @@ static struct uwp_element *uwp_hit_test_combobox( struct uwp_element *el, int x,
     return NULL;
 }
 
-static struct uwp_element *uwp_find_open_overlay_nav( struct uwp_element *el, int depth )
+static struct uwp_element *uwp_get_open_overlay_nav( void )
 {
-    if (!el || depth > 12 || el->visibility != 0) return NULL;
-    if (uwp_nav_is_overlay_open( el )) return el;
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *r = (ch && ch != el) ? uwp_find_open_overlay_nav( ch, depth + 1 ) : NULL;
-            if (r) return r;
-        }
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *r = (ch && ch != el) ? uwp_find_open_overlay_nav( ch, depth + 1 ) : NULL;
-        if (r) return r;
-    }
+    if (g_open_overlay_nav && g_open_overlay_nav->visibility == 0 &&
+        uwp_nav_is_overlay_open( g_open_overlay_nav ))
+        return g_open_overlay_nav;
     return NULL;
 }
 
@@ -986,8 +970,8 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
                 if (new_hov != asb->hovered_dropdown_idx)
                 {
                     asb->hovered_dropdown_idx = new_hov;
+                    uwp_invalidate_paint_only();
                     if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    uwp_invalidate_window();
                     handled = TRUE;
                 }
             }
@@ -1028,7 +1012,7 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
 
     if (root_el)
     {
-        struct uwp_element *nav = uwp_find_open_overlay_nav( root_el, 0 );
+        struct uwp_element *nav = uwp_get_open_overlay_nav();
         if (nav && nav->nav_pane_bounds.right > nav->nav_pane_bounds.left)
         {
             RECT prc = nav->nav_pane_bounds;
@@ -1210,8 +1194,8 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
                 if (hwnd) ClientToScreen( hwnd, &spt );
                 uwp_show_flyout_popup( hit, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
             }
+            uwp_invalidate_paint_only();
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
             return TRUE;
         }
         return FALSE;
@@ -1303,7 +1287,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             return TRUE;
         }
         {
-            struct uwp_element *nav = uwp_find_open_overlay_nav( root_el, 0 );
+            struct uwp_element *nav = uwp_get_open_overlay_nav();
             if (nav)
             {
                 struct uwp_element *nav_item = uwp_hit_test_nav_item( nav, x, y );
@@ -1449,12 +1433,29 @@ BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y )
     return fired;
 }
 
+static BOOL uwp_elem_has_ctrl_overrides( struct uwp_element *el )
+{
+    void *ctrl_ovr = NULL;
+    if (!el || !el->outer) return FALSE;
+    if (el->has_ctrl_overrides != 0)
+        return el->has_ctrl_overrides > 0;
+    if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IControlOverrides_UWP, &ctrl_ovr )) && ctrl_ovr)
+    {
+        BOOL is_ext = !((char *)ctrl_ovr >= (char *)el && (char *)ctrl_ovr < (char *)(el + 1));
+        IUnknown_Release( (IUnknown *)ctrl_ovr );
+        el->has_ctrl_overrides = is_ext ? 1 : -1;
+        return is_ext;
+    }
+    el->has_ctrl_overrides = -1;
+    return FALSE;
+}
+
 BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
                                       const struct xaml_pointer_info *info, BOOL bubble )
 {
     struct uwp_pointer_routed_args *args;
     struct uwp_element *cur;
-    BOOL fired = FALSE;
+    BOOL fired = FALSE, any_listener = FALSE;
     int ovr_slot = -1;
 
     if (!target) return FALSE;
@@ -1470,6 +1471,18 @@ BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_eve
     default:                    ovr_slot = -1; break;
     }
 
+    for (cur = target; cur; cur = bubble ? cur->parent : NULL)
+    {
+        struct xaml_event_registry *reg = uwp_elem_ptr_registry( cur, kind );
+        if ((reg && reg->next_token > 0) ||
+            (ovr_slot >= 0 && cur->outer && uwp_elem_has_ctrl_overrides( cur )))
+        {
+            any_listener = TRUE;
+            break;
+        }
+    }
+    if (!any_listener) return FALSE;
+
     args = uwp_pointer_routed_args_create( info, target->outer ? target->outer : &target->IInspectable_iface );
     if (!args) return FALSE;
 
@@ -1477,10 +1490,10 @@ BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_eve
     {
         struct xaml_event_registry *reg = uwp_elem_ptr_registry( cur, kind );
         void **handlers = NULL;
-        unsigned int i, count = reg ? xaml_event_registry_snapshot_alloc( reg, &handlers ) : 0;
+        unsigned int i, count = (reg && reg->next_token > 0) ? xaml_event_registry_snapshot_alloc( reg, &handlers ) : 0;
         IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
 
-        if (ovr_slot >= 0 && cur->outer)
+        if (ovr_slot >= 0 && cur->outer && uwp_elem_has_ctrl_overrides( cur ))
         {
             void *ctrl_ovr = NULL;
             if (SUCCEEDED(IInspectable_QueryInterface( cur->outer, &IID_IControlOverrides_UWP, &ctrl_ovr )) && ctrl_ovr)

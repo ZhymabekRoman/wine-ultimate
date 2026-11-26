@@ -98,6 +98,15 @@ void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
 
 struct uwp_element *g_open_combobox = NULL;
 
+void uwp_nav_track_open_state( struct uwp_element *nav )
+{
+    if (!nav) return;
+    if (nav->nav_is_pane_open && uwp_is_nav_view( nav ))
+        g_open_overlay_nav = nav;
+    else if (g_open_overlay_nav == nav)
+        g_open_overlay_nav = NULL;
+}
+
 void uwp_nav_set_pane_open( struct uwp_element *nav, BOOL open )
 {
     void *is_open_dp = NULL;
@@ -105,6 +114,7 @@ void uwp_nav_set_pane_open( struct uwp_element *nav, BOOL open )
     if (!nav) return;
     if (nav->nav_is_pane_open == open) return;
     nav->nav_is_pane_open = open;
+    uwp_nav_track_open_state( nav );
     if (!open) nav->nav_scroll_y = 0;
     TRACE( "uwp_nav_set_pane_open(%s) -> %d\n", debugstr_w(nav->name), (int)open );
 

@@ -251,56 +251,204 @@ void uwp_elem_append_text( struct uwp_element *el, const WCHAR *s )
     el->text_len = (UINT32)(cur_len + add_len);
 }
 
+struct uwp_ptr_slot
+{
+    void *key;
+    struct uwp_element *el;
+};
+
+struct uwp_neg_slot
+{
+    void *ptr;
+    const void *vtbl;
+    UINT32 gen;
+};
+
+#define UWP_NEG_CACHE_SIZE 512
+
+static struct uwp_ptr_slot *g_elem_ptr_map = NULL;
+static UINT32 g_elem_ptr_cap = 0;
+static UINT32 g_elem_ptr_cnt = 0;
+static ULONG_PTR g_elem_min_addr = 0;
+static ULONG_PTR g_elem_max_addr = 0;
+static struct uwp_neg_slot g_neg_ptr_cache[UWP_NEG_CACHE_SIZE];
+static UINT32 g_neg_cache_gen = 1;
+
+static struct uwp_element *uwp_elem_from_vtbl_fast( void *ptr );
+
+static inline UINT32 uwp_hash_ptr( const void *p )
+{
+    ULONG_PTR v = (ULONG_PTR)p;
+    v = (v >> 3) ^ (v >> 17);
+    return (UINT32)(v * 2654435761u);
+}
+
+static void uwp_ptr_map_grow_locked( void )
+{
+    UINT32 new_cap = g_elem_ptr_cap ? g_elem_ptr_cap * 2 : 2048;
+    struct uwp_ptr_slot *nt = calloc( new_cap, sizeof(*nt) );
+    UINT32 mask = new_cap - 1, i;
+    if (!nt) return;
+    if (g_elem_ptr_map)
+    {
+        for (i = 0; i < g_elem_ptr_cap; i++)
+        {
+            if (g_elem_ptr_map[i].key)
+            {
+                UINT32 idx = uwp_hash_ptr( g_elem_ptr_map[i].key ) & mask;
+                while (nt[idx].key) idx = (idx + 1) & mask;
+                nt[idx] = g_elem_ptr_map[i];
+            }
+        }
+        free( g_elem_ptr_map );
+    }
+    g_elem_ptr_map = nt;
+    g_elem_ptr_cap = new_cap;
+}
+
+static void uwp_ptr_map_insert_locked( void *key, struct uwp_element *el )
+{
+    UINT32 mask, idx;
+    if (!key || !el) return;
+    if (!g_elem_ptr_map || (g_elem_ptr_cnt + 1) * 100 >= g_elem_ptr_cap * 65)
+        uwp_ptr_map_grow_locked();
+    if (!g_elem_ptr_map) return;
+    mask = g_elem_ptr_cap - 1;
+    idx = uwp_hash_ptr( key ) & mask;
+    for (;;)
+    {
+        if (!g_elem_ptr_map[idx].key)
+        {
+            g_elem_ptr_map[idx].key = key;
+            g_elem_ptr_map[idx].el = el;
+            g_elem_ptr_cnt++;
+            return;
+        }
+        if (g_elem_ptr_map[idx].key == key)
+        {
+            g_elem_ptr_map[idx].el = el;
+            return;
+        }
+        idx = (idx + 1) & mask;
+    }
+}
+
+static struct uwp_element *uwp_ptr_map_lookup_locked( const void *ptr )
+{
+    UINT32 mask, idx;
+    if (!g_elem_ptr_map || !g_elem_ptr_cap) return NULL;
+    mask = g_elem_ptr_cap - 1;
+    idx = uwp_hash_ptr( ptr ) & mask;
+    for (;;)
+    {
+        void *k = g_elem_ptr_map[idx].key;
+        if (!k) return NULL;
+        if (k == ptr)
+        {
+            struct uwp_element *el = g_elem_ptr_map[idx].el;
+            if (el && ((void *)ptr == (void *)el->outer ||
+                       (void *)ptr == (void *)el->provider_inst ||
+                       ((const char *)ptr >= (const char *)el && (const char *)ptr < (const char *)(el + 1))))
+                return el;
+            return NULL;
+        }
+        idx = (idx + 1) & mask;
+    }
+}
+
+void uwp_elem_register_alias( struct uwp_element *el, void *alias_ptr )
+{
+    if (!el || !alias_ptr) return;
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    uwp_ptr_map_insert_locked( alias_ptr, el );
+    if (++g_neg_cache_gen == 0) g_neg_cache_gen = 1;
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+}
+
 static void register_uwp_elem( struct uwp_element *el )
 {
+    ULONG_PTR lo = (ULONG_PTR)el;
+    ULONG_PTR hi = (ULONG_PTR)(el + 1);
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     el->next_reg = g_all_uwp_elems_head;
     g_all_uwp_elems_head = el;
     g_all_uwp_elem_cnt++;
+    if (!g_elem_min_addr || lo < g_elem_min_addr) g_elem_min_addr = lo;
+    if (hi > g_elem_max_addr) g_elem_max_addr = hi;
+    uwp_ptr_map_insert_locked( el, el );
+    if (el->outer) uwp_ptr_map_insert_locked( el->outer, el );
+    if (el->provider_inst) uwp_ptr_map_insert_locked( el->provider_inst, el );
+    if (++g_neg_cache_gen == 0) g_neg_cache_gen = 1;
     ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
 }
 
 static const GUID IID_UWP_ELEM_SELF =
     { 0x7a1b2c3d, 0x4e5f, 0x4678, { 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x79 } };
 
+static struct uwp_element *uwp_elem_lookup_direct( void *ptr )
+{
+    struct uwp_element *el;
+    if (!ptr || (ULONG_PTR)ptr < 0x10000) return NULL;
+    el = uwp_elem_from_vtbl_fast( ptr );
+    if (el) return el;
+    AcquireSRWLockShared( &g_all_uwp_elems_lock );
+    el = uwp_ptr_map_lookup_locked( ptr );
+    ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+    return el;
+}
+
+static void uwp_neg_cache_store( void *ptr, const void *vtbl )
+{
+    UINT32 slot = uwp_hash_ptr( ptr ) & (UWP_NEG_CACHE_SIZE - 1);
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    g_neg_ptr_cache[slot].ptr = ptr;
+    g_neg_ptr_cache[slot].vtbl = vtbl;
+    g_neg_ptr_cache[slot].gen = g_neg_cache_gen;
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+}
+
 struct uwp_element *uwp_elem_from_any( void *ptr )
 {
     struct uwp_element *el;
+    const void *vtbl;
     void *self_iface = NULL;
     void *inner = NULL;
     if (!ptr || (ULONG_PTR)ptr < 0x10000) return NULL;
-    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-    for (el = g_all_uwp_elems_head; el; el = el->next_reg)
+
+    /* Tier 1: zero-lock O(1) vtable->offset lookup for embedded COM sub-interfaces */
+    el = uwp_elem_from_vtbl_fast( ptr );
+    if (el) return el;
+
+    /* Tier 2: shared-lock O(1) hash lookup for outer, provider_inst & base pointer */
+    AcquireSRWLockShared( &g_all_uwp_elems_lock );
+    el = uwp_ptr_map_lookup_locked( ptr );
+    if (el)
     {
-        if ((void *)ptr == (void *)el->outer ||
-            (void *)ptr == (void *)el->provider_inst ||
-            ((char *)ptr >= (char *)el && (char *)ptr < (char *)(el + 1)))
+        ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+        return el;
+    }
+    vtbl = *(const void **)ptr;
+    {
+        UINT32 slot = uwp_hash_ptr( ptr ) & (UWP_NEG_CACHE_SIZE - 1);
+        if (g_neg_ptr_cache[slot].ptr == ptr &&
+            g_neg_ptr_cache[slot].vtbl == vtbl &&
+            g_neg_ptr_cache[slot].gen == g_neg_cache_gen)
         {
-            ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
-            return el;
+            ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+            return NULL;
         }
     }
-    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+    ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+
     /* .NET Native hands us __ComObject RCWs that answer QI from their own
      * projection table (only IUnknown): unwrap get_Inner (slot 6) /
      * get_InnerIUnknown (slot 7) to reach our CCW face, then resolve that.
      * Only when the SELF identity QI failed (i.e. ptr is a foreign RCW). */
     if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_UWP_ELEM_SELF, &self_iface )) && self_iface)
     {
-        void *probe_ptr = self_iface;
-        AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-        for (el = g_all_uwp_elems_head; el; el = el->next_reg)
-        {
-            if (probe_ptr == (void *)&el->nondelegating_iface ||
-                ((char *)probe_ptr >= (char *)el && (char *)probe_ptr < (char *)(el + 1)))
-            {
-                ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
-                IUnknown_Release( (IUnknown *)self_iface );
-                return el;
-            }
-        }
-        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+        el = uwp_elem_lookup_direct( self_iface );
         IUnknown_Release( (IUnknown *)self_iface );
+        if (el) return el;
     }
     if (ptr != uwp_get_app_outer())
     {
@@ -315,29 +463,20 @@ struct uwp_element *uwp_elem_from_any( void *ptr )
             (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IResourceDictionary_WinUI, &pv_iface )) && pv_iface))
         {
             IUnknown_Release( (IUnknown *)pv_iface );
+            uwp_neg_cache_store( ptr, vtbl );
             return NULL;
         }
         /* If ptr answers IUIElement, resolve directly via IID_UWP_ELEM_SELF or table without probing vtbl[6] */
         if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IUIElement_UWP, &ui_iface )) && ui_iface)
         {
-            if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ui_iface, &IID_UWP_ELEM_SELF, &self_iface )) && self_iface)
+            el = uwp_elem_lookup_direct( ui_iface );
+            if (!el && SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ui_iface, &IID_UWP_ELEM_SELF, &self_iface )) && self_iface)
             {
-                AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-                for (el = g_all_uwp_elems_head; el; el = el->next_reg)
-                {
-                    if (self_iface == (void *)&el->nondelegating_iface ||
-                        ((char *)self_iface >= (char *)el && (char *)self_iface < (char *)(el + 1)))
-                    {
-                        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
-                        IUnknown_Release( (IUnknown *)self_iface );
-                        IUnknown_Release( (IUnknown *)ui_iface );
-                        return el;
-                    }
-                }
-                ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+                el = uwp_elem_lookup_direct( self_iface );
                 IUnknown_Release( (IUnknown *)self_iface );
             }
             IUnknown_Release( (IUnknown *)ui_iface );
+            if (el) return el;
         }
         /* Only probe MCG __ComObject get_Inner (vtbl[6]/[7]) if GetRuntimeClassName is not implemented */
         cls_hr = E_FAIL;
@@ -353,13 +492,14 @@ struct uwp_element *uwp_elem_from_any( void *ptr )
         if (SUCCEEDED(cls_hr))
         {
             if (hcls) WindowsDeleteString( hcls );
+            uwp_neg_cache_store( ptr, vtbl );
             return NULL;
         }
         __TRY
         {
-            void **vtbl = *(void ***)ptr;
-            HRESULT (WINAPI *get_inner)(void *, void **) = (void *)vtbl[6];
-            HRESULT (WINAPI *get_inner_iu)(void *, void **) = (void *)vtbl[7];
+            void **p_vtbl = *(void ***)ptr;
+            HRESULT (WINAPI *get_inner)(void *, void **) = (void *)p_vtbl[6];
+            HRESULT (WINAPI *get_inner_iu)(void *, void **) = (void *)p_vtbl[7];
             if (get_inner && SUCCEEDED(get_inner( ptr, &cand )) && cand)
                 inner = cand;
             else if (get_inner_iu && SUCCEEDED(get_inner_iu( ptr, &cand )) && cand)
@@ -379,24 +519,16 @@ struct uwp_element *uwp_elem_from_any( void *ptr )
             if (FAILED(IUnknown_QueryInterface( (IUnknown *)inner, &IID_UWP_ELEM_SELF, &id )) || !id)
             {
                 IUnknown_Release( (IUnknown *)inner );
+                uwp_neg_cache_store( ptr, vtbl );
                 return NULL;
             }
+            el = uwp_elem_lookup_direct( id );
             IUnknown_Release( (IUnknown *)id );
-            AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-            for (el = g_all_uwp_elems_head; el; el = el->next_reg)
-            {
-                if ((void *)inner == (void *)el->outer ||
-                    (void *)inner == (void *)&el->nondelegating_iface ||
-                    ((char *)inner >= (char *)el && (char *)inner < (char *)(el + 1)))
-                {
-                    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
-                    IUnknown_Release( (IUnknown *)inner );
-                    return el;
-                }
-            }
-            TRACE( "uwp_elem_from_any: INNER-MISS ptr=%p inner=%p cnt=%d\n", ptr, inner, g_all_uwp_elem_cnt );
-            ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+            if (!el) el = uwp_elem_lookup_direct( inner );
             IUnknown_Release( (IUnknown *)inner );
+            if (el) return el;
+            TRACE( "uwp_elem_from_any: INNER-MISS ptr=%p inner=%p cnt=%d\n", ptr, inner, g_all_uwp_elem_cnt );
+            uwp_neg_cache_store( ptr, vtbl );
             return NULL;
         }
     }
@@ -405,50 +537,35 @@ struct uwp_element *uwp_elem_from_any( void *ptr )
         void *do_iface = NULL;
         if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IDependencyObject_UWP, &do_iface )) && do_iface)
         {
-            struct uwp_element *e2;
             int k;
-            el = NULL;
+            el = uwp_elem_lookup_direct( do_iface );
             /* RCW may return its own projected face; probe all our faces on it */
-            for (k = 0; k < 8; k++)
+            for (k = 0; !el && k < 4; k++)
             {
                 void *cand = NULL;
-                static const GUID *iids[8] = { &IID_IUIElement_UWP, &IID_IFrameworkElement_UWP,
+                static const GUID *iids[4] = { &IID_IUIElement_UWP, &IID_IFrameworkElement_UWP,
                     &IID_IControl_UWP, &IID_IColumnDefinition_UWP };
-                if (k >= 4) break;
                 if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)do_iface, iids[k], &cand )) && cand)
                 {
-                    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-                    for (e2 = g_all_uwp_elems_head; e2; e2 = e2->next_reg)
-                    {
-                        if ((void *)cand == (void *)e2->outer ||
-                            ((char *)cand >= (char *)e2 && (char *)cand < (char *)(e2 + 1)))
-                        { el = e2; break; }
-                    }
-                    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+                    el = uwp_elem_lookup_direct( cand );
                     IUnknown_Release( (IUnknown *)cand );
-                    if (el) break;
                 }
             }
-            if (el)
-            {
-                IUnknown_Release( (IUnknown *)do_iface );
-                return el;
-            }
-            AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-            TRACE( "uwp_elem_from_any: MISS ptr=%p do_iface=%p cnt=%d\n", ptr, do_iface, g_all_uwp_elem_cnt );
-            ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
             IUnknown_Release( (IUnknown *)do_iface );
+            if (el) return el;
+            TRACE( "uwp_elem_from_any: MISS ptr=%p do_iface=%p cnt=%d\n", ptr, do_iface, g_all_uwp_elem_cnt );
         }
     }
+    uwp_neg_cache_store( ptr, vtbl );
     return NULL;
 }
 
 HWND g_island_hwnds[16];
 int g_island_hwnd_cnt = 0;
 
-void uwp_invalidate_window( void )
+void uwp_invalidate_paint_only( void )
 {
-    g_layout_dirty = TRUE;
+    g_paint_dirty = TRUE;
     if (g_island_hwnd_cnt > 0)
     {
         int i;
@@ -469,6 +586,13 @@ void uwp_invalidate_window( void )
             InvalidateRect( top, NULL, FALSE );
         }
     }
+}
+
+void uwp_invalidate_window( void )
+{
+    g_layout_dirty = TRUE;
+    if (++g_layout_gen == 0) g_layout_gen = 1;
+    uwp_invalidate_paint_only();
 }
 
 static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REFIID iid, void **out );
@@ -655,20 +779,373 @@ HRESULT WINAPI uwp_generic_noop( void *iface, ... )
     return S_OK;
 }
 
+enum uwp_qi_guard
+{
+    QI_GUARD_NONE = 0,
+    QI_GUARD_TOGGLE_MENU_ITEM,
+    QI_GUARD_NOT_TEMPLATE_SELECTOR,
+    QI_GUARD_MENU_FLYOUT_SUB_ITEM,
+    QI_GUARD_MENU_FLYOUT_ITEM,
+    QI_GUARD_AUTOSUGGEST_ALT,
+    QI_GUARD_FRAME,
+    QI_GUARD_MEDIA_PLAYER,
+    QI_GUARD_NAV_TRANSITION,
+    QI_GUARD_FLYOUT_ALT,
+    QI_GUARD_IMAGE,
+    QI_GUARD_EASE,
+    QI_GUARD_NAVVIEW_ALT,
+    QI_GUARD_NAVVIEW_ITEM,
+    QI_GUARD_SCROLL_VIEWER,
+};
+
+#define UWP_QI_MAP_SIZE 512
+#define UWP_QI_FLAG_OCCUPIED 1
+#define UWP_QI_FLAG_PARTIAL  2
+
+struct uwp_qi_slot
+{
+    GUID iid;
+    UINT16 off;
+    UINT16 alt_off;
+    BYTE guard;
+    BYTE flags;
+};
+
+static struct uwp_qi_slot g_qi_map[UWP_QI_MAP_SIZE];
+static INIT_ONCE g_qi_map_once = INIT_ONCE_STATIC_INIT;
+
+static inline UINT32 uwp_qi_hash( UINT32 data1 )
+{
+    return (data1 * 2654435761u) >> 23; /* 9 bits -> [0..511] */
+}
+
+static void qi_map_put( const GUID *iid, size_t off, size_t alt_off, BYTE guard, BYTE extra_flags )
+{
+    UINT32 idx = uwp_qi_hash( iid->Data1 ) & (UWP_QI_MAP_SIZE - 1);
+    for (;;)
+    {
+        struct uwp_qi_slot *s = &g_qi_map[idx];
+        if (!(s->flags & UWP_QI_FLAG_OCCUPIED))
+        {
+            s->iid = *iid;
+            s->off = (UINT16)off;
+            s->alt_off = (UINT16)alt_off;
+            s->guard = guard;
+            s->flags = (BYTE)(UWP_QI_FLAG_OCCUPIED | extra_flags);
+            return;
+        }
+        /* First registration wins (preserves original if/else precedence) */
+        if ((s->flags & UWP_QI_FLAG_PARTIAL)
+            ? (s->iid.Data1 == iid->Data1 && s->iid.Data2 == iid->Data2 && s->iid.Data3 == iid->Data3)
+            : IsEqualGUID( &s->iid, iid ))
+            return;
+        idx = (idx + 1) & (UWP_QI_MAP_SIZE - 1);
+    }
+}
+
+static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
+{
+    static const GUID IID_IXamlCompositionBrushBaseProtected_UWP =
+        { 0x1513f3d8, 0x0457, 0x4e1c, { 0xad, 0x77, 0x11, 0xc1, 0xd9, 0x87, 0x97, 0x43 } };
+    static const GUID IID_IXamlCompositionBrushBase_UWP =
+        { 0x410b99e7, 0x9d63, 0x4449, { 0xa3, 0x58, 0x49, 0x62, 0xfd, 0x93, 0x5f, 0x39 } };
+    static const GUID IID_ILoadedImageSurface_UWP =
+        { 0x091e237c, 0x5217, 0x424b, { 0xb6, 0xea, 0x19, 0x34, 0x18, 0xc2, 0x6d, 0x0b } };
+    static const GUID IID_ICompositionSurface_UWP =
+        { 0x1527540d, 0x42c7, 0x47a6, { 0xa4, 0x08, 0x66, 0x8f, 0x79, 0xa9, 0x0d, 0xfb } };
+    static const GUID IID_IListViewBase_UWP =
+        { 0xf6ce8c6d, 0xfe96, 0x41ad, { 0xa6, 0x4a, 0xc2, 0xb8, 0x1c, 0x4a, 0xf7, 0xf8 } };
+    static const GUID IID_ISelector_UWP =
+        { 0xe30eb3a5, 0xb36b, 0x42dc, { 0x85, 0x27, 0xcd, 0x25, 0x13, 0x6c, 0x08, 0x3c } };
+    static const GUID IID_IComboBox_UWP =
+        { 0xb9a8d05c, 0xac97, 0x47f1, { 0xa5, 0xf4, 0x3f, 0x9f, 0x4d, 0x4b, 0x11, 0x6c } };
+    static const GUID IID_IItemsControl_UWP =
+        { 0x3d0813ba, 0x6890, 0x4537, { 0xbf, 0xe5, 0x79, 0x6d, 0x94, 0x58, 0xed, 0xd6 } };
+    static const GUID IID_IItemsControl_UWP2 =
+        { 0xf4a91dd8, 0xd979, 0x4381, { 0x86, 0x52, 0xbd, 0xa0, 0x34, 0x2a, 0x76, 0x5e } };
+    static const GUID IID_IListViewBase2_UWP =
+        { 0xd1c2a4f7, 0x78a3, 0x4491, { 0x86, 0xe0, 0x2d, 0xde, 0xbc, 0x00, 0x7a, 0xc5 } };
+    static const GUID IID_IListViewBase4_UWP =
+        { 0x18b7792b, 0x11dc, 0x4eb6, { 0xa7, 0xbc, 0x74, 0x1a, 0xdb, 0x3e, 0xeb, 0x79 } };
+    static const GUID IID_IListView_UWP =
+        { 0x8eed9bc2, 0xa58c, 0x4453, { 0xaf, 0x0f, 0xa9, 0x2e, 0xe0, 0x6d, 0x03, 0x17 } };
+    static const GUID IID_IShape_UWP =
+        { 0x786f2b75, 0x9aa0, 0x454d, { 0xae, 0x06, 0xa2, 0x46, 0x6e, 0x37, 0xc8, 0x32 } };
+    static const GUID IID_IScrollViewer3_Real_UWP =
+        { 0x74e9be21, 0x5de2, 0x595e, { 0xbc, 0x08, 0xdb, 0xd3, 0xc5, 0x77, 0x49, 0x2c } };
+    static const GUID IID_IScrollAnchorProvider_UWP =
+        { 0x6ae99a0f, 0x478c, 0x5440, { 0xb2, 0xc6, 0xea, 0xd4, 0x37, 0x8e, 0xf8, 0xe4 } };
+    static const GUID IID_IStateTrigger_UWP =
+        { 0x67adef2e, 0xd8d9, 0x49f7, { 0xa1, 0xfd, 0x2e, 0x35, 0xee, 0xdd, 0x23, 0xcd } };
+    static const GUID IID_IBitmapImage_UWP =
+        { 0x31af3271, 0xe3b4, 0x442d, { 0xa3, 0x41, 0x4c, 0x02, 0x26, 0xb2, 0x72, 0x5b } };
+    static const GUID IID_IBitmapImage2_UWP =
+        { 0x1abaee23, 0x74ee, 0x4cc7, { 0x99, 0xba, 0xb1, 0x71, 0xe3, 0xcd, 0xa6, 0x1e } };
+    static const GUID IID_IBitmapImage2_Real_UWP =
+        { 0x1069c1b6, 0x8c9b, 0x4762, { 0xbe, 0x3d, 0x75, 0x9f, 0x56, 0x98, 0xf2, 0xb3 } };
+    static const GUID IID_IBitmapImage3_UWP =
+        { 0x7311e0d4, 0xfe94, 0x4e70, { 0x9b, 0x90, 0xcd, 0xd4, 0x7a, 0xc2, 0x3a, 0xfb } };
+    static const GUID IID_IBitmapSource_UWP =
+        { 0x23d86411, 0x202f, 0x41b2, { 0x8c, 0x5b, 0xa8, 0xa3, 0xb3, 0x33, 0x80, 0x0b } };
+    static const GUID IID_IAnimatedVisualPlayer_WinUI =
+        { 0xbf7f8865, 0x7b79, 0x5354, { 0x97, 0x88, 0xc2, 0x1e, 0x52, 0x35, 0x91, 0xea } };
+    static const GUID IID_IObservableVector_DO =
+        { 0xfac6f4d2, 0x96fd, 0x5ceb, { 0x80, 0xbf, 0x46, 0xac, 0x65, 0x29, 0xfc, 0x65 } };
+    static const GUID IID_IObservableVector_ICBE =
+        { 0xd5644006, 0x717d, 0x512d, { 0x87, 0x85, 0xb4, 0x8c, 0x17, 0xe7, 0x34, 0x68 } };
+    static const GUID IID_IVector_DO =
+        { 0x771b857e, 0xab5c, 0x5db8, { 0xa0, 0x21, 0x39, 0x7c, 0x92, 0xcd, 0xc4, 0x4c } };
+    static const GUID IID_IVector_MBI =
+        { 0xef83f4ba, 0x0b73, 0x51d5, { 0xb1, 0x3b, 0x89, 0xa2, 0xb1, 0x56, 0xad, 0x9a } };
+    static const GUID IID_IVector_MFIB =
+        { 0xf7f1c37b, 0xb4df, 0x5128, { 0xa4, 0x76, 0xfc, 0x83, 0x99, 0xbc, 0x10, 0xaf } };
+    static const GUID IID_IIterable_DO =
+        { 0xf66c6bd3, 0x55b4, 0x5bbb, { 0xb8, 0x2a, 0x6d, 0x9c, 0xe3, 0x83, 0x09, 0x1a } };
+    static const GUID IID_IVectorView_DO =
+        { 0xfe750d77, 0x1307, 0x5df2, { 0xa0, 0x21, 0x1c, 0x7a, 0x8d, 0x6b, 0x80, 0xad } };
+    static const GUID p_IRichTextBlock  = { 0xe5fff9e2, 0xb968, 0x49e7, { 0 } };
+    static const GUID p_IRichTextBlock2 = { 0x3f209013, 0x03e7, 0x4508, { 0 } };
+    static const GUID p_ITextBlock6     = { 0xce5eb4c8, 0x2f10, 0x4b88, { 0 } };
+    static const GUID p_IRichTextBlock6 = { 0x394b0030, 0x9f4e, 0x41e6, { 0 } };
+    static const GUID p_IStoryboard     = { 0x0bc465dc, 0xbe4d, 0x4d0d, { 0 } };
+    static const GUID p_IStoryboard3    = { 0x04d41bb3, 0x8721, 0x519e, { 0 } };
+    static const GUID p_IParagraph      = { 0xf83ef59a, 0xfa61, 0x4bef, { 0 } };
+    static const GUID p_ISpan           = { 0x54f03373, 0xc273, 0x4f3b, { 0 } };
+    static const GUID p_ISpanUWP        = { 0x9839d4a9, 0x02af, 0x4811, { 0 } };
+    static const GUID p_IRun            = { 0x59553c83, 0x0e14, 0x49bd, { 0 } };
+    static const GUID p_IBinding        = { 0x3f7a0c6b, 0xd00f, 0x4730, { 0 } };
+    static const GUID p_IPropertyPath   = { 0x300e5d8a, 0x1ff3, 0x4d2c, { 0 } };
+    size_t k;
+
+#define QI_ADD( g, field ) \
+    qi_map_put( &(g), offsetof( struct uwp_element, field ), 0, QI_GUARD_NONE, 0 )
+#define QI_ADD_G( g, field, grd ) \
+    qi_map_put( &(g), offsetof( struct uwp_element, field ), 0, (grd), 0 )
+#define QI_ADD_ALT( g, field, alt_field, grd ) \
+    qi_map_put( &(g), offsetof( struct uwp_element, field ), offsetof( struct uwp_element, alt_field ), (grd), 0 )
+#define QI_ADD_P( g, field ) \
+    qi_map_put( &(g), offsetof( struct uwp_element, field ), 0, QI_GUARD_NONE, UWP_QI_FLAG_PARTIAL )
+
+    QI_ADD( IID_IDependencyObject2_UWP, IDependencyObject2_iface );
+    QI_ADD( IID_IFrameworkElement2_UWP, IFrameworkElement2_iface );
+    QI_ADD( IID_IFrameworkElement3_UWP, IFrameworkElement3_iface );
+    QI_ADD( IID_IControl_UWP, IControl_iface );
+    QI_ADD( IID_IControlProtected_UWP, IControlProtected_iface );
+    QI_ADD( IID_IContentControl_UWP, IContentControl_iface );
+    QI_ADD_ALT( IID_INavigationView_UWP, IStyle_iface, IContentControl_iface, QI_GUARD_NAVVIEW_ALT );
+    QI_ADD( IID_INavigationView2_UWP, IContentControl_iface );
+    QI_ADD( IID_IDesktopWindowXamlSource_UWP, IContentControl_iface );
+    QI_ADD( IID_IDesktopWindowXamlSourceNative_UWP, IDesktopWindowXamlSourceNative_iface );
+    QI_ADD( IID_IDesktopWindowXamlSourceNative2_UWP, IDesktopWindowXamlSourceNative_iface );
+    QI_ADD( IID_IUserControl_UWP, IUserControl_iface );
+    QI_ADD( IID_IPage_UWP, IPage_iface );
+    QI_ADD( IID_IFrame_UWP, IFrame_iface );
+    QI_ADD( IID_INavigate_UWP, IFrame_iface );
+    QI_ADD( IID_IButtonBase_UWP, IButtonBase_iface );
+    QI_ADD( IID_IHyperlinkButton_UWP, IButtonBase_iface );
+    QI_ADD( IID_IToggleButton_UWP, IToggleButton_iface );
+    QI_ADD( IID_IRadioButton_UWP, IToggleButton_iface );
+    QI_ADD_G( IID_IToggleMenuFlyoutItem_UWP, IToggleMenuFlyoutItem_iface, QI_GUARD_TOGGLE_MENU_ITEM );
+    QI_ADD( IID_IRadioButtons_WinUI, IStyle_iface );
+    QI_ADD_G( IID_IDataTemplate_UWP, IDataTemplate_iface, QI_GUARD_NOT_TEMPLATE_SELECTOR );
+    QI_ADD( IID_IDataTemplateSelector_UWP, IDataTemplateSelector_iface );
+    QI_ADD( IID_IDataTemplateSelector2_UWP, IDataTemplateSelector2_iface );
+    QI_ADD( IID_IPanel_UWP, IPanel_iface );
+    QI_ADD( IID_IStackPanel_UWP, IPanel_iface );
+    QI_ADD( IID_IStackPanel_UWP2, IPanel_iface );
+    QI_ADD( IID_IStackPanel2_Real_UWP, IPanel_iface );
+    QI_ADD( IID_IMenuBar_WinUI, IPanel_iface );
+    QI_ADD_G( IID_IMenuFlyoutSubItem_UWP, IMenuFlyoutSubItem_iface, QI_GUARD_MENU_FLYOUT_SUB_ITEM );
+    QI_ADD( IID_IUIElement4_Real_UWP, IUIElement4_iface );
+    QI_ADD( IID_IUIElement4_UWP, IUIElement4_iface );
+    QI_ADD( IID_IUIElement5_Real_UWP, IUIElement5_iface );
+    QI_ADD( IID_IUIElement5_UWP, IUIElement5_iface );
+    QI_ADD( IID_IButtonWithFlyout_Real_UWP, IButtonWithFlyout_iface );
+    QI_ADD( IID_IButtonWithFlyout_UWP, IButtonWithFlyout_iface );
+    QI_ADD( IID_IUIElement7_UWP, IUIElement7_iface );
+    QI_ADD( IID_IKeyboardAccelerator_UWP, IKeyboardAccelerator_iface );
+    QI_ADD( IID_IXamlUICommand_UWP, IXamlUICommand_iface );
+    QI_ADD( IID_ICommand_UWP, ICommand_iface );
+    QI_ADD( IID_ICommand_UWP2, ICommand_iface );
+    QI_ADD_G( IID_IMenuFlyoutItem_UWP, IMenuFlyoutItem_iface, QI_GUARD_MENU_FLYOUT_ITEM );
+    QI_ADD_G( IID_IMenuFlyoutItem3_UWP, IMenuFlyoutItem3_iface, QI_GUARD_MENU_FLYOUT_ITEM );
+    QI_ADD( IID_IMenuFlyout2_Real_UWP, IMenuFlyout2_iface );
+    QI_ADD( IID_IAutoSuggestBox_Real_UWP, IItemsControl_iface );
+    QI_ADD_ALT( IID_IAutoSuggestBox2_Real_UWP, IAutoSuggestBox2_iface, ITextBlock_iface, QI_GUARD_AUTOSUGGEST_ALT );
+    QI_ADD_ALT( IID_IContentDialog_UWP, IAutoSuggestBox_iface, IContentDialog_iface, QI_GUARD_AUTOSUGGEST_ALT );
+    QI_ADD_ALT( IID_IContentDialog_UWP_Alt, IAutoSuggestBox_iface, IContentDialog_iface, QI_GUARD_AUTOSUGGEST_ALT );
+    QI_ADD( IID_IContentDialog2_UWP, IContentDialog2_iface );
+    QI_ADD( IID_ISwapChainPanel_UWP, ISwapChainPanel_iface );
+    QI_ADD( IID_ISwapChainPanelNative_UWP, ISwapChainPanelNative2_iface );
+    QI_ADD( IID_ISwapChainPanelNative2_UWP, ISwapChainPanelNative2_iface );
+    QI_ADD( IID_ITeachingTip_WinUI, ITeachingTip_iface );
+    QI_ADD( IID_IGrid_UWP, IGrid_iface );
+    QI_ADD( IID_IGrid_UWP2, IGrid_iface );
+    QI_ADD( IID_IGrid3_Calc, IGrid3_iface );
+    QI_ADD( IID_IGrid3_UWP, IGrid3_iface );
+    QI_ADD( IID_IBorder_UWP, IBorder_iface );
+    QI_ADD( IID_IBorder2_Calc, IBorder_iface );
+    QI_ADD( IID_ITextBlock_UWP, ITextBlock_iface );
+    QI_ADD_P( p_IRichTextBlock, IRichTextBlock_iface );
+    QI_ADD( IID_ITextBlock2_UWP, ITextBlock2_iface );
+    QI_ADD_P( p_IRichTextBlock2, ITextBlock2_iface );
+    QI_ADD( IID_ITextBlock6_UWP, ITextBlock6_iface );
+    QI_ADD_P( p_ITextBlock6, ITextBlock6_iface );
+    QI_ADD_P( p_IRichTextBlock6, ITextBlock6_iface );
+    QI_ADD_P( p_IStoryboard, IStoryboard_iface );
+    QI_ADD_P( p_IStoryboard3, IStoryboard_iface );
+    QI_ADD_P( p_IParagraph, IParagraph_iface );
+    QI_ADD_P( p_ISpan, IParagraph_iface );
+    QI_ADD_P( p_ISpanUWP, IParagraph_iface );
+    QI_ADD_P( p_IRun, IRun_iface );
+    QI_ADD_P( p_IBinding, IBinding_iface );
+    QI_ADD_P( p_IPropertyPath, IPropertyPath_iface );
+    QI_ADD( IID_IRowDefinition_UWP, IRowDefinition_iface );
+    QI_ADD( IID_IColumnDefinition_UWP, IColumnDefinition_iface );
+    QI_ADD( IID_IScrollViewer_UWP, IScrollViewer_iface );
+    QI_ADD( IID_IScrollViewer2_UWP, IScrollViewer_iface );
+    QI_ADD( IID_IScrollViewer3_UWP, IScrollViewer_iface );
+    QI_ADD( IID_IFrameworkElement7_UWP, IFrameworkElement7_iface );
+    QI_ADD( IID_IFrameworkElement7_Proj, IFrameworkElement7_iface );
+
+    QI_ADD( IID_IUIElement2_UWP, IStyle_iface );
+    QI_ADD( IID_IUIElement3_UWP, IStyle_iface );
+    QI_ADD( IID_IUIElementOverrides_UWP, IStyle_iface );
+    QI_ADD( IID_IUIElement_Calc2, IStyle_iface );
+    QI_ADD( IID_IFrameworkElement4_UWP, IStyle_iface );
+    QI_ADD( IID_IFrameworkElement6_UWP, IStyle_iface );
+    QI_ADD( IID_IFrameworkElementOverrides_UWP, IStyle_iface );
+    QI_ADD( IID_IFrameworkElementOverrides2_UWP, IStyle_iface );
+    QI_ADD( IID_IControl2_UWP, IStyle_iface );
+    QI_ADD( IID_IControl3_UWP, IStyle_iface );
+    QI_ADD( IID_IControl4_UWP, IStyle_iface );
+    QI_ADD( IID_IControl5_UWP, IStyle_iface );
+    QI_ADD( IID_IControlOverrides_UWP, IStyle_iface );
+    QI_ADD( IID_IContentControl2_UWP, IStyle_iface );
+    QI_ADD( IID_IContentControlOverrides_UWP, IStyle_iface );
+    QI_ADD( IID_IContentControlOvr_Calc, IStyle_iface );
+    QI_ADD( IID_IPageOverrides_UWP, IStyle_iface );
+    QI_ADD( IID_IButton_UWP, IStyle_iface );
+    QI_ADD( IID_IToggleButtonOverrides_UWP, IStyle_iface );
+    QI_ADD( IID_ITextBlock3_UWP, IStyle_iface );
+    QI_ADD( IID_ITextBlock_Calc2, IStyle_iface );
+    QI_ADD( IID_ITextBlock_Calc3, IStyle_iface );
+    QI_ADD( IID_ITextBlock_Calc4, IStyle_iface );
+    QI_ADD( IID_IStyle_UWP, IStyle_iface );
+    QI_ADD( IID_ISetter_UWP, IStyle_iface );
+    QI_ADD( IID_ISetterBase_UWP, IStyle_iface );
+    QI_ADD( IID_IVisualStateGroup_UWP, IStyle_iface );
+    QI_ADD( IID_IVisualState_UWP, IStyle_iface );
+
+    QI_ADD( IID_IPopup_UWP, IPopup_iface );
+    QI_ADD( IID_IPopup_WinUI, IPopup_iface );
+    QI_ADD( IID_IPopup2_UWP, IPopup2_iface );
+    QI_ADD( IID_IPopup2_WinUI, IPopup2_iface );
+    QI_ADD( IID_IPopup3_UWP, IPopup3_iface );
+    QI_ADD( IID_IPopup3_WinUI, IPopup3_iface );
+    QI_ADD( IID_IBrush_UWP, IBrush_iface );
+    QI_ADD( IID_ISolidColorBrush_UWP, ISolidColorBrush_iface );
+    QI_ADD( IID_IFontFamily_UWP, IFontFamily_iface );
+    QI_ADD( IID_IFontIcon_UWP, IFontIcon_iface );
+    QI_ADD( IID_IImageBrush_UWP, IImageBrush_iface );
+    QI_ADD( IID_ITileBrush_UWP, ITileBrush_iface );
+    QI_ADD( IID_ITileBrush_UWP_Alt, ITileBrush_iface );
+    QI_ADD( IID_IGradientBrush_UWP, IGradientBrush_iface );
+    QI_ADD( IID_ILinearGradientBrush_UWP, ILinearGradientBrush_iface );
+    QI_ADD( IID_IGradientStop_UWP, IGradientStop_iface );
+    QI_ADD( IID_IPathGeometry_UWP, IPathGeometry_iface );
+    QI_ADD( IID_IPathGeometry_UWP_Alt, IPathFigure_iface );
+    QI_ADD( IID_IXamlCompositionBrushBaseProtected_UWP, IXamlCompositionBrushBaseProtected_iface );
+    QI_ADD( IID_IXamlCompositionBrushBase_UWP, IStyle_iface );
+    QI_ADD( IID_ILoadedImageSurface_UWP, ILoadedImageSurface_iface );
+    QI_ADD( IID_ICompositionSurface_UWP, IInspectable_iface );
+
+    QI_ADD( IID_IRoutedEventArgs_QI_UWP, IInspectable_iface );
+    QI_ADD( IID_IRoutedEventArgs_Clone_UWP, IInspectable_iface );
+    QI_ADD( IID_IRoutedEventArgs2_UWP, IInspectable_iface );
+    QI_ADD( IID_IRoutedEventArgs_WinUI3, IInspectable_iface );
+    QI_ADD( IID_ISplitView_UWP, ISplitView_iface );
+    QI_ADD( IID_ISplitView2_UWP, ISplitView2_iface );
+    QI_ADD( IID_IItemsRepeater_UWP, IPanel_iface );
+    QI_ADD( IID_IItemsRepeaterSizingTarget_UWP, IPanel_iface );
+    QI_ADD( IID_IContentPresenter_UWP, IContentControl_iface );
+    QI_ADD_G( IID_IFrameProj_UWP, IFrame2_iface, QI_GUARD_FRAME );
+    QI_ADD_G( IID_IFrame3_UWP, IFrame3_iface, QI_GUARD_FRAME );
+    QI_ADD_G( IID_IFrame5_UWP, IFrame5_iface, QI_GUARD_FRAME );
+    QI_ADD_G( IID_IMediaPlayerElement_UWP, IMediaPlayerElement_iface, QI_GUARD_MEDIA_PLAYER );
+    QI_ADD_G( IID_INavigationTransitionInfo_UWP, IStyle_iface, QI_GUARD_NAV_TRANSITION );
+    QI_ADD_G( IID_IEntranceNavigationTransitionInfo_UWP, IStyle_iface, QI_GUARD_NAV_TRANSITION );
+    QI_ADD_ALT( IID_IFlyoutBase5_UWP, IStyle_iface, IFlyout_iface, QI_GUARD_FLYOUT_ALT );
+    QI_ADD_G( IID_IImage2_UWP, IImage_iface, QI_GUARD_IMAGE );
+    QI_ADD_G( IID_IEasingFunctionBase_UWP, IEasingFunctionBase_iface, QI_GUARD_EASE );
+    QI_ADD_G( IID_INavigationViewItem_UWP, IStyle_iface, QI_GUARD_NAVVIEW_ITEM );
+    QI_ADD( IID_IFlyoutBase_UWP, IFlyout_iface );
+    QI_ADD( IID_IFlyoutBase3_UWP, IFlyout_iface );
+    QI_ADD( IID_IMenuFlyout_UWP, IFlyout_iface );
+    QI_ADD( IID_IMenuFlyout_UWP2, IFlyout_iface );
+    QI_ADD( IID_IMenuFlyoutItemBase_UWP, IFlyout_iface );
+    QI_ADD( IID_IMenuFlyoutItemBase_UWP2, IFlyout_iface );
+    QI_ADD( IID_IMenuBarItem_WinUI, IFlyout_iface );
+    QI_ADD( IID_ITabView_WinUI, IFlyout_iface );
+
+    QI_ADD( IID_IListViewBase_UWP, IFlyout_iface );
+    QI_ADD( IID_IBitmapImage_UWP, IBitmapImage_iface );
+    QI_ADD( IID_IBitmapSource_UWP, IBitmapSource_iface );
+    QI_ADD( IID_IStateTrigger_UWP, IStateTriggerPub_iface );
+    QI_ADD( IID_IShape_UWP, IShape_iface );
+    QI_ADD( IID_IListViewBase2_UWP, IStyle_iface );
+    QI_ADD( IID_IListViewBase4_UWP, IStyle_iface );
+    QI_ADD( IID_IListView_UWP, IStyle_iface );
+    QI_ADD( IID_IScrollViewer3_Real_UWP, IStyle_iface );
+    QI_ADD_G( IID_IScrollAnchorProvider_UWP, IStyle_iface, QI_GUARD_SCROLL_VIEWER );
+    QI_ADD( IID_IBitmapImage2_UWP, IStyle_iface );
+    QI_ADD( IID_IBitmapImage2_Real_UWP, IStyle_iface );
+    QI_ADD( IID_IBitmapImage3_UWP, IStyle_iface );
+    QI_ADD( IID_IAnimatedVisualPlayer_WinUI, IStyle_iface );
+    QI_ADD( IID_ISelector_UWP, ISelector_iface );
+    QI_ADD( IID_IComboBox_UWP, IComboBox_iface );
+    QI_ADD( IID_IItemsControl_UWP, IItemsControl_iface );
+    QI_ADD( IID_IItemsControl_UWP2, IItemsControl_iface );
+
+    QI_ADD( IID_IDispatcherTimer_UWP, IInspectable_iface );
+    QI_ADD( IID_IStateTriggerBase_UWP, IStyle_iface );
+    QI_ADD( IID_IMarkupExtension_UWP, IStyle_iface );
+    QI_ADD( IID_IMarkupExtensionOverrides_UWP, IStyle_iface );
+    QI_ADD( IID_IStateTriggerBaseProtected_UWP, IStateTrigger_iface );
+    QI_ADD( IID_IUIElement10_UWP, IUIElement10_iface );
+    QI_ADD( IID_IXamlRoot_UWP, IXamlRoot_iface );
+    QI_ADD( IID_IObservableVector_DO, IObservableVector_iface );
+    QI_ADD( IID_IObservableVector_ICBE, IObservableVector_iface );
+    QI_ADD( IID_IVector_DO, IVector_iface );
+    QI_ADD( IID_IVector_IInspectable_UWP, IVector_iface );
+    QI_ADD( IID_IVector_MBI, IVector_iface );
+    QI_ADD( IID_IVector_MFIB, IVector_iface );
+    QI_ADD( IID_IVector_GradientStop_UWP, IVector_iface );
+    QI_ADD( IID_IIterable_DO, IIterable_iface );
+    QI_ADD( IID_IIterable_GradientStop_UWP, IIterable_iface );
+    QI_ADD( IID_IVectorView_DO, IVectorView_iface );
+    QI_ADD( IID_IVectorView_GradientStop_UWP, IVectorView_iface );
+
+    for (k = 0; k < ARRAY_SIZE(IID_IUIE_Extra); k++)
+        QI_ADD( IID_IUIE_Extra[k], IStyle_iface );
+
+#undef QI_ADD
+#undef QI_ADD_G
+#undef QI_ADD_ALT
+#undef QI_ADD_P
+    return TRUE;
+}
+
 static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, nondelegating_iface );
+    UINT32 idx;
     if (!out) return E_POINTER;
     *out = NULL;
 
-    if (IsEqualGUID( iid, &IID_UWP_ELEM_SELF ))
-    {
-        *out = &impl->nondelegating_iface;
-        InterlockedIncrement( &impl->ref );
-        return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+    /* Inline fast-paths for hottest IIDs */
+    if (IsEqualGUID( iid, &IID_UWP_ELEM_SELF ) ||
+        IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ))
     {
         *out = &impl->nondelegating_iface;
@@ -693,7 +1170,6 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-
     if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
     {
         *out = &impl->IWeakReferenceSource_iface;
@@ -703,433 +1179,81 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
 
     if (IsEqualGUID( iid, &IID_IDependencyObject_UWP ))
         *out = &impl->IDependencyObject_iface;
-    else if (IsEqualGUID( iid, &IID_IDependencyObject2_UWP ))
-        *out = &impl->IDependencyObject2_iface;
     else if (IsEqualGUID( iid, &IID_IUIElement_UWP ))
         *out = &impl->IUIElement_iface;
     else if (IsEqualGUID( iid, &IID_IFrameworkElement_UWP ))
         *out = &impl->IFrameworkElement_iface;
-    else if (IsEqualGUID( iid, &IID_IFrameworkElement2_UWP ))
-        *out = &impl->IFrameworkElement2_iface;
-    else if (IsEqualGUID( iid, &IID_IFrameworkElement3_UWP ))
-        *out = &impl->IFrameworkElement3_iface;
-    else if (IsEqualGUID( iid, &IID_IControl_UWP ))
-        *out = &impl->IControl_iface;
-    else if (IsEqualGUID( iid, &IID_IControlProtected_UWP ))
-        *out = &impl->IControlProtected_iface;
-    else if (IsEqualGUID( iid, &IID_IContentControl_UWP ) ||
-             IsEqualGUID( iid, &IID_INavigationView_UWP ) ||
-             IsEqualGUID( iid, &IID_INavigationView2_UWP ) ||
-             IsEqualGUID( iid, &IID_IDesktopWindowXamlSource_UWP ))
-        *out = &impl->IContentControl_iface;
-    else if (IsEqualGUID( iid, &IID_IDesktopWindowXamlSourceNative_UWP ) ||
-             IsEqualGUID( iid, &IID_IDesktopWindowXamlSourceNative2_UWP ))
-        *out = &impl->IDesktopWindowXamlSourceNative_iface;
-    else if (IsEqualGUID( iid, &IID_IUserControl_UWP ))
-        *out = &impl->IUserControl_iface;
-    else if (IsEqualGUID( iid, &IID_IPage_UWP ))
-        *out = &impl->IPage_iface;
-    else if (IsEqualGUID( iid, &IID_IFrame_UWP ) ||
-             IsEqualGUID( iid, &IID_INavigate_UWP ))
-        *out = &impl->IFrame_iface;
-    else if (IsEqualGUID( iid, &IID_IButtonBase_UWP ) ||
-             IsEqualGUID( iid, &IID_IHyperlinkButton_UWP ))
-        *out = &impl->IButtonBase_iface;
-    else if (IsEqualGUID( iid, &IID_IToggleButton_UWP ) ||
-             IsEqualGUID( iid, &IID_IRadioButton_UWP ))
-        *out = &impl->IToggleButton_iface;
-    else if (IsEqualGUID( iid, &IID_IToggleMenuFlyoutItem_UWP ))
-    {
-        if (impl->class_flags & (UWP_CF_TOGGLE_MENU_ITEM | UWP_CF_RADIO_MENU_ITEM))
-            *out = &impl->IToggleMenuFlyoutItem_iface;
-    }
-    else if (IsEqualGUID( iid, &IID_IRadioButtons_WinUI ))
-        *out = &impl->IStyle_iface;
-    else if (IsEqualGUID( iid, &IID_IDataTemplate_UWP ) &&
-             !wcsstr( impl->class_name, L"TemplateSelector" ))
-        *out = &impl->IDataTemplate_iface;
-    else if (IsEqualGUID( iid, &IID_IDataTemplateSelector_UWP ))
-        *out = &impl->IDataTemplateSelector_iface;
-    else if (IsEqualGUID( iid, &IID_IDataTemplateSelector2_UWP ))
-        *out = &impl->IDataTemplateSelector2_iface;
-    else if (IsEqualGUID( iid, &IID_IPanel_UWP ) ||
-             IsEqualGUID( iid, &IID_IStackPanel_UWP ) ||
-             IsEqualGUID( iid, &IID_IStackPanel_UWP2 ) ||
-             IsEqualGUID( iid, &IID_IStackPanel2_Real_UWP ) ||
-             IsEqualGUID( iid, &IID_IMenuBar_WinUI ))
-        *out = &impl->IPanel_iface;
-    else if (IsEqualGUID( iid, &IID_IMenuFlyoutSubItem_UWP ))
-    {
-        if (impl->class_flags & UWP_CF_MENU_FLYOUT_SUB_ITEM)
-            *out = &impl->IMenuFlyoutSubItem_iface;
-    }
-    else if (IsEqualGUID( iid, &IID_IUIElement4_Real_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement4_UWP ))
-        *out = &impl->IUIElement4_iface;
-    else if (IsEqualGUID( iid, &IID_IUIElement5_Real_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement5_UWP ))
-        *out = &impl->IUIElement5_iface;
-    else if (IsEqualGUID( iid, &IID_IButtonWithFlyout_Real_UWP ) ||
-             IsEqualGUID( iid, &IID_IButtonWithFlyout_UWP ))
-        *out = &impl->IButtonWithFlyout_iface;
-    else if (IsEqualGUID( iid, &IID_IUIElement7_UWP ))
-        *out = &impl->IUIElement7_iface;
-    else if (IsEqualGUID( iid, &IID_IKeyboardAccelerator_UWP ))
-        *out = &impl->IKeyboardAccelerator_iface;
-    else if (IsEqualGUID( iid, &IID_IXamlUICommand_UWP ))
-        *out = &impl->IXamlUICommand_iface;
-    else if (IsEqualGUID( iid, &IID_ICommand_UWP ) ||
-             IsEqualGUID( iid, &IID_ICommand_UWP2 ))
-        *out = &impl->ICommand_iface;
-    else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem_UWP ))
-    {
-        if (impl->class_flags & UWP_CF_MENU_FLYOUT_ITEM)
-            *out = &impl->IMenuFlyoutItem_iface;
-    }
-    else if (IsEqualGUID( iid, &IID_IMenuFlyoutItem3_UWP ))
-    {
-        if (impl->class_flags & UWP_CF_MENU_FLYOUT_ITEM)
-            *out = &impl->IMenuFlyoutItem3_iface;
-    }
-    else if (IsEqualGUID( iid, &IID_IMenuFlyout2_Real_UWP ))
-        *out = &impl->IMenuFlyout2_iface;
-    else if (IsEqualGUID( iid, &IID_IAutoSuggestBox_Real_UWP ))
-    {
-        *out = &impl->IItemsControl_iface;
-    }
-    else if (IsEqualGUID( iid, &IID_IAutoSuggestBox2_Real_UWP ))
-    {
-        if (uwp_is_autosuggest( impl ))
-            *out = &impl->IAutoSuggestBox2_iface;
-        else
-            *out = &impl->ITextBlock_iface;
-    }
-    else if (IsEqualGUID( iid, &IID_IContentDialog_UWP ) ||
-             IsEqualGUID( iid, &IID_IContentDialog_UWP_Alt ))
-    {
-        if (uwp_is_autosuggest( impl ))
-            *out = &impl->IAutoSuggestBox_iface;
-        else
-            *out = &impl->IContentDialog_iface;
-    }
-    else if (IsEqualGUID( iid, &IID_IContentDialog2_UWP ))
-        *out = &impl->IContentDialog2_iface;
-    else if (IsEqualGUID( iid, &IID_ISwapChainPanel_UWP ))
-        *out = &impl->ISwapChainPanel_iface;
-    else if (IsEqualGUID( iid, &IID_ISwapChainPanelNative_UWP ) ||
-             IsEqualGUID( iid, &IID_ISwapChainPanelNative2_UWP ))
-        *out = &impl->ISwapChainPanelNative2_iface;
-    else if (IsEqualGUID( iid, &IID_ITeachingTip_WinUI ))
-        *out = &impl->ITeachingTip_iface;
-    else if (IsEqualGUID( iid, &IID_IGrid_UWP ) ||
-             IsEqualGUID( iid, &IID_IGrid_UWP2 ))
-        *out = &impl->IGrid_iface;
-    else if (IsEqualGUID( iid, &IID_IGrid3_Calc ) ||
-             IsEqualGUID( iid, &IID_IGrid3_UWP ))
-        *out = &impl->IGrid3_iface;
-    else if (IsEqualGUID( iid, &IID_IBorder_UWP ) ||
-             IsEqualGUID( iid, &IID_IBorder2_Calc ))
-        *out = &impl->IBorder_iface;
-    else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ))
-        *out = &impl->ITextBlock_iface;
-    else if (iid->Data1 == 0xe5fff9e2 && iid->Data2 == 0xb968 && iid->Data3 == 0x49e7) /* IRichTextBlock */
-        *out = &impl->IRichTextBlock_iface;
-    else if (IsEqualGUID( iid, &IID_ITextBlock2_UWP ) ||
-             (iid->Data1 == 0x3f209013 && iid->Data2 == 0x03e7 && iid->Data3 == 0x4508)) /* IRichTextBlock2 */
-        *out = &impl->ITextBlock2_iface;
-    else if (IsEqualGUID( iid, &IID_ITextBlock6_UWP ) ||
-             (iid->Data1 == 0xce5eb4c8 && iid->Data2 == 0x2f10 && iid->Data3 == 0x4b88) || /* ITextBlock6 */
-             (iid->Data1 == 0x394b0030 && iid->Data2 == 0x9f4e && iid->Data3 == 0x41e6))   /* IRichTextBlock6 */
-        *out = &impl->ITextBlock6_iface;
-    else if ((iid->Data1 == 0x0bc465dc && iid->Data2 == 0xbe4d && iid->Data3 == 0x4d0d) || /* IStoryboard */
-             (iid->Data1 == 0x04d41bb3 && iid->Data2 == 0x8721 && iid->Data3 == 0x519e))   /* IStoryboard (WinUI3) */
-        *out = &impl->IStoryboard_iface;
-    else if ((iid->Data1 == 0xf83ef59a && iid->Data2 == 0xfa61 && iid->Data3 == 0x4bef) || /* IParagraph */
-             (iid->Data1 == 0x54f03373 && iid->Data2 == 0xc273 && iid->Data3 == 0x4f3b) || /* ISpan */
-             (iid->Data1 == 0x9839d4a9 && iid->Data2 == 0x02af && iid->Data3 == 0x4811))   /* ISpan (UWP) */
-        *out = &impl->IParagraph_iface;
-    else if (iid->Data1 == 0x59553c83 && iid->Data2 == 0x0e14 && iid->Data3 == 0x49bd)     /* IRun */
-        *out = &impl->IRun_iface;
-    else if (iid->Data1 == 0x3f7a0c6b && iid->Data2 == 0xd00f && iid->Data3 == 0x4730)     /* IBinding */
-        *out = &impl->IBinding_iface;
-    else if (iid->Data1 == 0x300e5d8a && iid->Data2 == 0x1ff3 && iid->Data3 == 0x4d2c)     /* IPropertyPath */
-        *out = &impl->IPropertyPath_iface;
-    else if (IsEqualGUID( iid, &IID_IRowDefinition_UWP ))
-        *out = &impl->IRowDefinition_iface;
-    else if (IsEqualGUID( iid, &IID_IColumnDefinition_UWP ))
-        *out = &impl->IColumnDefinition_iface;
-    else if (IsEqualGUID( iid, &IID_IScrollViewer_UWP ) ||
-             IsEqualGUID( iid, &IID_IScrollViewer2_UWP ) ||
-             IsEqualGUID( iid, &IID_IScrollViewer3_UWP ))
-        *out = &impl->IScrollViewer_iface;
-    else if (IsEqualGUID( iid, &IID_IFrameworkElement7_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElement7_Proj ))
-        *out = &impl->IFrameworkElement7_iface;
-    else if (IsEqualGUID( iid, &IID_IUIElement2_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement3_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement5_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElementOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement_Calc2 ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElement4_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElement6_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElementOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElementOverrides2_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl2_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl3_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl4_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl5_UWP ) ||
-             IsEqualGUID( iid, &IID_IControlOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IContentControl2_UWP ) ||
-             IsEqualGUID( iid, &IID_IContentControlOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IContentControlOvr_Calc ) ||
-             IsEqualGUID( iid, &IID_IPageOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IButton_UWP ) ||
-             IsEqualGUID( iid, &IID_IToggleButtonOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_ITextBlock3_UWP ) ||
-             IsEqualGUID( iid, &IID_ITextBlock_Calc2 ) ||
-             IsEqualGUID( iid, &IID_ITextBlock_Calc3 ) ||
-             IsEqualGUID( iid, &IID_ITextBlock_Calc4 ) ||
-             IsEqualGUID( iid, &IID_IStyle_UWP ) ||
-             IsEqualGUID( iid, &IID_ISetter_UWP ) ||
-             IsEqualGUID( iid, &IID_ISetterBase_UWP ) ||
-             IsEqualGUID( iid, &IID_IVisualStateGroup_UWP ) ||
-             IsEqualGUID( iid, &IID_IVisualState_UWP ))
-        *out = &impl->IStyle_iface;
-    else if (IsEqualGUID( iid, &IID_IPopup_UWP ) ||
-             IsEqualGUID( iid, &IID_IPopup_WinUI ))
-        *out = &impl->IPopup_iface;
-    else if (IsEqualGUID( iid, &IID_IPopup2_UWP ) ||
-             IsEqualGUID( iid, &IID_IPopup2_WinUI ))
-        *out = &impl->IPopup2_iface;
-    else if (IsEqualGUID( iid, &IID_IPopup3_UWP ) ||
-             IsEqualGUID( iid, &IID_IPopup3_WinUI ))
-        *out = &impl->IPopup3_iface;
-    else if (IsEqualGUID( iid, &IID_IBrush_UWP ))
-        *out = &impl->IBrush_iface;
-    else if (IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ))
-        *out = &impl->ISolidColorBrush_iface;
-    else if (IsEqualGUID( iid, &IID_IFontFamily_UWP ))
-        *out = &impl->IFontFamily_iface;
-    else if (IsEqualGUID( iid, &IID_IFontIcon_UWP ))
-        *out = &impl->IFontIcon_iface;
-    else if (IsEqualGUID( iid, &IID_IImageBrush_UWP ))
-        *out = &impl->IImageBrush_iface;
-    else if (IsEqualGUID( iid, &IID_ITileBrush_UWP ) ||
-             IsEqualGUID( iid, &IID_ITileBrush_UWP_Alt ))
-        *out = &impl->ITileBrush_iface;
-    else if (IsEqualGUID( iid, &IID_IGradientBrush_UWP ))
-        *out = &impl->IGradientBrush_iface;
-    else if (IsEqualGUID( iid, &IID_ILinearGradientBrush_UWP ))
-        *out = &impl->ILinearGradientBrush_iface;
-    else if (IsEqualGUID( iid, &IID_IGradientStop_UWP ))
-        *out = &impl->IGradientStop_iface;
-    else if (IsEqualGUID( iid, &IID_IPathGeometry_UWP ))
-        *out = &impl->IPathGeometry_iface;
-    else if (IsEqualGUID( iid, &IID_IPathGeometry_UWP_Alt ))
-        *out = &impl->IPathFigure_iface;
     else
     {
-        static const GUID IID_IXamlCompositionBrushBaseProtected_UWP =
-            { 0x1513f3d8, 0x0457, 0x4e1c, { 0xad, 0x77, 0x11, 0xc1, 0xd9, 0x87, 0x97, 0x43 } };
-        static const GUID IID_IXamlCompositionBrushBase_UWP =
-            { 0x410b99e7, 0x9d63, 0x4449, { 0xa3, 0x58, 0x49, 0x62, 0xfd, 0x93, 0x5f, 0x39 } };
-        static const GUID IID_ILoadedImageSurface_UWP =
-            { 0x091e237c, 0x5217, 0x424b, { 0xb6, 0xea, 0x19, 0x34, 0x18, 0xc2, 0x6d, 0x0b } };
-        static const GUID IID_ICompositionSurface_UWP =
-            { 0x1527540d, 0x42c7, 0x47a6, { 0xa4, 0x08, 0x66, 0x8f, 0x79, 0xa9, 0x0d, 0xfb } };
-        if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBaseProtected_UWP ))
-            *out = &impl->IXamlCompositionBrushBaseProtected_iface;
-        else if (IsEqualGUID( iid, &IID_IXamlCompositionBrushBase_UWP ))
-            *out = &impl->IStyle_iface;
-        else if (IsEqualGUID( iid, &IID_ILoadedImageSurface_UWP ))
-            *out = &impl->ILoadedImageSurface_iface;
-        else if (IsEqualGUID( iid, &IID_ICompositionSurface_UWP ))
-            *out = &impl->IInspectable_iface;
-    }
-    if (!*out && (IsEqualGUID( iid, &IID_IRoutedEventArgs_QI_UWP ) ||
-              IsEqualGUID( iid, &IID_IRoutedEventArgs_Clone_UWP ) ||
-              IsEqualGUID( iid, &IID_IRoutedEventArgs2_UWP ) ||
-              IsEqualGUID( iid, &IID_IRoutedEventArgs_WinUI3 )))
-        *out = &impl->IInspectable_iface;
-    else if (IsEqualGUID( iid, &IID_ISplitView_UWP ))
-        *out = &impl->ISplitView_iface;
-    else if (IsEqualGUID( iid, &IID_ISplitView2_UWP ))
-        *out = &impl->ISplitView2_iface;
-    else if (IsEqualGUID( iid, &IID_IItemsRepeater_UWP ) ||
-             IsEqualGUID( iid, &IID_IItemsRepeaterSizingTarget_UWP ))
-        *out = &impl->IPanel_iface;
-    else if (IsEqualGUID( iid, &IID_IContentPresenter_UWP ))
-        *out = &impl->IContentControl_iface;
-    else if ((IsEqualGUID( iid, &IID_IFrameProj_UWP ) &&
-             (wcsstr( impl->class_name, L".Controls.Frame" ) ||
-              wcsstr( impl->class_name, L".Controls.ContentFrame" ))))
-        *out = &impl->IFrame2_iface; /* IFrame2: Navigate(TypeName, param, transitionInfo) */
-    else if (IsEqualGUID( iid, &IID_IFrame3_UWP ) &&
-             (wcsstr( impl->class_name, L".Controls.Frame" ) ||
-              wcsstr( impl->class_name, L".Controls.ContentFrame" )))
-        *out = &impl->IFrame3_iface;
-    else if (IsEqualGUID( iid, &IID_IFrame5_UWP ) &&
-             (wcsstr( impl->class_name, L".Controls.Frame" ) ||
-              wcsstr( impl->class_name, L".Controls.ContentFrame" )))
-        *out = &impl->IFrame5_iface;
-    else if (IsEqualGUID( iid, &IID_IMediaPlayerElement_UWP ) &&
-             (impl->class_flags & UWP_CF_MEDIA_PLAYER))
-        *out = &impl->IMediaPlayerElement_iface;
-    else if ((IsEqualGUID( iid, &IID_INavigationTransitionInfo_UWP ) ||
-              IsEqualGUID( iid, &IID_IEntranceNavigationTransitionInfo_UWP )) &&
-             wcsstr( impl->class_name, L"NavigationTransitionInfo" ))
-        *out = &impl->IStyle_iface; /* INavigationTransitionInfo / IEntranceNavigationTransitionInfo */
-    else if (IsEqualGUID( iid, &IID_IFlyoutBase5_UWP ) &&
-             uwp_is_flyout( impl ))
-        *out = &impl->IStyle_iface; /* IFlyoutBase5 */
-    else if (IsEqualGUID( iid, &IID_IImage2_UWP ) &&
-             wcsstr( impl->class_name, L"Image" ))
-        *out = &impl->IImage_iface; /* Windows.UI.Xaml.Controls.IImage */
-    else if (IsEqualGUID( iid, &IID_IEasingFunctionBase_UWP ) &&
-             (wcsstr( impl->class_name, L"Ease" ) || wcsstr( impl->class_name, L"EasingFunction" )))
-        *out = &impl->IEasingFunctionBase_iface;
-    else if (IsEqualGUID( iid, &IID_INavigationView_UWP ) &&
-             !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ))
-        *out = &impl->IStyle_iface;
-    else if (IsEqualGUID( iid, &IID_INavigationViewItem_UWP ) &&
-             !wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.NavigationViewItem" ))
-        *out = &impl->IStyle_iface;
-    else if (IsEqualGUID( iid, &IID_IFlyoutBase_UWP ) ||
-             IsEqualGUID( iid, &IID_IFlyoutBase3_UWP ) ||
-             IsEqualGUID( iid, &IID_IFlyoutBase5_UWP ) ||
-             IsEqualGUID( iid, &IID_IMenuFlyout_UWP ) ||
-             IsEqualGUID( iid, &IID_IMenuFlyout_UWP2 ) ||
-             IsEqualGUID( iid, &IID_IMenuFlyoutItemBase_UWP ) ||
-             IsEqualGUID( iid, &IID_IMenuFlyoutItemBase_UWP2 ) ||
-             IsEqualGUID( iid, &IID_IMenuBarItem_WinUI ) ||
-             IsEqualGUID( iid, &IID_ITabView_WinUI ))
-        *out = &impl->IFlyout_iface;
-    if (!*out)
-    {
-        static const GUID IID_IListViewBase_UWP =
-            { 0xf6ce8c6d, 0xfe96, 0x41ad, { 0xa6, 0x4a, 0xc2, 0xb8, 0x1c, 0x4a, 0xf7, 0xf8 } };
-        static const GUID IID_ISelector_UWP =
-            { 0xe30eb3a5, 0xb36b, 0x42dc, { 0x85, 0x27, 0xcd, 0x25, 0x13, 0x6c, 0x08, 0x3c } };
-        static const GUID IID_IComboBox_UWP =
-            { 0xb9a8d05c, 0xac97, 0x47f1, { 0xa5, 0xf4, 0x3f, 0x9f, 0x4d, 0x4b, 0x11, 0x6c } };
-        static const GUID IID_IItemsControl_UWP =
-            { 0x3d0813ba, 0x6890, 0x4537, { 0xbf, 0xe5, 0x79, 0x6d, 0x94, 0x58, 0xed, 0xd6 } };
-        static const GUID IID_IItemsControl_UWP2 =
-            { 0xf4a91dd8, 0xd979, 0x4381, { 0x86, 0x52, 0xbd, 0xa0, 0x34, 0x2a, 0x76, 0x5e } };
-        static const GUID IID_IListViewBase2_UWP =
-            { 0xd1c2a4f7, 0x78a3, 0x4491, { 0x86, 0xe0, 0x2d, 0xde, 0xbc, 0x00, 0x7a, 0xc5 } };
-        static const GUID IID_IListViewBase4_UWP =
-            { 0x18b7792b, 0x11dc, 0x4eb6, { 0xa7, 0xbc, 0x74, 0x1a, 0xdb, 0x3e, 0xeb, 0x79 } };
-        static const GUID IID_IListView_UWP =
-            { 0x8eed9bc2, 0xa58c, 0x4453, { 0xaf, 0x0f, 0xa9, 0x2e, 0xe0, 0x6d, 0x03, 0x17 } };
-        static const GUID IID_IShape_UWP =
-            { 0x786f2b75, 0x9aa0, 0x454d, { 0xae, 0x06, 0xa2, 0x46, 0x6e, 0x37, 0xc8, 0x32 } };
-        static const GUID IID_IScrollViewer3_Real_UWP =
-            { 0x74e9be21, 0x5de2, 0x595e, { 0xbc, 0x08, 0xdb, 0xd3, 0xc5, 0x77, 0x49, 0x2c } };
-        static const GUID IID_IScrollAnchorProvider_UWP =
-            { 0x6ae99a0f, 0x478c, 0x5440, { 0xb2, 0xc6, 0xea, 0xd4, 0x37, 0x8e, 0xf8, 0xe4 } };
-        static const GUID IID_IStateTrigger_UWP =
-            { 0x67adef2e, 0xd8d9, 0x49f7, { 0xa1, 0xfd, 0x2e, 0x35, 0xee, 0xdd, 0x23, 0xcd } };
-        static const GUID IID_IBitmapImage_UWP =
-            { 0x31af3271, 0xe3b4, 0x442d, { 0xa3, 0x41, 0x4c, 0x02, 0x26, 0xb2, 0x72, 0x5b } };
-        static const GUID IID_IBitmapImage2_UWP =
-            { 0x1abaee23, 0x74ee, 0x4cc7, { 0x99, 0xba, 0xb1, 0x71, 0xe3, 0xcd, 0xa6, 0x1e } };
-        static const GUID IID_IBitmapImage2_Real_UWP =
-            { 0x1069c1b6, 0x8c9b, 0x4762, { 0xbe, 0x3d, 0x75, 0x9f, 0x56, 0x98, 0xf2, 0xb3 } };
-        static const GUID IID_IBitmapImage3_UWP =
-            { 0x7311e0d4, 0xfe94, 0x4e70, { 0x9b, 0x90, 0xcd, 0xd4, 0x7a, 0xc2, 0x3a, 0xfb } };
-        static const GUID IID_IBitmapSource_UWP =
-            { 0x23d86411, 0x202f, 0x41b2, { 0x8c, 0x5b, 0xa8, 0xa3, 0xb3, 0x33, 0x80, 0x0b } };
-        static const GUID IID_IAnimatedVisualPlayer_WinUI =
-            { 0xbf7f8865, 0x7b79, 0x5354, { 0x97, 0x88, 0xc2, 0x1e, 0x52, 0x35, 0x91, 0xea } };
-        if (IsEqualGUID( iid, &IID_IListViewBase_UWP ))
-            *out = &impl->IFlyout_iface;
-        else if (IsEqualGUID( iid, &IID_IBitmapImage_UWP ))
-            *out = &impl->IBitmapImage_iface;
-        else if (IsEqualGUID( iid, &IID_IBitmapSource_UWP ))
-            *out = &impl->IBitmapSource_iface;
-        else if (IsEqualGUID( iid, &IID_IStateTrigger_UWP ))
-            *out = &impl->IStateTriggerPub_iface;
-        else if (IsEqualGUID( iid, &IID_IShape_UWP ))
-            *out = &impl->IShape_iface;
-        else if (IsEqualGUID( iid, &IID_IListViewBase2_UWP ) ||
-                 IsEqualGUID( iid, &IID_IListViewBase4_UWP ) ||
-                 IsEqualGUID( iid, &IID_IListView_UWP ) ||
-                 IsEqualGUID( iid, &IID_IScrollViewer3_Real_UWP ) ||
-                 (IsEqualGUID( iid, &IID_IScrollAnchorProvider_UWP ) &&
-                  (impl->kind == UWP_KIND_SCROLL_VIEWER || uwp_is_scroll_viewer( impl ))) ||
-                 IsEqualGUID( iid, &IID_IBitmapImage2_UWP ) ||
-                 IsEqualGUID( iid, &IID_IBitmapImage2_Real_UWP ) ||
-                 IsEqualGUID( iid, &IID_IBitmapImage3_UWP ) ||
-                 IsEqualGUID( iid, &IID_IAnimatedVisualPlayer_WinUI ))
-            *out = &impl->IStyle_iface;
-        else if (IsEqualGUID( iid, &IID_ISelector_UWP ))
-            *out = &impl->ISelector_iface;
-        else if (IsEqualGUID( iid, &IID_IComboBox_UWP ))
-            *out = &impl->IComboBox_iface;
-        else if (IsEqualGUID( iid, &IID_IItemsControl_UWP ) ||
-                 IsEqualGUID( iid, &IID_IItemsControl_UWP2 ))
-            *out = &impl->IItemsControl_iface;
-    }
-    if (!*out)
-    {
-        if (IsEqualGUID( iid, &IID_IDispatcherTimer_UWP ))
-            *out = &impl->IInspectable_iface;
-        else if (IsEqualGUID( iid, &IID_IStateTriggerBase_UWP ) ||
-                 IsEqualGUID( iid, &IID_IMarkupExtension_UWP ) ||
-                 IsEqualGUID( iid, &IID_IMarkupExtensionOverrides_UWP ))
-            *out = &impl->IStyle_iface;
-        else if (IsEqualGUID( iid, &IID_IStateTriggerBaseProtected_UWP ))
-            *out = &impl->IStateTrigger_iface;
-        else if (IsEqualGUID( iid, &IID_IUIElement10_UWP ))
-            *out = &impl->IUIElement10_iface;
-        else if (IsEqualGUID( iid, &IID_IXamlRoot_UWP ))
-            *out = &impl->IXamlRoot_iface;
-        else
-    {
-        static const GUID IID_IObservableVector_DO =
-            { 0xfac6f4d2, 0x96fd, 0x5ceb, { 0x80, 0xbf, 0x46, 0xac, 0x65, 0x29, 0xfc, 0x65 } };
-        static const GUID IID_IObservableVector_ICBE =
-            { 0xd5644006, 0x717d, 0x512d, { 0x87, 0x85, 0xb4, 0x8c, 0x17, 0xe7, 0x34, 0x68 } };
-        static const GUID IID_IVector_DO =
-            { 0x771b857e, 0xab5c, 0x5db8, { 0xa0, 0x21, 0x39, 0x7c, 0x92, 0xcd, 0xc4, 0x4c } };
-        static const GUID IID_IVector_MBI =
-            { 0xef83f4ba, 0x0b73, 0x51d5, { 0xb1, 0x3b, 0x89, 0xa2, 0xb1, 0x56, 0xad, 0x9a } };
-        static const GUID IID_IVector_MFIB =
-            { 0xf7f1c37b, 0xb4df, 0x5128, { 0xa4, 0x76, 0xfc, 0x83, 0x99, 0xbc, 0x10, 0xaf } };
-        static const GUID IID_IIterable_DO =
-            { 0xf66c6bd3, 0x55b4, 0x5bbb, { 0xb8, 0x2a, 0x6d, 0x9c, 0xe3, 0x83, 0x09, 0x1a } };
-        static const GUID IID_IVectorView_DO =
-            { 0xfe750d77, 0x1307, 0x5df2, { 0xa0, 0x21, 0x1c, 0x7a, 0x8d, 0x6b, 0x80, 0xad } };
-        if (IsEqualGUID( iid, &IID_IObservableVector_DO ) ||
-            IsEqualGUID( iid, &IID_IObservableVector_ICBE ))
-            *out = &impl->IObservableVector_iface;
-        else if (IsEqualGUID( iid, &IID_IVector_DO ) ||
-                 IsEqualGUID( iid, &IID_IVector_IInspectable_UWP ) ||
-                 IsEqualGUID( iid, &IID_IVector_MBI ) ||
-                 IsEqualGUID( iid, &IID_IVector_MFIB ) ||
-                 IsEqualGUID( iid, &IID_IVector_GradientStop_UWP ))
-            *out = &impl->IVector_iface;
-        else if (IsEqualGUID( iid, &IID_IIterable_DO ) ||
-                 IsEqualGUID( iid, &IID_IIterable_GradientStop_UWP ))
-            *out = &impl->IIterable_iface;
-        else if (IsEqualGUID( iid, &IID_IVectorView_DO ) ||
-                 IsEqualGUID( iid, &IID_IVectorView_GradientStop_UWP ))
-            *out = &impl->IVectorView_iface;
-        else
+        InitOnceExecuteOnce( &g_qi_map_once, init_qi_map, NULL, NULL );
+        idx = uwp_qi_hash( iid->Data1 ) & (UWP_QI_MAP_SIZE - 1);
+        for (;;)
         {
-            size_t k;
-            for (k = 0; k < ARRAY_SIZE(IID_IUIE_Extra); k++)
+            const struct uwp_qi_slot *s = &g_qi_map[idx];
+            if (!(s->flags & UWP_QI_FLAG_OCCUPIED)) break;
+            if ((s->flags & UWP_QI_FLAG_PARTIAL)
+                ? (s->iid.Data1 == iid->Data1 && s->iid.Data2 == iid->Data2 && s->iid.Data3 == iid->Data3)
+                : IsEqualGUID( &s->iid, iid ))
             {
-                if (IsEqualGUID( iid, &IID_IUIE_Extra[k] ))
+                BOOL ok = TRUE;
+                UINT16 chosen_off = s->off;
+                switch (s->guard)
                 {
-                    *out = &impl->IStyle_iface;
+                case QI_GUARD_NONE:
+                    break;
+                case QI_GUARD_TOGGLE_MENU_ITEM:
+                    ok = (impl->class_flags & (UWP_CF_TOGGLE_MENU_ITEM | UWP_CF_RADIO_MENU_ITEM)) != 0;
+                    break;
+                case QI_GUARD_NOT_TEMPLATE_SELECTOR:
+                    ok = (wcsstr( impl->class_name, L"TemplateSelector" ) == NULL);
+                    break;
+                case QI_GUARD_MENU_FLYOUT_SUB_ITEM:
+                    ok = (impl->class_flags & UWP_CF_MENU_FLYOUT_SUB_ITEM) != 0;
+                    break;
+                case QI_GUARD_MENU_FLYOUT_ITEM:
+                    ok = (impl->class_flags & UWP_CF_MENU_FLYOUT_ITEM) != 0;
+                    break;
+                case QI_GUARD_AUTOSUGGEST_ALT:
+                    if (!uwp_is_autosuggest( impl )) chosen_off = s->alt_off;
+                    break;
+                case QI_GUARD_FRAME:
+                    ok = (wcsstr( impl->class_name, L".Controls.Frame" ) != NULL ||
+                          wcsstr( impl->class_name, L".Controls.ContentFrame" ) != NULL);
+                    break;
+                case QI_GUARD_MEDIA_PLAYER:
+                    ok = (impl->class_flags & UWP_CF_MEDIA_PLAYER) != 0;
+                    break;
+                case QI_GUARD_NAV_TRANSITION:
+                    ok = (wcsstr( impl->class_name, L"NavigationTransitionInfo" ) != NULL);
+                    break;
+                case QI_GUARD_FLYOUT_ALT:
+                    if (!uwp_is_flyout( impl )) chosen_off = s->alt_off;
+                    break;
+                case QI_GUARD_IMAGE:
+                    ok = (wcsstr( impl->class_name, L"Image" ) != NULL);
+                    break;
+                case QI_GUARD_EASE:
+                    ok = (wcsstr( impl->class_name, L"Ease" ) != NULL ||
+                          wcsstr( impl->class_name, L"EasingFunction" ) != NULL);
+                    break;
+                case QI_GUARD_NAVVIEW_ALT:
+                    if (wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.NavigationView" ) != 0)
+                        chosen_off = s->alt_off;
+                    break;
+                case QI_GUARD_NAVVIEW_ITEM:
+                    ok = (wcscmp( impl->class_name, L"Microsoft.UI.Xaml.Controls.NavigationViewItem" ) == 0);
+                    break;
+                case QI_GUARD_SCROLL_VIEWER:
+                    ok = (impl->kind == UWP_KIND_SCROLL_VIEWER || uwp_is_scroll_viewer( impl ));
                     break;
                 }
+                if (ok) *out = (char *)impl + chosen_off;
+                break;
             }
+            idx = (idx + 1) & (UWP_QI_MAP_SIZE - 1);
         }
     }
-    }
+
     if (!*out && (IsEqualGUID( iid, &IID_IDCompositionVisual ) ||
                   IsEqualGUID( iid, &IID_IDCompositionVisual2 )))
     {
@@ -1900,6 +2024,191 @@ static const void *uwp_scp_native_vtbl[8] =
     [5 ... 7] = uwp_generic_noop,
 };
 
+#define UWP_VTBL_MAP_SIZE 256
+
+struct uwp_vtbl_off
+{
+    const void *vtbl;
+    UINT16 off0;
+    UINT16 off1;
+};
+
+static struct uwp_vtbl_off g_vtbl_off_map[UWP_VTBL_MAP_SIZE];
+static INIT_ONCE g_vtbl_map_once = INIT_ONCE_STATIC_INIT;
+
+static void vtbl_map_put( const void *vtbl, size_t off )
+{
+    UINT32 idx = uwp_hash_ptr( vtbl ) & (UWP_VTBL_MAP_SIZE - 1);
+    UINT16 o = (UINT16)off;
+    for (;;)
+    {
+        struct uwp_vtbl_off *e = &g_vtbl_off_map[idx];
+        if (!e->vtbl)
+        {
+            e->vtbl = vtbl;
+            e->off0 = o;
+            e->off1 = 0xffff;
+            return;
+        }
+        if (e->vtbl == vtbl)
+        {
+            if (o < e->off0)
+            {
+                e->off1 = e->off0;
+                e->off0 = o;
+            }
+            else if (o != e->off0)
+            {
+                e->off1 = o;
+            }
+            return;
+        }
+        idx = (idx + 1) & (UWP_VTBL_MAP_SIZE - 1);
+    }
+}
+
+static BOOL CALLBACK init_uwp_vtbl_map( INIT_ONCE *once, void *param, void **ctx )
+{
+#define VMAP( v, field ) vtbl_map_put( (v), offsetof( struct uwp_element, field ) )
+    VMAP( uwp_nondelegating_vtbl, nondelegating_iface );
+    VMAP( uwp_timer_vtbl, IInspectable_iface );
+    VMAP( uwp_navview_vtbl, IInspectable_iface );
+    VMAP( uwp_fe_vtbl, IInspectable_iface );
+    VMAP( uwp_do_vtbl, IDependencyObject_iface );
+    VMAP( uwp_do2_vtbl, IDependencyObject2_iface );
+    VMAP( uwp_ui_vtbl, IUIElement_iface );
+    VMAP( uwp_fe_vtbl, IFrameworkElement_iface );
+    VMAP( uwp_fe2_vtbl, IFrameworkElement2_iface );
+    VMAP( uwp_fe3_vtbl, IFrameworkElement3_iface );
+    VMAP( uwp_fe7_vtbl, IFrameworkElement7_iface );
+    VMAP( uwp_ctrl_vtbl, IControl_iface );
+    VMAP( uwp_ctrl_prot_vtbl, IControlProtected_iface );
+    VMAP( uwp_cc_vtbl, IContentControl_iface );
+    VMAP( uwp_cc_vtbl, IUserControl_iface );
+    VMAP( uwp_page_vtbl, IPage_iface );
+    VMAP( uwp_frame_vtbl, IFrame_iface );
+    VMAP( uwp_frame2_vtbl, IFrame2_iface );
+    VMAP( uwp_frame3_vtbl, IFrame3_iface );
+    VMAP( uwp_frame5_vtbl, IFrame5_iface );
+    VMAP( uwp_btn_vtbl, IButtonBase_iface );
+    VMAP( uwp_tbtn_vtbl, IToggleButton_iface );
+    VMAP( uwp_panel_vtbl, IPanel_iface );
+    VMAP( uwp_grid_vtbl, IGrid_iface );
+    VMAP( uwp_grid3_vtbl, IGrid3_iface );
+    VMAP( uwp_border_vtbl, IBorder_iface );
+    VMAP( uwp_tb_vtbl, ITextBlock_iface );
+    VMAP( uwp_paragraph_vtbl, IParagraph_iface );
+    VMAP( uwp_run_vtbl, IRun_iface );
+    VMAP( &uwp_binding_vtbl, IBinding_iface );
+    VMAP( &uwp_pp_vtbl, IPropertyPath_iface );
+    VMAP( uwp_rowcol_vtbl, IRowDefinition_iface );
+    VMAP( uwp_rowcol_vtbl, IColumnDefinition_iface );
+    VMAP( uwp_visual_state_vtbl, IStyle_iface );
+    VMAP( uwp_noop_vtbl, IStyle_iface );
+    VMAP( uwp_data_template_vtbl, IDataTemplate_iface );
+    VMAP( uwp_dts_vtbl, IDataTemplateSelector_iface );
+    VMAP( uwp_dts2_vtbl, IDataTemplateSelector2_iface );
+    VMAP( uwp_brush_vtbl, IBrush_iface );
+    VMAP( uwp_scb_vtbl, ISolidColorBrush_iface );
+    VMAP( uwp_flyout_vtbl, IFlyout_iface );
+    VMAP( uwp_selector_vtbl, ISelector_iface );
+    VMAP( uwp_combobox_vtbl, IComboBox_iface );
+    VMAP( uwp_items_ctrl_vtbl, IItemsControl_iface );
+    VMAP( &uwp_state_trigger_vtbl, IStateTrigger_iface );
+    VMAP( &uwp_state_trigger_pub_vtbl, IStateTriggerPub_iface );
+    VMAP( uwp_el_obsvec_vtbl, IObservableVector_iface );
+    VMAP( uwp_el_vec_vtbl, IVector_iface );
+    VMAP( uwp_el_iterable_vtbl, IIterable_iface );
+    VMAP( uwp_el_vecview_vtbl, IVectorView_iface );
+    VMAP( uwp_sv_vtbl, IScrollViewer_iface );
+    VMAP( uwp_dwxs_native_vtbl, IDesktopWindowXamlSourceNative_iface );
+    VMAP( uwp_ui7_vtbl, IUIElement7_iface );
+    VMAP( uwp_ka_vtbl, IKeyboardAccelerator_iface );
+    VMAP( uwp_xaml_cmd_vtbl, IXamlUICommand_iface );
+    VMAP( uwp_icmd_vtbl, ICommand_iface );
+    VMAP( uwp_mfi_vtbl, IMenuFlyoutItem_iface );
+    VMAP( uwp_mfi3_vtbl, IMenuFlyoutItem3_iface );
+    VMAP( uwp_tmfi_vtbl, IToggleMenuFlyoutItem_iface );
+    VMAP( uwp_mfsi_vtbl, IMenuFlyoutSubItem_iface );
+    VMAP( uwp_mf2_vtbl, IMenuFlyout2_iface );
+    VMAP( uwp_ui4_vtbl, IUIElement4_iface );
+    VMAP( uwp_ui5_vtbl, IUIElement5_iface );
+    VMAP( uwp_uie10_vtbl, IUIElement10_iface );
+    VMAP( uwp_xaml_root_vtbl, IXamlRoot_iface );
+    VMAP( uwp_button_flyout_vtbl, IButtonWithFlyout_iface );
+    VMAP( uwp_cd_vtbl, IContentDialog_iface );
+    VMAP( uwp_cd2_vtbl, IContentDialog2_iface );
+    VMAP( uwp_scp_vtbl, ISwapChainPanel_iface );
+    VMAP( uwp_scp_native_vtbl, ISwapChainPanelNative2_iface );
+    VMAP( uwp_teachingtip_vtbl, ITeachingTip_iface );
+    VMAP( uwp_asb_vtbl, IAutoSuggestBox_iface );
+    VMAP( uwp_asb2_vtbl, IAutoSuggestBox2_iface );
+    VMAP( uwp_splitview_vtbl, ISplitView_iface );
+    VMAP( uwp_splitview2_vtbl, ISplitView2_iface );
+    VMAP( uwp_ease_vtbl, IEasingFunctionBase_iface );
+    VMAP( uwp_mpe_vtbl, IMediaPlayerElement_iface );
+    VMAP( uwp_bi_vtbl, IBitmapImage_iface );
+    VMAP( uwp_bs_vtbl, IBitmapSource_iface );
+    VMAP( uwp_img_vtbl, IImage_iface );
+    VMAP( uwp_shape_vtbl, IShape_iface );
+    VMAP( uwp_xcbb_prot_vtbl, IXamlCompositionBrushBaseProtected_iface );
+    VMAP( uwp_lis_vtbl, ILoadedImageSurface_iface );
+    VMAP( uwp_font_family_vtbl, IFontFamily_iface );
+    VMAP( uwp_font_icon_vtbl, IFontIcon_iface );
+    VMAP( uwp_image_brush_vtbl, IImageBrush_iface );
+    VMAP( uwp_tile_brush_vtbl, ITileBrush_iface );
+    VMAP( uwp_grad_brush_vtbl, IGradientBrush_iface );
+    VMAP( uwp_lgb_vtbl, ILinearGradientBrush_iface );
+    VMAP( uwp_grad_stop_vtbl, IGradientStop_iface );
+    VMAP( uwp_path_geom_vtbl, IPathGeometry_iface );
+    VMAP( uwp_path_geom_f2_vtbl, IPathFigure_iface );
+    VMAP( uwp_rtb_vtbl, IRichTextBlock_iface );
+    VMAP( uwp_tb2_vtbl, ITextBlock2_iface );
+    VMAP( uwp_tb6_vtbl, ITextBlock6_iface );
+    VMAP( uwp_popup_vtbl, IPopup_iface );
+    VMAP( uwp_popup2_vtbl, IPopup2_iface );
+    VMAP( uwp_popup3_vtbl, IPopup3_iface );
+    VMAP( uwp_sb_vtbl, IStoryboard_iface );
+    VMAP( &uwp_wrs_vtbl, IWeakReferenceSource_iface );
+    VMAP( &uwp_disp_vtbl, IDispatch_iface );
+    VMAP( &uwp_rtt_vtbl, IReferenceTrackerTarget_iface );
+#undef VMAP
+    return TRUE;
+}
+
+static struct uwp_element *uwp_elem_from_vtbl_fast( void *ptr )
+{
+    ULONG_PTR addr = (ULONG_PTR)ptr;
+    const void *vtbl;
+    UINT32 idx;
+    if ((addr & (sizeof(void *) - 1)) != 0 || addr < g_elem_min_addr || addr >= g_elem_max_addr)
+        return NULL;
+    InitOnceExecuteOnce( &g_vtbl_map_once, init_uwp_vtbl_map, NULL, NULL );
+    vtbl = *(const void **)ptr;
+    idx = uwp_hash_ptr( vtbl ) & (UWP_VTBL_MAP_SIZE - 1);
+    for (;;)
+    {
+        const struct uwp_vtbl_off *e = &g_vtbl_off_map[idx];
+        if (!e->vtbl) return NULL;
+        if (e->vtbl == vtbl)
+        {
+            struct uwp_element *cand = (struct uwp_element *)((char *)ptr - e->off0);
+            if (cand->magic == UWP_ELEM_MAGIC &&
+                cand->nondelegating_iface.lpVtbl == (const struct IInspectableVtbl *)uwp_nondelegating_vtbl)
+                return cand;
+            if (e->off1 != 0xffff)
+            {
+                cand = (struct uwp_element *)((char *)ptr - e->off1);
+                if (cand->magic == UWP_ELEM_MAGIC &&
+                    cand->nondelegating_iface.lpVtbl == (const struct IInspectableVtbl *)uwp_nondelegating_vtbl)
+                    return cand;
+            }
+            return NULL;
+        }
+        idx = (idx + 1) & (UWP_VTBL_MAP_SIZE - 1);
+    }
+}
+
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance )
 {
     struct uwp_element *impl;
@@ -2023,6 +2332,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IReferenceTrackerTarget_iface.lpVtbl = (const IInspectableVtbl *)&uwp_rtt_vtbl;
     impl->ITypeInfo_iface.lpVtbl = &uwp_disp_ti_vtbl;
 
+    impl->magic = UWP_ELEM_MAGIC;
     impl->ref = 1;
     impl->outer = outer;
     impl->accel_enabled = TRUE;
@@ -2917,8 +3227,8 @@ BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, cons
         (!root_el->has_bounds || g_layout_dirty || root_el != last_root || width != last_w || height != last_h))
     {
         RECT rc = { 0, 0, width, height };
-        uwp_arrange_element( root_el, rc );
         g_layout_dirty = FALSE;
+        uwp_arrange_element( root_el, rc );
         last_root = root_el;
         last_w = width;
         last_h = height;

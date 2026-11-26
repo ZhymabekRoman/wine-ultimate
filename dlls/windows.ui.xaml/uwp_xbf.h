@@ -59,6 +59,9 @@ struct pri_xbf_catalog
     struct pri_xbf_entry *entries;
     DWORD cnt;
     DWORD cap;
+    int *path_slots;
+    int *base_slots;
+    DWORD hash_mask;
 };
 
 struct xbf_ctx

@@ -181,14 +181,180 @@ COLORREF g_paint_page_bg = RGB( 31, 31, 31 );
 
 static SRWLOCK g_http_img_cache_lock = SRWLOCK_INIT;
 static volatile LONG g_active_http_workers = 0;
-static struct
+
+#define HTTP_IMG_CACHE_SLOTS 512
+#define HTTP_IMG_HASH_SIZE   1024
+#define HTTP_IMG_MAX_WAITERS 32
+
+enum http_img_state
+{
+    HTTP_IMG_EMPTY = 0,
+    HTTP_IMG_IN_FLIGHT,
+    HTTP_IMG_DONE,
+    HTTP_IMG_FAILED,
+};
+
+struct http_img_entry
 {
     WCHAR url[512];
     BYTE *pixels;
     UINT w, h;
-    BOOL done;
-} g_http_img_cache[256];
+    UINT max_dim;
+    enum http_img_state state;
+    UINT64 lru_tick;
+    struct uwp_element *waiters[HTTP_IMG_MAX_WAITERS];
+    int waiter_cnt;
+};
+
+static struct http_img_entry g_http_img_cache[HTTP_IMG_CACHE_SLOTS];
+static int g_http_img_hash[HTTP_IMG_HASH_SIZE]; /* slot index + 1, 0 = empty */
 static int g_http_img_cache_cnt = 0;
+static UINT64 g_http_img_lru_clock = 1;
+
+#define LOCAL_IMG_CACHE_SLOTS 256
+#define LOCAL_IMG_HASH_SIZE   512
+
+struct local_img_entry
+{
+    WCHAR key[520]; /* "S:" or "D:" + image_src */
+    BYTE *pixels;
+    UINT w, h;
+    BOOL valid;
+    BOOL found;
+    UINT64 lru_tick;
+};
+
+static SRWLOCK g_local_img_cache_lock = SRWLOCK_INIT;
+static struct local_img_entry g_local_img_cache[LOCAL_IMG_CACHE_SLOTS];
+static int g_local_img_hash[LOCAL_IMG_HASH_SIZE]; /* slot index + 1, 0 = empty */
+static int g_local_img_cache_cnt = 0;
+static UINT64 g_local_img_lru_clock = 1;
+
+static inline UINT32 img_hash_wstr( const WCHAR *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        h ^= (UINT32)*s;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static inline UINT32 img_hash_wstr_ci( const WCHAR *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        WCHAR c = *s;
+        if (c >= L'A' && c <= L'Z') c += 32;
+        h ^= (UINT32)c;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void http_img_rebuild_hash_locked( void )
+{
+    int i;
+    memset( g_http_img_hash, 0, sizeof(g_http_img_hash) );
+    for (i = 0; i < g_http_img_cache_cnt; i++)
+    {
+        UINT32 idx;
+        if (g_http_img_cache[i].state == HTTP_IMG_EMPTY) continue;
+        idx = img_hash_wstr( g_http_img_cache[i].url ) & (HTTP_IMG_HASH_SIZE - 1);
+        while (g_http_img_hash[idx]) idx = (idx + 1) & (HTTP_IMG_HASH_SIZE - 1);
+        g_http_img_hash[idx] = i + 1;
+    }
+}
+
+static int http_img_find_locked( const WCHAR *url )
+{
+    UINT32 idx = img_hash_wstr( url ) & (HTTP_IMG_HASH_SIZE - 1);
+    int v;
+    while ((v = g_http_img_hash[idx]) != 0)
+    {
+        if (!wcscmp( g_http_img_cache[v - 1].url, url ))
+            return v - 1;
+        idx = (idx + 1) & (HTTP_IMG_HASH_SIZE - 1);
+    }
+    return -1;
+}
+
+static int http_img_alloc_slot_locked( const WCHAR *url )
+{
+    int slot = -1;
+    if (g_http_img_cache_cnt < HTTP_IMG_CACHE_SLOTS)
+    {
+        UINT32 idx;
+        slot = g_http_img_cache_cnt++;
+        memset( &g_http_img_cache[slot], 0, sizeof(g_http_img_cache[slot]) );
+        lstrcpynW( g_http_img_cache[slot].url, url, ARRAY_SIZE(g_http_img_cache[slot].url) );
+        idx = img_hash_wstr( g_http_img_cache[slot].url ) & (HTTP_IMG_HASH_SIZE - 1);
+        while (g_http_img_hash[idx]) idx = (idx + 1) & (HTTP_IMG_HASH_SIZE - 1);
+        g_http_img_hash[idx] = slot + 1;
+        return slot;
+    }
+    /* Evict least-recently-used completed slot (never evict IN_FLIGHT; leave pixels intact for live elements) */
+    {
+        int i;
+        UINT64 best_tick = ~(UINT64)0;
+        for (i = 0; i < HTTP_IMG_CACHE_SLOTS; i++)
+        {
+            if (g_http_img_cache[i].state != HTTP_IMG_IN_FLIGHT && g_http_img_cache[i].lru_tick < best_tick)
+            {
+                best_tick = g_http_img_cache[i].lru_tick;
+                slot = i;
+            }
+        }
+        if (slot < 0) return -1;
+        memset( &g_http_img_cache[slot], 0, sizeof(g_http_img_cache[slot]) );
+        lstrcpynW( g_http_img_cache[slot].url, url, ARRAY_SIZE(g_http_img_cache[slot].url) );
+        http_img_rebuild_hash_locked();
+        return slot;
+    }
+}
+
+typedef void *HINTERNET_t;
+
+static struct
+{
+    BOOL ready;
+    HMODULE hwh;
+    HINTERNET_t session;
+    HINTERNET_t (WINAPI *pOpen)( LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD );
+    HINTERNET_t (WINAPI *pConnect)( HINTERNET_t, LPCWSTR, WORD, DWORD );
+    HINTERNET_t (WINAPI *pOpenReq)( HINTERNET_t, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR *, DWORD );
+    BOOL (WINAPI *pSendReq)( HINTERNET_t, LPCWSTR, DWORD, LPVOID, DWORD, DWORD, DWORD_PTR );
+    BOOL (WINAPI *pRecvResp)( HINTERNET_t, LPVOID );
+    BOOL (WINAPI *pReadData)( HINTERNET_t, LPVOID, DWORD, LPDWORD );
+    BOOL (WINAPI *pClose)( HINTERNET_t );
+    BOOL (WINAPI *pCrackUrl)( LPCWSTR, DWORD, DWORD, void * );
+} g_winhttp;
+
+static INIT_ONCE g_winhttp_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK init_winhttp_session( INIT_ONCE *once, void *param, void **ctx )
+{
+    g_winhttp.hwh = LoadLibraryW( L"winhttp.dll" );
+    if (!g_winhttp.hwh) return TRUE;
+    g_winhttp.pOpen     = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpOpen" );
+    g_winhttp.pConnect  = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpConnect" );
+    g_winhttp.pOpenReq  = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpOpenRequest" );
+    g_winhttp.pSendReq  = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpSendRequest" );
+    g_winhttp.pRecvResp = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpReceiveResponse" );
+    g_winhttp.pReadData = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpReadData" );
+    g_winhttp.pClose    = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpCloseHandle" );
+    g_winhttp.pCrackUrl = (void *)GetProcAddress( g_winhttp.hwh, "WinHttpCrackUrl" );
+    if (g_winhttp.pOpen && g_winhttp.pConnect && g_winhttp.pOpenReq && g_winhttp.pSendReq &&
+        g_winhttp.pRecvResp && g_winhttp.pReadData && g_winhttp.pClose && g_winhttp.pCrackUrl)
+    {
+        g_winhttp.session = g_winhttp.pOpen( L"WineStoreXAML/1.0", 0, NULL, NULL, 0 );
+        if (g_winhttp.session)
+            g_winhttp.ready = TRUE;
+    }
+    return TRUE;
+}
 
 static BOOL uwp_wic_decode_memory( const BYTE *data, DWORD len, UINT max_dim, BYTE **out_pixels, UINT *out_w, UINT *out_h )
 {
@@ -350,20 +516,19 @@ void uwp_on_image_loaded( struct uwp_element *el )
     }
 }
 
+struct http_worker_ctx
+{
+    int cache_slot;
+    UINT max_dim;
+    WCHAR url[512];
+};
+
 static DWORD WINAPI uwp_http_image_worker( LPVOID param )
 {
-    struct uwp_element *el = (struct uwp_element *)param;
-    HMODULE hwh;
+    struct http_worker_ctx *wctx = (struct http_worker_ctx *)param;
     WCHAR url[512];
-    typedef void *HINTERNET_t;
-    HINTERNET_t (WINAPI *pOpen)( LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD );
-    HINTERNET_t (WINAPI *pConnect)( HINTERNET_t, LPCWSTR, WORD, DWORD );
-    HINTERNET_t (WINAPI *pOpenReq)( HINTERNET_t, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR *, DWORD );
-    BOOL (WINAPI *pSendReq)( HINTERNET_t, LPCWSTR, DWORD, LPVOID, DWORD, DWORD, DWORD_PTR );
-    BOOL (WINAPI *pRecvResp)( HINTERNET_t, LPVOID );
-    BOOL (WINAPI *pReadData)( HINTERNET_t, LPVOID, DWORD, LPDWORD );
-    BOOL (WINAPI *pClose)( HINTERNET_t );
-    BOOL (WINAPI *pCrackUrl)( LPCWSTR, DWORD, DWORD, void * );
+    int cache_slot;
+    UINT max_dim;
     struct
     {
         DWORD dwStructSize;
@@ -385,118 +550,187 @@ static DWORD WINAPI uwp_http_image_worker( LPVOID param )
     WCHAR host[256] = {0}, path[512] = {0};
     BYTE *buf = NULL;
     DWORD cap = 0, len = 0;
+    BYTE *px = NULL;
+    UINT pw = 0, ph = 0;
+    struct uwp_element *waiters[HTTP_IMG_MAX_WAITERS];
+    int waiter_cnt = 0, wi;
+    BOOL need_layout = FALSE;
 
-    if (!el) return 0;
-    lstrcpynW( url, el->image_src, ARRAY_SIZE(url) );
+    if (!wctx) return 0;
+    lstrcpynW( url, wctx->url, ARRAY_SIZE(url) );
+    cache_slot = wctx->cache_slot;
+    max_dim = wctx->max_dim;
+    free( wctx );
+
     CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    InitOnceExecuteOnce( &g_winhttp_once, init_winhttp_session, NULL, NULL );
 
-    hwh = LoadLibraryW( L"winhttp.dll" );
-    if (hwh)
+    if (g_winhttp.ready)
     {
-        pOpen = (void *)GetProcAddress( hwh, "WinHttpOpen" );
-        pConnect = (void *)GetProcAddress( hwh, "WinHttpConnect" );
-        pOpenReq = (void *)GetProcAddress( hwh, "WinHttpOpenRequest" );
-        pSendReq = (void *)GetProcAddress( hwh, "WinHttpSendRequest" );
-        pRecvResp = (void *)GetProcAddress( hwh, "WinHttpReceiveResponse" );
-        pReadData = (void *)GetProcAddress( hwh, "WinHttpReadData" );
-        pClose = (void *)GetProcAddress( hwh, "WinHttpCloseHandle" );
-        pCrackUrl = (void *)GetProcAddress( hwh, "WinHttpCrackUrl" );
-        if (pOpen && pConnect && pOpenReq && pSendReq && pRecvResp && pReadData && pClose && pCrackUrl)
+        uc.dwStructSize = sizeof(uc);
+        uc.lpszHostName = host; uc.dwHostNameLength = ARRAY_SIZE(host);
+        uc.lpszUrlPath = path; uc.dwUrlPathLength = ARRAY_SIZE(path);
+        if (g_winhttp.pCrackUrl( url, 0, 0, &uc ) && host[0])
         {
-            uc.dwStructSize = sizeof(uc);
-            uc.lpszHostName = host; uc.dwHostNameLength = ARRAY_SIZE(host);
-            uc.lpszUrlPath = path; uc.dwUrlPathLength = ARRAY_SIZE(path);
-            if (pCrackUrl( url, 0, 0, &uc ) && host[0])
+            HINTERNET_t con = g_winhttp.pConnect( g_winhttp.session, host,
+                                                  uc.nPort ? uc.nPort : (uc.nScheme == 2 ? 443 : 80), 0 );
+            if (con)
             {
-                HINTERNET_t ses = pOpen( L"WineStoreXAML/1.0", 0, NULL, NULL, 0 );
-                if (ses)
+                DWORD flags = (uc.nScheme == 2) ? 0x00800000 : 0; /* WINHTTP_FLAG_SECURE */
+                HINTERNET_t req = g_winhttp.pOpenReq( con, L"GET", path[0] ? path : L"/", NULL, NULL, NULL, flags );
+                if (req)
                 {
-                    HINTERNET_t con = pConnect( ses, host, uc.nPort ? uc.nPort : (uc.nScheme == 2 ? 443 : 80), 0 );
-                    if (con)
+                    if (g_winhttp.pSendReq( req, NULL, 0, NULL, 0, 0, 0 ) && g_winhttp.pRecvResp( req, NULL ))
                     {
-                        DWORD flags = (uc.nScheme == 2) ? 0x00800000 : 0; /* WINHTTP_FLAG_SECURE */
-                        HINTERNET_t req = pOpenReq( con, L"GET", path[0] ? path : L"/", NULL, NULL, NULL, flags );
-                        if (req)
+                        BYTE chunk[16384];
+                        DWORD got = 0;
+                        while (g_winhttp.pReadData( req, chunk, sizeof(chunk), &got ) && got > 0)
                         {
-                            if (pSendReq( req, NULL, 0, NULL, 0, 0, 0 ) && pRecvResp( req, NULL ))
+                            if (len + got > 8 * 1024 * 1024) break;
+                            if (len + got > cap)
                             {
-                                BYTE chunk[16384];
-                                DWORD got = 0;
-                                while (pReadData( req, chunk, sizeof(chunk), &got ) && got > 0)
-                                {
-                                    if (len + got > 8 * 1024 * 1024) break;
-                                    if (len + got > cap)
-                                    {
-                                        DWORD ncap = cap ? cap * 2 : 65536;
-                                        BYTE *nb;
-                                        while (ncap < len + got) ncap *= 2;
-                                        nb = realloc( buf, ncap );
-                                        if (!nb) break;
-                                        buf = nb; cap = ncap;
-                                    }
-                                    memcpy( buf + len, chunk, got );
-                                    len += got;
-                                }
+                                DWORD ncap = cap ? cap * 2 : 65536;
+                                BYTE *nb;
+                                while (ncap < len + got) ncap *= 2;
+                                nb = realloc( buf, ncap );
+                                if (!nb) break;
+                                buf = nb; cap = ncap;
                             }
-                            pClose( req );
+                            memcpy( buf + len, chunk, got );
+                            len += got;
                         }
-                        pClose( con );
                     }
-                    pClose( ses );
+                    g_winhttp.pClose( req );
                 }
+                g_winhttp.pClose( con );
             }
         }
     }
 
     if (buf && len > 0)
-    {
-        BYTE *px = NULL;
-        UINT pw = 0, ph = 0;
-        UINT max_dim = 384;
-        if (wcsstr( el->class_name, L"LoadedImageSurface" ) || wcsstr( el->name, L"Hero" ) ||
-            (el->has_bounds && ((el->bounds.right - el->bounds.left) > 320 || (el->bounds.bottom - el->bounds.top) > 320)))
-            max_dim = 1024;
-        if (uwp_wic_decode_memory( buf, len, max_dim, &px, &pw, &ph ) && px)
-        {
-            AcquireSRWLockExclusive( &g_http_img_cache_lock );
-            if (g_http_img_cache_cnt < (int)ARRAY_SIZE(g_http_img_cache))
-            {
-                int idx = g_http_img_cache_cnt++;
-                lstrcpynW( g_http_img_cache[idx].url, url, ARRAY_SIZE(g_http_img_cache[idx].url) );
-                g_http_img_cache[idx].pixels = px;
-                g_http_img_cache[idx].w = pw;
-                g_http_img_cache[idx].h = ph;
-                g_http_img_cache[idx].done = TRUE;
-            }
-            ReleaseSRWLockExclusive( &g_http_img_cache_lock );
-            if (!wcscmp( el->image_src, url ))
-            {
-                struct uwp_element *anc;
-                int hop;
-                el->img_pixels = px;
-                el->img_w = pw;
-                el->img_h = ph;
-                el->img_loaded = TRUE;
-                for (anc = el, hop = 0; anc && hop < 4; anc = anc->parent, hop++)
-                {
-                    if (anc->opacity <= 0.005)
-                        anc->opacity = 1.0;
-                }
-                uwp_invalidate_window();
-            }
-        }
-    }
+        uwp_wic_decode_memory( buf, len, max_dim, &px, &pw, &ph );
     free( buf );
-    el->img_loaded = TRUE;
+
+    AcquireSRWLockExclusive( &g_http_img_cache_lock );
+    if (cache_slot >= 0 && cache_slot < HTTP_IMG_CACHE_SLOTS && !wcscmp( g_http_img_cache[cache_slot].url, url ))
+    {
+        struct http_img_entry *e = &g_http_img_cache[cache_slot];
+        e->pixels = px;
+        e->w = pw;
+        e->h = ph;
+        e->state = px ? HTTP_IMG_DONE : HTTP_IMG_FAILED;
+        e->lru_tick = ++g_http_img_lru_clock;
+        waiter_cnt = min( e->waiter_cnt, HTTP_IMG_MAX_WAITERS );
+        for (wi = 0; wi < waiter_cnt; wi++)
+            waiters[wi] = e->waiters[wi];
+        e->waiter_cnt = 0;
+    }
+    ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+
+    for (wi = 0; wi < waiter_cnt; wi++)
+    {
+        struct uwp_element *wel = waiters[wi];
+        if (!wel) continue;
+        if (px && !wcscmp( wel->image_src, url ))
+        {
+            struct uwp_element *anc;
+            int hop;
+            wel->img_pixels = px;
+            wel->img_w = pw;
+            wel->img_h = ph;
+            for (anc = wel, hop = 0; anc && hop < 4; anc = anc->parent, hop++)
+            {
+                if (anc->opacity <= 0.005)
+                    anc->opacity = 1.0;
+            }
+            if (!wel->has_bounds || wel->bounds.right <= wel->bounds.left || wel->bounds.bottom <= wel->bounds.top)
+                need_layout = TRUE;
+        }
+        wel->img_loaded = TRUE;
+    }
+
     CoUninitialize();
     InterlockedDecrement( &g_active_http_workers );
-    uwp_invalidate_window();
+    if (need_layout)
+        uwp_invalidate_window();
+    else
+        uwp_invalidate_paint_only();
     return 0;
+}
+
+static int local_img_find_locked( const WCHAR *key )
+{
+    UINT32 idx = img_hash_wstr_ci( key ) & (LOCAL_IMG_HASH_SIZE - 1);
+    int v;
+    while ((v = g_local_img_hash[idx]) != 0)
+    {
+        if (!wcsicmp( g_local_img_cache[v - 1].key, key ))
+            return v - 1;
+        idx = (idx + 1) & (LOCAL_IMG_HASH_SIZE - 1);
+    }
+    return -1;
+}
+
+static void local_img_rebuild_hash_locked( void )
+{
+    int i;
+    memset( g_local_img_hash, 0, sizeof(g_local_img_hash) );
+    for (i = 0; i < g_local_img_cache_cnt; i++)
+    {
+        UINT32 idx;
+        if (!g_local_img_cache[i].valid) continue;
+        idx = img_hash_wstr_ci( g_local_img_cache[i].key ) & (LOCAL_IMG_HASH_SIZE - 1);
+        while (g_local_img_hash[idx]) idx = (idx + 1) & (LOCAL_IMG_HASH_SIZE - 1);
+        g_local_img_hash[idx] = i + 1;
+    }
+}
+
+static void local_img_store( const WCHAR *key, BYTE *pixels, UINT w, UINT h, BOOL found )
+{
+    int slot;
+    AcquireSRWLockExclusive( &g_local_img_cache_lock );
+    slot = local_img_find_locked( key );
+    if (slot < 0)
+    {
+        if (g_local_img_cache_cnt < LOCAL_IMG_CACHE_SLOTS)
+        {
+            UINT32 idx;
+            slot = g_local_img_cache_cnt++;
+            lstrcpynW( g_local_img_cache[slot].key, key, ARRAY_SIZE(g_local_img_cache[slot].key) );
+            idx = img_hash_wstr_ci( g_local_img_cache[slot].key ) & (LOCAL_IMG_HASH_SIZE - 1);
+            while (g_local_img_hash[idx]) idx = (idx + 1) & (LOCAL_IMG_HASH_SIZE - 1);
+            g_local_img_hash[idx] = slot + 1;
+        }
+        else
+        {
+            int i;
+            UINT64 best_tick = ~(UINT64)0;
+            slot = 0;
+            for (i = 0; i < LOCAL_IMG_CACHE_SLOTS; i++)
+            {
+                if (g_local_img_cache[i].lru_tick < best_tick)
+                {
+                    best_tick = g_local_img_cache[i].lru_tick;
+                    slot = i;
+                }
+            }
+            lstrcpynW( g_local_img_cache[slot].key, key, ARRAY_SIZE(g_local_img_cache[slot].key) );
+            local_img_rebuild_hash_locked();
+        }
+    }
+    g_local_img_cache[slot].pixels = pixels;
+    g_local_img_cache[slot].w = w;
+    g_local_img_cache[slot].h = h;
+    g_local_img_cache[slot].found = found;
+    g_local_img_cache[slot].valid = TRUE;
+    g_local_img_cache[slot].lru_tick = ++g_local_img_lru_clock;
+    ReleaseSRWLockExclusive( &g_local_img_cache_lock );
 }
 
 void uwp_load_image_asset( struct uwp_element *el )
 {
     WCHAR rel[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0}, candidate[MAX_PATH] = {0};
+    WCHAR local_key[520];
     const WCHAR *p = el->image_src;
     static const WCHAR *const scales_small[] = {
         L"", L".targetsize-24_altform-unplated", L".targetsize-24",
@@ -527,40 +761,127 @@ void uwp_load_image_asset( struct uwp_element *el )
     if (!wcsncmp( p, L"http://", 7 ) || !wcsncmp( p, L"https://", 8 ))
     {
         int ci;
-        AcquireSRWLockShared( &g_http_img_cache_lock );
-        for (ci = 0; ci < g_http_img_cache_cnt; ci++)
+        UINT max_dim = 384;
+        if (wcsstr( el->class_name, L"LoadedImageSurface" ) || wcsstr( el->name, L"Hero" ) ||
+            (el->has_bounds && ((el->bounds.right - el->bounds.left) > 320 || (el->bounds.bottom - el->bounds.top) > 320)))
+            max_dim = 1024;
+
+        AcquireSRWLockExclusive( &g_http_img_cache_lock );
+        ci = http_img_find_locked( p );
+        if (ci >= 0)
         {
-            if (g_http_img_cache[ci].done && !wcscmp( g_http_img_cache[ci].url, p ))
+            struct http_img_entry *e = &g_http_img_cache[ci];
+            e->lru_tick = ++g_http_img_lru_clock;
+            if (e->state == HTTP_IMG_DONE)
             {
-                el->img_pixels = g_http_img_cache[ci].pixels;
-                el->img_w = g_http_img_cache[ci].w;
-                el->img_h = g_http_img_cache[ci].h;
+                el->img_pixels = e->pixels;
+                el->img_w = e->w;
+                el->img_h = e->h;
                 el->img_loaded = TRUE;
-                ReleaseSRWLockShared( &g_http_img_cache_lock );
+                ReleaseSRWLockExclusive( &g_http_img_cache_lock );
                 uwp_on_image_loaded( el );
                 return;
             }
-        }
-        ReleaseSRWLockShared( &g_http_img_cache_lock );
-        if (el->has_bounds && (el->bounds.bottom <= 0 || el->bounds.top >= 1150))
-            return;
-        if (InterlockedCompareExchange( &g_active_http_workers, 0, 0 ) >= 10)
-            return;
-        if (InterlockedCompareExchange( &el->img_loading, 1, 0 ) == 0)
-        {
-            HANDLE th;
-            InterlockedIncrement( &g_active_http_workers );
-            th = CreateThread( NULL, 0, uwp_http_image_worker, el, 0, NULL );
-            if (th) CloseHandle( th );
-            else
+            if (e->state == HTTP_IMG_FAILED)
             {
-                InterlockedDecrement( &g_active_http_workers );
                 el->img_loaded = TRUE;
+                ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+                return;
+            }
+            if (e->state == HTTP_IMG_IN_FLIGHT)
+            {
+                /* Deduplicate in-flight download: register el as waiter instead of spawning a new worker */
+                int wi;
+                BOOL present = FALSE;
+                for (wi = 0; wi < e->waiter_cnt; wi++)
+                    if (e->waiters[wi] == el) { present = TRUE; break; }
+                if (!present && e->waiter_cnt < HTTP_IMG_MAX_WAITERS)
+                    e->waiters[e->waiter_cnt++] = el;
+                InterlockedExchange( &el->img_loading, 1 );
+                ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+                return;
             }
         }
+        if (el->has_bounds && (el->bounds.bottom <= 0 || el->bounds.top >= 1150))
+        {
+            ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+            return;
+        }
+        if (InterlockedCompareExchange( &g_active_http_workers, 0, 0 ) >= 10)
+        {
+            ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+            return;
+        }
+        if (InterlockedCompareExchange( &el->img_loading, 1, 0 ) == 0)
+        {
+            int slot = http_img_alloc_slot_locked( p );
+            struct http_worker_ctx *wctx = (slot >= 0) ? malloc( sizeof(*wctx) ) : NULL;
+            if (slot >= 0 && wctx)
+            {
+                HANDLE th;
+                struct http_img_entry *e = &g_http_img_cache[slot];
+                e->state = HTTP_IMG_IN_FLIGHT;
+                e->max_dim = max_dim;
+                e->lru_tick = ++g_http_img_lru_clock;
+                e->waiters[0] = el;
+                e->waiter_cnt = 1;
+                wctx->cache_slot = slot;
+                wctx->max_dim = max_dim;
+                lstrcpynW( wctx->url, p, ARRAY_SIZE(wctx->url) );
+                ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+
+                InterlockedIncrement( &g_active_http_workers );
+                th = CreateThread( NULL, 0, uwp_http_image_worker, wctx, 0, NULL );
+                if (th) CloseHandle( th );
+                else
+                {
+                    InterlockedDecrement( &g_active_http_workers );
+                    free( wctx );
+                    AcquireSRWLockExclusive( &g_http_img_cache_lock );
+                    if (!wcscmp( g_http_img_cache[slot].url, p ))
+                    {
+                        g_http_img_cache[slot].state = HTTP_IMG_FAILED;
+                        g_http_img_cache[slot].waiter_cnt = 0;
+                    }
+                    ReleaseSRWLockExclusive( &g_http_img_cache_lock );
+                    el->img_loaded = TRUE;
+                }
+                return;
+            }
+            free( wctx );
+            InterlockedExchange( &el->img_loading, 0 );
+        }
+        ReleaseSRWLockExclusive( &g_http_img_cache_lock );
         return;
     }
+
     el->img_loaded = TRUE;
+
+    /* Check local ms-appx:// decoded image cache */
+    local_key[0] = prefer_small ? L'S' : L'D';
+    local_key[1] = L':';
+    lstrcpynW( local_key + 2, p, ARRAY_SIZE(local_key) - 2 );
+    AcquireSRWLockShared( &g_local_img_cache_lock );
+    {
+        int lci = local_img_find_locked( local_key );
+        if (lci >= 0 && g_local_img_cache[lci].valid)
+        {
+            struct local_img_entry *le = &g_local_img_cache[lci];
+            le->lru_tick = ++g_local_img_lru_clock;
+            if (le->found && le->pixels)
+            {
+                el->img_pixels = le->pixels;
+                el->img_w = le->w;
+                el->img_h = le->h;
+                ReleaseSRWLockShared( &g_local_img_cache_lock );
+                uwp_on_image_loaded( el );
+                return;
+            }
+            ReleaseSRWLockShared( &g_local_img_cache_lock );
+            return;
+        }
+    }
+    ReleaseSRWLockShared( &g_local_img_cache_lock );
 
     if (!wcsncmp( p, L"ms-appx:///", 11 )) p += 11;
     else if (!wcsncmp( p, L"ms-appx://", 10 )) p += 10;
@@ -589,7 +910,11 @@ void uwp_load_image_asset( struct uwp_element *el )
         if (GetFileAttributesW( candidate ) != INVALID_FILE_ATTRIBUTES) break;
         candidate[0] = 0;
     }
-    if (!candidate[0]) return;
+    if (!candidate[0])
+    {
+        local_img_store( local_key, NULL, 0, 0, FALSE );
+        return;
+    }
 
     if (SUCCEEDED(CoCreateInstance( &CLSID_WICImagingFactory_local, NULL, CLSCTX_INPROC_SERVER,
                                     &IID_IWICImagingFactory_local, (void **)&wic )) && wic)
@@ -613,6 +938,7 @@ void uwp_load_image_asset( struct uwp_element *el )
                         {
                             if (SUCCEEDED(IWICFormatConverter_CopyPixels( conv, NULL, w * 4, w * h * 4, buf )))
                             {
+                                local_img_store( local_key, buf, w, h, TRUE );
                                 el->img_pixels = buf;
                                 el->img_w = w;
                                 el->img_h = h;
