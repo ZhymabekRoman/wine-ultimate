@@ -93,13 +93,6 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
     if (wcsstr( cls, L"Card" )) flags |= UWP_CF_CARD;
     if (wcsstr( cls, L"Shimmer" )) flags |= UWP_CF_SHIMMER;
     if (wcsstr( cls, L"Skeleton" )) flags |= UWP_CF_SKELETON;
-    if (wcsstr( cls, L"DynamicSpotlightControl" ))
-        flags |= UWP_CF_SPOTLIGHT | UWP_CF_SPOTLIGHT_DECOR;
-    else if (wcsstr( cls, L"ScrollingSpotlightControl" ) ||
-             wcsstr( cls, L"CarrouselSpotlightControl" ) ||
-             wcsstr( cls, L"ScrollingPreviewListView" ) ||
-             wcsstr( cls, L"SpotlightHeroImage" ))
-        flags |= UWP_CF_SPOTLIGHT_DECOR;
     if (wcsstr( cls, L"ListView" )) flags |= UWP_CF_LISTVIEW;
     if (wcsstr( cls, L"GridView" )) flags |= UWP_CF_GRIDVIEW;
     if (wcsstr( cls, L"Item" )) flags |= UWP_CF_HAS_ITEM;
@@ -145,8 +138,6 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
     if (wcsstr( cls, L"Ellipse" )) flags |= UWP_CF_ELLIPSE;
     if (wcsstr( cls, L"Brush" )) flags |= UWP_CF_BRUSH;
     if (wcsstr( cls, L"FlipView" )) flags |= UWP_CF_FLIPVIEW;
-    if (wcsstr( cls, L"TileList" )) flags |= UWP_CF_TILE_LIST;
-    if (wcsstr( cls, L"CalculationResult" )) flags |= UWP_CF_CALC_RESULT;
     if (wcsstr( cls, L"ContentPresenter" )) flags |= UWP_CF_CONTENT_PRESENTER;
     if (wcsstr( cls, L"Storyboard" )) flags |= UWP_CF_STORYBOARD;
     if (!wcsncmp( cls, L"Microsoft.UI.Xaml.", 18 )) flags |= UWP_CF_WINUI_PREFIX;

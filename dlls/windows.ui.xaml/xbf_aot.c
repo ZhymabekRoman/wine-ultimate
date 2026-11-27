@@ -572,7 +572,11 @@ static void aot_exec_create_app_node( struct xbf_aot_exec_ctx *ec, const struct 
         }
         else if (!inst) inst = el->outer ? el->outer : &el->IInspectable_iface;
         lstrcpynW( el->class_name, cls_name, ARRAY_SIZE(el->class_name) );
-        el->kind = classify_uwp_class( el->class_name );
+        {
+            enum uwp_elem_kind new_kind = classify_uwp_class( el->class_name );
+            if (new_kind != UWP_KIND_GENERIC || el->kind == UWP_KIND_GENERIC)
+                el->kind = new_kind;
+        }
         uwp_elem_sync_class_flags( el );
     }
     if (FAILED(phr) || !inst)

@@ -1968,6 +1968,30 @@ static BOOL xbf_apply_nav_prop_name( struct xbf_ctx *ctx, struct uwp_element *el
     return FALSE;
 }
 
+static int xbf_parse_h_align( int vt, double num, const WCHAR *sval )
+{
+    if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+    {
+        if (!wcsicmp( sval, L"Left" )) return 0;
+        if (!wcsicmp( sval, L"Center" )) return 1;
+        if (!wcsicmp( sval, L"Right" )) return 2;
+        if (!wcsicmp( sval, L"Stretch" )) return 3;
+    }
+    return (int)num;
+}
+
+static int xbf_parse_text_align( int vt, double num, const WCHAR *sval )
+{
+    if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+    {
+        if (!wcsicmp( sval, L"Center" )) return 0;
+        if (!wcsicmp( sval, L"Left" )) return 1;
+        if (!wcsicmp( sval, L"Right" )) return 2;
+        if (!wcsicmp( sval, L"Justify" )) return 3;
+    }
+    return (int)num;
+}
+
 static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *el,
                                       const WCHAR *owner_cls, const WCHAR *prop_name,
                                       int vt, double num, const WCHAR *sval, BOOL is_res_ref )
@@ -2012,43 +2036,101 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
         else el->text_wrapping = (int)num;
         return;
     }
+    if (!wcscmp( prop_name, L"FontSize" ))
+    {
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_FONT_SIZE )) return;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
+        {
+            el->font_size = resolved_d;
+            el->has_font_size = TRUE;
+            xbf_prop_mark_local( ctx, el, UWP_LP_FONT_SIZE );
+        }
+        return;
+    }
+    if (!wcscmp( prop_name, L"FontWeight" ))
+    {
+        int fw;
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_FONT_WEIGHT )) return;
+        fw = uwp_parse_font_weight( sval, num, vt );
+        if (fw > 0)
+        {
+            el->font_weight = fw;
+            xbf_prop_mark_local( ctx, el, UWP_LP_FONT_WEIGHT );
+        }
+        return;
+    }
+    if (!wcscmp( prop_name, L"HorizontalAlignment" ))
+    {
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_H_ALIGN )) return;
+        el->h_align = xbf_parse_h_align( vt, num, sval );
+        xbf_prop_mark_local( ctx, el, UWP_LP_H_ALIGN );
+        return;
+    }
+    if (!wcscmp( prop_name, L"HorizontalContentAlignment" ))
+    {
+        el->h_content_align = xbf_parse_h_align( vt, num, sval );
+        el->has_h_content_align = TRUE;
+        return;
+    }
+    if (!wcscmp( prop_name, L"TextAlignment" ))
+    {
+        el->text_align = xbf_parse_text_align( vt, num, sval );
+        el->has_text_align = TRUE;
+        return;
+    }
+    if (!wcscmp( prop_name, L"FlowDirection" ))
+    {
+        if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+            el->flow_direction = !wcsicmp( sval, L"RightToLeft" ) ? 2 : 1;
+        else
+            el->flow_direction = ((int)num == 1) ? 2 : 1;
+        return;
+    }
     xbf_apply_nav_prop_name( ctx, el, prop_name, vt, num, sval, is_res_ref, &resolved_d, &has_resolved_d );
 
-    if (owner_cls && owner_cls[0] &&
-        !wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
-        (!wcscmp( prop_name, L"PaneDisplayMode" ) || !wcscmp( prop_name, L"IsPaneOpen" ) ||
-         !wcscmp( prop_name, L"OpenPaneLength" ) || !wcscmp( prop_name, L"CompactPaneLength" ) ||
-         !wcscmp( prop_name, L"IsSettingsVisible" ) || !wcscmp( prop_name, L"IsPaneToggleButtonVisible" ) ||
-         !wcscmp( prop_name, L"CompactModeThresholdWidth" ) || !wcscmp( prop_name, L"ExpandedModeThresholdWidth" )))
+    if (((owner_cls && owner_cls[0] &&
+          !wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
+          (!wcscmp( prop_name, L"PaneDisplayMode" ) || !wcscmp( prop_name, L"IsPaneOpen" ) ||
+           !wcscmp( prop_name, L"OpenPaneLength" ) || !wcscmp( prop_name, L"CompactPaneLength" ) ||
+           !wcscmp( prop_name, L"IsSettingsVisible" ) || !wcscmp( prop_name, L"IsPaneToggleButtonVisible" ) ||
+           !wcscmp( prop_name, L"CompactModeThresholdWidth" ) || !wcscmp( prop_name, L"ExpandedModeThresholdWidth" ))) ||
+         (el->class_name[0] && !(el->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX)) &&
+          (!owner_cls || !owner_cls[0] ||
+           (wcsncmp( owner_cls, L"Windows.UI.Xaml.", 16 ) != 0 &&
+            wcsncmp( owner_cls, L"Microsoft.UI.Xaml.", 18 ) != 0)))))
     {
+        const WCHAR *set_cls = (owner_cls && owner_cls[0]) ? owner_cls : el->class_name;
         void *ao = (ctx && ctx->app_outer) ? ctx->app_outer : uwp_get_app_outer();
-        if (ao)
+        if (ao && set_cls[0])
         {
             IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+            if (!has_resolved_d && (vt == 0x03 || vt == 0x04 || is_res_ref) &&
+                xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ))
+                has_resolved_d = TRUE;
             if (has_resolved_d)
             {
                 WCHAR nbuf[64];
                 swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", resolved_d );
-                uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, nbuf );
+                uwp_set_custom_xaml_member( ao, set_cls, prop_name, target, nbuf );
             }
             else if (vt == 0x01 || vt == 0x02)
-                uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, (vt == 0x02) ? L"True" : L"False" );
+                uwp_set_custom_xaml_member( ao, set_cls, prop_name, target, (vt == 0x02) ? L"True" : L"False" );
             else if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
-                uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, sval );
+                uwp_set_custom_xaml_member( ao, set_cls, prop_name, target, sval );
             else if (vt == 0x03 || vt == 0x04 || vt == 0x0b)
             {
                 if (!wcscmp( prop_name, L"PaneDisplayMode" ))
                 {
                     static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
                     int m = (int)num;
-                    uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target,
+                    uwp_set_custom_xaml_member( ao, set_cls, prop_name, target,
                                                 (m >= 0 && m < 5) ? modes[m] : L"Auto" );
                 }
                 else
                 {
                     WCHAR nbuf[64];
                     swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", num );
-                    uwp_set_custom_xaml_member( ao, owner_cls, prop_name, target, nbuf );
+                    uwp_set_custom_xaml_member( ao, set_cls, prop_name, target, nbuf );
                 }
             }
         }
@@ -2439,7 +2521,7 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
             el->corner_radius = num;
         return TRUE;
     case XBF_PROP_CONTROL_HORIZONTAL_CONTENT_ALIGNMENT:
-        el->h_content_align = (int)num; el->has_h_content_align = TRUE; return TRUE;
+        el->h_content_align = xbf_parse_h_align( vt, num, sval ); el->has_h_content_align = TRUE; return TRUE;
     case XBF_PROP_CONTROL_VERTICAL_CONTENT_ALIGNMENT:
         el->v_content_align = (int)num; el->has_v_content_align = TRUE; return TRUE;
     case XBF_PROP_WIDTH:
@@ -2466,7 +2548,7 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
         return TRUE;
     case XBF_PROP_HORIZONTAL_ALIGNMENT:
         if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_H_ALIGN )) return TRUE;
-        el->h_align = (int)num;
+        el->h_align = xbf_parse_h_align( vt, num, sval );
         xbf_prop_mark_local( ctx, el, UWP_LP_H_ALIGN );
         return TRUE;
     case XBF_PROP_VERTICAL_ALIGNMENT:
@@ -2707,7 +2789,13 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
         break;
     }
     case XBF_PROP_TEXTBLOCK_TEXT_ALIGNMENT:
-        el->text_align = (int)num; el->has_text_align = TRUE; break;
+        el->text_align = xbf_parse_text_align( vt, num, sval ); el->has_text_align = TRUE; break;
+    case XBF_PROP_FLOW_DIRECTION:
+        if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
+            el->flow_direction = !wcsicmp( sval, L"RightToLeft" ) ? 2 : 1;
+        else
+            el->flow_direction = ((int)num == 1) ? 2 : 1;
+        break;
     case XBF_PROP_TEXTBLOCK_TEXT_WRAPPING:
     case XBF_PROP_RICHTEXTBLOCK_TEXT_WRAPPING:
         if ((vt == 0x05 || vt == 0x09) && sval && sval[0])

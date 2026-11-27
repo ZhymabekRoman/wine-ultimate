@@ -393,23 +393,15 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 
     if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
-        /* Avoid double-painting CalculationResult if its inner NormalOutput TextBlock is painted */
-        if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
-            el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
-        {
-            if (uwp_has_text( el ) && wcscmp( uwp_elem_text( el->tpl_normal_output ), uwp_elem_text( el ) ) != 0)
-                uwp_elem_set_text( el->tpl_normal_output, uwp_elem_text( el ) );
-            uwp_paint_element( hdc, el->tpl_normal_output );
-            return;
-        }
         if (uwp_has_text( el ))
         {
             RECT trc = el->bounds;
-            BOOL is_result = uwp_is_display_result_element( el );
-            int fh = is_result
-                ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
-                : max( (int)(12 * g_layout_scale + 0.5f), min( (int)(22 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
-            HFONT font = CreateFontW( -fh, 0, 0, 0, is_result ? FW_SEMIBOLD : FW_NORMAL,
+            int fh = max( (int)(12 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
+            int fw = (el->font_weight > 0) ? el->font_weight : FW_NORMAL;
+            UINT hflag = el->has_text_align
+                ? ((el->text_align == 0) ? DT_CENTER : (el->text_align == 2 ? DT_RIGHT : DT_LEFT))
+                : (el->h_align == 1 ? DT_CENTER : (el->h_align == 2 ? DT_RIGHT : DT_LEFT));
+            HFONT font = CreateFontW( -fh, 0, 0, 0, fw,
                                       FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
             HGDIOBJ old_font = SelectObject( hdc, font );
@@ -429,7 +421,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             SetBkMode( hdc, TRANSPARENT );
             InflateRect( &trc, -8, 0 );
             DrawTextW( hdc, uwp_elem_text( el ), -1, &trc,
-                       (is_result ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE );
+                       hflag | DT_VCENTER | DT_SINGLELINE );
             SelectObject( hdc, old_font );
             DeleteObject( font );
         }

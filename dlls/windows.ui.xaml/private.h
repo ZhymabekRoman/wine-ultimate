@@ -141,15 +141,10 @@ IActivationFactory *xaml_get_ceol_factory( void );
 HRESULT xaml_dp_get_default_value( void *dp, IInspectable **out );
 HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value );
 /* Runtime app capabilities, probed from the running application's own
- * COM/WinRT surface (IXamlMetadataProvider QI + registered XAML types),
- * not from package-family name tables. */
+ * COM/WinRT surface (IXamlMetadataProvider QI), not from package-family tables. */
 struct xaml_app_caps
 {
     BOOL winui3;                 /* App answers IXamlMetadataProvider(WinUI3): Microsoft.UI.Xaml family */
-    WCHAR app_ns[80];            /* Root namespace of the running Application class, empty = unknown */
-    BOOL teardown_vm;            /* uwp_xaml.c: DataContext-clear keeps the VM alive (provider-registered VM) */
-    BOOL display_sync;           /* uwp_xaml.c: sync result display from VM (provider-registered VM) */
-    WCHAR vm_type[128];          /* Full VM type name registered in the app provider, empty = none */
 };
 
 BOOL xaml_is_builtin_dp( const void *dp );

@@ -64,12 +64,6 @@ static IActivationFactory *xaml_lookup_static_factory( const WCHAR *name )
     return NULL;
 }
 
-static BOOL wstr_ends_with( const WCHAR *s, const WCHAR *suffix )
-{
-    size_t slen = wcslen( s ), suflen = wcslen( suffix );
-    return slen >= suflen && !wcscmp( s + slen - suflen, suffix );
-}
-
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buf = WindowsGetStringRawBuffer( classid, NULL );
@@ -99,13 +93,12 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Canvas" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Button" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.TextBlock" ) ||
-           !wcscmp( buf, L"Microsoft.UI.Xaml.Controls.Primitives.Popup" ) ||
-           wstr_ends_with( buf, L".CalculationResult" ))) &&
-        (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 ) ||
-         wstr_ends_with( buf, L".CalculationResult" )) &&
+           !wcscmp( buf, L"Microsoft.UI.Xaml.Controls.Primitives.Popup" ))) &&
+        (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 )) &&
         wcscmp( buf, L"Windows.UI.Xaml.Application" ) != 0 &&
         wcscmp( buf, L"Microsoft.UI.Xaml.Application" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Window" ) != 0 &&
+        wcscmp( buf, L"Microsoft.UI.Xaml.Window" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.PropertyMetadata" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.DependencyProperty" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.ResourceDictionary" ) != 0 &&

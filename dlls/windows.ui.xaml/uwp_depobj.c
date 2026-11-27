@@ -234,11 +234,6 @@ struct uwp_rd_bucket *uwp_rd_bucket_for_el( struct uwp_element *el, BOOL create 
     return b;
 }
 
-/* --- Live engine: StandardCalculatorViewModel (CalcViewModel.dll) ---
- * Slot 7 = get_DisplayValue(HSTRING*), slot 79 = SendCommandToCalcManager(int).
- * Init is async (Concurrency task): m_calculatorManager lands at this+392
- * ~100ms after activation, so pump messages before the first SendCommand. */
-
 const GUID IID_INotifyPropertyChanged_UWP =
     { 0xcf75d69c, 0xf2f4, 0x486b, { 0xb3, 0x02, 0xbb, 0x4c, 0x09, 0xba, 0xeb, 0xfa } };
 const GUID IID_IPropertyChangedEventHandler_UWP =
@@ -530,8 +525,7 @@ static BOOL uwp_should_sync_display_text( const struct uwp_element *impl, const 
         return FALSE;
     if (uwp_is_tooltip( impl ) || uwp_is_nav_settings_item( impl ))
         return FALSE;
-    return uwp_is_display_result_element( impl ) ||
-           uwp_substr_in_table( impl->class_name, text_class_substrs, ARRAY_SIZE(text_class_substrs) ) ||
+    return uwp_substr_in_table( impl->class_name, text_class_substrs, ARRAY_SIZE(text_class_substrs) ) ||
            uwp_wcs_in_table( impl->class_name, text_class_exact, ARRAY_SIZE(text_class_exact) ) ||
            (impl->kind == UWP_KIND_TEXT_BLOCK && !wcscmp( dpn, L"Text" ));
 }
@@ -673,8 +667,6 @@ static void uwp_setval_sync_display_text( struct uwp_element *impl, const WCHAR 
     if (uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
     {
         uwp_elem_set_text( impl, str_val );
-        if (impl->tpl_normal_output)
-            uwp_elem_set_text( impl->tpl_normal_output, str_val );
         TRACE( "SetValue updated display text on %s (%s) -> %s\n",
                debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_val) );
         uwp_invalidate_window();

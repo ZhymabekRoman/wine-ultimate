@@ -578,92 +578,10 @@ void xaml_apply_window_icon( HWND top )
 static struct xaml_app_caps g_caps;
 static BOOL g_caps_ready;
 
-/* Ask the application's own IXamlMetadataProvider (slot 7 GetXamlTypeByFullName,
- * shared layout of the UWP and WinUI providers) whether a type is registered. */
-static BOOL caps_provider_has( void *provider, const WCHAR *full_name )
-{
-    const struct abi_xaml_metadata_provider *mp = (const struct abi_xaml_metadata_provider *)provider;
-    HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = mp->lpVtbl->GetXamlTypeByFullName;
-    HRESULT hr = E_FAIL;
-    HSTRING h = NULL;
-    void *xt = NULL;
-
-    if (!get_by_name || !full_name || !full_name[0]) return FALSE;
-    if (FAILED(WindowsCreateString( full_name, lstrlenW( full_name ), &h )) || !h) return FALSE;
-    __TRY
-    {
-        hr = get_by_name( provider, h, &xt );
-    }
-    __EXCEPT_ALL
-    {
-        hr = E_FAIL;
-    }
-    __ENDTRY;
-    WindowsDeleteString( h );
-    if (SUCCEEDED( hr ) && xt)
-    {
-        IInspectable_Release( (IInspectable *)xt );
-        return TRUE;
-    }
-    return FALSE;
-}
-
-/* Namespace of the running App class: "CalculatorApp.App" -> "CalculatorApp". */
-static void caps_app_namespace( IInspectable *outer, WCHAR *ns, DWORD size )
-{
-    HSTRING h = NULL;
-    ns[0] = 0;
-    __TRY
-    {
-        if (SUCCEEDED( IInspectable_GetRuntimeClassName( outer, &h ) ) && h)
-        {
-            const WCHAR *raw = WindowsGetStringRawBuffer( h, NULL );
-            if (raw)
-            {
-                WCHAR *dot;
-                lstrcpynW( ns, raw, (int)size );
-                dot = wcsrchr( ns, L'.' );
-                if (dot) *dot = 0;
-            }
-        }
-    }
-    __EXCEPT_ALL
-    {
-        ns[0] = 0;
-    }
-    __ENDTRY;
-    if (h) WindowsDeleteString( h );
-}
-
-/* Probe ns + each suffix against the app's provider; on a hit store the full
- * registered type name in out. */
-static BOOL caps_find_type( void *provider, const WCHAR *ns, const WCHAR *const *suffixes,
-                            SIZE_T count, WCHAR *out, DWORD out_chars )
-{
-    SIZE_T i;
-    WCHAR full[160];
-
-    for (i = 0; i < count; i++)
-    {
-        full[0] = 0;
-        if (ns && ns[0]) lstrcpynW( full, ns, ARRAY_SIZE( full ) );
-        lstrcpynW( full + lstrlenW( full ), suffixes[i], (int)(ARRAY_SIZE( full ) - lstrlenW( full )) );
-        if (caps_provider_has( provider, full ))
-        {
-            lstrcpynW( out, full, (int)out_chars );
-            return TRUE;
-        }
-    }
-    return FALSE;
-}
-
 /* Probe the running application's COM surface: which IXamlMetadataProvider face
- * it answers (UWP vs WinUI 3), and which XAML types it has registered. */
+ * it answers (UWP vs WinUI 3). */
 static BOOL caps_probe( IInspectable *outer )
 {
-    static const WCHAR *vm_suffixes[] =
-        { L".ViewModel.StandardCalculatorViewModel", L".StandardCalculatorViewModel" };
-    WCHAR ns[80] = {0};
     void *provider = NULL;
 
     if (SUCCEEDED( IInspectable_QueryInterface( outer, &IID_IXamlMetadataProvider_WinUI, &provider ) ) && provider)
@@ -672,18 +590,6 @@ static BOOL caps_probe( IInspectable *outer )
         g_caps.winui3 = FALSE;
     else
         return FALSE; /* app object not metadata-ready yet: probe again later */
-
-    caps_app_namespace( outer, ns, ARRAY_SIZE( ns ) );
-    lstrcpynW( g_caps.app_ns, ns, ARRAY_SIZE( g_caps.app_ns ) );
-
-    /* A StandardCalculatorViewModel-style VM registered in the app's provider
-     * drives the display sync/teardown behaviour for any app exposing one. */
-    if (caps_find_type( provider, ns, vm_suffixes, ARRAY_SIZE( vm_suffixes ),
-                        g_caps.vm_type, ARRAY_SIZE( g_caps.vm_type ) ))
-    {
-        g_caps.teardown_vm = TRUE;
-        g_caps.display_sync = TRUE;
-    }
 
     IInspectable_Release( (IInspectable *)provider );
     return TRUE;

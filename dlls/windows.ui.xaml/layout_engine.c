@@ -252,8 +252,6 @@ static void uwp_invoke_winui_measure_arrange( struct uwp_element *el, int w, int
 
 #define UWP_MEMO_SHIMMER_VALID   0x01
 #define UWP_MEMO_SHIMMER_VAL     0x02
-#define UWP_MEMO_SPOTLIGHT_VALID 0x04
-#define UWP_MEMO_SPOTLIGHT_VAL   0x08
 #define UWP_MEMO_SCROLL_VALID    0x10
 #define UWP_MEMO_SCROLL_VAL      0x20
 
@@ -295,56 +293,13 @@ static BOOL uwp_has_shimmer_descendant_ex( struct uwp_element *el, int depth, BO
     return res;
 }
 
-static BOOL uwp_has_spotlight_descendant_ex( struct uwp_element *el, int depth, BOOL *trunc )
-{
-    BOOL res = FALSE, child_trunc = FALSE;
-    if (!el || el->visibility != 0) return FALSE;
-    if (depth > 10) { if (trunc) *trunc = TRUE; return FALSE; }
-    if (el->content_flags_gen == g_layout_gen && (el->cached_content_flags & UWP_MEMO_SPOTLIGHT_VALID))
-        return (el->cached_content_flags & UWP_MEMO_SPOTLIGHT_VAL) != 0;
-    if (el->class_flags & UWP_CF_SPOTLIGHT_DECOR)
-        res = TRUE;
-    if (!res && el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el && uwp_has_spotlight_descendant_ex( ch, depth + 1, &child_trunc )) res = TRUE;
-    }
-    if (!res && el->children_coll)
-    {
-        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int i;
-        for (i = 0; i < v->count; i++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
-            if (ch && ch != el && uwp_has_spotlight_descendant_ex( ch, depth + 1, &child_trunc )) { res = TRUE; break; }
-        }
-    }
-    if (res || !child_trunc)
-    {
-        if (el->content_flags_gen != g_layout_gen)
-        {
-            el->content_flags_gen = g_layout_gen;
-            el->cached_content_flags = 0;
-        }
-        el->cached_content_flags |= UWP_MEMO_SPOTLIGHT_VALID | (res ? UWP_MEMO_SPOTLIGHT_VAL : 0);
-    }
-    else if (trunc)
-        *trunc = TRUE;
-    return res;
-}
-
-static BOOL uwp_has_spotlight_descendant( struct uwp_element *el, int depth )
-{
-    return uwp_has_spotlight_descendant_ex( el, depth, NULL );
-}
-
 static BOOL uwp_subtree_has_rich_control( const struct uwp_element *el, int depth )
 {
     if (!el || depth > 5 || el->visibility != 0) return FALSE;
     if (el->kind == UWP_KIND_IMAGE || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
         el->kind == UWP_KIND_SCROLL_VIEWER || uwp_is_scroll_viewer( el ) || uwp_is_items_repeater( el ) ||
         uwp_is_text_input( el ) || uwp_is_combobox( el ) ||
-        (el->class_flags & (UWP_CF_SPOTLIGHT | UWP_CF_MEDIA_PLAYER | UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW | UWP_CF_CARD)))
+        (el->class_flags & (UWP_CF_MEDIA_PLAYER | UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW | UWP_CF_CARD)))
         return TRUE;
     if (el->content)
     {
@@ -364,13 +319,13 @@ static BOOL uwp_subtree_has_rich_control( const struct uwp_element *el, int dept
     return FALSE;
 }
 
-static BOOL uwp_is_scroll_overlay_title( struct uwp_element *ch, struct uwp_element *sv_child )
+static BOOL uwp_is_scroll_overlay_header( const struct uwp_element *ch, const struct uwp_element *sv_child )
 {
     if (!ch || !sv_child || ch == sv_child || ch->visibility != 0) return FALSE;
     if (ch->grid_row != sv_child->grid_row || ch->grid_col != sv_child->grid_col) return FALSE;
+    if (ch->has_bg || ch->bg_brush) return FALSE;
     if (uwp_subtree_has_rich_control( ch, 0 )) return FALSE;
-    if (!uwp_paint_btn_child_has_text( ch, 0 )) return FALSE;
-    return uwp_has_spotlight_descendant( sv_child, 0 );
+    return uwp_paint_btn_child_has_text( ch, 0 );
 }
 
 static BOOL uwp_scroll_child_has_content_ex( struct uwp_element *el, int depth, BOOL *trunc )
@@ -380,9 +335,7 @@ static BOOL uwp_scroll_child_has_content_ex( struct uwp_element *el, int depth, 
     if (depth > 14) { if (trunc) *trunc = TRUE; return FALSE; }
     if (el->content_flags_gen == g_layout_gen && (el->cached_content_flags & UWP_MEMO_SCROLL_VALID))
         return (el->cached_content_flags & UWP_MEMO_SCROLL_VAL) != 0;
-    if (uwp_has_spotlight_descendant_ex( el, 0, &child_trunc ))
-        res = TRUE;
-    else if (uwp_has_shimmer_descendant_ex( el, 0, &child_trunc ) && el->kind == UWP_KIND_BORDER)
+    if (uwp_has_shimmer_descendant_ex( el, 0, &child_trunc ) && el->kind == UWP_KIND_BORDER)
         res = FALSE;
     else if (uwp_has_text( el ) || el->inlines_coll || (el->media && (el->media->img_pixels || el->media->img_loaded)))
         res = TRUE;
@@ -1651,7 +1604,7 @@ static void arrange_grid( struct uwp_element *el, RECT rc, int w, int h )
         int r0, r1, c0, c1;
         RECT crc;
         if (!ch) continue;
-        if (sv_child && uwp_is_scroll_overlay_title( ch, sv_child ))
+        if (sv_child && uwp_is_scroll_overlay_header( ch, sv_child ))
         {
             uwp_clear_bounds_tree( ch );
             continue;
@@ -1726,7 +1679,7 @@ static void arrange_stack_panel( struct uwp_element *el, RECT rc, int w, int h )
         int auto_total_h = max( 0, h - fixed_h );
         double horiz_scale = (el->orientation == 1 && horiz_unmeasured_cnt == 0 && horiz_total_nw > (double)w && w > 0)
             ? ((double)w / horiz_total_nw) : 1.0;
-        BOOL in_scroll = FALSE, is_top_scroll_panel = TRUE, has_spotlight_slot = FALSE;
+        BOOL in_scroll = FALSE, is_top_scroll_panel = TRUE;
         struct uwp_element *sv = NULL;
 
         if (el->orientation == 1 && use_horiz_flow && spacing_px > 0 && children->count > 1)
@@ -1787,11 +1740,6 @@ static void arrange_stack_panel( struct uwp_element *el, RECT rc, int w, int h )
                     int nat_h;
                     if (mh > 0.0)
                         nat_h = max( 24, (int)(mh + uwp_clamp_top_margin( ch->margin_t ) + max( 0.0, ch->margin_b ) + 0.5) );
-                    else if (uwp_has_spotlight_descendant( ch, 0 ))
-                    {
-                        if (has_spotlight_slot) { uwp_clear_bounds_tree( ch ); idx++; continue; }
-                        has_spotlight_slot = TRUE; nat_h = 330;
-                    }
                     else nat_h = uwp_scroll_child_has_content( ch, 0 ) ? 168 : 4;
                     crc.top = cur_y; crc.bottom = cur_y + nat_h;
                     cur_y = crc.bottom + (nat_h > 24 ? 8 : 0);

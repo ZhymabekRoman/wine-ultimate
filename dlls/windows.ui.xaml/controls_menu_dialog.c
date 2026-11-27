@@ -707,7 +707,7 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
             SetTextColor( hdc, RGB( 255, 255, 255 ) );
 
             SetRect( &trc, 20, 16, rc.right - 20, 46 );
-            DrawTextW( hdc, dtitle[0] ? dtitle : L"Notepad", -1, &trc,
+            DrawTextW( hdc, dtitle[0] ? dtitle : L"", -1, &trc,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE );
 
             SelectObject( hdc, f_body );

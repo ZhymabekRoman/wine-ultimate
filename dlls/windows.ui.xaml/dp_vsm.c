@@ -643,7 +643,37 @@ static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_grou
         {
             uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_FONT_SIZE );
             target->font_size = fs;
+            target->has_font_size = TRUE;
+            if (wcscmp( prop, L"FontSize" ) != 0 && target->class_name[0] &&
+                !(target->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX)) &&
+                uwp_get_app_outer())
+            {
+                WCHAR nbuf[64];
+                IInspectable *tobj = target->outer ? target->outer : &target->IInspectable_iface;
+                swprintf( nbuf, ARRAY_SIZE(nbuf), L"%g", fs );
+                uwp_set_custom_xaml_member( uwp_get_app_outer(), target->class_name, prop, tobj, nbuf );
+            }
         }
+    }
+    else if (wcsstr( prop, L"FontWeight" ))
+    {
+        int fw = 0;
+        if (s->val_str[0])
+        {
+            if (!wcsicmp( s->val_str, L"Thin" )) fw = FW_THIN;
+            else if (!wcsicmp( s->val_str, L"ExtraLight" )) fw = FW_EXTRALIGHT;
+            else if (!wcsicmp( s->val_str, L"Light" )) fw = FW_LIGHT;
+            else if (!wcsicmp( s->val_str, L"SemiLight" )) fw = 350;
+            else if (!wcsicmp( s->val_str, L"Normal" )) fw = FW_NORMAL;
+            else if (!wcsicmp( s->val_str, L"Medium" )) fw = FW_MEDIUM;
+            else if (!wcsicmp( s->val_str, L"SemiBold" )) fw = FW_SEMIBOLD;
+            else if (!wcsicmp( s->val_str, L"Bold" )) fw = FW_BOLD;
+            else if (!wcsicmp( s->val_str, L"ExtraBold" )) fw = FW_EXTRABOLD;
+            else if (!wcsicmp( s->val_str, L"Black" )) fw = FW_HEAVY;
+        }
+        else if (s->num >= 100.0 && s->num <= 900.0)
+            fw = (int)s->num;
+        if (fw > 0) target->font_weight = fw;
     }
     else if (wcsstr( prop, L"Opacity" ))
     {

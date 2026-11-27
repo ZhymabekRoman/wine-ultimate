@@ -37,60 +37,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 /* Split from uwp_xaml.c: hit-testing, pointer/mouse/tapped dispatch, keyboard & accelerators. */
 
-static struct uwp_element *uwp_resolve_spotlight_card( struct uwp_element *spot_el, int target_idx )
-{
-    struct uwp_element *page_root = spot_el;
-    struct uwp_element *cards[4] = {0};
-    WCHAR titles[4][128];
-    struct uwp_element *stack[128];
-    int sp = 0, cnt = 0;
-
-    if (!spot_el || target_idx < 0 || target_idx >= 4) return NULL;
-    while (page_root->parent) page_root = page_root->parent;
-    memset( titles, 0, sizeof(titles) );
-    stack[sp++] = page_root;
-    while (sp > 0 && cnt < 4)
-    {
-        struct uwp_element *cur = stack[--sp];
-        if (!cur) continue;
-        if (cur != spot_el && uwp_is_card( cur ) && uwp_has_text( cur ))
-        {
-            const WCHAR *ctext = uwp_elem_text( cur );
-            const WCHAR *nl = wcschr( ctext, '\n' );
-            size_t tlen = nl ? (size_t)(nl - ctext) : wcslen( ctext );
-            int dup = 0, d;
-            WCHAR tbuf[128] = {0};
-            if (tlen >= ARRAY_SIZE(tbuf)) tlen = ARRAY_SIZE(tbuf) - 1;
-            memcpy( tbuf, ctext, tlen * sizeof(WCHAR) );
-            tbuf[tlen] = 0;
-            for (d = 0; d < cnt; d++)
-                if (!wcscmp( titles[d], tbuf )) { dup = 1; break; }
-            if (!dup && tbuf[0])
-            {
-                lstrcpynW( titles[cnt], tbuf, ARRAY_SIZE(titles[0]) );
-                cards[cnt++] = cur;
-            }
-        }
-        if (cur->children_coll)
-        {
-            struct uwp_vec_view *v = CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface );
-            int k;
-            for (k = (int)v->count - 1; k >= 0 && sp < (int)ARRAY_SIZE(stack); k--)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-                if (ch && ch != cur) stack[sp++] = ch;
-            }
-        }
-        if (cur->content && sp < (int)ARRAY_SIZE(stack))
-        {
-            struct uwp_element *ch = uwp_elem_from_any( cur->content );
-            if (ch && ch != cur) stack[sp++] = ch;
-        }
-    }
-    if (cnt == 0) return NULL;
-    return cards[min( cnt - 1, target_idx )];
-}
-
 static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
 {
     if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
@@ -114,25 +60,6 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         struct uwp_element *hit = uwp_hit_test_button( ch, x, y );
         if (hit) return hit;
-    }
-
-    if (el->has_bounds && el->is_enabled &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom &&
-        (el->class_flags & UWP_CF_SPOTLIGHT))
-    {
-        RECT rc = el->bounds;
-        int avail_w = rc.right - rc.left, avail_h = rc.bottom - rc.top;
-        if (avail_w >= 480 && avail_h >= 180)
-        {
-            int pad = 12, gap = 12;
-            int hero_w = ((avail_w - pad * 2 - gap * 2) * 58) / 100;
-            int hx0 = rc.left + pad, hx1 = hx0 + hero_w;
-            int prev_w = max( 1, (avail_w - pad * 2 - hero_w - gap * 2) / 2 );
-            int idx = (x <= hx1) ? 0 : (1 + max( 0, min( 1, (x - (hx1 + gap)) / max( 1, prev_w + gap ) ) ));
-            struct uwp_element *spot_card = uwp_resolve_spotlight_card( el, idx );
-            if (spot_card) return spot_card;
-        }
     }
 
     if (el->has_bounds && el->is_enabled &&
@@ -451,15 +378,7 @@ void uwp_invoke_button( struct uwp_element *btn )
     if (UWP_EV_ANY( btn, tapped_reg ) && UWP_EV_CNT( btn, click_reg ) == 0 && !btn->command)
         uwp_fire_tapped_bubble( btn, btn->bounds.left + 8, btn->bounds.top + 8 );
 
-    /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
-    if (xaml_get_app_caps()->vm_type[0])
-    {
-        int code = uwp_resolve_button_calc_code( btn );
-        if (code >= 0)
-            uwp_calc_vm_send( code, btn->command_param );
-    }
-
-    /* 4. If CloseButton inside an open Popup was clicked and Popup is still open, close it */
+    /* 3. If CloseButton inside an open Popup was clicked and Popup is still open, close it */
     if (!wcscmp( btn->name, L"CloseButton" ))
     {
         struct uwp_element *pops[16];

@@ -65,28 +65,6 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
               UWP_EV_CNT( impl, click_reg ), impl->command );
     }
 
-    if (dc)
-    {
-        if (uwp_is_display_result_element( impl ))
-        {
-            uwp_calc_vm_set_instance( dc, NULL );
-        }
-        else
-        {
-            void *npc = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( dc, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
-            {
-                IUnknown_Release( (IUnknown *)npc );
-                if (!uwp_get_app_outer() || uwp_vm_supports_display_or_cmd( dc ))
-                    uwp_calc_vm_set_instance( dc, NULL );
-            }
-        }
-    }
-    else if (!xaml_get_app_caps()->teardown_vm && g_calc_vm.vm)
-    {
-        uwp_calc_vm_teardown( FALSE );
-    }
-
     if (dc && dc != old_dc && impl->dt_binding_connector)
     {
         void *bc_src = impl->dt_binding_connector;
@@ -191,8 +169,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
     /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
      * has actually been inflated into the control's visual tree (except WinUI
      * builtin controls like NavigationView/ItemsRepeater that synthesize parts). */
-    if (!has_children && !(el->class_flags & UWP_CF_WINUI_PREFIX) &&
-        !uwp_is_display_result_element( el ))
+    if (!has_children && !(el->class_flags & UWP_CF_WINUI_PREFIX))
         return;
     el->template_applied = TRUE;
     if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_UWP, &fe_ovr )) && fe_ovr)
@@ -217,11 +194,6 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         IUnknown_Release( (IUnknown *)fe_ovr );
     }
     uwp_sync_all_template_presenters( el );
-    if (xaml_get_app_caps()->display_sync && uwp_is_display_result_element( el ))
-    {
-        uwp_calc_vm_ensure();
-        uwp_sync_calc_display_from_vm();
-    }
 }
 
 void uwp_fire_size_and_layout_changed( struct uwp_element *el )

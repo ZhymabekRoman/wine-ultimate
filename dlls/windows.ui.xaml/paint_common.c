@@ -97,7 +97,7 @@ BOOL uwp_is_zero_layout_anchor( const struct uwp_element *el )
         return FALSE;
     if (el->class_flags & (UWP_CF_TEXT_BOX | UWP_CF_AUTO_SUGGEST_BOX | UWP_CF_COMBOBOX |
                            UWP_CF_PROGRESS_BAR | UWP_CF_RECTANGLE | UWP_CF_ELLIPSE |
-                           UWP_CF_SPOTLIGHT | UWP_CF_MEDIA_PLAYER | UWP_CF_NAV_VIEW |
+                           UWP_CF_MEDIA_PLAYER | UWP_CF_NAV_VIEW |
                            UWP_CF_TABVIEW | UWP_CF_ITEMS_REPEATER | UWP_CF_LISTVIEW |
                            UWP_CF_GRIDVIEW | UWP_CF_FONT_ICON | UWP_CF_SYMBOL_ICON))
         return FALSE;
@@ -492,7 +492,7 @@ void uwp_resolve_and_load_image( struct uwp_element *el )
     {
         static const WCHAR *const img_props[] =
             { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"Source", L"IconUrl", L"IconUri",
-              L"TileImageUrl", L"BoxArtUrl", L"PosterUrl", L"ThumbnailUrl", L"Images", L"Image", L"Icon" };
+              L"ThumbnailUrl", L"Images", L"Image", L"Icon" };
         struct uwp_element *p;
         int hop;
         for (p = el->parent, hop = 0; p && hop < 14 && !uwp_elem_image_src( el )[0]; p = p->parent, hop++)

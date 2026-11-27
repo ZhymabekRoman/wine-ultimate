@@ -193,19 +193,6 @@ struct xaml_static_factory
     IActivationFactory *factory;
 };
 
-struct uwp_calc_vm
-{
-    IInspectable *vm;             /* Active ViewModel RCW/instance */
-    IInspectable *npc;            /* Held INotifyPropertyChanged face for remove_PropertyChanged on teardown */
-    EventRegistrationToken npc_token;
-    BOOL npc_hooked;
-    IInspectable *cmd;            /* Optional ICommand face resolved via IXamlMember / QI */
-    IDependencyProperty *display_dp;
-    WCHAR vm_class_name[128];
-    BOOL pumped;
-    int last_code;                /* dedupe repeated clicks on init-pending VM */
-};
-
 static inline BOOL uwp_style_is_accent_name( const WCHAR *name )
 {
     if (!name || !name[0]) return FALSE;
@@ -226,7 +213,6 @@ static inline BOOL uwp_brush_key_is_accent( const WCHAR *key )
 }
 
 /* Globals */
-extern struct uwp_calc_vm g_calc_vm;
 extern int g_app_requested_theme;
 extern int g_app_rd_sentinel;
 extern BOOL g_app_res_loaded;
@@ -280,7 +266,6 @@ BOOL uwp_parse_color_string( const WCHAR *s, UINT32 *out_argb );
 BOOL uwp_is_bg_pid( WORD pid );
 BOOL uwp_is_border_pid( WORD pid );
 BOOL uwp_is_fg_pid( WORD pid );
-BOOL uwp_is_display_result_element( const struct uwp_element *el );
 void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *style_key );
 void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
                             struct uwp_rd_bucket *b, struct uwp_rd_entry *se, int depth );
@@ -307,18 +292,11 @@ void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls, cons
 void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,
                             const WCHAR *prop_name, const WCHAR *path, IInspectable *src );
 
-/* ViewModel bridge (uwp_vm_bridge.c) */
-BOOL uwp_vm_supports_display_or_cmd( IInspectable *vm );
+/* Generic WinRT property reflection helpers (uwp_reflection.c) */
 BOOL uwp_vm_query_string_prop_depth( IInspectable *vm, const WCHAR *const *props, unsigned int count,
                                      WCHAR *out, size_t out_len, int depth );
 BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsigned int count,
                                WCHAR *out, size_t out_len );
-int  uwp_resolve_button_calc_code( struct uwp_element *btn );
-void uwp_calc_vm_ensure( void );
-void uwp_calc_vm_send( int code, IInspectable *cmd_param );
-void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name );
-void uwp_calc_vm_teardown( BOOL final_cleanup );
-void uwp_sync_calc_display_from_vm( void );
 
 /* Class factory helpers */
 ULONG WINAPI uwp_cf_AddRef( IActivationFactory *iface );

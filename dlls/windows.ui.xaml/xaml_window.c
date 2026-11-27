@@ -28,7 +28,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-void uwp_sync_calc_display_from_vm( void );
 void uwp_keyboard_press_char( WCHAR ch );
 BOOL uwp_dispatch_keydown( HWND hwnd, UINT vk, LPARAM lparam, void *island_root_ptr );
 
@@ -999,7 +998,6 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         hr = notify_inner_core_window_key( hwnd, msg, wparam );
         if (msg == WM_CHAR && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
             uwp_keyboard_press_char( (WCHAR)wparam );
-        uwp_sync_calc_display_from_vm();
         xaml_mark_window_dirty();
         if (msg != WM_KEYUP)
             xaml_window_present( &global_xaml_window );

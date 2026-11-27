@@ -130,12 +130,19 @@ struct test_fe_vtbl
     HRESULT (WINAPI *put_Width)(void *, double);
     void *pad17;
     HRESULT (WINAPI *put_Height)(void *, double);
-    void *pad19_31[13];
+    void *pad19_27[9];
+    HRESULT (WINAPI *put_HorizontalAlignment)(void *, int);
+    void *pad29;
+    HRESULT (WINAPI *put_VerticalAlignment)(void *, int);
+    void *pad31;
     HRESULT (WINAPI *put_Margin)(void *, struct test_thickness *);
     void *pad33;
     HRESULT (WINAPI *put_Name)(void *, HSTRING);
-    void *pad35_36[2];
+    void *pad35;
+    HRESULT (WINAPI *get_DataContext)(void *, void **);
     HRESULT (WINAPI *put_DataContext)(void *, void *);
+    void *pad38_51[14];
+    HRESULT (WINAPI *SetBinding)(void *, void *, void *);
 };
 struct test_fe_iface { const struct test_fe_vtbl *lpVtbl; };
 
@@ -167,13 +174,6 @@ struct test_tb_vtbl
     HRESULT (WINAPI *get_Text)(void *, HSTRING *);
 };
 struct test_tb_iface { const struct test_tb_vtbl *lpVtbl; };
-
-struct test_pc_handler_vtbl
-{
-    void *pad0_2[3];
-    HRESULT (WINAPI *Invoke)(void *, void *, void *);
-};
-struct test_pc_handler_iface { const struct test_pc_handler_vtbl *lpVtbl; };
 
 struct test_dp_statics_vtbl
 {
@@ -1005,8 +1005,12 @@ static void test_PointerBridge( void )
     IInspectable_QueryInterface( child_obj, &IID_IFrameworkElement_test, &child_fe );
     ((const struct test_fe_iface *)parent_fe)->lpVtbl->put_Width( parent_fe, 200.0 );
     ((const struct test_fe_iface *)parent_fe)->lpVtbl->put_Height( parent_fe, 200.0 );
+    ((const struct test_fe_iface *)parent_fe)->lpVtbl->put_HorizontalAlignment( parent_fe, 0 );
+    ((const struct test_fe_iface *)parent_fe)->lpVtbl->put_VerticalAlignment( parent_fe, 0 );
     ((const struct test_fe_iface *)child_fe)->lpVtbl->put_Width( child_fe, 80.0 );
     ((const struct test_fe_iface *)child_fe)->lpVtbl->put_Height( child_fe, 80.0 );
+    ((const struct test_fe_iface *)child_fe)->lpVtbl->put_HorizontalAlignment( child_fe, 0 );
+    ((const struct test_fe_iface *)child_fe)->lpVtbl->put_VerticalAlignment( child_fe, 0 );
     ((const struct test_fe_iface *)child_fe)->lpVtbl->put_Margin( child_fe, &margin );
 
     IInspectable_QueryInterface( parent_obj, &IID_IPanel_test, &parent_panel );
@@ -1063,214 +1067,188 @@ static void test_PointerBridge( void )
     IInspectable_Release( win );
 }
 
-static const GUID IID_INotifyPropertyChanged_test =
-    { 0xcf75d69c, 0xf2f4, 0x4fb6, { 0xa7, 0xc3, 0x5f, 0x20, 0x42, 0x0f, 0x5d, 0x42 } };
 static const GUID IID_ITextBlock_test =
     { 0xae2d9271, 0x3b4a, 0x45fc, { 0x84, 0x68, 0xf7, 0x94, 0x95, 0x48, 0xf4, 0xd5 } };
+static const GUID IID_IPropertyValue_test =
+    { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
 
-struct fake_calc_vm
+struct fake_string_pv
 {
-    const void **vtbl_insp;
-    const void **vtbl_npc;
+    const void **vtbl;
     LONG ref;
-    const WCHAR *display_val;
-    void *pc_handler;
-    INT64 pc_token;
-    int add_pc_cnt;
-    int rem_pc_cnt;
+    const WCHAR *val;
 };
 
-static inline struct fake_calc_vm *vm_from_npc( void *iface )
+static HRESULT WINAPI fake_pv_QI( void *iface, REFIID iid, void **out )
 {
-    return CONTAINING_RECORD( iface, struct fake_calc_vm, vtbl_npc );
-}
-
-static HRESULT WINAPI fake_vm_QI( void *iface, REFIID iid, void **out )
-{
-    struct fake_calc_vm *vm = iface;
+    struct fake_string_pv *pv = iface;
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ))
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPropertyValue_test ))
     {
-        InterlockedIncrement( &vm->ref );
-        *out = &vm->vtbl_insp;
-        return S_OK;
-    }
-    if (IsEqualGUID( iid, &IID_INotifyPropertyChanged_test ))
-    {
-        InterlockedIncrement( &vm->ref );
-        *out = &vm->vtbl_npc;
+        InterlockedIncrement( &pv->ref );
+        *out = iface;
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI fake_vm_AddRef( void *iface )
+static ULONG WINAPI fake_pv_AddRef( void *iface )
 {
-    struct fake_calc_vm *vm = iface;
-    return InterlockedIncrement( &vm->ref );
+    struct fake_string_pv *pv = iface;
+    return InterlockedIncrement( &pv->ref );
 }
-static ULONG WINAPI fake_vm_Release( void *iface )
+static ULONG WINAPI fake_pv_Release( void *iface )
 {
-    struct fake_calc_vm *vm = iface;
-    return InterlockedDecrement( &vm->ref );
+    struct fake_string_pv *pv = iface;
+    return InterlockedDecrement( &pv->ref );
 }
-static HRESULT WINAPI fake_vm_GetIids( void *iface, ULONG *cnt, IID **iids )
+static HRESULT WINAPI fake_pv_GetIids( void *iface, ULONG *cnt, IID **iids )
 {
     if (cnt) *cnt = 0;
     if (iids) *iids = NULL;
     return S_OK;
 }
-static HRESULT WINAPI fake_vm_GetRuntimeClassName( void *iface, HSTRING *name )
+static HRESULT WINAPI fake_pv_GetRuntimeClassName( void *iface, HSTRING *name )
 {
-    static const WCHAR cls[] = L"CalculatorApp.ViewModel.StandardCalculatorViewModel";
+    static const WCHAR cls[] = L"Windows.Foundation.IPropertyValue";
     return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
 }
-static HRESULT WINAPI fake_vm_GetTrustLevel( void *iface, TrustLevel *lvl )
+static HRESULT WINAPI fake_pv_GetTrustLevel( void *iface, TrustLevel *lvl )
 {
     if (lvl) *lvl = BaseTrust;
     return S_OK;
 }
-static HRESULT WINAPI fake_vm_slot6_noop( void *iface ) { return S_OK; }
-static HRESULT WINAPI fake_vm_get_DisplayValue( void *iface, HSTRING *out )
+static HRESULT WINAPI fake_pv_get_Type( void *iface, int *type )
 {
-    struct fake_calc_vm *vm = iface;
-    const WCHAR *s = vm->display_val ? vm->display_val : L"";
+    if (type) *type = 12; /* PropertyType_String */
+    return S_OK;
+}
+static HRESULT WINAPI fake_pv_get_IsNumericScalar( void *iface, boolean *val )
+{
+    if (val) *val = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI fake_pv_noop( void *iface ) { return E_NOTIMPL; }
+static HRESULT WINAPI fake_pv_GetString( void *iface, HSTRING *out )
+{
+    struct fake_string_pv *pv = iface;
+    const WCHAR *s = pv->val ? pv->val : L"";
     return WindowsCreateString( s, wcslen( s ), out );
 }
 
-static HRESULT WINAPI fake_vm_npc_QI( void *iface, REFIID iid, void **out )
+static const void *fake_pv_vtbl[] =
 {
-    return fake_vm_QI( vm_from_npc( iface ), iid, out );
-}
-static ULONG WINAPI fake_vm_npc_AddRef( void *iface )
-{
-    return fake_vm_AddRef( vm_from_npc( iface ) );
-}
-static ULONG WINAPI fake_vm_npc_Release( void *iface )
-{
-    return fake_vm_Release( vm_from_npc( iface ) );
-}
-static HRESULT WINAPI fake_vm_npc_add_PropertyChanged( void *iface, void *handler, EventRegistrationToken *tok )
-{
-    struct fake_calc_vm *vm = vm_from_npc( iface );
-    vm->add_pc_cnt++;
-    vm->pc_handler = handler;
-    vm->pc_token = 0x7700 + vm->add_pc_cnt;
-    if (tok) tok->value = vm->pc_token;
-    return S_OK;
-}
-static HRESULT WINAPI fake_vm_npc_remove_PropertyChanged( void *iface, EventRegistrationToken tok )
-{
-    struct fake_calc_vm *vm = vm_from_npc( iface );
-    if (tok.value == vm->pc_token)
-    {
-        vm->rem_pc_cnt++;
-        vm->pc_handler = NULL;
-    }
-    return S_OK;
-}
-
-static const void *fake_vm_insp_vtbl[] =
-{
-    fake_vm_QI,
-    fake_vm_AddRef,
-    fake_vm_Release,
-    fake_vm_GetIids,
-    fake_vm_GetRuntimeClassName,
-    fake_vm_GetTrustLevel,
-    fake_vm_slot6_noop,
-    fake_vm_get_DisplayValue, /* slot 7: get_DisplayValue */
-};
-
-static const void *fake_vm_npc_vtbl[] =
-{
-    fake_vm_npc_QI,
-    fake_vm_npc_AddRef,
-    fake_vm_npc_Release,
-    fake_vm_GetIids,
-    fake_vm_GetRuntimeClassName,
-    fake_vm_GetTrustLevel,
-    fake_vm_npc_add_PropertyChanged,    /* slot 6: add_PropertyChanged */
-    fake_vm_npc_remove_PropertyChanged, /* slot 7: remove_PropertyChanged */
+    fake_pv_QI,
+    fake_pv_AddRef,
+    fake_pv_Release,
+    fake_pv_GetIids,
+    fake_pv_GetRuntimeClassName,
+    fake_pv_GetTrustLevel,
+    fake_pv_get_Type,          /* 6 */
+    fake_pv_get_IsNumericScalar, /* 7 */
+    fake_pv_noop, fake_pv_noop, fake_pv_noop, fake_pv_noop, fake_pv_noop, /* 8..12 */
+    fake_pv_noop, fake_pv_noop, fake_pv_noop, fake_pv_noop, fake_pv_noop, /* 13..17 */
+    fake_pv_noop,              /* 18: GetBoolean */
+    fake_pv_GetString,         /* 19: GetString */
 };
 
 static void test_VmDataContextBinding( void )
 {
-    IActivationFactory *res_af = NULL;
-    IInspectable *res_obj = NULL;
-    void *res_fe = NULL, *res_tb = NULL;
+    static const GUID IID_IDependencyPropertyStatics_test =
+        { 0x49e5f28f, 0x8259, 0x4d5c, { 0xaa, 0xe0, 0x83, 0xd5, 0x6d, 0xbb, 0x68, 0xd9 } };
+    IActivationFactory *tb_af = NULL, *dp_af = NULL, *bind_af = NULL;
+    IInspectable *tb_obj = NULL, *bind_obj = NULL;
+    void *tb_fe = NULL, *tb_iface = NULL, *dp_statics = NULL, *dc_out = NULL;
+    IUnknown *text_dp = NULL;
     HSTRING str = NULL, htxt = NULL;
+    struct { HSTRING Name; int Kind; } tname = { NULL, 0 };
     const WCHAR *raw = NULL;
     HRESULT hr;
-    struct fake_calc_vm vm1 = { fake_vm_insp_vtbl, fake_vm_npc_vtbl, 1, L"42" };
-    struct fake_calc_vm vm2 = { fake_vm_insp_vtbl, fake_vm_npc_vtbl, 1, L"2718" };
+    struct fake_string_pv pv1 = { fake_pv_vtbl, 1, L"42" };
+    struct fake_string_pv pv2 = { fake_pv_vtbl, 1, L"2718" };
 
     WindowsCreateString( L"Windows.UI.Xaml.Controls.TextBlock", 34, &str );
-    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&res_af );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&tb_af );
     WindowsDeleteString( str );
-    ok( hr == S_OK && res_af != NULL, "TextBlock factory hr %#lx\n", hr );
-    if (FAILED(hr) || !res_af) return;
+    ok( hr == S_OK && tb_af != NULL, "TextBlock factory hr %#lx\n", hr );
+    if (FAILED(hr) || !tb_af) return;
 
-    hr = IActivationFactory_ActivateInstance( res_af, &res_obj );
-    IActivationFactory_Release( res_af );
-    ok( hr == S_OK && res_obj != NULL, "TextBlock ActivateInstance hr %#lx\n", hr );
-    if (FAILED(hr) || !res_obj) return;
+    hr = IActivationFactory_ActivateInstance( tb_af, &tb_obj );
+    IActivationFactory_Release( tb_af );
+    ok( hr == S_OK && tb_obj != NULL, "TextBlock ActivateInstance hr %#lx\n", hr );
+    if (FAILED(hr) || !tb_obj) return;
 
-    hr = IInspectable_QueryInterface( res_obj, &IID_IFrameworkElement_test, &res_fe );
-    ok( hr == S_OK && res_fe != NULL, "QI IFrameworkElement hr %#lx\n", hr );
-    hr = IInspectable_QueryInterface( res_obj, &IID_ITextBlock_test, &res_tb );
-    ok( hr == S_OK && res_tb != NULL, "QI ITextBlock hr %#lx\n", hr );
+    hr = IInspectable_QueryInterface( tb_obj, &IID_IFrameworkElement_test, &tb_fe );
+    ok( hr == S_OK && tb_fe != NULL, "QI IFrameworkElement hr %#lx\n", hr );
+    hr = IInspectable_QueryInterface( tb_obj, &IID_ITextBlock_test, &tb_iface );
+    ok( hr == S_OK && tb_iface != NULL, "QI ITextBlock hr %#lx\n", hr );
 
-    /* Name the element "Results" so it acts as a CalculationResult display sink */
-    WindowsCreateString( L"Results", 7, &str );
-    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_Name( res_fe, str );
+    WindowsCreateString( L"Windows.UI.Xaml.DependencyProperty", 34, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&dp_af );
     WindowsDeleteString( str );
-    ok( hr == S_OK, "put_Name(Results) hr %#lx\n", hr );
+    ok( hr == S_OK && dp_af != NULL, "DependencyProperty factory hr %#lx\n", hr );
+    hr = IActivationFactory_QueryInterface( dp_af, &IID_IDependencyPropertyStatics_test, &dp_statics );
+    IActivationFactory_Release( dp_af );
+    ok( hr == S_OK && dp_statics != NULL, "QI IDependencyPropertyStatics hr %#lx\n", hr );
 
-    /* 1. Setting DataContext to vm1 subscribes to INotifyPropertyChanged and syncs DisplayValue ("42") */
-    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_DataContext( res_fe, &vm1.vtbl_insp );
-    ok( hr == S_OK, "put_DataContext(vm1) hr %#lx\n", hr );
-    ok( vm1.add_pc_cnt == 1 && vm1.pc_handler != NULL, "expected add_PropertyChanged count 1, got %d\n", vm1.add_pc_cnt );
+    WindowsCreateString( L"String", 6, &tname.Name );
+    WindowsCreateString( L"Text", 4, &str );
+    hr = ((const struct test_dp_statics_iface *)dp_statics)->lpVtbl->Register(
+        dp_statics, str, &tname, &tname, NULL, &text_dp );
+    WindowsDeleteString( str );
+    WindowsDeleteString( tname.Name );
+    ok( hr == S_OK && text_dp != NULL, "Register Text DP hr %#lx\n", hr );
 
-    hr = ((const struct test_tb_iface *)res_tb)->lpVtbl->get_Text( res_tb, &htxt );
+    WindowsCreateString( L"Windows.UI.Xaml.Data.Binding", 28, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&bind_af );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && bind_af != NULL, "Binding factory hr %#lx\n", hr );
+    hr = IActivationFactory_ActivateInstance( bind_af, &bind_obj );
+    IActivationFactory_Release( bind_af );
+    ok( hr == S_OK && bind_obj != NULL, "Binding ActivateInstance hr %#lx\n", hr );
+
+    hr = ((const struct test_fe_iface *)tb_fe)->lpVtbl->SetBinding( tb_fe, text_dp, bind_obj );
+    ok( hr == S_OK, "SetBinding hr %#lx\n", hr );
+
+    /* 1. Setting DataContext to pv1 applies binding to TextBlock ("42") */
+    hr = ((const struct test_fe_iface *)tb_fe)->lpVtbl->put_DataContext( tb_fe, &pv1 );
+    ok( hr == S_OK, "put_DataContext(pv1) hr %#lx\n", hr );
+    hr = ((const struct test_fe_iface *)tb_fe)->lpVtbl->get_DataContext( tb_fe, &dc_out );
+    ok( hr == S_OK && dc_out == &pv1, "expected DataContext == pv1, got %p\n", dc_out );
+    if (dc_out) IUnknown_Release( (IUnknown *)dc_out );
+    dc_out = NULL;
+
+    hr = ((const struct test_tb_iface *)tb_iface)->lpVtbl->get_Text( tb_iface, &htxt );
     raw = htxt ? WindowsGetStringRawBuffer( htxt, NULL ) : NULL;
-    ok( hr == S_OK && raw && !wcscmp( raw, L"42" ), "expected CalculationResult text '42', got %s\n", wine_dbgstr_w( raw ) );
+    ok( hr == S_OK && raw && !wcscmp( raw, L"42" ), "expected bound TextBlock text '42', got %s\n", wine_dbgstr_w( raw ) );
     if (htxt) { WindowsDeleteString( htxt ); htxt = NULL; }
 
-    /* 2. Firing PropertyChanged on vm1 updates CalculationResult display text ("314") */
-    vm1.display_val = L"314";
-    if (vm1.pc_handler)
-    {
-        const struct test_pc_handler_iface *pch = (const struct test_pc_handler_iface *)vm1.pc_handler;
-        pch->lpVtbl->Invoke( vm1.pc_handler, &vm1.vtbl_insp, NULL );
-    }
-    hr = ((const struct test_tb_iface *)res_tb)->lpVtbl->get_Text( res_tb, &htxt );
+    /* 2. Switching DataContext to pv2 updates bound text ("2718") and releases pv1 */
+    hr = ((const struct test_fe_iface *)tb_fe)->lpVtbl->put_DataContext( tb_fe, &pv2 );
+    ok( hr == S_OK, "put_DataContext(pv2) hr %#lx\n", hr );
+    ok( pv1.ref == 1, "expected pv1 refcount restored to 1 after switch, got %ld\n", pv1.ref );
+
+    hr = ((const struct test_tb_iface *)tb_iface)->lpVtbl->get_Text( tb_iface, &htxt );
     raw = htxt ? WindowsGetStringRawBuffer( htxt, NULL ) : NULL;
-    ok( hr == S_OK && raw && !wcscmp( raw, L"314" ), "expected updated CalculationResult text '314', got %s\n", wine_dbgstr_w( raw ) );
+    ok( hr == S_OK && raw && !wcscmp( raw, L"2718" ), "expected bound TextBlock text '2718', got %s\n", wine_dbgstr_w( raw ) );
     if (htxt) { WindowsDeleteString( htxt ); htxt = NULL; }
 
-    /* 3. Switching DataContext to vm2 unsubscribes/releases vm1 and syncs vm2 ("2718") */
-    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_DataContext( res_fe, &vm2.vtbl_insp );
-    ok( hr == S_OK, "put_DataContext(vm2) hr %#lx\n", hr );
-    ok( vm1.rem_pc_cnt == 1, "expected vm1 remove_PropertyChanged count 1, got %d\n", vm1.rem_pc_cnt );
-    ok( vm1.ref == 1, "expected vm1 refcount restored to 1 after teardown, got %ld\n", vm1.ref );
-
-    hr = ((const struct test_tb_iface *)res_tb)->lpVtbl->get_Text( res_tb, &htxt );
-    raw = htxt ? WindowsGetStringRawBuffer( htxt, NULL ) : NULL;
-    ok( hr == S_OK && raw && !wcscmp( raw, L"2718" ), "expected CalculationResult text '2718', got %s\n", wine_dbgstr_w( raw ) );
-    if (htxt) { WindowsDeleteString( htxt ); htxt = NULL; }
-
-    /* 4. Clearing DataContext to NULL unsubscribes and releases vm2 */
-    hr = ((const struct test_fe_iface *)res_fe)->lpVtbl->put_DataContext( res_fe, NULL );
+    /* 3. Clearing DataContext to NULL returns NULL and releases pv2 once element is freed */
+    hr = ((const struct test_fe_iface *)tb_fe)->lpVtbl->put_DataContext( tb_fe, NULL );
     ok( hr == S_OK, "put_DataContext(NULL) hr %#lx\n", hr );
-    ok( vm2.rem_pc_cnt == 1, "expected vm2 remove_PropertyChanged count 1, got %d\n", vm2.rem_pc_cnt );
-    ok( vm2.ref == 1, "expected vm2 refcount restored to 1 after teardown, got %ld\n", vm2.ref );
+    hr = ((const struct test_fe_iface *)tb_fe)->lpVtbl->get_DataContext( tb_fe, &dc_out );
+    ok( hr == S_OK && dc_out == NULL, "expected NULL DataContext, got %p\n", dc_out );
 
-    IUnknown_Release( (IUnknown *)res_tb );
-    IUnknown_Release( (IUnknown *)res_fe );
-    IInspectable_Release( res_obj );
+    IInspectable_Release( bind_obj );
+    IUnknown_Release( text_dp );
+    IUnknown_Release( (IUnknown *)dp_statics );
+    IUnknown_Release( (IUnknown *)tb_iface );
+    IUnknown_Release( (IUnknown *)tb_fe );
+    IInspectable_Release( tb_obj );
+    ok( pv2.ref == 1, "expected pv2 refcount restored to 1 after teardown, got %ld\n", pv2.ref );
 }
 
 static void test_VectorGrowthBeyondOldCaps( void )

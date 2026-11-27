@@ -2482,7 +2482,7 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
     {
         IInspectable *btn_inner = NULL;
         IInspectable *tmpl = NULL;
-        IInspectable *sel = (!(impl->class_flags & (UWP_CF_TILE_LIST | UWP_CF_ITEMS_REPEATER)))
+        IInspectable *sel = (!(impl->class_flags & UWP_CF_ITEMS_REPEATER))
                                 ? (impl->item_template_selector ? impl->item_template_selector : impl->item_template) : NULL;
         if (sel)
         {

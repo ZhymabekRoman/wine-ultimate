@@ -88,8 +88,18 @@ static HRESULT WINAPI uwp_ui_get_DesiredSize( void *iface, Size *sz )
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (sz)
     {
-        sz->Width = (impl && impl->actual_w > 0) ? (FLOAT)impl->actual_w : 100.0f;
-        sz->Height = (impl && impl->actual_h > 0) ? (FLOAT)impl->actual_h : 40.0f;
+        if (impl && impl->kind == UWP_KIND_TEXT_BLOCK && uwp_has_text( impl ))
+        {
+            double fs = (impl->font_size > 0.0) ? impl->font_size : 14.0;
+            size_t len = wcslen( uwp_elem_text( impl ) );
+            sz->Width = (FLOAT)max( 4.0, (double)len * fs * 0.58 + 8.0 );
+            sz->Height = (FLOAT)max( 12.0, fs * 1.35 );
+        }
+        else
+        {
+            sz->Width = (impl && impl->actual_w > 0) ? (FLOAT)impl->actual_w : 100.0f;
+            sz->Height = (impl && impl->actual_h > 0) ? (FLOAT)impl->actual_h : 40.0f;
+        }
     }
     return S_OK;
 }
@@ -394,7 +404,17 @@ HRESULT WINAPI uwp_fe_put_Style( void *iface, IInspectable *val )
 HRESULT WINAPI uwp_fe_get_ActualWidth( void *iface, double *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (val) *val = (impl && impl->actual_w > 0) ? impl->actual_w : 320.0;
+    if (val)
+    {
+        if (impl && impl->kind == UWP_KIND_TEXT_BLOCK && uwp_has_text( impl ) &&
+            impl->parent && uwp_is_scroll_viewer( impl->parent ))
+        {
+            double fs = (impl->font_size > 0.0) ? impl->font_size : 14.0;
+            *val = max( 4.0, (double)wcslen( uwp_elem_text( impl ) ) * fs * 0.58 + 8.0 );
+        }
+        else
+            *val = (impl && impl->actual_w > 0) ? impl->actual_w : 320.0;
+    }
     return S_OK;
 }
 
@@ -1317,8 +1337,7 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
 
     /* Prefer real elements instantiated from the control's inflated XBF ControlTemplate
      * before falling back to synthetic template parts. */
-    if (impl->template_root && impl->named_cnt > 0 &&
-        wcscmp( nm, L"TextContainer" ) != 0 && wcscmp( nm, L"NormalOutput" ) != 0)
+    if (impl->template_root && impl->named_cnt > 0)
     {
         int i;
         for (i = 0; i < impl->named_cnt; i++)
@@ -1334,76 +1353,6 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
     if (child)
     {
         /* Found in inflated ControlTemplate */
-    }
-    else if (!wcscmp( nm, L"TextContainer" ))
-    {
-        if (!impl->tpl_text_container)
-        {
-            IInspectable *raw = NULL;
-            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.ScrollViewer", NULL, NULL, (void **)&raw )) && raw)
-            {
-                child = uwp_elem_from_any( raw );
-                if (child)
-                {
-                    child->parent = impl;
-                    child->in_visual_tree = TRUE;
-                    child->actual_w = 320.0;
-                    child->actual_h = 80.0;
-                    lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-                    impl->tpl_text_container = child;
-                }
-                IInspectable_Release( raw );
-            }
-        }
-        child = impl->tpl_text_container;
-    }
-    else if (!wcscmp( nm, L"NormalOutput" ))
-    {
-        if (!impl->tpl_normal_output)
-        {
-            IInspectable *raw = NULL;
-            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&raw )) && raw)
-            {
-                child = uwp_elem_from_any( raw );
-                if (child)
-                {
-                    child->parent = impl->tpl_text_container ? impl->tpl_text_container : impl;
-                    child->in_visual_tree = TRUE;
-                    child->actual_w = 300.0;
-                    child->actual_h = 64.0;
-                    child->font_size = 44.0;
-                    lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-                    if (uwp_has_text( impl )) uwp_elem_set_text( child, uwp_elem_text( impl ) );
-                    impl->tpl_normal_output = child;
-                    if (impl->tpl_text_container)
-                    {
-                        impl->tpl_text_container->content = &child->IInspectable_iface;
-                        IInspectable_AddRef( &child->IInspectable_iface );
-                    }
-                    if (impl->content) IInspectable_Release( impl->content );
-                    impl->content = &child->IInspectable_iface;
-                    IInspectable_AddRef( &child->IInspectable_iface );
-                }
-                IInspectable_Release( raw );
-            }
-        }
-        child = impl->tpl_normal_output;
-    }
-    else if (!wcscmp( nm, L"ScrollLeft" ) || !wcscmp( nm, L"ScrollRight" ))
-    {
-        IInspectable *raw = NULL;
-        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.HyperlinkButton", NULL, NULL, (void **)&raw )) && raw)
-        {
-            child = uwp_elem_from_any( raw );
-            if (child)
-            {
-                child->parent = impl;
-                child->in_visual_tree = TRUE;
-                child->visibility = 1; /* Collapsed by default */
-                lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
-            }
-            IInspectable_Release( raw );
-        }
     }
     else if (!wcscmp( nm, L"ContentRootGrid" ) || !wcscmp( nm, L"RootGrid" ) ||
              !wcscmp( nm, L"DialogSpace" ) || !wcscmp( nm, L"CommandSpace" ))
@@ -2013,11 +1962,14 @@ const void *uwp_ui_vtbl[128] =
 
 static HRESULT WINAPI uwp_fe_get_FlowDirection( void *iface, int *dir )
 {
-    if (dir) *dir = 0;
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (dir) *dir = (impl && impl->flow_direction == 2) ? 1 : 0;
     return S_OK;
 }
 static HRESULT WINAPI uwp_fe_put_FlowDirection( void *iface, int dir )
 {
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->flow_direction = (dir == 1) ? 2 : 1; uwp_invalidate_window(); }
     return S_OK;
 }
 static HRESULT WINAPI uwp_fe_get_BaseUri( void *iface, void **uri )
@@ -2038,8 +1990,32 @@ static HRESULT WINAPI uwp_fe_probe##n( void *iface, ... ) \
     return S_OK; \
 }
 
-DEFINE_FE_PROBE(6)   DEFINE_FE_PROBE(11)  DEFINE_FE_PROBE(12)  DEFINE_FE_PROBE(27)
-DEFINE_FE_PROBE(28)  DEFINE_FE_PROBE(29)  DEFINE_FE_PROBE(30)
+DEFINE_FE_PROBE(6)   DEFINE_FE_PROBE(11)  DEFINE_FE_PROBE(12)
+
+static HRESULT WINAPI uwp_fe_get_HorizontalAlignment( void *iface, INT32 *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = impl ? impl->h_align : 3;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fe_put_HorizontalAlignment( void *iface, INT32 val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->h_align = val; impl->local_prop_mask |= UWP_LP_H_ALIGN; g_layout_dirty = TRUE; }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fe_get_VerticalAlignment( void *iface, INT32 *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = impl ? impl->v_align : 3;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fe_put_VerticalAlignment( void *iface, INT32 val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) { impl->v_align = val; impl->local_prop_mask |= UWP_LP_V_ALIGN; g_layout_dirty = TRUE; }
+    return S_OK;
+}
 DEFINE_FE_PROBE(53)  DEFINE_FE_PROBE(54)  DEFINE_FE_PROBE(55)
 DEFINE_FE_PROBE(58)  DEFINE_FE_PROBE(59)  DEFINE_FE_PROBE(60)  DEFINE_FE_PROBE(61)
 DEFINE_FE_PROBE(63)  DEFINE_FE_PROBE(64)  DEFINE_FE_PROBE(65)  DEFINE_FE_PROBE(66)
@@ -2677,10 +2653,10 @@ const void *uwp_fe_vtbl[112] =
     [6] = uwp_fe_probe6,
     [11] = uwp_fe_probe11,
     [12] = uwp_fe_probe12,
-    [27] = uwp_fe_probe27,
-    [28] = uwp_fe_probe28,
-    [29] = uwp_fe_probe29,
-    [30] = uwp_fe_probe30,
+    [27] = uwp_fe_get_HorizontalAlignment,
+    [28] = uwp_fe_put_HorizontalAlignment,
+    [29] = uwp_fe_get_VerticalAlignment,
+    [30] = uwp_fe_put_VerticalAlignment,
     [38] = uwp_fe_get_Style,
     [39] = uwp_fe_put_Style,
     [44] = uwp_fe_remove_Loaded,

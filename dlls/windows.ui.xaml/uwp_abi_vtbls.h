@@ -586,26 +586,6 @@ struct abi_tab_item_vm_vtbl
 };
 struct abi_tab_item_vm { const struct abi_tab_item_vm_vtbl *lpVtbl; };
 
-struct abi_calc_vm_display_vtbl
-{
-    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
-    ULONG (WINAPI *AddRef)( void *This );
-    ULONG (WINAPI *Release)( void *This );
-    void *pad3_6[4];
-    HRESULT (WINAPI *get_DisplayValue)( void *This, HSTRING *out );             /* slot 7 */
-};
-struct abi_calc_vm_display { const struct abi_calc_vm_display_vtbl *lpVtbl; };
-
-struct abi_calc_btn_args_factory_vtbl
-{
-    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
-    ULONG (WINAPI *AddRef)( void *This );
-    ULONG (WINAPI *Release)( void *This );
-    void *pad3_5[3];
-    HRESULT (WINAPI *CreateInstance)( void *This, HSTRING str, INT32 code, IInspectable **out ); /* slot 6 */
-};
-struct abi_calc_btn_args_factory { const struct abi_calc_btn_args_factory_vtbl *lpVtbl; };
-
 struct abi_run_vtbl
 {
     HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );

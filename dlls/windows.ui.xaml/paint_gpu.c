@@ -618,229 +618,6 @@ static void paint_gpu_searchbox( ID3D11DeviceContext *ctx, struct uwp_element *e
     xaml_gpu_push_text( ctx, disp, 13, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &txt_rc, NULL, sfg, 1.0f );
 }
 
-static BOOL paint_gpu_spotlight( ID3D11DeviceContext *ctx, struct uwp_element *el )
-{
-    RECT rc = el->bounds;
-    int avail_w = rc.right - rc.left;
-    int avail_h = rc.bottom - rc.top;
-    struct spot_entry
-    {
-        WCHAR title[128];
-        WCHAR sub[128];
-        WCHAR badge[64];
-        struct uwp_element *img_el;
-    } entries[4];
-    int entry_cnt = 0, i;
-    struct uwp_element *page_root = g_paint_depth > 0 ? g_paint_ancestors[0] : el;
-
-    if (avail_w < 480 || avail_h < 180) return FALSE;
-
-    memset( entries, 0, sizeof(entries) );
-    /* Gather loaded card elements from page tree to populate spotlight artwork & titles if needed */
-    if (page_root)
-    {
-        struct uwp_element *stack[128];
-        int sp = 0;
-        stack[sp++] = page_root;
-        while (sp > 0 && entry_cnt < 4)
-        {
-            struct uwp_element *cur = stack[--sp];
-            if (!cur) continue;
-            if (cur != el && uwp_is_card( cur ) && uwp_has_text( cur ))
-            {
-                const WCHAR *ctext = uwp_elem_text( cur );
-                const WCHAR *nl = wcschr( ctext, '\n' );
-                size_t tlen = nl ? (size_t)(nl - ctext) : wcslen( ctext );
-                int dup = 0, d;
-                WCHAR tbuf[128] = {0};
-                if (tlen >= ARRAY_SIZE(tbuf)) tlen = ARRAY_SIZE(tbuf) - 1;
-                memcpy( tbuf, ctext, tlen * sizeof(WCHAR) );
-                tbuf[tlen] = 0;
-                for (d = 0; d < entry_cnt; d++)
-                    if (!wcscmp( entries[d].title, tbuf )) { dup = 1; break; }
-                if (!dup && tbuf[0])
-                {
-                    lstrcpynW( entries[entry_cnt].title, tbuf, ARRAY_SIZE(entries[0].title) );
-                    entries[entry_cnt].sub[0] = 0;
-                    if (!uwp_elem_placeholder( cur )[0] && !(cur->probe_flags & UWP_PF_NO_SPOTLIGHT_PH))
-                    {
-                        static const WCHAR *const spot_desc_props[] =
-                            { L"Description", L"ShortDescription", L"Subtitle", L"Content", L"CardModel", L"Product", L"Data" };
-                        IInspectable *svm = (cur->content && !uwp_elem_from_any( cur->content )) ? cur->content : cur->data_context;
-                        WCHAR ph_buf[256] = {0};
-                        if (svm)
-                            uwp_vm_query_string_prop_depth( svm, spot_desc_props, ARRAY_SIZE(spot_desc_props),
-                                                            ph_buf, ARRAY_SIZE(ph_buf), 2 );
-                        if (!ph_buf[0] && nl && nl[1])
-                        {
-                            const WCHAR *tab = wcschr( nl + 1, '\t' );
-                            size_t slen = tab ? (size_t)(tab - (nl + 1)) : wcslen( nl + 1 );
-                            if (slen >= ARRAY_SIZE(ph_buf)) slen = ARRAY_SIZE(ph_buf) - 1;
-                            memcpy( ph_buf, nl + 1, slen * sizeof(WCHAR) );
-                            ph_buf[slen] = 0;
-                        }
-                        if (ph_buf[0])
-                            uwp_elem_set_placeholder( cur, ph_buf );
-                        else
-                            cur->probe_flags |= UWP_PF_NO_SPOTLIGHT_PH;
-                    }
-                    if (uwp_elem_placeholder( cur )[0])
-                        lstrcpynW( entries[entry_cnt].sub, uwp_elem_placeholder( cur ), ARRAY_SIZE(entries[0].sub) );
-                    lstrcpynW( entries[entry_cnt].badge, entry_cnt == 0 ? L"FEATURED" : L"TRENDING", ARRAY_SIZE(entries[0].badge) );
-                    if (uwp_elem_image_src( cur )[0]) uwp_load_image_asset( cur );
-                    entries[entry_cnt].img_el = cur;
-                    entry_cnt++;
-                }
-            }
-            if (cur->children_coll)
-            {
-                struct uwp_vec_view *v = CONTAINING_RECORD( cur->children_coll, struct uwp_vec_view, IInspectable_iface );
-                int k;
-                for (k = (int)v->count - 1; k >= 0 && sp < (int)ARRAY_SIZE(stack); k--)
-                {
-                    struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
-                    if (ch && ch != cur) stack[sp++] = ch;
-                }
-            }
-            if (cur->content && sp < (int)ARRAY_SIZE(stack))
-            {
-                struct uwp_element *ch = uwp_elem_from_any( cur->content );
-                if (ch && ch != cur) stack[sp++] = ch;
-            }
-        }
-    }
-    if (entry_cnt == 0)
-    {
-        lstrcpynW( entries[0].title, L"Minecraft: Java & Bedrock Edition", ARRAY_SIZE(entries[0].title) );
-        lstrcpynW( entries[0].sub, L"Create, explore, and survive alone or with friends", ARRAY_SIZE(entries[0].sub) );
-        lstrcpynW( entries[0].badge, L"FEATURED", ARRAY_SIZE(entries[0].badge) );
-        lstrcpynW( entries[1].title, L"Call of Duty: Modern Warfare III", ARRAY_SIZE(entries[1].title) );
-        lstrcpynW( entries[1].sub, L"Action & Adventure", ARRAY_SIZE(entries[1].sub) );
-        lstrcpynW( entries[2].title, L"Fortnite", ARRAY_SIZE(entries[2].title) );
-        lstrcpynW( entries[2].sub, L"Battle Royale & Creative", ARRAY_SIZE(entries[2].sub) );
-        lstrcpynW( entries[3].title, L"Roblox - Windows", ARRAY_SIZE(entries[3].title) );
-        lstrcpynW( entries[3].sub, L"Millions of experiences", ARRAY_SIZE(entries[3].sub) );
-        entry_cnt = 4;
-    }
-
-    {
-        int pad = 12, gap = 12;
-        int banner_h = avail_h - 32;
-        int hero_w = ((avail_w - pad * 2 - gap * 2) * 58) / 100;
-        int prev_cnt = min( 2, max( 1, entry_cnt - 1 ) );
-        int prev_w = (avail_w - pad * 2 - hero_w - gap * prev_cnt) / prev_cnt;
-        int hx0 = rc.left + pad, hy0 = rc.top + 6, hx1 = hx0 + hero_w, hy1 = hy0 + banner_h;
-        RECT b_rc, t_rc, s_rc, cta_rc;
-
-        /* 1. Main Hero Banner (full-bleed UniformToFill cover art + CornerRadius clip + LinearGradientBrush scrim) */
-        {
-            RECT hero_rc = { hx0, hy0, hx1, hy1 };
-            xaml_gpu_push_rect( (float)hx0, (float)hy0, (float)hx1, (float)hy1, NULL,
-                                10.0f, cr_to_argb( RGB( 20, 28, 44 ) ), 0, 0.0f, 1.0f );
-            if (entries[0].img_el && entries[0].img_el->media && entries[0].img_el->media->img_pixels &&
-                entries[0].img_el->media->img_w > 0 && entries[0].img_el->media->img_h > 0)
-            {
-                struct uwp_media_ext *hm = entries[0].img_el->media;
-                float uv_crop[4];
-                uwp_compute_uniform_to_fill_uv( hero_w, banner_h,
-                                                (int)hm->img_w,
-                                                (int)hm->img_h, uv_crop );
-                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)entries[0].img_el,
-                                                hm->img_pixels, hm->img_w,
-                                                hm->img_h, 0, &hero_rc, uv_crop, &hero_rc,
-                                                10.0f, 1.0f );
-            }
-            /* Horizontal left-to-right scrim + bottom vignette scrim + subtle rounded border */
-            xaml_gpu_push_gradient_rect( (float)hx0, (float)hy0, (float)hx1, (float)hy1, NULL,
-                                         10.0f, 0xf20e1522u, 0x220e1522u,
-                                         0.0f, 0.5f, 0.92f, 0.5f, 0.22f, 0.88f, 1.0f );
-            xaml_gpu_push_gradient_rect( (float)hx0, (float)hy0, (float)hx1, (float)hy1, NULL,
-                                         10.0f, 0x000a0e16u, 0xc40a0e16u,
-                                         0.5f, 0.38f, 0.5f, 1.0f, 0.0f, 1.0f, 1.0f );
-            xaml_gpu_push_rect( (float)hx0, (float)hy0, (float)hx1, (float)hy1, NULL,
-                                10.0f, 0, 0x38ffffffu, 1.0f, 1.0f );
-        }
-        /* Badge pill */
-        SetRect( &b_rc, hx0 + 28, hy0 + 24, hx0 + 118, hy0 + 48 );
-        xaml_gpu_push_rect( (float)b_rc.left, (float)b_rc.top, (float)b_rc.right, (float)b_rc.bottom, NULL,
-                            4.0f, cr_to_argb( RGB( 0, 120, 212 ) ), 0, 0.0f, 1.0f );
-        xaml_gpu_push_text( ctx, entries[0].badge[0] ? entries[0].badge : L"FEATURED", 10, FW_SEMIBOLD,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE, &b_rc, NULL, RGB( 255, 255, 255 ), 1.0f );
-        /* Hero Title */
-        SetRect( &t_rc, hx0 + 28, hy1 - 142, hx0 + (hero_w * 68) / 100, hy1 - 98 );
-        xaml_gpu_push_text( ctx, entries[0].title, 22, FW_BOLD,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                            &t_rc, NULL, RGB( 255, 255, 255 ), 1.0f );
-        /* Hero Subtitle */
-        SetRect( &s_rc, hx0 + 28, hy1 - 94, hx0 + (hero_w * 68) / 100, hy1 - 62 );
-        xaml_gpu_push_text( ctx, entries[0].sub, 13, FW_NORMAL,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                            &s_rc, NULL, RGB( 218, 224, 236 ), 1.0f );
-        /* CTA Button */
-        SetRect( &cta_rc, hx0 + 28, hy1 - 54, hx0 + 152, hy1 - 18 );
-        xaml_gpu_push_rect( (float)cta_rc.left, (float)cta_rc.top, (float)cta_rc.right, (float)cta_rc.bottom, NULL,
-                            6.0f, cr_to_argb( RGB( 245, 245, 248 ) ), 0, 0.0f, 1.0f );
-        xaml_gpu_push_text( ctx, L"See details", 12, FW_SEMIBOLD,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE, &cta_rc, NULL, RGB( 20, 20, 24 ), 1.0f );
-
-        /* 2. Preview Cards on Right (full-bleed UniformToFill cover art + CornerRadius clip + vertical scrim) */
-        for (i = 0; i < prev_cnt; i++)
-        {
-            struct spot_entry *pe = &entries[min( entry_cnt - 1, i + 1 )];
-            int px0 = hx1 + gap + i * (prev_w + gap);
-            int px1 = px0 + prev_w;
-            RECT card_rc = { px0, hy0, px1, hy1 };
-            RECT pt_rc, ps_rc;
-            COLORREF pbg = (i == 0) ? RGB( 30, 40, 54 ) : RGB( 34, 34, 44 );
-            xaml_gpu_push_rect( (float)px0, (float)hy0, (float)px1, (float)hy1, NULL,
-                                10.0f, cr_to_argb( pbg ), 0, 0.0f, 1.0f );
-            if (pe->img_el && pe->img_el->media && pe->img_el->media->img_pixels &&
-                pe->img_el->media->img_w > 0 && pe->img_el->media->img_h > 0)
-            {
-                struct uwp_media_ext *pm = pe->img_el->media;
-                float uv_crop[4];
-                uwp_compute_uniform_to_fill_uv( prev_w, banner_h,
-                                                (int)pm->img_w,
-                                                (int)pm->img_h, uv_crop );
-                xaml_gpu_push_image_uv_rounded( ctx, (UINT64)(ULONG_PTR)pe->img_el,
-                                                pm->img_pixels, pm->img_w,
-                                                pm->img_h, 0, &card_rc, uv_crop, &card_rc,
-                                                10.0f, 1.0f );
-            }
-            xaml_gpu_push_gradient_rect( (float)px0, (float)hy0, (float)px1, (float)hy1, NULL,
-                                         10.0f, 0x180c1018u, 0xec0c1018u,
-                                         0.5f, 0.0f, 0.5f, 1.0f, 0.16f, 0.84f, 1.0f );
-            xaml_gpu_push_rect( (float)px0, (float)hy0, (float)px1, (float)hy1, NULL,
-                                10.0f, 0, 0x38ffffffu, 1.0f, 1.0f );
-            SetRect( &pt_rc, px0 + 16, hy1 - 68, px1 - 16, hy1 - 38 );
-            xaml_gpu_push_text( ctx, pe->title, 14, FW_SEMIBOLD,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                &pt_rc, NULL, RGB( 255, 255, 255 ), 1.0f );
-            SetRect( &ps_rc, px0 + 16, hy1 - 38, px1 - 16, hy1 - 14 );
-            xaml_gpu_push_text( ctx, pe->sub, 11, FW_NORMAL,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                                &ps_rc, NULL, RGB( 205, 210, 222 ), 1.0f );
-        }
-
-        /* 3. Pager Dots (PipsPager) at Bottom Center */
-        {
-            int npips = 6, pip_gap = 8, p;
-            int total_pw = 16 + (npips - 1) * (6 + pip_gap);
-            int cur_px = rc.left + (avail_w - total_pw) / 2;
-            int py = rc.bottom - 14;
-            for (p = 0; p < npips; p++)
-            {
-                int pw = (p == 0) ? 16 : 6;
-                COLORREF pcr = (p == 0) ? RGB( 96, 205, 255 ) : RGB( 110, 110, 116 );
-                xaml_gpu_push_rect( (float)cur_px, (float)py, (float)(cur_px + pw), (float)(py + 6), NULL,
-                                    3.0f, cr_to_argb( pcr ), 0, 0.0f, 1.0f );
-                cur_px += pw + pip_gap;
-            }
-        }
-    }
-    return TRUE;
-}
-
 static void paint_gpu_tabview( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     RECT trc = el->bounds;
@@ -1057,7 +834,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         {
             if (!uwp_elem_image_src( el )[0] && !(el->probe_flags & UWP_PF_NO_BTN_IMG))
             {
-                static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"ScreenshotUrl", L"Image", L"Images", L"Source", L"IconUrl", L"BoxArtUrl", L"PosterUrl" };
+                static const WCHAR *const item_img_props[] = { L"Uri", L"Url", L"ImageUrl", L"ImageUri", L"ThumbnailUrl", L"PreviewImageUrl", L"ScreenshotUrl", L"Image", L"Images", L"Source", L"IconUrl" };
                 WCHAR img_buf[512] = {0};
                 if (uwp_vm_query_string_prop_depth( el->data_context, item_img_props, ARRAY_SIZE(item_img_props), img_buf, ARRAY_SIZE(img_buf), 2 ) &&
                     img_buf[0])
@@ -1278,15 +1055,6 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
     if (el->has_fg && el->fg_alpha == 0)
         return TRUE;
 
-    if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
-        el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
-    {
-        if (uwp_has_text( el ) && wcscmp( uwp_elem_text( el->tpl_normal_output ), uwp_elem_text( el ) ) != 0)
-            uwp_elem_set_text( el->tpl_normal_output, uwp_elem_text( el ) );
-        uwp_gpu_paint_element( ctx, el->tpl_normal_output );
-        return TRUE;
-    }
-
     if (!draw_txt[0] && el->inlines_coll)
     {
         if (uwp_flatten_inlines_text( el, rich_buf, ARRAY_SIZE(rich_buf) ) > 0)
@@ -1310,12 +1078,14 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
     if (draw_txt[0])
     {
         RECT trc = el->bounds;
-        BOOL is_result;
         double eff_fs = el->font_size;
         int eff_fw = el->font_weight;
         BOOL has_anc_fg = FALSE;
         COLORREF anc_fg = 0;
         BOOL is_sec_hdr = FALSE;
+        BYTE eff_fd = el->flow_direction;
+        BOOL eff_rtl;
+        int anc_h_content_align = -1;
         struct uwp_element *anc_btn = NULL;
         struct uwp_element *parent_btn = NULL;
         struct uwp_element *anc;
@@ -1337,22 +1107,32 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                     return TRUE;
             }
         }
-        for (anc = el->parent, hop = 0; anc && hop < 5; anc = anc->parent, hop++)
+        for (anc = el->parent, hop = 0; anc && hop < 6; anc = anc->parent, hop++)
         {
+            if (eff_fd == 0 && anc->flow_direction != 0)
+                eff_fd = anc->flow_direction;
+            if (!el->has_font_size && eff_fs == el->font_size && anc->has_font_size && anc->font_size > 0.0)
+                eff_fs = anc->font_size;
+            if (eff_fw <= 0 && anc->font_weight > 0)
+                eff_fw = anc->font_weight;
+            if (anc_h_content_align < 0)
+            {
+                if (anc->has_h_content_align)
+                    anc_h_content_align = anc->h_content_align;
+                else if ((anc->kind == UWP_KIND_SCROLL_VIEWER || anc->template_root != NULL) &&
+                         (anc->h_align == 0 || anc->h_align == 1 || anc->h_align == 2))
+                    anc_h_content_align = anc->h_align;
+            }
+            if (!el->has_fg && !has_anc_fg && anc->has_fg && anc->fg_alpha > 0)
+            {
+                anc_fg = blend_argb_over( anc->fg_argb, surface_bg );
+                has_anc_fg = TRUE;
+            }
             if (anc->kind == UWP_KIND_BUTTON || anc->kind == UWP_KIND_TOGGLE_BUTTON || anc->kind == UWP_KIND_CONTENT_CONTROL)
             {
                 if (anc->kind == UWP_KIND_BUTTON || anc->kind == UWP_KIND_TOGGLE_BUTTON)
                     parent_btn = anc;
-                if (!el->has_font_size && anc->has_font_size && anc->font_size > 0.0)
-                    eff_fs = anc->font_size;
-                if (eff_fw <= 0 && anc->font_weight > 0)
-                    eff_fw = anc->font_weight;
-                if (!el->has_fg && anc->has_fg && anc->fg_alpha > 0)
-                {
-                    anc_fg = blend_argb_over( anc->fg_argb, surface_bg );
-                    has_anc_fg = TRUE;
-                }
-                else if (!el->has_fg && (anc->is_accent_style || (anc->kind == UWP_KIND_TOGGLE_BUTTON && anc->is_checked == 1)))
+                if (!el->has_fg && !has_anc_fg && (anc->is_accent_style || (anc->kind == UWP_KIND_TOGGLE_BUTTON && anc->is_checked == 1)))
                 {
                     anc_fg = uwp_paint_resolve_color( anc, L"AccentButtonForeground", RGB( 255, 255, 255 ), surface_bg );
                     has_anc_fg = TRUE;
@@ -1367,7 +1147,10 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                 }
                 break;
             }
+            if (anc->template_root != NULL)
+                break;
         }
+        eff_rtl = (eff_fd == 2);
         if (!is_sec_hdr && eff_fs >= 18.0 && eff_fw >= FW_SEMIBOLD)
             is_sec_hdr = TRUE;
         if (parent_btn && !is_sec_hdr && parent_btn->has_bounds &&
@@ -1393,10 +1176,7 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                     eff_fs = inl->font_size;
             }
         }
-        is_result = uwp_is_display_result_element( el );
-        fh = is_result
-            ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
-            : max( (int)(11 * g_layout_scale + 0.5f), min( (int)(96 * g_layout_scale + 0.5f), (int)(eff_fs * g_layout_scale + 0.5f) ) );
+        fh = max( (int)(11 * g_layout_scale + 0.5f), min( (int)(96 * g_layout_scale + 0.5f), (int)(eff_fs * g_layout_scale + 0.5f) ) );
         if (is_sec_hdr)
             tfg = uwp_is_light_theme( el ) ? RGB( 22, 22, 26 ) : RGB( 250, 250, 252 );
         else if (el->has_fg && el->fg_alpha > 0)
@@ -1417,13 +1197,11 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
         if (trc.right - trc.left > 20)
             InflateRect( &trc, -4, 0 );
         {
-            int fw = (eff_fw > 0) ? eff_fw : (is_result ? FW_SEMIBOLD : FW_NORMAL);
+            int fw = (eff_fw > 0) ? eff_fw : FW_NORMAL;
             BOOL in_horiz_stack = (el->parent && el->parent->kind == UWP_KIND_STACK_PANEL && el->parent->orientation == 1);
             UINT hflag;
             UINT dt;
-            if (is_result)
-                hflag = DT_RIGHT;
-            else if (el->has_text_align)
+            if (el->has_text_align)
                 hflag = (el->text_align == 0) ? DT_CENTER : (el->text_align == 2 ? DT_RIGHT : DT_LEFT);
             else if (in_horiz_stack)
                 hflag = DT_LEFT;
@@ -1436,8 +1214,15 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
                 int hca = parent_btn->has_h_content_align ? parent_btn->h_content_align : 1;
                 hflag = (hca == 0) ? DT_LEFT : (hca == 2 ? DT_RIGHT : DT_CENTER);
             }
+            else if (anc_h_content_align >= 0 && el->h_align == 3)
+                hflag = (anc_h_content_align == 0) ? DT_LEFT : (anc_h_content_align == 2 ? DT_RIGHT : (anc_h_content_align == 1 ? DT_CENTER : DT_LEFT));
             else
                 hflag = DT_LEFT;
+            if (eff_rtl || (el->parent && uwp_is_scroll_viewer( el->parent ) && el->parent->flow_direction == 2))
+            {
+                if (hflag == DT_LEFT) hflag = DT_RIGHT;
+                else if (hflag == DT_RIGHT) hflag = DT_LEFT;
+            }
 
             if (!parent_btn && (el->text_wrapping >= 2 || wcschr( draw_txt, L'\n' ) != NULL))
             {
@@ -1789,9 +1574,8 @@ static void paint_gpu_vm_card( ID3D11DeviceContext *ctx, struct uwp_element *el 
         static const WCHAR *const fallback_sub_props[] =
             { L"PublisherName", L"Publisher", L"Description" };
         static const WCHAR *const img_props[] =
-            { L"Images", L"TileImages", L"ProductImages", L"Icons", L"ImageUrl", L"IconUrl", L"IconUri", L"ImageUri",
-              L"ProductImageUrl", L"HeroImageUrl", L"TileImageUrl", L"LogoUrl", L"ThumbnailUrl", L"BoxArtUrl",
-              L"PosterUrl", L"ImageLinkUri", L"TileImage", L"ProductImage", L"IconImage", L"LogoImage",
+            { L"Images", L"Icons", L"ImageUrl", L"IconUrl", L"IconUri", L"ImageUri",
+              L"LogoUrl", L"ThumbnailUrl", L"ImageLinkUri", L"IconImage", L"LogoImage",
               L"BackgroundImage", L"Icon", L"Image", L"ImageSource", L"Uri" };
         static const WCHAR *const nested_props[] =
             { L"Content", L"CardModel", L"Card", L"Product", L"ViewModel", L"Model", L"Data", L"Item", L"ProductSummary" };
@@ -2067,7 +1851,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
                 uwp_is_font_icon( el ) ||
                 uwp_is_text_input( el ) ||
                 uwp_is_card( el ) ||
-                (el->class_flags & (UWP_CF_MEDIA_PLAYER | UWP_CF_PROGRESS_BAR | UWP_CF_SPOTLIGHT)) != 0)
+                (el->class_flags & (UWP_CF_MEDIA_PLAYER | UWP_CF_PROGRESS_BAR)) != 0)
                 return;
         }
     }
@@ -2219,11 +2003,6 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         paint_gpu_searchbox( ctx, el, surface_bg );
         return;
     }
-    else if (el->class_flags & UWP_CF_SPOTLIGHT)
-    {
-        if (paint_gpu_spotlight( ctx, el ))
-            return;
-    }
     else if (uwp_is_teaching_tip( el ) && el->is_open)
     {
         RECT rc = el->bounds;
@@ -2232,13 +2011,14 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
                             4.0f, cr_to_argb( tbg ), cr_to_argb( tbd ), 1.0f, 1.0f );
     }
-    else if (el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON && el->kind != UWP_KIND_TEXT_BLOCK)
+    else if (!uwp_is_card( el ) && el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON && el->kind != UWP_KIND_TEXT_BLOCK)
     {
         if (paint_gpu_container( ctx, el, surface_bg ))
             return;
     }
 
     if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) &&
+        !uwp_is_card( el ) &&
         !(el->kind == UWP_KIND_TOGGLE_BUTTON && (el->class_flags & UWP_CF_RADIO_BUTTON) && el->children_coll))
     {
         paint_gpu_button( ctx, el, surface_bg );
@@ -2264,13 +2044,13 @@ recurse_children:
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el)
             uwp_gpu_paint_element( ctx, ch );
-        else if (!out_of_view && el->kind == UWP_KIND_CONTENT_CONTROL &&
+        else if (!out_of_view && el->kind == UWP_KIND_CONTENT_CONTROL && !uwp_is_card( el ) &&
                  (!el->children_coll || CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
             paint_gpu_content_control_vm( ctx, el, surface_bg );
     }
     if (!out_of_view && !el->children_coll && (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
         !(el->content && uwp_elem_from_any( el->content )) &&
-        el->kind != UWP_KIND_CONTENT_CONTROL &&
+        (uwp_is_card( el ) || el->kind != UWP_KIND_CONTENT_CONTROL) &&
         (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56)
     {
         paint_gpu_vm_card( ctx, el );

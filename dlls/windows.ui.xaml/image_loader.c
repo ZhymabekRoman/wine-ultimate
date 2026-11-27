@@ -349,7 +349,7 @@ static BOOL CALLBACK init_winhttp_session( INIT_ONCE *once, void *param, void **
     if (g_winhttp.pOpen && g_winhttp.pConnect && g_winhttp.pOpenReq && g_winhttp.pSendReq &&
         g_winhttp.pRecvResp && g_winhttp.pReadData && g_winhttp.pClose && g_winhttp.pCrackUrl)
     {
-        g_winhttp.session = g_winhttp.pOpen( L"WineStoreXAML/1.0", 0, NULL, NULL, 0 );
+        g_winhttp.session = g_winhttp.pOpen( L"WineXAML/1.0", 0, NULL, NULL, 0 );
         if (g_winhttp.session)
             g_winhttp.ready = TRUE;
     }
@@ -769,7 +769,7 @@ void uwp_load_image_asset( struct uwp_element *el )
     {
         int ci;
         UINT max_dim = 384;
-        if ((el->class_flags2 & UWP_CF2_LOADED_IMAGE_SURF) || (el->class_flags & UWP_CF_SPOTLIGHT) ||
+        if ((el->class_flags2 & UWP_CF2_LOADED_IMAGE_SURF) ||
             el->width > 320.0 || el->height > 320.0 ||
             (el->has_bounds && ((el->bounds.right - el->bounds.left) > 320 || (el->bounds.bottom - el->bounds.top) > 320)))
             max_dim = 1024;

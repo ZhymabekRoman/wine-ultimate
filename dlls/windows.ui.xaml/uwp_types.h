@@ -120,8 +120,6 @@ enum uwp_elem_kind
 #define UWP_CF_CARD                     (1ULL << 12)
 #define UWP_CF_SHIMMER                  (1ULL << 13)
 #define UWP_CF_SKELETON                 (1ULL << 14)
-#define UWP_CF_SPOTLIGHT                (1ULL << 15)
-#define UWP_CF_SPOTLIGHT_DECOR          (1ULL << 16)
 #define UWP_CF_LISTVIEW                 (1ULL << 17)
 #define UWP_CF_GRIDVIEW                 (1ULL << 18)
 #define UWP_CF_HAS_ITEM                 (1ULL << 19)
@@ -162,8 +160,6 @@ enum uwp_elem_kind
 #define UWP_CF_ELLIPSE                  (1ULL << 54)
 #define UWP_CF_BRUSH                    (1ULL << 55)
 #define UWP_CF_FLIPVIEW                 (1ULL << 56)
-#define UWP_CF_TILE_LIST                (1ULL << 57)
-#define UWP_CF_CALC_RESULT              (1ULL << 58)
 #define UWP_CF_CONTENT_PRESENTER        (1ULL << 59)
 #define UWP_CF_STORYBOARD               (1ULL << 60)
 #define UWP_CF_WINUI_PREFIX             (1ULL << 61)
@@ -746,6 +742,7 @@ struct uwp_element
     COLORREF bg_color;
     UINT32 bg_argb;
     BYTE bg_alpha;
+    BYTE flow_direction; /* 0=unset, 1=LeftToRight, 2=RightToLeft */
     BOOL has_bg;
     COLORREF fg_color;
     UINT32 fg_argb;
@@ -787,9 +784,6 @@ struct uwp_element
     int dp_cb_cnt;
     int dp_cb_cap;
     INT64 dp_cb_next_token;
-    /* Template children cache (for CalculationResult etc.) */
-    struct uwp_element *tpl_text_container;
-    struct uwp_element *tpl_normal_output;
     /* Named children & deferred substreams for FindName */
     struct uwp_element **named_elems;
     int named_cnt;
@@ -1150,7 +1144,6 @@ static inline void uwp_elem_set_default_style_key_name( struct uwp_element *el, 
 #define UWP_PF_NO_BTN_IMG       0x0004u
 #define UWP_PF_NO_CARD          0x0008u
 #define UWP_PF_NO_VM            0x0010u
-#define UWP_PF_NO_SPOTLIGHT_PH  0x0020u
 
 /* Local-value precedence bits stored in struct uwp_element::local_prop_mask */
 #define UWP_LP_WIDTH            (1u << 0)

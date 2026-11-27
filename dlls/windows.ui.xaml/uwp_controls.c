@@ -1412,11 +1412,9 @@ enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
     if (wcsstr( cls, L"RadioButton" )) return UWP_KIND_TOGGLE_BUTTON;
     if (wcsstr( cls, L"ToggleButton" )) return UWP_KIND_TOGGLE_BUTTON;
     if (wcsstr( cls, L"Button" )) return UWP_KIND_BUTTON;
-    if (wcsstr( cls, L"TextBlock" ) || wcsstr( cls, L"CalculationResult" )) return UWP_KIND_TEXT_BLOCK;
+    if (wcsstr( cls, L"TextBlock" )) return UWP_KIND_TEXT_BLOCK;
     if (wcsstr( cls, L"ScrollViewer" )) return UWP_KIND_SCROLL_VIEWER;
-    if (wcsstr( cls, L"UserControl" ) || wcsstr( cls, L"Calculator" ) ||
-        wcsstr( cls, L"NumberPad" ) || wcsstr( cls, L"TitleBar" ) ||
-        wcsstr( cls, L"Operators" )) return UWP_KIND_USER_CONTROL;
+    if (wcsstr( cls, L"UserControl" )) return UWP_KIND_USER_CONTROL;
     if (wcsstr( cls, L"ContentControl" ) || wcsstr( cls, L"NavigationView" ) ||
         wcsstr( cls, L"Pivot" ) || wcsstr( cls, L"Viewbox" ) ||
         wcsstr( cls, L"DesktopWindowXamlSource" )) return UWP_KIND_CONTENT_CONTROL;
@@ -2508,4 +2506,3 @@ HRESULT WINAPI dp_args_get_NewValue( void *iface, IInspectable **out )
     if (*out) IInspectable_AddRef( *out );
     return S_OK;
 }
-struct uwp_calc_vm g_calc_vm;

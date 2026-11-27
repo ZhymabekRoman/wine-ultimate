@@ -157,6 +157,24 @@ static HRESULT WINAPI uwp_rtb_get_HasOverflowContent( void *iface, boolean *out 
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_tb_get_FontWeight( void *iface, UINT16 *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = (impl && impl->font_weight > 0) ? (UINT16)impl->font_weight : 400;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_tb_put_FontWeight( void *iface, UINT16 val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl && val >= 100 && val <= 900)
+    {
+        impl->font_weight = (int)val;
+        impl->local_prop_mask |= UWP_LP_FONT_WEIGHT;
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+
 const void *uwp_tb_vtbl[64] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -169,7 +187,9 @@ const void *uwp_tb_vtbl[64] =
     [7] = uwp_ctrl_put_FontSize,     /* put_FontSize */
     [8] = uwp_ctrl_get_FontFamily,   /* get_FontFamily */
     [9] = uwp_ctrl_put_FontFamily,   /* put_FontFamily */
-    [10 ... 19] = uwp_generic_noop,
+    [10] = uwp_tb_get_FontWeight,    /* get_FontWeight */
+    [11] = uwp_tb_put_FontWeight,    /* put_FontWeight */
+    [12 ... 19] = uwp_generic_noop,
     [20] = uwp_tb_get_TextWrapping,  /* get_TextWrapping */
     [21] = uwp_tb_put_TextWrapping,  /* put_TextWrapping */
     [22 ... 23] = uwp_generic_noop,
