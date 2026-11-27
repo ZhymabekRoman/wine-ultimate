@@ -1816,12 +1816,12 @@ static BOOL warm_shared_visual_cache(struct composition_device *device)
     {
         HANDLE h = device->handle_buf[i];
         IDCompositionVisual *root = shared_visual_query_root(h);
-
-        if (root && impl_from_IDCompositionVisual(root)->is_shared_proxy)
-            has_cross_process = TRUE;
+        struct composition_visual *root_impl = root ? impl_from_IDCompositionVisual(root) : NULL;
 
         dcomp_lock();
         shared_visual_cache_set(h, root);
+        if (!root_impl || root_impl->is_shared_proxy || !shared_visual_has_in_process_target(h, root_impl))
+            has_cross_process = TRUE;
         dcomp_unlock();
     }
     return has_cross_process;

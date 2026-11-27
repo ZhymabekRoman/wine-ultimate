@@ -353,6 +353,12 @@ static struct composition_target *find_in_process_target_for_root(const struct c
     return NULL;
 }
 
+/* dcomp_cs held. */
+BOOL shared_visual_has_in_process_target(HANDLE shared_handle, const struct composition_visual *child_root)
+{
+    return find_in_process_target_for_root(NULL, shared_handle, child_root) != NULL;
+}
+
 static BOOL visual_subtree_delegates_in_process(const struct composition_target *target,
         const struct composition_visual *visual, unsigned int depth, BOOL *found_delegate)
 {

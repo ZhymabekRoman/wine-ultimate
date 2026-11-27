@@ -936,8 +936,10 @@ struct core_webview2
     IInspectable ICoreWebView2_3_iface;
     IInspectable ICoreWebView2_11_iface;
     IInspectable ICoreWebView2_13_iface;
+    IInspectable ICoreWebView2_19_iface;
     IInspectable ICoreWebView2_stub_iface;
     LONG ref;
+    INT32 memory_usage_target_level;
     HSTRING source_uri;
     BOOL real_loader;
     void *loader_core;         /* COM ICoreWebView2* */

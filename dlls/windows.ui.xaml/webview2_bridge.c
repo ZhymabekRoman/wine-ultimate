@@ -146,6 +146,8 @@ const GUID IID_ICoreWebView2_12 =
     { 0xdbbbe9a1, 0x18d3, 0x5f67, { 0xb3, 0x62, 0x0f, 0x4a, 0xe9, 0x37, 0xd7, 0x54 } };
 const GUID IID_ICoreWebView2_13 =
     { 0x314b5846, 0xdbc7, 0x5de4, { 0xa7, 0x92, 0x64, 0x7e, 0xa0, 0xf3, 0x29, 0x6a } };
+static const GUID IID_ICoreWebView2_19 =
+    { 0x35a94a5c, 0xe027, 0x5dc5, { 0x8c, 0x2b, 0xc2, 0xfc, 0x7d, 0x58, 0x91, 0x59 } };
 
 const GUID IID_ICoreWebView2Settings =
     { 0x003b325e, 0x74cd, 0x52dd, { 0x80, 0x24, 0xeb, 0xb8, 0xbe, 0x38, 0xe4, 0x8e } };
@@ -177,6 +179,10 @@ static inline struct core_webview2 *impl_from_cwv2_3( void *iface )
 static inline struct core_webview2 *impl_from_cwv2_13( void *iface )
 {
     return CONTAINING_RECORD( iface, struct core_webview2, ICoreWebView2_13_iface );
+}
+static inline struct core_webview2 *impl_from_cwv2_19( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_webview2, ICoreWebView2_19_iface );
 }
 static inline struct core_webview2 *impl_from_cwv2_stub( void *iface )
 {
@@ -217,6 +223,12 @@ static HRESULT WINAPI cwv2_QueryInterface( IInspectable *iface, REFIID iid, void
     if (IsEqualGUID( iid, &IID_ICoreWebView2_13 ))
     {
         *out = &impl->ICoreWebView2_13_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICoreWebView2_19 ))
+    {
+        *out = &impl->ICoreWebView2_19_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -295,7 +307,23 @@ static ULONG WINAPI cwv2_2_Release( IInspectable *iface )
 CWV2_SUB_IUNKNOWN( 3 )
 CWV2_SUB_IUNKNOWN( 11 )
 CWV2_SUB_IUNKNOWN( 13 )
+CWV2_SUB_IUNKNOWN( 19 )
 CWV2_SUB_IUNKNOWN( stub )
+
+static HRESULT WINAPI cwv2_19_get_MemoryUsageTargetLevel( void *iface, INT32 *level )
+{
+    struct core_webview2 *impl = impl_from_cwv2_19( iface );
+    if (!level) return E_POINTER;
+    *level = impl->memory_usage_target_level;
+    return S_OK;
+}
+
+static HRESULT WINAPI cwv2_19_put_MemoryUsageTargetLevel( void *iface, INT32 level )
+{
+    struct core_webview2 *impl = impl_from_cwv2_19( iface );
+    impl->memory_usage_target_level = level;
+    return S_OK;
+}
 
 static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
 {
@@ -962,6 +990,19 @@ static const void *cwv2_13_vtbl[256] =
     [6] = cwv2_get_Profile,
 };
 
+static const void *cwv2_19_vtbl[256] =
+{
+    [0] = cwv2_19_QueryInterface,
+    [1] = cwv2_19_AddRef,
+    [2] = cwv2_19_Release,
+    [3] = cwv2_GetIids,
+    [4] = cwv2_GetRuntimeClassName,
+    [5] = cwv2_GetTrustLevel,
+    [6] = cwv2_19_get_MemoryUsageTargetLevel,
+    [7] = cwv2_19_put_MemoryUsageTargetLevel,
+    [8 ... 255] = cwv2_generic_slot,
+};
+
 static const void *cwv2_stub_vtbl[256] =
 {
     [0] = cwv2_stub_QueryInterface,
@@ -1034,7 +1075,7 @@ static void wv2_navigate_once( struct xaml_element *impl )
     const WCHAR *url = NULL;
 
     if (impl->navigated) return;
-    if (!impl->loader_core) { ERR( "wv2_navigate_once: no loader_core\n" ); return; }
+    if (!impl->loader_core) { TRACE( "wv2_navigate_once: no loader_core (deferred)\n" ); return; }
     if (impl->wv2_source_uri)
         url = WindowsGetStringRawBuffer( impl->wv2_source_uri, NULL );
     else if (impl->core_webview2)
@@ -1112,6 +1153,7 @@ void trigger_core_webview2_initialized( struct xaml_element *impl, void *iface )
             cwv->ICoreWebView2_3_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_3_vtbl );
             cwv->ICoreWebView2_11_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_11_vtbl );
             cwv->ICoreWebView2_13_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_13_vtbl );
+            cwv->ICoreWebView2_19_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_19_vtbl );
             cwv->ICoreWebView2_stub_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_stub_vtbl );
             cwv->ref = 1;
             cwv->real_loader = impl->real_loader;

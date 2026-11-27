@@ -791,11 +791,6 @@ static const GUID IID_IIterable_AppInstallItem =
 static const GUID IID_IIterator_AppInstallItem =
     { 0xccaca81b, 0x6cf7, 0x56f0, { 0xb7, 0xff, 0x8a, 0xc5, 0x19, 0x1e, 0x79, 0xbf } };
 
-static void *store_create_empty_vector_view( void )
-{
-    return store_create_vector_view( NULL, 0, &IID_IVectorView_Object, &IID_IIterable_Object );
-}
-
 static void *store_create_empty_app_install_item_vector_view( void )
 {
     struct winrt_vector_view *vv = store_create_vector_view( NULL, 0,
@@ -3325,9 +3320,22 @@ static HRESULT WINAPI store_ctx_RequestPurchaseWithPropertiesAsync( void *iface,
 {
     return store_async_create( NULL, FALSE, FALSE, S_OK, op );
 }
+static const GUID IID_IVectorView_StorePackageUpdate =
+    { 0x971c3ea6, 0x4388, 0x5a38, { 0xae, 0x13, 0x49, 0x29, 0xb6, 0xd6, 0xd7, 0x80 } };
+static const GUID IID_IIterable_StorePackageUpdate =
+    { 0x6b076c51, 0x849e, 0x5ec5, { 0xae, 0xd5, 0x9b, 0x05, 0x85, 0x59, 0x19, 0x02 } };
+static const GUID IID_IIterator_StorePackageUpdate =
+    { 0xb75dd77b, 0x87ca, 0x5956, { 0x89, 0x02, 0x84, 0xe9, 0xff, 0xc9, 0x7d, 0x83 } };
+
 static HRESULT WINAPI store_ctx_GetAppAndOptionalStorePackageUpdatesAsync( void *iface, void **op )
 {
-    return store_async_create( store_create_empty_vector_view(), FALSE, FALSE, S_OK, op );
+    struct winrt_vector_view *vv = store_create_vector_view( NULL, 0,
+        &IID_IVectorView_StorePackageUpdate, &IID_IIterable_StorePackageUpdate );
+    HRESULT hr;
+    if (vv) vv->iterator_iid = IID_IIterator_StorePackageUpdate;
+    hr = store_async_create( vv, FALSE, FALSE, S_OK, op );
+    if (vv) vector_view_Release( &vv->vtbl_vector );
+    return hr;
 }
 static HRESULT WINAPI store_ctx_RequestDownloadStorePackageUpdatesAsync( void *iface, void *upd, void **op )
 {

@@ -669,6 +669,11 @@ static HRESULT WINAPI application_stub_zero( void *iface, void *out )
     if (out) *(void **)out = NULL;
     return S_OK;
 }
+static HRESULT WINAPI application_stub_zero32( void *iface, UINT32 *out )
+{
+    if (out) *out = 0;
+    return S_OK;
+}
 static HRESULT WINAPI application_stub_ok( void *iface )
 {
     return S_OK;
@@ -698,6 +703,17 @@ static HRESULT WINAPI application_put_Resources( void *iface, void *value )
     IInspectable *new_res = (IInspectable *)value;
     TRACE( "iface %p, impl %p, value %p\n", iface, impl, value );
     if (!impl) return E_POINTER;
+    if (new_res)
+    {
+        void *rd_check = NULL;
+        if (FAILED( IUnknown_QueryInterface( (IUnknown *)new_res, &IID_IResourceDictionary_WinUI, &rd_check ) ) &&
+            FAILED( IUnknown_QueryInterface( (IUnknown *)new_res, &IID_IResourceDictionary_UWP, &rd_check ) ))
+        {
+            WARN( "rejecting non-ResourceDictionary value %p on impl %p\n", new_res, impl );
+            return E_INVALIDARG;
+        }
+        if (rd_check) IUnknown_Release( (IUnknown *)rd_check );
+    }
     if (impl->resources != new_res)
     {
         if (new_res) IInspectable_AddRef( new_res );
@@ -1099,17 +1115,17 @@ static const void *ms_application_vtbl[] =
     ms_application_GetRuntimeClassName,   /* 4: GetRuntimeClassName */
     application_GetTrustLevel,            /* 5: GetTrustLevel */
     application_get_Resources,            /* 6: get_Resources */
-    application_put_Resources,            /* 7: set_Resources */
-    application_add_UnhandledException,   /* 8: add_UnhandledException */
-    application_remove_UnhandledException,/* 9: remove_UnhandledException */
-    application_stub_zero,                /* 10: get_HighContrastAdjustment */
-    application_stub_ok,                  /* 11: set_HighContrastAdjustment */
-    application_get_RequestedTheme,       /* 12: get_RequestedTheme */
-    application_put_RequestedTheme,       /* 13: set_RequestedTheme */
-    application_get_Resources,            /* 14: get_Resources */
-    application_put_Resources,            /* 15: set_Resources */
-    application_Exit,                     /* 16: Exit */
-    application_stub_zero,                /* 17 */
+    application_put_Resources,            /* 7: put_Resources */
+    application_stub_zero,                /* 8: get_DebugSettings */
+    application_get_RequestedTheme,       /* 9: get_RequestedTheme */
+    application_put_RequestedTheme,       /* 10: put_RequestedTheme */
+    application_stub_zero32,              /* 11: get_FocusVisualKind */
+    application_stub_ok,                  /* 12: put_FocusVisualKind */
+    application_stub_zero32,              /* 13: get_HighContrastAdjustment */
+    application_stub_ok,                  /* 14: put_HighContrastAdjustment */
+    application_add_UnhandledException,   /* 15: add_UnhandledException */
+    application_remove_UnhandledException,/* 16: remove_UnhandledException */
+    application_Exit,                     /* 17: Exit */
     application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
     application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
     application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,

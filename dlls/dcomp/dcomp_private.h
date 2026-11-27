@@ -360,6 +360,7 @@ struct composition_visual *find_root_visual_container(struct composition_target 
         struct composition_target **out_host_target);
 struct composition_visual *resolve_shared_visual_root(HANDLE shared_handle);
 BOOL visual_tree_has_content(struct composition_visual *visual);
+BOOL shared_visual_has_in_process_target(HANDLE shared_handle, const struct composition_visual *child_root);
 BOOL target_delegates_to_in_process_target(const struct composition_target *target, const struct composition_visual *root);
 BOOL CALLBACK dcomp_enforce_own_captured_cb(HWND hwnd, LPARAM lparam);
 void dcomp_enforce_captured_toolwindow(HWND top);
