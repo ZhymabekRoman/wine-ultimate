@@ -2351,7 +2351,6 @@ DECL_HANDLER(connect_alpc_port)
     /* Block client until server calls accept_alpc_connection */
     {
         struct async *async = create_request_async( client_port->fd,
-                                                     get_fd_comp_flags(client_port->fd),
                                                      &req->async, 1 );
         if (async)
         {
@@ -2662,7 +2661,7 @@ DECL_HANDLER(recv_alpc_port)
         return;
     }
 
-    if ((async = create_request_async( port->fd, get_fd_comp_flags( port->fd ), &req->async, 0 )))
+    if ((async = create_request_async( port->fd, &req->async, 0 )))
     {
         if (event) async_set_event( async, event );
         alpc_fd_read( port->fd, async, 0 );

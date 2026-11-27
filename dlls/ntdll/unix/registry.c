@@ -254,7 +254,6 @@ static inline int reg_shm_eq_icase( const WCHAR *a, const WCHAR *b, uint32_t len
 
 static inline uint64_t reg_shm_lookup_handle( const struct reg_shm *shm, HANDLE handle, uint32_t *can_query )
 {
-    uint32_t pid = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
     obj_handle_t hval = wine_server_obj_handle( handle );
     uint64_t h = ((uint64_t)pid * 0x9e3779b97f4a7c15ULL) ^ ((uint64_t)hval * 0xbf58476d1ce4e5b9ULL);
     uint32_t bucket = (uint32_t)(h & (REG_SHM_HANDLE_BUCKETS - 1)) * REG_SHM_HANDLE_WAYS;

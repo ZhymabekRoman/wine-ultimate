@@ -3423,6 +3423,17 @@ static UINT32 processor_arch_from_string(const WCHAR *str, unsigned int len)
     return ~0u;
 }
 
+static const WCHAR *processor_arch_from_code(UINT32 code)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(arch_names); ++i)
+        if (arch_names[i].code == code)
+            return arch_names[i].name;
+
+    return NULL;
+}
+
 /***********************************************************************
  *         PackageIdFromFullName   (kernelbase.@)
  */
@@ -3582,5 +3593,87 @@ LONG WINAPI PackageFamilyNameFromId(const PACKAGE_ID *id, UINT32 *length, WCHAR 
     family_name[name_len] = L'_';
     memcpy(family_name + name_len + 1, id->publisherId, (pub_len + 1) * sizeof(WCHAR));
     *length = needed;
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         PackageFullNameFromId   (kernelbase.@)
+ */
+LONG WINAPI PackageFullNameFromId(const PACKAGE_ID *id, UINT32 *length, WCHAR *buffer)
+{
+    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    WCHAR version[PACKAGE_VERSION_MAX_LENGTH + 1];
+    const WCHAR *arch;
+    size_t len;
+
+    TRACE("id %p, length %p, buffer %p\n", id, length, buffer);
+
+    if (!id || !length)
+        return ERROR_INVALID_PARAMETER;
+
+    len = id->name ? wcslen(id->name) : 0;
+    if (len < PACKAGE_NAME_MIN_LENGTH || len > PACKAGE_NAME_MAX_LENGTH)
+        return ERROR_INVALID_PARAMETER;
+
+    *full_name = 0;
+    wcscpy(full_name, id->name);
+    wcscat(full_name, L"_");
+
+    swprintf(version, ARRAYSIZE(version), L"%u.%u.%u.%u", id->version.Major, id->version.Minor,
+            id->version.Build, id->version.Revision);
+    wcscat(full_name, version);
+    wcscat(full_name, L"_");
+
+    arch = processor_arch_from_code(id->processorArchitecture);
+    if (!arch)
+    {
+        WARN("Unrecognized architecture id %u.\n", id->processorArchitecture);
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    wcscat(full_name, arch);
+    wcscat(full_name, L"_");
+
+    if (id->resourceId)
+    {
+        len = wcslen(id->resourceId);
+
+        if (len > PACKAGE_RESOURCEID_MAX_LENGTH)
+            return ERROR_INVALID_PARAMETER;
+
+        wcscat(full_name, id->resourceId);
+        wcscat(full_name, L"_");
+    }
+
+    if (id->publisherId)
+    {
+        len = wcslen(id->publisherId);
+
+        if (len != PACKAGE_PUBLISHERID_MAX_LENGTH)
+            return ERROR_INVALID_PARAMETER;
+
+        wcscat(full_name, id->publisherId);
+    }
+    else
+    {
+        if (!id->publisher)
+            return ERROR_INVALID_PARAMETER;
+
+        FIXME("Publisher ID generation is not implemented.\n");
+
+        wcscat(full_name, L"123456789abcd");
+    }
+
+    len = wcslen(full_name);
+
+    if (!buffer || *length <= len)
+    {
+        *length = len + 1;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    wcscpy(buffer, full_name);
+    *length = len + 1;
+
     return ERROR_SUCCESS;
 }

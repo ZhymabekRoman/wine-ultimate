@@ -4110,7 +4110,6 @@ static inline void iocp_shm_spin_unlock( uint32_t *lock )
 static inline struct iocp_shm_port *iocp_shm_lookup_port( struct iocp_shm *shm, HANDLE handle,
                                                           uint64_t *gen_out, uint32_t *access_out )
 {
-    uint32_t pid = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
     uint32_t hval = (uint32_t)wine_server_obj_handle( handle );
     uint32_t base = (iocp_shm_hash_handle( pid, hval ) % IOCP_SHM_HANDLE_BUCKETS) * IOCP_SHM_HANDLE_WAYS;
     uint32_t way;

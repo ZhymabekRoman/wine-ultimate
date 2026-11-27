@@ -452,7 +452,16 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         0,    /* TokenRestrictedDeviceGroups */
         sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenSecurityAttributes */
         sizeof(DWORD), /* TokenIsRestricted */
-        0     /* TokenProcessTrustLevel */
+        0,    /* TokenProcessTrustLevel */
+        0,    /* TokenPrivateNameSpace  */
+        0,    /* TokenSingletonAttributes */
+        0,    /* TokenBnoIsolation */
+        0,    /* TokenChildProcessFlags */
+        0,    /* TokenIsLessPrivilegedAppContainer */
+        0,    /* TokenIsSandboxed */
+        0,    /* TokenIsAppSilo  */
+        0,    /* TokenLoggingInformation */
+        0,    /* TokenLearningMode */
     };
 
     ULONG len = 0;
@@ -460,7 +469,7 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
 
     TRACE( "(%p,%s,%p,%d,%p)\n", token, debugstr_TokenInformationClass(class), info, length, retlen );
 
-    if (class < MaxTokenInfoClass) len = info_len[class];
+    if (class < ARRAY_SIZE(info_len)) len = info_len[class];
     if (retlen) *retlen = len;
     if (length < len) return STATUS_BUFFER_TOO_SMALL;
 

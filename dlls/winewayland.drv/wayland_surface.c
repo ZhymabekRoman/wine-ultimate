@@ -1242,6 +1242,7 @@ static void wayland_client_surface_present(struct client_surface *client, HDC hd
 
 static const struct client_surface_funcs wayland_client_surface_funcs =
 {
+    .size = sizeof(struct wayland_client_surface),
     .destroy = wayland_client_surface_destroy,
     .detach = wayland_client_surface_detach,
     .update = wayland_client_surface_update,
@@ -1259,7 +1260,7 @@ struct client_surface *WAYLAND_CreateClientSurface(HWND hwnd, int pixel_format, 
     struct wayland_client_surface *client;
     struct wl_region *empty_region;
 
-    if (!(client = client_surface_create(sizeof(*client), &wayland_client_surface_funcs, hwnd, pixel_format, raw))) return NULL;
+    if (!(client = client_surface_create(&wayland_client_surface_funcs, hwnd, pixel_format, raw))) return NULL;
 
     client->wl_surface =
         wl_compositor_create_surface(process_wayland.wl_compositor);
@@ -1398,11 +1399,8 @@ void wayland_surface_ensure_contents(struct wayland_surface *surface)
         wayland_surface_attach_shm(surface, dummy_shm_buffer, damage);
         wl_surface_commit(surface->wl_surface);
     }
-    else
-    {
-        wayland_shm_buffer_unref(dummy_shm_buffer);
-    }
 
+    wayland_shm_buffer_unref(dummy_shm_buffer);
     if (damage) NtGdiDeleteObjectApp(damage);
 }
 

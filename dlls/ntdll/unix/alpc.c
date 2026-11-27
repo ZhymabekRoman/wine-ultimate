@@ -198,7 +198,6 @@ static inline void alpc_shm_spin_unlock( uint32_t *lock )
 
 static inline struct alpc_shm_port *alpc_shm_lookup_port( struct alpc_shm *shm, HANDLE port_handle, uint64_t *gen_out )
 {
-    uint32_t pid = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
     uint32_t hval = (uint32_t)wine_server_obj_handle( port_handle );
     uint32_t base = (alpc_shm_hash_handle( pid, hval ) % ALPC_SHM_HANDLE_BUCKETS) * ALPC_SHM_HANDLE_WAYS;
     uint32_t way;
@@ -620,7 +619,7 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
 
     if ((ret = wine_server_alloc_object_attributes( &port_obj_attr, &objattr, &len ))) return ret;
 
-    if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, NULL )))
+    if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion )))
     {
         free( objattr );
         return STATUS_NO_MEMORY;
@@ -1319,7 +1318,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                port_handle, send_msg->Type, send_msg->MessageId, (unsigned int)flags,
                debugstr_alpc_frame( send_msg, send_size ) );
 
-        if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
+        if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion )))
             return STATUS_NO_MEMORY;
         async->buffer = NULL;
         async->size   = 0;
@@ -1436,7 +1435,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     }
 
     /* --- Receive phase --- */
-    if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
+    if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion )))
         return STATUS_NO_MEMORY;
     async->buffer = recv_msg;
     async->size   = recv_size;

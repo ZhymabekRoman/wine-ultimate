@@ -2861,24 +2861,35 @@ static void STDMETHODCALLTYPE d3d11_device_context_UpdateSubresource1(ID3D11Devi
 static void STDMETHODCALLTYPE d3d11_device_context_DiscardResource(ID3D11DeviceContext4 *iface,
         ID3D11Resource *resource)
 {
+    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
+    struct wined3d_resource *wined3d_resource;
+
     TRACE("iface %p, resource %p.\n", iface, resource);
 
     if (!resource)
         return;
 
-    /* DiscardResource is an optimization hint indicating previous resource
-     * contents are no longer needed; keeping contents intact is spec-valid. */
+    wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
+    wined3d_device_context_discard_resource(context->wined3d_context, wined3d_resource, NULL);
 }
 
 static void STDMETHODCALLTYPE d3d11_device_context_DiscardView(ID3D11DeviceContext4 *iface, ID3D11View *view)
 {
+    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
+    struct wined3d_resource *wined3d_resource;
+    struct wined3d_view_desc desc;
+    ID3D11Resource *resource;
+
     TRACE("iface %p, view %p.\n", iface, view);
 
     if (!view)
         return;
 
-    /* DiscardView is an optimization hint indicating previous view contents
-     * are no longer needed; keeping contents intact is spec-valid. */
+    ID3D11View_GetResource(view, &resource);
+    wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
+    wined3d_view_desc_from_d3d11_view(view, &desc);
+    wined3d_device_context_discard_resource(context->wined3d_context, wined3d_resource, &desc);
+    ID3D11Resource_Release(resource);
 }
 
 static void STDMETHODCALLTYPE d3d11_device_context_VSSetConstantBuffers1(ID3D11DeviceContext4 *iface,

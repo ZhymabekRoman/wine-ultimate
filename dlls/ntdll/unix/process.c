@@ -671,7 +671,7 @@ static int zygote_usable( const struct pe_image_info *pe_info )
     }
     if (zygote_disabled) return 0;
     if (getenv( "LD_PRELOAD" ) || getenv( "WINELOADER" )) return 0;  /* loader overrides differ */
-    if (peb->BeingDebugged) return 0;
+    if (peb && peb->BeingDebugged) return 0;
     if (pe_info && is_machine_64bit( pe_info->machine ) != is_win64) return 0;
     return 1;
 }
@@ -1088,7 +1088,8 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     pid_t pid;
     char **argv;
 
-    detached = (peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
+    detached = (peb && peb->ProcessParameters &&
+                params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                params->ConsoleHandle == NULL;
@@ -1250,7 +1251,8 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
         isatty(1) && is_unix_console_handle( params->hStdOutput ))
         stdout_fd = 1;
 
-    detached = (peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
+    detached = (peb && peb->ProcessParameters &&
+                params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                params->ConsoleHandle == NULL;

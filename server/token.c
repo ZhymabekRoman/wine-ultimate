@@ -118,6 +118,7 @@ struct token
     struct sid    *appcontainer_sid; /* appcontainer sid, NULL for a non-appcontainer token */
     unsigned int   appcontainer_num; /* appcontainer number */
     struct list    capabilities;    /* appcontainer capabilities (struct capability) */
+    struct list    kernel_object;   /* list of kernel object pointers */
 };
 
 struct privilege
@@ -146,6 +147,7 @@ static void token_dump( struct object *obj, int verbose );
 static void token_destroy( struct object *obj );
 static int token_set_sd( struct object *obj, const struct security_descriptor *sd,
                          unsigned int set_info );
+static struct list *token_get_kernel_obj_list( struct object *obj );
 
 static const struct object_ops token_ops =
 {
@@ -153,6 +155,7 @@ static const struct object_ops token_ops =
     .type    = &token_type,
     .dump    = token_dump,
     .set_sd  = token_set_sd,
+    .get_kernel_obj_list = token_get_kernel_obj_list,
     .destroy = token_destroy,
 };
 
@@ -168,6 +171,12 @@ static int token_set_sd( struct object *obj, const struct security_descriptor *s
                          unsigned int set_info )
 {
     return default_set_sd( obj, sd, set_info & ~LABEL_SECURITY_INFORMATION );
+}
+
+static struct list *token_get_kernel_obj_list( struct object *obj )
+{
+    struct token *token = (struct token *)obj;
+    return &token->kernel_object;
 }
 
 void security_set_thread_token( struct thread *thread, obj_handle_t handle )
@@ -514,6 +523,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->integrity_rid = SECURITY_MANDATORY_HIGH_RID;
         token->appcontainer_sid = NULL;
         token->appcontainer_num = 0;
+        list_init( &token->kernel_object );
         token->primary = primary;
         token->session_id = session_id;
         /* primary tokens don't have impersonation levels */
