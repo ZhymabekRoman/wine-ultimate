@@ -152,6 +152,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -172,6 +173,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -192,6 +194,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -212,6 +215,7 @@ AddService=EventLog,0x800,EventLogService
 AddService=HTTP,0,HTTPService
 AddService=MSIServer,0,MSIService
 AddService=RpcSs,0,RpcSsService
+AddService=SamSs,0,SamSsService
 AddService=scardsvr,0,ScardSvrService
 AddService=Spooler,0,SpoolerService
 AddService=StiSvc,0,StiService
@@ -1383,6 +1387,14 @@ DisplayName="Remote Procedure Call (RPC)"
 ServiceBinary="%11%\rpcss.exe"
 ServiceType=32
 StartType=2
+ErrorControl=1
+
+[SamSsService]
+Description="Security Accounts Manager service"
+DisplayName="Security Accounts Manager"
+ServiceBinary="%11%\lsass.exe"
+ServiceType=32
+StartType=3
 ErrorControl=1
 
 [ScardSvrService]

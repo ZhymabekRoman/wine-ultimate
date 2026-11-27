@@ -2548,7 +2548,7 @@ NTSTATUS WINAPI TpAllocIoCompletion( TP_IO **out, HANDLE file, PTP_IO_CALLBACK c
     {
         tp_threadpool_unlock( pool );
         RtlFreeHeap( GetProcessHeap(), 0, object );
-        return status;
+        return STATUS_NO_MEMORY;
     }
 
     if ((status = tp_ioqueue_lock( object, file )))
@@ -3090,33 +3090,12 @@ BOOL WINAPI TpSetPoolMinThreads( TP_POOL *pool, DWORD minimum )
     return !status;
 }
 
-/***********************************************************************
- *           TpSetTimerEx  (NTDLL.@)
- */
-BOOL WINAPI TpSetTimerEx( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
+static BOOL tp_set_timer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
 {
     struct threadpool_object *this = impl_from_TP_TIMER( timer );
-    BOOL prev;
-
-    TRACE( "%p %p %lu %lu\n", timer, timeout, period, window_length );
-
-    RtlEnterCriticalSection( &timerqueue.cs );
-    prev = this->u.timer.timer_set;
-    RtlLeaveCriticalSection( &timerqueue.cs );
-
-    TpSetTimer( timer, timeout, period, window_length );
-    return prev;
-}
-
-/***********************************************************************
- *           TpSetTimer    (NTDLL.@)
- */
-VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
-{
-    struct threadpool_object *this = impl_from_TP_TIMER( timer );
+    BOOL submit_timer = FALSE, was_timer_set;
     struct threadpool_object *other_timer;
     struct list *pending_timers;
-    BOOL submit_timer = FALSE;
     ULONGLONG timestamp;
 
     TRACE( "%p %p %lu %lu\n", timer, timeout, period, window_length );
@@ -3124,6 +3103,8 @@ VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LO
     RtlEnterCriticalSection( &timerqueue.cs );
 
     assert( this->u.timer.timer_initialized );
+
+    was_timer_set = this->u.timer.timer_set;
     this->u.timer.timer_set = timeout != NULL;
 
     /* Convert relative timeout to absolute timestamp and handle a timeout
@@ -3195,6 +3176,28 @@ VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LO
 
     if (submit_timer)
        tp_object_submit( this, FALSE );
+
+    return was_timer_set;
+}
+
+/***********************************************************************
+ *           TpSetTimer    (NTDLL.@)
+ */
+VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
+{
+    TRACE( "%p %p %lu %lu\n", timer, timeout, period, window_length );
+
+    tp_set_timer( timer, timeout, period, window_length );
+}
+
+/***********************************************************************
+ *           TpSetTimerEx    (NTDLL.@)
+ */
+BOOL WINAPI TpSetTimerEx( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
+{
+    TRACE( "%p %p %lu %lu\n", timer, timeout, period, window_length );
+
+    return tp_set_timer( timer, timeout, period, window_length );
 }
 
 /***********************************************************************

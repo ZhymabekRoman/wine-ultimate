@@ -178,7 +178,6 @@ typedef XID GLXPbuffer;
 #define GLX_FLOAT_COMPONENTS_NV           0x20B0
 
 
-static const char *glExtensions;
 static const char *glxExtensions;
 static int glxVersion[2];
 static int glx_opcode;
@@ -349,7 +348,6 @@ static BOOL X11DRV_WineGL_InitOpenglInfo(void)
     Window win = 0, root = 0;
     const char *gl_version;
     const char *gl_renderer;
-    const char *gl_extensions;
     BOOL glx_direct;
     XVisualInfo *vis;
     GLXContext ctx = NULL;
@@ -399,8 +397,6 @@ static BOOL X11DRV_WineGL_InitOpenglInfo(void)
     }
     gl_renderer = (const char *)pglGetString(GL_RENDERER);
     gl_version  = (const char *)pglGetString(GL_VERSION);
-    gl_extensions = (const char *)pglGetString(GL_EXTENSIONS);
-    glExtensions = gl_extensions ? strdup( gl_extensions ) : NULL;
 
     /* Get the common GLX version supported by GLX client and server ( major/minor) */
     pglXQueryVersion(gdi_display, &glxVersion[0], &glxVersion[1]);
@@ -1520,8 +1516,7 @@ static void x11drv_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensio
             extensions[WGL_NV_float_buffer] = 1;
 
         /* Again there's no GLX equivalent for this extension, so depend on the required GL extension */
-        if (has_extension(glExtensions, "GL_NV_texture_rectangle"))
-            extensions[WGL_NV_render_texture_rectangle] = 1;
+        if (extensions[GL_NV_texture_rectangle]) extensions[WGL_NV_render_texture_rectangle] = 1;
     }
 
     /* EXT Extensions */
@@ -1547,7 +1542,7 @@ static void x11drv_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensio
     }
 
     /* The OpenGL extension GL_NV_vertex_array_range adds wgl/glX functions which aren't exported as 'real' wgl/glX extensions. */
-    if (has_extension(glExtensions, "GL_NV_vertex_array_range"))
+    if (extensions[GL_NV_vertex_array_range])
     {
         extensions[WGL_NV_vertex_array_range] = 1;
         funcs->p_wglAllocateMemoryNV = pglXAllocateMemoryNV;
