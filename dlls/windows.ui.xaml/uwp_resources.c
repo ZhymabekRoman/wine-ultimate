@@ -791,7 +791,7 @@ static BOOL uwp_mark_res_xbf_loaded( const char *resolved_path )
     if (!resolved_path || !resolved_path[0]) return FALSE;
     for (i = 0; i < g_loaded_res_xbf_cnt; i++)
     {
-        if (!strcasecmp( g_loaded_res_xbfs[i], resolved_path ))
+        if (!_stricmp( g_loaded_res_xbfs[i], resolved_path ))
             return FALSE;
     }
     if (g_loaded_res_xbf_cnt < (int)ARRAY_SIZE(g_loaded_res_xbfs))
@@ -924,11 +924,11 @@ void uwp_ensure_app_resources_loaded( void )
         {
             size_t plen = path ? strlen( path ) : 0;
             BOOL is_generic = FALSE;
-            if (plen >= 19 && !strcasecmp( path + plen - 19, "/Themes/Generic.xbf" ))
+            if (plen >= 19 && !_stricmp( path + plen - 19, "/Themes/Generic.xbf" ))
                 is_generic = TRUE;
-            else if (plen >= 19 && !strcasecmp( path + plen - 19, "\\Themes\\Generic.xbf" ))
+            else if (plen >= 19 && !_stricmp( path + plen - 19, "\\Themes\\Generic.xbf" ))
                 is_generic = TRUE;
-            else if (plen == 18 && !strcasecmp( path, "Themes/Generic.xbf" ))
+            else if (plen == 18 && !_stricmp( path, "Themes/Generic.xbf" ))
                 is_generic = TRUE;
             if (is_generic && data && sz > 0 && uwp_mark_res_xbf_loaded( path ))
             {

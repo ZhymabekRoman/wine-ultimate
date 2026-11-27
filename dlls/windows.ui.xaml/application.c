@@ -1422,7 +1422,7 @@ static const BYTE *xaml_find_xbf_stream_in_pri( const BYTE *data, DWORD size, co
         {
             const BYTE *b = scan;
             while (b > data && *(b - 1) != 0 && (scan - b) < 128) b--;
-            if ((size_t)(scan + 4 - b) == target_len && !strncasecmp( (const char *)b, target_xbf, target_len ))
+            if ((size_t)(scan + 4 - b) == target_len && !_strnicmp( (const char *)b, target_xbf, target_len ))
             {
                 target_idx = cur_idx;
                 TRACE( "Found XBF name '%s' at index %d\n", target_xbf, target_idx );

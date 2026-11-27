@@ -70,6 +70,15 @@ static D3D_FEATURE_LEVEL d3d_feature_level_from_wined3d(enum wined3d_feature_lev
     return (D3D_FEATURE_LEVEL)level;
 }
 
+static struct wined3d_adapter *d3d_device_get_adapter(struct d3d_device *device)
+{
+    struct wined3d *wined3d = wined3d_device_get_wined3d(device->wined3d_device);
+    struct wined3d_device_creation_parameters params;
+
+    wined3d_device_get_creation_parameters(device->wined3d_device, &params);
+    return wined3d_get_adapter(wined3d, params.adapter_idx);
+}
+
 /* ID3DDeviceContextState methods */
 
 static inline struct d3d_device_context_state *impl_from_ID3DDeviceContextState(ID3DDeviceContextState *iface)
@@ -9826,7 +9835,7 @@ static UINT STDMETHODCALLTYPE d3d11_video_device_GetVideoDecoderProfileCount(ID3
 
     TRACE("iface %p.\n", iface);
 
-    return wined3d_device_get_video_decode_profile_count(device->wined3d_device);
+    return wined3d_adapter_get_decode_profile_count(d3d_device_get_adapter(device));
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_GetVideoDecoderProfile(
@@ -9836,13 +9845,14 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_device_GetVideoDecoderProfile(
 
     TRACE("iface %p, index %u, profile %p.\n", iface, index, profile);
 
-    return wined3d_device_get_video_decode_profile(device->wined3d_device, index, profile);
+    return wined3d_adapter_get_decode_profile(d3d_device_get_adapter(device), index, profile);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_CheckVideoDecoderFormat(
         ID3D11VideoDevice1 *iface, const GUID *profile, DXGI_FORMAT format, BOOL *supported)
 {
     struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    struct wined3d_adapter *adapter = d3d_device_get_adapter(device);
     GUID wined3d_profile;
     unsigned int i, count;
 
@@ -9855,10 +9865,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_device_CheckVideoDecoderFormat(
     /* wined3d's video decoder implementation only produces NV12 output. */
     *supported = false;
 
-    count = wined3d_device_get_video_decode_profile_count(device->wined3d_device);
+    count = wined3d_adapter_get_decode_profile_count(adapter);
     for (i = 0; i < count; ++i)
     {
-        if (FAILED(wined3d_device_get_video_decode_profile(device->wined3d_device, i, &wined3d_profile)))
+        if (FAILED(wined3d_adapter_get_decode_profile(adapter, i, &wined3d_profile)))
             continue;
         if (IsEqualGUID(&wined3d_profile, profile))
         {
@@ -9874,6 +9884,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_device_GetVideoProfileSupported(
         ID3D11VideoDevice1 *iface, const GUID *profile, BOOL *supported)
 {
     struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    struct wined3d_adapter *adapter = d3d_device_get_adapter(device);
     GUID wined3d_profile;
     unsigned int i, count;
 
@@ -9882,10 +9893,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_device_GetVideoProfileSupported(
     if (!profile || !supported)
         return E_INVALIDARG;
 
-    count = wined3d_device_get_video_decode_profile_count(device->wined3d_device);
+    count = wined3d_adapter_get_decode_profile_count(adapter);
     for (i = 0; i < count; ++i)
     {
-        if (FAILED(wined3d_device_get_video_decode_profile(device->wined3d_device, i, &wined3d_profile)))
+        if (FAILED(wined3d_adapter_get_decode_profile(adapter, i, &wined3d_profile)))
             continue;
         if (IsEqualGUID(&wined3d_profile, profile))
         {
