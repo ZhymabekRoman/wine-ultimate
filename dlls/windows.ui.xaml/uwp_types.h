@@ -413,6 +413,10 @@ struct uwp_event_bag
     struct xaml_event_registry cdp_date_changed_reg;
     struct xaml_event_registry pivot_item_loading_reg;
     struct xaml_event_registry pivot_item_loaded_reg;
+    struct xaml_event_registry sv_pane_closing_reg;
+    struct xaml_event_registry sv_pane_closed_reg;
+    struct xaml_event_registry sv_pane_opening_reg;
+    struct xaml_event_registry sv_pane_opened_reg;
 };
 
 /* Lazy sidecar for Image / BitmapImage / MediaPlayerElement state. */

@@ -712,7 +712,7 @@ static void uwp_setval_apply_nav_dp( struct uwp_element *impl, const WCHAR *dpna
             {
                 if (impl->named_elems[ni] && !wcscmp( impl->named_elems[ni]->name, L"RootSplitView" ))
                 {
-                    impl->named_elems[ni]->is_open = ne->nav_is_pane_open;
+                    uwp_sv_set_pane_open( impl->named_elems[ni], ne->nav_is_pane_open );
                     break;
                 }
             }

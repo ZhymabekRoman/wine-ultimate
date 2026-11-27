@@ -252,6 +252,8 @@ HRESULT WINAPI uwp_fe_get_Tag( void *iface, void **out )
     if ((ULONG_PTR)out < 0x10000 || IsBadWritePtr( out, sizeof(void *) )) return S_OK;
     *out = impl ? impl->tag : NULL;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    TRACE( "uwp_fe_get_Tag on %s (%s) -> %p\n",
+           impl ? debugstr_w(impl->class_name) : "?", impl ? debugstr_w(impl->name) : "", *out );
     return S_OK;
 }
 
@@ -259,6 +261,8 @@ HRESULT WINAPI uwp_fe_put_Tag( void *iface, void *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return S_OK;
+    TRACE( "uwp_fe_put_Tag on %s (%s) -> %p\n",
+           debugstr_w(impl->class_name), debugstr_w(impl->name), val );
     if (impl->tag) IInspectable_Release( impl->tag );
     impl->tag = (IInspectable *)val;
     if (impl->tag) IInspectable_AddRef( impl->tag );
@@ -610,10 +614,14 @@ HRESULT WINAPI uwp_fe_get_DataContext( void *iface, void **out )
         {
             *out = cur->data_context;
             IInspectable_AddRef( (IInspectable *)*out );
+            TRACE( "uwp_fe_get_DataContext on %s (%s) -> %p (from %s)\n",
+                   debugstr_w(impl->class_name), debugstr_w(impl->name), *out, debugstr_w(cur->class_name) );
             return S_OK;
         }
         cur = cur->parent;
     }
+    TRACE( "uwp_fe_get_DataContext on %s (%s) -> NULL\n",
+           impl ? debugstr_w(impl->class_name) : "?", impl ? debugstr_w(impl->name) : "" );
     return S_OK;
 }
 
@@ -625,6 +633,38 @@ HRESULT WINAPI uwp_fe_put_DataContext( void *iface, void *val )
            debugstr_w(impl->class_name), debugstr_w(impl->name), val );
     uwp_propagate_data_context( impl, (IInspectable *)val );
     return S_OK;
+}
+
+static void uwp_restore_deferred_element( struct uwp_element *scope, struct uwp_element *nel )
+{
+    IInspectable *raw;
+    if (!nel || nel->visibility != 1) return;
+    nel->visibility = 0;
+    g_layout_dirty = TRUE;
+    uwp_invalidate_window();
+    if (!scope || nel->conn_id <= 0) return;
+    raw = nel->outer ? nel->outer : &nel->IInspectable_iface;
+    {
+        IInspectable *comp = scope->outer ? scope->outer : &scope->IInspectable_iface;
+        void *conn = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( comp, &IID_IComponentConnector_UWP_g, &conn )) && conn)
+        {
+            const struct abi_component_connector *acc = (const struct abi_component_connector *)conn;
+            if (acc->lpVtbl->Connect) acc->lpVtbl->Connect( conn, nel->conn_id, raw );
+            IUnknown_Release( (IUnknown *)conn );
+        }
+        else if (SUCCEEDED(IInspectable_QueryInterface( comp, &IID_IComponentConnector_WinUI, &conn )) && conn)
+        {
+            const struct abi_component_connector *acc = (const struct abi_component_connector *)conn;
+            if (acc->lpVtbl->Connect) acc->lpVtbl->Connect( conn, nel->conn_id, raw );
+            IUnknown_Release( (IUnknown *)conn );
+        }
+    }
+    if (scope->binding_connector)
+    {
+        const struct abi_component_connector *bcc = (const struct abi_component_connector *)scope->binding_connector;
+        if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( scope->binding_connector, nel->conn_id, raw );
+    }
 }
 
 HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
@@ -646,6 +686,7 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
     /* 1. Check deferred entries on root and impl */
     {
         BOOL is_defer = FALSE;
+        struct uwp_element *defer_scope = NULL;
         if (root->defer_entries)
         {
             for (i = 0; i < root->defer_cnt; i++)
@@ -653,6 +694,7 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
                 if (!wcscmp( root->defer_entries[i].name, want ))
                 {
                     is_defer = TRUE;
+                    defer_scope = root;
                     if (!root->defer_entries[i].realized)
                         uwp_realize_deferred_entry( &root->defer_entries[i] );
                 }
@@ -665,6 +707,7 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
                 if (!wcscmp( impl->defer_entries[i].name, want ))
                 {
                     is_defer = TRUE;
+                    defer_scope = impl;
                     if (!impl->defer_entries[i].realized)
                         uwp_realize_deferred_entry( &impl->defer_entries[i] );
                 }
@@ -677,12 +720,8 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
             struct uwp_element *nel = impl->named_elems[i];
             if (nel && !wcscmp( nel->name, want ))
             {
-                if (is_defer && nel->visibility == 1)
-                {
-                    nel->visibility = 0;
-                    g_layout_dirty = TRUE;
-                    uwp_invalidate_window();
-                }
+                if (is_defer)
+                    uwp_restore_deferred_element( defer_scope ? defer_scope : impl, nel );
                 *out = nel->outer ? nel->outer : &nel->IInspectable_iface;
                 IInspectable_AddRef( (IInspectable *)*out );
                 return S_OK;
@@ -695,12 +734,8 @@ HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
                 struct uwp_element *nel = root->named_elems[i];
                 if (nel && !wcscmp( nel->name, want ))
                 {
-                    if (is_defer && nel->visibility == 1)
-                    {
-                        nel->visibility = 0;
-                        g_layout_dirty = TRUE;
-                        uwp_invalidate_window();
-                    }
+                    if (is_defer)
+                        uwp_restore_deferred_element( defer_scope ? defer_scope : root, nel );
                     *out = nel->outer ? nel->outer : &nel->IInspectable_iface;
                     IInspectable_AddRef( (IInspectable *)*out );
                     return S_OK;

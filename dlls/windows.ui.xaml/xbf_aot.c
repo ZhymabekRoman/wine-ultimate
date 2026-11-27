@@ -740,7 +740,7 @@ static void aot_exec_connect( struct xbf_aot_exec_ctx *ec, const struct xbf_aot_
         return;
     }
 
-    if (!ec->is_template && !ec->out_created)
+    if (!ec->is_template)
     {
         void *bc = ec->root_binding ? ec->root_binding : (ec->root_el ? ec->root_el->binding_connector : NULL);
         if (bc)
@@ -760,10 +760,14 @@ static void aot_exec_connect( struct xbf_aot_exec_ctx *ec, const struct xbf_aot_
                 if (SUCCEEDED(IInspectable_QueryInterface( ec->component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
                 {
                     const struct abi_component_connector2 *acc2 = (const struct abi_component_connector2 *)conn2;
+                    HRESULT ghr = E_NOTIMPL;
                     if (acc2->lpVtbl->GetBindingConnector)
-                        acc2->lpVtbl->GetBindingConnector( conn2, op->cid, raw, &bc );
+                        ghr = acc2->lpVtbl->GetBindingConnector( conn2, op->cid, raw, &bc );
+                    TRACE( "AOT DT GetBindingConnector(cid=%d, raw=%p) -> hr=%#lx bc=%p\n", op->cid, raw, ghr, bc );
                     IUnknown_Release( (IUnknown *)conn2 );
                 }
+                else
+                    TRACE( "AOT DT QI(IComponentConnector2) failed on comp=%p\n", ec->component );
             }
             else
             {

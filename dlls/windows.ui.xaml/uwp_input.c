@@ -1231,6 +1231,28 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
 
     if (msg == WM_LBUTTONDOWN)
     {
+        struct uwp_element *ov_nav = uwp_get_open_overlay_nav();
+        if (ov_nav && ov_nav->nav && ov_nav->nav->nav_pane_bounds.right > ov_nav->nav->nav_pane_bounds.left)
+        {
+            RECT prc = ov_nav->nav->nav_pane_bounds;
+            if (x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom)
+            {
+                struct uwp_element *pane_btn = uwp_hit_test_button( ov_nav, x, y );
+                if (pane_btn && !wcscmp( pane_btn->name, L"TogglePaneButton" ))
+                {
+                    struct xaml_pointer_info info = {0};
+                    g_pressed_btn = pane_btn;
+                    pane_btn->is_pressed = TRUE;
+                    info.x = (float)x; info.y = (float)y; info.pointer_id = 1;
+                    info.is_left = TRUE; info.is_in_contact = TRUE; info.is_in_window = TRUE;
+                    uwp_fire_element_pointer( pane_btn, XAML_PTR_PRESSED, &info, TRUE );
+                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                    uwp_invalidate_window();
+                }
+                return TRUE;
+            }
+        }
+        {
         struct uwp_element *tv = uwp_hit_test_tabview( root_el, x, y );
         struct uwp_element *cb = tv ? NULL : uwp_hit_test_combobox( root_el, x, y );
         struct uwp_element *cdp = (tv || cb) ? NULL : uwp_hit_test_cdp( root_el, x, y );
@@ -1330,6 +1352,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
             return TRUE;
+        }
         }
     }
     else if (msg == WM_MOUSEMOVE)

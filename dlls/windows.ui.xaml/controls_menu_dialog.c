@@ -1670,6 +1670,151 @@ const void *uwp_asb2_vtbl[16] =
     [10 ... 15] = uwp_generic_noop,
 };
 
+struct uwp_sv_closing_args
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    boolean cancel;
+};
+static HRESULT WINAPI uwp_sv_closing_QI( IInspectable *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = iface;
+    IInspectable_AddRef( iface );
+    return S_OK;
+}
+static ULONG WINAPI uwp_sv_closing_AddRef( IInspectable *iface )
+{
+    struct uwp_sv_closing_args *a = CONTAINING_RECORD( iface, struct uwp_sv_closing_args, IInspectable_iface );
+    return InterlockedIncrement( &a->ref );
+}
+static ULONG WINAPI uwp_sv_closing_Release( IInspectable *iface )
+{
+    struct uwp_sv_closing_args *a = CONTAINING_RECORD( iface, struct uwp_sv_closing_args, IInspectable_iface );
+    ULONG r = InterlockedDecrement( &a->ref );
+    if (!r) free( a );
+    return r;
+}
+static HRESULT WINAPI uwp_sv_closing_get_Cancel( void *iface, boolean *val )
+{
+    struct uwp_sv_closing_args *a = CONTAINING_RECORD( iface, struct uwp_sv_closing_args, IInspectable_iface );
+    if (val) *val = a->cancel;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_sv_closing_put_Cancel( void *iface, boolean val )
+{
+    struct uwp_sv_closing_args *a = CONTAINING_RECORD( iface, struct uwp_sv_closing_args, IInspectable_iface );
+    a->cancel = (val != 0);
+    return S_OK;
+}
+static const void *uwp_sv_closing_vtbl[10] =
+{
+    [0] = uwp_sv_closing_QI,
+    [1] = uwp_sv_closing_AddRef,
+    [2] = uwp_sv_closing_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_sv_closing_get_Cancel,
+    [7] = uwp_sv_closing_put_Cancel,
+    [8 ... 9] = uwp_generic_noop,
+};
+
+void uwp_sv_set_pane_open( struct uwp_element *sv, BOOL open )
+{
+    BOOL prev;
+    IInspectable *sender;
+    if (!sv) return;
+    prev = sv->is_open ? TRUE : FALSE;
+    open = open ? TRUE : FALSE;
+    if (prev == open) return;
+    sender = sv->outer ? sv->outer : &sv->IInspectable_iface;
+    if (!open)
+    {
+        if (UWP_EV_ANY( sv, sv_pane_closing_reg ))
+        {
+            struct uwp_sv_closing_args *args = calloc( 1, sizeof(*args) );
+            if (args)
+            {
+                args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_sv_closing_vtbl;
+                args->ref = 1;
+                uwp_fire_event_registry( &sv->events->sv_pane_closing_reg, sender,
+                                         &args->IInspectable_iface, "SplitView.PaneClosing" );
+                if (args->cancel)
+                {
+                    IInspectable_Release( &args->IInspectable_iface );
+                    return;
+                }
+                IInspectable_Release( &args->IInspectable_iface );
+            }
+        }
+        sv->is_open = FALSE;
+        if (UWP_EV_ANY( sv, sv_pane_closed_reg ))
+            uwp_fire_event_registry( &sv->events->sv_pane_closed_reg, sender, NULL, "SplitView.PaneClosed" );
+    }
+    else
+    {
+        if (UWP_EV_ANY( sv, sv_pane_opening_reg ))
+            uwp_fire_event_registry( &sv->events->sv_pane_opening_reg, sender, NULL, "SplitView.PaneOpening" );
+        sv->is_open = TRUE;
+        if (UWP_EV_ANY( sv, sv_pane_opened_reg ))
+            uwp_fire_event_registry( &sv->events->sv_pane_opened_reg, sender, NULL, "SplitView.PaneOpened" );
+    }
+}
+
+static HRESULT WINAPI uwp_sv_add_PaneClosing( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->sv_pane_closing_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_sv_remove_PaneClosing( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->sv_pane_closing_reg, tok );
+}
+static HRESULT WINAPI uwp_sv_add_PaneClosed( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->sv_pane_closed_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_sv_remove_PaneClosed( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->sv_pane_closed_reg, tok );
+}
+static HRESULT WINAPI uwp_sv_add_PaneOpening( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->sv_pane_opening_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_sv_remove_PaneOpening( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->sv_pane_opening_reg, tok );
+}
+static HRESULT WINAPI uwp_sv_add_PaneOpened( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->sv_pane_opened_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_sv_remove_PaneOpened( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->sv_pane_opened_reg, tok );
+}
+
 static HRESULT WINAPI uwp_sv_get_IsPaneOpen( void *iface, boolean *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -1679,7 +1824,7 @@ static HRESULT WINAPI uwp_sv_get_IsPaneOpen( void *iface, boolean *val )
 static HRESULT WINAPI uwp_sv_put_IsPaneOpen( void *iface, boolean val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->is_open = (val != 0);
+    if (impl) uwp_sv_set_pane_open( impl, val != 0 );
     return S_OK;
 }
 static HRESULT WINAPI uwp_sv_get_OpenPaneLength( void *iface, double *val )
@@ -1800,10 +1945,10 @@ const void *uwp_splitview_vtbl[32] =
     [20] = uwp_cd_get_NullOut,       /* get_TemplateSettings */
     [21] = uwp_cd_get_NullOut,       /* get_PaneBackground */
     [22] = uwp_generic_noop,         /* put_PaneBackground */
-    [23] = uwp_ui_event_add,         /* add_PaneClosing */
-    [24] = uwp_generic_noop,         /* remove_PaneClosing */
-    [25] = uwp_ui_event_add,         /* add_PaneClosed */
-    [26] = uwp_generic_noop,         /* remove_PaneClosed */
+    [23] = uwp_sv_add_PaneClosing,   /* add_PaneClosing */
+    [24] = uwp_sv_remove_PaneClosing,/* remove_PaneClosing */
+    [25] = uwp_sv_add_PaneClosed,    /* add_PaneClosed */
+    [26] = uwp_sv_remove_PaneClosed, /* remove_PaneClosed */
     [27 ... 31] = uwp_generic_noop,
 };
 
@@ -1815,10 +1960,10 @@ const void *uwp_splitview2_vtbl[16] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6] = uwp_ui_event_add,          /* ISplitView3::add_PaneOpening */
-    [7] = uwp_generic_noop,          /* ISplitView3::remove_PaneOpening */
-    [8] = uwp_ui_event_add,          /* ISplitView3::add_PaneOpened */
-    [9] = uwp_generic_noop,          /* ISplitView3::remove_PaneOpened */
+    [6] = uwp_sv_add_PaneOpening,    /* ISplitView3::add_PaneOpening */
+    [7] = uwp_sv_remove_PaneOpening, /* ISplitView3::remove_PaneOpening */
+    [8] = uwp_sv_add_PaneOpened,     /* ISplitView3::add_PaneOpened */
+    [9] = uwp_sv_remove_PaneOpened,  /* ISplitView3::remove_PaneOpened */
     [10 ... 15] = uwp_generic_noop,
 };
 

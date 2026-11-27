@@ -347,6 +347,7 @@ void uwp_nav_fire( struct uwp_element *el, struct xaml_event_registry *reg,
 HRESULT WINAPI uwp_nav_get_FooterMenuItems( void *iface, void **out );
 HRESULT WINAPI uwp_nav_get_IsPaneOpen( void *iface, boolean *open );
 HRESULT WINAPI uwp_nav_put_IsPaneOpen( void *iface, boolean open );
+void uwp_sv_set_pane_open( struct uwp_element *sv, BOOL open );
 void uwp_nav_set_pane_open( struct uwp_element *nav, BOOL open );
 void uwp_nav_track_open_state( struct uwp_element *nav );
 void uwp_nav_select_item( struct uwp_element *nav, struct uwp_element *nvi );

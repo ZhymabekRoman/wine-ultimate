@@ -1668,6 +1668,10 @@ static void uwp_event_bag_destroy( struct uwp_event_bag *ev )
     xaml_event_registry_clear( &ev->cdp_date_changed_reg );
     xaml_event_registry_clear( &ev->pivot_item_loading_reg );
     xaml_event_registry_clear( &ev->pivot_item_loaded_reg );
+    xaml_event_registry_clear( &ev->sv_pane_closing_reg );
+    xaml_event_registry_clear( &ev->sv_pane_closed_reg );
+    xaml_event_registry_clear( &ev->sv_pane_opening_reg );
+    xaml_event_registry_clear( &ev->sv_pane_opened_reg );
     free( ev );
 }
 
