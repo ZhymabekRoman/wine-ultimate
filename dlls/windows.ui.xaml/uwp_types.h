@@ -413,6 +413,7 @@ struct uwp_event_bag
     struct xaml_event_registry sv_pane_closed_reg;
     struct xaml_event_registry sv_pane_opening_reg;
     struct xaml_event_registry sv_pane_opened_reg;
+    struct xaml_event_registry actual_theme_reg;
 };
 
 /* Lazy sidecar for Image / BitmapImage / MediaPlayerElement state. */
@@ -492,6 +493,9 @@ struct uwp_nav_ext
     WCHAR cdp_placeholder[64];
     WCHAR cdp_header[128];
     WCHAR cdp_date_format[64];
+    int tab_hovered_idx;
+    BOOL tab_hovered_close;
+    int tab_close_overlay_mode;
 };
 
 /* Lazy sidecar for Style / Brush / Gradient / Storyboard / Animation / TemplateBinding state. */
@@ -525,6 +529,13 @@ struct uwp_style_anim_ext
     struct uwp_element *anim_target_el;
     double anim_to;
     BOOL anim_has_to;
+    WCHAR bg_theme_key[96];
+    WCHAR fg_theme_key[96];
+    WCHAR border_theme_key[96];
+    double scale_x;
+    double scale_y;
+    double center_x;
+    double center_y;
 };
 
 struct uwp_element

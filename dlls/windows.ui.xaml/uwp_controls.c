@@ -1662,6 +1662,50 @@ void uwp_fire_evc_if_needed( struct uwp_element *impl )
     free( handlers );
 }
 
+static HRESULT WINAPI uwp_fe6_get_ActualTheme( IInspectable *iface, int *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, ILoadedImageSurface_iface );
+    int theme = uwp_is_light_theme( impl ) ? 1 : 2;
+    TRACE( "uwp_fe6_get_ActualTheme(%s, %s) -> %d\n",
+           debugstr_w(impl->class_name), debugstr_w(impl->name), theme );
+    if (val) *val = theme;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fe6_add_ActualThemeChanged( IInspectable *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, ILoadedImageSurface_iface );
+    struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
+    if (tok) tok->value = 0;
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->actual_theme_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_fe6_remove_ActualThemeChanged( IInspectable *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, ILoadedImageSurface_iface );
+    if (!impl || !impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->actual_theme_reg, tok );
+}
+void uwp_fire_actual_theme_changed( struct uwp_element *el )
+{
+    if (!el || !el->events || el->events->actual_theme_reg.count == 0) return;
+    uwp_fire_event_registry( &el->events->actual_theme_reg,
+                             el->outer ? el->outer : &el->IInspectable_iface,
+                             NULL, "FrameworkElement::ActualThemeChanged" );
+}
+const void *uwp_fe6_vtbl[12] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_fe6_get_ActualTheme,
+    [7] = uwp_fe6_add_ActualThemeChanged,
+    [8] = uwp_fe6_remove_ActualThemeChanged,
+    [9 ... 11] = uwp_generic_noop,
+};
+
 static HRESULT WINAPI uwp_fe7_get_IsLoaded( IInspectable *iface, boolean *val )
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IFrameworkElement7_iface );

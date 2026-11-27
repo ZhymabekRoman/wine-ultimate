@@ -1276,8 +1276,60 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
     }
     else if (msg == WM_MOUSEMOVE)
     {
-        struct uwp_element *hit = uwp_hit_test_button( root_el, x, y );
-        if (hit != g_hovered_elem)
+        static struct uwp_element *s_hovered_tv = NULL;
+        struct uwp_element *tv = uwp_hit_test_tabview( root_el, x, y );
+        struct uwp_element *hit = tv ? NULL : uwp_hit_test_button( root_el, x, y );
+        BOOL tv_changed = FALSE;
+        if (s_hovered_tv && s_hovered_tv != tv && uwp_elem_from_any( &s_hovered_tv->IInspectable_iface ) == s_hovered_tv && s_hovered_tv->magic == UWP_ELEM_MAGIC)
+        {
+            if (s_hovered_tv->nav && (s_hovered_tv->nav->tab_hovered_idx != -1 || s_hovered_tv->nav->tab_hovered_close))
+            {
+                s_hovered_tv->nav->tab_hovered_idx = -1;
+                s_hovered_tv->nav->tab_hovered_close = FALSE;
+                tv_changed = TRUE;
+            }
+        }
+        s_hovered_tv = tv;
+        if (tv)
+        {
+            struct uwp_nav_ext *nav = uwp_elem_ensure_nav( tv );
+            if (nav)
+            {
+                IInspectable *items[64];
+                int count = uwp_tabview_get_items( tv, items, ARRAY_SIZE(items) );
+                int n = max( 1, count ), i;
+                int new_idx = -1;
+                BOOL new_close = FALSE;
+                POINT pt = { x, y };
+                RECT pill, close_rc, add_rc;
+                uwp_tabview_compute_rects( &tv->bounds, n, 0, &pill, &close_rc, &add_rc );
+                if (PtInRect( &add_rc, pt ))
+                {
+                    new_idx = -2;
+                }
+                else
+                {
+                    for (i = 0; i < count; i++)
+                    {
+                        uwp_tabview_compute_rects( &tv->bounds, n, i, &pill, &close_rc, &add_rc );
+                        if (PtInRect( &pill, pt ))
+                        {
+                            new_idx = i;
+                            new_close = PtInRect( &close_rc, pt );
+                            break;
+                        }
+                    }
+                }
+                for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+                if (nav->tab_hovered_idx != new_idx || nav->tab_hovered_close != new_close)
+                {
+                    nav->tab_hovered_idx = new_idx;
+                    nav->tab_hovered_close = new_close;
+                    tv_changed = TRUE;
+                }
+            }
+        }
+        if (hit != g_hovered_elem || tv_changed)
         {
             if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
             g_hovered_elem = hit;

@@ -5581,136 +5581,144 @@ static void test_GetIndex(void)
   SendMessageA(hwnd, WM_SETTEXT, 0, (LPARAM)test_text1);
 
   /* Insertion point at the start of each paragraph: char, line and
-   * paragraph indices must agree with the visible layout (no word wrap). */
+   * paragraph indices are 1-based in TOM. */
   hr = ITextDocument_Range(doc, 0, 0, &range);
   ok(hr == S_OK, "got 0x%08lx\n", hr);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpDocument, &value);
+  hr = ITextRange_GetIndex(range, tomStory, &value);
   ok(hr == S_OK, "got 0x%08lx\n", hr);
-  ok(value == 0, "got %ld\n", value);
+  ok(value == 1, "got %ld\n", value);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpChar, &value);
+  hr = ITextRange_GetIndex(range, tomCharacter, &value);
   ok(hr == S_OK, "got 0x%08lx\n", hr);
-  ok(value == 0, "got %ld\n", value);
+  ok(value == 1, "got %ld\n", value);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpLine, &value);
+  hr = ITextRange_GetIndex(range, tomLine, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 0, "got %ld\n", value);
+  ok(value == 1, "got %ld\n", value);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpParagraph, &value);
+  hr = ITextRange_GetIndex(range, tomParagraph, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 0, "got %ld\n", value);
+  ok(value == 1, "got %ld\n", value);
 
   hr = ITextRange_SetRange(range, 6, 6);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpChar, &value);
+  hr = ITextRange_GetIndex(range, tomCharacter, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 6, "got %ld\n", value);
+  ok(value == 7, "got %ld\n", value);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpLine, &value);
+  hr = ITextRange_GetIndex(range, tomLine, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 1, "got %ld\n", value);
+  ok(value == 2, "got %ld\n", value);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpParagraph, &value);
+  hr = ITextRange_GetIndex(range, tomParagraph, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 1, "got %ld\n", value);
+  ok(value == 2, "got %ld\n", value);
+
+  /* Expand(tomParagraph) scopes to the current paragraph only. */
+  hr = ITextRange_Expand(range, tomParagraph, NULL);
+  ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
+  CHECK_RANGE(range, 6, 12);
+  value = 0xdeadbeef;
+  hr = ITextRange_GetIndex(range, tomParagraph, &value);
+  ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
+  ok(value == 2, "got %ld\n", value);
 
   hr = ITextRange_SetRange(range, 12, 14);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpLine, &value);
+  hr = ITextRange_GetIndex(range, tomLine, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 2, "got %ld\n", value);
+  ok(value == 3, "got %ld\n", value);
 
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpParagraph, &value);
+  hr = ITextRange_GetIndex(range, tomParagraph, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 2, "got %ld\n", value);
+  ok(value == 3, "got %ld\n", value);
 
   /* Character inside a paragraph keeps its line and paragraph index. */
   hr = ITextRange_SetRange(range, 8, 8);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpLine, &value);
+  hr = ITextRange_GetIndex(range, tomLine, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 1, "got %ld\n", value);
+  ok(value == 2, "got %ld\n", value);
 
   /* The paragraph mark belongs to the paragraph it terminates. */
   hr = ITextRange_SetRange(range, 5, 5);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpParagraph, &value);
+  hr = ITextRange_GetIndex(range, tomParagraph, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 0, "got %ld\n", value);
+  ok(value == 1, "got %ld\n", value);
 
   /* Selection mirrors the current selection start. */
   SendMessageA(hwnd, EM_SETSEL, 12, 12);
   value = 0xdeadbeef;
-  hr = ITextSelection_GetIndex(selection, scpLine, &value);
+  hr = ITextSelection_GetIndex(selection, tomLine, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 2, "got %ld\n", value);
+  ok(value == 3, "got %ld\n", value);
 
   value = 0xdeadbeef;
-  hr = ITextSelection_GetIndex(selection, scpChar, &value);
+  hr = ITextSelection_GetIndex(selection, tomCharacter, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 12, "got %ld\n", value);
+  ok(value == 13, "got %ld\n", value);
 
-  /* SetIndex moves the range to the start of the indexed unit. */
+  /* SetIndex moves the range to the start of the 1-based indexed unit. */
   hr = ITextRange_SetRange(range, 0, 0);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  hr = ITextRange_SetIndex(range, scpParagraph, 2, tomFalse);
+  hr = ITextRange_SetIndex(range, tomParagraph, 3, tomFalse);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   CHECK_RANGE(range, 12, 12);
 
-  hr = ITextRange_SetIndex(range, scpLine, 1, tomFalse);
+  hr = ITextRange_SetIndex(range, tomLine, 2, tomFalse);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   CHECK_RANGE(range, 6, 6);
 
-  hr = ITextRange_SetIndex(range, scpChar, 4, tomFalse);
+  hr = ITextRange_SetIndex(range, tomCharacter, 5, tomFalse);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   CHECK_RANGE(range, 4, 4);
 
-  hr = ITextRange_SetIndex(range, scpDocument, 0, tomFalse);
+  hr = ITextRange_SetIndex(range, tomStory, 1, tomFalse);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   CHECK_RANGE(range, 0, 0);
 
-  /* Word and sentence indices count units preceding the insertion point.
-   * Exact native granularity for these units is todo. */
+  /* Word and sentence indices count 1-based units. */
   SendMessageA(hwnd, WM_SETTEXT, 0, (LPARAM)test_text2);
 
   hr = ITextRange_SetRange(range, 0, 0);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpWord, &value);
+  hr = ITextRange_GetIndex(range, tomWord, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 0, "got %ld\n", value);
+  ok(value == 1, "got %ld\n", value);
 
   hr = ITextRange_SetRange(range, 8, 8); /* whitespace before "dd" */
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpWord, &value);
+  hr = ITextRange_GetIndex(range, tomWord, &value);
+  ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
+  ok(value == 3, "got %ld\n", value);
+  value = 0xdeadbeef;
+  hr = ITextRange_GetIndex(range, tomSentence, &value);
   ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
   ok(value == 2, "got %ld\n", value);
-  value = 0xdeadbeef;
-  hr = ITextRange_GetIndex(range, scpSentence, &value);
-  ok(SUCCEEDED(hr), "got 0x%08lx\n", hr);
-  ok(value == 1, "got %ld\n", value);
 
   release_interfaces(&hwnd, &reole, &doc, NULL);
 
-  hr = ITextRange_GetIndex(range, scpChar, &value);
+  hr = ITextRange_GetIndex(range, tomCharacter, &value);
   ok(hr == CO_E_RELEASED, "got 0x%08lx\n", hr);
 
-  hr = ITextRange_SetIndex(range, scpChar, 0, tomFalse);
+  hr = ITextRange_SetIndex(range, tomCharacter, 1, tomFalse);
   ok(hr == CO_E_RELEASED, "got 0x%08lx\n", hr);
 
   ITextSelection_Release(selection);

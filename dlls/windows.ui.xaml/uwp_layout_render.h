@@ -306,6 +306,8 @@ void uwp_tabview_compute_rects( const RECT *trc, int count, int idx, RECT *pill_
 void uwp_tabview_fire_add_tab( struct uwp_element *tv );
 void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item );
 void uwp_tabview_select_item( struct uwp_element *tv, IInspectable *item );
+void uwp_tabview_sync_containers( struct uwp_element *tv );
+void uwp_apply_template_force( struct uwp_element *el );
 HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationToken *tok );
 HRESULT WINAPI uwp_btn_remove_Click( void *iface, EventRegistrationToken tok );
 HRESULT WINAPI uwp_btn_get_Command( void *iface, void **out );

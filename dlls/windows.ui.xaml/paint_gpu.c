@@ -618,48 +618,228 @@ static void paint_gpu_searchbox( ID3D11DeviceContext *ctx, struct uwp_element *e
     xaml_gpu_push_text( ctx, disp, 13, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &txt_rc, NULL, sfg, 1.0f );
 }
 
+static BOOL uwp_is_animated_icon( const struct uwp_element *el )
+{
+    return el && wcsstr( el->class_name, L"AnimatedIcon" ) && !wcsstr( el->class_name, L"Source" );
+}
+
+static void paint_gpu_animated_icon( ID3D11DeviceContext *ctx, struct uwp_element *el, COLORREF surface_bg )
+{
+    IInspectable *fb_src = NULL;
+    struct uwp_element *src_el = NULL;
+    WCHAR glyph[16] = {0}, ff_raw[64] = {0}, ff_buf[64] = {0};
+    double fs = el->has_font_size ? el->font_size : 14.0;
+    BOOL light = uwp_is_light_theme( el );
+    COLORREF tfg;
+    int di, fh;
+
+    if (el->dp_cnt > 0 && el->dp_store)
+    {
+        AcquireSRWLockShared( &el->dp_lock );
+        for (di = 0; di < el->dp_cnt; di++)
+        {
+            const WCHAR *dpn = xaml_dp_get_name( el->dp_store[di].dp );
+            if (!wcscmp( dpn, L"FallbackIconSource" ) && el->dp_store[di].value)
+            {
+                fb_src = el->dp_store[di].value;
+                IInspectable_AddRef( fb_src );
+                break;
+            }
+        }
+        ReleaseSRWLockShared( &el->dp_lock );
+    }
+    if (fb_src)
+    {
+        src_el = uwp_elem_from_any( fb_src );
+        if (src_el)
+        {
+            if (uwp_has_text( src_el ))
+                lstrcpynW( glyph, uwp_elem_text( src_el ), ARRAY_SIZE(glyph) );
+            if (uwp_elem_font_family( src_el )[0])
+                lstrcpynW( ff_raw, uwp_elem_font_family( src_el ), ARRAY_SIZE(ff_raw) );
+            if (src_el->has_font_size && src_el->font_size > 0.0)
+                fs = src_el->font_size;
+            if (!glyph[0] && src_el->dp_cnt > 0 && src_el->dp_store)
+            {
+                AcquireSRWLockShared( &src_el->dp_lock );
+                for (di = 0; di < src_el->dp_cnt && !glyph[0]; di++)
+                {
+                    const WCHAR *sdpn = xaml_dp_get_name( src_el->dp_store[di].dp );
+                    IInspectable *sv = src_el->dp_store[di].value;
+                    INT32 sym = 0;
+                    if (!sv) continue;
+                    if (!wcscmp( sdpn, L"Glyph" ))
+                        uwp_unbox_string( sv, glyph, ARRAY_SIZE(glyph) );
+                    else if (!wcscmp( sdpn, L"Symbol" ) && uwp_unbox_enum_int32( sv, &sym, TRUE ) && sym > 0)
+                    {
+                        glyph[0] = (WCHAR)sym;
+                        glyph[1] = 0;
+                    }
+                }
+                ReleaseSRWLockShared( &src_el->dp_lock );
+            }
+        }
+    }
+    if (!glyph[0] && uwp_has_text( el ))
+        lstrcpynW( glyph, uwp_elem_text( el ), ARRAY_SIZE(glyph) );
+
+    if (!glyph[0])
+    {
+        if (fb_src) IInspectable_Release( fb_src );
+        return;
+    }
+
+    if (!ff_raw[0])
+        lstrcpynW( ff_raw, uwp_elem_font_family( el )[0] ? uwp_elem_font_family( el ) : L"Segoe MDL2 Assets", ARRAY_SIZE(ff_raw) );
+    uwp_resolve_font_family( ff_raw, ff_buf, ARRAY_SIZE(ff_buf) );
+    if (!ff_buf[0]) lstrcpynW( ff_buf, ff_raw, ARRAY_SIZE(ff_buf) );
+
+    if (glyph[0] >= 0xe000 && !glyph[1] && !xaml_gpu_font_has_glyphs( ff_buf, glyph ))
+    {
+        switch (glyph[0])
+        {
+        case 0xe713: lstrcpynW( glyph, L"\x2699", ARRAY_SIZE(glyph) ); break;
+        case 0xe711: lstrcpynW( glyph, L"\x00d7", ARRAY_SIZE(glyph) ); break;
+        case 0xe710: lstrcpynW( glyph, L"+", ARRAY_SIZE(glyph) ); break;
+        case 0xe70d: lstrcpynW( glyph, L"\x25be", ARRAY_SIZE(glyph) ); break;
+        case 0xe70e: lstrcpynW( glyph, L"\x25b4", ARRAY_SIZE(glyph) ); break;
+        }
+        lstrcpynW( ff_buf, L"Segoe UI", ARRAY_SIZE(ff_buf) );
+    }
+
+    if (src_el && src_el->has_fg && src_el->fg_alpha > 0)
+        tfg = blend_argb_over( src_el->fg_argb, surface_bg );
+    else if (el->has_fg && el->fg_alpha > 0)
+        tfg = blend_argb_over( el->fg_argb, surface_bg );
+    else if (el->parent && el->parent->has_fg && el->parent->fg_alpha > 0)
+        tfg = blend_argb_over( el->parent->fg_argb, surface_bg );
+    else
+        tfg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                       light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
+
+    fh = max( (int)(12 * g_layout_scale + 0.5f),
+              min( (int)(48 * g_layout_scale + 0.5f), (int)(fs * g_layout_scale + 0.5f) ) );
+    if (glyph[0] == 0x2699 && !glyph[1])
+        fh = max( fh, (int)(16 * g_layout_scale + 0.5f) );
+    xaml_gpu_push_text_font( ctx, glyph, ff_buf, fh, FW_NORMAL,
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE, &el->bounds, NULL, tfg, (float)el->opacity );
+    if (fb_src) IInspectable_Release( fb_src );
+}
+
 static void paint_gpu_tabview( ID3D11DeviceContext *ctx, struct uwp_element *el )
 {
     RECT trc = el->bounds;
     IInspectable *items[64];
     int count = uwp_tabview_get_items( el, items, ARRAY_SIZE(items) );
+    BOOL light = uwp_is_light_theme( el );
+    COLORREF strip_bg = uwp_paint_resolve_color( el, L"TabViewBackground",
+                                                 light ? RGB( 236, 236, 238 ) : RGB( 32, 32, 32 ),
+                                                 light ? RGB( 236, 236, 238 ) : RGB( 32, 32, 32 ) );
+    COLORREF sel_bg = uwp_paint_resolve_color( el, L"TabViewItemHeaderBackgroundSelected",
+                                               light ? RGB( 250, 250, 250 ) : RGB( 44, 44, 44 ),
+                                               strip_bg );
+    COLORREF hov_bg = light ? RGB( 226, 226, 228 ) : RGB( 40, 40, 40 );
+    COLORREF sel_fg = light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 );
+    COLORREF inact_fg = light ? RGB( 92, 92, 96 ) : RGB( 195, 195, 195 );
+    COLORREF close_fg = light ? RGB( 96, 96, 100 ) : RGB( 185, 185, 185 );
+    COLORREF add_fg = light ? RGB( 48, 48, 52 ) : RGB( 220, 220, 220 );
+    UINT32 sep_argb = light ? 0x20000000u : 0x22ffffffu;
+    UINT32 btn_hov_argb = light ? 0x12000000u : 0x18ffffffu;
+    int hov_idx = el->nav ? el->nav->tab_hovered_idx : -1;
+    BOOL hov_close = el->nav ? el->nav->tab_hovered_close : FALSE;
+    int overlay_mode = el->nav ? el->nav->tab_close_overlay_mode : 0;
+    WCHAR mdl2_buf[64] = {0};
+    BOOL has_mdl2_close = FALSE;
     int i;
+
+    xaml_gpu_push_rect( (float)trc.left, (float)trc.top, (float)trc.right, (float)trc.bottom, NULL,
+                        0.0f, cr_to_argb( strip_bg ), 0, 0.0f, 1.0f );
+
+    uwp_resolve_font_family( L"Segoe MDL2 Assets", mdl2_buf, ARRAY_SIZE(mdl2_buf) );
+    has_mdl2_close = mdl2_buf[0] && xaml_gpu_font_has_glyphs( mdl2_buf, L"\xE711" );
+
     if (count == 0)
     {
         RECT pill, close_rc, add_rc;
         uwp_tabview_compute_rects( &trc, 1, 0, &pill, &close_rc, &add_rc );
         if (uwp_has_text( el ))
         {
-            xaml_gpu_push_rect( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
-                                0.0f, cr_to_argb( RGB( 44, 44, 44 ) ), 0, 0.0f, 1.0f );
-            pill.left += 10;
-            pill.right = max( pill.left, close_rc.left - 2 );
-            xaml_gpu_push_text( ctx, uwp_elem_text( el ), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, RGB( 255, 255, 255 ), 1.0f );
-            xaml_gpu_push_text( ctx, L"\x00d7", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &close_rc, NULL, RGB( 185, 185, 185 ), 1.0f );
+            xaml_gpu_push_rect_radii( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
+                                      8.0f, 8.0f, 0.0f, 0.0f, cr_to_argb( sel_bg ), 0, 0.0f, 1.0f );
+            pill.left += 12;
+            pill.right = max( pill.left, close_rc.left - 4 );
+            xaml_gpu_push_text( ctx, uwp_elem_text( el ), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, sel_fg, 1.0f );
+            xaml_gpu_push_text_font( ctx, has_mdl2_close ? L"\xE711" : L"\x00d7",
+                                     has_mdl2_close ? mdl2_buf : L"Segoe UI",
+                                     has_mdl2_close ? 10 : 13, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                     &close_rc, NULL, close_fg, 1.0f );
         }
         if (add_rc.right > add_rc.left + 12)
-            xaml_gpu_push_text( ctx, L"+", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &add_rc, NULL, RGB( 210, 210, 210 ), 1.0f );
+        {
+            if (hov_idx == -2)
+                xaml_gpu_push_rect( (float)add_rc.left, (float)add_rc.top, (float)add_rc.right, (float)add_rc.bottom, NULL,
+                                    4.0f, btn_hov_argb, 0, 0.0f, 1.0f );
+            xaml_gpu_push_text( ctx, L"+", 15, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &add_rc, NULL, add_fg, 1.0f );
+        }
         return;
     }
-    for (i = 0; i < count; i++)
     {
-        WCHAR tab_title[128] = {0};
-        RECT pill, close_rc, add_rc;
         IInspectable *sel = uwp_elem_selected_item( el );
-        BOOL is_sel = sel ? (items[i] == sel) : (i == 0);
-        COLORREF bg = is_sel ? RGB( 44, 44, 44 ) : RGB( 28, 28, 28 );
-        COLORREF fg = is_sel ? RGB( 255, 255, 255 ) : RGB( 195, 195, 195 );
-        uwp_tabview_get_item_title( items[i], tab_title, ARRAY_SIZE(tab_title) );
-        uwp_tabview_compute_rects( &trc, count, i, &pill, &close_rc, &add_rc );
-        xaml_gpu_push_rect( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
-                            0.0f, cr_to_argb( bg ), is_sel ? 0 : cr_to_argb( RGB( 54, 54, 54 ) ), is_sel ? 0.0f : 1.0f, 1.0f );
-        pill.left += 10;
-        pill.right = max( pill.left, close_rc.left - 2 );
-        xaml_gpu_push_text( ctx, tab_title, 13, is_sel ? FW_SEMIBOLD : FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, fg, 1.0f );
-        xaml_gpu_push_text( ctx, L"\x00d7", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &close_rc, NULL, RGB( 185, 185, 185 ), 1.0f );
-        if (i == count - 1 && add_rc.right > add_rc.left + 12)
-            xaml_gpu_push_text( ctx, L"+", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &add_rc, NULL, RGB( 210, 210, 210 ), 1.0f );
-        IInspectable_Release( items[i] );
+        int sel_idx = 0;
+        for (i = 0; i < count; i++)
+        {
+            if (sel && items[i] == sel) { sel_idx = i; break; }
+        }
+        for (i = 0; i < count; i++)
+        {
+            WCHAR tab_title[128] = {0};
+            RECT pill, close_rc, add_rc;
+            BOOL is_sel = (i == sel_idx);
+            BOOL is_hov = (i == hov_idx);
+            BOOL show_close = is_sel || is_hov || (overlay_mode == 2);
+            uwp_tabview_get_item_title( items[i], tab_title, ARRAY_SIZE(tab_title) );
+            uwp_tabview_compute_rects( &trc, count, i, &pill, &close_rc, &add_rc );
+            if (is_sel)
+            {
+                xaml_gpu_push_rect_radii( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
+                                          8.0f, 8.0f, 0.0f, 0.0f, cr_to_argb( sel_bg ), 0, 0.0f, 1.0f );
+            }
+            else if (is_hov)
+            {
+                xaml_gpu_push_rect_radii( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
+                                          8.0f, 8.0f, 0.0f, 0.0f, cr_to_argb( hov_bg ), 0, 0.0f, 1.0f );
+            }
+            if (i < count - 1 && !is_sel && i + 1 != sel_idx && !is_hov && hov_idx != i + 1)
+            {
+                int cy = (pill.top + pill.bottom) / 2;
+                xaml_gpu_push_rect( (float)(pill.right - 1), (float)(cy - 8), (float)pill.right, (float)(cy + 8), NULL,
+                                    0.0f, sep_argb, 0, 0.0f, 1.0f );
+            }
+            pill.left += 12;
+            pill.right = show_close ? max( pill.left, close_rc.left - 4 ) : max( pill.left, pill.right - 10 );
+            xaml_gpu_push_text( ctx, tab_title, 13, is_sel ? FW_SEMIBOLD : FW_NORMAL,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                &pill, NULL, is_sel ? sel_fg : inact_fg, 1.0f );
+            if (show_close)
+            {
+                if (is_hov && hov_close)
+                    xaml_gpu_push_rect( (float)close_rc.left, (float)close_rc.top, (float)close_rc.right, (float)close_rc.bottom, NULL,
+                                        4.0f, btn_hov_argb, 0, 0.0f, 1.0f );
+                xaml_gpu_push_text_font( ctx, has_mdl2_close ? L"\xE711" : L"\x00d7",
+                                         has_mdl2_close ? mdl2_buf : L"Segoe UI",
+                                         has_mdl2_close ? 10 : 13, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                         &close_rc, NULL, is_sel ? sel_fg : close_fg, 1.0f );
+            }
+            if (i == count - 1 && add_rc.right > add_rc.left + 12)
+            {
+                if (hov_idx == -2)
+                    xaml_gpu_push_rect( (float)add_rc.left, (float)add_rc.top, (float)add_rc.right, (float)add_rc.bottom, NULL,
+                                        4.0f, btn_hov_argb, 0, 0.0f, 1.0f );
+                xaml_gpu_push_text( ctx, L"+", 15, FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &add_rc, NULL, add_fg, 1.0f );
+            }
+        }
+        for (i = 0; i < count; i++)
+            IInspectable_Release( items[i] );
     }
 }
 
@@ -930,10 +1110,13 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
     if (uwp_paint_is_nav_toggle_item( el ))
     {
         RECT rc = el->bounds;
+        BOOL light = uwp_is_light_theme( el );
         BOOL selected = (el->is_checked == 1);
         if (selected || el->is_hovered || el->is_pressed)
         {
-            COLORREF nav_bg = el->is_pressed ? RGB( 52, 52, 52 ) : (selected ? RGB( 40, 40, 40 ) : RGB( 34, 34, 34 ));
+            COLORREF nav_bg = light
+                ? (el->is_pressed ? RGB( 218, 218, 224 ) : (selected ? RGB( 232, 232, 236 ) : RGB( 238, 238, 242 )))
+                : (el->is_pressed ? RGB( 52, 52, 52 ) : (selected ? RGB( 40, 40, 40 ) : RGB( 34, 34, 34 )));
             xaml_gpu_push_rect( (float)(rc.left + 2), (float)(rc.top + 2), (float)(rc.right - 2), (float)(rc.bottom - 2),
                                 NULL, 3.0f, cr_to_argb( nav_bg ), 0, 0.0f, 1.0f );
         }
@@ -946,8 +1129,8 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         if (label[0])
         {
             COLORREF nfg = selected
-                ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), surface_bg )
-                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 180, 180, 180 ), surface_bg );
+                ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg )
+                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", light ? RGB( 96, 96, 102 ) : RGB( 180, 180, 180 ), surface_bg );
             xaml_gpu_push_text( ctx, label, 12, selected ? FW_SEMIBOLD : FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &rc, NULL, nfg, 1.0f );
         }
         return;
@@ -1190,9 +1373,10 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
             (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
         {
             RECT hrc = trc;
+            COLORREF hbg = uwp_is_light_theme( el ) ? RGB( 230, 230, 234 ) : RGB( 54, 54, 54 );
             InflateRect( &hrc, -2, -3 );
             xaml_gpu_push_rect( (float)hrc.left, (float)hrc.top, (float)hrc.right, (float)hrc.bottom, NULL,
-                                3.0f, cr_to_argb( RGB( 54, 54, 54 ) ), 0, 0.0f, 1.0f );
+                                4.0f, cr_to_argb( hbg ), 0, 0.0f, 1.0f );
         }
         if (trc.right - trc.left > 20)
             InflateRect( &trc, -4, 0 );
@@ -1540,8 +1724,12 @@ static void paint_gpu_content_control_vm( ID3D11DeviceContext *ctx, struct uwp_e
         }
         else
         {
-            COLORREF bg = (el->is_pressed || el->is_hovered) ? RGB( 60, 60, 60 ) : RGB( 42, 42, 42 );
-            COLORREF fg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 240, 240, 240 ), surface_bg );
+            BOOL light = uwp_is_light_theme( el );
+            COLORREF bg = light
+                ? ((el->is_pressed || el->is_hovered) ? RGB( 228, 228, 232 ) : RGB( 242, 242, 245 ))
+                : ((el->is_pressed || el->is_hovered) ? RGB( 60, 60, 60 ) : RGB( 42, 42, 42 ));
+            COLORREF fg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                                   light ? RGB( 26, 26, 26 ) : RGB( 240, 240, 240 ), surface_bg );
             InflateRect( &brc, -2, -4 );
             xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
                                 6.0f, cr_to_argb( bg ), 0, 0.0f, 1.0f );
@@ -1975,6 +2163,12 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         return;
     }
 
+    if (uwp_is_animated_icon( el ) && !el->content && !el->children_coll)
+    {
+        paint_gpu_animated_icon( ctx, el, surface_bg );
+        return;
+    }
+
     if (el->kind == UWP_KIND_PROGRESS_RING)
     {
         paint_gpu_progress_ring( el, surface_bg );
@@ -1992,7 +2186,8 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
         if (uwp_has_text( el ))
         {
             RECT rc = el->bounds;
-            COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg );
+            COLORREF tfg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush",
+                                                    uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
             RECT trc = { rc.left + 12, rc.top, rc.left + 200, rc.bottom };
             xaml_gpu_push_text( ctx, uwp_elem_text( el ), 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
                                 &trc, NULL, tfg, 1.0f );

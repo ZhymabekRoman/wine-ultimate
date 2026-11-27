@@ -856,9 +856,10 @@ static void xaml_gpu_apply_clip( float out_clip[4], const RECT *clip_rc )
     out_clip[3] = b;
 }
 
-void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
-                         float radius, UINT32 fill_argb, UINT32 border_argb,
-                         float border_thickness, float opacity )
+void xaml_gpu_push_rect_radii( float x0, float y0, float x1, float y1, const RECT *clip_rc,
+                               float r_tl, float r_tr, float r_br, float r_bl,
+                               UINT32 fill_argb, UINT32 border_argb,
+                               float border_thickness, float opacity )
 {
     struct xaml_gpu_instance *inst;
     float clip[4];
@@ -873,10 +874,10 @@ void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *cli
     inst->rect[2] = x1;
     inst->rect[3] = y1;
     memcpy( inst->clip, clip, sizeof(clip) );
-    inst->radii[0] = radius;
-    inst->radii[1] = radius;
-    inst->radii[2] = radius;
-    inst->radii[3] = radius;
+    inst->radii[0] = r_tl;
+    inst->radii[1] = r_tr;
+    inst->radii[2] = r_br;
+    inst->radii[3] = r_bl;
     rgba_to_float4( fill_argb, inst->fill_color );
     rgba_to_float4( border_argb, inst->border_color );
     memset( inst->uv, 0, sizeof(inst->uv) );
@@ -884,6 +885,15 @@ void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *cli
     inst->params[1] = 0.0f; /* SDF rect/border */
     inst->params[2] = opacity;
     inst->params[3] = 0.0f;
+}
+
+void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
+                         float radius, UINT32 fill_argb, UINT32 border_argb,
+                         float border_thickness, float opacity )
+{
+    xaml_gpu_push_rect_radii( x0, y0, x1, y1, clip_rc,
+                              radius, radius, radius, radius,
+                              fill_argb, border_argb, border_thickness, opacity );
 }
 
 void xaml_gpu_push_gradient_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,

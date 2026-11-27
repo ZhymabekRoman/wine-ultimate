@@ -2355,11 +2355,17 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
         if (vt == 0x08) { uwp_el_set_bg_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_BACKGROUND ); }
         else if (sval && sval[0])
         {
+            UINT32 lit_c = 0;
             if (uwp_brush_key_is_accent( sval ))
                 el->is_accent_style = TRUE;
             if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
             {
                 uwp_el_set_bg_argb( el, argb );
+                if (!uwp_parse_color_string( sval, &lit_c ))
+                {
+                    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                    if (sa) lstrcpynW( sa->bg_theme_key, sval, ARRAY_SIZE(sa->bg_theme_key) );
+                }
                 xbf_prop_mark_local( ctx, el, UWP_LP_BACKGROUND );
             }
         }
@@ -2371,7 +2377,13 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
         if (vt == 0x08) { uwp_el_set_fg_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_FOREGROUND ); }
         else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
         {
+            UINT32 lit_c = 0;
             uwp_el_set_fg_argb( el, argb );
+            if (!uwp_parse_color_string( sval, &lit_c ))
+            {
+                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                if (sa) lstrcpynW( sa->fg_theme_key, sval, ARRAY_SIZE(sa->fg_theme_key) );
+            }
             xbf_prop_mark_local( ctx, el, UWP_LP_FOREGROUND );
         }
         return TRUE;
@@ -2382,7 +2394,13 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
         if (vt == 0x08) { uwp_el_set_border_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_BORDER_BRUSH ); }
         else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
         {
+            UINT32 lit_c = 0;
             uwp_el_set_border_argb( el, argb );
+            if (!uwp_parse_color_string( sval, &lit_c ))
+            {
+                struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                if (sa) lstrcpynW( sa->border_theme_key, sval, ARRAY_SIZE(sa->border_theme_key) );
+            }
             xbf_prop_mark_local( ctx, el, UWP_LP_BORDER_BRUSH );
         }
         return TRUE;

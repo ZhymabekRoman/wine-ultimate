@@ -569,25 +569,11 @@ static HRESULT WINAPI uwp_tabview_put_TabItemsSource( void *iface, void *src )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
     struct uwp_nav_ext *nav = uwp_elem_ensure_nav( impl );
-    int ni;
     if (!nav) return S_OK;
     if (nav->tab_items_source) IInspectable_Release( nav->tab_items_source );
     nav->tab_items_source = (IInspectable *)src;
     if (nav->tab_items_source) IInspectable_AddRef( nav->tab_items_source );
-    for (ni = 0; ni < impl->named_cnt; ni++)
-    {
-        if (impl->named_elems[ni] && !wcscmp( impl->named_elems[ni]->name, L"TabListView" ))
-        {
-            struct uwp_element *tlv = impl->named_elems[ni];
-            if (tlv->items_source != (IInspectable *)src)
-            {
-                if (tlv->items_source) IInspectable_Release( tlv->items_source );
-                tlv->items_source = (IInspectable *)src;
-                if (tlv->items_source) IInspectable_AddRef( tlv->items_source );
-            }
-            break;
-        }
-    }
+    uwp_tabview_sync_containers( impl );
     TRACE( "ITabView::put_TabItemsSource -> %p\n", src );
     uwp_invalidate_window();
     return S_OK;
@@ -717,16 +703,22 @@ void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len )
 
 void uwp_tabview_compute_rects( const RECT *trc, int count, int idx, RECT *pill_rc, RECT *close_rc, RECT *add_rc )
 {
-    int avail_w = max( 80, (int)(trc->right - trc->left) - 42 );
+    int avail_w = max( 80, (int)(trc->right - trc->left) - 44 );
     int n = max( 1, count );
-    int tw = min( 186, max( 72, (avail_w - (n - 1) * 2) / n ) );
-    int x0 = trc->left + 4 + idx * (tw + 2);
-    if (pill_rc) SetRect( pill_rc, x0, trc->top + 3, min( trc->right - 34, x0 + tw ), trc->bottom );
-    if (close_rc && pill_rc) SetRect( close_rc, pill_rc->right - 22, pill_rc->top + 2, pill_rc->right - 4, pill_rc->bottom - 2 );
+    int tw = min( 220, max( 72, avail_w / n ) );
+    int x0 = trc->left + 4 + idx * tw;
+    int cy;
+    if (pill_rc) SetRect( pill_rc, x0, trc->top + 4, min( trc->right - 36, x0 + tw ), trc->bottom );
+    if (close_rc && pill_rc)
+    {
+        cy = (pill_rc->top + pill_rc->bottom) / 2;
+        SetRect( close_rc, pill_rc->right - 26, cy - 11, pill_rc->right - 4, cy + 11 );
+    }
     if (add_rc)
     {
-        int ax = trc->left + 4 + n * (tw + 2) + 4;
-        SetRect( add_rc, ax, trc->top + 4, min( trc->right - 2, ax + 28 ), trc->bottom - 2 );
+        int ax = trc->left + 4 + n * tw + 6;
+        int scy = (trc->top + trc->bottom) / 2;
+        SetRect( add_rc, ax, max( trc->top + 3, scy - 13 ), min( trc->right - 2, ax + 30 ), min( trc->bottom - 2, scy + 13 ) );
     }
 }
 
@@ -740,6 +732,71 @@ static struct uwp_element *uwp_find_named_child( struct uwp_element *owner, cons
             return owner->named_elems[i];
     }
     return NULL;
+}
+
+void uwp_tabview_sync_containers( struct uwp_element *tv )
+{
+    struct uwp_element *tlv;
+    IInspectable *items[64];
+    int count, i;
+    BOOL match = FALSE;
+
+    if (!tv) return;
+    tlv = uwp_find_named_child( tv, L"TabListView" );
+    if (!tlv) return;
+
+    if (tv->nav && tlv->items_source != tv->nav->tab_items_source)
+    {
+        if (tlv->items_source) IInspectable_Release( tlv->items_source );
+        tlv->items_source = tv->nav->tab_items_source;
+        if (tlv->items_source) IInspectable_AddRef( tlv->items_source );
+    }
+    if (tv->item_template && tlv->item_template != tv->item_template)
+    {
+        if (tlv->item_template) IInspectable_Release( tlv->item_template );
+        tlv->item_template = tv->item_template;
+        IInspectable_AddRef( tlv->item_template );
+    }
+    if (!tlv->items_source) return;
+
+    count = (int)uwp_winrt_vec_snapshot( tlv->items_source, items, ARRAY_SIZE(items) );
+    if (tlv->children_coll)
+    {
+        struct uwp_vec_view *cv = CONTAINING_RECORD( tlv->children_coll, struct uwp_vec_view, IInspectable_iface );
+        if ((int)cv->count == count)
+        {
+            match = TRUE;
+            for (i = 0; i < count; i++)
+            {
+                struct uwp_element *cel = uwp_elem_from_any( cv->items[i] );
+                if (!cel || (cel->data_context != items[i] && &cel->IInspectable_iface != items[i] &&
+                             (!cel->outer || cel->outer != items[i])))
+                {
+                    match = FALSE;
+                    break;
+                }
+            }
+        }
+    }
+    if (!match)
+    {
+        uwp_items_ctrl_materialize_source( tlv, tlv->items_source );
+    }
+    if (tlv->children_coll)
+    {
+        struct uwp_vec_view *cv = CONTAINING_RECORD( tlv->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (i = 0; (unsigned int)i < cv->count; i++)
+        {
+            struct uwp_element *cel = uwp_elem_from_any( cv->items[i] );
+            if (cel)
+            {
+                cel->parent = tlv;
+                uwp_apply_template_force( cel );
+            }
+        }
+    }
+    for (i = 0; i < count; i++)
+        IInspectable_Release( items[i] );
 }
 
 void uwp_tabview_fire_add_tab( struct uwp_element *tv )
@@ -785,16 +842,45 @@ void uwp_tabview_fire_add_tab( struct uwp_element *tv )
 void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item )
 {
     struct uwp_tab_close_args *args;
-    struct uwp_element *item_el;
+    struct uwp_element *item_el, *tlv;
     if (!tv || !item) return;
     item_el = uwp_elem_from_any( item );
     if (item_el)
     {
-        struct uwp_element *close_btn = uwp_find_named_child( item_el, L"CloseButton" );
+        struct uwp_element *close_btn;
+        uwp_apply_template_force( item_el );
+        close_btn = uwp_find_named_child( item_el, L"CloseButton" );
         if (close_btn && (UWP_EV_CNT( close_btn, click_reg ) > 0 || close_btn->command))
         {
             uwp_invoke_button( close_btn );
             return;
+        }
+    }
+    uwp_tabview_sync_containers( tv );
+    tlv = uwp_find_named_child( tv, L"TabListView" );
+    if (tlv && tlv->children_coll)
+    {
+        struct uwp_vec_view *cv = CONTAINING_RECORD( tlv->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < cv->count; k++)
+        {
+            struct uwp_element *cel = uwp_elem_from_any( cv->items[k] );
+            if (cel && (cel->data_context == item || &cel->IInspectable_iface == item ||
+                        (cel->outer && cel->outer == item)))
+            {
+                struct uwp_element *close_btn;
+                uwp_apply_template_force( cel );
+                close_btn = uwp_find_named_child( cel, L"CloseButton" );
+                TRACE( "uwp_tabview_fire_close_tab: container=%p close_btn=%p clicks=%u\n",
+                       cel, close_btn, close_btn ? UWP_EV_CNT( close_btn, click_reg ) : 0 );
+                if (close_btn && (UWP_EV_CNT( close_btn, click_reg ) > 0 || close_btn->command))
+                {
+                    uwp_invoke_button( close_btn );
+                    return;
+                }
+                item_el = cel;
+                break;
+            }
         }
     }
     TRACE( "uwp_tabview_fire_close_tab: cnt=%u item=%p\n", UWP_EV_CNT( tv, tab_close_reg ), item );
@@ -806,6 +892,11 @@ void uwp_tabview_fire_close_tab( struct uwp_element *tv, IInspectable *item )
         args->ref = 1;
         args->item = item;
         IInspectable_AddRef( item );
+        if (item_el)
+        {
+            args->tab = item_el->outer ? item_el->outer : &item_el->IInspectable_iface;
+            IInspectable_AddRef( args->tab );
+        }
         uwp_fire_event_registry( &tv->events->tab_close_reg,
                                  tv->outer ? tv->outer : &tv->IInspectable_iface,
                                  &args->IInspectable_iface, "TabView::TabCloseRequested" );
@@ -2739,6 +2830,94 @@ const void *uwp_items_ctrl_vtbl[32] =
     [15] = uwp_items_ctrl_get_DisplayMemberPath,
     [16] = uwp_items_ctrl_put_DisplayMemberPath,
     [17 ... 31] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_icm_ItemFromContainer( void *iface, void *container, void **out )
+{
+    struct uwp_element *cel = uwp_elem_from_any( container );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (cel)
+    {
+        *out = cel->data_context ? cel->data_context : (cel->outer ? cel->outer : &cel->IInspectable_iface);
+        if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_icm_ContainerFromItem( void *iface, void *item, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame2_iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (impl && item && impl->children_coll)
+    {
+        struct uwp_vec_view *cv = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < cv->count; k++)
+        {
+            struct uwp_element *cel = uwp_elem_from_any( cv->items[k] );
+            if (cel && (cel->data_context == (IInspectable *)item || &cel->IInspectable_iface == item ||
+                        (cel->outer && cel->outer == item)))
+            {
+                *out = cel->outer ? cel->outer : &cel->IInspectable_iface;
+                IInspectable_AddRef( (IInspectable *)*out );
+                break;
+            }
+        }
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_icm_IndexFromContainer( void *iface, void *container, INT32 *out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame2_iface );
+    struct uwp_element *target = uwp_elem_from_any( container );
+    if (!out) return E_POINTER;
+    *out = -1;
+    if (impl && target && impl->children_coll)
+    {
+        struct uwp_vec_view *cv = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < cv->count; k++)
+        {
+            if (uwp_elem_from_any( cv->items[k] ) == target)
+            {
+                *out = (INT32)k;
+                break;
+            }
+        }
+    }
+    return S_OK;
+}
+static HRESULT WINAPI uwp_icm_ContainerFromIndex( void *iface, INT32 index, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame2_iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (impl && index >= 0 && impl->children_coll)
+    {
+        struct uwp_vec_view *cv = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+        if ((unsigned int)index < cv->count)
+        {
+            struct uwp_element *cel = uwp_elem_from_any( cv->items[index] );
+            *out = (cel && cel->outer) ? cel->outer : cv->items[index];
+            if (*out) IInspectable_AddRef( (IInspectable *)*out );
+        }
+    }
+    return S_OK;
+}
+const void *uwp_icm_vtbl[12] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_icm_ItemFromContainer,
+    [7] = uwp_icm_ContainerFromItem,
+    [8] = uwp_icm_IndexFromContainer,
+    [9] = uwp_icm_ContainerFromIndex,
+    [10 ... 11] = uwp_generic_noop,
 };
 
 static HRESULT WINAPI uwp_key_args_QI( void *iface, REFIID iid, void **out )

@@ -155,26 +155,15 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
     if (old_dc) IInspectable_Release( old_dc );
 }
 
-static void uwp_apply_template_if_needed( struct uwp_element *el )
+void uwp_apply_template_force( struct uwp_element *el )
 {
     void *fe_ovr = NULL;
-    BOOL has_children = FALSE;
     if (!el || el->template_applied || !el->outer) return;
-    if (el->parent && (el->parent->class_flags & UWP_CF_WINUI_PREFIX))
-        return;
     if (!el->template_inflated)
         uwp_inflate_control_template( el );
-    if (el->named_cnt > 0 || UWP_EV_CNT( el, size_changed_reg ) > 0 || el->template_root != NULL)
-        has_children = TRUE;
-    /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
-     * has actually been inflated into the control's visual tree (except WinUI
-     * builtin controls like NavigationView/ItemsRepeater that synthesize parts). */
-    if (!has_children && !(el->class_flags & UWP_CF_WINUI_PREFIX))
-        return;
     el->template_applied = TRUE;
     if (SUCCEEDED(IInspectable_QueryInterface( el->outer, &IID_IFrameworkElementOverrides_UWP, &fe_ovr )) && fe_ovr)
     {
-        /* Slot 8 on IFrameworkElementOverrides is OnApplyTemplate() */
         const struct abi_fe_overrides *afo = (const struct abi_fe_overrides *)fe_ovr;
         if (afo->lpVtbl->OnApplyTemplate)
         {
@@ -194,6 +183,24 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         IUnknown_Release( (IUnknown *)fe_ovr );
     }
     uwp_sync_all_template_presenters( el );
+}
+
+static void uwp_apply_template_if_needed( struct uwp_element *el )
+{
+    BOOL has_children = FALSE;
+    if (!el || el->template_applied || !el->outer) return;
+    if (el->parent && (el->parent->class_flags & UWP_CF_WINUI_PREFIX))
+        return;
+    if (!el->template_inflated)
+        uwp_inflate_control_template( el );
+    if (el->named_cnt > 0 || UWP_EV_CNT( el, size_changed_reg ) > 0 || el->template_root != NULL)
+        has_children = TRUE;
+    /* On Windows XAML, OnApplyTemplate() is only called after a ControlTemplate
+     * has actually been inflated into the control's visual tree (except WinUI
+     * builtin controls like NavigationView/ItemsRepeater that synthesize parts). */
+    if (!has_children && !(el->class_flags & UWP_CF_WINUI_PREFIX))
+        return;
+    uwp_apply_template_force( el );
 }
 
 void uwp_fire_size_and_layout_changed( struct uwp_element *el )

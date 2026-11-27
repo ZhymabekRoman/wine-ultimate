@@ -1069,19 +1069,36 @@ static void aot_exec_set_obj_prop( struct xbf_aot_exec_ctx *ec, const struct xbf
         }
         if (got)
         {
+            UINT32 lit_c = 0;
+            BOOL is_res_key = !op->has_argb && sval[0] && !uwp_parse_color_string( sval, &lit_c );
             if (uwp_is_bg_pid( op->pid ))
             {
                 uwp_el_set_bg_argb( parent_el, argb );
+                if (is_res_key)
+                {
+                    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( parent_el );
+                    if (sa) lstrcpynW( sa->bg_theme_key, sval, ARRAY_SIZE(sa->bg_theme_key) );
+                }
                 if (!ec->fake_ctx.in_style_apply) parent_el->local_prop_mask |= UWP_LP_BACKGROUND;
             }
             else if (uwp_is_fg_pid( op->pid ))
             {
                 uwp_el_set_fg_argb( parent_el, argb );
+                if (is_res_key)
+                {
+                    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( parent_el );
+                    if (sa) lstrcpynW( sa->fg_theme_key, sval, ARRAY_SIZE(sa->fg_theme_key) );
+                }
                 if (!ec->fake_ctx.in_style_apply) parent_el->local_prop_mask |= UWP_LP_FOREGROUND;
             }
             else if (uwp_is_border_pid( op->pid ))
             {
                 uwp_el_set_border_argb( parent_el, argb );
+                if (is_res_key)
+                {
+                    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( parent_el );
+                    if (sa) lstrcpynW( sa->border_theme_key, sval, ARRAY_SIZE(sa->border_theme_key) );
+                }
                 if (!ec->fake_ctx.in_style_apply) parent_el->local_prop_mask |= UWP_LP_BORDER_BRUSH;
             }
         }

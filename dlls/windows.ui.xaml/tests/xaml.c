@@ -1608,6 +1608,298 @@ static void test_EventRegistryAndTransientLifecycle(void)
     }
 }
 
+struct test_fe2_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_RequestedTheme)(void *, int *);
+    HRESULT (WINAPI *put_RequestedTheme)(void *, int);
+};
+struct test_fe2_iface { const struct test_fe2_vtbl *lpVtbl; };
+
+struct test_fe6_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_ActualTheme)(void *, int *);
+    HRESULT (WINAPI *add_ActualThemeChanged)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_ActualThemeChanged)(void *, EventRegistrationToken);
+};
+struct test_fe6_iface { const struct test_fe6_vtbl *lpVtbl; };
+
+struct test_fe7_full_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_IsLoaded)(void *, boolean *);
+};
+struct test_fe7_full_iface { const struct test_fe7_full_vtbl *lpVtbl; };
+
+struct test_icm_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *ItemFromContainer)(void *, void *, void **);
+    HRESULT (WINAPI *ContainerFromItem)(void *, void *, void **);
+    HRESULT (WINAPI *IndexFromContainer)(void *, void *, INT32 *);
+    HRESULT (WINAPI *ContainerFromIndex)(void *, INT32, void **);
+};
+struct test_icm_iface { const struct test_icm_vtbl *lpVtbl; };
+
+struct test_ic_vtbl
+{
+    void *pad0_6[7];
+    HRESULT (WINAPI *put_ItemsSource)(void *, void *);
+};
+struct test_ic_iface { const struct test_ic_vtbl *lpVtbl; };
+
+struct test_vec_vtbl
+{
+    void *pad0_12[13];
+    HRESULT (WINAPI *Append)(void *, void *);
+};
+struct test_vec_iface { const struct test_vec_vtbl *lpVtbl; };
+
+struct test_fm_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *GetFocusedElement)(void *, void **);
+};
+struct test_fm_iface { const struct test_fm_vtbl *lpVtbl; };
+
+struct test_scale_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_CenterX)(void *, double *);
+    HRESULT (WINAPI *put_CenterX)(void *, double);
+    HRESULT (WINAPI *get_CenterY)(void *, double *);
+    HRESULT (WINAPI *put_CenterY)(void *, double);
+    HRESULT (WINAPI *get_ScaleX)(void *, double *);
+    HRESULT (WINAPI *put_ScaleX)(void *, double);
+    HRESULT (WINAPI *get_ScaleY)(void *, double *);
+    HRESULT (WINAPI *put_ScaleY)(void *, double);
+};
+struct test_scale_iface { const struct test_scale_vtbl *lpVtbl; };
+
+struct test_pv_statics_vtbl
+{
+    void *pad0_17[18];
+    HRESULT (WINAPI *CreateString)(void *, HSTRING, IInspectable **);
+};
+struct test_pv_statics_iface { const struct test_pv_statics_vtbl *lpVtbl; };
+
+static void test_WinUINotepadRegressions(void)
+{
+    static const GUID IID_IFrameworkElement2_t = { 0xf19104be, 0x422a, 0x4904, { 0xa5, 0x2f, 0xee, 0x72, 0x01, 0x04, 0x29, 0xe5 } };
+    static const GUID IID_IFrameworkElement6_t = { 0x792a5d91, 0x62a1, 0x40bf, { 0xa0, 0xce, 0xf9, 0xc1, 0x31, 0xfc, 0xb7, 0xa7 } };
+    static const GUID IID_IFrameworkElement7_t = { 0xeb06716a, 0x4214, 0x499c, { 0xa4, 0x8a, 0x2d, 0x5e, 0x5b, 0x13, 0x5b, 0x30 } };
+    static const GUID IID_IItemsControl_t = { 0x3d0813ba, 0x6890, 0x4537, { 0xbf, 0xe5, 0x79, 0x6d, 0x94, 0x58, 0xed, 0xd6 } };
+    static const GUID IID_IItemContainerMapping_t = { 0x53c9f23a, 0xf25d, 0x446a, { 0x99, 0xb8, 0xc7, 0xae, 0xb8, 0x39, 0x05, 0x0f } };
+    static const GUID IID_ITabView_t = { 0x6aa787ab, 0x5a30, 0x5ea2, { 0xbe, 0x5b, 0xae, 0xd8, 0x68, 0x38, 0x17, 0x56 } };
+    static const GUID IID_IFocusManagerStatics_t = { 0x1eccd326, 0x8182, 0x4482, { 0x82, 0x6a, 0x09, 0x18, 0xe9, 0xed, 0x9a, 0xf7 } };
+    static const GUID IID_IScaleTransform_t = { 0xed67f18d, 0x936e, 0x43ab, { 0x92, 0x9a, 0xe9, 0xcd, 0x0a, 0x51, 0x1e, 0x52 } };
+    static const GUID IID_IFrame2_t = { 0x65d505d9, 0xf6c5, 0x489a, { 0x93, 0xeb, 0x77, 0xa8, 0xc0, 0xdd, 0x46, 0x5b } };
+    static const GUID IID_IVector_obj_t = { 0x771b857e, 0xab5c, 0x5db8, { 0xa0, 0x21, 0x39, 0x7c, 0x92, 0xcd, 0xc4, 0x4c } };
+    static const GUID IID_IPropertyValueStatics_t = { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
+    HSTRING hcls, hs0 = NULL, hs1 = NULL;
+    IInspectable *grid = NULL, *lv = NULL, *tv = NULL, *item0 = NULL, *item1 = NULL, *vec_obj = NULL, *st = NULL;
+    void *fe2 = NULL, *fe6 = NULL, *fe7 = NULL, *ic = NULL, *icm = NULL, *tabview_if = NULL, *fm = NULL, *sc = NULL, *frame2 = NULL;
+    void *vec = NULL, *c0 = NULL, *it0 = NULL, *pvs = NULL;
+    struct test_dummy_handler theme_h = { test_dh_vtbl, 1, 0 };
+    EventRegistrationToken tok = {0};
+    int theme = -1;
+    boolean is_loaded = TRUE;
+    INT32 idx = -99;
+    void *focused = (void *)0xdeadbeef;
+    double sx = 0.0, sy = 0.0, cx = 0.0, cy = 0.0;
+    HRESULT hr;
+
+    /* 1. IFrameworkElement6 (ActualTheme + ActualThemeChanged) vs IFrameworkElement7 (IsLoaded) */
+    hr = WindowsCreateString( L"Windows.UI.Xaml.Controls.Grid", 29, &hcls );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoActivateInstance( hcls, &grid );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && grid != NULL, "Grid activate hr %#lx\n", hr );
+    if (grid)
+    {
+        hr = IInspectable_QueryInterface( grid, &IID_IFrameworkElement6_t, &fe6 );
+        ok( hr == S_OK && fe6 != NULL, "QI IFrameworkElement6 got hr %#lx\n", hr );
+        hr = IInspectable_QueryInterface( grid, &IID_IFrameworkElement2_t, &fe2 );
+        ok( hr == S_OK && fe2 != NULL, "QI IFrameworkElement2 got hr %#lx\n", hr );
+        if (fe6 && fe2)
+        {
+            const struct test_fe6_iface *f6 = (const struct test_fe6_iface *)fe6;
+            const struct test_fe2_iface *f2 = (const struct test_fe2_iface *)fe2;
+            hr = f6->lpVtbl->get_ActualTheme( fe6, &theme );
+            ok( hr == S_OK && (theme == 1 || theme == 2), "ActualTheme should be Light(1) or Dark(2), got %d (hr=%#lx)\n", theme, hr );
+            hr = f6->lpVtbl->add_ActualThemeChanged( fe6, &theme_h, &tok );
+            ok( hr == S_OK && tok.value != 0 && theme_h.ref == 2, "add_ActualThemeChanged hr %#lx ref %ld\n", hr, theme_h.ref );
+
+            hr = f2->lpVtbl->put_RequestedTheme( fe2, 1 );
+            ok( hr == S_OK, "put_RequestedTheme(1) hr %#lx\n", hr );
+            hr = f6->lpVtbl->get_ActualTheme( fe6, &theme );
+            ok( hr == S_OK && theme == 1, "ActualTheme after Light should be 1, got %d\n", theme );
+            ok( theme_h.invoke_cnt >= 1, "ActualThemeChanged should fire on Light switch (invoked=%ld)\n", theme_h.invoke_cnt );
+
+            hr = f2->lpVtbl->put_RequestedTheme( fe2, 2 );
+            ok( hr == S_OK, "put_RequestedTheme(2) hr %#lx\n", hr );
+            hr = f6->lpVtbl->get_ActualTheme( fe6, &theme );
+            ok( hr == S_OK && theme == 2, "ActualTheme after Dark should be 2, got %d\n", theme );
+            ok( theme_h.invoke_cnt >= 2, "ActualThemeChanged should fire on Dark switch (invoked=%ld)\n", theme_h.invoke_cnt );
+
+            hr = f6->lpVtbl->remove_ActualThemeChanged( fe6, tok );
+            ok( hr == S_OK && theme_h.ref == 1, "remove_ActualThemeChanged hr %#lx ref %ld\n", hr, theme_h.ref );
+        }
+        if (fe2) IUnknown_Release( (IUnknown *)fe2 );
+        if (fe6) IUnknown_Release( (IUnknown *)fe6 );
+
+        hr = IInspectable_QueryInterface( grid, &IID_IFrameworkElement7_t, &fe7 );
+        ok( hr == S_OK && fe7 != NULL, "QI IFrameworkElement7 got hr %#lx\n", hr );
+        if (fe7)
+        {
+            const struct test_fe7_full_iface *f7 = (const struct test_fe7_full_iface *)fe7;
+            hr = f7->lpVtbl->get_IsLoaded( fe7, &is_loaded );
+            ok( hr == S_OK && is_loaded == FALSE, "standalone Grid IsLoaded should be FALSE, got %d\n", is_loaded );
+            IUnknown_Release( (IUnknown *)fe7 );
+        }
+        IInspectable_Release( grid );
+    }
+
+    /* 2. ListView rejects ITabView and implements IItemContainerMapping; TabView accepts ITabView */
+    hr = WindowsCreateString( L"Windows.UI.Xaml.Controls.ListView", 33, &hcls );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoActivateInstance( hcls, &lv );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && lv != NULL, "ListView activate hr %#lx\n", hr );
+    if (lv)
+    {
+        hr = IInspectable_QueryInterface( lv, &IID_ITabView_t, &tabview_if );
+        ok( hr == E_NOINTERFACE && tabview_if == NULL, "ListView must NOT answer ITabView (hr=%#lx)\n", hr );
+        if (tabview_if) { IUnknown_Release( (IUnknown *)tabview_if ); tabview_if = NULL; }
+
+        hr = IInspectable_QueryInterface( lv, &IID_IItemContainerMapping_t, &icm );
+        ok( hr == S_OK && icm != NULL, "ListView should answer IItemContainerMapping (hr=%#lx)\n", hr );
+        hr = IInspectable_QueryInterface( lv, &IID_IItemsControl_t, &ic );
+        ok( hr == S_OK && ic != NULL, "ListView should answer IItemsControl (hr=%#lx)\n", hr );
+
+        hr = WindowsCreateString( L"Windows.Foundation.PropertyValue", 32, &hcls );
+        if (SUCCEEDED(hr) && SUCCEEDED(RoGetActivationFactory( hcls, &IID_IPropertyValueStatics_t, &pvs )) && pvs)
+        {
+            WindowsCreateString( L"Tab0", 4, &hs0 );
+            WindowsCreateString( L"Tab1", 4, &hs1 );
+            ((const struct test_pv_statics_iface *)pvs)->lpVtbl->CreateString( pvs, hs0, &item0 );
+            ((const struct test_pv_statics_iface *)pvs)->lpVtbl->CreateString( pvs, hs1, &item1 );
+            if (hs0) WindowsDeleteString( hs0 );
+            if (hs1) WindowsDeleteString( hs1 );
+            IUnknown_Release( (IUnknown *)pvs );
+        }
+        WindowsDeleteString( hcls );
+        hr = WindowsCreateString( L"Windows.UI.Xaml.DependencyObjectCollection", 44, &hcls );
+        if (SUCCEEDED(hr)) { RoActivateInstance( hcls, &vec_obj ); WindowsDeleteString( hcls ); }
+
+        if (ic && icm && item0 && item1 && vec_obj &&
+            SUCCEEDED(IInspectable_QueryInterface( vec_obj, &IID_IVector_obj_t, &vec )) && vec)
+        {
+            const struct test_vec_iface *v = (const struct test_vec_iface *)vec;
+            const struct test_ic_iface *ici = (const struct test_ic_iface *)ic;
+            const struct test_icm_iface *icmi = (const struct test_icm_iface *)icm;
+            v->lpVtbl->Append( vec, item0 );
+            v->lpVtbl->Append( vec, item1 );
+            hr = ici->lpVtbl->put_ItemsSource( ic, vec_obj );
+            ok( hr == S_OK, "put_ItemsSource hr %#lx\n", hr );
+
+            hr = icmi->lpVtbl->ContainerFromIndex( icm, 1, &c0 );
+            ok( hr == S_OK && c0 != NULL, "ContainerFromIndex(1) hr %#lx c0=%p\n", hr, c0 );
+            if (c0)
+            {
+                hr = icmi->lpVtbl->IndexFromContainer( icm, c0, &idx );
+                ok( hr == S_OK && idx == 1, "IndexFromContainer(c0) should be 1, got %d (hr=%#lx)\n", idx, hr );
+                hr = icmi->lpVtbl->ItemFromContainer( icm, c0, &it0 );
+                ok( hr == S_OK && it0 == item1, "ItemFromContainer(c0) should return item1=%p, got %p\n", item1, it0 );
+                if (it0) IUnknown_Release( (IUnknown *)it0 );
+                IUnknown_Release( (IUnknown *)c0 );
+            }
+        }
+        if (vec) IUnknown_Release( (IUnknown *)vec );
+        if (vec_obj) IInspectable_Release( vec_obj );
+        if (item0) IInspectable_Release( item0 );
+        if (item1) IInspectable_Release( item1 );
+        if (ic) IUnknown_Release( (IUnknown *)ic );
+        if (icm) IUnknown_Release( (IUnknown *)icm );
+        IInspectable_Release( lv );
+    }
+
+    {
+        HMODULE hmod = GetModuleHandleW( L"windows.ui.xaml.dll" );
+        typedef HRESULT (WINAPI *pDllGetActivationFactory)(HSTRING, IActivationFactory **);
+        pDllGetActivationFactory pGetFactory = hmod ? (pDllGetActivationFactory)GetProcAddress( hmod, "DllGetActivationFactory" ) : NULL;
+        IActivationFactory *fac = NULL;
+        hr = WindowsCreateString( L"Microsoft.UI.Xaml.Controls.TabView", 34, &hcls );
+        ok( hr == S_OK, "got hr %#lx\n", hr );
+        if (pGetFactory && SUCCEEDED(pGetFactory( hcls, &fac )) && fac)
+        {
+            hr = IActivationFactory_ActivateInstance( fac, &tv );
+            IActivationFactory_Release( fac );
+        }
+        else
+            hr = E_FAIL;
+        WindowsDeleteString( hcls );
+        ok( hr == S_OK && tv != NULL, "TabView activate hr %#lx\n", hr );
+        if (tv)
+        {
+            hr = IInspectable_QueryInterface( tv, &IID_ITabView_t, &tabview_if );
+            ok( hr == S_OK && tabview_if != NULL, "TabView should answer ITabView (hr=%#lx)\n", hr );
+            if (tabview_if) IUnknown_Release( (IUnknown *)tabview_if );
+            IInspectable_Release( tv );
+        }
+    }
+
+    /* 3. FocusManager::GetFocusedElement returns NULL instead of a DependencyProperty */
+    hr = WindowsCreateString( L"Windows.UI.Xaml.Input.FocusManager", 34, &hcls );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoGetActivationFactory( hcls, &IID_IFocusManagerStatics_t, &fm );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && fm != NULL, "RoGetActivationFactory FocusManager hr %#lx\n", hr );
+    if (fm)
+    {
+        hr = ((const struct test_fm_iface *)fm)->lpVtbl->GetFocusedElement( fm, &focused );
+        ok( hr == S_OK && focused == NULL, "GetFocusedElement should return S_OK + NULL, got hr=%#lx focused=%p\n", hr, focused );
+        if (focused && (ULONG_PTR)focused > 0x10000) IUnknown_Release( (IUnknown *)focused );
+        IUnknown_Release( (IUnknown *)fm );
+    }
+
+    /* 4. ScaleTransform getters/setters and QI_GUARD_NOT_FRAME */
+    hr = WindowsCreateString( L"Windows.UI.Xaml.Media.ScaleTransform", 36, &hcls );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoActivateInstance( hcls, &st );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && st != NULL, "ScaleTransform activate hr %#lx\n", hr );
+    if (st)
+    {
+        hr = IInspectable_QueryInterface( st, &IID_IFrame2_t, &frame2 );
+        ok( hr == E_NOINTERFACE && frame2 == NULL, "ScaleTransform must not answer IFrame2 (hr=%#lx)\n", hr );
+        if (frame2) IUnknown_Release( (IUnknown *)frame2 );
+
+        hr = IInspectable_QueryInterface( st, &IID_IScaleTransform_t, &sc );
+        ok( hr == S_OK && sc != NULL, "QI IScaleTransform got hr %#lx\n", hr );
+        if (sc)
+        {
+            const struct test_scale_iface *si = (const struct test_scale_iface *)sc;
+            si->lpVtbl->get_ScaleX( sc, &sx );
+            si->lpVtbl->get_ScaleY( sc, &sy );
+            ok( sx == 1.0 && sy == 1.0, "ScaleTransform defaults should be 1.0/1.0, got %.2f/%.2f\n", sx, sy );
+            si->lpVtbl->put_CenterX( sc, 10.0 );
+            si->lpVtbl->put_CenterY( sc, 12.0 );
+            si->lpVtbl->put_ScaleX( sc, 1.5 );
+            si->lpVtbl->put_ScaleY( sc, 0.75 );
+            si->lpVtbl->get_CenterX( sc, &cx );
+            si->lpVtbl->get_CenterY( sc, &cy );
+            si->lpVtbl->get_ScaleX( sc, &sx );
+            si->lpVtbl->get_ScaleY( sc, &sy );
+            ok( cx == 10.0 && cy == 12.0 && sx == 1.5 && sy == 0.75,
+                "ScaleTransform roundtrip got (%.2f, %.2f, %.2f, %.2f)\n", cx, cy, sx, sy );
+            IUnknown_Release( (IUnknown *)sc );
+        }
+        IInspectable_Release( st );
+    }
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -1624,6 +1916,7 @@ START_TEST(xaml)
     test_VectorGrowthBeyondOldCaps();
     test_TruncatedXbfBounds();
     test_EventRegistryAndTransientLifecycle();
+    test_WinUINotepadRegressions();
 
     RoUninitialize();
 }

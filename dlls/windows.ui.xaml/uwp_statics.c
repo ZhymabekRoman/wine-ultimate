@@ -500,6 +500,7 @@ static const void *uwp_selector_statics_obj;
 static const void *uwp_buttonbase_statics_obj;
 static const void *uwp_uielement_routed_statics_obj;
 static const void *uwp_grid_statics_obj;
+static const void *uwp_focus_manager_statics_obj;
 static const GUID IID_IUIElementStatics4_UWP;
 static const GUID IID_IUIElementStatics6_UWP;
 static const GUID IID_IUIElementStatics7_UWP;
@@ -654,6 +655,15 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             IsEqualGUID( iid, &IID_IGridStatics_UWP3 ))
         {
             *out = (void *)&uwp_grid_statics_obj;
+            return S_OK;
+        }
+    }
+    {
+        static const GUID IID_IFocusManagerStatics_UWP =
+            { 0x1eccd326, 0x8182, 0x4482, { 0x82, 0x6a, 0x09, 0x18, 0xe9, 0xed, 0x9a, 0xf7 } };
+        if (IsEqualGUID( iid, &IID_IFocusManagerStatics_UWP ))
+        {
+            *out = (void *)&uwp_focus_manager_statics_obj;
             return S_OK;
         }
     }
@@ -1074,6 +1084,43 @@ static const void *uwp_grid_statics_vtbl[24] =
     [18 ... 23] = uwp_generic_noop,
 };
 static const void *uwp_grid_statics_obj = uwp_grid_statics_vtbl;
+
+static HRESULT WINAPI uwp_fm_GetFocusedElement( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fm_TryMoveFocus( void *iface, int dir, boolean *res )
+{
+    if (res) *res = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fm_FindNextFocusableElement( void *iface, int dir, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fm_FindNextFocusableElementWithHint( void *iface, int dir, RECT hint, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static const void *uwp_focus_manager_statics_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = uwp_fm_GetFocusedElement,
+    [7] = uwp_fm_TryMoveFocus,
+    [8] = uwp_fm_FindNextFocusableElement,
+    [9] = uwp_fm_FindNextFocusableElementWithHint,
+    [10 ... 15] = uwp_generic_noop,
+};
+static const void *uwp_focus_manager_statics_obj = uwp_focus_manager_statics_vtbl;
 
 static const void *uwp_uielement_statics_vtbl[64] =
 {

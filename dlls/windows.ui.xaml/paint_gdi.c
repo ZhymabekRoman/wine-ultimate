@@ -207,11 +207,27 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             RECT trc = el->bounds;
             IInspectable *items[64];
             int count = uwp_tabview_get_items( el, items, ARRAY_SIZE(items) );
+            BOOL light = uwp_is_light_theme( el );
+            COLORREF strip_bg = uwp_paint_resolve_color( el, L"TabViewBackground",
+                                                         light ? RGB( 236, 236, 238 ) : RGB( 32, 32, 32 ),
+                                                         light ? RGB( 236, 236, 238 ) : RGB( 32, 32, 32 ) );
+            COLORREF sel_bg = uwp_paint_resolve_color( el, L"TabViewItemHeaderBackgroundSelected",
+                                                       light ? RGB( 250, 250, 250 ) : RGB( 44, 44, 44 ),
+                                                       strip_bg );
+            COLORREF sel_fg = light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 );
+            COLORREF inact_fg = light ? RGB( 92, 92, 96 ) : RGB( 195, 195, 195 );
+            COLORREF close_fg = light ? RGB( 96, 96, 100 ) : RGB( 185, 185, 185 );
+            COLORREF add_fg = light ? RGB( 48, 48, 52 ) : RGB( 220, 220, 220 );
+            int hov_idx = el->nav ? el->nav->tab_hovered_idx : -1;
+            int overlay_mode = el->nav ? el->nav->tab_close_overlay_mode : 0;
+            HBRUSH sbr = CreateSolidBrush( strip_bg );
             int i;
             HFONT font = CreateFontW( -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                       CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
             HGDIOBJ old_font = SelectObject( hdc, font );
+            FillRect( hdc, &trc, sbr );
+            DeleteObject( sbr );
             SetBkMode( hdc, TRANSPARENT );
             if (count == 0)
             {
@@ -219,19 +235,19 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                 uwp_tabview_compute_rects( &trc, 1, 0, &pill, &close_rc, &add_rc );
                 if (uwp_has_text( el ))
                 {
-                    HBRUSH tbr = CreateSolidBrush( RGB( 44, 44, 44 ) );
+                    HBRUSH tbr = CreateSolidBrush( sel_bg );
                     FillRect( hdc, &pill, tbr );
                     DeleteObject( tbr );
-                    SetTextColor( hdc, RGB( 255, 255, 255 ) );
-                    pill.left += 10;
-                    pill.right = max( pill.left, close_rc.left - 2 );
+                    SetTextColor( hdc, sel_fg );
+                    pill.left += 12;
+                    pill.right = max( pill.left, close_rc.left - 4 );
                     DrawTextW( hdc, uwp_elem_text( el ), -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
-                    SetTextColor( hdc, RGB( 185, 185, 185 ) );
+                    SetTextColor( hdc, close_fg );
                     DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 }
                 if (add_rc.right > add_rc.left + 12)
                 {
-                    SetTextColor( hdc, RGB( 210, 210, 210 ) );
+                    SetTextColor( hdc, add_fg );
                     DrawTextW( hdc, L"+", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 }
             }
@@ -241,20 +257,28 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                 RECT pill, close_rc, add_rc;
                 IInspectable *sel = uwp_elem_selected_item( el );
                 BOOL is_sel = sel ? (items[i] == sel) : (i == 0);
-                HBRUSH tbr = CreateSolidBrush( is_sel ? RGB( 44, 44, 44 ) : RGB( 28, 28, 28 ) );
+                BOOL is_hov = (i == hov_idx);
+                BOOL show_close = is_sel || is_hov || (overlay_mode == 2);
                 uwp_tabview_get_item_title( items[i], tab_title, ARRAY_SIZE(tab_title) );
                 uwp_tabview_compute_rects( &trc, count, i, &pill, &close_rc, &add_rc );
-                FillRect( hdc, &pill, tbr );
-                DeleteObject( tbr );
-                SetTextColor( hdc, is_sel ? RGB( 255, 255, 255 ) : RGB( 195, 195, 195 ) );
-                pill.left += 10;
-                pill.right = max( pill.left, close_rc.left - 2 );
+                if (is_sel)
+                {
+                    HBRUSH tbr = CreateSolidBrush( sel_bg );
+                    FillRect( hdc, &pill, tbr );
+                    DeleteObject( tbr );
+                }
+                SetTextColor( hdc, is_sel ? sel_fg : inact_fg );
+                pill.left += 12;
+                pill.right = show_close ? max( pill.left, close_rc.left - 4 ) : max( pill.left, pill.right - 10 );
                 DrawTextW( hdc, tab_title, -1, &pill, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
-                SetTextColor( hdc, RGB( 185, 185, 185 ) );
-                DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                if (show_close)
+                {
+                    SetTextColor( hdc, close_fg );
+                    DrawTextW( hdc, L"\x00d7", -1, &close_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                }
                 if (i == count - 1 && add_rc.right > add_rc.left + 12)
                 {
-                    SetTextColor( hdc, RGB( 210, 210, 210 ) );
+                    SetTextColor( hdc, add_fg );
                     DrawTextW( hdc, L"+", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 }
                 IInspectable_Release( items[i] );
@@ -296,6 +320,63 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             }
             return;
         }
+    }
+
+    if (wcsstr( el->class_name, L"AnimatedIcon" ) && !wcsstr( el->class_name, L"Source" ) && !el->content && !el->children_coll)
+    {
+        IInspectable *fb_src = NULL;
+        struct uwp_element *src_el = NULL;
+        WCHAR glyph[16] = {0}, ff_raw[64] = {0}, ff_buf[64] = {0};
+        double fs = el->has_font_size ? el->font_size : 14.0;
+        int di;
+        if (el->dp_cnt > 0 && el->dp_store)
+        {
+            AcquireSRWLockShared( &el->dp_lock );
+            for (di = 0; di < el->dp_cnt; di++)
+            {
+                if (!wcscmp( xaml_dp_get_name( el->dp_store[di].dp ), L"FallbackIconSource" ) && el->dp_store[di].value)
+                {
+                    fb_src = el->dp_store[di].value;
+                    IInspectable_AddRef( fb_src );
+                    break;
+                }
+            }
+            ReleaseSRWLockShared( &el->dp_lock );
+        }
+        if (fb_src && (src_el = uwp_elem_from_any( fb_src )))
+        {
+            if (uwp_has_text( src_el )) lstrcpynW( glyph, uwp_elem_text( src_el ), ARRAY_SIZE(glyph) );
+            if (uwp_elem_font_family( src_el )[0]) lstrcpynW( ff_raw, uwp_elem_font_family( src_el ), ARRAY_SIZE(ff_raw) );
+            if (src_el->has_font_size && src_el->font_size > 0.0) fs = src_el->font_size;
+        }
+        if (glyph[0])
+        {
+            COLORREF tfg = uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                                    uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
+            int fh = max( 12, (int)(fs * g_layout_scale + 0.5f) );
+            HFONT gfont;
+            HGDIOBJ old_gfont;
+            if (!ff_raw[0]) lstrcpynW( ff_raw, L"Segoe MDL2 Assets", ARRAY_SIZE(ff_raw) );
+            uwp_resolve_font_family( ff_raw, ff_buf, ARRAY_SIZE(ff_buf) );
+            if (!ff_buf[0]) lstrcpynW( ff_buf, ff_raw, ARRAY_SIZE(ff_buf) );
+            if (glyph[0] >= 0xe000 && !glyph[1] && !xaml_gpu_font_has_glyphs( ff_buf, glyph ))
+            {
+                if (glyph[0] == 0xe713) lstrcpynW( glyph, L"\x2699", ARRAY_SIZE(glyph) );
+                else if (glyph[0] == 0xe711) lstrcpynW( glyph, L"\x00d7", ARRAY_SIZE(glyph) );
+                lstrcpynW( ff_buf, L"Segoe UI", ARRAY_SIZE(ff_buf) );
+            }
+            gfont = CreateFontW( -fh, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, FF_SWISS, ff_buf );
+            old_gfont = SelectObject( hdc, gfont );
+            SetTextColor( hdc, tfg );
+            SetBkMode( hdc, TRANSPARENT );
+            DrawTextW( hdc, glyph, -1, &el->bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+            SelectObject( hdc, old_gfont );
+            DeleteObject( gfont );
+        }
+        if (fb_src) IInspectable_Release( fb_src );
+        return;
     }
 
     if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
@@ -407,12 +488,13 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             HGDIOBJ old_font = SelectObject( hdc, font );
             COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
                 ? blend_argb_over( el->fg_argb, surface_bg )
-                : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
+                : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                           uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg );
             if (uwp_is_menubar_item( el ) &&
                 (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
             {
                 RECT hrc = trc;
-                HBRUSH hbr = CreateSolidBrush( RGB( 54, 54, 54 ) );
+                HBRUSH hbr = CreateSolidBrush( uwp_is_light_theme( el ) ? RGB( 230, 230, 234 ) : RGB( 54, 54, 54 ) );
                 InflateRect( &hrc, -2, -3 );
                 FillRect( hdc, &hrc, hbr );
                 DeleteObject( hbr );

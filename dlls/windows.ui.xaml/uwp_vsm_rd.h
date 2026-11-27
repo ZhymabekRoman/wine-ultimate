@@ -266,6 +266,8 @@ BOOL uwp_parse_color_string( const WCHAR *s, UINT32 *out_argb );
 BOOL uwp_is_bg_pid( WORD pid );
 BOOL uwp_is_border_pid( WORD pid );
 BOOL uwp_is_fg_pid( WORD pid );
+void uwp_refresh_theme_tree( struct uwp_element *el );
+void uwp_fire_actual_theme_changed( struct uwp_element *el );
 void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *style_key );
 void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
                             struct uwp_rd_bucket *b, struct uwp_rd_entry *se, int depth );

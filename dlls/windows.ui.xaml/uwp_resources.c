@@ -1176,7 +1176,7 @@ BOOL uwp_is_light_theme( struct uwp_element *scope_el )
     struct uwp_element *cur;
     int hops = 0;
 
-    for (cur = scope_el; cur && hops < 16; cur = cur->parent, hops++)
+    for (cur = scope_el; cur && hops < 64; cur = cur->parent, hops++)
     {
         if (cur->requested_theme == 1) return TRUE;  /* ElementTheme_Light */
         if (cur->requested_theme == 2) return FALSE; /* ElementTheme_Dark */
@@ -1544,4 +1544,84 @@ BOOL uwp_rd_haskey( void *rd_key, void *key_obj )
     if (uwp_rd_find_entry( b, b ? b->owner_el : NULL, key_str, 0, &e, &found_b ) && e)
         return e->value != NULL || e->kind != UWP_RD_OBJ;
     return FALSE;
+}
+
+static void uwp_refresh_theme_tree_depth( struct uwp_element *el, int depth )
+{
+    UINT32 argb = 0;
+    int i;
+    if (!el || depth > 32) return;
+    if (el->style_anim)
+    {
+        struct uwp_style_anim_ext *sa = el->style_anim;
+        if (sa->bg_theme_key[0] && uwp_resolve_brush_or_color( el->rd_bucket, el, sa->bg_theme_key, 0, &argb ))
+            uwp_el_set_bg_argb( el, argb );
+        if (sa->fg_theme_key[0] && uwp_resolve_brush_or_color( el->rd_bucket, el, sa->fg_theme_key, 0, &argb ))
+            uwp_el_set_fg_argb( el, argb );
+        if (sa->border_theme_key[0] && uwp_resolve_brush_or_color( el->rd_bucket, el, sa->border_theme_key, 0, &argb ))
+            uwp_el_set_border_argb( el, argb );
+    }
+    if (el->bg_brush)
+    {
+        struct uwp_element *be = uwp_elem_from_any( el->bg_brush );
+        if (be && be->style_anim && be->style_anim->brush_color_ref[0] &&
+            uwp_resolve_brush_or_color( el->rd_bucket, el, be->style_anim->brush_color_ref, 0, &argb ))
+            uwp_set_brush_element_argb( el->bg_brush, argb );
+    }
+    if (el->fill_brush)
+    {
+        struct uwp_element *fe = uwp_elem_from_any( el->fill_brush );
+        if (fe && fe->style_anim && fe->style_anim->brush_color_ref[0] &&
+            uwp_resolve_brush_or_color( el->rd_bucket, el, fe->style_anim->brush_color_ref, 0, &argb ))
+            uwp_set_brush_element_argb( el->fill_brush, argb );
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el)
+        {
+            if (!ch->parent) ch->parent = el;
+            uwp_refresh_theme_tree_depth( ch, depth + 1 );
+        }
+    }
+    if (el->pane)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->pane );
+        if (ch && ch != el)
+        {
+            if (!ch->parent) ch->parent = el;
+            uwp_refresh_theme_tree_depth( ch, depth + 1 );
+        }
+    }
+    if (el->template_root && el->template_root != el)
+    {
+        if (!el->template_root->parent) el->template_root->parent = el;
+        uwp_refresh_theme_tree_depth( el->template_root, depth + 1 );
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (i = 0; v && (unsigned int)i < v->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[i] );
+            if (ch && ch != el)
+            {
+                if (!ch->parent) ch->parent = el;
+                uwp_refresh_theme_tree_depth( ch, depth + 1 );
+            }
+        }
+    }
+    for (i = 0; i < el->named_cnt; i++)
+    {
+        struct uwp_element *ch = el->named_elems[i];
+        if (ch && ch != el && ch->parent == el)
+            uwp_refresh_theme_tree_depth( ch, depth + 1 );
+    }
+    if (el->events && el->events->actual_theme_reg.count > 0)
+        uwp_fire_actual_theme_changed( el );
+}
+
+void uwp_refresh_theme_tree( struct uwp_element *el )
+{
+    uwp_refresh_theme_tree_depth( el, 0 );
 }

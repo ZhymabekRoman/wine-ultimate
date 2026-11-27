@@ -98,6 +98,10 @@ void xaml_gpu_get_clip( BOOL *has_clip, RECT *clip_rc );
 void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
                          float radius, UINT32 fill_argb, UINT32 border_argb,
                          float border_thickness, float opacity );
+void xaml_gpu_push_rect_radii( float x0, float y0, float x1, float y1, const RECT *clip_rc,
+                               float r_tl, float r_tr, float r_br, float r_bl,
+                               UINT32 fill_argb, UINT32 border_argb,
+                               float border_thickness, float opacity );
 void xaml_gpu_push_gradient_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
                                   float radius, UINT32 color0_argb, UINT32 color1_argb,
                                   float start_x, float start_y, float end_x, float end_y,

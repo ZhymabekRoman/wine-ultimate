@@ -2248,3 +2248,78 @@ void uwp_media_ensure_started( struct uwp_element *el )
     if (!m->video_thread)
         InterlockedExchange( &m->video_started, 0 );
 }
+
+static HRESULT WINAPI uwp_scale_get_CenterX( void *iface, double *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    if (!val) return E_POINTER;
+    *val = (impl && impl->style_anim) ? impl->style_anim->center_x : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scale_put_CenterX( void *iface, double val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->center_x = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scale_get_CenterY( void *iface, double *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    if (!val) return E_POINTER;
+    *val = (impl && impl->style_anim) ? impl->style_anim->center_y : 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scale_put_CenterY( void *iface, double val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->center_y = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scale_get_ScaleX( void *iface, double *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    if (!val) return E_POINTER;
+    *val = (impl && impl->style_anim) ? impl->style_anim->scale_x : 1.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scale_put_ScaleX( void *iface, double val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->scale_x = val;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scale_get_ScaleY( void *iface, double *val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    if (!val) return E_POINTER;
+    *val = (impl && impl->style_anim) ? impl->style_anim->scale_y : 1.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scale_put_ScaleY( void *iface, double val )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFrame3_iface );
+    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+    if (sa) sa->scale_y = val;
+    return S_OK;
+}
+const void *uwp_scale_transform_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_scale_get_CenterX,
+    [7] = uwp_scale_put_CenterX,
+    [8] = uwp_scale_get_CenterY,
+    [9] = uwp_scale_put_CenterY,
+    [10] = uwp_scale_get_ScaleX,
+    [11] = uwp_scale_put_ScaleX,
+    [12] = uwp_scale_get_ScaleY,
+    [13] = uwp_scale_put_ScaleY,
+    [14 ... 15] = uwp_generic_noop,
+};

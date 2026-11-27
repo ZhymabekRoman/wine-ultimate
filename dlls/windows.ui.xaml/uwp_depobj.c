@@ -538,10 +538,24 @@ static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname
         { L"AddTabButtonCommandParameter",offsetof(struct uwp_nav_ext, tab_add_cmd_param), FALSE },
     };
     struct uwp_nav_ext *nav = uwp_elem_ensure_nav( impl );
+    INT32 ev = 0;
     size_t k;
 
     if (!nav) return;
     TRACE( "TabView SetValue dp=%s val=%p\n", debugstr_w(dpname), val );
+    if (!wcscmp( dpname, L"CloseButtonOverlayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+    {
+        nav->tab_close_overlay_mode = ev;
+        uwp_invalidate_window();
+        return;
+    }
+    if (!wcscmp( dpname, L"TabItemTemplate" ))
+    {
+        uwp_replace_iface( &impl->item_template, val );
+        uwp_tabview_sync_containers( impl );
+        uwp_invalidate_window();
+        return;
+    }
     for (k = 0; k < ARRAY_SIZE(tab_dps); k++)
     {
         if (!wcscmp( dpname, tab_dps[k].dp ))
@@ -549,17 +563,7 @@ static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname
             IInspectable **slot = (IInspectable **)((char *)nav + tab_dps[k].off);
             BOOL changed = uwp_replace_iface( slot, val );
             if (!wcscmp( dpname, L"TabItemsSource" ))
-            {
-                int ni;
-                for (ni = 0; ni < impl->named_cnt; ni++)
-                {
-                    if (impl->named_elems[ni] && !wcscmp( impl->named_elems[ni]->name, L"TabListView" ))
-                    {
-                        uwp_replace_iface( &impl->named_elems[ni]->items_source, val );
-                        break;
-                    }
-                }
-            }
+                uwp_tabview_sync_containers( impl );
             if (changed && tab_dps[k].invalidate)
                 uwp_invalidate_window();
             return;
@@ -932,6 +936,74 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
     else if (!wcscmp( dpname, L"Flyout" ))
     {
         uwp_replace_iface( &impl->flyout, val );
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"Glyph" ) && val)
+    {
+        WCHAR gbuf[32] = {0};
+        if (uwp_unbox_string( val, gbuf, ARRAY_SIZE(gbuf) ) && gbuf[0])
+        {
+            uwp_elem_set_text( impl, gbuf );
+            uwp_invalidate_window();
+        }
+    }
+    else if (!wcscmp( dpname, L"Symbol" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+    {
+        WCHAR gbuf[2] = { (WCHAR)ev, 0 };
+        if (ev > 0)
+        {
+            uwp_elem_set_text( impl, gbuf );
+            if (!uwp_elem_font_family( impl )[0])
+                uwp_elem_set_font_family( impl, L"Segoe MDL2 Assets" );
+            uwp_invalidate_window();
+        }
+    }
+    else if (!wcscmp( dpname, L"FontSize" ) && val && uwp_unbox_double( val, &dv ) && dv > 0.0)
+    {
+        impl->font_size = dv;
+        impl->has_font_size = TRUE;
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"FontFamily" ) && val)
+    {
+        struct uwp_element *ff = uwp_elem_from_any( val );
+        const WCHAR *ffs = uwp_elem_font_family( ff );
+        if (ffs && ffs[0])
+            uwp_elem_set_font_family( impl, ffs );
+        else
+        {
+            WCHAR sbuf[128] = {0};
+            if (uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ) && sbuf[0])
+                uwp_elem_set_font_family( impl, sbuf );
+        }
+        uwp_invalidate_window();
+    }
+    else if (!wcscmp( dpname, L"Foreground" ))
+    {
+        if (!val)
+        {
+            impl->has_fg = FALSE;
+            impl->fg_alpha = 0;
+        }
+        else
+        {
+            struct uwp_element *be = uwp_elem_from_any( val );
+            if (be && uwp_elem_has_brush_argb( be ))
+                uwp_el_set_fg_argb( impl, uwp_elem_brush_argb( be ) );
+            else
+            {
+                void *scb = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ISolidColorBrush_UWP, &scb )) && scb)
+                {
+                    typedef HRESULT (WINAPI *scb_get_color_fn)( void *, Color * );
+                    scb_get_color_fn fn = (scb_get_color_fn)((void **)*(void **)scb)[6];
+                    Color c = {0};
+                    if (fn && SUCCEEDED(fn( scb, &c )))
+                        uwp_el_set_fg_argb( impl, ((UINT32)c.A << 24) | ((UINT32)c.R << 16) | ((UINT32)c.G << 8) | c.B );
+                    IUnknown_Release( (IUnknown *)scb );
+                }
+            }
+        }
         uwp_invalidate_window();
     }
     else if (!wcscmp( dpname, L"IsChecked" ) || !wcscmp( dpname, L"IsSelected" ))

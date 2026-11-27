@@ -169,6 +169,9 @@ const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp,
         case 0xf7c8: return L"x\x00b2";
         case 0xf899: return L"\x221a";
         case 0xe700: return L"\x2630";
+        case 0xe710: return L"+";
+        case 0xe711: return L"\x00d7";
+        case 0xe713: return L"\x2699";
         case 0xe81c: return L"H";
         case 0xee49: return L"\x29c9";
         }

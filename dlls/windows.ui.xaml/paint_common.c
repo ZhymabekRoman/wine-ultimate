@@ -218,14 +218,17 @@ void uwp_paint_resolve_progress_ring_colors( struct uwp_element *el, COLORREF su
 void uwp_paint_resolve_teaching_tip_colors( struct uwp_element *el, COLORREF surface_bg,
                                             COLORREF *out_bg, COLORREF *out_bd )
 {
+    BOOL light = uwp_is_light_theme( el );
     if (out_bg)
     {
         *out_bg = (el->has_bg && el->bg_alpha > 0)
             ? blend_argb_over( el->bg_argb, surface_bg )
-            : uwp_paint_resolve_color( el, L"SolidBackgroundFillColorTertiaryBrush", RGB( 44, 44, 44 ), surface_bg );
+            : uwp_paint_resolve_color( el, L"SolidBackgroundFillColorTertiaryBrush",
+                                       light ? RGB( 249, 249, 249 ) : RGB( 44, 44, 44 ), surface_bg );
     }
     if (out_bd)
-        *out_bd = uwp_paint_resolve_color( el, L"SurfaceStrokeColorFlyoutBrush", RGB( 82, 82, 82 ), surface_bg );
+        *out_bd = uwp_paint_resolve_color( el, L"SurfaceStrokeColorFlyoutBrush",
+                                           light ? RGB( 220, 220, 224 ) : RGB( 82, 82, 82 ), surface_bg );
 }
 
 void uwp_paint_resolve_searchbox_style( struct uwp_element *el, COLORREF surface_bg,
@@ -233,17 +236,22 @@ void uwp_paint_resolve_searchbox_style( struct uwp_element *el, COLORREF surface
                                         COLORREF *out_bg, COLORREF *out_bd, COLORREF *out_fg,
                                         WCHAR *disp, size_t disp_cap )
 {
+    BOOL light = uwp_is_light_theme( el );
     COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
         ? blend_argb_over( el->bg_argb, surface_bg )
-        : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 45, 45, 48 ), surface_bg );
+        : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush",
+                                   light ? RGB( 255, 255, 255 ) : RGB( 45, 45, 48 ), surface_bg );
     COLORREF sbd = focused
         ? uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg )
-        : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 78, 78, 84 ), surface_bg );
+        : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush",
+                                   light ? RGB( 210, 210, 214 ) : RGB( 78, 78, 84 ), surface_bg );
     COLORREF sfg = (cur_txt && cur_txt[0])
-        ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), sbg )
+        ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush",
+                                   light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), sbg )
         : ((el->has_fg && el->fg_alpha > 0)
             ? blend_argb_over( el->fg_argb, sbg )
-            : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 190, 190, 195 ), sbg ));
+            : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush",
+                                       light ? RGB( 96, 96, 102 ) : RGB( 190, 190, 195 ), sbg ));
     const WCHAR *ph = uwp_elem_placeholder( el );
     const WCHAR *fallback = (ph && ph[0]) ? ph : L"\x26b2   Search";
 
@@ -283,8 +291,13 @@ void uwp_paint_resolve_button_style( struct uwp_element *el, COLORREF surface_bg
     {
         if (el->bg_alpha == 0)
         {
+            BOOL light = uwp_is_light_theme( el );
             draw_bg = el->is_pressed || el->is_hovered;
-            bg = el->is_pressed ? RGB( 55, 55, 55 ) : (el->is_hovered ? RGB( 45, 45, 45 ) : surface_bg);
+            bg = el->is_pressed
+                ? (light ? RGB( 218, 218, 224 ) : RGB( 62, 62, 66 ))
+                : (el->is_hovered
+                    ? (light ? RGB( 230, 230, 234 ) : RGB( 50, 50, 54 ))
+                    : surface_bg);
             bg_argb = uwp_cr_to_argb( bg );
         }
         else
@@ -347,7 +360,7 @@ void uwp_paint_resolve_button_style( struct uwp_element *el, COLORREF surface_bg
         if (uwp_resolve_brush_or_color( NULL, el, L"ControlStrokeColorDefaultBrush", 0, &res_argb ) && ((res_argb >> 24) & 0xff))
             bd_argb = apply_opacity_to_argb( res_argb, el->opacity );
         else
-            bd_argb = 0x33ffffffu;
+            bd_argb = uwp_is_light_theme( el ) ? 0x1a000000u : 0x33ffffffu;
         bd = blend_argb_over( bd_argb, surface_bg );
     }
 

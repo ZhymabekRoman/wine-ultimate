@@ -910,9 +910,15 @@ HRESULT WINAPI uwp_fe2_get_RequestedTheme( void *iface, int *out )
 HRESULT WINAPI uwp_fe2_put_RequestedTheme( void *iface, int val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
+    TRACE( "IFrameworkElement2::put_RequestedTheme on %s (%s) %d -> %d\n",
+           impl ? debugstr_w(impl->class_name) : "(null)",
+           impl ? debugstr_w(impl->name) : "",
+           impl ? impl->requested_theme : -1, val );
     if (impl && impl->requested_theme != val)
     {
         impl->requested_theme = val;
+        uwp_refresh_theme_tree( impl );
+        g_layout_dirty = TRUE;
         uwp_invalidate_window();
     }
     return S_OK;
@@ -1413,12 +1419,19 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                     child->parent = impl;
                     child->in_visual_tree = TRUE;
                     lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
+                    if (impl->item_template)
+                    {
+                        child->item_template = impl->item_template;
+                        IInspectable_AddRef( child->item_template );
+                    }
                     if (impl->nav && impl->nav->tab_items_source)
                     {
                         child->items_source = impl->nav->tab_items_source;
                         IInspectable_AddRef( child->items_source );
                     }
                     uwp_element_add_named( impl, child );
+                    if (child->items_source)
+                        uwp_items_ctrl_materialize_source( child, child->items_source );
                 }
                 IInspectable_Release( raw );
             }

@@ -884,29 +884,48 @@ static void textfont_cache_range_props(ITextFontImpl *font)
     }
 }
 
-static HRESULT textrange_expand(ITextRange *range, LONG unit, LONG *delta)
+static HRESULT textrange_expand(ITextRange *range, ME_TextEditor *editor, LONG unit, LONG *delta)
 {
     LONG expand_start, expand_end;
+    LONG start = 0, end = 0, story_len = 0;
+
+    ITextRange_GetStart(range, &start);
+    ITextRange_GetEnd(range, &end);
+    ITextRange_GetStoryLength(range, &story_len);
 
     switch (unit)
     {
     case tomStory:
-    case tomParagraph:
         expand_start = 0;
-        ITextRange_GetStoryLength(range, &expand_end);
+        expand_end = story_len;
         break;
+    case tomParagraph:
+    {
+        ME_Paragraph *para = editor_first_para(editor);
+        LONG lo = min(start, end), hi = max(start, end);
+        while (para && para->next_para && para->next_para->type == diParagraph &&
+               para->next_para->member.para.nCharOfs <= lo)
+            para = para_next(para);
+        expand_start = para ? para->nCharOfs : 0;
+        while (para && para->next_para && para->next_para->type == diParagraph &&
+               para->next_para->member.para.nCharOfs <= hi)
+        {
+            if (lo < hi && para->next_para->member.para.nCharOfs == hi)
+                break;
+            para = para_next(para);
+        }
+        expand_end = (para && para->next_para && para->next_para->type == diParagraph)
+                   ? para->next_para->member.para.nCharOfs
+                   : story_len;
+        break;
+    }
     default:
         FIXME("unit %ld is not supported\n", unit);
         return E_NOTIMPL;
     }
 
-    if (delta) {
-        LONG start, end;
-
-        ITextRange_GetStart(range, &start);
-        ITextRange_GetEnd(range, &end);
+    if (delta)
         *delta = expand_end - expand_start - (end - start);
-    }
 
     ITextRange_SetStart(range, expand_start);
     ITextRange_SetEnd(range, expand_end);
@@ -1920,7 +1939,7 @@ static HRESULT WINAPI ITextRange_fnExpand(ITextRange *me, LONG unit, LONG *delta
     if (!This->child.reole)
         return CO_E_RELEASED;
 
-    return textrange_expand(me, unit, delta);
+    return textrange_expand(me, This->child.reole->editor, unit, delta);
 }
 
 /* 0-based index of the paragraph containing char offset ofs */
@@ -1999,31 +2018,31 @@ static LONG sentence_index( ME_TextEditor *editor, LONG ofs )
     return index;
 }
 
-/* index of the given unit at the range start, matching native GetIndex:
- * scpDocument -> 0, scpChar -> cp, scpLine -> visual line number,
- * scpParagraph -> 0-based paragraph number, scpWord/scpSentence ->
- * 0-based number of units preceding the insertion point */
+/* index of the given unit at the range start, matching native GetIndex (1-based):
+ * tomStory -> 1, tomCharacter -> cp + 1, tomLine -> 1-based visual line number,
+ * tomParagraph -> 1-based paragraph number, tomWord/tomSentence ->
+ * 1-based unit index */
 static HRESULT textrange_get_index( ME_TextEditor *editor, LONG start, LONG unit, LONG *index )
 {
     switch (unit)
     {
-    case scpDocument:
-        *index = 0;
+    case tomStory:
+        *index = 1;
         break;
-    case scpChar:
-        *index = start;
+    case tomCharacter:
+        *index = start + 1;
         break;
-    case scpLine:
-        *index = row_number_from_char_ofs( editor, start );
+    case tomLine:
+        *index = row_number_from_char_ofs( editor, start ) + 1;
         break;
-    case scpParagraph:
-        *index = paragraph_index( editor, start );
+    case tomParagraph:
+        *index = paragraph_index( editor, start ) + 1;
         break;
-    case scpWord:
-        *index = word_index( editor, start );
+    case tomWord:
+        *index = word_index( editor, start ) + 1;
         break;
-    case scpSentence:
-        *index = sentence_index( editor, start );
+    case tomSentence:
+        *index = sentence_index( editor, start ) + 1;
         break;
     default:
         FIXME("unit %ld not supported\n", unit);
@@ -2032,22 +2051,24 @@ static HRESULT textrange_get_index( ME_TextEditor *editor, LONG start, LONG unit
     return S_OK;
 }
 
-/* Move *io_pos to the start of the *io_index-th unit, clamping at the
- * story end; *io_index receives the index actually reached. */
+/* Move *io_pos to the start of the 1-based *io_index-th unit, clamping at the
+ * story end; *io_index receives the 1-based index actually reached. */
 static void unit_seek( ME_TextEditor *editor, LONG unit, LONG *io_index, LONG *io_pos )
 {
-    LONG index = *io_index;
+    LONG target_idx = (*io_index > 1) ? (*io_index - 1) : 0;
+    LONG index = target_idx;
 
     switch (unit)
     {
-    case scpDocument:
-        *io_index = 0;
+    case tomStory:
+        *io_index = 1;
         *io_pos = 0;
         return;
-    case scpChar:
-        *io_pos = max( 0, min( index, ME_GetTextLength( editor ) ) );
+    case tomCharacter:
+        *io_pos = max( 0, min( target_idx, ME_GetTextLength( editor ) ) );
+        *io_index = *io_pos + 1;
         return;
-    case scpLine:
+    case tomLine:
     {
         LONG len = ME_GetTextLength( editor );
         LONG pos = 0;
@@ -2066,23 +2087,23 @@ static void unit_seek( ME_TextEditor *editor, LONG unit, LONG *io_index, LONG *i
             }
             pos = next;
         }
-        *io_index -= index;
+        *io_index = (target_idx - index) + 1;
         *io_pos = pos;
         return;
     }
-    case scpParagraph:
+    case tomParagraph:
     {
         ME_Paragraph *para = editor_first_para( editor );
-        while (index > 0 && para_next( para ))
+        while (index > 0 && para->next_para && para->next_para->type == diParagraph)
         {
             para = para_next( para );
             index--;
         }
-        *io_index -= index;
+        *io_index = (target_idx - index) + 1;
         *io_pos = para->nCharOfs;
         return;
     }
-    case scpWord:
+    case tomWord:
     {
         ME_Cursor cursor;
         ME_SetCursorToStart( editor, &cursor );
@@ -2093,11 +2114,11 @@ static void unit_seek( ME_TextEditor *editor, LONG unit, LONG *io_index, LONG *i
             if (ME_GetCursorOfs( &cursor ) <= prev) break;
             index--;
         }
-        *io_index -= index;
+        *io_index = (target_idx - index) + 1;
         *io_pos = ME_GetCursorOfs( &cursor );
         return;
     }
-    case scpSentence:
+    case tomSentence:
     {
         ME_Cursor cursor;
         LONG reached = 0;
@@ -2113,9 +2134,9 @@ static void unit_seek( ME_TextEditor *editor, LONG unit, LONG *io_index, LONG *i
             {
                 after_delim = FALSE;
                 reached++;
-                if (reached >= *io_index)
+                if (reached >= target_idx)
                 {
-                    *io_index = reached;
+                    *io_index = reached + 1;
                     *io_pos = pos;
                     return;
                 }
@@ -2123,7 +2144,7 @@ static void unit_seek( ME_TextEditor *editor, LONG unit, LONG *io_index, LONG *i
             ME_MoveCursorChars( editor, &cursor, 1, FALSE );
             pos = ME_GetCursorOfs( &cursor );
         }
-        *io_index = reached;
+        *io_index = reached + 1;
         *io_pos = pos;
         return;
     }
@@ -5255,7 +5276,7 @@ static HRESULT WINAPI ITextSelection_fnExpand(ITextSelection *me, LONG unit, LON
         return CO_E_RELEASED;
 
     ITextSelection_QueryInterface(me, &IID_ITextRange, (void**)&range);
-    hr = textrange_expand(range, unit, delta);
+    hr = textrange_expand(range, This->services->editor, unit, delta);
     ITextRange_Release(range);
     return hr;
 }

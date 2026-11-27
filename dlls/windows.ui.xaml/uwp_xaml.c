@@ -396,6 +396,7 @@ struct uwp_nav_ext *uwp_elem_ensure_nav( struct uwp_element *el )
     n = calloc( 1, sizeof(*n) );
     if (!n) return NULL;
     n->selected_index = -1;
+    n->tab_hovered_idx = -1;
     n->nav_stack_enabled = TRUE;
     n->nav_open_pane_length = 280.0;
     n->nav_compact_pane_length = 68.0;
@@ -1112,6 +1113,9 @@ enum uwp_qi_guard
     QI_GUARD_NAVVIEW_ALT,
     QI_GUARD_NAVVIEW_ITEM,
     QI_GUARD_SCROLL_VIEWER,
+    QI_GUARD_NOT_FRAME,
+    QI_GUARD_TABVIEW,
+    QI_GUARD_NOT_LOADED_SURFACE,
 };
 
 #define UWP_QI_MAP_SIZE 512
@@ -1331,7 +1335,7 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IUIElementOverrides_UWP, IStyle_iface );
     QI_ADD( IID_IUIElement_Calc2, IStyle_iface );
     QI_ADD( IID_IFrameworkElement4_UWP, IStyle_iface );
-    QI_ADD( IID_IFrameworkElement6_UWP, IStyle_iface );
+    QI_ADD_G( IID_IFrameworkElement6_UWP, ILoadedImageSurface_iface, QI_GUARD_NOT_LOADED_SURFACE );
     QI_ADD( IID_IFrameworkElementOverrides_UWP, IStyle_iface );
     QI_ADD( IID_IFrameworkElementOverrides2_UWP, IStyle_iface );
     QI_ADD( IID_IControl2_UWP, IStyle_iface );
@@ -1390,6 +1394,9 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD_G( IID_IFrameProj_UWP, IFrame2_iface, QI_GUARD_FRAME );
     QI_ADD_G( IID_IFrame3_UWP, IFrame3_iface, QI_GUARD_FRAME );
     QI_ADD_G( IID_IFrame5_UWP, IFrame5_iface, QI_GUARD_FRAME );
+    QI_ADD_G( IID_IItemContainerMapping_UWP, IFrame2_iface, QI_GUARD_NOT_FRAME );
+    QI_ADD_G( IID_IScaleTransform_UWP, IFrame3_iface, QI_GUARD_NOT_FRAME );
+    QI_ADD_G( IID_ITransform_UWP, IStyle_iface, QI_GUARD_NOT_FRAME );
     QI_ADD_G( IID_IMediaPlayerElement_UWP, IMediaPlayerElement_iface, QI_GUARD_MEDIA_PLAYER );
     QI_ADD_G( IID_INavigationTransitionInfo_UWP, IStyle_iface, QI_GUARD_NAV_TRANSITION );
     QI_ADD_G( IID_IEntranceNavigationTransitionInfo_UWP, IStyle_iface, QI_GUARD_NAV_TRANSITION );
@@ -1404,7 +1411,7 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IMenuFlyoutItemBase_UWP, IFlyout_iface );
     QI_ADD( IID_IMenuFlyoutItemBase_UWP2, IFlyout_iface );
     QI_ADD( IID_IMenuBarItem_WinUI, IFlyout_iface );
-    QI_ADD( IID_ITabView_WinUI, IFlyout_iface );
+    QI_ADD_G( IID_ITabView_WinUI, IFlyout_iface, QI_GUARD_TABVIEW );
 
     QI_ADD( IID_IListViewBase_UWP, IFlyout_iface );
     QI_ADD( IID_IBitmapImage_UWP, IBitmapImage_iface );
@@ -1567,6 +1574,15 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                 case QI_GUARD_SCROLL_VIEWER:
                     ok = (impl->kind == UWP_KIND_SCROLL_VIEWER || uwp_is_scroll_viewer( impl ));
                     break;
+                case QI_GUARD_NOT_FRAME:
+                    ok = !(impl->class_flags2 & UWP_CF2_FRAME);
+                    break;
+                case QI_GUARD_TABVIEW:
+                    ok = uwp_is_tabview( impl );
+                    break;
+                case QI_GUARD_NOT_LOADED_SURFACE:
+                    ok = !wcsstr( impl->class_name, L"LoadedImageSurface" );
+                    break;
                 }
                 if (ok) *out = (char *)impl + chosen_off;
                 break;
@@ -1663,6 +1679,7 @@ static void uwp_event_bag_destroy( struct uwp_event_bag *ev )
     xaml_event_registry_clear( &ev->sv_pane_closed_reg );
     xaml_event_registry_clear( &ev->sv_pane_opening_reg );
     xaml_event_registry_clear( &ev->sv_pane_opened_reg );
+    xaml_event_registry_clear( &ev->actual_theme_reg );
     free( ev );
 }
 
@@ -2623,6 +2640,7 @@ static BOOL CALLBACK init_uwp_vtbl_map( INIT_ONCE *once, void *param, void **ctx
     VMAP( uwp_fe_vtbl, IFrameworkElement_iface );
     VMAP( uwp_fe2_vtbl, IFrameworkElement2_iface );
     VMAP( uwp_fe3_vtbl, IFrameworkElement3_iface );
+    VMAP( uwp_fe6_vtbl, ILoadedImageSurface_iface );
     VMAP( uwp_fe7_vtbl, IFrameworkElement7_iface );
     VMAP( uwp_ctrl_vtbl, IControl_iface );
     VMAP( uwp_ctrl_prot_vtbl, IControlProtected_iface );
@@ -2633,6 +2651,8 @@ static BOOL CALLBACK init_uwp_vtbl_map( INIT_ONCE *once, void *param, void **ctx
     VMAP( uwp_frame2_vtbl, IFrame2_iface );
     VMAP( uwp_frame3_vtbl, IFrame3_iface );
     VMAP( uwp_frame5_vtbl, IFrame5_iface );
+    VMAP( uwp_icm_vtbl, IFrame2_iface );
+    VMAP( uwp_scale_transform_vtbl, IFrame3_iface );
     VMAP( uwp_btn_vtbl, IButtonBase_iface );
     VMAP( uwp_tbtn_vtbl, IToggleButton_iface );
     VMAP( uwp_panel_vtbl, IPanel_iface );
@@ -2861,7 +2881,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IImage_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_img_vtbl;
     impl->IShape_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_shape_vtbl;
     impl->IXamlCompositionBrushBaseProtected_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xcbb_prot_vtbl;
-    impl->ILoadedImageSurface_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_lis_vtbl;
+    impl->ILoadedImageSurface_iface.lpVtbl = (const struct IInspectableVtbl *)(wcsstr( impl->class_name, L"LoadedImageSurface" )
+        ? uwp_lis_vtbl : uwp_fe6_vtbl);
     impl->IFontFamily_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_family_vtbl;
     impl->IFontIcon_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_icon_vtbl;
     impl->IImageBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_image_brush_vtbl;
@@ -2890,6 +2911,11 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     lstrcpynW( impl->class_name, class_name ? class_name : L"Windows.UI.Xaml.FrameworkElement", ARRAY_SIZE(impl->class_name) );
     impl->kind = classify_uwp_class( impl->class_name );
     uwp_elem_sync_class_flags( impl );
+    if (!(impl->class_flags2 & UWP_CF2_FRAME))
+    {
+        impl->IFrame2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_icm_vtbl;
+        impl->IFrame3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_scale_transform_vtbl;
+    }
     if (impl->kind == UWP_KIND_PAGE) g_last_created_page = impl;
     impl->grid_row_span = 1;
     impl->grid_col_span = 1;
