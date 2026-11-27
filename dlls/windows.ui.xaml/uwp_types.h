@@ -573,6 +573,7 @@ struct uwp_element
     IInspectable IStateTrigger_iface;
     IInspectable IStateTriggerPub_iface;
     boolean state_trigger_active;
+    UINT32 local_prop_mask; /* UWP_LP_* bits: local XBF/property values take precedence over Style setters */
     IInspectable IObservableVector_iface;
     IInspectable IVector_iface;
     IInspectable IIterable_iface;
@@ -1146,6 +1147,24 @@ static inline void uwp_elem_set_default_style_key_name( struct uwp_element *el, 
 #define UWP_PF_NO_CARD          0x0008u
 #define UWP_PF_NO_VM            0x0010u
 #define UWP_PF_NO_SPOTLIGHT_PH  0x0020u
+
+/* Local-value precedence bits stored in struct uwp_element::local_prop_mask */
+#define UWP_LP_WIDTH            (1u << 0)
+#define UWP_LP_HEIGHT           (1u << 1)
+#define UWP_LP_MARGIN           (1u << 2)
+#define UWP_LP_PADDING          (1u << 3)
+#define UWP_LP_BACKGROUND       (1u << 4)
+#define UWP_LP_FOREGROUND       (1u << 5)
+#define UWP_LP_VISIBILITY       (1u << 6)
+#define UWP_LP_H_ALIGN          (1u << 7)
+#define UWP_LP_V_ALIGN          (1u << 8)
+#define UWP_LP_FONT_SIZE        (1u << 9)
+#define UWP_LP_FONT_WEIGHT      (1u << 10)
+#define UWP_LP_FONT_FAMILY      (1u << 11)
+#define UWP_LP_BORDER_BRUSH     (1u << 12)
+#define UWP_LP_BORDER_THICKNESS (1u << 13)
+#define UWP_LP_CORNER_RADIUS    (1u << 14)
+#define UWP_LP_OPACITY          (1u << 15)
 
 static inline const WCHAR *uwp_elem_placeholder( const struct uwp_element *el )
 {

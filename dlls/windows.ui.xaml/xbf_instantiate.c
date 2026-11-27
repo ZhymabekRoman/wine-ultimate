@@ -294,62 +294,62 @@ static BOOL xbf_compile_push_object( struct xbf_sub_state *st, BYTE op, DWORD cu
 
     reuse_active_rd = (st->rd_tbl != NULL && st->obj_sp == 0 && is_rd_type && st->active_rd_node_idx != (~0u));
     if (is_rd_type) nflags |= XBF_AOT_NODE_IS_RD;
+    if (op == 0x17) nflags |= XBF_AOT_NODE_ROOT_DECL;
     if (reuse_active_rd)
     {
         cur_node_idx = st->active_rd_node_idx;
         if (cur_node_idx < ctx->aot->node_cnt)
             ctx->aot->nodes[cur_node_idx].flags |= XBF_AOT_NODE_IS_RD;
     }
-    else if (op == 0x17 && (ctx->root_el || (ctx->root_comp && !ctx->rd_only && !ctx->is_template)))
-    {
-        nflags |= XBF_AOT_NODE_ROOT_REUSE;
-        cur_node_idx = 0;
-        if (ctx->aot->node_cnt > 0)
-            ctx->aot->nodes[0].flags |= nflags;
-    }
-    else if ((ctx->rd_only || st->rd_tbl) && !is_rd_type &&
-             ((!ctx->connector &&
-               !(tid < ctx->type_cnt && (wcsstr( ctx->types[tid].full_name, L"Breakpoint" ) ||
-                                         wcsstr( ctx->types[tid].full_name, L"TemplateSelector" ) ||
-                                         wcsstr( ctx->types[tid].full_name, L"Converter" ) ||
-                                         wcsstr( ctx->types[tid].full_name, L"Layout" )))) ||
-              tid == XBF_TYPE_STYLE || tid == XBF_TYPE_BRUSH_C || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
-              tid == XBF_TYPE_BRUSH_B || tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 || tid == XBF_TYPE_STRING ||
+    else if ((ctx->rd_only || st->rd_tbl) && !is_rd_type && op != 0x17 &&
+             (sv.kind == UWP_RD_BRUSH || sv.kind == UWP_RD_COLOR ||
+              tid == XBF_TYPE_STYLE || tid == XBF_TYPE_SETTER_A || tid == XBF_TYPE_SETTER_B ||
+              tid == XBF_TYPE_DOUBLE || tid == XBF_TYPE_INT32 || tid == XBF_TYPE_STRING ||
               tid == XBF_TYPE_THICKNESS || tid == XBF_TYPE_CORNER_RADIUS || tid == XBF_TYPE_FONT_FAMILY ||
-              tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_RESOURCE_DICTIONARY))
+              tid == XBF_TYPE_COLUMN_DEFINITION || tid == XBF_TYPE_GRID_LENGTH))
     {
         nflags |= XBF_AOT_NODE_LIGHTWEIGHT;
         cur_node_idx = xbf_aot_add_node( ctx->aot, L"", L"", tid, nflags, FALSE, 0 );
     }
-    else if (tid & 0x8000)
-    {
-        WCHAR winui_buf[160];
-        cls_name = uwp_btype_to_class_name( tid );
-        if (!ctx->is_uwp_conn && !wcsncmp( cls_name, L"Windows.UI.Xaml.", 16 ))
-        {
-            swprintf( winui_buf, ARRAY_SIZE(winui_buf), L"Microsoft.UI.Xaml.%s", cls_name + 16 );
-            cls_name = winui_buf;
-        }
-        nflags |= XBF_AOT_NODE_BUILTIN;
-        if (tid == XBF_TYPE_DEFERRED_ELEMENT) nflags |= XBF_AOT_NODE_DEFERRED;
-        cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
-                                         (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
-    }
-    else if (tid < ctx->type_cnt)
-    {
-        cls_name = ctx->types[tid].full_name;
-        nflags |= XBF_AOT_NODE_APP_TYPE;
-        short_n = ctx->types[tid].short_name;
-        if (!wcsncmp( ctx->types[tid].xmlns, L"using:", 6 )) nflags |= XBF_AOT_NODE_USING_NS;
-        if (is_rd_type || wcsstr( cls_name, L"ResourceString" ) || wcsstr( cls_name, L"ResourceVirtualKey" ))
-            nflags |= XBF_AOT_NODE_NO_PROVIDER;
-        cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, short_n, tid, nflags,
-                                         (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
-    }
     else
     {
-        cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
-                                         (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
+        WCHAR winui_buf[160];
+        if (tid & 0x8000)
+        {
+            cls_name = uwp_btype_to_class_name( tid );
+            if (!ctx->is_uwp_conn && !wcsncmp( cls_name, L"Windows.UI.Xaml.", 16 ))
+            {
+                swprintf( winui_buf, ARRAY_SIZE(winui_buf), L"Microsoft.UI.Xaml.%s", cls_name + 16 );
+                cls_name = winui_buf;
+            }
+            nflags |= XBF_AOT_NODE_BUILTIN;
+            if (tid == XBF_TYPE_DEFERRED_ELEMENT) nflags |= XBF_AOT_NODE_DEFERRED;
+        }
+        else if (tid < ctx->type_cnt)
+        {
+            cls_name = ctx->types[tid].full_name;
+            nflags |= XBF_AOT_NODE_APP_TYPE;
+            short_n = ctx->types[tid].short_name;
+            if (!wcsncmp( ctx->types[tid].xmlns, L"using:", 6 )) nflags |= XBF_AOT_NODE_USING_NS;
+            if (is_rd_type) nflags |= XBF_AOT_NODE_NO_PROVIDER;
+        }
+
+        if (op == 0x17 && ctx->aot->node_cnt > 0 && (ctx->aot->nodes[0].flags & XBF_AOT_NODE_ROOT_DECL))
+        {
+            struct xbf_aot_node *n0 = &ctx->aot->nodes[0];
+            n0->class_name_off = xbf_aot_intern_str( ctx->aot, cls_name );
+            n0->short_name_off = xbf_aot_intern_str( ctx->aot, short_n );
+            n0->tid = tid;
+            n0->flags |= nflags;
+            n0->has_init_argb = (sv.kind == UWP_RD_BRUSH && sv.has_argb) ? 1u : 0u;
+            n0->init_argb = sv.argb;
+            cur_node_idx = 0;
+        }
+        else
+        {
+            cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, short_n, tid, nflags,
+                                             (sv.kind == UWP_RD_BRUSH && sv.has_argb), sv.argb );
+        }
     }
 
     if (cur_node_idx != (~0u) && !reuse_active_rd)
@@ -924,8 +924,9 @@ static BOOL xbf_compile_defer_substream( struct xbf_sub_state *st, DWORD cur_rel
         if (!ctx->rd_only)
         {
             BOOL prev_vsm = ctx->vsm_collect;
+            BOOL has_root_slot = (ctx->aot->node_cnt > 0 && (ctx->aot->nodes[0].flags & XBF_AOT_NODE_ROOT_DECL));
             ctx->vsm_collect = (st->sub_idx == 0);
-            xbf_compile_substream( ctx, (int)def_sub, ctx->root_el != NULL, NULL, st->active_rd_node_idx, st->vsm_holder );
+            xbf_compile_substream( ctx, (int)def_sub, has_root_slot, NULL, st->active_rd_node_idx, st->vsm_holder );
             ctx->vsm_collect = prev_vsm;
         }
         else if (ctx->sub_done && def_sub < ctx->sub_cnt)
@@ -1129,8 +1130,8 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
 
     aot_b.xbf_sz = xbf_sz;
     aot_b.only_sub_idx = only_sub_idx;
-    if (root_el_pre || (component && !rd_only && !is_template))
-        xbf_aot_add_node( &aot_b, root_el_pre ? root_el_pre->class_name : L"", L"", 0, XBF_AOT_NODE_ROOT_REUSE, FALSE, 0 );
+    if (only_sub_idx < 0 && !rd_only)
+        xbf_aot_add_node( &aot_b, L"", L"", 0, XBF_AOT_NODE_ROOT_DECL, FALSE, 0 );
     ctx.aot = &aot_b;
 
     ctx.xbf = xbf;
@@ -1254,7 +1255,7 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
     }
 
     /* 3. Record XBF-referenced resources and using: controls from metadata tables */
-    if (!rd_only && ctx.root_el && only_sub_idx < 0)
+    if (!rd_only && only_sub_idx < 0)
     {
         const BYTE *rx = NULL;
         DWORD rsz = 0;
@@ -1338,7 +1339,7 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
                 }
                 else
                 {
-                    xbf_compile_substream( &ctx, 0, ctx.root_el != NULL, NULL, (~0u), vsm_holder );
+                    xbf_compile_substream( &ctx, 0, TRUE, NULL, (~0u), vsm_holder );
                     /* Also compile substream 1..N for VisualStateGroups / Styles that hold connection IDs */
                     for (i = 1; i < ctx.sub_cnt; i++)
                     {

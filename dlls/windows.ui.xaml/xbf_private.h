@@ -27,12 +27,12 @@
  * ============================================================================ */
 
 #define XBF_AOT_MAGIC       0x58424641u /* 'XBFA' */
-#define XBF_AOT_VERSION     15u
+#define XBF_AOT_VERSION     16u
 #define XBF_AOT_CACHE_SLOTS 512
 
 enum xbf_aot_node_flags
 {
-    XBF_AOT_NODE_ROOT_REUSE  = 0x01,
+    XBF_AOT_NODE_ROOT_DECL   = 0x01,
     XBF_AOT_NODE_LIGHTWEIGHT = 0x02,
     XBF_AOT_NODE_BUILTIN     = 0x04,
     XBF_AOT_NODE_APP_TYPE    = 0x08,

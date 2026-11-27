@@ -423,8 +423,7 @@ static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uw
                 uwp_invalidate_window();
             }
         }
-        else if (tpid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT ||
-                 tpid == XBF_PROP_FLOW_DIRECTION)
+        else if (tpid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT)
         {
             double dv = 0.0;
             if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)

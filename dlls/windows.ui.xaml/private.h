@@ -146,9 +146,7 @@ HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value );
 struct xaml_app_caps
 {
     BOOL winui3;                 /* App answers IXamlMetadataProvider(WinUI3): Microsoft.UI.Xaml family */
-    BOOL coreapp_seed;           /* CoreApplication-driven UWP app: seed tree + view lifecycle */
     WCHAR app_ns[80];            /* Root namespace of the running Application class, empty = unknown */
-    WCHAR seed_page[64];         /* Short root-page name registered in the app provider, empty = no seed tree */
     BOOL teardown_vm;            /* uwp_xaml.c: DataContext-clear keeps the VM alive (provider-registered VM) */
     BOOL display_sync;           /* uwp_xaml.c: sync result display from VM (provider-registered VM) */
     WCHAR vm_type[128];          /* Full VM type name registered in the app provider, empty = none */

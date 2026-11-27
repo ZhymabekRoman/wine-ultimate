@@ -437,6 +437,8 @@ struct xbf_aot_exec_ctx
     const char *base_xbf_dir;
     struct uwp_rd_bucket *target_rd;
     BOOL is_template;
+    BOOL reuse_root;
+    BOOL winui3_rd_only;
     struct xbf_ctx fake_ctx;
     struct uwp_element **nodes_el;
     IInspectable **nodes_raw;
@@ -597,10 +599,18 @@ static void aot_exec_create_node( struct xbf_aot_exec_ctx *ec, const struct xbf_
     cls_name = xbf_aot_str( ec->hdr, nd->class_name_off );
     short_name = xbf_aot_str( ec->hdr, nd->short_name_off );
 
-    if (nd->flags & XBF_AOT_NODE_ROOT_REUSE)
+    if (ec->winui3_rd_only)
+    {
+        if (nd->flags & XBF_AOT_NODE_IS_RD)
+        {
+            uwp_element_create( L"Windows.UI.Xaml.ResourceDictionary", NULL, NULL, (void **)&inst );
+            el = uwp_elem_from_any( inst );
+        }
+    }
+    else if ((nd->flags & XBF_AOT_NODE_ROOT_DECL) && op->node_idx == 0 && ec->reuse_root)
     {
         el = ec->root_el;
-        inst = ec->component;
+        inst = ec->component ? ec->component : (el ? (el->outer ? el->outer : &el->IInspectable_iface) : NULL);
         if ((nd->flags & XBF_AOT_NODE_IS_RD) && ec->target_rd && el)
         {
             el->rd_bucket = ec->target_rd;
@@ -665,7 +675,7 @@ static void aot_exec_create_node( struct xbf_aot_exec_ctx *ec, const struct xbf_
         if (nd->flags & XBF_AOT_NODE_IS_RD)
         {
             el->kind = UWP_KIND_RESOURCE_DICT;
-            if (((nd->flags & XBF_AOT_NODE_ROOT_REUSE) || op->node_idx == 0) && ec->target_rd)
+            if (((nd->flags & XBF_AOT_NODE_ROOT_DECL) || op->node_idx == 0) && ec->target_rd)
             {
                 el->rd_bucket = ec->target_rd;
                 ec->target_rd->owner_el = el;
@@ -1051,21 +1061,36 @@ static void aot_exec_set_obj_prop( struct xbf_aot_exec_ctx *ec, const struct xbf
         }
         if (got)
         {
-            if (uwp_is_bg_pid( op->pid )) uwp_el_set_bg_argb( parent_el, argb );
-            else if (uwp_is_fg_pid( op->pid )) uwp_el_set_fg_argb( parent_el, argb );
-            else if (uwp_is_border_pid( op->pid )) uwp_el_set_border_argb( parent_el, argb );
+            if (uwp_is_bg_pid( op->pid ))
+            {
+                uwp_el_set_bg_argb( parent_el, argb );
+                if (!ec->fake_ctx.in_style_apply) parent_el->local_prop_mask |= UWP_LP_BACKGROUND;
+            }
+            else if (uwp_is_fg_pid( op->pid ))
+            {
+                uwp_el_set_fg_argb( parent_el, argb );
+                if (!ec->fake_ctx.in_style_apply) parent_el->local_prop_mask |= UWP_LP_FOREGROUND;
+            }
+            else if (uwp_is_border_pid( op->pid ))
+            {
+                uwp_el_set_border_argb( parent_el, argb );
+                if (!ec->fake_ctx.in_style_apply) parent_el->local_prop_mask |= UWP_LP_BORDER_BRUSH;
+            }
         }
     }
     else if (op->sv_kind == UWP_RD_STYLE && op->pid == XBF_PROP_STYLE)
     {
         const WCHAR *based_on = xbf_aot_str( ec->hdr, op->str_off );
+        BOOL prev_in_style = ec->fake_ctx.in_style_apply;
         UINT32 si;
+        ec->fake_ctx.in_style_apply = TRUE;
         if (based_on[0]) uwp_apply_style_by_name( &ec->fake_ctx, parent_el, based_on );
         for (si = 0; si < op->setter_cnt && op->setter_start + si < ec->hdr->style_setter_cnt; si++)
         {
             const struct uwp_style_setter *st = &ec->style_setters[op->setter_start + si];
             xbf_apply_property( &ec->fake_ctx, parent_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
         }
+        ec->fake_ctx.in_style_apply = prev_in_style;
     }
     else if (op->pid == 0x000c && uwp_has_text( child_el ))
     {
@@ -1150,10 +1175,12 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
 {
     struct uwp_element *target_el = (op->node_idx < ec->hdr->node_cnt) ? ec->nodes_el[op->node_idx] : NULL;
     struct uwp_element *val_el = (op->child_idx < ec->hdr->node_cnt) ? ec->nodes_el[op->child_idx] : NULL;
+    IInspectable *val_raw = (op->child_idx < ec->hdr->node_cnt) ? ec->nodes_raw[op->child_idx] : NULL;
     WCHAR resolved[256] = {0};
+    WCHAR raw_key_buf[256] = {0};
 
-    if (!target_el || !val_el) return;
-    if (val_el->class_flags2 & UWP_CF2_NULL_EXT)
+    if (!target_el || (!val_el && !val_raw)) return;
+    if (val_el && (val_el->class_flags2 & UWP_CF2_NULL_EXT))
     {
         if (uwp_is_fg_pid( op->pid ))
         {
@@ -1163,7 +1190,7 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
         }
         return;
     }
-    if (!wcscmp( val_el->class_name, L"Windows.UI.Xaml.Data.Binding" ))
+    if (val_el && !wcscmp( val_el->class_name, L"Windows.UI.Xaml.Data.Binding" ))
     {
         const WCHAR *dp_name = NULL, *owner_cls = NULL;
         switch (op->pid)
@@ -1176,7 +1203,7 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
         case XBF_PROP_UIELEMENT_VISIBILITY_V2: dp_name = L"Visibility"; break;
         case XBF_PROP_TOGGLE_BUTTON_IS_CHECKED:
         case XBF_PROP_TOGGLE_MENU_FLYOUT_ITEM_IS_CHECKED: dp_name = L"IsChecked"; break;
-        case XBF_PROP_ACCELERATOR_SCOPE_OWNER: dp_name = L"IsEnabled"; break;
+        case XBF_PROP_ACCELERATOR_IS_ENABLED: dp_name = L"IsEnabled"; break;
         default:
             if (op->pid < ec->hdr->prop_cnt && ec->fake_ctx.props[op->pid].name[0])
                 dp_name = ec->fake_ctx.props[op->pid].name;
@@ -1200,9 +1227,24 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
         return;
     }
     {
-        const WCHAR *res_key = uwp_has_text( val_el ) ? uwp_elem_text( val_el ) : val_el->name;
+        const WCHAR *res_key = NULL;
+        if (val_el)
+            res_key = uwp_has_text( val_el ) ? uwp_elem_text( val_el ) : val_el->name;
+        else if (val_raw && op->child_idx < ec->hdr->node_cnt)
+        {
+            const WCHAR *val_cls = xbf_aot_str( ec->hdr, ec->nodes[op->child_idx].class_name_off );
+            void *ao = ec->app_outer ? ec->app_outer : uwp_get_app_outer();
+            IInspectable *name_obj = NULL;
+            if (ao && val_cls && val_cls[0] &&
+                uwp_get_custom_xaml_member( ao, val_cls, L"Name", val_raw, &name_obj ) && name_obj)
+            {
+                if (uwp_unbox_string( name_obj, raw_key_buf, ARRAY_SIZE(raw_key_buf) ))
+                    res_key = raw_key_buf;
+                IInspectable_Release( name_obj );
+            }
+        }
         if (!res_key || !res_key[0]) return;
-        if (val_el->class_flags2 & UWP_CF2_TEMPLATE_BINDING)
+        if (val_el && (val_el->class_flags2 & UWP_CF2_TEMPLATE_BINDING))
         {
             struct uwp_style_anim_ext *tsa = uwp_elem_ensure_style_anim( target_el );
             if (tsa)
@@ -1233,8 +1275,8 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
                 if (ne) lstrcpynW( ne->cdp_placeholder, resolved, ARRAY_SIZE(ne->cdp_placeholder) );
                 if (!ne || !ne->cdp_has_date) uwp_elem_set_text( target_el, resolved );
             }
-            else if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
-                     op->pid == XBF_PROP_TEXTBLOCK_TEXT || op->pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
+            else if (op->pid == XBF_PROP_CONTENT ||
+                     op->pid == XBF_PROP_TEXTBLOCK_TEXT ||
                      op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == XBF_PROP_RUN_TEXT ||
                      (op->pid != XBF_PROP_AUTOMATION_ID && is_text_prop && !uwp_has_text( target_el )))
                 uwp_elem_set_text( target_el, resolved );
@@ -1413,20 +1455,34 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
     ec.fake_ctx.root_comp = component;
     ec.fake_ctx.target_rd = target_rd;
 
+    ec.reuse_root = (!is_template && (root_el != NULL || (component != NULL && !target_rd)));
+
+    if (!is_uwp_conn && connector && !target_rd && hdr->node_cnt > 0 && (ec.nodes[0].flags & XBF_AOT_NODE_IS_RD))
+    {
+        struct uwp_rd_bucket *comp_rd = root_el ? uwp_rd_bucket_for_el( root_el, TRUE ) : get_rd_bucket( component, TRUE );
+        TRACE( "xbf_aot_instantiate: loading WinUI 3 ResourceDictionary root into bucket %p\n", comp_rd );
+        ec.target_rd = comp_rd;
+        ec.fake_ctx.target_rd = comp_rd;
+        ec.winui3_rd_only = TRUE;
+        ec.reuse_root = FALSE;
+        if (comp_rd)
+        {
+            for (i = 0; i < hdr->res_uri_cnt; i++)
+                uwp_load_res_xbf_into_bucket( base_xbf_dir, xbf_aot_str( hdr, res_uris[i] ), comp_rd );
+        }
+    }
+
     if (root_el)
     {
         for (i = 0; i < hdr->ref_cnt; i++)
             uwp_record_xbf_ref( root_el, xbf_aot_str( hdr, refs[i].full_name_off ),
                                 xbf_aot_str( hdr, refs[i].short_name_off ), refs[i].is_resource_path != 0 );
-        for (i = 0; i < hdr->res_uri_cnt; i++)
-            uwp_load_res_xbf_into_bucket( NULL, xbf_aot_str( hdr, res_uris[i] ),
-                                          target_rd ? target_rd : uwp_rd_bucket_for_el( root_el, TRUE ) );
-    }
-
-    if (!is_uwp_conn && connector && !target_rd && hdr->node_cnt > 0 && (ec.nodes[0].flags & XBF_AOT_NODE_IS_RD))
-    {
-        TRACE( "xbf_aot_instantiate: skipping WinUI 3 ResourceDictionary root\n" );
-        return;
+        if (!ec.winui3_rd_only)
+        {
+            for (i = 0; i < hdr->res_uri_cnt; i++)
+                uwp_load_res_xbf_into_bucket( NULL, xbf_aot_str( hdr, res_uris[i] ),
+                                              target_rd ? target_rd : uwp_rd_bucket_for_el( root_el, TRUE ) );
+        }
     }
 
     if (hdr->node_cnt > 0)
@@ -1434,14 +1490,15 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
         ec.nodes_el = calloc( hdr->node_cnt, sizeof(*ec.nodes_el) );
         ec.nodes_raw = calloc( hdr->node_cnt, sizeof(*ec.nodes_raw) );
         if (!ec.nodes_el || !ec.nodes_raw) { free( ec.nodes_el ); free( ec.nodes_raw ); return; }
-        if (root_el || (component && (ec.nodes[0].flags & XBF_AOT_NODE_ROOT_REUSE)))
+        if (ec.reuse_root && (ec.nodes[0].flags & XBF_AOT_NODE_ROOT_DECL))
         {
             ec.nodes_el[0] = root_el;
             ec.nodes_raw[0] = component ? component : (root_el->outer ? root_el->outer : &root_el->IInspectable_iface);
         }
     }
 
-    aot_replay_vsm_groups( hdr, root_el );
+    if (!ec.winui3_rd_only)
+        aot_replay_vsm_groups( hdr, root_el );
 
     for (i = 0; i < hdr->op_cnt; i++)
     {
@@ -1470,11 +1527,11 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 }
             }
             break;
-        case XBF_AOT_OP_CONNECT: aot_exec_connect( &ec, op ); break;
+        case XBF_AOT_OP_CONNECT: if (!ec.winui3_rd_only) aot_exec_connect( &ec, op ); break;
         case XBF_AOT_OP_SET_PROP: aot_exec_set_prop( &ec, op, i ); break;
         case XBF_AOT_OP_ADD_CHILD: aot_exec_add_child( &ec, op ); break;
         case XBF_AOT_OP_SET_OBJ_PROP: aot_exec_set_obj_prop( &ec, op ); break;
-        case XBF_AOT_OP_PROVIDE_VALUE: aot_exec_provide_value( &ec, op ); break;
+        case XBF_AOT_OP_PROVIDE_VALUE: if (!ec.winui3_rd_only) aot_exec_provide_value( &ec, op ); break;
         case XBF_AOT_OP_TEMPLATE_BINDING:
             if (op->node_idx < hdr->node_cnt && ec.nodes_el[op->node_idx])
             {
@@ -1484,7 +1541,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                 {
                     struct uwp_style_anim_ext *tsa = uwp_elem_ensure_style_anim( target_el );
                     if (tsa) { tsa->tpl_bind_target_pid = op->pid; lstrcpynW( tsa->tpl_bind_src_prop, src_name, ARRAY_SIZE(tsa->tpl_bind_src_prop) ); }
-                    if (op->pid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT || op->pid == XBF_PROP_FLOW_DIRECTION)
+                    if (op->pid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT)
                         target_el->height = 0.1;
                 }
             }

@@ -36,6 +36,9 @@ struct application
     LONG ref;
     IInspectable *outer;
     IInspectable *resources;   /* lazy Windows.Foundation.Collections.PropertySet for the Resources QI set */
+    struct xaml_event_registry unhandled_exception_reg;
+    struct xaml_event_registry suspending_reg;
+    struct xaml_event_registry resuming_reg;
 };
 extern struct application *current_application;
 

@@ -70,6 +70,7 @@ struct uwp_boxed_thickness
     IInspectable IInspectable_iface;
     IInspectable IPropertyValue_iface;
     LONG ref;
+    BOOL is_corner_radius;
     double val[4];
 };
 
@@ -97,8 +98,8 @@ static HRESULT WINAPI uwp_bth_QueryInterface( IInspectable *iface, REFIID iid, v
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IReference_Thickness_UWP ) ||
-        IsEqualGUID( iid, &IID_IReference_CornerRadius_UWP ))
+        (!impl->is_corner_radius && IsEqualGUID( iid, &IID_IReference_Thickness_UWP )) ||
+        (impl->is_corner_radius && IsEqualGUID( iid, &IID_IReference_CornerRadius_UWP )))
     {
         *out = &impl->IInspectable_iface;
         IInspectable_AddRef( &impl->IInspectable_iface );
@@ -155,7 +156,18 @@ static HRESULT WINAPI uwp_bth_GetIids( IInspectable *iface, ULONG *cnt, IID **ii
 
 static HRESULT WINAPI uwp_bth_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.Foundation.IReference`1<Windows.UI.Xaml.Thickness>", 58, name );
+    static const WCHAR th_cls[] = L"Windows.Foundation.IReference`1<Windows.UI.Xaml.Thickness>";
+    static const WCHAR cr_cls[] = L"Windows.Foundation.IReference`1<Windows.UI.Xaml.CornerRadius>";
+    struct uwp_boxed_thickness *impl = CONTAINING_RECORD( iface, struct uwp_boxed_thickness, IInspectable_iface );
+    if (impl->is_corner_radius)
+        return WindowsCreateString( cr_cls, ARRAY_SIZE(cr_cls) - 1, name );
+    return WindowsCreateString( th_cls, ARRAY_SIZE(th_cls) - 1, name );
+}
+
+static HRESULT WINAPI uwp_bth_pv_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    struct uwp_boxed_thickness *impl = CONTAINING_RECORD( iface, struct uwp_boxed_thickness, IPropertyValue_iface );
+    return uwp_bth_GetRuntimeClassName( &impl->IInspectable_iface, name );
 }
 
 static HRESULT WINAPI uwp_bth_GetTrustLevel( IInspectable *iface, TrustLevel *lvl )
@@ -189,19 +201,20 @@ static const void *uwp_bth_pv_vtbl[16] =
     uwp_bth_pv_AddRef,
     uwp_bth_pv_Release,
     uwp_bth_GetIids,
-    uwp_bth_GetRuntimeClassName,
+    uwp_bth_pv_GetRuntimeClassName,
     uwp_bth_GetTrustLevel,
     uwp_bth_pv_get_Type,
     uwp_bth_pv_get_IsNumericScalar,
 };
 
-static IInspectable *box_thickness_value( const double vec4[4] )
+static IInspectable *box_thickness_value( const double vec4[4], BOOL is_corner_radius )
 {
     struct uwp_boxed_thickness *impl = calloc( 1, sizeof(*impl) );
     if (!impl) return NULL;
     impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bth_vtbl;
     impl->IPropertyValue_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bth_pv_vtbl;
     impl->ref = 1;
+    impl->is_corner_radius = is_corner_radius;
     if (vec4) memcpy( impl->val, vec4, sizeof(impl->val) );
     return &impl->IInspectable_iface;
 }
@@ -587,9 +600,11 @@ struct uwp_rd_bmap_slot
     struct uwp_rd_bucket *b;
 };
 
+static SRWLOCK g_rd_bmap_lock = SRWLOCK_INIT;
 static struct uwp_rd_bmap_slot *g_rd_bmap = NULL;
 static UINT32 g_rd_bmap_cap = 0;
 static UINT32 g_rd_bmap_cnt = 0;
+static SRWLOCK g_loaded_res_xbfs_lock = SRWLOCK_INIT;
 
 static inline UINT32 rd_hash_ptr( const void *p )
 {
@@ -647,10 +662,8 @@ static void rd_bmap_insert( void *key, struct uwp_rd_bucket *b )
     g_rd_bmap[idx].b = b;
 }
 
-struct uwp_rd_bucket *get_rd_bucket( void *rd_key, BOOL create )
+static struct uwp_rd_bucket *rd_bmap_find_locked( void *rd_key )
 {
-    struct uwp_rd_bucket *b = NULL;
-    if (!rd_key) return NULL;
     if (g_rd_bmap && g_rd_bmap_cap)
     {
         UINT32 mask = g_rd_bmap_cap - 1;
@@ -661,13 +674,32 @@ struct uwp_rd_bucket *get_rd_bucket( void *rd_key, BOOL create )
             idx = (idx + 1) & mask;
         }
     }
-    if (!create) return NULL;
-    b = calloc( 1, sizeof(*b) );
-    if (!b) return NULL;
-    b->rd_key = rd_key;
-    b->next = g_rd_buckets_head;
-    g_rd_buckets_head = b;
-    rd_bmap_insert( rd_key, b );
+    return NULL;
+}
+
+struct uwp_rd_bucket *get_rd_bucket( void *rd_key, BOOL create )
+{
+    struct uwp_rd_bucket *b = NULL;
+    if (!rd_key) return NULL;
+    AcquireSRWLockShared( &g_rd_bmap_lock );
+    b = rd_bmap_find_locked( rd_key );
+    ReleaseSRWLockShared( &g_rd_bmap_lock );
+    if (b || !create) return b;
+
+    AcquireSRWLockExclusive( &g_rd_bmap_lock );
+    b = rd_bmap_find_locked( rd_key );
+    if (!b)
+    {
+        b = calloc( 1, sizeof(*b) );
+        if (b)
+        {
+            b->rd_key = rd_key;
+            b->next = g_rd_buckets_head;
+            g_rd_buckets_head = b;
+            rd_bmap_insert( rd_key, b );
+        }
+    }
+    ReleaseSRWLockExclusive( &g_rd_bmap_lock );
     return b;
 }
 
@@ -774,33 +806,25 @@ void uwp_rd_link_theme( struct uwp_rd_bucket *parent, const WCHAR *theme_name, s
     else if (!wcsicmp( theme_name, L"HighContrast" )) parent->theme_hc = child;
 }
 
-static void uwp_rd_insert( void *rd_key, const WCHAR *key, IInspectable *val )
-{
-    struct uwp_rd_bucket *b;
-    struct uwp_rd_entry *e;
-    if (!rd_key || !key || !key[0] || !val) return;
-    b = get_rd_bucket( rd_key, TRUE );
-    e = rd_bucket_upsert( b, key );
-    if (!e) return;
-    if (e->value) IInspectable_Release( e->value );
-    e->value = val;
-    IInspectable_AddRef( val );
-    e->kind = UWP_RD_OBJ;
-}
-
 static BOOL uwp_mark_res_xbf_loaded( const char *resolved_path )
 {
     int i;
     if (!resolved_path || !resolved_path[0]) return FALSE;
+    AcquireSRWLockExclusive( &g_loaded_res_xbfs_lock );
     for (i = 0; i < g_loaded_res_xbf_cnt; i++)
     {
         if (!_stricmp( g_loaded_res_xbfs[i], resolved_path ))
+        {
+            ReleaseSRWLockExclusive( &g_loaded_res_xbfs_lock );
             return FALSE;
+        }
     }
-    if (g_loaded_res_xbf_cnt < (int)ARRAY_SIZE(g_loaded_res_xbfs))
+    if (xaml_vec_grow( (void **)&g_loaded_res_xbfs, &g_loaded_res_xbf_cap,
+                       g_loaded_res_xbf_cnt + 1, sizeof(*g_loaded_res_xbfs), 128 ))
     {
         snprintf( g_loaded_res_xbfs[g_loaded_res_xbf_cnt++], 256, "%s", resolved_path );
     }
+    ReleaseSRWLockExclusive( &g_loaded_res_xbfs_lock );
     return TRUE;
 }
 
@@ -819,13 +843,263 @@ void uwp_load_res_xbf_into_bucket( const char *base_dir, const WCHAR *uri_or_pat
     uwp_parse_xbf_into_rd( xbf, xbf_sz, resolved, target );
 }
 
+static UINT32 uwp_get_system_accent_argb( void )
+{
+    static UINT32 cached_accent = 0;
+    static BOOL accent_init = FALSE;
+    if (!accent_init)
+    {
+        HKEY hk = NULL;
+        DWORD abgr = 0, type = 0, cb = sizeof(abgr);
+        accent_init = TRUE;
+        cached_accent = 0xff0078d4u; /* Windows Fluent default blue */
+        if (RegOpenKeyExW( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_READ, &hk ) == ERROR_SUCCESS)
+        {
+            if (RegQueryValueExW( hk, L"AccentColor", NULL, &type, (BYTE *)&abgr, &cb ) == ERROR_SUCCESS &&
+                type == REG_DWORD && (abgr & 0x00ffffffu))
+            {
+                BYTE r = (BYTE)(abgr & 0xff);
+                BYTE g = (BYTE)((abgr >> 8) & 0xff);
+                BYTE b = (BYTE)((abgr >> 16) & 0xff);
+                cached_accent = 0xff000000u | ((UINT32)r << 16) | ((UINT32)g << 8) | b;
+            }
+            RegCloseKey( hk );
+        }
+    }
+    return cached_accent;
+}
+
+/* Seed documented Fluent Light & Dark system theme defaults into a dedicated
+ * fallback bucket linked at the lowest priority of g_theme_rd_sentinel. */
+static void uwp_seed_theme_fallback_buckets( struct uwp_rd_bucket *theme_b )
+{
+    static int g_theme_fb_sentinel = 0;
+    static int g_theme_fb_dark_sentinel = 0;
+    static int g_theme_fb_light_sentinel = 0;
+    static const struct { const WCHAR *name; enum uwp_rd_kind kind; UINT32 dark_argb; UINT32 light_argb; } defaults[] =
+    {
+        { L"ApplicationPageBackgroundThemeBrush",       UWP_RD_BRUSH, 0xff1f1f1fu, 0xfff3f3f3u },
+        { L"SystemControlPageBackgroundChromeLowBrush", UWP_RD_BRUSH, 0xff1f1f1fu, 0xfff3f3f3u },
+        { L"SolidBackgroundFillColorBaseBrush",         UWP_RD_BRUSH, 0xff202020u, 0xfff3f3f3u },
+        { L"SolidBackgroundFillColorTertiaryBrush",     UWP_RD_BRUSH, 0xff2c2c2cu, 0xfff9f9f9u },
+        { L"SurfaceStrokeColorFlyoutBrush",             UWP_RD_BRUSH, 0xff525252u, 0x19000000u },
+        { L"SystemAltHighColor",                        UWP_RD_COLOR, 0xff000000u, 0xffffffffu },
+        { L"SystemAltMediumHighColor",                  UWP_RD_COLOR, 0xcc000000u, 0xccffffffu },
+        { L"SystemAltMediumColor",                      UWP_RD_COLOR, 0x99000000u, 0x99ffffffu },
+        { L"SystemAltMediumLowColor",                   UWP_RD_COLOR, 0x66000000u, 0x66ffffffu },
+        { L"SystemAltLowColor",                         UWP_RD_COLOR, 0x33000000u, 0x33ffffffu },
+        { L"SystemBaseHighColor",                       UWP_RD_COLOR, 0xffffffffu, 0xff000000u },
+        { L"SystemBaseMediumHighColor",                 UWP_RD_COLOR, 0xccffffffu, 0xcc000000u },
+        { L"SystemBaseMediumColor",                     UWP_RD_COLOR, 0x99ffffffu, 0x99000000u },
+        { L"SystemBaseMediumLowColor",                  UWP_RD_COLOR, 0x66ffffffu, 0x66000000u },
+        { L"SystemBaseLowColor",                        UWP_RD_COLOR, 0x33ffffffu, 0x33000000u },
+        { L"SystemChromeWhiteColor",                    UWP_RD_COLOR, 0xffffffffu, 0xffffffffu },
+        { L"SystemChromeBlackLowColor",                 UWP_RD_COLOR, 0xff171717u, 0xfff2f2f2u },
+        { L"SystemChromeMediumLowColor",                UWP_RD_COLOR, 0xff2b2b2bu, 0xfff2f2f2u },
+        { L"SystemListLowColor",                        UWP_RD_COLOR, 0x19ffffffu, 0x19000000u },
+        { L"SystemColorWindowColor",                    UWP_RD_COLOR, 0xff202020u, 0xffffffffu },
+        { L"SystemColorWindowTextColor",                UWP_RD_COLOR, 0xffffffffu, 0xff1a1a1au },
+        { L"SystemColorButtonFaceColor",                UWP_RD_COLOR, 0xff323232u, 0xfff0f0f0u },
+        { L"DefaultTextForegroundThemeBrush",           UWP_RD_BRUSH, 0xffffffffu, 0xff1a1a1au },
+        { L"TextFillColorPrimaryBrush",                 UWP_RD_BRUSH, 0xffffffffu, 0xff1a1a1au },
+        { L"TextFillColorSecondaryBrush",               UWP_RD_BRUSH, 0xffc5c5c5u, 0xff5c5c5cu },
+        { L"TextFillColorDisabledBrush",                UWP_RD_BRUSH, 0x5dffffffu, 0x5c000000u },
+        { L"TextOnAccentFillColorPrimaryBrush",         UWP_RD_BRUSH, 0xffffffffu, 0xffffffffu },
+        { L"PrimaryForegroundBrush",                    UWP_RD_BRUSH, 0xffffffffu, 0xff1a1a1au },
+        { L"SecondaryForegroundBrush",                  UWP_RD_BRUSH, 0xffb4b4b4u, 0xff5c5c5cu },
+        { L"ControlFillColorDefaultBrush",              UWP_RD_BRUSH, 0x18ffffffu, 0xb3ffffffu },
+        { L"ControlFillColorSecondaryBrush",            UWP_RD_BRUSH, 0x22ffffffu, 0x80f9f9f9u },
+        { L"ControlStrokeColorDefaultBrush",            UWP_RD_BRUSH, 0x18ffffffu, 0x19000000u },
+        { L"CardBackgroundFillColorDefaultBrush",       UWP_RD_BRUSH, 0x0dffffffu, 0xb3ffffffu },
+        { L"SystemAccentColorLight1",                   UWP_RD_COLOR, 0xff2b88d8u, 0xff2b88d8u },
+        { L"SystemAccentColorLight2",                   UWP_RD_COLOR, 0xff4cc2ffu, 0xff4cc2ffu },
+        { L"SystemAccentColorLight3",                   UWP_RD_COLOR, 0xff99ebffu, 0xff99ebffu },
+        { L"SystemAccentColorDark1",                    UWP_RD_COLOR, 0xff005a9eu, 0xff005a9eu },
+        { L"SystemAccentColorDark2",                    UWP_RD_COLOR, 0xff004578u, 0xff004578u },
+        { L"SystemAccentColorDark3",                    UWP_RD_COLOR, 0xff002642u, 0xff002642u },
+        { L"AccentTextThemeResource",                   UWP_RD_BRUSH, 0xff4cc2ffu, 0xff0067c0u },
+        { L"SystemControlForegroundAccentBrush",        UWP_RD_BRUSH, 0xff4cc2ffu, 0xff0067c0u },
+        { L"AccentTextFillColorPrimaryBrush",           UWP_RD_BRUSH, 0xff4cc2ffu, 0xff0067c0u },
+        { L"AccentButtonBackground",                    UWP_RD_BRUSH, 0xff0078d4u, 0xff0067c0u },
+        { L"AccentButtonForeground",                    UWP_RD_BRUSH, 0xffffffffu, 0xffffffffu },
+    };
+    static const struct { const WCHAR *name; enum uwp_rd_kind kind; } accent_keys[] =
+    {
+        { L"SystemAccentColor",                 UWP_RD_COLOR },
+        { L"AccentFillColorDefaultBrush",       UWP_RD_BRUSH },
+        { L"SystemControlHighlightAccentBrush", UWP_RD_BRUSH },
+        { L"AccentBrush",                       UWP_RD_BRUSH },
+    };
+    struct uwp_rd_bucket *fb, *fb_dark, *fb_light;
+    UINT32 sys_accent = uwp_get_system_accent_argb();
+    size_t i;
+
+    if (!theme_b) return;
+    fb = get_rd_bucket( &g_theme_fb_sentinel, TRUE );
+    fb_dark = get_rd_bucket( &g_theme_fb_dark_sentinel, TRUE );
+    fb_light = get_rd_bucket( &g_theme_fb_light_sentinel, TRUE );
+    if (!fb || !fb_dark || !fb_light) return;
+
+    for (i = 0; i < ARRAY_SIZE(defaults); i++)
+    {
+        struct uwp_rd_entry *ed = rd_bucket_upsert( fb_dark, defaults[i].name );
+        struct uwp_rd_entry *el = rd_bucket_upsert( fb_light, defaults[i].name );
+        if (ed)
+        {
+            ed->kind = defaults[i].kind;
+            ed->argb = defaults[i].dark_argb;
+            ed->has_argb = TRUE;
+            ed->opacity = 1.0;
+        }
+        if (el)
+        {
+            el->kind = defaults[i].kind;
+            el->argb = defaults[i].light_argb;
+            el->has_argb = TRUE;
+            el->opacity = 1.0;
+        }
+    }
+    for (i = 0; i < ARRAY_SIZE(accent_keys); i++)
+    {
+        struct uwp_rd_entry *ed = rd_bucket_upsert( fb_dark, accent_keys[i].name );
+        struct uwp_rd_entry *el = rd_bucket_upsert( fb_light, accent_keys[i].name );
+        if (ed)
+        {
+            ed->kind = accent_keys[i].kind;
+            ed->argb = sys_accent;
+            ed->has_argb = TRUE;
+            ed->opacity = 1.0;
+        }
+        if (el)
+        {
+            el->kind = accent_keys[i].kind;
+            el->argb = 0xff0067c0u;
+            el->has_argb = TRUE;
+            el->opacity = 1.0;
+        }
+    }
+    uwp_rd_link_theme( fb, L"Dark", fb_dark );
+    uwp_rd_link_theme( fb, L"Light", fb_light );
+    uwp_rd_link_merged( theme_b, fb );
+}
+
+/* Compare two versioned theme XBF basenames (e.g. "21h1_themeresources.xbf" vs
+ * "rs5_themeresources.xbf"). Prefers non-_v1, then digit-prefixed release tags
+ * (YYhN) over letter-prefixed tags (rsN), then lexicographically higher tag. */
+static int uwp_compare_theme_xbf_rank( const char *base_a, const char *base_b )
+{
+    BOOL a_v1, b_v1, a_dig, b_dig;
+    size_t la, lb;
+    if (!base_a) return -1;
+    if (!base_b) return 1;
+    la = strlen( base_a );
+    lb = strlen( base_b );
+    a_v1 = (la >= 7 && !_stricmp( base_a + la - 7, "_v1.xbf" ));
+    b_v1 = (lb >= 7 && !_stricmp( base_b + lb - 7, "_v1.xbf" ));
+    if (a_v1 != b_v1) return a_v1 ? -1 : 1;
+    a_dig = (base_a[0] >= '0' && base_a[0] <= '9');
+    b_dig = (base_b[0] >= '0' && base_b[0] <= '9');
+    if (a_dig != b_dig) return a_dig ? 1 : -1;
+    return _stricmp( base_a, base_b );
+}
+
+static BOOL uwp_path_in_themes_dir( const char *path, const char **out_base )
+{
+    const char *p, *slash;
+    if (!path || !path[0]) return FALSE;
+    slash = strrchr( path, '/' );
+    if (!slash) slash = strrchr( path, '\\' );
+    if (!slash || slash < path + 6) return FALSE;
+    p = slash - 6;
+    if (_strnicmp( p, "Themes", 6 ) != 0) return FALSE;
+    if (p > path && p[-1] != '/' && p[-1] != '\\') return FALSE;
+    if (out_base) *out_base = slash + 1;
+    return TRUE;
+}
+
+static void uwp_discover_and_load_theme_xbfs( struct uwp_rd_bucket *theme_b )
+{
+    static BOOL (*const cat_getters[2])( DWORD, const char **, const BYTE **, DWORD * ) =
+    {
+        uwp_pri_get_cat_entry,
+        uwp_pri_get_winui_cat_entry,
+    };
+    const char *best_tr_path = NULL, *best_tr_base = NULL;
+    const BYTE *best_tr_data = NULL;
+    DWORD best_tr_sz = 0;
+    const char *best_gen_path = NULL, *best_gen_base = NULL;
+    const BYTE *best_gen_data = NULL;
+    DWORD best_gen_sz = 0;
+    int ci;
+
+    for (ci = 0; ci < 2; ci++)
+    {
+        DWORD k;
+        const char *path = NULL;
+        const BYTE *data = NULL;
+        DWORD sz = 0;
+        for (k = 0; cat_getters[ci]( k, &path, &data, &sz ); k++)
+        {
+            const char *base = NULL;
+            size_t blen;
+            if (!data || !sz || !uwp_path_in_themes_dir( path, &base ) || !base) continue;
+            blen = strlen( base );
+            /* Exact Themes/Generic.xbf from package and sub-libraries: load all */
+            if (!_stricmp( base, "Generic.xbf" ))
+            {
+                if (uwp_mark_res_xbf_loaded( path ))
+                {
+                    TRACE( "xbf-res: loading generic theme %s (%lu bytes)\n", path, (unsigned long)sz );
+                    uwp_parse_xbf_into_rd( data, sz, path, theme_b );
+                }
+                continue;
+            }
+            /* Versioned *themeresources*.xbf: pick highest-ranked release */
+            if ((blen >= 18 && !_stricmp( base + blen - 18, "themeresources.xbf" )) ||
+                (blen >= 21 && !_stricmp( base + blen - 21, "themeresources_v1.xbf" )))
+            {
+                if (!best_tr_base || uwp_compare_theme_xbf_rank( base, best_tr_base ) > 0)
+                {
+                    best_tr_path = path;
+                    best_tr_base = base;
+                    best_tr_data = data;
+                    best_tr_sz = sz;
+                }
+                continue;
+            }
+            /* Versioned *generic*.xbf: pick highest-ranked release */
+            if ((blen > 11 && !_stricmp( base + blen - 11, "generic.xbf" )) ||
+                (blen > 14 && !_stricmp( base + blen - 14, "generic_v1.xbf" )))
+            {
+                if (!best_gen_base || uwp_compare_theme_xbf_rank( base, best_gen_base ) > 0)
+                {
+                    best_gen_path = path;
+                    best_gen_base = base;
+                    best_gen_data = data;
+                    best_gen_sz = sz;
+                }
+            }
+        }
+    }
+
+    if (best_tr_path && best_tr_data && best_tr_sz && uwp_mark_res_xbf_loaded( best_tr_path ))
+    {
+        TRACE( "xbf-res: loading discovered theme resources %s (%lu bytes)\n", best_tr_path, (unsigned long)best_tr_sz );
+        uwp_parse_xbf_into_rd( best_tr_data, best_tr_sz, best_tr_path, theme_b );
+    }
+    if (best_gen_path && best_gen_data && best_gen_sz && uwp_mark_res_xbf_loaded( best_gen_path ))
+    {
+        TRACE( "xbf-res: loading discovered versioned generic %s (%lu bytes)\n", best_gen_path, (unsigned long)best_gen_sz );
+        uwp_parse_xbf_into_rd( best_gen_data, best_gen_sz, best_gen_path, theme_b );
+    }
+}
+
 /* Registry-driven per-app Resources_xbf + App.xbf + WinUI theme defaults (no hardcoded app families) */
 void uwp_ensure_app_resources_loaded( void )
 {
     struct uwp_rd_bucket *app_b, *theme_b;
     WCHAR pkg_full[256] = {0};
     UINT32 len = ARRAY_SIZE(pkg_full);
-    HMODULE reg_mod;
 
     if (g_app_res_loaded || g_app_res_loading) return;
     g_app_res_loading = TRUE;
@@ -833,64 +1107,53 @@ void uwp_ensure_app_resources_loaded( void )
     app_b = get_rd_bucket( &g_app_rd_sentinel, TRUE );
     theme_b = get_rd_bucket( &g_theme_rd_sentinel, TRUE );
 
+    /* Seed system fallback Light/Dark buckets at lowest priority (merged[0]) before XBFs */
+    uwp_seed_theme_fallback_buckets( theme_b );
+
     /* 1. Check Software\Classes\AppModel\Repository\Packages\<FullName>\Resources_xbf */
     if (GetCurrentPackageFullName( &len, pkg_full ) == ERROR_SUCCESS && pkg_full[0])
     {
-        reg_mod = GetModuleHandleW( L"kernelbase.dll" );
-        if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
-        if (reg_mod)
+        static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+        WCHAR sub[512];
+        size_t r;
+        swprintf( sub, ARRAY_SIZE(sub), L"Software\\Classes\\AppModel\\Repository\\Packages\\%s", pkg_full );
+        for (r = 0; r < ARRAY_SIZE(roots); r++)
         {
-            typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
-            typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
-            typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
-            p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
-            p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
-            p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
-            if (p_open && p_query && p_close)
+            HKEY hk = NULL;
+            WCHAR valbuf[1024] = {0};
+            DWORD type = 0, cb = sizeof(valbuf) - sizeof(WCHAR);
+            if (RegOpenKeyExW( roots[r], sub, 0, KEY_READ, &hk ) != ERROR_SUCCESS) continue;
+            if (RegQueryValueExW( hk, L"Resources_xbf", NULL, &type, (BYTE *)valbuf, &cb ) == ERROR_SUCCESS)
             {
-                static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
-                WCHAR sub[512];
-                size_t r;
-                swprintf( sub, ARRAY_SIZE(sub), L"Software\\Classes\\AppModel\\Repository\\Packages\\%s", pkg_full );
-                for (r = 0; r < ARRAY_SIZE(roots); r++)
+                if (type == REG_MULTI_SZ)
                 {
-                    HKEY hk = NULL;
-                    WCHAR valbuf[1024] = {0};
-                    DWORD type = 0, cb = sizeof(valbuf) - sizeof(WCHAR);
-                    if (p_open( roots[r], sub, 0, KEY_READ, &hk ) != ERROR_SUCCESS) continue;
-                    if (p_query( hk, L"Resources_xbf", NULL, &type, (BYTE *)valbuf, &cb ) == ERROR_SUCCESS)
+                    const WCHAR *it = valbuf;
+                    while (*it)
                     {
-                        if (type == REG_MULTI_SZ)
-                        {
-                            const WCHAR *it = valbuf;
-                            while (*it)
-                            {
-                                TRACE( "xbf-res: registry Resources_xbf[%s] -> %s\n", debugstr_w(pkg_full), debugstr_w(it) );
-                                uwp_load_res_xbf_into_bucket( NULL, it, app_b );
-                                it += wcslen( it ) + 1;
-                            }
-                        }
-                        else if ((type == REG_SZ || type == REG_EXPAND_SZ) && valbuf[0])
-                        {
-                            WCHAR *tok = valbuf;
-                            while (*tok)
-                            {
-                                WCHAR *sep = wcspbrk( tok, L";," );
-                                if (sep) *sep = 0;
-                                while (*tok == L' ') tok++;
-                                if (*tok)
-                                {
-                                    TRACE( "xbf-res: registry Resources_xbf[%s] -> %s\n", debugstr_w(pkg_full), debugstr_w(tok) );
-                                    uwp_load_res_xbf_into_bucket( NULL, tok, app_b );
-                                }
-                                if (!sep) break;
-                                tok = sep + 1;
-                            }
-                        }
+                        TRACE( "xbf-res: registry Resources_xbf[%s] -> %s\n", debugstr_w(pkg_full), debugstr_w(it) );
+                        uwp_load_res_xbf_into_bucket( NULL, it, app_b );
+                        it += wcslen( it ) + 1;
                     }
-                    p_close( hk );
+                }
+                else if ((type == REG_SZ || type == REG_EXPAND_SZ) && valbuf[0])
+                {
+                    WCHAR *tok = valbuf;
+                    while (*tok)
+                    {
+                        WCHAR *sep = wcspbrk( tok, L";," );
+                        if (sep) *sep = 0;
+                        while (*tok == L' ') tok++;
+                        if (*tok)
+                        {
+                            TRACE( "xbf-res: registry Resources_xbf[%s] -> %s\n", debugstr_w(pkg_full), debugstr_w(tok) );
+                            uwp_load_res_xbf_into_bucket( NULL, tok, app_b );
+                        }
+                        if (!sep) break;
+                        tok = sep + 1;
+                    }
                 }
             }
+            RegCloseKey( hk );
         }
     }
 
@@ -898,39 +1161,9 @@ void uwp_ensure_app_resources_loaded( void )
     if (app_b)
         uwp_load_res_xbf_into_bucket( NULL, L"App.xbf", app_b );
 
-    /* 2b. Generically load package and sub-library Themes/Generic.xbf files into theme_b */
+    /* 3. Dynamically discover and load package/WinUI theme resource and generic XBFs */
     if (theme_b)
-    {
-        DWORD k;
-        const char *path = NULL;
-        const BYTE *data = NULL;
-        DWORD sz = 0;
-        for (k = 0; uwp_pri_get_cat_entry( k, &path, &data, &sz ); k++)
-        {
-            size_t plen = path ? strlen( path ) : 0;
-            BOOL is_generic = FALSE;
-            if (plen >= 19 && !_stricmp( path + plen - 19, "/Themes/Generic.xbf" ))
-                is_generic = TRUE;
-            else if (plen >= 19 && !_stricmp( path + plen - 19, "\\Themes\\Generic.xbf" ))
-                is_generic = TRUE;
-            else if (plen == 18 && !_stricmp( path, "Themes/Generic.xbf" ))
-                is_generic = TRUE;
-            if (is_generic && data && sz > 0 && uwp_mark_res_xbf_loaded( path ))
-            {
-                TRACE( "xbf-res: loading generic theme %s (%lu bytes)\n", path, (unsigned long)sz );
-                uwp_parse_xbf_into_rd( data, sz, path, theme_b );
-            }
-        }
-    }
-
-    /* 3. Load WinUI / system theme XBF into theme defaults bucket */
-    if (theme_b)
-    {
-        uwp_load_res_xbf_into_bucket( NULL, L"Microsoft.UI.Xaml/Themes/21h1_themeresources.xbf", theme_b );
-        uwp_load_res_xbf_into_bucket( NULL, L"Microsoft.UI.Xaml/Themes/21h1_generic.xbf", theme_b );
-        if (theme_b->count == 0 && !theme_b->theme_default && !theme_b->theme_dark && !theme_b->theme_light)
-            uwp_load_res_xbf_into_bucket( NULL, L"Microsoft.UI.Xaml/Themes/rs5_themeresources.xbf", theme_b );
-    }
+        uwp_discover_and_load_theme_xbfs( theme_b );
 
     g_app_res_loaded = TRUE;
     g_app_res_loading = FALSE;
@@ -953,31 +1186,17 @@ BOOL uwp_is_light_theme( struct uwp_element *scope_el )
 
     if (!sys_theme_init)
     {
-        HMODULE reg_mod = GetModuleHandleW( L"kernelbase.dll" );
+        HKEY hk = NULL;
+        DWORD val = 0, type = 0, cb = sizeof(val);
         sys_theme_init = TRUE;
         sys_is_light = FALSE;
-        if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
-        if (reg_mod)
+        if (RegOpenKeyExW( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                           0, KEY_READ, &hk ) == ERROR_SUCCESS)
         {
-            typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
-            typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
-            typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
-            p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
-            p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
-            p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
-            if (p_open && p_query && p_close)
-            {
-                HKEY hk = NULL;
-                DWORD val = 0, type = 0, cb = sizeof(val);
-                if (p_open( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                            0, KEY_READ, &hk ) == ERROR_SUCCESS)
-                {
-                    if (p_query( hk, L"AppsUseLightTheme", NULL, &type, (BYTE *)&val, &cb ) == ERROR_SUCCESS &&
-                        type == REG_DWORD)
-                        sys_is_light = (val != 0);
-                    p_close( hk );
-                }
-            }
+            if (RegQueryValueExW( hk, L"AppsUseLightTheme", NULL, &type, (BYTE *)&val, &cb ) == ERROR_SUCCESS &&
+                type == REG_DWORD)
+                sys_is_light = (val != 0);
+            RegCloseKey( hk );
         }
     }
     return sys_is_light;
@@ -1109,116 +1328,35 @@ found:
     return TRUE;
 }
 
-static UINT32 uwp_get_system_accent_argb( void )
+static BOOL uwp_resolve_brush_entry( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
+                                     struct uwp_rd_entry *e, struct uwp_rd_bucket *found_b,
+                                     int depth, UINT32 *out_argb )
 {
-    static UINT32 cached_accent = 0;
-    static BOOL accent_init = FALSE;
-    if (!accent_init)
+    if (!e) return FALSE;
+    if (e->kind == UWP_RD_COLOR)
     {
-        HMODULE reg_mod = GetModuleHandleW( L"kernelbase.dll" );
-        accent_init = TRUE;
-        cached_accent = 0xff0078d4u; /* Windows Fluent default blue */
-        if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
-        if (reg_mod)
+        *out_argb = e->argb;
+        return TRUE;
+    }
+    if (e->kind == UWP_RD_BRUSH)
+    {
+        if (e->has_argb)
         {
-            typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
-            typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
-            typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
-            p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
-            p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
-            p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
-            if (p_open && p_query && p_close)
+            *out_argb = apply_opacity_to_argb( e->argb, e->opacity );
+            return TRUE;
+        }
+        if (e->str_val[0])
+        {
+            UINT32 inner = 0;
+            if (uwp_resolve_brush_or_color( found_b ? found_b : start_bucket, scope_el, e->str_val, depth + 1, &inner ))
             {
-                HKEY hk = NULL;
-                DWORD abgr = 0, type = 0, cb = sizeof(abgr);
-                if (p_open( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_READ, &hk ) == ERROR_SUCCESS)
-                {
-                    if (p_query( hk, L"AccentColor", NULL, &type, (BYTE *)&abgr, &cb ) == ERROR_SUCCESS &&
-                        type == REG_DWORD && (abgr & 0x00ffffffu))
-                    {
-                        BYTE r = (BYTE)(abgr & 0xff);
-                        BYTE g = (BYTE)((abgr >> 8) & 0xff);
-                        BYTE b = (BYTE)((abgr >> 16) & 0xff);
-                        cached_accent = 0xff000000u | ((UINT32)r << 16) | ((UINT32)g << 8) | b;
-                    }
-                    p_close( hk );
-                }
+                *out_argb = apply_opacity_to_argb( inner, e->opacity );
+                return TRUE;
             }
         }
     }
-    return cached_accent;
-}
-
-/* Documented system/Fluent Light & Dark theme fallback ONLY with TRACE when not found in element/page/app/WinUI dicts */
-static BOOL uwp_theme_default_fallback( const WCHAR *key, BOOL is_light, UINT32 *out_argb )
-{
-    static const struct { const WCHAR *name; UINT32 dark_argb; UINT32 light_argb; } defaults[] =
-    {
-        { L"ApplicationPageBackgroundThemeBrush",       0xff1f1f1fu, 0xfff3f3f3u },
-        { L"SystemControlPageBackgroundChromeLowBrush", 0xff1f1f1fu, 0xfff3f3f3u },
-        { L"SolidBackgroundFillColorBaseBrush",         0xff202020u, 0xfff3f3f3u },
-        { L"SolidBackgroundFillColorTertiaryBrush",     0xff2c2c2cu, 0xfff9f9f9u },
-        { L"SurfaceStrokeColorFlyoutBrush",             0xff525252u, 0x19000000u },
-        { L"SystemAltHighColor",                        0xff000000u, 0xffffffffu },
-        { L"SystemAltMediumHighColor",                  0xcc000000u, 0xccffffffu },
-        { L"SystemAltMediumColor",                      0x99000000u, 0x99ffffffu },
-        { L"SystemAltMediumLowColor",                   0x66000000u, 0x66ffffffu },
-        { L"SystemAltLowColor",                         0x33000000u, 0x33ffffffu },
-        { L"SystemBaseHighColor",                       0xffffffffu, 0xff000000u },
-        { L"SystemBaseMediumHighColor",                 0xccffffffu, 0xcc000000u },
-        { L"SystemBaseMediumColor",                     0x99ffffffu, 0x99000000u },
-        { L"SystemBaseMediumLowColor",                  0x66ffffffu, 0x66000000u },
-        { L"SystemBaseLowColor",                        0x33ffffffu, 0x33000000u },
-        { L"SystemChromeWhiteColor",                    0xffffffffu, 0xffffffffu },
-        { L"SystemChromeBlackLowColor",                 0xff171717u, 0xfff2f2f2u },
-        { L"SystemChromeMediumLowColor",                0xff2b2b2bu, 0xfff2f2f2u },
-        { L"SystemListLowColor",                        0x19ffffffu, 0x19000000u },
-        { L"SystemColorWindowColor",                    0xff202020u, 0xffffffffu },
-        { L"SystemColorWindowTextColor",                0xffffffffu, 0xff1a1a1au },
-        { L"SystemColorButtonFaceColor",                0xff323232u, 0xfff0f0f0u },
-        { L"DefaultTextForegroundThemeBrush",           0xffffffffu, 0xff1a1a1au },
-        { L"TextFillColorPrimaryBrush",                 0xffffffffu, 0xff1a1a1au },
-        { L"TextFillColorSecondaryBrush",               0xffc5c5c5u, 0xff5c5c5cu },
-        { L"TextFillColorDisabledBrush",                0x5dffffffu, 0x5c000000u },
-        { L"TextOnAccentFillColorPrimaryBrush",         0xffffffffu, 0xffffffffu },
-        { L"PrimaryForegroundBrush",                    0xffffffffu, 0xff1a1a1au },
-        { L"SecondaryForegroundBrush",                  0xffb4b4b4u, 0xff5c5c5cu },
-        { L"ControlFillColorDefaultBrush",              0x18ffffffu, 0xb3ffffffu },
-        { L"ControlFillColorSecondaryBrush",            0x22ffffffu, 0x80f9f9f9u },
-        { L"ControlStrokeColorDefaultBrush",            0x18ffffffu, 0x19000000u },
-        { L"CardBackgroundFillColorDefaultBrush",       0x0dffffffu, 0xb3ffffffu },
-        { L"SystemAccentColorLight1",                   0xff2b88d8u, 0xff2b88d8u },
-        { L"SystemAccentColorLight2",                   0xff4cc2ffu, 0xff4cc2ffu },
-        { L"SystemAccentColorLight3",                   0xff99ebffu, 0xff99ebffu },
-        { L"SystemAccentColorDark1",                    0xff005a9eu, 0xff005a9eu },
-        { L"SystemAccentColorDark2",                    0xff004578u, 0xff004578u },
-        { L"SystemAccentColorDark3",                    0xff002642u, 0xff002642u },
-        { L"AccentTextThemeResource",                   0xff4cc2ffu, 0xff0067c0u },
-        { L"SystemControlForegroundAccentBrush",        0xff4cc2ffu, 0xff0067c0u },
-        { L"AccentTextFillColorPrimaryBrush",           0xff4cc2ffu, 0xff0067c0u },
-        { L"AccentButtonBackground",                    0xff0078d4u, 0xff0067c0u },
-        { L"AccentButtonForeground",                    0xffffffffu, 0xffffffffu },
-    };
-    size_t i;
-    if (!key || !key[0] || !out_argb) return FALSE;
-    if (!wcscmp( key, L"SystemAccentColor" ) ||
-        !wcscmp( key, L"AccentFillColorDefaultBrush" ) ||
-        !wcscmp( key, L"SystemControlHighlightAccentBrush" ) ||
-        !wcscmp( key, L"AccentBrush" ))
-    {
-        *out_argb = is_light ? 0xff0067c0u : uwp_get_system_accent_argb();
-        TRACE( "xbf-res: theme default fallback key=%s light=%d -> #%08x\n", debugstr_w(key), is_light, *out_argb );
-        return TRUE;
-    }
-    for (i = 0; i < ARRAY_SIZE(defaults); i++)
-    {
-        if (!wcscmp( key, defaults[i].name ))
-        {
-            *out_argb = is_light ? defaults[i].light_argb : defaults[i].dark_argb;
-            TRACE( "xbf-res: theme default fallback key=%s light=%d -> #%08x\n", debugstr_w(key), is_light, *out_argb );
-            return TRUE;
-        }
-    }
+    if (e->kind == UWP_RD_STRING && e->str_val[0])
+        return uwp_resolve_brush_or_color( found_b ? found_b : start_bucket, scope_el, e->str_val, depth + 1, out_argb );
     return FALSE;
 }
 
@@ -1228,6 +1366,7 @@ BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_
     WCHAR key[128] = {0};
     struct uwp_rd_entry *e = NULL;
     struct uwp_rd_bucket *found_b = NULL;
+    const WCHAR *fallback_key = NULL;
 
     if (!key_or_expr || !key_or_expr[0] || !out_argb || depth > 12) return FALSE;
     if (uwp_parse_color_string( key_or_expr, out_argb )) return TRUE;
@@ -1236,46 +1375,26 @@ BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_
     if (!key[0]) return FALSE;
     if (uwp_parse_color_string( key, out_argb )) return TRUE;
 
+    uwp_ensure_app_resources_loaded();
+    if (uwp_rd_find_entry( start_bucket, scope_el, key, depth, &e, &found_b ) && e &&
+        uwp_resolve_brush_entry( start_bucket, scope_el, e, found_b, depth, out_argb ))
+        return TRUE;
+
+    /* Fall back for standard Button / DropDownButton theme brush keys only on miss */
     if (!scope_el || !scope_el->is_accent_style)
     {
         if (!wcscmp( key, L"ButtonBackground" ) || !wcscmp( key, L"DropDownButtonBackground" ))
-            lstrcpynW( key, L"ControlFillColorDefaultBrush", ARRAY_SIZE(key) );
+            fallback_key = L"ControlFillColorDefaultBrush";
         else if (!wcscmp( key, L"ButtonForeground" ) || !wcscmp( key, L"DropDownButtonForeground" ))
-            lstrcpynW( key, L"TextFillColorPrimaryBrush", ARRAY_SIZE(key) );
+            fallback_key = L"TextFillColorPrimaryBrush";
         else if (!wcscmp( key, L"ButtonBorderBrush" ) || !wcscmp( key, L"DropDownButtonBorderBrush" ))
-            lstrcpynW( key, L"ControlStrokeColorDefaultBrush", ARRAY_SIZE(key) );
+            fallback_key = L"ControlStrokeColorDefaultBrush";
+        if (fallback_key &&
+            uwp_rd_find_entry( start_bucket, scope_el, fallback_key, depth + 1, &e, &found_b ) && e)
+            return uwp_resolve_brush_entry( start_bucket, scope_el, e, found_b, depth + 1, out_argb );
     }
 
-    uwp_ensure_app_resources_loaded();
-    if (uwp_rd_find_entry( start_bucket, scope_el, key, depth, &e, &found_b ) && e)
-    {
-        if (e->kind == UWP_RD_COLOR)
-        {
-            *out_argb = e->argb;
-            return TRUE;
-        }
-        if (e->kind == UWP_RD_BRUSH)
-        {
-            if (e->has_argb)
-            {
-                *out_argb = apply_opacity_to_argb( e->argb, e->opacity );
-                return TRUE;
-            }
-            if (e->str_val[0])
-            {
-                UINT32 inner = 0;
-                if (uwp_resolve_brush_or_color( found_b ? found_b : start_bucket, scope_el, e->str_val, depth + 1, &inner ))
-                {
-                    *out_argb = apply_opacity_to_argb( inner, e->opacity );
-                    return TRUE;
-                }
-            }
-        }
-        if (e->kind == UWP_RD_STRING && e->str_val[0])
-            return uwp_resolve_brush_or_color( found_b ? found_b : start_bucket, scope_el, e->str_val, depth + 1, out_argb );
-    }
-
-    return uwp_theme_default_fallback( key, uwp_is_light_theme( scope_el ), out_argb );
+    return FALSE;
 }
 
 IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_entry *e )
@@ -1285,7 +1404,7 @@ IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_e
     if (e->kind == UWP_RD_DOUBLE)
         e->value = (e->tid == XBF_TYPE_INT32) ? box_int32_value( (INT32)e->dval ) : box_double_value( e->dval );
     else if (e->kind == UWP_RD_THICKNESS)
-        e->value = box_thickness_value( e->vec4 );
+        e->value = box_thickness_value( e->vec4, e->tid == XBF_TYPE_CORNER_RADIUS );
     else if (e->kind == UWP_RD_STRING)
         e->value = box_string_value( e->str_val );
     else if (e->kind == UWP_RD_FONT_FAMILY)
@@ -1402,119 +1521,27 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
         }
     }
 
-    /* Documented fallback for system theme color/brush keys queried via Application.Resources */
-    {
-        UINT32 argb = 0;
-        if (uwp_theme_default_fallback( key_str, uwp_is_light_theme( b ? b->owner_el : NULL ), &argb ))
-        {
-            IInspectable *br = NULL;
-            size_t klen = wcslen( key_str );
-            BOOL is_color_key = (klen >= 5 && !wcscmp( key_str + klen - 5, L"Color" )) ||
-                                (klen >= 6 && !wcsncmp( key_str + klen - 6, L"Color", 5 ) &&
-                                 (key_str[klen - 1] >= '0' && key_str[klen - 1] <= '9'));
-            if (is_color_key)
-            {
-                IInspectable *col = box_color_value( argb );
-                if (col)
-                {
-                    struct uwp_rd_bucket *target = b ? b : get_rd_bucket( rd_key, TRUE );
-                    struct uwp_rd_entry *ne = rd_bucket_upsert( target, key_str );
-                    if (ne)
-                    {
-                        ne->kind = UWP_RD_COLOR;
-                        ne->argb = argb;
-                        ne->has_argb = TRUE;
-                        ne->value = col;
-                        IInspectable_AddRef( col );
-                    }
-                    *out_val = col;
-                    return S_OK;
-                }
-            }
-            if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Media.SolidColorBrush", (void **)&br )) && br)
-            {
-                struct uwp_rd_bucket *target = b ? b : get_rd_bucket( rd_key, TRUE );
-                struct uwp_rd_entry *ne = rd_bucket_upsert( target, key_str );
-                if (ne)
-                {
-                    ne->kind = UWP_RD_BRUSH;
-                    ne->argb = argb;
-                    ne->has_argb = TRUE;
-                    ne->value = br;
-                    IInspectable_AddRef( br );
-                }
-                uwp_set_brush_element_argb( br, argb );
-                *out_val = br;
-                return S_OK;
-            }
-        }
-    }
-
-    /* Synthesize Style / Brush / MenuFlyout if requested by name from Resources */
-    if (wcsstr( key_str, L"Style" ))
-    {
-        void *st = NULL;
-        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Style", NULL, NULL, &st )) && st)
-        {
-            struct uwp_element *st_el = uwp_elem_from_any( st );
-            if (st_el) lstrcpynW( st_el->name, key_str, ARRAY_SIZE(st_el->name) );
-            uwp_rd_insert( rd_key, key_str, (IInspectable *)st );
-            *out_val = st;
-            return S_OK;
-        }
-    }
-    if (wcsstr( key_str, L"ContextMenu" ) || wcsstr( key_str, L"Flyout" ))
-    {
-        IInspectable *flyout = NULL;
-        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Controls.MenuFlyout", (void **)&flyout )) && flyout)
-        {
-            uwp_rd_insert( rd_key, key_str, flyout );
-            *out_val = flyout;
-            return S_OK;
-        }
-    }
-    if (wcsstr( key_str, L"Brush" ))
-    {
-        IInspectable *br = NULL;
-        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Media.SolidColorBrush", (void **)&br )) && br)
-        {
-            uwp_rd_insert( rd_key, key_str, br );
-            *out_val = br;
-            return S_OK;
-        }
-    }
-    if (wcsstr( key_str, L"Template" ))
-    {
-        IInspectable *dt = NULL;
-        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.DataTemplate", (void **)&dt )) && dt)
-        {
-            uwp_rd_insert( rd_key, key_str, dt );
-            *out_val = dt;
-            return S_OK;
-        }
-    }
-    if (wcsstr( key_str, L"Layout" ))
-    {
-        IInspectable *ly = NULL;
-        if ((SUCCEEDED(uwp_create_instance_from_provider( L"Microsoft.UI.Xaml.Controls.UniformGridLayout", (void **)&ly )) && ly) ||
-            (SUCCEEDED(uwp_create_instance_from_provider( L"Microsoft.UI.Xaml.Controls.StackLayout", (void **)&ly )) && ly))
-        {
-            uwp_rd_insert( rd_key, key_str, ly );
-            *out_val = ly;
-            return S_OK;
-        }
-    }
-
     return 0x8000000b; /* E_BOUNDS */
 }
 
 BOOL uwp_rd_haskey( void *rd_key, void *key_obj )
 {
-    void *val = NULL;
-    if (SUCCEEDED(uwp_rd_lookup( rd_key, key_obj, &val )) && val)
+    WCHAR raw_str[128] = {0}, key_str[128] = {0};
+    struct uwp_rd_bucket *b, *found_b = NULL;
+    struct uwp_rd_entry *e = NULL;
+
+    if (!key_obj) return FALSE;
+    if (!uwp_unbox_string( key_obj, raw_str, ARRAY_SIZE(raw_str) ))
     {
-        IInspectable_Release( (IInspectable *)val );
-        return TRUE;
+        const WCHAR *raw = WindowsGetStringRawBuffer( (HSTRING)key_obj, NULL );
+        if (raw) lstrcpynW( raw_str, raw, ARRAY_SIZE(raw_str) );
     }
+    uwp_extract_resource_key( raw_str, key_str, ARRAY_SIZE(key_str) );
+    if (!key_str[0]) return FALSE;
+
+    uwp_ensure_app_resources_loaded();
+    b = get_rd_bucket( rd_key, FALSE );
+    if (uwp_rd_find_entry( b, b ? b->owner_el : NULL, key_str, 0, &e, &found_b ) && e)
+        return e->value != NULL || e->kind != UWP_RD_OBJ;
     return FALSE;
 }

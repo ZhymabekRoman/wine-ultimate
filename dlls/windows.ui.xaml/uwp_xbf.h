@@ -92,6 +92,7 @@ struct xbf_ctx
     BOOL rd_only;
     BOOL is_template;
     BOOL vsm_collect;
+    BOOL in_style_apply;
     struct xbf_aot_builder *aot;
 };
 
@@ -179,7 +180,8 @@ extern const BYTE *g_winui_pri_data;
 extern BOOL g_winui_pri_probed;
 extern DWORD g_winui_pri_size;
 extern int g_loaded_res_xbf_cnt;
-extern char g_loaded_res_xbfs[128][256];
+extern int g_loaded_res_xbf_cap;
+extern char (*g_loaded_res_xbfs)[256];
 
 /* PRI / XBF decode, instantiation, deferred realization & metadata cache APIs */
 void ensure_winui_pri_cat( void );
@@ -198,6 +200,7 @@ BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
                            const BYTE **out_ptr, DWORD *out_sz,
                            char *out_resolved, size_t out_resolved_sz );
 BOOL uwp_pri_get_cat_entry( DWORD idx, const char **out_path, const BYTE **out_data, DWORD *out_sz );
+BOOL uwp_pri_get_winui_cat_entry( DWORD idx, const char **out_path, const BYTE **out_data, DWORD *out_sz );
 IInspectable *uwp_instantiate_xbf_substream( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx, IInspectable *owner_comp );
 IInspectable *uwp_instantiate_xbf_substream_rd( const BYTE *xbf_data, DWORD xbf_size, DWORD sub_idx, IInspectable *owner_comp, struct uwp_rd_bucket *rd_bucket );
 void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,

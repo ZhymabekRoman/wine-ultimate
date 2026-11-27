@@ -661,8 +661,6 @@ static BOOL caps_find_type( void *provider, const WCHAR *ns, const WCHAR *const 
  * it answers (UWP vs WinUI 3), and which XAML types it has registered. */
 static BOOL caps_probe( IInspectable *outer )
 {
-    static const WCHAR *page_suffixes[] =
-        { L".Controls.Calculator", L".Calculator", L".StoreManifestPage" };
     static const WCHAR *vm_suffixes[] =
         { L".ViewModel.StandardCalculatorViewModel", L".StandardCalculatorViewModel" };
     WCHAR ns[80] = {0};
@@ -677,19 +675,6 @@ static BOOL caps_probe( IInspectable *outer )
 
     caps_app_namespace( outer, ns, ARRAY_SIZE( ns ) );
     lstrcpynW( g_caps.app_ns, ns, ARRAY_SIZE( g_caps.app_ns ) );
-
-    if (!g_caps.winui3)
-    {
-        /* CoreApplication-driven UWP app: a registered root page enables the seed tree. */
-        WCHAR full[160] = {0};
-        if (caps_find_type( provider, ns, page_suffixes, ARRAY_SIZE( page_suffixes ),
-                            full, ARRAY_SIZE( full ) ))
-        {
-            const WCHAR *dot = wcsrchr( full, L'.' );
-            lstrcpynW( g_caps.seed_page, dot ? dot + 1 : full, ARRAY_SIZE( g_caps.seed_page ) );
-        }
-        g_caps.coreapp_seed = !!g_caps.seed_page[0];
-    }
 
     /* A StandardCalculatorViewModel-style VM registered in the app's provider
      * drives the display sync/teardown behaviour for any app exposing one. */

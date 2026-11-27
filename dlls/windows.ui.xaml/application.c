@@ -23,6 +23,7 @@
 #include "private.h"
 #include "app_private.h"
 #include "uwp_abi_vtbls.h"
+#include "uwp_vsm_rd.h"
 #include "windows.applicationmodel.activation.h"
 
 
@@ -62,8 +63,6 @@ static const GUID IID_IApplicationOverrides_WinUI =
     { 0xa33e81ef, 0xc665, 0x503b, { 0x88, 0x27, 0xd2, 0x7e, 0xf1, 0x72, 0x0a, 0x06 } };
 static const GUID IID_IApplicationOverrides_UWP =
     { 0x25f99ff7, 0x9347, 0x459a, { 0x9f, 0xac, 0xb2, 0xd0, 0xe1, 0x1c, 0x1a, 0x0f } };
-
-static BOOL lifecycle_started = FALSE;
 
 static HRESULT WINAPI app_view_activated_Invoke(
     __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface,
@@ -114,11 +113,8 @@ static HRESULT WINAPI app_view_activated_Invoke(
             }
             else
             {
-                const struct abi_app_overrides_winui *ov = (const struct abi_app_overrides_winui *)current_application->outer;
-                HRESULT (WINAPI *on_launched)( void *, void * ) = ov->lpVtbl->OnLaunched;
-                WARN( "invoking App OnLaunched fallback vtbl[6] %p (outer %p, args %p)\n",
-                       on_launched, current_application->outer, args );
-                if (on_launched) on_launched( current_application->outer, args );
+                WARN( "outer %p does not implement IApplicationOverrides (WinUI/UWP), skipping OnLaunched\n",
+                      current_application->outer );
             }
         }
     }
@@ -698,47 +694,74 @@ static HRESULT WINAPI application_get_Resources( void *iface, void **value )
 
 static HRESULT WINAPI application_put_Resources( void *iface, void *value )
 {
-    TRACE( "iface %p, value %p\n", iface, value );
+    struct application *impl = app_from_iface( iface );
+    IInspectable *new_res = (IInspectable *)value;
+    TRACE( "iface %p, impl %p, value %p\n", iface, impl, value );
+    if (!impl) return E_POINTER;
+    if (impl->resources != new_res)
+    {
+        if (new_res) IInspectable_AddRef( new_res );
+        if (impl->resources) IInspectable_Release( impl->resources );
+        impl->resources = new_res;
+    }
+    if (new_res)
+    {
+        struct uwp_rd_bucket *app_b = get_rd_bucket( &g_app_rd_sentinel, TRUE );
+        struct uwp_element *val_el = uwp_elem_from_any( new_res );
+        struct uwp_rd_bucket *val_b = val_el ? uwp_rd_bucket_for_el( val_el, TRUE )
+                                             : get_rd_bucket( new_res, TRUE );
+        if (app_b && val_b)
+            uwp_rd_link_merged( app_b, val_b );
+    }
     return S_OK;
 }
 
 static HRESULT WINAPI application_add_UnhandledException( void *iface, void *handler, EventRegistrationToken *token )
 {
+    struct application *impl = app_from_iface( iface );
     TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
-    if (token) token->value = 1;
-    return S_OK;
+    if (!impl) return E_POINTER;
+    return xaml_event_registry_add( &impl->unhandled_exception_reg, handler, token );
 }
 
 static HRESULT WINAPI application_remove_UnhandledException( void *iface, EventRegistrationToken token )
 {
+    struct application *impl = app_from_iface( iface );
     TRACE( "iface %p, token %llu\n", iface, (unsigned long long)token.value );
-    return S_OK;
+    if (!impl) return E_POINTER;
+    return xaml_event_registry_remove( &impl->unhandled_exception_reg, token );
 }
 
 static HRESULT WINAPI application_add_Suspending( void *iface, void *handler, EventRegistrationToken *token )
 {
+    struct application *impl = app_from_iface( iface );
     TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
-    if (token) token->value = 1;
-    return S_OK;
+    if (!impl) return E_POINTER;
+    return xaml_event_registry_add( &impl->suspending_reg, handler, token );
 }
 
 static HRESULT WINAPI application_remove_Suspending( void *iface, EventRegistrationToken token )
 {
+    struct application *impl = app_from_iface( iface );
     TRACE( "iface %p, token %llu\n", iface, (unsigned long long)token.value );
-    return S_OK;
+    if (!impl) return E_POINTER;
+    return xaml_event_registry_remove( &impl->suspending_reg, token );
 }
 
 static HRESULT WINAPI application_add_Resuming( void *iface, void *handler, EventRegistrationToken *token )
 {
+    struct application *impl = app_from_iface( iface );
     TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
-    if (token) token->value = 1;
-    return S_OK;
+    if (!impl) return E_POINTER;
+    return xaml_event_registry_add( &impl->resuming_reg, handler, token );
 }
 
 static HRESULT WINAPI application_remove_Resuming( void *iface, EventRegistrationToken token )
 {
+    struct application *impl = app_from_iface( iface );
     TRACE( "iface %p, token %llu\n", iface, (unsigned long long)token.value );
-    return S_OK;
+    if (!impl) return E_POINTER;
+    return xaml_event_registry_remove( &impl->resuming_reg, token );
 }
 
 static HRESULT WINAPI application_Exit( void *iface )
@@ -831,7 +854,14 @@ static ULONG WINAPI application_Release( IApplication *iface )
 
     ref = InterlockedDecrement( &impl->ref );
     TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        if (impl->resources) IInspectable_Release( impl->resources );
+        xaml_event_registry_clear( &impl->unhandled_exception_reg );
+        xaml_event_registry_clear( &impl->suspending_reg );
+        xaml_event_registry_clear( &impl->resuming_reg );
+        free( impl );
+    }
     return ref;
 }
 
@@ -1455,7 +1485,6 @@ static HRESULT application_statics_start_impl( IApplicationInitializationCallbac
 
     if (callback)
     {
-        lifecycle_started = TRUE;
         hr = IApplicationInitializationCallback_Invoke( callback, NULL );
         TRACE( "callback->Invoke returned %#lx\n", hr );
     }
@@ -1659,52 +1688,6 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
         {
             *instance = &impl->IApplication_iface;
             IApplication_AddRef( *instance );
-        }
-
-        /* If this is the main application instance registration (called from Main/App..ctor),
-         * drive the view lifecycle and message pump for pure UWP apps. FullTrust / XAML Islands
-         * apps (coreapp_seed == FALSE) construct Application and run their own Win32 window + pump. */
-        if (!lifecycle_started && xaml_get_app_caps()->coreapp_seed)
-        {
-            struct view_source *source;
-            lifecycle_started = TRUE;
-            source = calloc( 1, sizeof(*source) );
-            if (source)
-            {
-                ICoreApplication *core_app = NULL;
-                HSTRING class_name;
-                HRESULT hr;
-
-                source->IFrameworkViewSource_iface.lpVtbl = &view_source_vtbl;
-                source->ref = 1;
-
-                hr = WindowsCreateString( L"Windows.ApplicationModel.Core.CoreApplication",
-                                          wcslen( L"Windows.ApplicationModel.Core.CoreApplication" ),
-                                          &class_name );
-                if (SUCCEEDED(hr))
-                {
-                    hr = RoGetActivationFactory( class_name, &IID_ICoreApplication, (void **)&core_app );
-                    WindowsDeleteString( class_name );
-                }
-
-                if (SUCCEEDED(hr) && core_app)
-                {
-                    TRACE( "driving CoreApplication view lifecycle with source %p\n", source );
-                    hr = ICoreApplication_Run( core_app, &source->IFrameworkViewSource_iface );
-                    ICoreApplication_Release( core_app );
-                }
-                else
-                {
-                    IFrameworkView *view = NULL;
-                    WARN( "CoreApplication factory unavailable (hr %#lx), driving view directly\n", hr );
-                    if (SUCCEEDED(IFrameworkViewSource_CreateView( &source->IFrameworkViewSource_iface, &view )) && view)
-                    {
-                        hr = IFrameworkView_Run( view );
-                        IFrameworkView_Release( view );
-                    }
-                }
-                IFrameworkViewSource_Release( &source->IFrameworkViewSource_iface );
-            }
         }
     }
     else

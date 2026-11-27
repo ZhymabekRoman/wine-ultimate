@@ -119,6 +119,33 @@ static BOOL pri_get_section( const BYTE *pri, DWORD pri_sz, int sec_idx, const B
     return TRUE;
 }
 
+static BOOL pri_find_section_by_magic( const BYTE *pri, DWORD pri_sz, const char *magic, size_t magic_len,
+                                       const BYTE **out_sec, DWORD *out_sz )
+{
+    DWORD toc_off, sec_base;
+    WORD num_sec, i;
+
+    if (!pri || pri_sz < 0x20 || !magic || magic_len == 0 || magic_len > 16) return FALSE;
+    toc_off = *(const DWORD *)(pri + 0x10);
+    sec_base = *(const DWORD *)(pri + 0x14);
+    num_sec = *(const WORD *)(pri + 0x18);
+    for (i = 0; i < num_sec; i++)
+    {
+        DWORD toc_entry = toc_off + (DWORD)i * 32;
+        DWORD off, sz;
+        if (toc_entry + 32 > pri_sz) break;
+        if (memcmp( pri + toc_entry, magic, magic_len ) != 0) continue;
+        off = *(const DWORD *)(pri + toc_entry + 24);
+        sz = *(const DWORD *)(pri + toc_entry + 28);
+        if (sec_base + off + sz > pri_sz || sz < magic_len) continue;
+        if (memcmp( pri + sec_base + off, magic, magic_len ) != 0) continue;
+        *out_sec = pri + sec_base + off;
+        *out_sz = sz;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL pri_get_data_item( const BYTE *pri, DWORD pri_sz, int sec_idx, int data_idx, const BYTE **out_ptr, DWORD *out_sz )
 {
     const BYTE *di = NULL;
@@ -196,16 +223,44 @@ static void pri_build_node_path( const BYTE *hs, DWORD hs_sz, DWORD node_off, DW
     buf[pos] = 0;
 }
 
-static DWORD pri_select_english_cand_offset( const BYTE *pri, DWORD pri_sz, DWORD dec )
+static void pri_get_user_locale( WCHAR *out_full, size_t full_cap, WCHAR *out_lang, size_t lang_cap )
+{
+    static WCHAR cached_full[LOCALE_NAME_MAX_LENGTH] = {0};
+    static WCHAR cached_lang[16] = {0};
+    static BOOL init = FALSE;
+
+    if (!init)
+    {
+        WCHAR buf[LOCALE_NAME_MAX_LENGTH] = {0};
+        if (GetUserDefaultLocaleName( buf, ARRAY_SIZE(buf) ) > 0 && buf[0])
+        {
+            const WCHAR *dash = wcschr( buf, L'-' );
+            lstrcpynW( cached_full, buf, ARRAY_SIZE(cached_full) );
+            if (dash && dash > buf)
+            {
+                size_t llen = min( (size_t)(dash - buf), ARRAY_SIZE(cached_lang) - 1 );
+                memcpy( cached_lang, buf, llen * sizeof(WCHAR) );
+                cached_lang[llen] = 0;
+            }
+            else
+                lstrcpynW( cached_lang, buf, ARRAY_SIZE(cached_lang) );
+        }
+        init = TRUE;
+    }
+    lstrcpynW( out_full, cached_full, (int)full_cap );
+    lstrcpynW( out_lang, cached_lang, (int)lang_cap );
+}
+
+static DWORD pri_select_locale_cand_offset( const BYTE *pri, DWORD pri_sz, DWORD dec )
 {
     const BYTE *decn_sec = NULL, *d;
     DWORD decn_sz = 0, size, qualin_at, dq_at, idx_at, val_at;
     WORD ndist, nqual, nqset, ndec, nidx, dec_first, dec_n, j, k;
-    DWORD fallback_en = (~0u);
+    WCHAR user_full[LOCALE_NAME_MAX_LENGTH] = {0}, user_lang[16] = {0};
+    size_t user_lang_len;
+    DWORD match_user_lang = (~0u), match_en_us = (~0u), match_en = (~0u);
 
-    if (!pri_get_section( pri, pri_sz, 0, &decn_sec, &decn_sz ) || decn_sz < 0x2c)
-        return 0;
-    if (memcmp( decn_sec, "[mrm_decn_info]", 15 ) != 0)
+    if (!pri_find_section_by_magic( pri, pri_sz, "[mrm_decn_info]", 15, &decn_sec, &decn_sz ) || decn_sz < 0x2c)
         return 0;
     d = decn_sec + 0x20;
     size = decn_sz - 0x20;
@@ -225,6 +280,9 @@ static DWORD pri_select_english_cand_offset( const BYTE *pri, DWORD pri_sz, DWOR
     dec_first = *(const WORD *)(d + 12 + dec * 4);
     dec_n     = *(const WORD *)(d + 12 + dec * 4 + 2);
     if (dec_n <= 1) return 0;
+
+    pri_get_user_locale( user_full, ARRAY_SIZE(user_full), user_lang, ARRAY_SIZE(user_lang) );
+    user_lang_len = wcslen( user_lang );
 
     for (j = 0; j < dec_n; j++)
     {
@@ -249,13 +307,22 @@ static DWORD pri_select_english_cand_offset( const BYTE *pri, DWORD pri_sz, DWOR
             at    = val_at + voff * 2;
             if (qtype != 0 || at + 2 > size) continue;
             val_str = (const WCHAR *)(d + at);
-            if (!wcsicmp( val_str, L"en-US" ))
+            if (user_full[0] && !wcsicmp( val_str, user_full ))
                 return j;
-            if (fallback_en == (~0u) && (!wcsnicmp( val_str, L"en-", 3 ) || !wcsicmp( val_str, L"en" )))
-                fallback_en = j;
+            if (match_user_lang == (~0u) && user_lang_len > 0 &&
+                !wcsnicmp( val_str, user_lang, user_lang_len ) &&
+                (val_str[user_lang_len] == 0 || val_str[user_lang_len] == L'-'))
+                match_user_lang = j;
+            if (match_en_us == (~0u) && !wcsicmp( val_str, L"en-US" ))
+                match_en_us = j;
+            if (match_en == (~0u) && (!wcsnicmp( val_str, L"en-", 3 ) || !wcsicmp( val_str, L"en" )))
+                match_en = j;
         }
     }
-    return (fallback_en != (~0u)) ? fallback_en : 0;
+    if (match_user_lang != (~0u)) return match_user_lang;
+    if (match_en_us != (~0u)) return match_en_us;
+    if (match_en != (~0u)) return match_en;
+    return 0;
 }
 
 static BOOL pri_resolve_item_data( const BYTE *pri, DWORD pri_sz, const BYTE *rm, DWORD rm_sz,
@@ -277,7 +344,7 @@ static BOOL pri_resolve_item_data( const BYTE *pri, DWORD pri_sz, const BYTE *rm
         cand_base = *(const DWORD *)(rm + r_off + 4);
     }
     else return FALSE;
-    cand_idx = cand_base + pri_select_english_cand_offset( pri, pri_sz, dec );
+    cand_idx = cand_base + pri_select_locale_cand_offset( pri, pri_sz, dec );
     if (cand_off + (cand_idx + 1) * 8 > rm_sz) cand_idx = cand_base;
     if (cand_off + (cand_idx + 1) * 8 > rm_sz) return FALSE;
     if (out_vti) *out_vti = *(const BYTE *)(rm + cand_off + cand_idx * 8 + 1);
@@ -351,8 +418,8 @@ static BOOL CALLBACK init_pri_item_index( INIT_ONCE *once, void *param, void **c
     UINT32 cap = 64, mask;
 
     if (!pri) return TRUE;
-    if (!pri_get_section( pri, pri_sz, 2, &hs, &hs_sz ) || hs_sz < 0xd8) return TRUE;
-    if (!pri_get_section( pri, pri_sz, 3, &rm, &rm_sz ) || rm_sz < 0x80) return TRUE;
+    if (!pri_find_section_by_magic( pri, pri_sz, "[mrm_hschemaex]", 15, &hs, &hs_sz ) || hs_sz < 0xd8) return TRUE;
+    if (!pri_find_section_by_magic( pri, pri_sz, "[mrm_res_map2_]", 15, &rm, &rm_sz ) || rm_sz < 0x80) return TRUE;
 
     l1 = *(const WORD *)(hs + 0x22);
     l2 = *(const WORD *)(hs + 0x24);
@@ -594,8 +661,8 @@ void uwp_pri_enum_xbfs_in_blob( const BYTE *pri, DWORD pri_sz,
     DWORD hs_base, iid;
 
     if (!pri || !cb) return;
-    if (!pri_get_section( pri, pri_sz, 2, &hs, &hs_sz ) || hs_sz < 0xd8) return;
-    if (!pri_get_section( pri, pri_sz, 3, &rm, &rm_sz ) || rm_sz < 0x80) return;
+    if (!pri_find_section_by_magic( pri, pri_sz, "[mrm_hschemaex]", 15, &hs, &hs_sz ) || hs_sz < 0xd8) return;
+    if (!pri_find_section_by_magic( pri, pri_sz, "[mrm_res_map2_]", 15, &rm, &rm_sz ) || rm_sz < 0x80) return;
 
     l1 = *(const WORD *)(hs + 0x22);
     l2 = *(const WORD *)(hs + 0x24);
@@ -974,6 +1041,16 @@ BOOL uwp_pri_get_cat_entry( DWORD idx, const char **out_path, const BYTE **out_d
     return TRUE;
 }
 
+BOOL uwp_pri_get_winui_cat_entry( DWORD idx, const char **out_path, const BYTE **out_data, DWORD *out_sz )
+{
+    ensure_winui_pri_cat();
+    if (idx >= g_winui_pri_cat.cnt) return FALSE;
+    if (out_path) *out_path = g_winui_pri_cat.entries[idx].path;
+    if (out_data) *out_data = g_winui_pri_cat.entries[idx].data;
+    if (out_sz) *out_sz = g_winui_pri_cat.entries[idx].size;
+    return TRUE;
+}
+
 BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
                                   const BYTE **out_ptr, DWORD *out_sz,
                                   char *out_resolved, size_t out_resolved_sz )
@@ -1088,16 +1165,14 @@ BOOL uwp_pri_lookup_string( const WCHAR *res_name, WCHAR *out_buf, int out_chars
  * 2. PropertyValue Boxing & Unboxing Helpers
  * ============================================================================ */
 
-void uwp_parse_xbf_into_rd( const BYTE *xbf, DWORD xbf_sz, const char *base_xbf_path,
-                                   struct uwp_rd_bucket *target_rd );
-
 struct uwp_rd_bucket *g_rd_buckets_head = NULL;
 int g_app_rd_sentinel = 0;
 int g_theme_rd_sentinel = 0;
 BOOL g_app_res_loaded = FALSE;
 BOOL g_app_res_loading = FALSE;
-char g_loaded_res_xbfs[128][256];
+char (*g_loaded_res_xbfs)[256] = NULL;
 int g_loaded_res_xbf_cnt = 0;
+int g_loaded_res_xbf_cap = 0;
 
 static UINT32 xaml_meta_hash( const WCHAR *s )
 {
@@ -1214,21 +1289,21 @@ static HRESULT WINAPI xaml_ct_get_True( void *iface, boolean *out )
 
 static HRESULT WINAPI xaml_ct_get_FullName( void *iface, HSTRING *name )
 {
-    struct xaml_cached_type *t = (struct xaml_cached_type *)iface;
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
     if (!name) return E_POINTER;
     return WindowsCreateString( t->full_name, wcslen( t->full_name ), name );
 }
 
 static HRESULT WINAPI xaml_ct_get_Name( void *iface, HSTRING *name )
 {
-    struct xaml_cached_type *t = (struct xaml_cached_type *)iface;
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
     if (!name) return E_POINTER;
     return WindowsCreateString( t->short_name, wcslen( t->short_name ), name );
 }
 
 static HRESULT WINAPI xaml_ct_ActivateInstance( void *iface, IInspectable **instance )
 {
-    struct xaml_cached_type *t = (struct xaml_cached_type *)iface;
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
     HRESULT hr;
     if (!instance) return E_POINTER;
     *instance = NULL;
@@ -1264,7 +1339,7 @@ static HRESULT WINAPI xaml_ct_RunInitializer( void *iface )
 
 static HRESULT WINAPI xaml_ct_get_UnderlyingType( void *iface, TypeName *type )
 {
-    struct xaml_cached_type *t = (struct xaml_cached_type *)iface;
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
     if (!type) return E_POINTER;
     type->Kind = TypeKind_Metadata;
     return WindowsCreateString( t->full_name, wcslen( t->full_name ), &type->Name );
@@ -1483,11 +1558,6 @@ struct xaml_type *uwp_provider_get_xaml_type_cached( struct xaml_metadata_provid
     return xt;
 }
 
-void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
-                                     void *connector, BOOL is_uwp_conn, void *app_outer,
-                                     int only_sub_idx, struct uwp_element *attach_root,
-                                     struct uwp_element **out_created );
-
 BOOL uwp_panel_has_concrete_child( struct uwp_element *panel )
 {
     struct uwp_vec_view *v;
@@ -1513,17 +1583,6 @@ BOOL uwp_panel_has_concrete_child( struct uwp_element *panel )
     }
     return FALSE;
 }
-
-void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
-                                     void *connector, BOOL is_uwp_conn, void *app_outer,
-                                     int only_sub_idx, struct uwp_element *attach_root,
-                                     struct uwp_element **out_created );
-
-
-typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
-typedef LONG (WINAPI *p_RegEnumKeyExW_t)( HKEY, DWORD, LPWSTR, LPDWORD, LPDWORD, LPWSTR, LPDWORD, PFILETIME );
-typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
-typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
 
 BOOL xbf_read_uleb( const BYTE *buf, DWORD *io_p, DWORD end_p, DWORD *out_val )
 {
@@ -1821,6 +1880,94 @@ static BOOL xbf_resolve_double_prop( struct xbf_ctx *ctx, struct uwp_element *el
     return FALSE;
 }
 
+static inline BOOL xbf_prop_blocked_by_local( const struct xbf_ctx *ctx, const struct uwp_element *el, UINT32 bit )
+{
+    return (ctx && ctx->in_style_apply && (el->local_prop_mask & bit) != 0);
+}
+
+static inline void xbf_prop_mark_local( const struct xbf_ctx *ctx, struct uwp_element *el, UINT32 bit )
+{
+    if (!ctx || !ctx->in_style_apply) el->local_prop_mask |= bit;
+}
+
+static BOOL xbf_apply_nav_prop_name( struct xbf_ctx *ctx, struct uwp_element *el,
+                                     const WCHAR *prop_name, int vt, double num,
+                                     const WCHAR *sval, BOOL is_res_ref,
+                                     double *out_resolved_d, BOOL *out_has_resolved_d )
+{
+    if (!wcscmp( prop_name, L"DisplayMemberPath" ) && sval && sval[0])
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
+        return TRUE;
+    }
+    if (!uwp_is_nav_view( el )) return FALSE;
+    if (!wcscmp( prop_name, L"PaneDisplayMode" ))
+    {
+        int mode = -1;
+        if (vt == 0x04 || vt == 0x0b) mode = (int)num;
+        else if (sval && sval[0])
+        {
+            if (!wcscmp( sval, L"Auto" )) mode = 0;
+            else if (!wcscmp( sval, L"Left" )) mode = 1;
+            else if (!wcscmp( sval, L"Top" )) mode = 2;
+            else if (!wcscmp( sval, L"LeftCompact" )) mode = 3;
+            else if (!wcscmp( sval, L"LeftMinimal" )) mode = 4;
+        }
+        if (mode >= 0 && mode <= 4)
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne) { ne->nav_pane_display_mode = mode; ne->nav_pane_display_mode_set = TRUE; }
+            TRACE( "xbf_apply_nav_prop: NavView(%s) PaneDisplayMode=%d (%s)\n",
+                   debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
+        }
+        return TRUE;
+    }
+    if (!wcscmp( prop_name, L"IsPaneOpen" ))
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne)
+        {
+            if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_open = (vt == 0x02);
+            else if (sval && sval[0]) ne->nav_is_pane_open = !wcsicmp( sval, L"True" );
+        }
+        uwp_nav_track_open_state( el );
+        return TRUE;
+    }
+    if (!wcscmp( prop_name, L"OpenPaneLength" ) || !wcscmp( prop_name, L"CompactPaneLength" ) ||
+        !wcscmp( prop_name, L"CompactModeThresholdWidth" ) || !wcscmp( prop_name, L"ExpandedModeThresholdWidth" ))
+    {
+        double d = 0.0;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
+        {
+            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+            if (ne)
+            {
+                if (!wcscmp( prop_name, L"OpenPaneLength" )) ne->nav_open_pane_length = d;
+                else if (!wcscmp( prop_name, L"CompactPaneLength" )) ne->nav_compact_pane_length = d;
+                else if (!wcscmp( prop_name, L"CompactModeThresholdWidth" )) ne->nav_compact_threshold = d;
+                else ne->nav_expanded_threshold = d;
+            }
+            if (out_resolved_d) *out_resolved_d = d;
+            if (out_has_resolved_d) *out_has_resolved_d = TRUE;
+        }
+        return TRUE;
+    }
+    if (!wcscmp( prop_name, L"IsSettingsVisible" ) || !wcscmp( prop_name, L"IsPaneToggleButtonVisible" ))
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        BOOL flag;
+        if (!ne) return TRUE;
+        if (vt == 0x01 || vt == 0x02) flag = (vt == 0x02);
+        else if (sval && sval[0]) flag = !wcsicmp( sval, L"True" );
+        else return TRUE;
+        if (!wcscmp( prop_name, L"IsSettingsVisible" )) ne->nav_is_settings_visible = flag;
+        else ne->nav_is_pane_toggle_visible = flag;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *el,
                                       const WCHAR *owner_cls, const WCHAR *prop_name,
                                       int vt, double num, const WCHAR *sval, BOOL is_res_ref )
@@ -1830,16 +1977,22 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
     if (!el || !prop_name || !prop_name[0]) return;
     if (!wcscmp( prop_name, L"Visibility" ))
     {
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_VISIBILITY )) return;
         if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
             el->visibility = !wcsicmp( sval, L"Collapsed" ) ? 1 : 0;
         else
             el->visibility = (int)num;
+        xbf_prop_mark_local( ctx, el, UWP_LP_VISIBILITY );
         return;
     }
     if (!wcscmp( prop_name, L"Opacity" ))
     {
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_OPACITY )) return;
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ))
+        {
             el->opacity = resolved_d;
+            xbf_prop_mark_local( ctx, el, UWP_LP_OPACITY );
+        }
         return;
     }
     if (!wcscmp( prop_name, L"MaxLines" ))
@@ -1859,99 +2012,7 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
         else el->text_wrapping = (int)num;
         return;
     }
-    if (!wcscmp( prop_name, L"DisplayMemberPath" ) && sval && sval[0])
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
-    }
-    else if (!wcscmp( prop_name, L"PaneDisplayMode" ) && uwp_is_nav_view( el ))
-    {
-        int mode = -1;
-        if (vt == 0x04 || vt == 0x0b) mode = (int)num;
-        else if (sval && sval[0])
-        {
-            if (!wcscmp( sval, L"Auto" )) mode = 0;
-            else if (!wcscmp( sval, L"Left" )) mode = 1;
-            else if (!wcscmp( sval, L"Top" )) mode = 2;
-            else if (!wcscmp( sval, L"LeftCompact" )) mode = 3;
-            else if (!wcscmp( sval, L"LeftMinimal" )) mode = 4;
-        }
-        if (mode >= 0 && mode <= 4)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne)
-            {
-                ne->nav_pane_display_mode = mode;
-                ne->nav_pane_display_mode_set = TRUE;
-            }
-            TRACE( "xbf_apply_named_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
-                   debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
-        }
-    }
-    else if (!wcscmp( prop_name, L"IsPaneOpen" ) && uwp_is_nav_view( el ))
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        if (ne)
-        {
-            if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_open = (vt == 0x02);
-            else if (sval && sval[0]) ne->nav_is_pane_open = !wcsicmp( sval, L"True" );
-        }
-        uwp_nav_track_open_state( el );
-    }
-    else if (!wcscmp( prop_name, L"OpenPaneLength" ) && uwp_is_nav_view( el ))
-    {
-        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne) ne->nav_open_pane_length = resolved_d;
-            has_resolved_d = TRUE;
-        }
-    }
-    else if (!wcscmp( prop_name, L"CompactPaneLength" ) && uwp_is_nav_view( el ))
-    {
-        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne) ne->nav_compact_pane_length = resolved_d;
-            has_resolved_d = TRUE;
-        }
-    }
-    else if (!wcscmp( prop_name, L"CompactModeThresholdWidth" ) && uwp_is_nav_view( el ))
-    {
-        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne) ne->nav_compact_threshold = resolved_d;
-            has_resolved_d = TRUE;
-        }
-    }
-    else if (!wcscmp( prop_name, L"ExpandedModeThresholdWidth" ) && uwp_is_nav_view( el ))
-    {
-        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved_d ) && resolved_d > 0.0)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne) ne->nav_expanded_threshold = resolved_d;
-            has_resolved_d = TRUE;
-        }
-    }
-    else if (!wcscmp( prop_name, L"IsSettingsVisible" ) && uwp_is_nav_view( el ))
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        if (ne)
-        {
-            if (vt == 0x01 || vt == 0x02) ne->nav_is_settings_visible = (vt == 0x02);
-            else if (sval && sval[0]) ne->nav_is_settings_visible = !wcsicmp( sval, L"True" );
-        }
-    }
-    else if (!wcscmp( prop_name, L"IsPaneToggleButtonVisible" ) && uwp_is_nav_view( el ))
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        if (ne)
-        {
-            if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_toggle_visible = (vt == 0x02);
-            else if (sval && sval[0]) ne->nav_is_pane_toggle_visible = !wcsicmp( sval, L"True" );
-        }
-    }
+    xbf_apply_nav_prop_name( ctx, el, prop_name, vt, num, sval, is_res_ref, &resolved_d, &has_resolved_d );
 
     if (owner_cls && owner_cls[0] &&
         !wcscmp( owner_cls, L"Microsoft.UI.Xaml.Controls.NavigationView" ) &&
@@ -1997,16 +2058,13 @@ static void xbf_apply_named_property( struct xbf_ctx *ctx, struct uwp_element *e
 void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
                                    struct uwp_rd_bucket *b, struct uwp_rd_entry *se, int depth )
 {
+    struct xbf_ctx local_ctx = {0};
+    struct xbf_ctx *use_ctx = ctx ? ctx : &local_ctx;
+    BOOL prev_in_style;
     int i;
-    double saved_fs;
-    BOOL saved_has_fs;
-    int saved_fw;
-    WCHAR saved_ff[128];
     if (!el || !se || se->kind != UWP_RD_STYLE || depth > 8) return;
-    saved_fs = el->font_size;
-    saved_has_fs = el->has_font_size;
-    saved_fw = el->font_weight;
-    lstrcpynW( saved_ff, uwp_elem_font_family( el ), ARRAY_SIZE(saved_ff) );
+    prev_in_style = use_ctx->in_style_apply;
+    use_ctx->in_style_apply = TRUE;
     if (uwp_style_is_accent_name( se->key ))
         el->is_accent_style = TRUE;
     if (se->str_val[0])
@@ -2016,7 +2074,7 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
         if (uwp_style_is_accent_name( se->str_val ))
             el->is_accent_style = TRUE;
         if (uwp_rd_find_entry( b, el, se->str_val, 0, &base_se, &base_b ) && base_se)
-            uwp_apply_style_entry( ctx, el, base_b, base_se, depth + 1 );
+            uwp_apply_style_entry( use_ctx, el, base_b, base_se, depth + 1 );
     }
     if (se->template_xbf_data && se->template_xbf_size)
     {
@@ -2029,20 +2087,11 @@ void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
     {
         const struct uwp_style_setter *st = &se->setters[i];
         if (!(st->pid & 0x8000) && st->prop_name[0])
-            xbf_apply_named_property( ctx, el, st->owner_cls, st->prop_name, st->vt, st->num, st->str, st->is_res_ref );
+            xbf_apply_named_property( use_ctx, el, st->owner_cls, st->prop_name, st->vt, st->num, st->str, st->is_res_ref );
         else
-            xbf_apply_property( ctx, el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+            xbf_apply_property( use_ctx, el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
     }
-    /* Local typography values take precedence over Style setters regardless of XBF attribute order */
-    if (saved_has_fs)
-    {
-        el->font_size = saved_fs;
-        el->has_font_size = TRUE;
-    }
-    if (saved_fw > 0)
-        el->font_weight = saved_fw;
-    if (saved_ff[0])
-        uwp_elem_set_font_family( el, saved_ff );
+    use_ctx->in_style_apply = prev_in_style;
 }
 
 static void xbf_apply_stack_val_prop( struct xbf_ctx *ctx, struct uwp_element *el,
@@ -2220,28 +2269,40 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
     if (!(pid & 0x8000)) return FALSE;
     if (uwp_is_bg_pid( pid ))
     {
-        if (vt == 0x08) uwp_el_set_bg_argb( el, (UINT32)num );
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_BACKGROUND )) return TRUE;
+        if (vt == 0x08) { uwp_el_set_bg_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_BACKGROUND ); }
         else if (sval && sval[0])
         {
             if (uwp_brush_key_is_accent( sval ))
                 el->is_accent_style = TRUE;
             if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+            {
                 uwp_el_set_bg_argb( el, argb );
+                xbf_prop_mark_local( ctx, el, UWP_LP_BACKGROUND );
+            }
         }
         return TRUE;
     }
     if (uwp_is_fg_pid( pid ))
     {
-        if (vt == 0x08) uwp_el_set_fg_argb( el, (UINT32)num );
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_FOREGROUND )) return TRUE;
+        if (vt == 0x08) { uwp_el_set_fg_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_FOREGROUND ); }
         else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+        {
             uwp_el_set_fg_argb( el, argb );
+            xbf_prop_mark_local( ctx, el, UWP_LP_FOREGROUND );
+        }
         return TRUE;
     }
     if (uwp_is_border_pid( pid ))
     {
-        if (vt == 0x08) uwp_el_set_border_argb( el, (UINT32)num );
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_BORDER_BRUSH )) return TRUE;
+        if (vt == 0x08) { uwp_el_set_border_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_BORDER_BRUSH ); }
         else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+        {
             uwp_el_set_border_argb( el, argb );
+            xbf_prop_mark_local( ctx, el, UWP_LP_BORDER_BRUSH );
+        }
         return TRUE;
     }
     return FALSE;
@@ -2292,30 +2353,34 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
         if (vt == 0x03 || vt == 0x04) el->min_height = num;
         return TRUE;
     case XBF_PROP_MARGIN:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_MARGIN )) return TRUE;
         if (vt == 0x06)
         {
             el->margin_l = vec4[0]; el->margin_t = vec4[1];
             el->margin_r = vec4[2]; el->margin_b = vec4[3];
+            xbf_prop_mark_local( ctx, el, UWP_LP_MARGIN );
         }
         return TRUE;
     case XBF_PROP_CONTROL_PADDING:
     case XBF_PROP_BORDER_PADDING:
-    case XBF_PROP_PANEL_IS_IGNORING_TRANSITIONS:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_PADDING )) return TRUE;
         if (vt == 0x06)
         {
             el->padding_l = vec4[0]; el->padding_t = vec4[1];
             el->padding_r = vec4[2]; el->padding_b = vec4[3];
+            xbf_prop_mark_local( ctx, el, UWP_LP_PADDING );
         }
         return TRUE;
     case XBF_PROP_CONTROL_BORDER_THICKNESS:
     case XBF_PROP_BORDER_THICKNESS:
-    case XBF_PROP_PANEL_CHILDREN_TRANSITIONS:
     case XBF_PROP_GRID_BORDER_THICKNESS:
     case XBF_PROP_STACKPANEL_BORDER_THICKNESS:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_BORDER_THICKNESS )) return TRUE;
         if (vt == 0x06)
         {
             el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
             el->border_thick_r = vec4[2]; el->border_thick_b = vec4[3];
+            xbf_prop_mark_local( ctx, el, UWP_LP_BORDER_THICKNESS );
         }
         else if (is_res_ref && sval && sval[0])
         {
@@ -2325,6 +2390,7 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
             {
                 el->border_thick_l = te->vec4[0]; el->border_thick_t = te->vec4[1];
                 el->border_thick_r = te->vec4[2]; el->border_thick_b = te->vec4[3];
+                xbf_prop_mark_local( ctx, el, UWP_LP_BORDER_THICKNESS );
             }
         }
         return TRUE;
@@ -2332,10 +2398,17 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
     case XBF_PROP_GRID_CORNER_RADIUS:
     case XBF_PROP_STACKPANEL_CORNER_RADIUS:
     case XBF_PROP_CONTROL_CORNER_RADIUS:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_CORNER_RADIUS )) return TRUE;
         if (vt == 0x06)
+        {
             el->corner_radius = max( max( vec4[0], vec4[1] ), max( vec4[2], vec4[3] ) );
+            xbf_prop_mark_local( ctx, el, UWP_LP_CORNER_RADIUS );
+        }
         else if (vt == 0x03 || vt == 0x04)
+        {
             el->corner_radius = num;
+            xbf_prop_mark_local( ctx, el, UWP_LP_CORNER_RADIUS );
+        }
         else if (is_res_ref && sval && sval[0])
         {
             struct uwp_rd_entry *ce = NULL;
@@ -2343,15 +2416,21 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
             if (uwp_rd_find_entry( hint_rd, el, sval, 0, &ce, NULL ) && ce)
             {
                 if (ce->kind == UWP_RD_THICKNESS)
+                {
                     el->corner_radius = max( max( ce->vec4[0], ce->vec4[1] ), max( ce->vec4[2], ce->vec4[3] ) );
+                    xbf_prop_mark_local( ctx, el, UWP_LP_CORNER_RADIUS );
+                }
                 else if (ce->kind == UWP_RD_DOUBLE && ce->dval > 0.0)
+                {
                     el->corner_radius = ce->dval;
+                    xbf_prop_mark_local( ctx, el, UWP_LP_CORNER_RADIUS );
+                }
             }
         }
         else if (sval && sval[0])
         {
             double cr = wcstod( sval, NULL );
-            if (cr > 0.0) el->corner_radius = cr;
+            if (cr > 0.0) { el->corner_radius = cr; xbf_prop_mark_local( ctx, el, UWP_LP_CORNER_RADIUS ); }
         }
         return TRUE;
     case XBF_PROP_RECTANGLE_RADIUS_X:
@@ -2364,11 +2443,20 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
     case XBF_PROP_CONTROL_VERTICAL_CONTENT_ALIGNMENT:
         el->v_content_align = (int)num; el->has_v_content_align = TRUE; return TRUE;
     case XBF_PROP_WIDTH:
-        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->width = resolved;
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_WIDTH )) return TRUE;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved ))
+        {
+            el->width = resolved;
+            xbf_prop_mark_local( ctx, el, UWP_LP_WIDTH );
+        }
         return TRUE;
-    case XBF_PROP_FLOW_DIRECTION:
     case XBF_PROP_FRAMEWORKELEMENT_HEIGHT:
-        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->height = resolved;
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_HEIGHT )) return TRUE;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved ))
+        {
+            el->height = resolved;
+            xbf_prop_mark_local( ctx, el, UWP_LP_HEIGHT );
+        }
         return TRUE;
     case XBF_PROP_MIN_WIDTH:
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->min_width = resolved;
@@ -2376,8 +2464,16 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
     case XBF_PROP_MIN_HEIGHT:
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->min_height = resolved;
         return TRUE;
-    case XBF_PROP_HORIZONTAL_ALIGNMENT: el->h_align = (int)num; return TRUE;
-    case XBF_PROP_VERTICAL_ALIGNMENT: el->v_align = (int)num; return TRUE;
+    case XBF_PROP_HORIZONTAL_ALIGNMENT:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_H_ALIGN )) return TRUE;
+        el->h_align = (int)num;
+        xbf_prop_mark_local( ctx, el, UWP_LP_H_ALIGN );
+        return TRUE;
+    case XBF_PROP_VERTICAL_ALIGNMENT:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_V_ALIGN )) return TRUE;
+        el->v_align = (int)num;
+        xbf_prop_mark_local( ctx, el, UWP_LP_V_ALIGN );
+        return TRUE;
     case XBF_PROP_ORIENTATION:
     case XBF_PROP_STACKPANEL_ORIENTATION: el->orientation = (int)num; return TRUE;
     case XBF_PROP_STACKPANEL_SPACING:
@@ -2385,14 +2481,21 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
         return TRUE;
     case XBF_PROP_UIELEMENT_VISIBILITY_V2:
     case XBF_PROP_UIELEMENT_VISIBILITY:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_VISIBILITY )) return TRUE;
         if ((vt == 0x05 || vt == 0x09) && sval && sval[0])
             el->visibility = !wcsicmp( sval, L"Collapsed" ) ? 1 : 0;
         else
             el->visibility = (int)num;
+        xbf_prop_mark_local( ctx, el, UWP_LP_VISIBILITY );
         return TRUE;
     case XBF_PROP_UIELEMENT_OPACITY:
-        if (vt == 0x03 || vt == 0x04 || vt == 0x01 || vt == 0x02) el->opacity = num;
-        else if ((vt == 0x05 || vt == 0x09) && sval && sval[0]) el->opacity = wcstod( sval, NULL );
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_OPACITY )) return TRUE;
+        if (vt == 0x03 || vt == 0x04 || vt == 0x01 || vt == 0x02) { el->opacity = num; xbf_prop_mark_local( ctx, el, UWP_LP_OPACITY ); }
+        else if ((vt == 0x05 || vt == 0x09) && sval && sval[0]) { el->opacity = wcstod( sval, NULL ); xbf_prop_mark_local( ctx, el, UWP_LP_OPACITY ); }
+        return TRUE;
+    case XBF_PROP_POPUP_HORIZONTAL_OFFSET:
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved ))
+            el->popup_h_offset = resolved;
         return TRUE;
     default:
         return FALSE;
@@ -2513,18 +2616,23 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
     switch (pid)
     {
     case XBF_PROP_CONTENT:
-    case XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV:
-    case XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE:
     case XBF_PROP_FONTICON_GLYPH:
     case XBF_PROP_TEXTBLOCK_TEXT:
-    case XBF_PROP_TEMPLATE_BINDING_PROPERTY:
-    case XBF_PROP_BINDING_PATH:
     case XBF_PROP_RUN_TEXT:
-        if (sval && sval[0] && !(pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV && uwp_elem_uid( el )[0] && uwp_has_text( el )))
+        if (sval && sval[0])
+            uwp_elem_set_text( el, sval );
+        break;
+    case XBF_PROP_TEMPLATE_BINDING_PROPERTY:
+        if ((el->class_flags2 & UWP_CF2_TEMPLATE_BINDING) && sval && sval[0])
+            uwp_elem_set_text( el, sval );
+        break;
+    case XBF_PROP_BINDING_PATH:
+        if ((el->class_flags2 & UWP_CF2_BINDING) && sval && sval[0])
             uwp_elem_set_text( el, sval );
         break;
     case XBF_PROP_BINDING_ELEMENT_NAME:
-        if (sval && sval[0]) uwp_elem_set_placeholder( el, sval );
+        if ((el->class_flags2 & UWP_CF2_BINDING) && sval && sval[0])
+            uwp_elem_set_placeholder( el, sval );
         break;
     case XBF_PROP_IMAGE_SOURCE:
         if (sval && sval[0])
@@ -2548,27 +2656,11 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
         if (sval && sval[0]) xbf_apply_uid_pri_lookup( ctx, el, sval );
         break;
     case XBF_PROP_TEXTELEMENT_FONT_FAMILY:
-        if (vt == 0x03 || vt == 0x04)
-        {
-            if (num > 0) { el->font_size = num; el->has_font_size = TRUE; }
-            break;
-        }
-        if (is_res_ref && sval && sval[0])
-        {
-            struct uwp_rd_entry *de = NULL;
-            if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
-                de && de->kind == UWP_RD_DOUBLE && de->dval > 0)
-            {
-                el->font_size = de->dval;
-                el->has_font_size = TRUE;
-                break;
-            }
-        }
-        /* fall through */
     case XBF_PROP_CONTENTPRESENTER_FONT_FAMILY:
     case XBF_PROP_CONTROL_FONT_FAMILY:
     case XBF_PROP_TEXTBLOCK_FONT_FAMILY:
     case XBF_PROP_FONTICON_FONT_FAMILY:
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_FONT_FAMILY )) break;
         if (sval && sval[0])
         {
             WCHAR face[64] = {0};
@@ -2582,19 +2674,21 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
             }
             uwp_elem_set_font_family( el, ff_spec );
             uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
+            xbf_prop_mark_local( ctx, el, UWP_LP_FONT_FAMILY );
         }
         break;
-    case XBF_PROP_POPUP_HORIZONTAL_OFFSET:
     case XBF_PROP_CONTROL_FONTSIZE:
     case XBF_PROP_TEXTBLOCK_FONTSIZE:
     case XBF_PROP_TEXTELEMENT_FONTSIZE:
     case XBF_PROP_FONTICON_FONTSIZE:
     {
         double fs = 0.0;
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_FONT_SIZE )) break;
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &fs ) && fs > 0.0)
         {
             el->font_size = fs;
             el->has_font_size = TRUE;
+            xbf_prop_mark_local( ctx, el, UWP_LP_FONT_SIZE );
         }
         break;
     }
@@ -2602,8 +2696,14 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
     case XBF_PROP_CONTROL_FONT_WEIGHT:
     case XBF_PROP_TEXTELEMENT_FONT_WEIGHT:
     {
-        int fw = uwp_parse_font_weight( sval, num, vt );
-        if (fw > 0) el->font_weight = fw;
+        int fw;
+        if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_FONT_WEIGHT )) break;
+        fw = uwp_parse_font_weight( sval, num, vt );
+        if (fw > 0)
+        {
+            el->font_weight = fw;
+            xbf_prop_mark_local( ctx, el, UWP_LP_FONT_WEIGHT );
+        }
         break;
     }
     case XBF_PROP_TEXTBLOCK_TEXT_ALIGNMENT:
@@ -2655,7 +2755,7 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
         el->accel_mods = (UINT)num;
         uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
         break;
-    case XBF_PROP_ACCELERATOR_SCOPE_OWNER:
+    case XBF_PROP_ACCELERATOR_IS_ENABLED:
         el->accel_enabled = (num != 0.0);
         uwp_accel_register( el, el->accel_target, el->accel_key, el->accel_mods, el->accel_enabled );
         break;
@@ -2684,74 +2784,6 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
     }
 }
 
-static void xbf_apply_custom_nav_prop( struct xbf_ctx *ctx, struct uwp_element *el,
-                                       const struct xbf_prop_info *pi, int vt,
-                                       double num, const WCHAR *sval, BOOL is_res_ref )
-{
-    if (!wcscmp( pi->name, L"DisplayMemberPath" ) && sval && sval[0])
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        if (ne) lstrcpynW( ne->display_member_path, sval, ARRAY_SIZE(ne->display_member_path) );
-        return;
-    }
-    if (!uwp_is_nav_view( el )) return;
-    if (!wcscmp( pi->name, L"PaneDisplayMode" ))
-    {
-        int mode = -1;
-        if (vt == 0x04 || vt == 0x0b) mode = (int)num;
-        else if (sval && sval[0])
-        {
-            if (!wcscmp( sval, L"Auto" )) mode = 0;
-            else if (!wcscmp( sval, L"Left" )) mode = 1;
-            else if (!wcscmp( sval, L"Top" )) mode = 2;
-            else if (!wcscmp( sval, L"LeftCompact" )) mode = 3;
-            else if (!wcscmp( sval, L"LeftMinimal" )) mode = 4;
-        }
-        if (mode >= 0 && mode <= 4)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (ne) { ne->nav_pane_display_mode = mode; ne->nav_pane_display_mode_set = TRUE; }
-            TRACE( "xbf_apply_property: NavView(%s) PaneDisplayMode=%d (%s)\n",
-                   debugstr_w(el->name), mode, sval ? debugstr_w(sval) : "" );
-        }
-    }
-    else if (!wcscmp( pi->name, L"IsPaneOpen" ))
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        if (ne)
-        {
-            if (vt == 0x01 || vt == 0x02) ne->nav_is_pane_open = (vt == 0x02);
-            else if (sval && sval[0]) ne->nav_is_pane_open = !wcsicmp( sval, L"True" );
-        }
-        uwp_nav_track_open_state( el );
-    }
-    else if (!wcscmp( pi->name, L"OpenPaneLength" ) || !wcscmp( pi->name, L"CompactPaneLength" ) ||
-             !wcscmp( pi->name, L"CompactModeThresholdWidth" ) || !wcscmp( pi->name, L"ExpandedModeThresholdWidth" ))
-    {
-        double d = 0.0;
-        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &d ) && d > 0.0)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-            if (!ne) return;
-            if (!wcscmp( pi->name, L"OpenPaneLength" )) ne->nav_open_pane_length = d;
-            else if (!wcscmp( pi->name, L"CompactPaneLength" )) ne->nav_compact_pane_length = d;
-            else if (!wcscmp( pi->name, L"CompactModeThresholdWidth" )) ne->nav_compact_threshold = d;
-            else ne->nav_expanded_threshold = d;
-        }
-    }
-    else if (!wcscmp( pi->name, L"IsSettingsVisible" ) || !wcscmp( pi->name, L"IsPaneToggleButtonVisible" ))
-    {
-        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
-        BOOL flag;
-        if (!ne) return;
-        if (vt == 0x01 || vt == 0x02) flag = (vt == 0x02);
-        else if (sval && sval[0]) flag = !wcsicmp( sval, L"True" );
-        else return;
-        if (!wcscmp( pi->name, L"IsSettingsVisible" )) ne->nav_is_settings_visible = flag;
-        else ne->nav_is_pane_toggle_visible = flag;
-    }
-}
-
 static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
                                    const struct xbf_prop_info *pi, int vt,
                                    double num, const WCHAR *sval, BOOL is_res_ref )
@@ -2762,11 +2794,11 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
         else if (sval && sval[0]) el->is_checked = !wcsicmp( sval, L"True" ) ? 1 : 0;
         else el->is_checked = (num != 0.0) ? 1 : 0;
     }
-    xbf_apply_custom_nav_prop( ctx, el, pi, vt, num, sval, is_res_ref );
+    xbf_apply_nav_prop_name( ctx, el, pi->name, vt, num, sval, is_res_ref, NULL, NULL );
 
-    if (!wcscmp( pi->name, L"Name" ) && sval && sval[0] && !el->outer && !uwp_has_text( el ))
+    if (!wcscmp( pi->name, L"Name" ) && sval && sval[0] && !el->name[0])
     {
-        uwp_elem_set_text( el, sval );
+        lstrcpynW( el->name, sval, ARRAY_SIZE(el->name) );
     }
     if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
         (el->kind == UWP_KIND_TEXT_BLOCK || (el->class_flags & (UWP_CF_RUN | UWP_CF_INLINE))))
@@ -2796,15 +2828,19 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
     }
     else if (!wcscmp( pi->name, L"FontFamily" ) && sval && sval[0])
     {
-        WCHAR face[64] = {0};
-        const WCHAR *ff_spec = sval;
-        struct uwp_rd_entry *fe = NULL;
-        if ((is_res_ref || !wcschr( sval, L'#' )) &&
-            uwp_rd_find_entry( ctx->target_rd, el, sval, 0, &fe, NULL ) &&
-            fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
-            ff_spec = fe->str_val;
-        uwp_elem_set_font_family( el, ff_spec );
-        uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
+        if (!xbf_prop_blocked_by_local( ctx, el, UWP_LP_FONT_FAMILY ))
+        {
+            WCHAR face[64] = {0};
+            const WCHAR *ff_spec = sval;
+            struct uwp_rd_entry *fe = NULL;
+            if ((is_res_ref || !wcschr( sval, L'#' )) &&
+                uwp_rd_find_entry( ctx->target_rd, el, sval, 0, &fe, NULL ) &&
+                fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
+                ff_spec = fe->str_val;
+            uwp_elem_set_font_family( el, ff_spec );
+            uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
+            xbf_prop_mark_local( ctx, el, UWP_LP_FONT_FAMILY );
+        }
     }
     else if (is_res_ref && sval && sval[0] && pi->name[0] &&
              pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0] &&
