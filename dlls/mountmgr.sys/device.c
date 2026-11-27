@@ -61,6 +61,22 @@ enum fs_type
     FS_UDF       /* For reference [E] = Ecma-167.pdf, [U] = udf260.pdf */
 };
 
+/* struct disk_device represents any drive or filesystem (partition).
+ * It differs from struct volume in two respects:
+ *
+ * - struct volume *only* represents filesystems. A whole physical drive has
+ *   only a struct disk_device. Anything with an actual filesystem has both a
+ *   struct disk_device and a struct volume, linked to each other.
+ *
+ * - struct disk_device is allocated as the DeviceExtension for the ntoskrnl
+ *   device object. struct volume is allocated by us and we expect the pointer
+ *   to remain stable in various places.
+ *   Note that we can recreate the NT device in response to
+ *   IOCTL_MOUNTMGR_DEFINE_UNIX_DRIVE if the type of device is changed
+ *   (e.g. from hard disk to CD-ROM, which necessitates a differently
+ *   named NT device), which means that the disk_device is reallocated.
+ */
+
 struct disk_device
 {
     enum device_type      type;        /* drive type */
@@ -69,8 +85,7 @@ struct disk_device
     UNICODE_STRING        symlink;     /* device symlink if any */
     STORAGE_DEVICE_NUMBER devnum;      /* device number info */
     char                 *unix_device; /* unix device path */
-    char                 *unix_mount;  /* unix mount point path */
-    char                 *serial;      /* disk serial number */
+    char                 *disk_serial; /* disk serial number */
     struct volume        *volume;      /* associated volume */
 };
 
@@ -80,6 +95,7 @@ struct volume
     struct disk_device   *device;      /* disk device */
     char                 *udi;         /* unique identifier for dynamic volumes */
     unsigned int          ref;         /* ref count */
+    char                 *unix_mount;  /* unix mount point path */
     GUID                  guid;        /* volume uuid */
     struct mount_point   *mount;       /* Volume{xxx} mount point */
     WCHAR                 label[256];  /* volume label */
@@ -100,7 +116,7 @@ static struct list volumes_list = LIST_INIT(volumes_list);
 
 static void update_drive_table_and_user_shared_data(void);
 
-static DRIVER_OBJECT *harddisk_driver;
+static DRIVER_OBJECT *disk_driver;
 static DRIVER_OBJECT *serial_driver;
 static DRIVER_OBJECT *parallel_driver;
 
@@ -151,10 +167,10 @@ static void get_filesystem_label( struct volume *volume )
 {
     char buffer[256], *p;
     ULONG size = sizeof(buffer);
-    struct read_volume_file_params params = { volume->device->unix_mount, ".windows-label", buffer, &size };
+    struct read_volume_file_params params = { volume->unix_mount, ".windows-label", buffer, &size };
 
     volume->label[0] = 0;
-    if (!volume->device->unix_mount) return;
+    if (!volume->unix_mount) return;
     if (MOUNTMGR_CALL( read_volume_file, &params )) return;
 
     p = buffer + size;
@@ -169,10 +185,10 @@ static void get_filesystem_serial( struct volume *volume )
 {
     char buffer[32];
     ULONG size = sizeof(buffer);
-    struct read_volume_file_params params = { volume->device->unix_mount, ".windows-serial", buffer, &size };
+    struct read_volume_file_params params = { volume->unix_mount, ".windows-serial", buffer, &size };
 
     volume->serial = 0;
-    if (!volume->device->unix_mount) return;
+    if (!volume->unix_mount) return;
     if (MOUNTMGR_CALL( read_volume_file, &params )) return;
 
     buffer[size] = 0;
@@ -604,6 +620,8 @@ static NTSTATUS create_disk_device( enum device_type type, struct disk_device **
     UNICODE_STRING name;
     DEVICE_OBJECT *dev_obj;
     struct disk_device *device;
+    DEVICE_TYPE nt_type;
+    ULONG characteristics = FILE_DEVICE_IS_MOUNTED;
 
     switch(type)
     {
@@ -612,21 +630,32 @@ static NTSTATUS create_disk_device( enum device_type type, struct disk_device **
     case DEVICE_NETWORK:  /* FIXME */
         format = L"\\Device\\Harddisk%u";
         link_format = L"\\??\\PhysicalDrive%u";
+        nt_type = FILE_DEVICE_DISK;
         break;
     case DEVICE_HARDDISK_VOL:
         format = L"\\Device\\HarddiskVolume%u";
+        nt_type = FILE_DEVICE_DISK;
         first = 1;  /* harddisk volumes start counting from 1 */
         break;
     case DEVICE_FLOPPY:
         format = L"\\Device\\Floppy%u";
+        nt_type = FILE_DEVICE_DISK;
+        characteristics |= FILE_REMOVABLE_MEDIA;
         break;
     case DEVICE_CDROM:
+        format = L"\\Device\\CdRom%u";
+        link_format = L"\\??\\CdRom%u";
+        nt_type = FILE_DEVICE_CD_ROM;
+        characteristics |= FILE_REMOVABLE_MEDIA | FILE_READ_ONLY_DEVICE;
+        break;
     case DEVICE_DVD:
         format = L"\\Device\\CdRom%u";
         link_format = L"\\??\\CdRom%u";
+        nt_type = FILE_DEVICE_DVD;
         break;
     case DEVICE_RAMDISK:
         format = L"\\Device\\Ramdisk%u";
+        nt_type = FILE_DEVICE_DISK;
         break;
     }
 
@@ -636,7 +665,7 @@ static NTSTATUS create_disk_device( enum device_type type, struct disk_device **
     {
         swprintf( name.Buffer, name.MaximumLength / sizeof(WCHAR), format, i );
         name.Length = lstrlenW(name.Buffer) * sizeof(WCHAR);
-        status = IoCreateDevice( harddisk_driver, sizeof(*device), &name, 0, 0, FALSE, &dev_obj );
+        status = IoCreateDevice( disk_driver, sizeof(*device), &name, nt_type, characteristics, FALSE, &dev_obj );
         if (status != STATUS_OBJECT_NAME_COLLISION) break;
     }
     if (!status)
@@ -646,7 +675,6 @@ static NTSTATUS create_disk_device( enum device_type type, struct disk_device **
         device->name           = name;
         device->type           = type;
         device->unix_device    = NULL;
-        device->unix_mount     = NULL;
         device->symlink.Buffer = NULL;
         device->volume         = volume;
 
@@ -663,33 +691,30 @@ static NTSTATUS create_disk_device( enum device_type type, struct disk_device **
             }
         }
 
+        device->devnum.DeviceType = nt_type;
+
         switch (type)
         {
         case DEVICE_FLOPPY:
         case DEVICE_RAMDISK:
-            device->devnum.DeviceType = FILE_DEVICE_DISK;
             device->devnum.DeviceNumber = i;
             device->devnum.PartitionNumber = ~0u;
             break;
         case DEVICE_CDROM:
-            device->devnum.DeviceType = FILE_DEVICE_CD_ROM;
             device->devnum.DeviceNumber = i;
             device->devnum.PartitionNumber = ~0u;
             break;
         case DEVICE_DVD:
-            device->devnum.DeviceType = FILE_DEVICE_DVD;
             device->devnum.DeviceNumber = i;
             device->devnum.PartitionNumber = ~0u;
             break;
         case DEVICE_UNKNOWN:
         case DEVICE_HARDDISK:
         case DEVICE_NETWORK:  /* FIXME */
-            device->devnum.DeviceType = FILE_DEVICE_DISK;
             device->devnum.DeviceNumber = i;
             device->devnum.PartitionNumber = 0;
             break;
         case DEVICE_HARDDISK_VOL:
-            device->devnum.DeviceType = FILE_DEVICE_DISK;
             device->devnum.DeviceNumber = 0;
             device->devnum.PartitionNumber = i;
             break;
@@ -715,8 +740,7 @@ static void delete_disk_device( struct disk_device *device )
         RtlFreeUnicodeString( &device->symlink );
     }
     free( device->unix_device );
-    free( device->unix_mount );
-    free( device->serial );
+    free( device->disk_serial );
     RtlFreeUnicodeString( &device->name );
     IoDeleteDevice( device->dev_obj );
 }
@@ -740,6 +764,7 @@ static unsigned int release_volume( struct volume *volume )
         list_remove( &volume->entry );
         if (volume->mount) delete_mount_point( volume->mount );
         delete_disk_device( volume->device );
+        free( volume->unix_mount );
         free( volume );
     }
     return ret;
@@ -821,7 +846,7 @@ static void delete_dos_device( struct dos_drive *drive )
 }
 
 /* find a volume that matches the parameters */
-static struct volume *find_matching_volume( const char *udi, const char *device,
+static struct volume *find_matching_volume( const char *udi, const char *unix_device,
                                             const char *mount_point, enum device_type type )
 {
     struct volume *volume;
@@ -838,19 +863,19 @@ static struct volume *find_matching_volume( const char *udi, const char *device,
 
         disk_device = volume->device;
         if (disk_device->type != type) continue;
-        if (device && disk_device->unix_device)
+        if (unix_device && disk_device->unix_device)
         {
-            if (strcmp( device, disk_device->unix_device )) continue;
+            if (strcmp( unix_device, disk_device->unix_device )) continue;
             match++;
         }
-        if (mount_point && disk_device->unix_mount)
+        if (mount_point && volume->unix_mount)
         {
-            if (strcmp( mount_point, disk_device->unix_mount )) continue;
+            if (strcmp( mount_point, volume->unix_mount )) continue;
             match++;
         }
         if (!match) continue;
         TRACE( "found matching volume %s for device %s mount %s type %u\n",
-               debugstr_guid(&volume->guid), debugstr_a(device), debugstr_a(mount_point), type );
+               debugstr_guid(&volume->guid), debugstr_a(unix_device), debugstr_a(mount_point), type );
         return grab_volume( volume );
     }
     return NULL;
@@ -924,13 +949,13 @@ static BOOL get_volume_device_info( struct volume *volume )
 }
 
 /* set disk serial for dos devices that reside on a given Unix device */
-static void set_dos_devices_disk_serial( struct disk_device *device )
+static void set_dos_devices_disk_serial( struct volume *volume )
 {
     unsigned int devices;
     struct dos_drive *drive;
-    struct get_volume_dos_devices_params params = { device->unix_mount, &devices };
+    struct get_volume_dos_devices_params params = { volume->unix_mount, &devices };
 
-    if (!device->serial || !device->unix_mount || MOUNTMGR_CALL( get_volume_dos_devices, &params ))
+    if (!volume->device->disk_serial || !volume->unix_mount || MOUNTMGR_CALL( get_volume_dos_devices, &params ))
         return;
 
     LIST_FOR_EACH_ENTRY( drive, &drives_list, struct dos_drive, entry )
@@ -940,14 +965,14 @@ static void set_dos_devices_disk_serial( struct disk_device *device )
         /* copy serial if drive resides on this Unix device */
         if (devices & (1 << drive->drive))
         {
-            free( drive->volume->device->serial );
-            drive->volume->device->serial = strdup( device->serial );
+            free( drive->volume->device->disk_serial );
+            drive->volume->device->disk_serial = strdup( volume->device->disk_serial );
         }
     }
 }
 
 /* change the information for an existing volume */
-static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive, const char *device,
+static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive, const char *unix_device,
                                  const char *mount_point, enum device_type type, const GUID *guid,
                                  const char *label, const char *disk_serial )
 {
@@ -975,13 +1000,15 @@ static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive,
     else
     {
         free( disk_device->unix_device );
-        free( disk_device->unix_mount );
-        free( disk_device->serial );
+        free( disk_device->disk_serial );
     }
-    disk_device->unix_device = strdup( device );
-    disk_device->unix_mount = strdup( mount_point );
-    disk_device->serial = strdup( disk_serial );
-    set_dos_devices_disk_serial( disk_device );
+    disk_device->unix_device = strdup( unix_device );
+    disk_device->disk_serial = strdup( disk_serial );
+
+    free( volume->unix_mount );
+    volume->unix_mount = strdup( mount_point );
+
+    set_dos_devices_disk_serial( volume );
 
     if (!get_volume_device_info( volume ))
     {
@@ -1018,10 +1045,10 @@ static NTSTATUS set_volume_info( struct volume *volume, struct dos_drive *drive,
     if (drive && !drive->mount)
         drive->mount = add_dosdev_mount_point( disk_device->dev_obj, &disk_device->name, drive->drive );
 
-    if (disk_device->unix_mount)
+    if (volume->unix_mount)
     {
-        id = disk_device->unix_mount;
-        id_len = strlen( disk_device->unix_mount ) + 1;
+        id = volume->unix_mount;
+        id_len = strlen( volume->unix_mount ) + 1;
     }
     if (volume->mount) set_mount_point_id( volume->mount, id, id_len );
     if (drive && drive->mount) set_mount_point_id( drive->mount, id, id_len );
@@ -1064,7 +1091,7 @@ static void create_drive_devices(void)
     for (i = 0; i < MAX_DOS_DRIVES; i++)
     {
         char link[4096], unix_dev[4096];
-        char *device = NULL;
+        char *unix_device = NULL;
         struct get_dosdev_symlink_params params = { dosdev, link, sizeof(link) };
 
         dosdev[0] = 'a' + i;
@@ -1073,7 +1100,7 @@ static void create_drive_devices(void)
         dosdev[2] = ':';
         params.dest = unix_dev;
         params.size = sizeof(unix_dev);
-        if (!MOUNTMGR_CALL( get_dosdev_symlink, &params )) device = unix_dev;
+        if (!MOUNTMGR_CALL( get_dosdev_symlink, &params )) unix_device = unix_dev;
 
         drive_type = i < 2 ? DEVICE_FLOPPY : DEVICE_HARDDISK_VOL;
         if (drives_key)
@@ -1095,12 +1122,12 @@ static void create_drive_devices(void)
             }
         }
 
-        volume = find_matching_volume( NULL, device, link, drive_type );
+        volume = find_matching_volume( NULL, unix_device, link, drive_type );
         if (!create_dos_device( volume, NULL, i, drive_type, &drive ))
         {
             /* don't reset uuid if we used an existing volume */
             const GUID *guid = volume ? NULL : get_default_uuid(i);
-            set_volume_info( drive->volume, drive, device, link, drive_type, guid, NULL, NULL );
+            set_volume_info( drive->volume, drive, unix_device, link, drive_type, guid, NULL, NULL );
         }
         if (volume) release_volume( volume );
     }
@@ -1199,7 +1226,7 @@ static void create_scsi_entry( struct volume *volume, const struct scsi_info *in
 }
 
 /* create a new disk volume */
-NTSTATUS add_volume( const char *udi, const char *device, const char *mount_point,
+NTSTATUS add_volume( const char *udi, const char *unix_device, const char *mount_point,
                      enum device_type type, const GUID *guid, const char *disk_serial,
                      const char *label, const struct scsi_info *scsi_info )
 {
@@ -1207,7 +1234,7 @@ NTSTATUS add_volume( const char *udi, const char *device, const char *mount_poin
     NTSTATUS status = STATUS_SUCCESS;
 
     TRACE( "adding %s device %s mount %s type %u uuid %s\n", debugstr_a(udi),
-           debugstr_a(device), debugstr_a(mount_point), type, debugstr_guid(guid) );
+           debugstr_a(unix_device), debugstr_a(mount_point), type, debugstr_guid(guid) );
 
     EnterCriticalSection( &device_section );
     LIST_FOR_EACH_ENTRY( volume, &volumes_list, struct volume, entry )
@@ -1218,11 +1245,11 @@ NTSTATUS add_volume( const char *udi, const char *device, const char *mount_poin
         }
 
     /* udi not found, search for a non-dynamic volume */
-    if ((volume = find_matching_volume( udi, device, mount_point, type ))) set_volume_udi( volume, udi );
+    if ((volume = find_matching_volume( udi, unix_device, mount_point, type ))) set_volume_udi( volume, udi );
     else status = create_volume( udi, type, &volume );
 
 found:
-    if (!status) status = set_volume_info( volume, NULL, device, mount_point, type, guid, label, disk_serial );
+    if (!status) status = set_volume_info( volume, NULL, unix_device, mount_point, type, guid, label, disk_serial );
     if (!status && scsi_info) create_scsi_entry( volume, scsi_info );
     if (volume) release_volume( volume );
     LeaveCriticalSection( &device_section );
@@ -1249,7 +1276,7 @@ NTSTATUS remove_volume( const char *udi )
 
 
 /* create a new dos drive */
-NTSTATUS add_dos_device( int letter, const char *udi, const char *device,
+NTSTATUS add_dos_device( int letter, const char *udi, const char *unix_device,
                          const char *mount_point, enum device_type type, const GUID *guid,
                          const char *label, const struct scsi_info *scsi_info )
 {
@@ -1261,11 +1288,11 @@ NTSTATUS add_dos_device( int letter, const char *udi, const char *device,
     char dosdev[] = "a::";
 
     EnterCriticalSection( &device_section );
-    volume = find_matching_volume( udi, device, mount_point, type );
+    volume = find_matching_volume( udi, unix_device, mount_point, type );
 
     if (letter == -1)  /* auto-assign a letter */
     {
-        struct add_drive_params params = { device, type, &letter };
+        struct add_drive_params params = { unix_device, type, &letter };
         if ((status = MOUNTMGR_CALL( add_drive, &params ))) goto done;
 
         LIST_FOR_EACH_ENTRY_SAFE( drive, next, &drives_list, struct dos_drive, entry )
@@ -1276,7 +1303,7 @@ NTSTATUS add_dos_device( int letter, const char *udi, const char *device,
     }
     else  /* simply reset the device symlink */
     {
-        struct set_dosdev_symlink_params params = { dosdev, device };
+        struct set_dosdev_symlink_params params = { dosdev, unix_device };
 
         LIST_FOR_EACH_ENTRY( drive, &drives_list, struct dos_drive, entry )
             if (drive->drive == letter) break;
@@ -1288,8 +1315,8 @@ NTSTATUS add_dos_device( int letter, const char *udi, const char *device,
         }
         else
         {
-            if (!device || !drive->volume->device->unix_device ||
-                strcmp( device, drive->volume->device->unix_device ))
+            if (!unix_device || !drive->volume->device->unix_device ||
+                strcmp( unix_device, drive->volume->device->unix_device ))
                 MOUNTMGR_CALL( set_dosdev_symlink, &params );
             delete_dos_device( drive );
         }
@@ -1303,16 +1330,16 @@ found:
     set_drive_info( drive, letter, volume );
     dosdev[0] = 'a' + drive->drive;
     dosdev[2] = 0;
-    if (!mount_point || !volume->device->unix_mount || strcmp( mount_point, volume->device->unix_mount ))
+    if (!mount_point || !volume->unix_mount || strcmp( mount_point, volume->unix_mount ))
     {
         struct set_dosdev_symlink_params params = { dosdev, mount_point };
         MOUNTMGR_CALL( set_dosdev_symlink, &params );
     }
-    set_volume_info( volume, drive, device, mount_point, type, guid, label, NULL );
+    set_volume_info( volume, drive, unix_device, mount_point, type, guid, label, NULL );
 
     TRACE( "added device %c: udi %s for %s on %s type %u\n",
-           'a' + drive->drive, wine_dbgstr_a(udi), wine_dbgstr_a(device),
-           wine_dbgstr_a(mount_point), type );
+           'a' + drive->drive, debugstr_a(udi), debugstr_a(unix_device),
+           debugstr_a(mount_point), type );
 
     /* hack: force the drive type in the registry */
     if (!RegCreateKeyW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Drives", &hkey ))
@@ -1375,7 +1402,7 @@ NTSTATUS remove_dos_device( int letter, const char *udi )
             RegCloseKey( hkey );
         }
 
-        if (udi && drive->volume->device->unix_mount) notify = drive->drive;
+        if (udi && drive->volume->unix_mount) notify = drive->drive;
 
         delete_dos_device( drive );
         update_drive_table_and_user_shared_data();
@@ -1452,7 +1479,7 @@ static void update_drive_table_and_user_shared_data(void)
 
         if (idx < 0 || idx >= MAX_DOS_DRIVES) continue;
 
-        params.unix_mount = drive->volume && drive->volume->device ? drive->volume->device->unix_mount : NULL;
+        params.unix_mount = drive->volume ? drive->volume->unix_mount : NULL;
         params.case_sensitive = 1;
         params.fs_type = MOUNTMGR_FS_TYPE_NTFS;
         params.fs_attributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS |
@@ -1572,7 +1599,7 @@ NTSTATUS query_unix_drive( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_
 {
     const struct mountmgr_unix_drive *input = buff;
     struct mountmgr_unix_drive *output = NULL;
-    char *device, *mount_point;
+    char *unix_device, *mount_point;
     int letter = towlower( input->letter );
     DWORD size, type = DEVICE_UNKNOWN, serial;
     NTSTATUS status = STATUS_SUCCESS;
@@ -1594,8 +1621,8 @@ NTSTATUS query_unix_drive( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_
         device_type = volume->device->type;
         fs_type = get_mountmgr_fs_type( volume->fs_type );
         serial = volume->serial;
-        device = strdup( volume->device->unix_device );
-        mount_point = strdup( volume->device->unix_mount );
+        unix_device = strdup( volume->device->unix_device );
+        mount_point = strdup( volume->unix_mount );
         label = wcsdup( volume->label );
         release_volume( volume );
     }
@@ -1618,7 +1645,7 @@ NTSTATUS query_unix_drive( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_
 
     size = sizeof(*output);
     if (label) size += (lstrlenW(label) + 1) * sizeof(WCHAR);
-    if (device) size += strlen(device) + 1;
+    if (unix_device) size += strlen( unix_device ) + 1;
     if (mount_point) size += strlen(mount_point) + 1;
 
     input = NULL;
@@ -1646,20 +1673,20 @@ NTSTATUS query_unix_drive( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_
         strcpy( ptr, mount_point );
         ptr += strlen(ptr) + 1;
     }
-    if (device && ptr + strlen(device) + 1 - (char *)output <= outsize)
+    if (unix_device && ptr + strlen( unix_device ) + 1 - (char *)output <= outsize)
     {
         output->device_offset = ptr - (char *)output;
-        strcpy( ptr, device );
+        strcpy( ptr, unix_device );
         ptr += strlen(ptr) + 1;
     }
 
     TRACE( "returning %c: dev %s mount %s type %lu\n",
-           letter, debugstr_a(device), debugstr_a(mount_point), type );
+           letter, debugstr_a(unix_device), debugstr_a(mount_point), type );
 
     iosb->Information = ptr - (char *)output;
     if (size > outsize) status = STATUS_BUFFER_OVERFLOW;
 
-    free( device );
+    free( unix_device );
     free( mount_point );
     free( label );
     return status;
@@ -1690,7 +1717,7 @@ static NTSTATUS query_property( struct disk_device *device, IRP *irp )
         STORAGE_DEVICE_DESCRIPTOR *descriptor;
         DWORD len = sizeof(*descriptor);
 
-        if (device->serial) len += strlen( device->serial ) + 1;
+        if (device->disk_serial) len += strlen( device->disk_serial ) + 1;
 
         if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(STORAGE_DESCRIPTOR_HEADER))
             status = STATUS_INVALID_PARAMETER;
@@ -1719,11 +1746,11 @@ static NTSTATUS query_property( struct disk_device *device, IRP *irp )
             descriptor->ProductRevisionOffset = 0;
             descriptor->BusType = BusTypeScsi;
             descriptor->RawPropertiesLength = 0;
-            if (!device->serial) descriptor->SerialNumberOffset = 0;
+            if (!device->disk_serial) descriptor->SerialNumberOffset = 0;
             else
             {
                 descriptor->SerialNumberOffset = sizeof(*descriptor);
-                strcpy( (char *)descriptor + descriptor->SerialNumberOffset, device->serial );
+                strcpy( (char *)descriptor + descriptor->SerialNumberOffset, device->disk_serial );
             }
             irp->IoStatus.Information = len;
             status = STATUS_SUCCESS;
@@ -1791,7 +1818,7 @@ static NTSTATUS query_property( struct disk_device *device, IRP *irp )
     return status;
 }
 
-static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
+static NTSTATUS WINAPI disk_query_volume( DEVICE_OBJECT *device, IRP *irp )
 {
     IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation( irp );
     int info_class = irpsp->Parameters.QueryVolume.FsInformationClass;
@@ -1839,7 +1866,7 @@ static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
     {
         FILE_FS_SIZE_INFORMATION *info = irp->AssociatedIrp.SystemBuffer;
         struct size_info size_info = { 0, 0, 0, 0, 0 };
-        struct get_volume_size_info_params params = { dev->unix_mount, &size_info };
+        struct get_volume_size_info_params params = { volume->unix_mount, &size_info };
 
         if (length < sizeof(FILE_FS_SIZE_INFORMATION))
         {
@@ -1910,7 +1937,7 @@ static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
     {
         FILE_FS_FULL_SIZE_INFORMATION *info = irp->AssociatedIrp.SystemBuffer;
         struct size_info size_info = { 0, 0, 0, 0, 0 };
-        struct get_volume_size_info_params params = { dev->unix_mount, &size_info };
+        struct get_volume_size_info_params params = { volume->unix_mount, &size_info };
 
         if (length < sizeof(FILE_FS_FULL_SIZE_INFORMATION))
         {
@@ -1936,7 +1963,7 @@ static NTSTATUS WINAPI harddisk_query_volume( DEVICE_OBJECT *device, IRP *irp )
     {
         FILE_FS_FULL_SIZE_INFORMATION_EX *info = irp->AssociatedIrp.SystemBuffer;
         struct size_info size_info;
-        struct get_volume_size_info_params params = { dev->unix_mount, &size_info };
+        struct get_volume_size_info_params params = { volume->unix_mount, &size_info };
 
         if (length < sizeof(FILE_FS_FULL_SIZE_INFORMATION_EX))
         {
@@ -1979,8 +2006,7 @@ done:
     return status;
 }
 
-/* handler for ioctls on the harddisk device */
-static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
+static NTSTATUS WINAPI disk_ioctl( DEVICE_OBJECT *device, IRP *irp )
 {
     IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation( irp );
     struct disk_device *dev = device->DeviceExtension;
@@ -2045,8 +2071,14 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
     case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
     {
         struct size_info size_info = { 0, 0, 0, 0, 0 };
-        struct get_volume_size_info_params params = { dev->unix_mount, &size_info };
+        struct get_volume_size_info_params params;
         VOLUME_DISK_EXTENTS info = { 0 };
+
+        if (!dev->volume)
+        {
+            status = STATUS_INVALID_DEVICE_REQUEST;
+            break;
+        }
 
         if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(info))
         {
@@ -2059,6 +2091,9 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
         info.NumberOfDiskExtents = 1;
         info.Extents[0].DiskNumber = dev->devnum.DeviceNumber;
         info.Extents[0].StartingOffset.QuadPart = 0;
+
+        params.unix_mount = dev->volume->unix_mount;
+        params.info = &size_info;
 
         if ((status = MOUNTMGR_CALL( get_volume_size_info, &params )) == STATUS_SUCCESS)
         {
@@ -2091,13 +2126,13 @@ static NTSTATUS WINAPI harddisk_ioctl( DEVICE_OBJECT *device, IRP *irp )
 }
 
 /* driver entry point for the harddisk driver */
-NTSTATUS WINAPI harddisk_driver_entry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
+NTSTATUS WINAPI disk_driver_entry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
 {
     struct disk_device *device;
 
-    harddisk_driver = driver;
-    driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = harddisk_ioctl;
-    driver->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = harddisk_query_volume;
+    disk_driver = driver;
+    driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = disk_ioctl;
+    driver->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = disk_query_volume;
 
     /* create a harddisk0 device that isn't assigned to any drive */
     create_disk_device( DEVICE_HARDDISK, &device, NULL );

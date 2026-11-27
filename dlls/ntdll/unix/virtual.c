@@ -1673,8 +1673,8 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
         while (first)
         {
             struct file_view *view = WINE_RB_ENTRY_VALUE( first, struct file_view, entry );
-            if ((start = try_map_free_area( (char *)view->base + view->size, (char *)start + size, step,
-                                            start, size, unix_prot ))) break;
+            if ((start = try_map_free_area( max( (char *)base, (char *)view->base + view->size ),
+                                            (char *)start + size, step, start, size, unix_prot ))) break;
             if ((char *)view->base < (char *)base + size) return NULL;
             start = ROUND_ADDR( (char *)view->base - size, align_mask );
             /* stop if remaining space is not large enough */
@@ -1691,7 +1691,7 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
         while (first)
         {
             struct file_view *view = WINE_RB_ENTRY_VALUE( first, struct file_view, entry );
-            if ((start = try_map_free_area( start, view->base, step,
+            if ((start = try_map_free_area( start, min( end, view->base ), step,
                                             start, size, unix_prot ))) break;
             if ((UINT_PTR)view->base + view->size + align_mask < (UINT_PTR)view->base + view->size) return NULL;
             start = ROUND_ADDR( (char *)view->base + view->size + align_mask, align_mask );
@@ -2493,7 +2493,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
 
     if (base)
     {
-        if (is_beyond_limit( base, size, address_space_limit )) return STATUS_WORKING_SET_LIMIT_RANGE;
+        if (is_beyond_limit( base, size, user_space_limit )) return STATUS_INVALID_PARAMETER;
         if (limit_low && base < (void *)limit_low) return STATUS_CONFLICTING_ADDRESSES;
         if (limit_high && is_beyond_limit( base, size, (char *)limit_high + 1 )) return STATUS_CONFLICTING_ADDRESSES;
         if (is_beyond_limit( base, size, host_addr_space_limit )) return STATUS_CONFLICTING_ADDRESSES;
@@ -6243,7 +6243,13 @@ void virtual_set_large_address_space(void)
                 free_reserved_memory( 0, (char *)0x7ffe0000 );
 #endif
         }
-        else user_space_wow_limit = ((main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ? limit_4g : limit_2g) - 1;
+        else if (main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE)
+        {
+            user_space_wow_limit = limit_4g - 1;
+            /* reserve space for top-down allocations; some apps break if the entire high 2G is available */
+            reserve_area( (void *)0xfff00000, (void *)0xffff0000 );
+        }
+        else user_space_wow_limit = limit_2g - 1;
     }
     else
     {
@@ -6306,6 +6312,19 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
     {
         WARN("called with wrong alloc type flags (%08x) !\n", type);
         return STATUS_INVALID_PARAMETER;
+    }
+    switch (type & (MEM_PHYSICAL | MEM_LARGE_PAGES))
+    {
+    case MEM_PHYSICAL:
+        if (type & (MEM_COMMIT | MEM_RESET)) return STATUS_INVALID_PARAMETER;
+        break;
+    case MEM_LARGE_PAGES:
+        if (size & (user_shared_data->LargePageMinimum - 1)) return STATUS_INVALID_PARAMETER;
+        if (!(type & MEM_COMMIT)) return STATUS_INVALID_PARAMETER;
+        return STATUS_PRIVILEGE_NOT_HELD;
+    case MEM_PHYSICAL | MEM_LARGE_PAGES:
+        if (size & granularity_mask) return STATUS_INVALID_PARAMETER;
+        break;
     }
 
     if ((type & MEM_RESERVE_PLACEHOLDER)
@@ -6448,7 +6467,8 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
 NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
-    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET | MEM_RESET_UNDO;
+    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO |
+                                   MEM_TOP_DOWN | MEM_PHYSICAL | MEM_LARGE_PAGES | MEM_WRITE_WATCH;
     ULONG_PTR limit;
 
     TRACE("%p %p %08lx %x %08x\n", process, *ret, *size_ptr, type, protect );
@@ -6466,6 +6486,8 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
         union apc_call call;
         union apc_result result;
         unsigned int status;
+
+        if (is_old_wow64() && !zero_bits) zero_bits = ~0u;
 
         memset( &call, 0, sizeof(call) );
 
@@ -6520,11 +6542,8 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
         case MemExtendedParameterAddressRequirements:
         {
             MEM_ADDRESS_REQUIREMENTS *r = parameters[i].Pointer;
-            ULONG_PTR limit;
 
             if (!r) return STATUS_INVALID_PARAMETER;
-            if (is_wow64()) limit = get_wow_user_space_limit();
-            else limit = (ULONG_PTR)user_space_limit;
 
             if (r->Alignment)
             {
@@ -6538,7 +6557,7 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
             if (r->LowestStartingAddress)
             {
                 *limit_low = (ULONG_PTR)r->LowestStartingAddress;
-                if (*limit_low >= limit || (*limit_low & granularity_mask))
+                if (*limit_low >= (ULONG_PTR)user_space_limit || (*limit_low & granularity_mask))
                 {
                     WARN( "Invalid limit %p.\n", r->LowestStartingAddress );
                     return STATUS_INVALID_PARAMETER;
@@ -6553,7 +6572,7 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
                     WARN( "Invalid limit %p.\n", r->HighestEndingAddress );
                     return STATUS_INVALID_PARAMETER;
                 }
-                if (*limit_high > limit) *limit_high = limit;
+                if (*limit_high > (ULONG_PTR)user_space_limit) *limit_high = (ULONG_PTR)user_space_limit;
             }
             break;
         }
@@ -6589,8 +6608,9 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
                                            ULONG protect, MEM_EXTENDED_PARAMETER *parameters,
                                            ULONG count )
 {
-    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH
-                                   | MEM_RESET | MEM_RESET_UNDO | MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER;
+    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO | MEM_TOP_DOWN |
+                                   MEM_PHYSICAL | MEM_LARGE_PAGES | MEM_WRITE_WATCH |
+                                   MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER;
     ULONG_PTR limit_low = 0;
     ULONG_PTR limit_high = 0;
     ULONG_PTR align = 0;
@@ -6613,6 +6633,8 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
     {
         union apc_call call;
         union apc_result result;
+
+        if (is_old_wow64() && !limit_high && !*ret) limit_high = ~0u;
 
         memset( &call, 0, sizeof(call) );
 
@@ -6977,8 +6999,11 @@ static unsigned int get_basic_memory_info( HANDLE process, LPCVOID addr,
             info->AllocationProtect = result.virtual_query.alloc_prot;
             info->State             = (DWORD)result.virtual_query.state << 12;
             info->Type              = (DWORD)result.virtual_query.alloc_type << 16;
-            if (info->RegionSize != result.virtual_query.size)  /* truncated */
-                return STATUS_INVALID_PARAMETER;  /* FIXME */
+#ifndef _WIN64
+            if (result.virtual_query.base >= ~granularity_mask) return STATUS_INVALID_PARAMETER;
+            if ((result.virtual_query.base + result.virtual_query.size) >> 32)  /* overflow */
+                info->RegionSize = ~granularity_mask - result.virtual_query.base;
+#endif
             if (res_len) *res_len = sizeof(*info);
         }
         return result.virtual_query.status;
@@ -7577,6 +7602,8 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
         union apc_call call;
         union apc_result result;
 
+        if (is_old_wow64() && !zero_bits) zero_bits = ~0u;
+
         memset( &call, 0, sizeof(call) );
 
         call.map_view.type         = APC_MAP_VIEW;
@@ -7650,6 +7677,8 @@ NTSTATUS WINAPI NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr
     {
         union apc_call call;
         union apc_result result;
+
+        if (is_old_wow64() && !limit_high && !*addr_ptr) limit_high = ~0u;
 
         memset( &call, 0, sizeof(call) );
 

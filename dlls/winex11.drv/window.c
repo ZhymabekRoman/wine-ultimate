@@ -1474,18 +1474,12 @@ static void window_set_net_wm_state( struct x11drv_win_data *data, UINT new_stat
 
 static void window_set_config( struct x11drv_win_data *data, RECT rect, BOOL above )
 {
-    UINT style = NtUserGetWindowLongW( data->hwnd, GWL_STYLE ), mask = 0;
     const RECT *old_rect = &data->pending_state.rect;
     BOOL old_above = data->pending_state.above;
     XWindowChanges changes;
     RECT *new_rect = &rect;
+    UINT mask = 0;
 
-    /* resizing a managed maximized window is not allowed */
-    if ((style & WS_MAXIMIZE) && data->managed)
-    {
-        new_rect->right = new_rect->left + old_rect->right - old_rect->left;
-        new_rect->bottom = new_rect->top + old_rect->bottom - old_rect->top;
-    }
     /* only the size is allowed to change for the desktop window or systray docked windows */
     if (data->whole_window == root_window || data->embedded)
     {
@@ -1545,6 +1539,7 @@ static void window_set_config( struct x11drv_win_data *data, RECT rect, BOOL abo
     if (mask && data->managed && !is_virtual_desktop() && !data->configure_serial &&
         !data->wm_state_serial && !data->net_wm_state_serial)
     {
+        UINT style = NtUserGetWindowLongW( data->hwnd, GWL_STYLE );
         const RECT *cur = &data->current_state.rect;
         int want_w = new_rect->right - new_rect->left, want_h = new_rect->bottom - new_rect->top;
         BOOL size_match = cur->right - cur->left == want_w && cur->bottom - cur->top == want_h;
@@ -2503,8 +2498,8 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
     else
     {
         parent_win = data->whole_window;
-        x = data->rects.client.left - data->rects.visible.left;
-        y = data->rects.client.top - data->rects.visible.top;
+        x = client_rect.left;
+        y = client_rect.top;
     }
     cx = min( max( 1, client_rect.right - client_rect.left ), 65535 );
     cy = min( max( 1, client_rect.bottom - client_rect.top ), 65535 );

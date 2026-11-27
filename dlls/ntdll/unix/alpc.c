@@ -455,7 +455,7 @@ NTSTATUS WINAPI NtAlpcCreatePort( HANDLE *port_handle, OBJECT_ATTRIBUTES *obj_at
     *port_handle = NULL;
     if (port_attr && (port_attr->Flags & 0x100000)) return STATUS_INVALID_PARAMETER;
 
-    if ((ret = alloc_object_attributes( obj_attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( obj_attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_alpc_port )
     {
@@ -618,7 +618,7 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
     if (obj_attr && obj_attr->RootDirectory)
         port_obj_attr.RootDirectory = obj_attr->RootDirectory;
 
-    if ((ret = alloc_object_attributes( &port_obj_attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( &port_obj_attr, &objattr, &len ))) return ret;
 
     if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, NULL )))
     {

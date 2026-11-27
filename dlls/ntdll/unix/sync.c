@@ -215,8 +215,8 @@ static inline int futex_wake_one( const LONG *addr )
 #endif /* __APPLE__ */
 
 /* create a struct security_descriptor and contained information in one contiguous piece of memory */
-unsigned int alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
-                                      data_size_t *ret_len )
+unsigned int wine_server_alloc_object_attributes( const OBJECT_ATTRIBUTES *attr, struct object_attributes **ret,
+                                                  data_size_t *ret_len )
 {
     unsigned int len = sizeof(**ret);
     SID *owner = NULL, *group = NULL;
@@ -1649,7 +1649,6 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
 
     *handle = 0;
     if (max <= 0 || initial < 0 || initial > max) return STATUS_INVALID_PARAMETER;
-
 #ifdef __linux__
     {
         ACCESS_MASK norm_access;
@@ -1677,7 +1676,7 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
     }
 #endif
 
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_semaphore )
     {
@@ -1889,7 +1888,6 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
 
     *handle = 0;
     if (type != NotificationEvent && type != SynchronizationEvent) return STATUS_INVALID_PARAMETER;
-
 #ifdef __linux__
     {
         ACCESS_MASK norm_access;
@@ -1917,7 +1915,7 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
     }
 #endif
 
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_event )
     {
@@ -2295,7 +2293,7 @@ NTSTATUS WINAPI NtCreateMutant( HANDLE *handle, ACCESS_MASK access, const OBJECT
            attr ? debugstr_us(attr->ObjectName) : "(null)", owned );
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_mutex )
     {
@@ -2413,7 +2411,7 @@ NTSTATUS WINAPI NtCreateJobObject( HANDLE *handle, ACCESS_MASK access, const OBJ
     struct object_attributes *objattr;
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_job )
     {
@@ -2722,7 +2720,7 @@ NTSTATUS WINAPI NtCreateDebugObject( HANDLE *handle, ACCESS_MASK access,
 
     *handle = 0;
     if (flags & ~DEBUG_KILL_ON_CLOSE) return STATUS_INVALID_PARAMETER;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_debug_obj )
     {
@@ -2931,7 +2929,7 @@ NTSTATUS WINAPI NtCreateDirectoryObject( HANDLE *handle, ACCESS_MASK access, OBJ
     struct object_attributes *objattr;
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_directory )
     {
@@ -3082,7 +3080,7 @@ NTSTATUS WINAPI NtCreateSymbolicLinkObject( HANDLE *handle, ACCESS_MASK access,
     *handle = 0;
     if (!target->MaximumLength) return STATUS_INVALID_PARAMETER;
     if (!target->Buffer) return STATUS_ACCESS_VIOLATION;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_symlink )
     {
@@ -3206,7 +3204,7 @@ NTSTATUS WINAPI NtCreateTimer( HANDLE *handle, ACCESS_MASK access, const OBJECT_
 
     *handle = 0;
     if (type != NotificationTimer && type != SynchronizationTimer) return STATUS_INVALID_PARAMETER;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_timer )
     {
@@ -3872,7 +3870,7 @@ NTSTATUS WINAPI NtCreateKeyedEvent( HANDLE *handle, ACCESS_MASK access,
            attr ? debugstr_us(attr->ObjectName) : "(null)", flags );
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_keyed_event )
     {
@@ -4162,7 +4160,7 @@ NTSTATUS WINAPI NtCreateIoCompletion( HANDLE *handle, ACCESS_MASK access, OBJECT
     TRACE( "(%p, %x, %p, %d)\n", handle, access, attr, threads );
 
     *handle = 0;
-    if ((status = alloc_object_attributes( attr, &objattr, &len ))) return status;
+    if ((status = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return status;
 
     SERVER_START_REQ( create_completion )
     {
@@ -4601,7 +4599,7 @@ NTSTATUS WINAPI NtCreateWaitCompletionPacket( HANDLE *handle, ACCESS_MASK access
 
     if (!handle) return STATUS_ACCESS_VIOLATION;
     *handle = 0;
-    if ((status = alloc_object_attributes( attr, &objattr, &len ))) return status;
+    if ((status = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return status;
 
     SERVER_START_REQ( create_wait_completion_packet )
     {
@@ -4725,7 +4723,7 @@ NTSTATUS WINAPI NtCreateSection( HANDLE *handle, ACCESS_MASK access, const OBJEC
         return STATUS_INVALID_PAGE_PROTECTION;
     }
 
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( create_mapping )
     {
