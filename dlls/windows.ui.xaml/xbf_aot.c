@@ -443,6 +443,7 @@ struct xbf_aot_exec_ctx
     UINT32 *deferred_res_ops;
     int deferred_res_cnt;
     int deferred_res_cap;
+    void *root_binding;
     void *dt_binding;
 };
 
@@ -611,6 +612,27 @@ static void aot_exec_create_node( struct xbf_aot_exec_ctx *ec, const struct xbf_
         el = NULL;
         inst = NULL;
     }
+    else if (!ec->fake_ctx.is_uwp_conn && ec->connector)
+    {
+        if (nd->flags & XBF_AOT_NODE_BUILTIN)
+        {
+            element_create_typed( cls_name, (void **)&inst );
+        }
+        else if (nd->flags & XBF_AOT_NODE_APP_TYPE)
+        {
+            if ((nd->flags & XBF_AOT_NODE_NO_PROVIDER) ||
+                !wcsncmp( cls_name, L"Microsoft.UI.Xaml.", 18 ) ||
+                !wcsncmp( cls_name, L"Windows.UI.Xaml.", 16 ))
+                element_create_typed( cls_name, (void **)&inst );
+            else if (FAILED(uwp_create_instance_from_provider( cls_name, (void **)&inst )) || !inst)
+                element_create_typed( cls_name, (void **)&inst );
+        }
+        else
+        {
+            element_create_typed( cls_name, (void **)&inst );
+        }
+        el = NULL;
+    }
     else if (nd->flags & XBF_AOT_NODE_BUILTIN)
     {
         uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
@@ -664,33 +686,86 @@ static void aot_exec_connect( struct xbf_aot_exec_ctx *ec, const struct xbf_aot_
     const struct abi_component_connector *acc;
 
     if (el) el->conn_id = op->cid;
-    if (!ec->connector || !raw || op->cid == 1) return;
+    if (!ec->connector || !raw) return;
 
     acc = (const struct abi_component_connector *)ec->connector;
     TRACE( "AOT Connect(cid=%d, target=%p [%s %s])\n", op->cid, raw,
            el ? debugstr_w( el->class_name ) : "?", el ? debugstr_w( el->name ) : "" );
     acc->lpVtbl->Connect( ec->connector, op->cid, raw );
 
-    if (ec->root_el && ec->root_el->binding_connector && !ec->is_template)
+    if (op->cid == 1 && !ec->is_template && !ec->out_created)
     {
-        const struct abi_component_connector *bcc = (const struct abi_component_connector *)ec->root_el->binding_connector;
-        if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( ec->root_el->binding_connector, op->cid, raw );
+        void *binding = NULL;
+        if (ec->fake_ctx.is_uwp_conn)
+        {
+            void *conn2 = NULL;
+            if (ec->component &&
+                SUCCEEDED(IInspectable_QueryInterface( ec->component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
+            {
+                const struct abi_component_connector2 *acc2 = (const struct abi_component_connector2 *)conn2;
+                if (acc2->lpVtbl->GetBindingConnector)
+                    acc2->lpVtbl->GetBindingConnector( conn2, 1, raw, &binding );
+                IUnknown_Release( (IUnknown *)conn2 );
+            }
+        }
+        else
+        {
+            const struct abi_component_connector_winui *wcc = (const struct abi_component_connector_winui *)ec->connector;
+            if (wcc->lpVtbl->GetBindingConnector)
+                wcc->lpVtbl->GetBindingConnector( ec->connector, 1, raw, &binding );
+        }
+        if (binding)
+        {
+            const struct abi_component_connector *bcc = (const struct abi_component_connector *)binding;
+            if (ec->root_binding) IUnknown_Release( (IUnknown *)ec->root_binding );
+            ec->root_binding = binding;
+            if (ec->root_el)
+            {
+                if (ec->root_el->binding_connector) IUnknown_Release( (IUnknown *)ec->root_el->binding_connector );
+                ec->root_el->binding_connector = binding;
+                IUnknown_AddRef( (IUnknown *)binding );
+            }
+            if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( binding, 1, raw );
+        }
+        return;
+    }
+
+    if (!ec->is_template && !ec->out_created)
+    {
+        void *bc = ec->root_binding ? ec->root_binding : (ec->root_el ? ec->root_el->binding_connector : NULL);
+        if (bc)
+        {
+            const struct abi_component_connector *bcc = (const struct abi_component_connector *)bc;
+            if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( bc, op->cid, raw );
+        }
     }
     else if (ec->out_created)
     {
         if (!ec->dt_binding && ec->component)
         {
-            void *conn2 = NULL, *bc = NULL;
-            if (SUCCEEDED(IInspectable_QueryInterface( ec->component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
+            void *bc = NULL;
+            if (ec->fake_ctx.is_uwp_conn)
             {
-                const struct abi_component_connector2 *acc2 = (const struct abi_component_connector2 *)conn2;
-                if (acc2->lpVtbl->GetBindingConnector && SUCCEEDED(acc2->lpVtbl->GetBindingConnector( conn2, op->cid, raw, &bc )) && bc)
+                void *conn2 = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( ec->component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
                 {
-                    ec->dt_binding = bc;
-                    if (el && !el->dt_binding_connector) { el->dt_binding_connector = bc; IUnknown_AddRef( (IUnknown *)bc ); }
-                    if (el && !el->binding_connector) { el->binding_connector = bc; IUnknown_AddRef( (IUnknown *)bc ); }
+                    const struct abi_component_connector2 *acc2 = (const struct abi_component_connector2 *)conn2;
+                    if (acc2->lpVtbl->GetBindingConnector)
+                        acc2->lpVtbl->GetBindingConnector( conn2, op->cid, raw, &bc );
+                    IUnknown_Release( (IUnknown *)conn2 );
                 }
-                IUnknown_Release( (IUnknown *)conn2 );
+            }
+            else
+            {
+                const struct abi_component_connector_winui *wcc = (const struct abi_component_connector_winui *)ec->connector;
+                if (wcc->lpVtbl->GetBindingConnector)
+                    wcc->lpVtbl->GetBindingConnector( ec->connector, op->cid, raw, &bc );
+            }
+            if (bc)
+            {
+                ec->dt_binding = bc;
+                if (el && !el->dt_binding_connector) { el->dt_binding_connector = bc; IUnknown_AddRef( (IUnknown *)bc ); }
+                if (el && !el->binding_connector) { el->binding_connector = bc; IUnknown_AddRef( (IUnknown *)bc ); }
             }
         }
         if (ec->dt_binding)
@@ -1140,22 +1215,11 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
         if (uwp_pri_lookup_string( res_key, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
         {
             const WCHAR *pname = (op->pid < ec->hdr->prop_cnt) ? ec->fake_ctx.props[op->pid].name : L"";
-            BOOL is_chord = (!wcscmp( pname, L"VirtualKeyControlChord" ) || !wcscmp( pname, L"VirtualKeyAltChord" ) ||
-                             !wcscmp( pname, L"VirtualKeyShiftChord" ) || !wcscmp( pname, L"VirtualKeyControlShiftChord" ));
-            BOOL is_vk = (!wcscmp( pname, L"VirtualKey" ) || is_chord);
             BOOL is_text_prop = (!wcscmp( pname, L"Text" ) || !wcscmp( pname, L"Content" ) ||
                                  !wcscmp( pname, L"Glyph" ) || !wcscmp( pname, L"Label" ) ||
                                  !wcscmp( pname, L"Header" ) || !wcscmp( pname, L"Title" ) ||
                                  !wcscmp( pname, L"Description" ) ||
-                                 !wcscmp( pname, L"PlaceholderText" ) || !wcscmp( pname, L"Character" ));
-            if (is_chord)
-            {
-                UINT vk = uwp_parse_vk_string( resolved );
-                UINT mods = !wcscmp( pname, L"VirtualKeyControlChord" ) ? 1 :
-                            (!wcscmp( pname, L"VirtualKeyAltChord" ) ? 2 :
-                             (!wcscmp( pname, L"VirtualKeyShiftChord" ) ? 4 : 5));
-                if (vk) uwp_accel_register( NULL, target_el, vk, mods, TRUE );
-            }
+                                 !wcscmp( pname, L"PlaceholderText" ));
             if (op->pid == XBF_PROP_AUTOMATION_NAME)
                 uwp_elem_set_automation_name( target_el, resolved );
             else if (uwp_is_calendar_date_picker( target_el ) && !wcscmp( pname, L"Header" ))
@@ -1172,7 +1236,7 @@ static void aot_exec_provide_value( struct xbf_aot_exec_ctx *ec, const struct xb
             else if (op->pid == XBF_PROP_CONTENT || op->pid == XBF_PROP_UIELEMENT_XY_FOCUS_KEYBOARD_NAV ||
                      op->pid == XBF_PROP_TEXTBLOCK_TEXT || op->pid == XBF_PROP_UIELEMENT_EXIT_DISPLAY_MODE ||
                      op->pid == XBF_PROP_FONTICON_GLYPH || op->pid == XBF_PROP_RUN_TEXT ||
-                     (op->pid != XBF_PROP_AUTOMATION_ID && !is_vk && is_text_prop && !uwp_has_text( target_el )))
+                     (op->pid != XBF_PROP_AUTOMATION_ID && is_text_prop && !uwp_has_text( target_el )))
                 uwp_elem_set_text( target_el, resolved );
 
             if (pname[0] && op->pid < ec->hdr->prop_cnt && ec->fake_ctx.props[op->pid].owner_tid < ec->hdr->type_cnt)
@@ -1359,12 +1423,18 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
                                           target_rd ? target_rd : uwp_rd_bucket_for_el( root_el, TRUE ) );
     }
 
+    if (!is_uwp_conn && connector && !target_rd && hdr->node_cnt > 0 && (ec.nodes[0].flags & XBF_AOT_NODE_IS_RD))
+    {
+        TRACE( "xbf_aot_instantiate: skipping WinUI 3 ResourceDictionary root\n" );
+        return;
+    }
+
     if (hdr->node_cnt > 0)
     {
         ec.nodes_el = calloc( hdr->node_cnt, sizeof(*ec.nodes_el) );
         ec.nodes_raw = calloc( hdr->node_cnt, sizeof(*ec.nodes_raw) );
         if (!ec.nodes_el || !ec.nodes_raw) { free( ec.nodes_el ); free( ec.nodes_raw ); return; }
-        if (root_el)
+        if (root_el || (component && (ec.nodes[0].flags & XBF_AOT_NODE_ROOT_REUSE)))
         {
             ec.nodes_el[0] = root_el;
             ec.nodes_raw[0] = component ? component : (root_el->outer ? root_el->outer : &root_el->IInspectable_iface);
@@ -1436,6 +1506,7 @@ void xbf_aot_instantiate( const struct xbf_aot_header *hdr, const BYTE *xbf, DWO
 
     aot_finalize_deferred_and_triggers( &ec );
 
+    if (ec.root_binding) IUnknown_Release( (IUnknown *)ec.root_binding );
     if (ec.dt_binding) IUnknown_Release( (IUnknown *)ec.dt_binding );
     free( ec.deferred_res_ops );
     free( ec.nodes_el );

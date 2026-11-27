@@ -211,8 +211,18 @@ static inline BOOL uwp_style_is_accent_name( const WCHAR *name )
     if (!name || !name[0]) return FALSE;
     return wcsstr( name, L"AccentButton" ) != NULL ||
            wcsstr( name, L"PrimaryButtonStyle" ) != NULL ||
-           wcsstr( name, L"PrimaryPapButton" ) != NULL ||
            wcsstr( name, L"AccentStyle" ) != NULL;
+}
+
+static inline BOOL uwp_brush_key_is_accent( const WCHAR *key )
+{
+    if (!key || !key[0]) return FALSE;
+    return wcsstr( key, L"AccentButtonBackground" ) != NULL ||
+           wcsstr( key, L"AccentFillColorDefault" ) != NULL ||
+           wcsstr( key, L"SystemControlBackgroundAccentBrush" ) != NULL ||
+           wcsstr( key, L"SystemControlHighlightAccentBrush" ) != NULL ||
+           wcsstr( key, L"SystemAccentColor" ) != NULL ||
+           !wcscmp( key, L"AccentBrush" );
 }
 
 /* Globals */

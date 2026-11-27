@@ -665,8 +665,6 @@ static BOOL caps_probe( IInspectable *outer )
         { L".Controls.Calculator", L".Calculator", L".StoreManifestPage" };
     static const WCHAR *vm_suffixes[] =
         { L".ViewModel.StandardCalculatorViewModel", L".StandardCalculatorViewModel" };
-    static const WCHAR *design_suffixes[] =
-        { L".Design.FontScaleControlPanel" };
     WCHAR ns[80] = {0};
     void *provider = NULL;
 
@@ -701,10 +699,6 @@ static BOOL caps_probe( IInspectable *outer )
         g_caps.teardown_vm = TRUE;
         g_caps.display_sync = TRUE;
     }
-
-    /* Design-time panel (e.g. FontScaleControlPanel) registered in the provider. */
-    caps_find_type( provider, ns, design_suffixes, ARRAY_SIZE( design_suffixes ),
-                    g_caps.design_component, ARRAY_SIZE( g_caps.design_component ) );
 
     IInspectable_Release( (IInspectable *)provider );
     return TRUE;

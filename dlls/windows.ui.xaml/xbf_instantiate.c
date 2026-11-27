@@ -300,7 +300,7 @@ static BOOL xbf_compile_push_object( struct xbf_sub_state *st, BYTE op, DWORD cu
         if (cur_node_idx < ctx->aot->node_cnt)
             ctx->aot->nodes[cur_node_idx].flags |= XBF_AOT_NODE_IS_RD;
     }
-    else if (op == 0x17 && ctx->root_el)
+    else if (op == 0x17 && (ctx->root_el || (ctx->root_comp && !ctx->rd_only && !ctx->is_template)))
     {
         nflags |= XBF_AOT_NODE_ROOT_REUSE;
         cur_node_idx = 0;
@@ -323,7 +323,13 @@ static BOOL xbf_compile_push_object( struct xbf_sub_state *st, BYTE op, DWORD cu
     }
     else if (tid & 0x8000)
     {
+        WCHAR winui_buf[160];
         cls_name = uwp_btype_to_class_name( tid );
+        if (!ctx->is_uwp_conn && !wcsncmp( cls_name, L"Windows.UI.Xaml.", 16 ))
+        {
+            swprintf( winui_buf, ARRAY_SIZE(winui_buf), L"Microsoft.UI.Xaml.%s", cls_name + 16 );
+            cls_name = winui_buf;
+        }
         nflags |= XBF_AOT_NODE_BUILTIN;
         if (tid == XBF_TYPE_DEFERRED_ELEMENT) nflags |= XBF_AOT_NODE_DEFERRED;
         cur_node_idx = xbf_aot_add_node( ctx->aot, cls_name, L"", tid, nflags,
@@ -1123,8 +1129,8 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
 
     aot_b.xbf_sz = xbf_sz;
     aot_b.only_sub_idx = only_sub_idx;
-    if (root_el_pre)
-        xbf_aot_add_node( &aot_b, root_el_pre->class_name, L"", 0, XBF_AOT_NODE_ROOT_REUSE, FALSE, 0 );
+    if (root_el_pre || (component && !rd_only && !is_template))
+        xbf_aot_add_node( &aot_b, root_el_pre ? root_el_pre->class_name : L"", L"", 0, XBF_AOT_NODE_ROOT_REUSE, FALSE, 0 );
     ctx.aot = &aot_b;
 
     ctx.xbf = xbf;
@@ -1212,7 +1218,8 @@ void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *compon
                     if (ns && !wcsncmp( ns, L"using:", 6 ))
                         swprintf( ctx.types[i].full_name, 128, L"%s.%s", ns + 6, sname );
                     else
-                        swprintf( ctx.types[i].full_name, 128, L"Windows.UI.Xaml.Controls.%s", sname );
+                        swprintf( ctx.types[i].full_name, 128, L"%s.Controls.%s",
+                                  is_uwp_conn ? L"Windows.UI.Xaml" : L"Microsoft.UI.Xaml", sname );
                 }
             }
             else
@@ -1398,7 +1405,7 @@ cleanup:
 void uwp_parse_xbf_into_rd( const BYTE *xbf, DWORD xbf_sz, const char *base_xbf_path,
                             struct uwp_rd_bucket *target_rd )
 {
-    uwp_parse_xbf_internal( xbf, xbf_sz, NULL, NULL, FALSE, NULL, -1, NULL, NULL,
+    uwp_parse_xbf_internal( xbf, xbf_sz, NULL, NULL, !xaml_get_app_caps()->winui3, NULL, -1, NULL, NULL,
                             base_xbf_path, target_rd, TRUE );
 }
 
@@ -1492,15 +1499,33 @@ IInspectable *uwp_instantiate_xbf_substream( const BYTE *xbf_data, DWORD xbf_siz
 BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *app_outer )
 {
     static int depth = 0;
-    void *conn = NULL, *conn2 = NULL, *binding = NULL;
+    void *conn = NULL;
     void *uri_rt = NULL;
     WCHAR uri_str[MAX_PATH] = {0};
+    char resolved_path[256] = {0};
     const BYTE *xbf = NULL;
     DWORD xbf_sz = 0;
+    BOOL is_uwp_conn = TRUE;
 
     if (!component || !resourceLocator) return FALSE;
-    if (FAILED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector_UWP_g, &conn )) || !conn)
-        return FALSE;
+    if (xaml_get_app_caps()->winui3)
+    {
+        if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector_WinUI, &conn )) && conn)
+            is_uwp_conn = FALSE;
+        else if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector_UWP_g, &conn )) && conn)
+            is_uwp_conn = TRUE;
+        else
+            return FALSE;
+    }
+    else
+    {
+        if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector_UWP_g, &conn )) && conn)
+            is_uwp_conn = TRUE;
+        else if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector_WinUI, &conn )) && conn)
+            is_uwp_conn = FALSE;
+        else
+            return FALSE;
+    }
 
     if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)resourceLocator, &IID_IUriRuntimeClass_g, &uri_rt )) && uri_rt)
     {
@@ -1514,7 +1539,7 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
         IInspectable_Release( (IInspectable *)uri_rt );
     }
 
-    if (!uri_str[0] || !uwp_pri_find_xbf( uri_str, &xbf, &xbf_sz ))
+    if (!uri_str[0] || !uwp_pri_find_xbf_rel( NULL, uri_str, &xbf, &xbf_sz, resolved_path, sizeof(resolved_path) ))
     {
         IUnknown_Release( (IUnknown *)conn );
         return FALSE;
@@ -1527,32 +1552,16 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
     }
     depth++;
 
-    TRACE( "uwp_try_load_xbf_component: %s (%lu bytes) on %p (depth %d)\n",
-           debugstr_w(uri_str), (unsigned long)xbf_sz, component, depth );
+    TRACE( "uwp_try_load_xbf_component: %s (%lu bytes) on %p (uwp=%d depth=%d)\n",
+           debugstr_w(uri_str), (unsigned long)xbf_sz, component, is_uwp_conn, depth );
 
-    /* 1. Connect(1, component) and GetBindingConnector(1, component) first so root & {x:Bind} are wired */
-    {
-        struct uwp_element *comp_el = uwp_elem_from_any( component );
-        const struct abi_component_connector *acc = (const struct abi_component_connector *)conn;
-        HRESULT chr = acc->lpVtbl->Connect( conn, 1, component );
-        TRACE( "uwp_try_load_xbf_component: Connect(1,comp) -> %#lx\n", chr );
-        if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
-        {
-            const struct abi_component_connector2 *acc2 = (const struct abi_component_connector2 *)conn2;
-            if (acc2->lpVtbl->GetBindingConnector && SUCCEEDED(acc2->lpVtbl->GetBindingConnector( conn2, 1, component, &binding )) && binding)
-            {
-                const struct abi_component_connector *bcc = (const struct abi_component_connector *)binding;
-                if (comp_el) comp_el->binding_connector = binding;
-                if (bcc->lpVtbl->Connect) bcc->lpVtbl->Connect( binding, 1, component );
-            }
-            IUnknown_Release( (IUnknown *)conn2 );
-        }
-    }
+    /* Build visual tree and drive Connect/GetBindingConnector from real XBF v2 opcodes */
+    if (is_uwp_conn) uwp_ensure_app_resources_loaded();
+    uwp_parse_xbf_internal( xbf, xbf_sz, (IInspectable *)component, conn, is_uwp_conn, app_outer,
+                            -1, NULL, NULL, resolved_path[0] ? resolved_path : NULL, NULL, FALSE );
 
-    /* 2. Build visual tree from XBF v2 stream and Connect child elements */
-    uwp_parse_and_build_xbf( xbf, xbf_sz, (IInspectable *)component, conn, TRUE, app_outer, -1, NULL, NULL );
-
-    /* 2b. Realize default deferred elements inside empty panels */
+    /* Realize default deferred elements inside empty panels */
+    if (is_uwp_conn)
     {
         struct uwp_element *comp_el = uwp_elem_from_any( component );
         if (comp_el)

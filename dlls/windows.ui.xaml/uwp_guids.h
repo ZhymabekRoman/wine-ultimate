@@ -62,7 +62,6 @@ extern const GUID IID_IPropertyPathFactory_UWP;
 extern const GUID IID_IDependencyPropertyChangedCallback_UWP;
 extern const GUID IID_IDependencyPropertyChangedEventArgs_UWP;
 extern const GUID IID_IDataContextChangedEventArgs_UWP;
-extern const GUID IID_IReference_NumbersAndOperatorsEnum;
 
 /* UWP / WinUI XAML element & control IIDs */
 extern const GUID IID_IAutoSuggestBox_Real_UWP;

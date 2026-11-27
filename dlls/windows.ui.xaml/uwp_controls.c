@@ -152,6 +152,15 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
             TRACE( "uwp_cc_put_Content vm-string on %s (%s) -> %s\n",
                    debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_buf) );
         }
+        else if (val)
+        {
+            HSTRING hcls = NULL;
+            IInspectable_GetRuntimeClassName( (IInspectable *)val, &hcls );
+            TRACE( "uwp_cc_put_Content unhandled val=%p cls=%s on %s (%s)\n",
+                   val, hcls ? debugstr_w(WindowsGetStringRawBuffer( hcls, NULL )) : "(null)",
+                   debugstr_w(impl->class_name), debugstr_w(impl->name) );
+            if (hcls) WindowsDeleteString( hcls );
+        }
     }
     if (impl->island_hwnd) InvalidateRect( impl->island_hwnd, NULL, FALSE );
     uwp_invalidate_window();

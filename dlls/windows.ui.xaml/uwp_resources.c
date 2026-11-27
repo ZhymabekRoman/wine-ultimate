@@ -378,12 +378,23 @@ BOOL uwp_unbox_string( void *obj, WCHAR *buf, int buf_chars )
     if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)obj, &IID_IPropertyValue, (void **)&pv )) && pv)
     {
         PropertyType pt = PropertyType_Empty;
-        if (SUCCEEDED(IPropertyValue_get_Type( pv, &pt )) && pt == PropertyType_String &&
-            SUCCEEDED(IPropertyValue_GetString( pv, &hs )) && hs)
+        if (SUCCEEDED(IPropertyValue_get_Type( pv, &pt )))
         {
-            const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
-            if (raw) lstrcpynW( buf, raw, buf_chars );
-            WindowsDeleteString( hs );
+            if (pt == PropertyType_String && SUCCEEDED(IPropertyValue_GetString( pv, &hs )) && hs)
+            {
+                const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
+                if (raw) lstrcpynW( buf, raw, buf_chars );
+                WindowsDeleteString( hs );
+            }
+            else if (pt == PropertyType_Char16 && buf_chars >= 2)
+            {
+                WCHAR ch = 0;
+                if (SUCCEEDED(IPropertyValue_GetChar16( pv, &ch )) && ch)
+                {
+                    buf[0] = ch;
+                    buf[1] = 0;
+                }
+            }
         }
         IPropertyValue_Release( pv );
         if (buf[0]) return TRUE;
@@ -464,20 +475,9 @@ BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_i
     }
     else return FALSE;
 
-    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IReference_NumbersAndOperatorsEnum, &iref )) && iref)
     {
-        struct reference_int32 *ref = (struct reference_int32 *)iref;
-        INT32 v = 0;
-        HRESULT hr = ref->lpVtbl->get_Value ? ref->lpVtbl->get_Value( ref, &v ) : E_FAIL;
-        IUnknown_Release( (IUnknown *)iref );
-        if (SUCCEEDED(hr))
-        {
-            *out_val = v;
-            return TRUE;
-        }
-    }
-
-    {
+        static const GUID IID_IStringable_local =
+            { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
         HSTRING hcls = NULL;
         const WCHAR *cls = NULL;
         ULONG cnt = 0, k;
@@ -493,24 +493,27 @@ BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_i
                     if (IsEqualGUID( &iids[k], &IID_IUnknown ) ||
                         IsEqualGUID( &iids[k], &IID_IInspectable ) ||
                         IsEqualGUID( &iids[k], &IID_IAgileObject ) ||
+                        IsEqualGUID( &iids[k], &IID_IMarshal ) ||
+                        IsEqualGUID( &iids[k], &IID_IWeakReferenceSource ) ||
+                        IsEqualGUID( &iids[k], &IID_IStringable_local ) ||
                         IsEqualGUID( &iids[k], &IID_IPropertyValue_g ))
                         continue;
                     iref = NULL;
                     if (SUCCEEDED(IInspectable_QueryInterface( obj, &iids[k], &iref )) && iref)
                     {
-                        INT32 v = 0;
+                        UINT64 raw_v = 0;
                         HRESULT hr = E_FAIL;
                         __TRY
                         {
                             struct reference_int32 *ref = (struct reference_int32 *)iref;
-                            if (ref->lpVtbl->get_Value) hr = ref->lpVtbl->get_Value( ref, &v );
+                            if (ref->lpVtbl->get_Value) hr = ref->lpVtbl->get_Value( ref, (INT32 *)&raw_v );
                         }
                         __EXCEPT_ALL { hr = E_FAIL; }
                         __ENDTRY;
                         IUnknown_Release( (IUnknown *)iref );
                         if (SUCCEEDED(hr))
                         {
-                            *out_val = v;
+                            *out_val = (INT32)raw_v;
                             CoTaskMemFree( iids );
                             WindowsDeleteString( hcls );
                             return TRUE;
@@ -839,28 +842,10 @@ void uwp_ensure_app_resources_loaded( void )
         {
             typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
             typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
-            typedef LONG (WINAPI *p_RegDeleteValueW_t)( HKEY, LPCWSTR );
             typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
             p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
             p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
-            p_RegDeleteValueW_t p_del = (p_RegDeleteValueW_t)GetProcAddress( reg_mod, "RegDeleteValueW" );
             p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
-            if (p_open && p_del && p_close)
-            {
-                WCHAR fam[128] = {0};
-                UINT32 flen = ARRAY_SIZE(fam);
-                if (GetCurrentPackageFamilyName( &flen, fam ) == ERROR_SUCCESS && fam[0])
-                {
-                    WCHAR ssub[256];
-                    HKEY shk = NULL;
-                    swprintf( ssub, ARRAY_SIZE(ssub), L"Software\\%s\\Settings", fam );
-                    if (p_open( HKEY_CURRENT_USER, ssub, 0, KEY_SET_VALUE, &shk ) == ERROR_SUCCESS)
-                    {
-                        p_del( shk, L"VeryFirstLaunch" );
-                        p_close( shk );
-                    }
-                }
-            }
             if (p_open && p_query && p_close)
             {
                 static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };

@@ -666,6 +666,17 @@ struct abi_component_connector2_vtbl
 };
 struct abi_component_connector2 { const struct abi_component_connector2_vtbl *lpVtbl; };
 
+struct abi_component_connector_winui_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_5[3];
+    HRESULT (WINAPI *Connect)( void *This, int cid, void *target );             /* slot 6 */
+    HRESULT (WINAPI *GetBindingConnector)( void *This, int cid, void *target, void **out ); /* slot 7 */
+};
+struct abi_component_connector_winui { const struct abi_component_connector_winui_vtbl *lpVtbl; };
+
 struct abi_ctrl_overrides_vtbl
 {
     HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );

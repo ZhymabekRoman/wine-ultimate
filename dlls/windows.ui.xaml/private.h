@@ -152,7 +152,6 @@ struct xaml_app_caps
     BOOL teardown_vm;            /* uwp_xaml.c: DataContext-clear keeps the VM alive (provider-registered VM) */
     BOOL display_sync;           /* uwp_xaml.c: sync result display from VM (provider-registered VM) */
     WCHAR vm_type[128];          /* Full VM type name registered in the app provider, empty = none */
-    WCHAR design_component[128]; /* Design-time panel registered in the app provider, empty = none */
 };
 
 BOOL xaml_is_builtin_dp( const void *dp );

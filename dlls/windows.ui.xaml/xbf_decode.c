@@ -299,6 +299,20 @@ static inline UINT32 pri_hash_str_ci( const char *s )
     return h;
 }
 
+static inline UINT32 pri_hash_str_ci_n( const char *s, size_t len )
+{
+    UINT32 h = 2166136261u;
+    size_t i;
+    for (i = 0; i < len; i++)
+    {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        h ^= (UINT32)c;
+        h *= 16777619u;
+    }
+    return h;
+}
+
 struct pri_item_index
 {
     BOOL valid;
@@ -311,9 +325,14 @@ struct pri_item_index
     char **paths;
     const char **leaves;
     const char **seg2s;
+    const char **res_uids;
+    size_t *res_uid_lens;
+    const char **res_prop_rels;
     UINT32 *full_slots;
     UINT32 *leaf_slots;
     UINT32 *seg2_slots;
+    UINT32 *res_uid_heads;
+    UINT32 *res_uid_nexts;
     UINT32 hash_mask;
 };
 
@@ -361,11 +380,18 @@ static BOOL CALLBACK init_pri_item_index( INIT_ONCE *once, void *param, void **c
     g_pri_item_idx.paths = calloc( num_items, sizeof(char *) );
     g_pri_item_idx.leaves = calloc( num_items, sizeof(const char *) );
     g_pri_item_idx.seg2s = calloc( num_items, sizeof(const char *) );
+    g_pri_item_idx.res_uids = calloc( num_items, sizeof(const char *) );
+    g_pri_item_idx.res_uid_lens = calloc( num_items, sizeof(size_t) );
+    g_pri_item_idx.res_prop_rels = calloc( num_items, sizeof(const char *) );
     g_pri_item_idx.full_slots = calloc( cap, sizeof(UINT32) );
     g_pri_item_idx.leaf_slots = calloc( cap, sizeof(UINT32) );
     g_pri_item_idx.seg2_slots = calloc( cap, sizeof(UINT32) );
+    g_pri_item_idx.res_uid_heads = calloc( cap, sizeof(UINT32) );
+    g_pri_item_idx.res_uid_nexts = calloc( num_items, sizeof(UINT32) );
     if (!g_pri_item_idx.paths || !g_pri_item_idx.leaves || !g_pri_item_idx.seg2s ||
-        !g_pri_item_idx.full_slots || !g_pri_item_idx.leaf_slots || !g_pri_item_idx.seg2_slots)
+        !g_pri_item_idx.res_uids || !g_pri_item_idx.res_uid_lens || !g_pri_item_idx.res_prop_rels ||
+        !g_pri_item_idx.full_slots || !g_pri_item_idx.leaf_slots || !g_pri_item_idx.seg2_slots ||
+        !g_pri_item_idx.res_uid_heads || !g_pri_item_idx.res_uid_nexts)
         return TRUE;
 
     g_pri_item_idx.pri = pri;
@@ -433,6 +459,39 @@ static BOOL CALLBACK init_pri_item_index( INIT_ONCE *once, void *param, void **c
             }
             if (!g_pri_item_idx.seg2_slots[slot])
                 g_pri_item_idx.seg2_slots[slot] = iid + 1;
+        }
+
+        {
+            const char *res_after = NULL;
+            if (!_strnicmp( dup, "Resources/", 10 ))
+                res_after = dup + 10;
+            else
+            {
+                const char *p = dup;
+                while ((p = strchr( p, '/' )) != NULL)
+                {
+                    if (!_strnicmp( p + 1, "Resources/", 10 ))
+                    {
+                        res_after = p + 11;
+                        break;
+                    }
+                    p++;
+                }
+            }
+            if (res_after && *res_after)
+            {
+                const char *uid_slash = strchr( res_after, '/' );
+                if (uid_slash && uid_slash > res_after && uid_slash[1])
+                {
+                    size_t ulen = (size_t)(uid_slash - res_after);
+                    UINT32 uslot = pri_hash_str_ci_n( res_after, ulen ) & mask;
+                    g_pri_item_idx.res_uids[iid] = res_after;
+                    g_pri_item_idx.res_uid_lens[iid] = ulen;
+                    g_pri_item_idx.res_prop_rels[iid] = uid_slash + 1;
+                    g_pri_item_idx.res_uid_nexts[iid] = g_pri_item_idx.res_uid_heads[uslot];
+                    g_pri_item_idx.res_uid_heads[uslot] = iid + 1;
+                }
+            }
         }
     }
     g_pri_item_idx.valid = TRUE;
@@ -934,6 +993,70 @@ BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *ou
     return uwp_pri_find_xbf_rel( NULL, uri_or_name, out_ptr, out_sz, NULL, 0 );
 }
 
+static BOOL pri_decode_string_bytes( const BYTE *ptr, DWORD sz, BYTE vti, WCHAR *out_buf, int out_chars )
+{
+    if (!ptr || !sz || !out_buf || out_chars <= 0) return FALSE;
+    out_buf[0] = 0;
+    if (vti == 0 || (sz >= 2 && (sz % 2) == 0 && ptr[1] == 0 && ptr[sz - 1] == 0))
+    {
+        int wlen = (int)(sz / 2);
+        if (wlen >= out_chars) wlen = out_chars - 1;
+        memcpy( out_buf, ptr, wlen * sizeof(WCHAR) );
+        out_buf[wlen] = 0;
+    }
+    else
+    {
+        int n = MultiByteToWideChar( CP_UTF8, 0, (const char *)ptr, (int)sz, out_buf, out_chars - 1 );
+        if (n < 0) n = 0;
+        out_buf[n] = 0;
+    }
+    return out_buf[0] != 0;
+}
+
+static void uwp_pri_enum_uid_props( const WCHAR *uid,
+                                    void (*cb)( const WCHAR *prop_rel, const WCHAR *val, void *user ),
+                                    void *user )
+{
+    char uid_a[256] = {0};
+    size_t ulen;
+    UINT32 uslot, cur;
+
+    if (!uid || !uid[0] || !cb) return;
+    InitOnceExecuteOnce( &g_pri_item_idx_once, init_pri_item_index, NULL, NULL );
+    if (!g_pri_item_idx.valid) return;
+
+    WideCharToMultiByte( CP_UTF8, 0, uid, -1, uid_a, sizeof(uid_a) - 1, NULL, NULL );
+    ulen = strlen( uid_a );
+    if (!ulen) return;
+
+    uslot = pri_hash_str_ci_n( uid_a, ulen ) & g_pri_item_idx.hash_mask;
+    for (cur = g_pri_item_idx.res_uid_heads[uslot]; cur != 0; cur = g_pri_item_idx.res_uid_nexts[cur - 1])
+    {
+        DWORD iid = cur - 1;
+        const BYTE *ptr = NULL;
+        DWORD sz = 0;
+        BYTE vti = 0xff;
+        WCHAR prop_rel_w[256], val_w[256];
+        int pn;
+
+        if (g_pri_item_idx.res_uid_lens[iid] != ulen) continue;
+        if (_strnicmp( g_pri_item_idx.res_uids[iid], uid_a, ulen )) continue;
+        if (!pri_resolve_item_data( g_pri_item_idx.pri, g_pri_item_idx.pri_sz,
+                                    g_pri_item_idx.rm, g_pri_item_idx.rm_sz,
+                                    g_pri_item_idx.count1, g_pri_item_idx.extra_sz,
+                                    g_pri_item_idx.map_off, g_pri_item_idx.cand_off,
+                                    iid, &ptr, &sz, &vti ))
+            continue;
+        if (!pri_decode_string_bytes( ptr, sz, vti, val_w, ARRAY_SIZE(val_w) ))
+            continue;
+        pn = MultiByteToWideChar( CP_UTF8, 0, g_pri_item_idx.res_prop_rels[iid], -1,
+                                  prop_rel_w, ARRAY_SIZE(prop_rel_w) );
+        if (pn <= 0) continue;
+        TRACE( "PRI uid '%s' prop '%s' -> %s\n", uid_a, g_pri_item_idx.res_prop_rels[iid], debugstr_w(val_w) );
+        cb( prop_rel_w, val_w, user );
+    }
+}
+
 BOOL uwp_pri_lookup_string( const WCHAR *res_name, WCHAR *out_buf, int out_chars )
 {
     char full_path[256] = "Resources/";
@@ -955,21 +1078,10 @@ BOOL uwp_pri_lookup_string( const WCHAR *res_name, WCHAR *out_buf, int out_chars
     if (!pri_find_item_by_path( full_path, suffix, &ptr, &sz, &vti ) || !ptr || !sz)
         return FALSE;
 
-    if (vti == 0 || (sz >= 2 && (sz % 2) == 0 && ptr[1] == 0 && ptr[sz - 1] == 0))
-    {
-        int wlen = (int)(sz / 2);
-        if (wlen >= out_chars) wlen = out_chars - 1;
-        memcpy( out_buf, ptr, wlen * sizeof(WCHAR) );
-        out_buf[wlen] = 0;
-    }
-    else
-    {
-        int n = MultiByteToWideChar( CP_UTF8, 0, (const char *)ptr, (int)sz, out_buf, out_chars - 1 );
-        if (n < 0) n = 0;
-        out_buf[n] = 0;
-    }
+    if (!pri_decode_string_bytes( ptr, sz, vti, out_buf, out_chars ))
+        return FALSE;
     TRACE( "PRI string '%s' -> %s\n", full_path, debugstr_w(out_buf) );
-    return out_buf[0] != 0;
+    return TRUE;
 }
 
 /* ============================================================================
@@ -1978,14 +2090,11 @@ static void xbf_apply_stack_val_prop( struct xbf_ctx *ctx, struct uwp_element *e
         const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
         void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
         if (!owner_cls[0] || !ao) return;
-        if (!wcsstr( owner_cls, L"Breakpoint" ) && !wcsstr( owner_cls, L"Converter" ) && !wcsstr( owner_cls, L"Layout" ))
-            return;
         if (is_res_ref && sval && sval[0])
         {
             struct uwp_rd_entry *re = NULL;
             struct uwp_rd_bucket *found_b = NULL;
             IInspectable *res_val = NULL;
-            BOOL release_res = FALSE;
             if (uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd,
                                    ctx->root_el, sval, 0, &re, &found_b ) && re)
             {
@@ -1998,22 +2107,8 @@ static void xbf_apply_stack_val_prop( struct xbf_ctx *ctx, struct uwp_element *e
                 else
                     res_val = uwp_rd_materialize_entry( found_b, re );
             }
-            else if (wcsstr( sval, L"Style" ))
-            {
-                void *st = NULL;
-                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Style", NULL, NULL, &st )) && st)
-                {
-                    struct uwp_element *st_el = uwp_elem_from_any( st );
-                    if (st_el) lstrcpynW( st_el->name, sval, ARRAY_SIZE(st_el->name) );
-                    res_val = (IInspectable *)st;
-                    release_res = TRUE;
-                }
-            }
             if (res_val)
-            {
                 uwp_set_custom_xaml_member_obj( ao, owner_cls, pi->name, sv->raw, res_val );
-                if (release_res) IInspectable_Release( res_val );
-            }
         }
         else if (vt == 0x01 || vt == 0x02)
             uwp_set_custom_xaml_member( ao, owner_cls, pi->name, sv->raw, (vt == 0x02) ? L"True" : L"False" );
@@ -2126,8 +2221,13 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
     if (uwp_is_bg_pid( pid ))
     {
         if (vt == 0x08) uwp_el_set_bg_argb( el, (UINT32)num );
-        else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
-            uwp_el_set_bg_argb( el, argb );
+        else if (sval && sval[0])
+        {
+            if (uwp_brush_key_is_accent( sval ))
+                el->is_accent_style = TRUE;
+            if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+                uwp_el_set_bg_argb( el, argb );
+        }
         return TRUE;
     }
     if (uwp_is_fg_pid( pid ))
@@ -2299,45 +2399,111 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
     }
 }
 
+struct uid_pri_apply_ctx
+{
+    struct uwp_element *el;
+    void *ao;
+    IInspectable *target;
+};
+
+static BOOL uid_prop_is_display_text( const WCHAR *prop )
+{
+    return !wcscmp( prop, L"Content" ) || !wcscmp( prop, L"Text" ) ||
+           !wcscmp( prop, L"Title" ) || !wcscmp( prop, L"Header" ) ||
+           !wcscmp( prop, L"Label" ) || !wcscmp( prop, L"PlaceholderText" ) ||
+           !wcscmp( prop, L"ButtonText" ) || !wcscmp( prop, L"Glyph" );
+}
+
+static void xbf_uid_pri_prop_cb( const WCHAR *prop_rel, const WCHAR *val, void *user )
+{
+    struct uid_pri_apply_ctx *ac = user;
+    struct uwp_element *el = ac->el;
+
+    if (!prop_rel || !prop_rel[0] || !val || !val[0]) return;
+
+    if (!wcsncmp( prop_rel, L"[using:", 7 ))
+    {
+        const WCHAR *rb = wcschr( prop_rel + 7, L']' );
+        const WCHAR *sl = rb ? wcschr( rb + 1, L'/' ) : NULL;
+        if (rb && sl && rb > prop_rel + 7 && sl > rb + 1 && sl[1])
+        {
+            WCHAR owner_cls[256];
+            size_t ns_len = (size_t)(rb - (prop_rel + 7));
+            size_t ty_len = (size_t)(sl - (rb + 1));
+            const WCHAR *prop_name = sl + 1;
+
+            if (ns_len + 1 + ty_len < ARRAY_SIZE(owner_cls))
+            {
+                memcpy( owner_cls, prop_rel + 7, ns_len * sizeof(WCHAR) );
+                owner_cls[ns_len] = L'.';
+                memcpy( owner_cls + ns_len + 1, rb + 1, ty_len * sizeof(WCHAR) );
+                owner_cls[ns_len + 1 + ty_len] = 0;
+
+                if (!wcscmp( owner_cls, L"Windows.UI.Xaml.Automation.AutomationProperties" ))
+                {
+                    if (!wcscmp( prop_name, L"Name" ))
+                        uwp_elem_set_automation_name( el, val );
+                }
+                else if (!wcscmp( owner_cls, L"Windows.UI.Xaml.Controls.ToolTipService" ))
+                {
+                    /* ToolTip text should not replace visible control content */
+                }
+                else if (wcsncmp( owner_cls, L"Windows.UI.Xaml.", 16 ) != 0)
+                {
+                    if (ac->ao)
+                        uwp_set_custom_xaml_member( ac->ao, owner_cls, prop_name, ac->target, val );
+                    if (uid_prop_is_display_text( prop_name ) && !uwp_has_text( el ) &&
+                        (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
+                        uwp_elem_set_text( el, val );
+                }
+            }
+        }
+        return;
+    }
+
+    if (!wcscmp( prop_rel, L"AutomationProperties.Name" ))
+    {
+        uwp_elem_set_automation_name( el, val );
+        return;
+    }
+    if (!wcscmp( prop_rel, L"ToolTipService.ToolTip" ))
+        return;
+    if (!wcscmp( prop_rel, L"FontFamily" ))
+    {
+        uwp_elem_set_font_family( el, val );
+        return;
+    }
+    if (uwp_is_calendar_date_picker( el ) && !wcscmp( prop_rel, L"Header" ))
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne) lstrcpynW( ne->cdp_header, val, ARRAY_SIZE(ne->cdp_header) );
+        return;
+    }
+    if (uwp_is_calendar_date_picker( el ) && !wcscmp( prop_rel, L"PlaceholderText" ))
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( el );
+        if (ne) lstrcpynW( ne->cdp_placeholder, val, ARRAY_SIZE(ne->cdp_placeholder) );
+        if (!ne || !ne->cdp_has_date) uwp_elem_set_text( el, val );
+        return;
+    }
+    if (uid_prop_is_display_text( prop_rel ))
+    {
+        if (!uwp_has_text( el ) && (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
+            uwp_elem_set_text( el, val );
+    }
+    if (el->outer && ac->ao && !(el->class_flags & UWP_CF_UWP_PREFIX) && !wcschr( prop_rel, L'/' ))
+        uwp_set_custom_xaml_member( ac->ao, el->class_name, prop_rel, ac->target, val );
+}
+
 static void xbf_apply_uid_pri_lookup( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *sval )
 {
-    WCHAR res_key[256], res_val[128];
-    static const WCHAR *std_props[] =
-        { L"Content", L"Text", L"Title", L"Header", L"Label", L"PlaceholderText", L"ButtonText" };
-    unsigned int sp;
-    DWORD k;
-    void *ao = (ctx && ctx->app_outer) ? ctx->app_outer : uwp_get_app_outer();
-    IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
+    struct uid_pri_apply_ctx ac;
 
     uwp_elem_set_uid( el, sval );
-    if (uwp_has_text( el ) && el->kind != UWP_KIND_USER_CONTROL && !el->outer) return;
-
-    for (sp = 0; sp < ARRAY_SIZE(std_props); sp++)
-    {
-        swprintf( res_key, ARRAY_SIZE(res_key), L"%s/%s", sval, std_props[sp] );
-        if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
-        {
-            if (!uwp_has_text( el ) && (!el->content || el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TEXT_BLOCK))
-                uwp_elem_set_text( el, res_val );
-            if (el->outer && ao && !(el->class_flags & UWP_CF_UWP_PREFIX))
-                uwp_set_custom_xaml_member( ao, el->class_name, std_props[sp], target, res_val );
-        }
-    }
-    for (k = 0; ctx && k < ctx->prop_cnt && !uwp_has_text( el ); k++)
-    {
-        const struct xbf_prop_info *kpi = &ctx->props[k];
-        if (kpi->owner_tid < ctx->type_cnt &&
-            !wcsncmp( ctx->types[kpi->owner_tid].xmlns, L"using:", 6 ) &&
-            (!wcscmp( kpi->name, L"Character" ) || !wcscmp( kpi->name, L"Content" ) ||
-             !wcscmp( kpi->name, L"Text" ) || !wcscmp( kpi->name, L"Title" ) || !wcscmp( kpi->name, L"Header" )))
-        {
-            swprintf( res_key, ARRAY_SIZE(res_key), L"%s/[%s]%s/%s",
-                      sval, ctx->types[kpi->owner_tid].xmlns,
-                      ctx->types[kpi->owner_tid].short_name, kpi->name );
-            if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
-                uwp_elem_set_text( el, res_val );
-        }
-    }
+    ac.el = el;
+    ac.ao = (ctx && ctx->app_outer) ? ctx->app_outer : uwp_get_app_outer();
+    ac.target = el->outer ? el->outer : &el->IInspectable_iface;
+    uwp_pri_enum_uid_props( sval, xbf_uid_pri_prop_cb, &ac );
 }
 
 static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct uwp_element *el,
@@ -2640,41 +2806,6 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
         uwp_elem_set_font_family( el, ff_spec );
         uwp_resolve_font_family( ff_spec, face, ARRAY_SIZE(face) );
     }
-    else if ((!wcscmp( pi->name, L"VirtualKeyControlChord" ) || !wcscmp( pi->name, L"VirtualKeyAltChord" ) ||
-              !wcscmp( pi->name, L"VirtualKeyShiftChord" ) || !wcscmp( pi->name, L"VirtualKeyControlShiftChord" )) &&
-             sval && sval[0])
-    {
-        UINT vk = uwp_parse_vk_string( sval );
-        UINT mods = !wcscmp( pi->name, L"VirtualKeyControlChord" ) ? 1 :
-                    (!wcscmp( pi->name, L"VirtualKeyAltChord" ) ? 2 :
-                     (!wcscmp( pi->name, L"VirtualKeyShiftChord" ) ? 4 : 5));
-        if (vk) uwp_accel_register( NULL, el, vk, mods, TRUE );
-    }
-    else if (!wcscmp( pi->name, L"ButtonId" ) && sval && sval[0])
-    {
-        IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-        const WCHAR *owner_cls = (pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0])
-            ? ctx->types[pi->owner_tid].full_name
-            : (el->class_name[0] ? el->class_name : NULL);
-        if (owner_cls) uwp_set_custom_xaml_member( ctx->app_outer, owner_cls, L"ButtonId", target, sval );
-        if (!uwp_has_text( el ))
-        {
-            static const struct { const WCHAR *id; const WCHAR *label; } btn_id_map[] = {
-                { L"Zero", L"0" }, { L"One", L"1" }, { L"Two", L"2" }, { L"Three", L"3" },
-                { L"Four", L"4" }, { L"Five", L"5" }, { L"Six", L"6" }, { L"Seven", L"7" },
-                { L"Eight", L"8" }, { L"Nine", L"9" }, { L"Decimal", L"." }, { L"Add", L"+" },
-                { L"Subtract", L"-" }, { L"Multiply", L"\x00d7" }, { L"Divide", L"\x00f7" },
-                { L"Equals", L"=" }, { L"Clear", L"C" }, { L"ClearEntry", L"CE" },
-                { L"Backspace", L"\x232b" }, { L"Negate", L"+/-" }, { L"Percent", L"%" },
-                { L"Invert", L"1/x" }, { L"Power", L"x\x00b2" }, { L"Sqrt", L"\x221a" },
-            };
-            unsigned int bi;
-            for (bi = 0; bi < ARRAY_SIZE(btn_id_map); bi++)
-            {
-                if (!wcscmp( sval, btn_id_map[bi].id )) { uwp_elem_set_text( el, btn_id_map[bi].label ); break; }
-            }
-        }
-    }
     else if (is_res_ref && sval && sval[0] && pi->name[0] &&
              pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0] &&
              wcsncmp( ctx->types[pi->owner_tid].full_name, L"Windows.UI.Xaml.", 16 ) != 0)
@@ -2702,7 +2833,8 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
     else if (pi->name[0] && pi->owner_tid < ctx->type_cnt &&
              ctx->types[pi->owner_tid].full_name[0] &&
              wcsncmp( ctx->types[pi->owner_tid].full_name, L"Windows.UI.Xaml.", 16 ) != 0 &&
-             (vt == 0x01 || vt == 0x02 || vt == 0x03 || vt == 0x04 || vt == 0x09 || vt == 0x0b || vt == 0x0c || (vt == 0x05 && sval && sval[0])))
+             (vt == 0x01 || vt == 0x02 || vt == 0x03 || vt == 0x04 || vt == 0x0b || vt == 0x0c ||
+              ((vt == 0x05 || vt == 0x09) && sval && sval[0])))
     {
         void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
         if (ao)
@@ -2713,8 +2845,11 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
                                      !wcscmp( pi->name, L"PaneDisplayMode" ));
             if (vt == 0x01 || vt == 0x02)
                 uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, (vt == 0x02) ? L"True" : L"False" );
-            else if (vt == 0x05 && sval && sval[0])
-                uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, sval );
+            else if (vt == 0x05 || vt == 0x09)
+            {
+                if (sval && sval[0])
+                    uwp_set_custom_xaml_member( ao, owner_cls, pi->name, target, sval );
+            }
             else if (is_nav_pane_mode)
             {
                 static const WCHAR *const modes[] = { L"Auto", L"Left", L"Top", L"LeftCompact", L"LeftMinimal" };
