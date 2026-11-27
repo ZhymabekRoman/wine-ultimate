@@ -783,6 +783,13 @@ BOOL client_surface_get_size( struct client_surface *surface, SIZE *virtual_size
     return updated;
 }
 
+SIZE get_client_swapchain_size( HWND toplevel, HWND hwnd )
+{
+    RECT monitor, rect = get_client_surface_rects( toplevel, hwnd, &monitor );
+    SIZE size = { max( 1, rect.right - rect.left ), max( 1, rect.bottom - rect.top ) };
+    return size;
+}
+
 void use_window_client_surface( struct client_surface *surface, BOOL use )
 {
     TRACE( "surface %s, use %u\n", debugstr_client_surface( surface ), use );
@@ -829,14 +836,13 @@ struct client_surface *get_unused_client_surface( HWND hwnd, int format, BOOL ra
     return surface ? surface : user_driver->pCreateClientSurface( hwnd, format, raw );
 }
 
-BOOL is_client_surface_window( struct client_surface *surface, HWND hwnd )
+HWND get_client_surface_window( struct client_surface *surface )
 {
-    BOOL ret;
+    HWND ret;
 
     if (!surface) return FALSE;
     pthread_mutex_lock( &surfaces_lock );
-    if (hwnd) ret = surface->hwnd == hwnd;
-    else ret = surface->hwnd != NULL;
+    ret = surface->hwnd;
     pthread_mutex_unlock( &surfaces_lock );
 
     return ret;
@@ -6961,6 +6967,7 @@ LRESULT destroy_window( HWND hwnd )
     HMENU menu = 0, sys_menu;
     WND *win;
     HWND *children, toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
+    struct list swapchains = LIST_INIT(swapchains);
 
     TRACE( "%p\n", hwnd );
 
@@ -7009,6 +7016,7 @@ LRESULT destroy_window( HWND hwnd )
     NtUserDestroyCursor( win->hIconSmall2, 0 );
     surface = win->surface;
     win->surface = NULL;
+    list_move_tail( &swapchains, &win->opengl_swapchains );
     release_win_ptr( win );
 
     release_opengl_drawables( &drawables );
@@ -7021,6 +7029,7 @@ LRESULT destroy_window( HWND hwnd )
         window_surface_release( surface );
     }
 
+    free_opengl_swapchains( &swapchains );
     detach_client_surfaces( hwnd );
     if (win->current_drawable) opengl_drawable_release( win->current_drawable );
     if (win->unused_drawable) opengl_drawable_release( win->unused_drawable );
@@ -7136,7 +7145,7 @@ void destroy_thread_windows(void)
         struct destroy_entry *next;
     } *entry, *free_list = NULL;
     HWND capture = get_capture(), toplevel = NtUserGetAncestor( capture, GA_ROOT );
-    struct list drawables = LIST_INIT(drawables);
+    struct list drawables = LIST_INIT(drawables), swapchains = LIST_INIT(swapchains);
     HANDLE handle = 0;
     WND *win;
 
@@ -7149,6 +7158,7 @@ void destroy_thread_windows(void)
         BOOL is_child = (win->dwStyle & (WS_CHILD | WS_POPUP)) == WS_CHILD;
         struct destroy_entry tmp = {0};
 
+        list_move_tail( &swapchains, &win->opengl_swapchains );
         free_dce( win->dce, win->handle, &drawables );
         set_user_handle_ptr( handle, NULL );
         free( win->pScroll );
@@ -7179,6 +7189,7 @@ void destroy_thread_windows(void)
     user_unlock();
 
     release_opengl_drawables( &drawables );
+    free_opengl_swapchains( &swapchains );
 
     while ((entry = free_list))
     {
@@ -7295,6 +7306,7 @@ static WND *create_window_handle( HWND parent, HWND owner, UNICODE_STRING *name,
     win->parent     = full_parent;
     win->owner      = full_owner;
     win->class      = class;
+    list_init( &win->opengl_swapchains );
     set_user_handle_ptr( handle, win );
     return win;
 }

@@ -320,6 +320,8 @@ DECL_HANDLER(d3dkmt_share_objects);
 DECL_HANDLER(d3dkmt_object_open_name);
 DECL_HANDLER(d3dkmt_mutex_acquire);
 DECL_HANDLER(d3dkmt_mutex_release);
+DECL_HANDLER(d3dkmt_sync_wait);
+DECL_HANDLER(d3dkmt_sync_signal);
 DECL_HANDLER(create_alpc_port);
 DECL_HANDLER(connect_alpc_port);
 DECL_HANDLER(accept_alpc_connection);
@@ -655,6 +657,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_d3dkmt_object_open_name,
     (req_handler)req_d3dkmt_mutex_acquire,
     (req_handler)req_d3dkmt_mutex_release,
+    (req_handler)req_d3dkmt_sync_wait,
+    (req_handler)req_d3dkmt_sync_signal,
     (req_handler)req_create_alpc_port,
     (req_handler)req_connect_alpc_port,
     (req_handler)req_accept_alpc_connection,
@@ -796,6 +800,7 @@ C_ASSERT( offsetof(struct terminate_process_request, handle) == 12 );
 C_ASSERT( offsetof(struct terminate_process_request, exit_code) == 16 );
 C_ASSERT( sizeof(struct terminate_process_request) == 24 );
 C_ASSERT( offsetof(struct terminate_process_reply, self) == 8 );
+C_ASSERT( offsetof(struct terminate_process_reply, exit_code) == 12 );
 C_ASSERT( sizeof(struct terminate_process_reply) == 16 );
 C_ASSERT( offsetof(struct terminate_thread_request, handle) == 12 );
 C_ASSERT( offsetof(struct terminate_thread_request, exit_code) == 16 );
@@ -1990,15 +1995,14 @@ C_ASSERT( offsetof(struct add_clipboard_listener_request, window) == 12 );
 C_ASSERT( sizeof(struct add_clipboard_listener_request) == 16 );
 C_ASSERT( offsetof(struct remove_clipboard_listener_request, window) == 12 );
 C_ASSERT( sizeof(struct remove_clipboard_listener_request) == 16 );
-C_ASSERT( offsetof(struct create_token_request, token_id) == 12 );
+C_ASSERT( offsetof(struct create_token_request, auth_id) == 12 );
 C_ASSERT( offsetof(struct create_token_request, access) == 20 );
 C_ASSERT( offsetof(struct create_token_request, primary) == 24 );
 C_ASSERT( offsetof(struct create_token_request, impersonation_level) == 28 );
 C_ASSERT( offsetof(struct create_token_request, expire) == 32 );
 C_ASSERT( offsetof(struct create_token_request, group_count) == 40 );
-C_ASSERT( offsetof(struct create_token_request, primary_group) == 44 );
-C_ASSERT( offsetof(struct create_token_request, priv_count) == 48 );
-C_ASSERT( sizeof(struct create_token_request) == 56 );
+C_ASSERT( offsetof(struct create_token_request, priv_count) == 44 );
+C_ASSERT( sizeof(struct create_token_request) == 48 );
 C_ASSERT( offsetof(struct create_token_reply, token) == 8 );
 C_ASSERT( sizeof(struct create_token_reply) == 16 );
 C_ASSERT( offsetof(struct open_token_request, handle) == 12 );
@@ -2414,8 +2418,8 @@ C_ASSERT( offsetof(struct get_inproc_alert_fd_reply, handle) == 8 );
 C_ASSERT( sizeof(struct get_inproc_alert_fd_reply) == 16 );
 C_ASSERT( offsetof(struct d3dkmt_object_create_request, type) == 12 );
 C_ASSERT( offsetof(struct d3dkmt_object_create_request, fd) == 16 );
-C_ASSERT( offsetof(struct d3dkmt_object_create_request, value) == 20 );
-C_ASSERT( sizeof(struct d3dkmt_object_create_request) == 24 );
+C_ASSERT( offsetof(struct d3dkmt_object_create_request, value) == 24 );
+C_ASSERT( sizeof(struct d3dkmt_object_create_request) == 32 );
 C_ASSERT( offsetof(struct d3dkmt_object_create_reply, global) == 8 );
 C_ASSERT( offsetof(struct d3dkmt_object_create_reply, handle) == 12 );
 C_ASSERT( sizeof(struct d3dkmt_object_create_reply) == 16 );
@@ -2465,6 +2469,16 @@ C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, key_value) == 20 );
 C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, fence_value) == 24 );
 C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, runtime_size) == 32 );
 C_ASSERT( sizeof(struct d3dkmt_mutex_release_request) == 40 );
+C_ASSERT( offsetof(struct d3dkmt_sync_wait_request, sync) == 12 );
+C_ASSERT( offsetof(struct d3dkmt_sync_wait_request, fence_value) == 16 );
+C_ASSERT( offsetof(struct d3dkmt_sync_wait_request, wait_handle) == 20 );
+C_ASSERT( offsetof(struct d3dkmt_sync_wait_request, wait_status) == 24 );
+C_ASSERT( sizeof(struct d3dkmt_sync_wait_request) == 32 );
+C_ASSERT( offsetof(struct d3dkmt_sync_wait_reply, wait_handle) == 8 );
+C_ASSERT( sizeof(struct d3dkmt_sync_wait_reply) == 16 );
+C_ASSERT( offsetof(struct d3dkmt_sync_signal_request, sync) == 12 );
+C_ASSERT( offsetof(struct d3dkmt_sync_signal_request, fence_value) == 16 );
+C_ASSERT( sizeof(struct d3dkmt_sync_signal_request) == 24 );
 C_ASSERT( offsetof(struct create_alpc_port_request, access) == 12 );
 C_ASSERT( offsetof(struct create_alpc_port_request, flags) == 16 );
 C_ASSERT( offsetof(struct create_alpc_port_request, max_msg_len) == 20 );

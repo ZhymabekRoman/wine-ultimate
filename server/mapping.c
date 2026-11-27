@@ -844,10 +844,11 @@ static unsigned int get_image_params( struct mapping *mapping, file_pos_t file_s
     if (size < sizeof(mz.dos)) return STATUS_INVALID_IMAGE_NOT_MZ;
     if (mz.dos.e_magic != IMAGE_DOS_SIGNATURE) return STATUS_INVALID_IMAGE_NOT_MZ;
     mz_size = size;
-    pos = mz.dos.e_lfanew;
+    pos = (unsigned int)mz.dos.e_lfanew;
+    if (pos >= RTL_IMAGE_MAX_DOS_HEADER) return STATUS_INVALID_IMAGE_PROTECT;
 
     size = pread( unix_fd, &nt, sizeof(nt), pos );
-    if (size < sizeof(nt.Signature) + sizeof(nt.FileHeader)) return STATUS_INVALID_IMAGE_PROTECT;
+    if (size < (int)(sizeof(nt.Signature) + sizeof(nt.FileHeader))) return STATUS_INVALID_IMAGE_PROTECT;
     if (size < sizeof(nt)) memset( (char *)&nt + size, 0, sizeof(nt) - size );
     if (nt.Signature != IMAGE_NT_SIGNATURE)
     {
@@ -1338,8 +1339,6 @@ static client_ptr_t assign_map_address( struct mapping *mapping )
 
     if ((ret = get_fd_map_address( mapping->fd ))) return ret;
 
-    size += granularity_mask + 1;  /* leave some free space between mappings */
-
     /* Try preferred base first to avoid relocations and Copy-On-Write overhead */
     if (mapping->image.base && (mapping->image.base >= 0x10000) &&
         !is_map_addr_claimed( mapping->image.base, size ))
@@ -1349,7 +1348,6 @@ static client_ptr_t assign_map_address( struct mapping *mapping )
         set_fd_map_address( mapping->fd, ret, size );
         return ret;
     }
-
     for (i = 0; i < range->count; i++)
     {
         if (range->free[i].size < size) continue;
