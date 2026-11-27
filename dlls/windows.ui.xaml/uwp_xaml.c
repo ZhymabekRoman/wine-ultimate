@@ -4082,8 +4082,6 @@ BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, cons
             }
         }
         fired = uwp_fire_element_pointer( target, XAML_PTR_RELEASED, info, TRUE );
-        if (uwp_fire_tapped_bubble( target, (int)info->x, (int)info->y ))
-            fired = TRUE;
         if (nvi)
         {
             uwp_nav_select_item( NULL, nvi );

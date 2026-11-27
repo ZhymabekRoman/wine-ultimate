@@ -4741,9 +4741,8 @@ static HRESULT WINAPI rm_UnloadPriFiles( void *iface, void *files )
     TRACE( "stub\n" );
     return S_OK;
 }
-/* IResourceManager (IDL order): [II 5][CurrentCulture 6][put_CurrentCulture 7]
- *   [MainResourceMap 8][AllResourceMaps 9][DefaultContext 10]
- *   [LoadPriFiles 11][UnloadPriFiles 12] */
+/* IResourceManager (IDL order): [II 5][MainResourceMap 6][AllResourceMaps 7]
+ *   [DefaultContext 8][LoadPriFiles 9][UnloadPriFiles 10] */
 static const void *res_manager_vtbl[] =
 {
     rm_QueryInterface, rm_AddRef, rm_Release, rm_GetIids, rm_GetRuntimeClassName, rm_GetTrustLevel,

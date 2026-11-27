@@ -37,9 +37,9 @@
  *     slots on factory after ActivateInstance: Current, IsResourceReference
  *   IResourceManager          {f744d97b-9988-44fb-abd6-5378844cfa8b}
  *     slots: MainResourceMap, AllResourceMaps, DefaultContext,
- *            DefaultContext, LoadPriFiles, UnloadPriFiles
+ *            LoadPriFiles, UnloadPriFiles
  *   IResourceMap              {72284824-db8c-42f8-b08c-53ff357dad82}
- *     slots: TopLevelResourceKey, QualifierValues, Language, ResourceCount, GetValue, GetValueForContext, GetSubtree
+ *     slots: Uri, GetValue, GetValueForContext, GetSubtree
  *   IResourceCandidate        {af5207d9-c433-4764-b3fd-8fa6bfbcbadc}
  *     slots: Qualifiers, IsMatch, IsMatchAsDefault, IsDefault,
  *            ValueAsString, GetValueAsFileAsync, GetQualifierValue
@@ -70,7 +70,6 @@ static const IID IID_IResourceContext_loc = {0x2fa22f4b, 0x707e, 0x4b27, {0xad, 
 static const IID IID_IResourceContextStatics2_loc = {0x41f752ef, 0x12af, 0x41b9, {0xab, 0x36, 0xb1, 0xeb, 0x4b, 0x51, 0x24, 0x60}};
 static const IID IID_IResourceManagerStatics_loc = {0x1cc0fdfc, 0x69ee, 0x4e43, {0x99, 0x01, 0x47, 0xf1, 0x26, 0x87, 0xba, 0xf7}};
 static const IID IID_IResourceManager_loc = {0xf744d97b, 0x9988, 0x44fb, {0xab, 0xd6, 0x53, 0x78, 0x84, 0x4c, 0xfa, 0x8b}};
-static const IID IID_IResourceMap_loc = {0x72284824, 0xdb8c, 0x42f8, {0xb0, 0x8c, 0x53, 0xff, 0x35, 0x7d, 0xad, 0x82}};
 static const IID IID_IResourceCandidate_loc = {0xaf5207d9, 0xc433, 0x4764, {0xb3, 0xfd, 0x8f, 0xa6, 0xbf, 0xbc, 0xba, 0xdc}};
 /* IInspectable as declared in this tree's include/inspectable.idl
  * (uuid af86e2e0-b12d-4c6a-9c5a-d7aa65101e90); the module's QI compares the
@@ -154,14 +153,14 @@ static void test_resourcecontext_activation(void)
             ok(SUCCEEDED(hr) && size > 0, "QualifierValues size=%u hr=%08x\n", size, hr);
             CALL(qualmap, 2, (ULONG*)&hr);
         }
-        /* slot 11: Languages (IObservableVector<HSTRING> primary face) */
+        /* slot 11: Languages (IVectorView<HSTRING> primary face) */
         hr = CALL(ctx, 11, &lang);
         ok(SUCCEEDED(hr) && lang, "get_Languages hr=%08x\n", hr);
         if (lang)
         {
             UINT32 size = 0;
-            /* IObservableVector slots: [0..5 II][6 add][7 remove][8 GetAt][9 Size] */
-            hr = CALL(lang, 9, &size);
+            /* IVectorView slots: [0..5 II][6 GetAt][7 Size] */
+            hr = CALL(lang, 7, &size);
             ok(SUCCEEDED(hr) && size >= 1, "Languages size=%u hr=%08x\n", size, hr);
             CALL(lang, 2, (ULONG*)&hr);
         }
@@ -210,13 +209,13 @@ static void test_resourcemanager_lookup(void)
     ok(SUCCEEDED(hr) && rm, "IResourceManagerStatics::Current hr=%08x\n", hr);
     if (FAILED(hr) || !rm) goto done_factory;
 
-    /* ResourceManager QI IResourceManager, slot 8 MainResourceMap */
+    /* ResourceManager QI IResourceManager, slot 6 MainResourceMap */
     {
         void *rm2 = NULL;
         hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
         ok(hr == S_OK && rm2, "QI IResourceManager hr=%08x\n", hr);
         if (hr != S_OK) goto done_rm;
-        hr = CALL(rm2, 8, &map);
+        hr = CALL(rm2, 6, &map);
         ok(SUCCEEDED(hr) && map, "get_MainResourceMap hr=%08x\n", hr);
         CALL(rm2, 2, (ULONG*)&hr);
     }
@@ -224,7 +223,7 @@ static void test_resourcemanager_lookup(void)
 
     /* IResourceMap slot 7: GetValue(key) -> IResourceCandidate */
     WindowsCreateStringReference(L"Resources", 9, &khdr, &hkey);
-    hr = CALL(map, 10, hkey, &cand);
+    hr = CALL(map, 7, hkey, &cand);
     ok(SUCCEEDED(hr) && cand, "MainResourceMap::GetValue(\"Resources\") hr=%08x\n", hr);
     if (SUCCEEDED(hr) && cand)
     {
@@ -338,7 +337,7 @@ static void test_real_pri_lookup( void )
         void *rm2 = NULL;
         hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
         if (FAILED( hr )) goto done;
-        hr = CALL( rm2, 8, &map );  /* get_MainResourceMap */
+        hr = CALL( rm2, 6, &map );  /* get_MainResourceMap */
         CALL( rm2, 2, (ULONG*)&hr );
     }
     ok( SUCCEEDED( hr ) && map, "fixture: get_MainResourceMap hr=%08x\n", hr );
@@ -373,7 +372,7 @@ static void test_real_pri_lookup( void )
         HSTRING_HEADER hdr;
         WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &hdr, &hkey );
         cand = NULL;
-        hr = CALL( map, 10, hkey, &cand );  /* GetValue */
+        hr = CALL( map, 7, hkey, &cand );  /* GetValue */
         ok( SUCCEEDED( hr ) && cand, "fixture: GetValue(Resources\\CalculatorModeText) hr=%08x\n", hr );
         WindowsDeleteString( hkey );
         if (SUCCEEDED( hr ) && cand)
@@ -393,7 +392,7 @@ static void test_real_pri_lookup( void )
         HSTRING_HEADER hdr;
         void *sub2 = NULL;
         WindowsCreateStringReference( L"Resources", 9, &hdr, &hname );
-        hr = CALL( map, 12, hname, &sub );  /* GetSubtree */
+        hr = CALL( map, 9, hname, &sub );  /* GetSubtree */
         WindowsDeleteString( hname );
         ok( SUCCEEDED( hr ) && sub, "fixture: GetSubtree(Resources) hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && sub)
@@ -412,7 +411,7 @@ static void test_real_pri_lookup( void )
                 HSTRING_HEADER khdr;
                 WindowsCreateStringReference( L"CalculatorModeText", 18, &khdr, &hkey );
                 cand = NULL;
-                hr = CALL( sub, 10, hkey, &cand );
+                hr = CALL( sub, 7, hkey, &cand );
                 WindowsDeleteString( hkey );
                 ok( SUCCEEDED( hr ) && cand, "fixture: subtree GetValue(CalculatorModeText) hr=%08x\n", hr );
                 if (SUCCEEDED( hr ) && cand)
@@ -457,7 +456,7 @@ static void test_real_pri_lookup( void )
                 HSTRING_HEADER khdr;
                 WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &khdr, &hkey );
                 cand = NULL;
-                hr = CALL( map, 11, hkey, ctx, &cand );  /* GetValueForContext */
+                hr = CALL( map, 8, hkey, ctx, &cand );  /* GetValueForContext */
                 WindowsDeleteString( hkey );
                 ok( SUCCEEDED( hr ) && cand, "fixture: GetValueForContext(en-GB) hr=%08x\n", hr );
                 if (SUCCEEDED( hr ) && cand)
@@ -508,7 +507,7 @@ static void test_real_pri_lookup( void )
                     static const WCHAR key[] = L"Files\\Assets\\CalculatorAppList.png";
                     WindowsCreateStringReference( key, (UINT32)(sizeof(key)/sizeof(WCHAR) - 1), &khdr, &hkey );
                     cand = NULL;
-                    hr = CALL( map, 11, hkey, ctx3, &cand );
+                    hr = CALL( map, 8, hkey, ctx3, &cand );
                     WindowsDeleteString( hkey );
                     ok( SUCCEEDED( hr ) && cand, "fixture: GetValueForContext(Files item) hr=%08x\n", hr );
                     if (SUCCEEDED( hr ) && cand)
@@ -629,7 +628,7 @@ static void test_getiids_nullargs( void )
             {
                 void *rm2 = NULL;
                 hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
-                if (SUCCEEDED( hr )) CALL( rm2, 8, &map );  /* get_MainResourceMap */
+                if (SUCCEEDED( hr )) CALL( rm2, 6, &map );  /* get_MainResourceMap */
                 CALL( rm2, 2, (ULONG*)&hr );
             }
             if (map)
@@ -657,20 +656,11 @@ static void test_getiids_nullargs( void )
                 hr = CALL( ctx, 6, &view );  /* GetForCurrentView */
                 if (SUCCEEDED( hr ) && view)
                 {
-                    hr = CALL( view, 11, &lang );  /* get_Languages: the IObservableVector<HSTRING> face */
+                    hr = CALL( view, 11, &lang );  /* get_Languages: IVectorView<HSTRING> face */
                     if (SUCCEEDED( hr ) && lang)
                     {
-                        void *langs = NULL;
-                        /* the observable face is [add 6][remove 7] then the delegated
-                         * IVector block (idl:265-269), so GetView is slot 10 and the
-                         * IVectorView face it returns has its own Size at slot 7 */
-                        hr = CALL( lang, 10, &langs );
-                        if (SUCCEEDED( hr ) && langs)
-                        {
-                            hr = CALL( langs, 7, NULL );  /* IVectorView::Size(NULL) */
-                            ok( hr == E_POINTER, "getiids: IVectorView Size@7(NULL) hr=%08x (expect E_POINTER)\n", hr );
-                            CALL( langs, 2, (ULONG*)&hr );
-                        }
+                        hr = CALL( lang, 7, NULL );  /* IVectorView::Size(NULL) */
+                        ok( hr == E_POINTER, "getiids: IVectorView Size@7(NULL) hr=%08x (expect E_POINTER)\n", hr );
                         CALL( lang, 2, (ULONG*)&hr );
                     }
                     CALL( view, 2, (ULONG*)&hr );
@@ -1037,7 +1027,6 @@ static void test_memorymanager_activation(void)
      * Calculator startup).  The no-op stub path below documents the
      * activation surface for callers that do not depend on that quirk. */
     hr = get_factory(L"Windows.System.MemoryManager", &factory);
-    todo_wine
     ok(hr == S_OK, "RoGetActivationFactory(Windows.System.MemoryManager) hr=%08x\n", hr);
     if (hr != S_OK) return;
 
@@ -1085,23 +1074,9 @@ static void test_parameterized_class_names(void)
 {
     static const WCHAR name_mapview_ss[] = L"Windows.Foundation.Collections.IMapView`2<System.String,System.String>";
     static const WCHAR name_mapview_sm[] = L"Windows.Foundation.Collections.IMapView`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
-    /* The Languages GetView face names itself with the SharedLibrary Mcg
-     * name-pool key (short type-display spelling) that resolves, via
-     * StringMap::FindString -> McgClassData, to the __Impl whose frozen
-     * m_cachedInterfaces triple carries IIterable<IKeyValuePair<string,string>>
-     * (interface RID 0x1806800000, cast #14).  The fully-qualified
-     * `Windows.Foundation.Collections.IVectorView`1<System.String>` spelling
-     * misses that exact key and falls back to a target-less closest class. */
-    static const WCHAR name_vector_s[]   = L"Windows.Storage.UserDataPaths";
-    /* F1 (second-pass-silence wave): the Languages observable face answers its
-     * canonical parameterized-interface name -- the form the loose-binding RCW
-     * parses (arity + argument list, element spelled System.String).  The MWR
-     * ResourceManager class-key answer produced a silent second pass. */
+    static const WCHAR name_vector_s[]   = L"Windows.Foundation.Collections.IVectorView`1<System.String>";
     static const WCHAR name_vector_observable_s[] = L"Windows.Foundation.Collections.IObservableVector`1<System.String>";
-    /* The str_vector view impl (svv_QueryInterface vt_vv) is shared by the
-     * Languages GetView and the Qualifiers faces; both name themselves with the
-     * same SharedLibrary Mcg name-pool key so cast #14 resolves the triple. */
-    static const WCHAR name_vector_rq[]  = L"IIterable`1<IKeyValuePair`2<String,String>>";
+    static const WCHAR name_vector_rq[]  = L"Windows.Foundation.Collections.IVectorView`1<Windows.ApplicationModel.Resources.Core.ResourceQualifier>";
     static const WCHAR name_kvp_ss[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,System.String>";
     static const WCHAR name_kvp_sm[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
     static const WCHAR name_iter_s[]     = L"Windows.Foundation.Collections.IIterator`1<System.String>";
@@ -1129,15 +1104,23 @@ static void test_parameterized_class_names(void)
     ok( hr == S_OK && map, "class names: get_QualifierValues hr=%08x\n", hr );
     if (map)
     {
+        static const GUID IID_IIterable_KVP_SS = {0xe9bdaaf0, 0xcbf6, 0x5c72, {0xbe, 0x90, 0x29, 0xcb, 0xf3, 0xa1, 0x31, 0x9b}};
+        void *iterable = NULL;
         check_class_name( map, name_mapview_ss );
-        hr = CALL( map, 10, &it );  /* IIterable::First */
-        ok( hr == S_OK && it, "class names: QualifierValues First hr=%08x\n", hr );
+        hr = CALL( map, 0, &IID_IIterable_KVP_SS, &iterable );
+        ok( hr == S_OK && iterable, "class names: QualifierValues QI IIterable hr=%08x\n", hr );
+        if (iterable)
+        {
+            hr = CALL( iterable, 6, &it );  /* IIterable::First */
+            ok( hr == S_OK && it, "class names: QualifierValues First hr=%08x\n", hr );
+            CALL( iterable, 2, &hr );
+        }
         if (it)
         {
             check_class_name( it, name_iter_kvp_ss );
-            hr = CALL( it, 6, &has );  /* IIterator::MoveNext */
+            hr = CALL( it, 8, &has );  /* IIterator::MoveNext */
             ok( hr == S_OK && has, "class names: QualifierValues MoveNext hr=%08x has=%d\n", hr, has );
-            hr = CALL( it, 7, &pair );  /* IIterator::get_Current -> IKeyValuePair */
+            hr = CALL( it, 6, &pair );  /* IIterator::get_Current -> IKeyValuePair */
             ok( hr == S_OK && pair, "class names: QualifierValues Current hr=%08x\n", hr );
             if (pair)
             {
@@ -1154,31 +1137,21 @@ static void test_parameterized_class_names(void)
     ok( hr == S_OK && vec, "class names: get_Languages hr=%08x\n", hr );
     if (vec)
     {
-        /* the property is declared IObservableVector<string> and the face it
-         * hands out names itself as such (the loose-binding RCW parses the name
-         * to learn what it holds); the IVectorView name belongs to the read-only
-         * face GetView below returns */
-        check_class_name( vec, name_vector_observable_s );
-        /* Languages hands out the IObservableVector face: own members add 6 /
-         * remove 7, then the delegated IVector block (idl:265-269), so GetView
-         * -- an IVector member -- sits at 10, and the face it returns is the
-         * IVectorView, laid out [GetAt 6][Size 7][IndexOf 8][GetMany 9]
-         * [First 10] (idl:249-256). */
-        hr = CALL( vec, 10, &it );  /* IVector::GetView -> the IVectorView face */
-        ok( hr == S_OK && it, "class names: Languages GetView@10 hr=%08x\n", hr );
-        if (SUCCEEDED( hr ) && it)
+        static const GUID IID_IObservableVector_S = {0xf4e31e9a, 0x5e76, 0x5e53, {0x89, 0xf2, 0xb1, 0x62, 0xa8, 0xc3, 0x6f, 0x79}};
+        void *ov = NULL;
+        check_class_name( vec, name_vector_s );
+        hr = CALL( vec, 10, &pair );  /* IVectorView::First, slot 10 */
+        ok( hr == S_OK && pair, "class names: Languages First@10 hr=%08x\n", hr );
+        if (pair)
         {
-            check_class_name( it, name_vector_s );
-            hr = CALL( it, 10, &pair );  /* IVectorView::First, slot 10 */
-            ok( hr == S_OK && pair, "class names: Languages First@10 hr=%08x\n", hr );
-            if (pair)
-            {
-                check_class_name( pair, name_iter_s );
-                CALL( pair, 2, &hr );
-                pair = NULL;
-            }
-            CALL( it, 2, &hr );
-            it = NULL;
+            check_class_name( pair, name_iter_s );
+            CALL( pair, 2, &hr );
+            pair = NULL;
+        }
+        if (SUCCEEDED( CALL( vec, 0, &IID_IObservableVector_S, &ov ) ) && ov)
+        {
+            check_class_name( ov, name_vector_observable_s );
+            CALL( ov, 2, &hr );
         }
         CALL( vec, 2, &hr );
     }
@@ -1200,7 +1173,7 @@ static void test_parameterized_class_names(void)
     ok( hr == S_OK && rm2, "class names: QI IResourceManager hr=%08x\n", hr );
     if (hr == S_OK)
     {
-        hr = CALL( rm2, 9, &rmap );  /* IResourceManager::get_AllResourceMaps */
+        hr = CALL( rm2, 7, &rmap );  /* IResourceManager::get_AllResourceMaps */
         ok( hr == S_OK && rmap, "class names: get_AllResourceMaps hr=%08x\n", hr );
         if (rmap)
         {
@@ -1211,9 +1184,9 @@ static void test_parameterized_class_names(void)
             {
                 check_class_name( it2, name_iter_kvp_sm );
                 has = 0;
-                hr = CALL( it2, 6, &has );  /* MoveNext */
+                hr = CALL( it2, 8, &has );  /* MoveNext */
                 ok( hr == S_OK && has, "class names: AllResourceMaps MoveNext hr=%08x has=%d\n", hr, has );
-                hr = CALL( it2, 7, &pair2 );  /* get_Current */
+                hr = CALL( it2, 6, &pair2 );  /* get_Current */
                 ok( hr == S_OK && pair2, "class names: AllResourceMaps Current hr=%08x\n", hr );
                 if (pair2)
                 {
@@ -1225,12 +1198,12 @@ static void test_parameterized_class_names(void)
             CALL( rmap, 2, &hr );
         }
         /* MainResourceMap -> a candidate -> its Qualifiers vector */
-        hr = CALL( rm2, 8, &map );
+        hr = CALL( rm2, 6, &map );
         ok( hr == S_OK && map, "class names: get_MainResourceMap hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && map)
         {
             WindowsCreateStringReference( L"Resources", 9, &khdr, &hkey );
-            hr = CALL( map, 10, hkey, &cand );  /* IResourceMap::GetValue */
+            hr = CALL( map, 7, hkey, &cand );  /* IResourceMap::GetValue */
             ok( SUCCEEDED( hr ) && cand, "class names: GetValue hr=%08x\n", hr );
             if (SUCCEEDED( hr ) && cand)
             {
@@ -1401,12 +1374,12 @@ static void test_virtualized_hstring(void)
                 hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
                 if (SUCCEEDED(hr) && rm2)
                 {
-                    hr = CALL(rm2, 8, &map);  /* get_MainResourceMap */
+                    hr = CALL(rm2, 6, &map);  /* get_MainResourceMap */
                     if (SUCCEEDED(hr) && map)
                     {
                         s10calc.mt = NULL; s10calc.cch = 9; s10calc.pad = 0; lstrcpyW(s10calc.chars, L"Resources");
                         hcalc = (HSTRING)((char *)&s10calc + 7);
-                        hr = CALL(map, 10, hcalc, &cand);  /* IResourceMap::GetValue */
+                        hr = CALL(map, 7, hcalc, &cand);  /* IResourceMap::GetValue */
                         ok(SUCCEEDED(hr) && cand, "virt-hstring tag7: MainResourceMap::GetValue(Resources) hr=%08x\n", hr);
                         if (cand) CALL(cand, 2, (ULONG *)&hr);
                     }
@@ -1740,7 +1713,7 @@ static void test_ccw_string_key( void )
                 hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( rm, 0 ))( rm, &IID_IResourceManager_loc, &rm2 );
                 if (SUCCEEDED( hr ) && rm2)
                 {
-                    hr = CALL( rm2, 8, &map );  /* get_MainResourceMap */
+                    hr = CALL( rm2, 6, &map );  /* get_MainResourceMap */
                     if (SUCCEEDED( hr ) && map)
                     {
                         /* the map answers any key (key-as-value stub tier when
@@ -1753,7 +1726,7 @@ static void test_ccw_string_key( void )
 
                         base[0] = got[0] = 0;
                         WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &hdr, &hres );
-                        hr = CALL( map, 10, hres, &cand );  /* real-HSTRING baseline */
+                        hr = CALL( map, 7, hres, &cand );  /* real-HSTRING baseline */
                         if (SUCCEEDED( hr ) && cand)
                         {
                             cand_get_value( cand, base, ARRAYSIZE( base ) );
@@ -1762,7 +1735,7 @@ static void test_ccw_string_key( void )
                         ok( !wcscmp( base, L"Calculator" ), "ccw-key: baseline pri value is '%s'\n", wine_dbgstr_w( base ) );
 
                         cand = NULL;
-                        hr = CALL( map, 10, (HSTRING)&ccw_reskey, &cand );  /* IResourceMap::GetValue */
+                        hr = CALL( map, 7, (HSTRING)&ccw_reskey, &cand );  /* IResourceMap::GetValue */
                         ok( SUCCEEDED( hr ) && cand, "ccw-key: MainResourceMap::GetValue(CCW pri key) hr=%08x\n", hr );
                         if (cand)
                         {
@@ -1773,11 +1746,11 @@ static void test_ccw_string_key( void )
                         }
 
                         cand = NULL;
-                        hr = CALL( rm2, 10, &defctx );  /* get_DefaultContext */
+                        hr = CALL( rm2, 8, &defctx );  /* get_DefaultContext */
                         if (SUCCEEDED( hr ) && defctx)
                         {
                             got[0] = 0;
-                            hr = CALL( map, 11, (HSTRING)&ccw_reskey, defctx, &cand );  /* GetValueForContext */
+                            hr = CALL( map, 8, (HSTRING)&ccw_reskey, defctx, &cand );  /* GetValueForContext */
                             ok( SUCCEEDED( hr ) && cand, "ccw-key: GetValueForContext(CCW pri key) hr=%08x\n", hr );
                             if (cand)
                             {
@@ -1946,7 +1919,7 @@ static const WCHAR *elems_obsm_abi[] = { L"Windows.Foundation.Collections.IObser
 
 static void test_collections_abi_slots( void )
 {
-    static const WCHAR name_vv_s[] = L"Windows.Storage.UserDataPaths";
+    static const WCHAR name_vv_s[] = L"Windows.Foundation.Collections.IVectorView`1<System.String>";
     /* published instance IID of IVectorView<string>: the literal the Calculator
      * MRT engine QIs on the Languages object (observed in the +resources trace:
      * ov_QueryInterface languages QI {2f13c006-a03a-5f69-b090-75a43e33423e}) */
@@ -2001,10 +1974,19 @@ static void test_collections_abi_slots( void )
         "abi: QualifierValues Split@9 hr=%08x first=%p second=%p (want E_NOTIMPL and both out-params written null)\n",
         hr, first, second );
 
-    it = NULL;
-    hr = CALL( mv, 10, &it );                 /* IIterable::First, slot 10 */
-    ok( hr == S_OK && it, "abi: QualifierValues First@10 hr=%08x\n", hr );
-    if (it) CALL( it, 2, (ULONG *)&hr );
+    {
+        static const GUID IID_IIterable_KVP_SS = {0xe9bdaaf0, 0xcbf6, 0x5c72, {0xbe, 0x90, 0x29, 0xcb, 0xf3, 0xa1, 0x31, 0x9b}};
+        void *iterable = NULL;
+        it = NULL;
+        hr = CALL( mv, 0, &IID_IIterable_KVP_SS, &iterable );
+        if (SUCCEEDED( hr ) && iterable)
+        {
+            hr = CALL( iterable, 6, &it );             /* IIterable::First, slot 6 */
+            CALL( iterable, 2, (ULONG *)&hr );
+        }
+        ok( hr == S_OK && it, "abi: QualifierValues First@6 hr=%08x\n", hr );
+        if (it) CALL( it, 2, (ULONG *)&hr );
+    }
 
     /* the miss path: code ELEMENT_NOT_FOUND, retval written (empty) */
     hval = (HSTRING)0x1;
@@ -2066,13 +2048,13 @@ static void test_collections_abi_slots( void )
     }
 
     /* ---------------- IVectorView<HSTRING> (Languages) ---------------- */
-    hr = CALL( ctx, 11, &lang );                    /* get_Languages: IObservableVector face */
+    hr = CALL( ctx, 11, &lang );                    /* get_Languages: IVectorView<HSTRING> face */
     ok( hr == S_OK && lang, "abi: get_Languages hr=%08x\n", hr );
     if (SUCCEEDED( hr ) && lang)
     {
         size = 0;
-        hr = CALL( lang, 9, &size );                /* observable vector Size, slot 9 */
-        ok( hr == S_OK && size >= 1, "abi: Languages Size@9 hr=%08x size=%u\n", hr, size );
+        hr = CALL( lang, 7, &size );                /* vector view Size, slot 7 */
+        ok( hr == S_OK && size >= 1, "abi: Languages Size@7 hr=%08x size=%u\n", hr, size );
         osize = size;
 
         hr = RoGetParameterizedTypeInstanceIID( 2, elems_vectorview_s, NULL, &iid_vv, NULL );
@@ -2129,7 +2111,7 @@ static void test_collections_abi_slots( void )
     hr = QI_SLOT( rm, &IID_IResourceManager_loc, &rm2 );
     if (FAILED( hr ) || !rm2) goto done;
 
-    hr = CALL( rm2, 9, &rmaps );                    /* get_AllResourceMaps */
+    hr = CALL( rm2, 7, &rmaps );                    /* get_AllResourceMaps */
     ok( hr == S_OK && rmaps, "abi: get_AllResourceMaps hr=%08x\n", hr );
     if (SUCCEEDED( hr ) && rmaps)
     {
@@ -2145,10 +2127,10 @@ static void test_collections_abi_slots( void )
         if (it)
         {
             has = 0;
-            hr = CALL( it, 6, &has );
+            hr = CALL( it, 8, &has );               /* MoveNext, slot 8 */
             ok( hr == S_OK && has, "abi: AllResourceMaps MoveNext hr=%08x has=%d\n", hr, has );
             pair = NULL;
-            hr = CALL( it, 7, &pair );
+            hr = CALL( it, 6, &pair );              /* get_Current, slot 6 */
             if (SUCCEEDED( hr ) && pair)
             {
                 hkey = NULL;
@@ -2171,12 +2153,12 @@ static void test_collections_abi_slots( void )
         rmaps = NULL;
     }
 
-    hr = CALL( rm2, 8, &map );                      /* get_MainResourceMap */
+    hr = CALL( rm2, 6, &map );                      /* get_MainResourceMap */
     if (SUCCEEDED( hr ) && map)
     {
         WindowsCreateStringReference( L"Resources", 9, &hdr3, &hres );
         cand = NULL;
-        hr = CALL( map, 10, hres, &cand );           /* IResourceMap::GetValue */
+        hr = CALL( map, 7, hres, &cand );           /* IResourceMap::GetValue */
         ok( SUCCEEDED( hr ) && cand, "abi: GetValue(Resources) hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && cand)
         {
@@ -2664,7 +2646,7 @@ static void test_languages_shape(void)
         {
             size = 0;
             hr = CALL( ov, 9, &size );                         /* Size, slot 9 */
-            ok( hr == S_OK && size == 1, "shape: observable Size@9 hr=%08x size=%u want 1\n", hr, size );
+            ok( hr == S_OK && size == 2, "shape: observable Size@9 hr=%08x size=%u want 2\n", hr, size );
 
             hitem = NULL;
             hr = CALL( ov, 8, 0, &hitem );                     /* GetAt, slot 8 */
@@ -2685,7 +2667,7 @@ static void test_languages_shape(void)
             {
                 size = 0;
                 hr = CALL( view, 7, &size );                   /* view Size, slot 7 */
-                ok( hr == S_OK && size == 1, "shape: GetView face Size@7 hr=%08x size=%u want 1\n", hr, size );
+                ok( hr == S_OK && size == 2, "shape: GetView face Size@7 hr=%08x size=%u want 2\n", hr, size );
                 CALL( view, 2, (ULONG *)&hr );
                 view = NULL;
             }
@@ -2704,7 +2686,7 @@ static void test_languages_shape(void)
 
     size = 0;
     hr = CALL( vv, 7, &size );                                 /* Size, slot 7 */
-    ok( hr == S_OK && size == 1, "shape: view Size@7 hr=%08x size=%u want 1\n", hr, size );
+    ok( hr == S_OK && size == 2, "shape: view Size@7 hr=%08x size=%u want 2\n", hr, size );
 
     hitem = NULL;
     hr = CALL( vv, 6, 0, &hitem );                             /* GetAt, slot 6 */
@@ -2733,8 +2715,8 @@ static void test_languages_shape(void)
     }
     WindowsDeleteString( hprobe );
 
-    hr = CALL( vv, 6, 1, &hprobe );                            /* GetAt past the end */
-    ok( hr == E_BOUNDS, "shape: view GetAt@6(1) hr=%08x want E_BOUNDS\n", hr );
+    hr = CALL( vv, 6, 2, &hprobe );                            /* GetAt past the end */
+    ok( hr == E_BOUNDS, "shape: view GetAt@6(2) hr=%08x want E_BOUNDS\n", hr );
 
     hbuf[0] = hbuf[1] = NULL; got = 0xdead;
     hr = CALL( vv, 9, 0, 1, hbuf, &got );                      /* GetMany, slot 9 */
@@ -2742,7 +2724,7 @@ static void test_languages_shape(void)
 
     hbuf[0] = hbuf[1] = NULL; got = 0xdead;
     hr = CALL( vv, 9, 0, 2, hbuf, &got );                      /* GetMany oversized buffer */
-    ok( hr == S_OK && got == 1, "shape: view GetMany@9(0,2) hr=%08x got=%u want 1\n", hr, got );
+    ok( hr == S_OK && got == 2, "shape: view GetMany@9(0,2) hr=%08x got=%u want 2\n", hr, got );
 
 done:
     if (vv) CALL( vv, 2, (ULONG *)&hr );
@@ -2755,7 +2737,7 @@ done:
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
-    ok(SUCCEEDED(hr), "RoInitialize hr=%08lx\n", hr);
+    ok(SUCCEEDED(hr), "RoInitialize hr=%08lx\n", (unsigned long)hr);
 
     test_resourcecontext_activation();
     set_pri_env();

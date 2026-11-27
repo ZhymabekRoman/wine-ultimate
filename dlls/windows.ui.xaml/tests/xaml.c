@@ -162,9 +162,14 @@ struct test_vec_iface { const struct test_vec_vtbl *lpVtbl; };
 
 struct test_ui_vtbl
 {
-    void *pad0_56[57];
+    void *pad0_19[20];
+    HRESULT (WINAPI *put_IsHitTestVisible)(void *, boolean);
+    void *pad21_56[36];
     HRESULT (WINAPI *add_PointerPressed)(void *, void *, EventRegistrationToken *);
     HRESULT (WINAPI *remove_PointerPressed)(void *, EventRegistrationToken);
+    void *pad59_72[14];
+    HRESULT (WINAPI *add_Tapped)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Tapped)(void *, EventRegistrationToken);
 };
 struct test_ui_iface { const struct test_ui_vtbl *lpVtbl; };
 
@@ -2376,6 +2381,262 @@ static void test_CalculatorQaRegressions(void)
     if (btn) IInspectable_Release( btn );
 }
 
+struct tap_test_handler
+{
+    const void **lpVtbl;
+    LONG ref;
+    int fired_cnt;
+    IUnknown *last_orig_unk;
+    boolean set_handled;
+};
+
+struct test_tap_args_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_PointerDeviceType)(void *, INT32 *);
+    HRESULT (WINAPI *get_Handled)(void *, boolean *);
+    HRESULT (WINAPI *put_Handled)(void *, boolean);
+    HRESULT (WINAPI *GetPosition)(void *, void *, Point *);
+};
+struct test_tap_args_iface { const struct test_tap_args_vtbl *lpVtbl; };
+
+struct test_routed_args_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_OriginalSource)(void *, IInspectable **);
+};
+struct test_routed_args_iface { const struct test_routed_args_vtbl *lpVtbl; };
+
+static HRESULT WINAPI tap_test_QI( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct tap_test_handler *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI tap_test_AddRef( void *iface ) { return InterlockedIncrement( &((struct tap_test_handler *)iface)->ref ); }
+static ULONG WINAPI tap_test_Release( void *iface ) { return InterlockedDecrement( &((struct tap_test_handler *)iface)->ref ); }
+static HRESULT WINAPI tap_test_Invoke( void *iface, IInspectable *sender, void *args )
+{
+    static const GUID IID_ITappedRoutedEventArgs_t = { 0xafa4bd0f, 0xa05b, 0x4665, { 0x8d, 0x2c, 0xa6, 0xf6, 0x73, 0x67, 0x23, 0x8a } };
+    static const GUID IID_IRoutedEventArgs_t       = { 0x5c985ac6, 0xd802, 0x4b38, { 0xa2, 0x23, 0xbf, 0x07, 0x0c, 0x43, 0xfe, 0xdf } };
+    struct tap_test_handler *h = iface;
+    void *targs = NULL, *rargs = NULL;
+
+    (void)sender;
+    h->fired_cnt++;
+    if (h->last_orig_unk) { IUnknown_Release( h->last_orig_unk ); h->last_orig_unk = NULL; }
+    if (args && SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)args, &IID_IRoutedEventArgs_t, &rargs ) ) && rargs)
+    {
+        IInspectable *orig = NULL;
+        if (SUCCEEDED( ((const struct test_routed_args_iface *)rargs)->lpVtbl->get_OriginalSource( rargs, &orig ) ) && orig)
+        {
+            IInspectable_QueryInterface( orig, &IID_IUnknown, (void **)&h->last_orig_unk );
+            IInspectable_Release( orig );
+        }
+        IUnknown_Release( (IUnknown *)rargs );
+    }
+    if (args && SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)args, &IID_ITappedRoutedEventArgs_t, &targs ) ) && targs)
+    {
+        if (h->set_handled)
+            ((const struct test_tap_args_iface *)targs)->lpVtbl->put_Handled( targs, TRUE );
+        IUnknown_Release( (IUnknown *)targs );
+    }
+    return S_OK;
+}
+static const void *tap_test_vtbl[] = { tap_test_QI, tap_test_AddRef, tap_test_Release, tap_test_Invoke };
+
+static void test_HitTestAndRoutedBubbling( void )
+{
+    IActivationFactory *win_af = NULL, *grid_af = NULL, *sp_af = NULL;
+    IInspectable *win_statics = NULL, *win = NULL;
+    IInspectable *root_obj = NULL, *back_obj = NULL, *front_obj = NULL, *leaf_obj = NULL;
+    void *root_fe = NULL, *back_fe = NULL, *front_fe = NULL, *leaf_fe = NULL;
+    void *root_ui = NULL, *back_ui = NULL, *front_ui = NULL, *leaf_ui = NULL;
+    void *root_panel = NULL, *root_children = NULL, *front_panel = NULL, *front_children = NULL;
+    IUnknown *back_unk = NULL, *leaf_unk = NULL;
+    ICoreWindow *cw = NULL;
+    ICoreWindowInterop *interop = NULL;
+    HWND hwnd = NULL;
+    HSTRING str;
+    HRESULT hr;
+    struct tap_test_handler h_root  = { tap_test_vtbl, 1 };
+    struct tap_test_handler h_back  = { tap_test_vtbl, 1 };
+    struct tap_test_handler h_front = { tap_test_vtbl, 1 };
+    struct tap_test_handler h_leaf  = { tap_test_vtbl, 1 };
+    EventRegistrationToken tok_root = {0}, tok_back = {0}, tok_front = {0}, tok_leaf = {0};
+    struct test_thickness m_back  = { 20.0, 20.0, 0.0, 0.0 };
+    struct test_thickness m_front = { 40.0, 40.0, 0.0, 0.0 };
+    struct test_thickness m_leaf  = { 10.0, 10.0, 0.0, 0.0 };
+
+    init_user32_procs();
+
+    WindowsCreateString( L"Windows.UI.Xaml.Window", 22, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&win_af );
+    WindowsDeleteString( str );
+    if (FAILED(hr)) return;
+
+    hr = IActivationFactory_QueryInterface( win_af, &IID_IWindowStatics_test, (void **)&win_statics );
+    IActivationFactory_Release( win_af );
+    if (FAILED(hr)) return;
+
+    hr = ((const struct test_window_statics_iface *)win_statics)->lpVtbl->get_Current( win_statics, (void **)&win );
+    IInspectable_Release( win_statics );
+    if (FAILED(hr) || !win) return;
+
+    ((const struct test_window_iface *)win)->lpVtbl->Activate( win );
+    hr = ((const struct test_window_iface *)win)->lpVtbl->get_CoreWindow( win, &cw );
+    if (FAILED(hr) || !cw) { IInspectable_Release( win ); return; }
+
+    if (SUCCEEDED(ICoreWindow_QueryInterface( cw, &IID_ICoreWindowInterop, (void **)&interop )) && interop)
+    {
+        interop->lpVtbl->GetWindowHandle( interop, &hwnd );
+        interop->lpVtbl->Release( interop );
+    }
+    if (!pIsWindow( hwnd )) { ICoreWindow_Release( cw ); IInspectable_Release( win ); return; }
+
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.Grid", 29, &str );
+    RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&grid_af );
+    WindowsDeleteString( str );
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.StackPanel", 35, &str );
+    RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&sp_af );
+    WindowsDeleteString( str );
+
+    IActivationFactory_ActivateInstance( grid_af, &root_obj );
+    IActivationFactory_ActivateInstance( grid_af, &back_obj );
+    IActivationFactory_ActivateInstance( grid_af, &front_obj );
+    IActivationFactory_ActivateInstance( sp_af, &leaf_obj );
+    IActivationFactory_Release( grid_af );
+    IActivationFactory_Release( sp_af );
+
+    IInspectable_QueryInterface( back_obj, &IID_IUnknown, (void **)&back_unk );
+    IInspectable_QueryInterface( leaf_obj, &IID_IUnknown, (void **)&leaf_unk );
+    IInspectable_QueryInterface( root_obj, &IID_IFrameworkElement_test, &root_fe );
+    IInspectable_QueryInterface( back_obj, &IID_IFrameworkElement_test, &back_fe );
+    IInspectable_QueryInterface( front_obj, &IID_IFrameworkElement_test, &front_fe );
+    IInspectable_QueryInterface( leaf_obj, &IID_IFrameworkElement_test, &leaf_fe );
+
+    ((const struct test_fe_iface *)root_fe)->lpVtbl->put_Width( root_fe, 300.0 );
+    ((const struct test_fe_iface *)root_fe)->lpVtbl->put_Height( root_fe, 300.0 );
+    ((const struct test_fe_iface *)root_fe)->lpVtbl->put_HorizontalAlignment( root_fe, 0 );
+    ((const struct test_fe_iface *)root_fe)->lpVtbl->put_VerticalAlignment( root_fe, 0 );
+
+    ((const struct test_fe_iface *)back_fe)->lpVtbl->put_Width( back_fe, 100.0 );
+    ((const struct test_fe_iface *)back_fe)->lpVtbl->put_Height( back_fe, 100.0 );
+    ((const struct test_fe_iface *)back_fe)->lpVtbl->put_HorizontalAlignment( back_fe, 0 );
+    ((const struct test_fe_iface *)back_fe)->lpVtbl->put_VerticalAlignment( back_fe, 0 );
+    ((const struct test_fe_iface *)back_fe)->lpVtbl->put_Margin( back_fe, &m_back );
+
+    ((const struct test_fe_iface *)front_fe)->lpVtbl->put_Width( front_fe, 100.0 );
+    ((const struct test_fe_iface *)front_fe)->lpVtbl->put_Height( front_fe, 100.0 );
+    ((const struct test_fe_iface *)front_fe)->lpVtbl->put_HorizontalAlignment( front_fe, 0 );
+    ((const struct test_fe_iface *)front_fe)->lpVtbl->put_VerticalAlignment( front_fe, 0 );
+    ((const struct test_fe_iface *)front_fe)->lpVtbl->put_Margin( front_fe, &m_front );
+
+    ((const struct test_fe_iface *)leaf_fe)->lpVtbl->put_Width( leaf_fe, 60.0 );
+    ((const struct test_fe_iface *)leaf_fe)->lpVtbl->put_Height( leaf_fe, 60.0 );
+    ((const struct test_fe_iface *)leaf_fe)->lpVtbl->put_HorizontalAlignment( leaf_fe, 0 );
+    ((const struct test_fe_iface *)leaf_fe)->lpVtbl->put_VerticalAlignment( leaf_fe, 0 );
+    ((const struct test_fe_iface *)leaf_fe)->lpVtbl->put_Margin( leaf_fe, &m_leaf );
+
+    IInspectable_QueryInterface( front_obj, &IID_IPanel_test, &front_panel );
+    ((const struct test_panel_iface *)front_panel)->lpVtbl->get_Children( front_panel, &front_children );
+    ((const struct test_vec_iface *)front_children)->lpVtbl->Append( front_children, leaf_obj );
+
+    IInspectable_QueryInterface( root_obj, &IID_IPanel_test, &root_panel );
+    ((const struct test_panel_iface *)root_panel)->lpVtbl->get_Children( root_panel, &root_children );
+    ((const struct test_vec_iface *)root_children)->lpVtbl->Append( root_children, back_obj );
+    ((const struct test_vec_iface *)root_children)->lpVtbl->Append( root_children, front_obj );
+
+    IInspectable_QueryInterface( root_obj, &IID_IUIElement_test, &root_ui );
+    IInspectable_QueryInterface( back_obj, &IID_IUIElement_test, &back_ui );
+    IInspectable_QueryInterface( front_obj, &IID_IUIElement_test, &front_ui );
+    IInspectable_QueryInterface( leaf_obj, &IID_IUIElement_test, &leaf_ui );
+
+    ((const struct test_ui_iface *)root_ui)->lpVtbl->add_Tapped( root_ui, &h_root, &tok_root );
+    ((const struct test_ui_iface *)back_ui)->lpVtbl->add_Tapped( back_ui, &h_back, &tok_back );
+    ((const struct test_ui_iface *)front_ui)->lpVtbl->add_Tapped( front_ui, &h_front, &tok_front );
+    ((const struct test_ui_iface *)leaf_ui)->lpVtbl->add_Tapped( leaf_ui, &h_leaf, &tok_leaf );
+
+    ((const struct test_window_iface *)win)->lpVtbl->put_Content( win, root_obj );
+    pump_messages( hwnd );
+
+    /* 1. Overlap region (60,60): front_grid's leaf wins z-order, bubbles leaf -> front -> root, not back */
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 60, 60 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 60, 60 ) );
+    pump_messages( hwnd );
+    ok( h_leaf.fired_cnt == 1, "expected leaf Tapped 1, got %d\n", h_leaf.fired_cnt );
+    ok( h_front.fired_cnt == 1, "expected front Tapped 1, got %d\n", h_front.fired_cnt );
+    ok( h_root.fired_cnt == 1, "expected root Tapped 1, got %d\n", h_root.fired_cnt );
+    ok( h_back.fired_cnt == 0, "expected back Tapped 0 under front, got %d\n", h_back.fired_cnt );
+    ok( h_root.last_orig_unk == leaf_unk, "expected root OriginalSource == leaf (%p vs %p)\n",
+        h_root.last_orig_unk, leaf_unk );
+
+    /* 2. Handled=TRUE on front stops bubbling to root */
+    h_front.set_handled = TRUE;
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 60, 60 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 60, 60 ) );
+    pump_messages( hwnd );
+    ok( h_leaf.fired_cnt == 2, "expected leaf Tapped 2, got %d\n", h_leaf.fired_cnt );
+    ok( h_front.fired_cnt == 2, "expected front Tapped 2, got %d\n", h_front.fired_cnt );
+    ok( h_root.fired_cnt == 1, "expected root Tapped still 1 when Handled=TRUE, got %d\n", h_root.fired_cnt );
+    ok( h_back.fired_cnt == 0, "expected back Tapped still 0, got %d\n", h_back.fired_cnt );
+    h_front.set_handled = FALSE;
+
+    /* 3. Non-overlapped region of back_grid (25,25): hits back_grid and bubbles to root */
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 25, 25 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 25, 25 ) );
+    pump_messages( hwnd );
+    ok( h_back.fired_cnt == 1, "expected back Tapped 1, got %d\n", h_back.fired_cnt );
+    ok( h_root.fired_cnt == 2, "expected root Tapped 2, got %d\n", h_root.fired_cnt );
+    ok( h_root.last_orig_unk == back_unk, "expected root OriginalSource == back (%p vs %p)\n",
+        h_root.last_orig_unk, back_unk );
+
+    /* 4. IsHitTestVisible=FALSE on front_grid passes overlap click through to back_grid */
+    ((const struct test_ui_iface *)front_ui)->lpVtbl->put_IsHitTestVisible( front_ui, FALSE );
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 60, 60 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 60, 60 ) );
+    pump_messages( hwnd );
+    ok( h_leaf.fired_cnt == 2, "expected leaf Tapped still 2 when front hit-test invisible, got %d\n", h_leaf.fired_cnt );
+    ok( h_front.fired_cnt == 2, "expected front Tapped still 2 when hit-test invisible, got %d\n", h_front.fired_cnt );
+    ok( h_back.fired_cnt == 2, "expected back Tapped 2 on pass-through, got %d\n", h_back.fired_cnt );
+    ok( h_root.fired_cnt == 3, "expected root Tapped 3 on pass-through, got %d\n", h_root.fired_cnt );
+
+    if (h_root.last_orig_unk) IUnknown_Release( h_root.last_orig_unk );
+    if (h_back.last_orig_unk) IUnknown_Release( h_back.last_orig_unk );
+    if (h_front.last_orig_unk) IUnknown_Release( h_front.last_orig_unk );
+    if (h_leaf.last_orig_unk) IUnknown_Release( h_leaf.last_orig_unk );
+    ((const struct test_ui_iface *)root_ui)->lpVtbl->remove_Tapped( root_ui, tok_root );
+    ((const struct test_ui_iface *)back_ui)->lpVtbl->remove_Tapped( back_ui, tok_back );
+    ((const struct test_ui_iface *)front_ui)->lpVtbl->remove_Tapped( front_ui, tok_front );
+    ((const struct test_ui_iface *)leaf_ui)->lpVtbl->remove_Tapped( leaf_ui, tok_leaf );
+    ((const struct test_window_iface *)win)->lpVtbl->put_Content( win, NULL );
+    IUnknown_Release( (IUnknown *)leaf_ui );
+    IUnknown_Release( (IUnknown *)front_ui );
+    IUnknown_Release( (IUnknown *)back_ui );
+    IUnknown_Release( (IUnknown *)root_ui );
+    IUnknown_Release( (IUnknown *)front_children );
+    IUnknown_Release( (IUnknown *)front_panel );
+    IUnknown_Release( (IUnknown *)root_children );
+    IUnknown_Release( (IUnknown *)root_panel );
+    IUnknown_Release( (IUnknown *)leaf_fe );
+    IUnknown_Release( (IUnknown *)front_fe );
+    IUnknown_Release( (IUnknown *)back_fe );
+    IUnknown_Release( (IUnknown *)root_fe );
+    IUnknown_Release( leaf_unk );
+    IUnknown_Release( back_unk );
+    IInspectable_Release( leaf_obj );
+    IInspectable_Release( front_obj );
+    IInspectable_Release( back_obj );
+    IInspectable_Release( root_obj );
+    ICoreWindow_Release( cw );
+    IInspectable_Release( win );
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -2388,6 +2649,7 @@ START_TEST(xaml)
     test_SwapChainPanel();
     test_View_lifecycle();
     test_PointerBridge();
+    test_HitTestAndRoutedBubbling();
     test_VmDataContextBinding();
     test_VectorGrowthBeyondOldCaps();
     test_TruncatedXbfBounds();

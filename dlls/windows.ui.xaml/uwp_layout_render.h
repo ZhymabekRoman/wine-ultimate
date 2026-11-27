@@ -426,18 +426,7 @@ ULONG WINAPI pra_Release( void *iface );
 ULONG WINAPI uwp_tap_Release( void *iface );
 struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el, enum xaml_pointer_event_kind kind );
 /* Unified hit-testing & helpers shared between uwp_xaml.c and uwp_input.c. */
-enum uwp_hit_kind
-{
-    UWP_HIT_BUTTON = 0,
-    UWP_HIT_CDP,
-    UWP_HIT_EXPANDER_HEADER,
-    UWP_HIT_COMBOBOX,
-    UWP_HIT_TEXTBOX,
-    UWP_HIT_TABVIEW,
-    UWP_HIT_TAPPABLE,
-    UWP_HIT_SCROLL_VIEWER,
-};
-struct uwp_element *uwp_hit_test( struct uwp_element *el, int x, int y, enum uwp_hit_kind kind );
+struct uwp_element *uwp_hit_test_deepest( struct uwp_element *root, int x, int y );
 struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, int y );
 struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR *text );
 /* Pointer/tapped dispatch (uwp_input.c, called back from uwp_xaml.c). */

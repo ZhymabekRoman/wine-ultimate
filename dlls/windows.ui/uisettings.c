@@ -384,13 +384,8 @@ DEFINE_IINSPECTABLE( uisettings2, IUISettings2, struct uisettings, IUISettings_i
 
 static HRESULT WINAPI uisettings2_get_TextScaleFactor( IUISettings2 *iface, DOUBLE *value )
 {
-    UINT32 len = 0;
-    /* Packaged WinUI/C++/WinRT apps multiply TextScaleFactor directly (1.0 = 100%) */
-    if (GetCurrentPackageFullName( &len, NULL ) == ERROR_INSUFFICIENT_BUFFER)
-        *value = 1.0;
-    else
-        /* the projection exposes the scale in percent: 100 is the default 1:1 */
-        *value = 100.0;
+    if (!value) return E_POINTER;
+    *value = 1.0;
     return S_OK;
 }
 
