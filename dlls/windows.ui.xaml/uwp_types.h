@@ -211,6 +211,8 @@ enum uwp_elem_kind
 #define UWP_CF2_QUINTIC_EASE            (1ULL << 41)
 #define UWP_CF2_CALENDAR_DATE_PICKER    (1ULL << 42)
 #define UWP_CF2_EXPANDER                (1ULL << 43)
+#define UWP_CF2_TOGGLE_SWITCH           (1ULL << 44)
+#define UWP_CF2_HYPERLINK_BTN           (1ULL << 45)
 
 enum uwp_rd_kind
 {
@@ -522,8 +524,17 @@ struct uwp_style_anim_ext
     int tile_align_x, tile_align_y;
     int fill_rule;
     BOOL xcbb_connected;
-    WORD tpl_bind_target_pid;
-    WCHAR tpl_bind_src_prop[64];
+    struct uwp_tpl_binding_entry
+    {
+        WORD target_pid;
+        WCHAR src_prop[64];
+        WCHAR target_prop[64];
+    } *tpl_bindings;
+    int tpl_bind_cnt;
+    int tpl_bind_cap;
+    double grid_col_spacing;
+    double grid_row_spacing;
+    IInspectable *template_root_obj;
     WCHAR anim_target_name[96];
     WCHAR anim_target_prop[96];
     struct uwp_element *anim_target_el;
@@ -1350,6 +1361,16 @@ static inline BOOL uwp_is_calendar_date_picker( const struct uwp_element *el )
 static inline BOOL uwp_is_expander( const struct uwp_element *el )
 {
     return el && (el->class_flags2 & UWP_CF2_EXPANDER) != 0;
+}
+
+static inline BOOL uwp_is_toggle_switch( const struct uwp_element *el )
+{
+    return el && (el->class_flags2 & UWP_CF2_TOGGLE_SWITCH) != 0;
+}
+
+static inline BOOL uwp_is_hyperlink_button( const struct uwp_element *el )
+{
+    return el && (el->class_flags2 & UWP_CF2_HYPERLINK_BTN) != 0;
 }
 
 static inline BOOL uwp_is_rich_text_block( const struct uwp_element *el )

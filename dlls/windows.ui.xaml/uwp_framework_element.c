@@ -120,6 +120,9 @@ static HRESULT WINAPI uwp_ui_put_Visibility( void *iface, int vis )
     if (impl && impl->visibility != vis)
     {
         impl->visibility = vis;
+        if (impl->templated_parent)
+            uwp_sync_all_template_presenters( impl->templated_parent );
+        g_layout_dirty = TRUE;
         uwp_invalidate_window();
     }
     return S_OK;
@@ -1202,10 +1205,20 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
             if (tpl_root)
             {
                 el->template_root = tpl_root;
+                {
+                    struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+                    if (sa && sa->template_root_obj != tpl_obj)
+                    {
+                        if (sa->template_root_obj) IInspectable_Release( sa->template_root_obj );
+                        sa->template_root_obj = tpl_obj;
+                        IInspectable_AddRef( tpl_obj );
+                    }
+                }
                 el->in_visual_tree = TRUE;
                 tpl_root->parent = el;
                 tpl_root->in_visual_tree = TRUE;
                 uwp_collect_template_names( el, tpl_root, 0 );
+                uwp_sync_all_template_presenters( el );
                 if (el->content)
                 {
                     struct uwp_element *cp = uwp_find_content_presenter( tpl_root, 0 );
@@ -1218,14 +1231,6 @@ BOOL uwp_inflate_control_template( struct uwp_element *el )
                             if (ce) ce->parent = cp;
                         }
                     }
-                }
-                else if (!el->children_coll &&
-                         (!uwp_has_text( el ) || !(el->class_flags & (UWP_CF_UWP_PREFIX | UWP_CF_WINUI_PREFIX))) &&
-                         el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON &&
-                         el->kind != UWP_KIND_TEXT_BLOCK)
-                {
-                    el->content = tpl_obj;
-                    IInspectable_AddRef( tpl_obj );
                 }
                 TRACE( "uwp_inflate_control_template(%s %s): inflated sub=%u -> %s named_cnt=%d\n",
                        debugstr_w(el->class_name), debugstr_w(el->name),

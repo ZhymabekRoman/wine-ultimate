@@ -370,63 +370,252 @@ static BOOL uwp_substr_in_table( const WCHAR *s, const WCHAR *const *table, size
     return FALSE;
 }
 
-static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uwp_element *node,
-                                             const WCHAR *dpname, IInspectable *val, int depth )
+void uwp_sa_add_tpl_binding( struct uwp_element *target_el, WORD pid, const WCHAR *src_prop, const WCHAR *target_prop )
 {
-    if (!owner || !node || !dpname || !dpname[0] || depth > 16) return;
-    if (node->templated_parent == owner && node->style_anim && node->style_anim->tpl_bind_src_prop[0] &&
-        !wcscmp( node->style_anim->tpl_bind_src_prop, dpname ))
+    struct uwp_style_anim_ext *tsa;
+    int i;
+    if (!target_el || !src_prop || !src_prop[0]) return;
+    tsa = uwp_elem_ensure_style_anim( target_el );
+    if (!tsa) return;
+    for (i = 0; i < tsa->tpl_bind_cnt; i++)
     {
-        WORD tpid = node->style_anim->tpl_bind_target_pid;
-        if (tpid == XBF_PROP_TEXTBLOCK_TEXT ||
-            tpid == XBF_PROP_CONTENT ||
-            tpid == XBF_PROP_FONTICON_GLYPH ||
-            !wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" ))
+        if (tsa->tpl_bindings[i].target_pid == pid && !wcscmp( tsa->tpl_bindings[i].src_prop, src_prop ))
         {
-            struct uwp_element *ve = ((tpid == XBF_PROP_CONTENT ||
-                                       !wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" )) && val)
-                                     ? uwp_elem_from_any( val ) : NULL;
-            if (ve && ve != node && ve != owner)
+            if (target_prop && target_prop[0] && !tsa->tpl_bindings[i].target_prop[0])
+                lstrcpynW( tsa->tpl_bindings[i].target_prop, target_prop, ARRAY_SIZE(tsa->tpl_bindings[i].target_prop) );
+            return;
+        }
+    }
+    if (!xaml_vec_grow( (void **)&tsa->tpl_bindings, &tsa->tpl_bind_cap,
+                        tsa->tpl_bind_cnt + 1, sizeof(*tsa->tpl_bindings), 4 ))
+        return;
+    tsa->tpl_bindings[tsa->tpl_bind_cnt].target_pid = pid;
+    lstrcpynW( tsa->tpl_bindings[tsa->tpl_bind_cnt].src_prop, src_prop,
+               ARRAY_SIZE(tsa->tpl_bindings[tsa->tpl_bind_cnt].src_prop) );
+    lstrcpynW( tsa->tpl_bindings[tsa->tpl_bind_cnt].target_prop, target_prop ? target_prop : L"",
+               ARRAY_SIZE(tsa->tpl_bindings[tsa->tpl_bind_cnt].target_prop) );
+    tsa->tpl_bind_cnt++;
+}
+
+static BOOL uwp_is_effectively_visible( const struct uwp_element *el )
+{
+    int depth = 0;
+    const struct uwp_element *cur = el;
+    while (cur && depth++ < 32)
+    {
+        if (cur->visibility != 0) return FALSE;
+        cur = cur->parent;
+    }
+    return el != NULL;
+}
+
+static void uwp_apply_one_tpl_binding( struct uwp_element *owner, struct uwp_element *node,
+                                       const struct uwp_tpl_binding_entry *tb, IInspectable *val )
+{
+    WORD tpid = tb->target_pid;
+    const WCHAR *tprop = tb->target_prop;
+    BOOL is_header = !wcscmp( tprop, L"Header" );
+    BOOL node_vis = uwp_is_effectively_visible( node );
+    if (uwp_is_expander( node ) && is_header)
+    {
+        struct uwp_element *ve = val ? uwp_elem_from_any( val ) : NULL;
+        if (ve && ve != node && ve != owner)
+        {
+            if (node_vis || !ve->parent || !uwp_is_effectively_visible( ve->parent ))
             {
-                if (uwp_replace_iface( &node->content, val ))
-                {
+                BOOL changed = uwp_replace_iface( &node->pane, val );
+                if (node_vis && (!ve->parent || !uwp_is_effectively_visible( ve->parent )))
                     ve->parent = node;
-                    ve->in_visual_tree = TRUE;
-                    if (!ve->template_inflated || !ve->loaded_fired)
-                        uwp_fire_loaded_tree( ve );
+                ve->in_visual_tree = TRUE;
+                if (!ve->template_inflated || !ve->loaded_fired)
+                    uwp_fire_loaded_tree( ve );
+                if (changed)
+                {
                     g_layout_dirty = TRUE;
                     uwp_invalidate_window();
                 }
             }
-            else if (tpid == XBF_PROP_TEXTBLOCK_TEXT || tpid == XBF_PROP_CONTENT || tpid == XBF_PROP_FONTICON_GLYPH)
+        }
+        else if (val)
+        {
+            WCHAR sbuf[256] = {0};
+            if (uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
             {
-                WCHAR sbuf[256] = {0};
-                if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+                uwp_elem_set_text( node, sbuf );
+                uwp_invalidate_window();
+            }
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_TEXTBLOCK_TEXT ||
+        tpid == XBF_PROP_CONTENT ||
+        tpid == XBF_PROP_FONTICON_GLYPH ||
+        !wcscmp( tprop, L"Content" ) || !wcscmp( tprop, L"Text" ) ||
+        (!wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" ) && !tprop[0]))
+    {
+        struct uwp_element *ve = ((tpid == XBF_PROP_CONTENT || !wcscmp( tprop, L"Content" ) ||
+                                   !wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" )) && val)
+                                 ? uwp_elem_from_any( val ) : NULL;
+        if (ve && ve != node && ve != owner && ve != owner->template_root)
+        {
+            struct uwp_element *anc;
+            BOOL is_cycle = FALSE;
+            for (anc = node; anc; anc = anc->parent)
+                if (anc == ve) { is_cycle = TRUE; break; }
+            if (!is_cycle && (node_vis || !ve->parent || !uwp_is_effectively_visible( ve->parent )))
+            {
+                BOOL changed = uwp_replace_iface( &node->content, val );
+                if (node_vis && (!ve->parent || !uwp_is_effectively_visible( ve->parent )))
+                    ve->parent = node;
+                ve->in_visual_tree = TRUE;
+                if (!ve->template_inflated || !ve->loaded_fired)
+                    uwp_fire_loaded_tree( ve );
+                if (changed)
                 {
-                    uwp_elem_set_text( node, sbuf );
+                    g_layout_dirty = TRUE;
                     uwp_invalidate_window();
                 }
             }
         }
-        else if (tpid == XBF_PROP_WIDTH)
+        else if (tpid == XBF_PROP_TEXTBLOCK_TEXT || tpid == XBF_PROP_CONTENT || tpid == XBF_PROP_FONTICON_GLYPH ||
+                 !wcscmp( tprop, L"Text" ) || !wcscmp( tprop, L"Content" ))
         {
-            double dv = 0.0;
-            if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+            WCHAR sbuf[256] = {0};
+            if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
             {
-                node->width = (dv > 0.1) ? dv : 0.1;
+                uwp_elem_set_text( node, sbuf );
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
         }
-        else if (tpid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT)
+        return;
+    }
+    if (tpid == XBF_PROP_UIELEMENT_VISIBILITY || tpid == XBF_PROP_UIELEMENT_VISIBILITY_V2 ||
+        !wcscmp( tprop, L"Visibility" ))
+    {
+        INT32 ev = 0;
+        if (val && uwp_unbox_enum_int32( val, &ev, TRUE ))
         {
-            double dv = 0.0;
-            if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+            BYTE nv = (ev != 0) ? 1 : 0;
+            if (node->visibility != nv)
             {
-                node->height = (dv > 0.1) ? dv : 0.1;
+                node->visibility = nv;
                 g_layout_dirty = TRUE;
                 uwp_invalidate_window();
             }
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_CONTROL_FONTSIZE || tpid == XBF_PROP_TEXTBLOCK_FONTSIZE ||
+        tpid == XBF_PROP_TEXTELEMENT_FONTSIZE || tpid == XBF_PROP_FONTICON_FONTSIZE ||
+        !wcscmp( tprop, L"FontSize" ))
+    {
+        double dv = 0.0;
+        if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv > 0.0)
+        {
+            node->font_size = dv;
+            node->has_font_size = TRUE;
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        return;
+    }
+    if (node->kind == UWP_KIND_GRID && (tpid == XBF_PROP_GRID_COLUMN_SPACING || tpid == XBF_PROP_GRID_ROW_SPACING ||
+                                        !wcscmp( tprop, L"ColumnSpacing" ) || !wcscmp( tprop, L"RowSpacing" )))
+    {
+        double dv = 0.0;
+        if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+        {
+            struct uwp_style_anim_ext *nsa = uwp_elem_ensure_style_anim( node );
+            if (nsa)
+            {
+                if (tpid == XBF_PROP_GRID_COLUMN_SPACING || !wcscmp( tprop, L"ColumnSpacing" ))
+                    nsa->grid_col_spacing = dv;
+                else
+                    nsa->grid_row_spacing = dv;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_WIDTH || !wcscmp( tprop, L"Width" ))
+    {
+        double dv = 0.0;
+        if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+        {
+            node->width = (dv > 0.1) ? dv : 0.1;
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_FRAMEWORKELEMENT_HEIGHT || !wcscmp( tprop, L"Height" ))
+    {
+        double dv = 0.0;
+        if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+        {
+            node->height = (dv > 0.1) ? dv : 0.1;
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_HORIZONTAL_ALIGNMENT || !wcscmp( tprop, L"HorizontalAlignment" ))
+    {
+        INT32 ev = 0;
+        if (val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+        {
+            node->h_align = (BYTE)ev;
+            g_layout_dirty = TRUE;
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_VERTICAL_ALIGNMENT || !wcscmp( tprop, L"VerticalAlignment" ))
+    {
+        INT32 ev = 0;
+        if (val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+        {
+            node->v_align = (BYTE)ev;
+            g_layout_dirty = TRUE;
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_PANEL_BACKGROUND || tpid == XBF_PROP_BORDER_BACKGROUND ||
+        tpid == XBF_PROP_CONTROL_BACKGROUND || !wcscmp( tprop, L"Background" ))
+    {
+        struct uwp_element *be = val ? uwp_elem_from_any( val ) : NULL;
+        if (be && uwp_elem_has_brush_argb( be ))
+        {
+            uwp_el_set_bg_argb( node, apply_opacity_to_argb( uwp_elem_brush_argb( be ), uwp_elem_brush_opacity( be ) ) );
+            uwp_invalidate_window();
+        }
+        return;
+    }
+    if (tpid == XBF_PROP_BORDER_BRUSH || tpid == XBF_PROP_CONTROL_BORDER_BRUSH ||
+        tpid == XBF_PROP_GRID_BORDER_BRUSH || !wcscmp( tprop, L"BorderBrush" ))
+    {
+        struct uwp_element *be = val ? uwp_elem_from_any( val ) : NULL;
+        if (be && uwp_elem_has_brush_argb( be ))
+        {
+            uwp_el_set_border_argb( node, apply_opacity_to_argb( uwp_elem_brush_argb( be ), uwp_elem_brush_opacity( be ) ) );
+            uwp_invalidate_window();
+        }
+    }
+}
+
+static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uwp_element *node,
+                                             const WCHAR *dpname, IInspectable *val, int depth )
+{
+    if (!owner || !node || !dpname || !dpname[0] || depth > 16) return;
+    if (node->templated_parent == owner && node->style_anim && node->style_anim->tpl_bind_cnt > 0)
+    {
+        int bi;
+        for (bi = 0; bi < node->style_anim->tpl_bind_cnt; bi++)
+        {
+            const struct uwp_tpl_binding_entry *tb = &node->style_anim->tpl_bindings[bi];
+            if (!wcscmp( tb->src_prop, dpname ))
+                uwp_apply_one_tpl_binding( owner, node, tb, val );
         }
     }
     if (node->content)
@@ -446,7 +635,7 @@ static void uwp_sync_template_binding_tree( struct uwp_element *owner, struct uw
     }
 }
 
-static void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
+void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val )
 {
     static const struct { const WCHAR *dp; const WCHAR *target; } repeater_forwards[] = {
         { L"ItemsSource",          L"ItemsSource"  },
@@ -581,10 +770,73 @@ static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname
     }
 }
 
+static void uwp_sync_struct_tpl_props( struct uwp_element *owner, struct uwp_element *node, int depth )
+{
+    if (!owner || !node || depth > 16) return;
+    if (node->templated_parent == owner && node->style_anim && node->style_anim->tpl_bind_cnt > 0)
+    {
+        int bi;
+        for (bi = 0; bi < node->style_anim->tpl_bind_cnt; bi++)
+        {
+            const struct uwp_tpl_binding_entry *tb = &node->style_anim->tpl_bindings[bi];
+            const WCHAR *sp = tb->src_prop;
+            if (!wcscmp( sp, L"Content" ) && owner->content &&
+                (!wcscmp( tb->target_prop, L"Content" ) || tb->target_pid == XBF_PROP_CONTENT ||
+                 !wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" )))
+                uwp_apply_one_tpl_binding( owner, node, tb, owner->content );
+            else if (!wcscmp( sp, L"Header" ) && owner->pane)
+                uwp_apply_one_tpl_binding( owner, node, tb, owner->pane );
+            else if (!wcscmp( sp, L"Padding" ) &&
+                     (!wcscmp( tb->target_prop, L"Padding" ) || tb->target_pid == XBF_PROP_CONTROL_PADDING ||
+                      tb->target_pid == XBF_PROP_BORDER_PADDING))
+            {
+                node->padding_l = owner->padding_l; node->padding_t = owner->padding_t;
+                node->padding_r = owner->padding_r; node->padding_b = owner->padding_b;
+            }
+            else if (!wcscmp( sp, L"Background" ) && owner->has_bg)
+                uwp_el_set_bg_argb( node, owner->bg_argb );
+            else if (!wcscmp( sp, L"BorderBrush" ) && owner->has_border)
+                uwp_el_set_border_argb( node, owner->border_argb );
+            else if (!wcscmp( sp, L"BorderThickness" ))
+            {
+                node->border_thick_l = owner->border_thick_l; node->border_thick_t = owner->border_thick_t;
+                node->border_thick_r = owner->border_thick_r; node->border_thick_b = owner->border_thick_b;
+            }
+            else if (!wcscmp( sp, L"CornerRadius" ) && owner->corner_radius > 0.0)
+                node->corner_radius = owner->corner_radius;
+            else if (!wcscmp( sp, L"FontSize" ) && owner->has_font_size && owner->font_size > 0.0)
+            {
+                node->font_size = owner->font_size; node->has_font_size = TRUE;
+            }
+            else if (!wcscmp( sp, L"HorizontalAlignment" ))
+                node->h_align = owner->h_align;
+            else if (!wcscmp( sp, L"VerticalAlignment" ))
+                node->v_align = owner->v_align;
+        }
+    }
+    if (node->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( node->content );
+        if (ch && ch != node) uwp_sync_struct_tpl_props( owner, ch, depth + 1 );
+    }
+    if (node->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( node->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != node) uwp_sync_struct_tpl_props( owner, ch, depth + 1 );
+        }
+    }
+}
+
 void uwp_sync_all_template_presenters( struct uwp_element *impl )
 {
     int i;
     if (!impl) return;
+    if (impl->template_root)
+        uwp_sync_struct_tpl_props( impl, impl->template_root, 0 );
     for (i = 0; i < impl->dp_cnt; i++)
     {
         const WCHAR *dpn = xaml_dp_get_name( impl->dp_store[i].dp );
@@ -845,10 +1097,10 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
             }
         }
     }
-    else if (uwp_is_expander( impl ))
+    else if (uwp_is_expander( impl ) || impl->kind == UWP_KIND_CONTENT_CONTROL)
     {
         boolean bv = FALSE;
-        if (!wcscmp( dpname, L"IsExpanded" ) && val && uwp_unbox_bool( val, &bv ))
+        if (uwp_is_expander( impl ) && !wcscmp( dpname, L"IsExpanded" ) && val && uwp_unbox_bool( val, &bv ))
         {
             impl->is_open = (bv != 0);
             g_layout_dirty = TRUE;
@@ -896,6 +1148,29 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
             impl->is_open = (bv != 0);
         else if (!wcscmp( dpname, L"DisplayMode" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
             impl->orientation = ev;
+    }
+    else if (uwp_is_toggle_switch( impl ))
+    {
+        boolean bv = FALSE;
+        if (!wcscmp( dpname, L"IsOn" ) && val && uwp_unbox_bool( val, &bv ))
+        {
+            impl->is_checked = bv ? 1 : 0;
+            uwp_invalidate_window();
+        }
+    }
+    else if (impl->kind == UWP_KIND_GRID && (!wcscmp( dpname, L"ColumnSpacing" ) || !wcscmp( dpname, L"RowSpacing" )))
+    {
+        if (val && uwp_unbox_double( val, &dv ) && !isnan( dv ) && dv >= 0.0)
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( impl );
+            if (sa)
+            {
+                if (!wcscmp( dpname, L"ColumnSpacing" )) sa->grid_col_spacing = dv;
+                else sa->grid_row_spacing = dv;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+        }
     }
 
     if (!wcscmp( dpname, L"Command" ))

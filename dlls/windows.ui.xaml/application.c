@@ -21,6 +21,8 @@
 #include <string.h>
 
 #include "private.h"
+#include <excpt.h>
+#include "wine/exception.h"
 #include "app_private.h"
 #include "uwp_abi_vtbls.h"
 #include "uwp_vsm_rd.h"
@@ -1333,7 +1335,7 @@ static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
 static HRESULT WINAPI application_statics_get_Current( IApplicationStatics *iface,
         IApplication **current );
 
-static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void **out )
+static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void **out, struct uwp_element **out_el )
 {
     void *provider = NULL;
     void *xaml_type = NULL;
@@ -1343,6 +1345,7 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
 
     if (!out) return E_POINTER;
     *out = NULL;
+    if (out_el) *out_el = NULL;
 
     if (current_application && current_application->outer)
     {
@@ -1389,7 +1392,25 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
                     }
                     else if (activate)
                     {
-                        hr = activate( xaml_type, out );
+                        struct uwp_tls_prov_state saved_tls;
+                        struct uwp_element *direct_el = NULL;
+                        uwp_tls_provider_push( &saved_tls );
+                        __TRY
+                        {
+                            hr = activate( xaml_type, out );
+                        }
+                        __EXCEPT_ALL
+                        {
+                            hr = E_FAIL;
+                            TRACE( "ActivateInstance(%s) faulted\n", debugstr_w(full_name) );
+                        }
+                        __ENDTRY;
+                        if (SUCCEEDED(hr) && *out && out_el)
+                            direct_el = uwp_elem_from_any( *out );
+                        {
+                            struct uwp_element *popped = uwp_tls_provider_pop( &saved_tls, direct_el );
+                            if (out_el) *out_el = popped;
+                        }
                         if (FAILED(hr))
                             WARN( "ActivateInstance(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
                         else
@@ -1408,9 +1429,14 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
     return hr;
 }
 
+HRESULT uwp_create_instance_from_provider_el( const WCHAR *full_name, void **out, struct uwp_element **out_el )
+{
+    return xaml_create_instance_from_provider( full_name, out, out_el );
+}
+
 HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out )
 {
-    return xaml_create_instance_from_provider( full_name, out );
+    return xaml_create_instance_from_provider( full_name, out, NULL );
 }
 
 static void xaml_load_xbf_components( void *component, void *resourceLocator )

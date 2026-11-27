@@ -47,7 +47,6 @@ SOURCES = \
 	wv2_events.c \
 	wv2_host_sta.c \
 	xaml_window.c \
-	xbf_aot.c \
 	xbf_decode.c \
 	xbf_instantiate.c \
 	xbf_known_types.c

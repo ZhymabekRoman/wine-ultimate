@@ -1170,9 +1170,7 @@ int g_app_rd_sentinel = 0;
 int g_theme_rd_sentinel = 0;
 BOOL g_app_res_loaded = FALSE;
 BOOL g_app_res_loading = FALSE;
-char (*g_loaded_res_xbfs)[256] = NULL;
 int g_loaded_res_xbf_cnt = 0;
-int g_loaded_res_xbf_cap = 0;
 
 static UINT32 xaml_meta_hash( const WCHAR *s )
 {
@@ -1848,6 +1846,20 @@ static int uwp_parse_font_weight( const WCHAR *s, double num, int vt )
     return 0;
 }
 
+static inline BOOL xbf_rd_find_cached( struct xbf_ctx *ctx, struct uwp_rd_bucket *start_bucket,
+                                       struct uwp_element *scope_el, const WCHAR *raw_key,
+                                       struct uwp_rd_entry **out_entry, struct uwp_rd_bucket **out_bucket )
+{
+    if (ctx && ctx->res_cache_valid && ctx->res_cache_scope_el == scope_el &&
+        ctx->res_cache_key && raw_key && !wcscmp( ctx->res_cache_key, raw_key ))
+    {
+        *out_entry = ctx->res_cache_entry;
+        if (out_bucket) *out_bucket = ctx->res_cache_bucket;
+        return ctx->res_cache_entry != NULL;
+    }
+    return uwp_rd_find_entry( start_bucket, scope_el, raw_key, 0, out_entry, out_bucket );
+}
+
 static BOOL xbf_resolve_double_prop( struct xbf_ctx *ctx, struct uwp_element *el,
                                      int vt, double num, const WCHAR *sval, BOOL is_res_ref,
                                      double *out_val )
@@ -1861,7 +1873,7 @@ static BOOL xbf_resolve_double_prop( struct xbf_ctx *ctx, struct uwp_element *el
     {
         struct uwp_rd_entry *de = NULL;
         struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
-        if (uwp_rd_find_entry( hint_rd, el, sval, 0, &de, NULL ) && de && de->kind == UWP_RD_DOUBLE)
+        if (xbf_rd_find_cached( ctx, hint_rd, el, sval, &de, NULL ) && de && de->kind == UWP_RD_DOUBLE)
         {
             *out_val = de->dval;
             return TRUE;
@@ -2200,7 +2212,7 @@ static void xbf_apply_stack_val_prop( struct xbf_ctx *ctx, struct uwp_element *e
             else if (sval && sval[0])
             {
                 struct uwp_rd_entry *de = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                if (xbf_rd_find_cached( ctx, ctx ? ctx->target_rd : NULL, el, sval, &de, NULL ) &&
                     de && de->kind == UWP_RD_DOUBLE)
                     sv->opacity = de->dval;
             }
@@ -2226,8 +2238,8 @@ static void xbf_apply_stack_val_prop( struct xbf_ctx *ctx, struct uwp_element *e
             struct uwp_rd_entry *re = NULL;
             struct uwp_rd_bucket *found_b = NULL;
             IInspectable *res_val = NULL;
-            if (uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd,
-                                   ctx->root_el, sval, 0, &re, &found_b ) && re)
+            if (xbf_rd_find_cached( ctx, ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd,
+                                     ctx->root_el, sval, &re, &found_b ) && re)
             {
                 if (re->kind == UWP_RD_DOUBLE)
                 {
@@ -2254,6 +2266,18 @@ static void xbf_apply_stack_val_prop( struct xbf_ctx *ctx, struct uwp_element *e
     }
 }
 
+static BOOL xbf_resolve_brush_cached( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *sval, UINT32 *out_argb )
+{
+    if (ctx && ctx->res_cache_valid && ctx->res_cache_scope_el == el &&
+        ctx->res_cache_key && sval && !wcscmp( ctx->res_cache_key, sval ) && ctx->res_cache_entry)
+    {
+        if (uwp_resolve_brush_from_entry( ctx->res_cache_start_b, el, ctx->res_cache_entry,
+                                          ctx->res_cache_bucket, 0, out_argb ))
+            return TRUE;
+    }
+    return uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, out_argb );
+}
+
 static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_element *el,
                                           WORD pid, int vt, double num, const WCHAR *sval )
 {
@@ -2268,7 +2292,7 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
             if (vt == 0x08) { sa->brush_argb = (UINT32)num; sa->has_brush_argb = TRUE; }
             else if (sval && sval[0])
             {
-                if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+                if (xbf_resolve_brush_cached( ctx, el, sval, &argb ))
                 {
                     sa->brush_argb = argb;
                     sa->has_brush_argb = TRUE;
@@ -2358,7 +2382,7 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
             UINT32 lit_c = 0;
             if (uwp_brush_key_is_accent( sval ))
                 el->is_accent_style = TRUE;
-            if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+            if (xbf_resolve_brush_cached( ctx, el, sval, &argb ))
             {
                 uwp_el_set_bg_argb( el, argb );
                 if (!uwp_parse_color_string( sval, &lit_c ))
@@ -2375,7 +2399,7 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
     {
         if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_FOREGROUND )) return TRUE;
         if (vt == 0x08) { uwp_el_set_fg_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_FOREGROUND ); }
-        else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+        else if (sval && sval[0] && xbf_resolve_brush_cached( ctx, el, sval, &argb ))
         {
             UINT32 lit_c = 0;
             uwp_el_set_fg_argb( el, argb );
@@ -2392,7 +2416,7 @@ static BOOL xbf_apply_brush_or_grad_prop( struct xbf_ctx *ctx, struct uwp_elemen
     {
         if (xbf_prop_blocked_by_local( ctx, el, UWP_LP_BORDER_BRUSH )) return TRUE;
         if (vt == 0x08) { uwp_el_set_border_argb( el, (UINT32)num ); xbf_prop_mark_local( ctx, el, UWP_LP_BORDER_BRUSH ); }
-        else if (sval && sval[0] && uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+        else if (sval && sval[0] && xbf_resolve_brush_cached( ctx, el, sval, &argb ))
         {
             UINT32 lit_c = 0;
             uwp_el_set_border_argb( el, argb );
@@ -2430,7 +2454,7 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
         else if (is_res_ref && sval && sval[0])
         {
             struct uwp_rd_entry *de = NULL;
-            if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+            if (xbf_rd_find_cached( ctx, ctx ? ctx->target_rd : NULL, el, sval, &de, NULL ) &&
                 de && de->kind == UWP_RD_DOUBLE)
             {
                 el->grid_len_type = 1;
@@ -2486,7 +2510,7 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
         {
             struct uwp_rd_entry *te = NULL;
             struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
-            if (uwp_rd_find_entry( hint_rd, el, sval, 0, &te, NULL ) && te && te->kind == UWP_RD_THICKNESS)
+            if (xbf_rd_find_cached( ctx, hint_rd, el, sval, &te, NULL ) && te && te->kind == UWP_RD_THICKNESS)
             {
                 el->border_thick_l = te->vec4[0]; el->border_thick_t = te->vec4[1];
                 el->border_thick_r = te->vec4[2]; el->border_thick_b = te->vec4[3];
@@ -2513,7 +2537,7 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
         {
             struct uwp_rd_entry *ce = NULL;
             struct uwp_rd_bucket *hint_rd = ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL;
-            if (uwp_rd_find_entry( hint_rd, el, sval, 0, &ce, NULL ) && ce)
+            if (xbf_rd_find_cached( ctx, hint_rd, el, sval, &ce, NULL ) && ce)
             {
                 if (ce->kind == UWP_RD_THICKNESS)
                 {
@@ -2578,6 +2602,18 @@ static BOOL xbf_apply_known_layout_prop( struct xbf_ctx *ctx, struct uwp_element
     case XBF_PROP_STACKPANEL_ORIENTATION: el->orientation = (int)num; return TRUE;
     case XBF_PROP_STACKPANEL_SPACING:
         if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved )) el->spacing = resolved;
+        return TRUE;
+    case XBF_PROP_GRID_COLUMN_SPACING:
+    case XBF_PROP_GRID_ROW_SPACING:
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &resolved ) && resolved >= 0.0)
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa)
+            {
+                if (pid == XBF_PROP_GRID_COLUMN_SPACING) sa->grid_col_spacing = resolved;
+                else sa->grid_row_spacing = resolved;
+            }
+        }
         return TRUE;
     case XBF_PROP_UIELEMENT_VISIBILITY_V2:
     case XBF_PROP_UIELEMENT_VISIBILITY:
@@ -2768,7 +2804,7 @@ static void xbf_apply_known_text_and_control_prop( struct xbf_ctx *ctx, struct u
             if (is_res_ref || !wcschr( sval, L'#' ))
             {
                 struct uwp_rd_entry *fe = NULL;
-                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &fe, NULL ) &&
+                if (xbf_rd_find_cached( ctx, ctx ? ctx->target_rd : NULL, el, sval, &fe, NULL ) &&
                     fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
                     ff_spec = fe->str_val;
             }
@@ -2906,6 +2942,19 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
     {
         lstrcpynW( el->name, sval, ARRAY_SIZE(el->name) );
     }
+    if (el->kind == UWP_KIND_GRID && (!wcscmp( pi->name, L"ColumnSpacing" ) || !wcscmp( pi->name, L"RowSpacing" )))
+    {
+        double sp = 0.0;
+        if (xbf_resolve_double_prop( ctx, el, vt, num, sval, is_res_ref, &sp ) && sp >= 0.0)
+        {
+            struct uwp_style_anim_ext *sa = uwp_elem_ensure_style_anim( el );
+            if (sa)
+            {
+                if (!wcscmp( pi->name, L"ColumnSpacing" )) sa->grid_col_spacing = sp;
+                else sa->grid_row_spacing = sp;
+            }
+        }
+    }
     if (!wcscmp( pi->name, L"Text" ) && sval && sval[0] &&
         (el->kind == UWP_KIND_TEXT_BLOCK || (el->class_flags & (UWP_CF_RUN | UWP_CF_INLINE))))
     {
@@ -2940,7 +2989,7 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
             const WCHAR *ff_spec = sval;
             struct uwp_rd_entry *fe = NULL;
             if ((is_res_ref || !wcschr( sval, L'#' )) &&
-                uwp_rd_find_entry( ctx->target_rd, el, sval, 0, &fe, NULL ) &&
+                xbf_rd_find_cached( ctx, ctx->target_rd, el, sval, &fe, NULL ) &&
                 fe && (fe->kind == UWP_RD_FONT_FAMILY || fe->kind == UWP_RD_STRING) && fe->str_val[0])
                 ff_spec = fe->str_val;
             uwp_elem_set_font_family( el, ff_spec );
@@ -2955,7 +3004,7 @@ static void xbf_apply_custom_prop( struct xbf_ctx *ctx, struct uwp_element *el,
         void *ao = ctx->app_outer ? ctx->app_outer : uwp_get_app_outer();
         struct uwp_rd_entry *re = NULL;
         struct uwp_rd_bucket *found_b = NULL;
-        if (ao && uwp_rd_find_entry( ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd, el, sval, 0, &re, &found_b ) && re)
+        if (ao && xbf_rd_find_cached( ctx, ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd, el, sval, &re, &found_b ) && re)
         {
             const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
             IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
@@ -3017,8 +3066,8 @@ static void xbf_apply_item_template_res_ref( struct xbf_ctx *ctx, struct uwp_ele
     IInspectable *res_val;
 
     if (!el || !sval || !sval[0] || !xbf_prop_is_item_template( pid, ctx, &is_sel )) return;
-    if (!uwp_rd_find_entry( ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL,
-                            el, sval, 0, &re, &found_b ) || !re)
+    if (!xbf_rd_find_cached( ctx, ctx ? (ctx->root_el ? ctx->root_el->rd_bucket : ctx->target_rd) : NULL,
+                             el, sval, &re, &found_b ) || !re)
         return;
     res_val = uwp_rd_materialize_entry( found_b, re );
     if (!res_val) return;
@@ -3330,6 +3379,39 @@ BOOL xbf_read_style_defer_table( struct xbf_ctx *ctx, DWORD *io_p, DWORD end_p,
     return TRUE;
 }
 
+static BOOL xbf_rd_table_push( struct xbf_rd_table *tbl, WORD sid, DWORD off )
+{
+    if (!tbl->items)
+    {
+        tbl->items = tbl->stack_items;
+        tbl->cap = ARRAY_SIZE(tbl->stack_items);
+        tbl->heap_owned = FALSE;
+    }
+    if (tbl->count >= tbl->cap)
+    {
+        int ncap = tbl->cap ? tbl->cap * 2 : 128;
+        struct xbf_rd_map_item *ni;
+        if (!tbl->heap_owned)
+        {
+            ni = malloc( (size_t)ncap * sizeof(*ni) );
+            if (!ni) return FALSE;
+            memcpy( ni, tbl->items, (size_t)tbl->count * sizeof(*ni) );
+            tbl->heap_owned = TRUE;
+        }
+        else
+        {
+            ni = realloc( tbl->items, (size_t)ncap * sizeof(*ni) );
+            if (!ni) return FALSE;
+        }
+        tbl->items = ni;
+        tbl->cap = ncap;
+    }
+    tbl->items[tbl->count].key_sid = sid;
+    tbl->items[tbl->count].sub_off = off;
+    tbl->count++;
+    return TRUE;
+}
+
 BOOL xbf_read_rd_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
                                       DWORD def_sub_sz, struct xbf_rd_table *tbl, int *io_prop_sp )
 {
@@ -3346,11 +3428,8 @@ BOOL xbf_read_rd_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
         p += 2;
         if (!xbf_read_uleb( nodes, &p, end_p, &off ) || off > def_sub_sz)
             return FALSE;
-        if (!xaml_vec_grow( (void **)&tbl->items, &tbl->cap, tbl->count + 1, sizeof(*tbl->items), 32 ))
+        if (!xbf_rd_table_push( tbl, sid, off ))
             return FALSE;
-        tbl->items[tbl->count].key_sid = sid;
-        tbl->items[tbl->count].sub_off = off;
-        tbl->count++;
     }
 
     if (!xbf_read_uleb( nodes, &p, end_p, &c2 ) || c2 > (end_p - p) / 2)
@@ -3368,11 +3447,8 @@ BOOL xbf_read_rd_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
         p += 2;
         if (!xbf_read_uleb( nodes, &p, end_p, &off ) || off > def_sub_sz)
             return FALSE;
-        if (!xaml_vec_grow( (void **)&tbl->items, &tbl->cap, tbl->count + 1, sizeof(*tbl->items), 32 ))
+        if (!xbf_rd_table_push( tbl, sid, off ))
             return FALSE;
-        tbl->items[tbl->count].key_sid = sid;
-        tbl->items[tbl->count].sub_off = off;
-        tbl->count++;
     }
 
     if (!xbf_read_uleb( nodes, &p, end_p, &c4 ) || c4 > (end_p - p) / 3)

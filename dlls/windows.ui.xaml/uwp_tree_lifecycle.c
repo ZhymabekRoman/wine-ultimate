@@ -309,6 +309,8 @@ void uwp_fire_loaded_tree( struct uwp_element *el )
         uwp_nav_fire( el, UWP_EV_REG( el, nav_item_invoked_reg ), item_obj );
     }
 
+    if (el->template_root && el->template_root != el)
+        uwp_fire_loaded_tree( el->template_root );
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );

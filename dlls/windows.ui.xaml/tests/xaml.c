@@ -1677,6 +1677,16 @@ struct test_scale_vtbl
 };
 struct test_scale_iface { const struct test_scale_vtbl *lpVtbl; };
 
+struct test_ts_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_IsOn)(void *, boolean *);
+    HRESULT (WINAPI *put_IsOn)(void *, boolean);
+    HRESULT (WINAPI *add_Toggled)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Toggled)(void *, EventRegistrationToken);
+};
+struct test_ts_iface { const struct test_ts_vtbl *lpVtbl; };
+
 struct test_pv_statics_vtbl
 {
     void *pad0_17[18];
@@ -1897,6 +1907,58 @@ static void test_WinUINotepadRegressions(void)
             IUnknown_Release( (IUnknown *)sc );
         }
         IInspectable_Release( st );
+    }
+
+    /* 5. ToggleSwitch (IToggleSwitch IsOn + Toggled) & HyperlinkButton */
+    {
+        static const GUID IID_IToggleSwitch_t = { 0x331d8f00, 0xc5f9, 0x46a5, { 0xb6, 0xc8, 0xed, 0xe5, 0x39, 0x30, 0x45, 0x67 } };
+        static const GUID IID_IHyperlinkButton_t = { 0x325c44e0, 0x9a03, 0x4bf3, { 0xab, 0xd6, 0x6f, 0xbb, 0x46, 0xc9, 0xa4, 0x86 } };
+        IInspectable *ts = NULL, *hb = NULL;
+        void *its = NULL, *ihb = NULL;
+        struct test_dummy_handler ts_h = { test_dh_vtbl, 1, 0 };
+        EventRegistrationToken ts_tok = {0};
+        boolean is_on = TRUE;
+
+        hr = WindowsCreateString( L"Windows.UI.Xaml.Controls.ToggleSwitch", 37, &hcls );
+        ok( hr == S_OK, "got hr %#lx\n", hr );
+        hr = RoActivateInstance( hcls, &ts );
+        WindowsDeleteString( hcls );
+        ok( hr == S_OK && ts != NULL, "ToggleSwitch activate hr %#lx\n", hr );
+        if (ts)
+        {
+            hr = IInspectable_QueryInterface( ts, &IID_IToggleSwitch_t, &its );
+            ok( hr == S_OK && its != NULL, "QI IToggleSwitch hr %#lx\n", hr );
+            if (its)
+            {
+                const struct test_ts_iface *tsi = (const struct test_ts_iface *)its;
+                hr = tsi->lpVtbl->get_IsOn( its, &is_on );
+                ok( hr == S_OK && is_on == FALSE, "ToggleSwitch IsOn default should be FALSE, got %d\n", is_on );
+                hr = tsi->lpVtbl->add_Toggled( its, &ts_h, &ts_tok );
+                ok( hr == S_OK && ts_tok.value != 0 && ts_h.ref == 2, "add_Toggled hr %#lx ref %ld\n", hr, ts_h.ref );
+                hr = tsi->lpVtbl->put_IsOn( its, TRUE );
+                ok( hr == S_OK, "put_IsOn(TRUE) hr %#lx\n", hr );
+                hr = tsi->lpVtbl->get_IsOn( its, &is_on );
+                ok( hr == S_OK && is_on == TRUE && ts_h.invoke_cnt >= 1,
+                    "ToggleSwitch IsOn should be TRUE and Toggled fired (on=%d cnt=%ld)\n", is_on, ts_h.invoke_cnt );
+                hr = tsi->lpVtbl->remove_Toggled( its, ts_tok );
+                ok( hr == S_OK && ts_h.ref == 1, "remove_Toggled hr %#lx ref %ld\n", hr, ts_h.ref );
+                IUnknown_Release( (IUnknown *)its );
+            }
+            IInspectable_Release( ts );
+        }
+
+        hr = WindowsCreateString( L"Windows.UI.Xaml.Controls.HyperlinkButton", 40, &hcls );
+        ok( hr == S_OK, "got hr %#lx\n", hr );
+        hr = RoActivateInstance( hcls, &hb );
+        WindowsDeleteString( hcls );
+        ok( hr == S_OK && hb != NULL, "HyperlinkButton activate hr %#lx\n", hr );
+        if (hb)
+        {
+            hr = IInspectable_QueryInterface( hb, &IID_IHyperlinkButton_t, &ihb );
+            ok( hr == S_OK && ihb != NULL, "QI IHyperlinkButton hr %#lx\n", hr );
+            if (ihb) IUnknown_Release( (IUnknown *)ihb );
+            IInspectable_Release( hb );
+        }
     }
 }
 

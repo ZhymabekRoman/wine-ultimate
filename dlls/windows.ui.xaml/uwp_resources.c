@@ -806,24 +806,216 @@ void uwp_rd_link_theme( struct uwp_rd_bucket *parent, const WCHAR *theme_name, s
     else if (!wcsicmp( theme_name, L"HighContrast" )) parent->theme_hc = child;
 }
 
-static BOOL uwp_mark_res_xbf_loaded( const char *resolved_path )
+struct uwp_loaded_uri_slot
 {
-    int i;
-    if (!resolved_path || !resolved_path[0]) return FALSE;
-    AcquireSRWLockExclusive( &g_loaded_res_xbfs_lock );
-    for (i = 0; i < g_loaded_res_xbf_cnt; i++)
+    UINT32 hash;
+    WCHAR *uri;
+    char *base_dir;
+};
+
+struct uwp_loaded_res_slot
+{
+    UINT32 hash;
+    char *resolved;
+};
+
+static struct uwp_loaded_uri_slot *g_loaded_uri_ht = NULL;
+static UINT32 g_loaded_uri_ht_cap = 0;
+static UINT32 g_loaded_uri_ht_cnt = 0;
+
+static struct uwp_loaded_res_slot *g_loaded_res_ht = NULL;
+static UINT32 g_loaded_res_ht_cap = 0;
+static UINT32 g_loaded_res_ht_cnt = 0;
+
+static UINT32 rd_hash_uri_pair( const char *base_dir, const WCHAR *uri )
+{
+    UINT32 h = 2166136261u;
+    const char *p = base_dir ? base_dir : "";
+    for (; *p; p++)
     {
-        if (!_stricmp( g_loaded_res_xbfs[i], resolved_path ))
+        unsigned char c = (unsigned char)*p;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        h ^= c;
+        h *= 16777619u;
+    }
+    h ^= 0xffu;
+    h *= 16777619u;
+    for (; *uri; uri++)
+    {
+        WCHAR c = *uri;
+        if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+        h ^= (UINT32)c;
+        h *= 16777619u;
+    }
+    return h ? h : 1u;
+}
+
+static UINT32 rd_hash_cstr_ci( const char *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        unsigned char c = (unsigned char)*s;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        h ^= c;
+        h *= 16777619u;
+    }
+    return h ? h : 1u;
+}
+
+static BOOL uwp_uri_already_loaded( const char *base_dir, const WCHAR *uri )
+{
+    UINT32 h, mask, idx;
+    const char *bd = base_dir ? base_dir : "";
+    if (!uri || !uri[0]) return FALSE;
+    h = rd_hash_uri_pair( bd, uri );
+    AcquireSRWLockShared( &g_loaded_res_xbfs_lock );
+    if (g_loaded_uri_ht && g_loaded_uri_ht_cap > 0)
+    {
+        mask = g_loaded_uri_ht_cap - 1;
+        idx = h & mask;
+        while (g_loaded_uri_ht[idx].uri)
         {
-            ReleaseSRWLockExclusive( &g_loaded_res_xbfs_lock );
-            return FALSE;
+            if (g_loaded_uri_ht[idx].hash == h &&
+                !_stricmp( g_loaded_uri_ht[idx].base_dir, bd ) &&
+                !wcsicmp( g_loaded_uri_ht[idx].uri, uri ))
+            {
+                ReleaseSRWLockShared( &g_loaded_res_xbfs_lock );
+                return TRUE;
+            }
+            idx = (idx + 1) & mask;
         }
     }
-    if (xaml_vec_grow( (void **)&g_loaded_res_xbfs, &g_loaded_res_xbf_cap,
-                       g_loaded_res_xbf_cnt + 1, sizeof(*g_loaded_res_xbfs), 128 ))
+    ReleaseSRWLockShared( &g_loaded_res_xbfs_lock );
+    return FALSE;
+}
+
+static void uwp_record_uri_loaded( const char *base_dir, const WCHAR *uri )
+{
+    UINT32 h, mask, idx;
+    const char *bd = base_dir ? base_dir : "";
+    if (!uri || !uri[0]) return;
+    h = rd_hash_uri_pair( bd, uri );
+    AcquireSRWLockExclusive( &g_loaded_res_xbfs_lock );
+    if (!g_loaded_uri_ht || (g_loaded_uri_ht_cnt + 1) * 2 >= g_loaded_uri_ht_cap)
     {
-        snprintf( g_loaded_res_xbfs[g_loaded_res_xbf_cnt++], 256, "%s", resolved_path );
+        UINT32 ncap = g_loaded_uri_ht_cap ? g_loaded_uri_ht_cap * 2 : 512;
+        struct uwp_loaded_uri_slot *nt = calloc( ncap, sizeof(*nt) );
+        if (nt)
+        {
+            UINT32 nmask = ncap - 1, i;
+            if (g_loaded_uri_ht)
+            {
+                for (i = 0; i < g_loaded_uri_ht_cap; i++)
+                {
+                    if (g_loaded_uri_ht[i].uri)
+                    {
+                        UINT32 ni = g_loaded_uri_ht[i].hash & nmask;
+                        while (nt[ni].uri) ni = (ni + 1) & nmask;
+                        nt[ni] = g_loaded_uri_ht[i];
+                    }
+                }
+                free( g_loaded_uri_ht );
+            }
+            g_loaded_uri_ht = nt;
+            g_loaded_uri_ht_cap = ncap;
+        }
     }
+    if (g_loaded_uri_ht && g_loaded_uri_ht_cap > 0)
+    {
+        mask = g_loaded_uri_ht_cap - 1;
+        idx = h & mask;
+        while (g_loaded_uri_ht[idx].uri)
+        {
+            if (g_loaded_uri_ht[idx].hash == h &&
+                !_stricmp( g_loaded_uri_ht[idx].base_dir, bd ) &&
+                !wcsicmp( g_loaded_uri_ht[idx].uri, uri ))
+            {
+                ReleaseSRWLockExclusive( &g_loaded_res_xbfs_lock );
+                return;
+            }
+            idx = (idx + 1) & mask;
+        }
+        {
+            size_t ulen = wcslen( uri ) + 1;
+            size_t blen = strlen( bd ) + 1;
+            WCHAR *ucopy = malloc( ulen * sizeof(WCHAR) );
+            char *bcopy = malloc( blen );
+            if (ucopy && bcopy)
+            {
+                memcpy( ucopy, uri, ulen * sizeof(WCHAR) );
+                memcpy( bcopy, bd, blen );
+                g_loaded_uri_ht[idx].hash = h;
+                g_loaded_uri_ht[idx].uri = ucopy;
+                g_loaded_uri_ht[idx].base_dir = bcopy;
+                g_loaded_uri_ht_cnt++;
+            }
+            else
+            {
+                free( ucopy );
+                free( bcopy );
+            }
+        }
+    }
+    ReleaseSRWLockExclusive( &g_loaded_res_xbfs_lock );
+}
+
+static BOOL uwp_mark_res_xbf_loaded( const char *resolved_path )
+{
+    UINT32 h, mask, idx;
+    if (!resolved_path || !resolved_path[0]) return FALSE;
+    h = rd_hash_cstr_ci( resolved_path );
+    AcquireSRWLockExclusive( &g_loaded_res_xbfs_lock );
+    if (!g_loaded_res_ht || (g_loaded_res_ht_cnt + 1) * 2 >= g_loaded_res_ht_cap)
+    {
+        UINT32 ncap = g_loaded_res_ht_cap ? g_loaded_res_ht_cap * 2 : 512;
+        struct uwp_loaded_res_slot *nt = calloc( ncap, sizeof(*nt) );
+        if (nt)
+        {
+            UINT32 nmask = ncap - 1, i;
+            if (g_loaded_res_ht)
+            {
+                for (i = 0; i < g_loaded_res_ht_cap; i++)
+                {
+                    if (g_loaded_res_ht[i].resolved)
+                    {
+                        UINT32 ni = g_loaded_res_ht[i].hash & nmask;
+                        while (nt[ni].resolved) ni = (ni + 1) & nmask;
+                        nt[ni] = g_loaded_res_ht[i];
+                    }
+                }
+                free( g_loaded_res_ht );
+            }
+            g_loaded_res_ht = nt;
+            g_loaded_res_ht_cap = ncap;
+        }
+    }
+    if (g_loaded_res_ht && g_loaded_res_ht_cap > 0)
+    {
+        mask = g_loaded_res_ht_cap - 1;
+        idx = h & mask;
+        while (g_loaded_res_ht[idx].resolved)
+        {
+            if (g_loaded_res_ht[idx].hash == h && !_stricmp( g_loaded_res_ht[idx].resolved, resolved_path ))
+            {
+                ReleaseSRWLockExclusive( &g_loaded_res_xbfs_lock );
+                return FALSE;
+            }
+            idx = (idx + 1) & mask;
+        }
+        {
+            size_t rlen = strlen( resolved_path ) + 1;
+            char *rcopy = malloc( rlen );
+            if (rcopy)
+            {
+                memcpy( rcopy, resolved_path, rlen );
+                g_loaded_res_ht[idx].hash = h;
+                g_loaded_res_ht[idx].resolved = rcopy;
+                g_loaded_res_ht_cnt++;
+            }
+        }
+    }
+    g_loaded_res_xbf_cnt++;
     ReleaseSRWLockExclusive( &g_loaded_res_xbfs_lock );
     return TRUE;
 }
@@ -835,10 +1027,16 @@ void uwp_load_res_xbf_into_bucket( const char *base_dir, const WCHAR *uri_or_pat
     char resolved[256] = {0};
 
     if (!uri_or_path || !uri_or_path[0] || !target) return;
+    if (uwp_uri_already_loaded( base_dir, uri_or_path ))
+        return;
     if (!uwp_pri_find_xbf_rel( base_dir, uri_or_path, &xbf, &xbf_sz, resolved, sizeof(resolved) ))
         return;
     if (!uwp_mark_res_xbf_loaded( resolved[0] ? resolved : "xbf" ))
+    {
+        uwp_record_uri_loaded( base_dir, uri_or_path );
         return;
+    }
+    uwp_record_uri_loaded( base_dir, uri_or_path );
     TRACE( "xbf-res: loading %s (%lu bytes) into rd %p\n", resolved, (unsigned long)xbf_sz, target );
     uwp_parse_xbf_into_rd( xbf, xbf_sz, resolved, target );
 }
@@ -1328,9 +1526,9 @@ found:
     return TRUE;
 }
 
-static BOOL uwp_resolve_brush_entry( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
-                                     struct uwp_rd_entry *e, struct uwp_rd_bucket *found_b,
-                                     int depth, UINT32 *out_argb )
+BOOL uwp_resolve_brush_from_entry( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
+                                   struct uwp_rd_entry *e, struct uwp_rd_bucket *found_b,
+                                   int depth, UINT32 *out_argb )
 {
     if (!e) return FALSE;
     if (e->kind == UWP_RD_COLOR)
@@ -1377,7 +1575,7 @@ BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_
 
     uwp_ensure_app_resources_loaded();
     if (uwp_rd_find_entry( start_bucket, scope_el, key, depth, &e, &found_b ) && e &&
-        uwp_resolve_brush_entry( start_bucket, scope_el, e, found_b, depth, out_argb ))
+        uwp_resolve_brush_from_entry( start_bucket, scope_el, e, found_b, depth, out_argb ))
         return TRUE;
 
     /* Fall back for standard Button / DropDownButton theme brush keys only on miss */
@@ -1391,7 +1589,7 @@ BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_
             fallback_key = L"ControlStrokeColorDefaultBrush";
         if (fallback_key &&
             uwp_rd_find_entry( start_bucket, scope_el, fallback_key, depth + 1, &e, &found_b ) && e)
-            return uwp_resolve_brush_entry( start_bucket, scope_el, e, found_b, depth + 1, out_argb );
+            return uwp_resolve_brush_from_entry( start_bucket, scope_el, e, found_b, depth + 1, out_argb );
     }
 
     return FALSE;

@@ -257,6 +257,7 @@ extern const GUID IID_ITileBrush_UWP_Alt;
 extern const GUID IID_IToggleButtonFactory2_UWP;
 extern const GUID IID_IToggleButtonFactory_UWP;
 extern const GUID IID_IToggleButtonOverrides_UWP;
+extern const GUID IID_IToggleSwitch_UWP;
 extern const GUID IID_IToggleButtonStatics_UWP;
 extern const GUID IID_IToggleButton_UWP;
 extern const GUID IID_IToggleMenuFlyoutItem_UWP;

@@ -1155,13 +1155,21 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         return;
     }
 
+    if (el->template_root && el->template_root != el && !(el->class_flags & UWP_CF_UWP_PREFIX) &&
+        (wcscmp( el->template_root->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" ) ||
+         el->template_root->children_coll || el->template_root->content || el->template_root->has_bg))
+    {
+        uwp_gpu_paint_element( ctx, el->template_root );
+        return;
+    }
+
     InflateRect( &brc, -2, -2 );
     if (brc.right <= brc.left || brc.bottom <= brc.top) return;
 
     {
         UINT32 bg_argb = 0, bd_argb = 0;
         float rad = (el->corner_radius > 0.0) ? (float)el->corner_radius : 4.0f;
-        int fw = (el->font_weight > 0) ? el->font_weight : FW_SEMIBOLD;
+        int fw = (el->font_weight > 0) ? el->font_weight : (uwp_is_hyperlink_button( el ) ? FW_NORMAL : FW_SEMIBOLD);
 
         uwp_paint_resolve_button_style( el, surface_bg, label, &draw_bg, &draw_bd,
                                         &bg, &fg, &bd, &bg_argb, &bd_argb );
@@ -1195,7 +1203,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
             WCHAR ff_buf[64];
             RECT trc = brc;
             UINT dt_flags = DT_SINGLELINE;
-            int hca = el->has_h_content_align ? el->h_content_align : 1; /* default Center */
+            int hca = el->has_h_content_align ? el->h_content_align : (uwp_is_hyperlink_button( el ) ? 0 : 1);
             int vca = el->has_v_content_align ? el->v_content_align : 1; /* default Center */
             if ((el->class_flags & UWP_CF_DROP_DOWN_BUTTON) && (brc.right - brc.left) > 36)
             {
@@ -1207,7 +1215,7 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
                                          DT_CENTER | DT_VCENTER | DT_SINGLELINE, &crc, NULL, fg, 1.0f );
                 trc.right -= 18;
             }
-            if (hca == 0) { dt_flags |= DT_LEFT; trc.left += max( 4, (int)el->padding_l ); }
+            if (hca == 0) { dt_flags |= DT_LEFT; trc.left += uwp_is_hyperlink_button( el ) ? (int)(el->padding_l * g_layout_scale + 0.5f) : max( 4, (int)el->padding_l ); }
             else if (hca == 2) { dt_flags |= DT_RIGHT; trc.right -= max( 4, (int)el->padding_r ); }
             else dt_flags |= DT_CENTER;
             if (vca == 0) { dt_flags |= DT_TOP; trc.top += max( 2, (int)el->padding_t ); }
@@ -2212,6 +2220,30 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
             return;
     }
 
+    if (uwp_is_toggle_switch( el ))
+    {
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        BOOL light = uwp_is_light_theme( el );
+        BOOL on = (el->is_checked == 1);
+        RECT rc = el->bounds;
+        int cy = (rc.top + rc.bottom) / 2;
+        int tw = (int)(40 * sc + 0.5f), th = (int)(20 * sc + 0.5f);
+        int x0 = rc.left + max( 0, ((rc.right - rc.left) - tw) / 2 );
+        int y0 = cy - th / 2;
+        int kr = max( 5, (int)(6 * sc + 0.5f) );
+        int kx = on ? (x0 + tw - (int)(10 * sc + 0.5f)) : (x0 + (int)(10 * sc + 0.5f));
+        UINT32 acc_c = cr_to_argb( uwp_paint_resolve_color( el, L"SystemAccentColor",
+                                                            light ? RGB( 0, 95, 184 ) : RGB( 96, 205, 255 ), surface_bg ) );
+        UINT32 trk_bg = on ? acc_c : (el->is_hovered ? (light ? 0x10000000u : 0x16ffffffu) : 0x00000000u);
+        UINT32 trk_bd = on ? acc_c : (light ? 0x99000000u : 0x99ffffffu);
+        UINT32 knob_c = on ? (light ? 0xffffffffu : 0xff000000u) : (light ? 0xff5a5a5au : 0xffd0d0d0u);
+        xaml_gpu_push_rect( (float)x0, (float)y0, (float)(x0 + tw), (float)(y0 + th), NULL,
+                            (float)th * 0.5f, trk_bg, trk_bd, on ? 0.0f : 1.2f, 1.0f );
+        xaml_gpu_push_rect( (float)(kx - kr), (float)(cy - kr), (float)(kx + kr), (float)(cy + kr), NULL,
+                            (float)kr, knob_c, 0, 0.0f, 1.0f );
+        return;
+    }
+
     if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) &&
         !uwp_is_card( el ) &&
         !(el->kind == UWP_KIND_TOGGLE_BUTTON && (el->class_flags & UWP_CF_RADIO_BUTTON) && el->children_coll))
@@ -2234,7 +2266,13 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
     }
 
 recurse_children:
-    if (el->content)
+    if (el->template_root && el->template_root != el &&
+        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
+        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
+    {
+        uwp_gpu_paint_element( ctx, el->template_root );
+    }
+    else if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el)

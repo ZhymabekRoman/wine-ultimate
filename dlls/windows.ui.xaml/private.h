@@ -166,8 +166,17 @@ BOOL uwp_is_light_theme( struct uwp_element *scope_el );
 void uwp_invalidate_window( void );
 void uwp_invalidate_paint_only( void );
 void uwp_debug_dump_root( IInspectable *root );
+struct uwp_tls_prov_state
+{
+    struct uwp_element *first;
+    struct uwp_element *uc;
+};
+
+void uwp_tls_provider_push( struct uwp_tls_prov_state *saved );
+struct uwp_element *uwp_tls_provider_pop( const struct uwp_tls_prov_state *saved, struct uwp_element *direct_el );
 void *uwp_get_app_outer( void );
 HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );
+HRESULT uwp_create_instance_from_provider_el( const WCHAR *full_name, void **out, struct uwp_element **out_el );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
 HRESULT xaml_resource_dictionary_create_for_uwp( void **out );
 HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val );

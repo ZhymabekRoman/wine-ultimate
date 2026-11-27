@@ -26,7 +26,6 @@
 #define XAML_META_CACHE_SIZE 1024
 
 struct pri_xbf_entry;
-struct xbf_aot_builder;
 
 struct xbf_type_info
 {
@@ -52,6 +51,8 @@ struct xbf_rd_table
     struct xbf_rd_map_item *items;
     int count;
     int cap;
+    BOOL heap_owned;
+    struct xbf_rd_map_item stack_items[64];
 };
 
 struct pri_xbf_catalog
@@ -93,7 +94,12 @@ struct xbf_ctx
     BOOL is_template;
     BOOL vsm_collect;
     BOOL in_style_apply;
-    struct xbf_aot_builder *aot;
+    const WCHAR *res_cache_key;
+    struct uwp_rd_bucket *res_cache_start_b;
+    struct uwp_element *res_cache_scope_el;
+    struct uwp_rd_entry *res_cache_entry;
+    struct uwp_rd_bucket *res_cache_bucket;
+    BOOL res_cache_valid;
 };
 
 struct xbf_stack_val
@@ -180,8 +186,6 @@ extern const BYTE *g_winui_pri_data;
 extern BOOL g_winui_pri_probed;
 extern DWORD g_winui_pri_size;
 extern int g_loaded_res_xbf_cnt;
-extern int g_loaded_res_xbf_cap;
-extern char (*g_loaded_res_xbfs)[256];
 
 /* PRI / XBF decode, instantiation, deferred realization & metadata cache APIs */
 void ensure_winui_pri_cat( void );

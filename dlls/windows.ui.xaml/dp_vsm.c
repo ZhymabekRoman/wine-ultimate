@@ -189,7 +189,16 @@ void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const
     if (uwp_style_is_accent_name( key ))
         el->is_accent_style = TRUE;
     uwp_ensure_app_resources_loaded();
-    if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, key, 0, &se, &sb ) && se && se->kind == UWP_RD_STYLE)
+    if (ctx && ctx->res_cache_valid && ctx->res_cache_scope_el == el &&
+        ctx->res_cache_key && !wcscmp( ctx->res_cache_key, style_key ))
+    {
+        if (ctx->res_cache_entry && ctx->res_cache_entry->kind == UWP_RD_STYLE)
+        {
+            uwp_apply_style_entry( ctx, el, ctx->res_cache_bucket, ctx->res_cache_entry, 0 );
+            return;
+        }
+    }
+    else if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, key, 0, &se, &sb ) && se && se->kind == UWP_RD_STYLE)
     {
         uwp_apply_style_entry( ctx, el, sb, se, 0 );
         return;

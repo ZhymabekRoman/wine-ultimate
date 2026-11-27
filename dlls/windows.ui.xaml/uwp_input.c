@@ -55,7 +55,14 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
             if (hit) return hit;
         }
     }
-    if (el->content)
+    if (el->template_root && el->template_root != el &&
+        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
+        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
+    {
+        struct uwp_element *hit = uwp_hit_test_button( el->template_root, x, y );
+        if (hit) return hit;
+    }
+    else if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         struct uwp_element *hit = uwp_hit_test_button( ch, x, y );
@@ -66,6 +73,7 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
         x >= el->bounds.left && x < el->bounds.right &&
         y >= el->bounds.top && y < el->bounds.bottom &&
         (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
+         uwp_is_toggle_switch( el ) ||
          UWP_EV_CNT( el, click_reg ) > 0 || el->command != NULL || el->flyout != NULL ||
          uwp_is_menubar_item( el )))
     {
@@ -260,8 +268,13 @@ void uwp_invoke_button( struct uwp_element *btn )
               dpn[0] ? debugstr_w(dpn) : "?", btn->dp_store[i].value );
     }
 
-    /* 0. Toggle IsChecked on ToggleButton before firing Click/Command */
-    if (btn->kind == UWP_KIND_TOGGLE_BUTTON)
+    /* 0. Toggle IsChecked on ToggleButton / IsOn on ToggleSwitch before firing Click/Command */
+    if (uwp_is_toggle_switch( btn ))
+    {
+        btn->is_checked = (btn->is_checked == 1) ? 0 : 1;
+        uwp_invalidate_window();
+    }
+    else if (btn->kind == UWP_KIND_TOGGLE_BUTTON)
     {
         BOOL is_radio = !wcscmp( btn->class_name, L"Windows.UI.Xaml.Controls.RadioButton" );
         int target_chk = is_radio ? 1 : ((btn->is_checked == 1) ? 0 : 1);
@@ -499,7 +512,14 @@ static struct uwp_element *uwp_hit_test_expander_header( struct uwp_element *el,
             if (hit) return hit;
         }
     }
-    if (el->content && !uwp_is_expander( el ))
+    if (el->template_root && el->template_root != el &&
+        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
+        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
+    {
+        struct uwp_element *hit = uwp_hit_test_expander_header( el->template_root, x, y );
+        if (hit) return hit;
+    }
+    else if (el->content && !uwp_is_expander( el ))
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         struct uwp_element *hit = (ch && ch != el) ? uwp_hit_test_expander_header( ch, x, y ) : NULL;
@@ -537,7 +557,14 @@ static struct uwp_element *uwp_hit_test_combobox( struct uwp_element *el, int x,
             if (hit) return hit;
         }
     }
-    if (el->content)
+    if (el->template_root && el->template_root != el &&
+        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
+        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
+    {
+        struct uwp_element *hit = uwp_hit_test_combobox( el->template_root, x, y );
+        if (hit) return hit;
+    }
+    else if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         struct uwp_element *hit = (ch && ch != el) ? uwp_hit_test_combobox( ch, x, y ) : NULL;

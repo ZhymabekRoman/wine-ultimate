@@ -281,6 +281,55 @@ void uwp_paint_resolve_button_style( struct uwp_element *el, COLORREF surface_bg
     COLORREF bg, fg, bd;
     BOOL is_accent_or_checked = el->is_accent_style || (el->kind == UWP_KIND_TOGGLE_BUTTON && el->is_checked == 1);
 
+    if (uwp_is_hyperlink_button( el ))
+    {
+        BOOL light = uwp_is_light_theme( el );
+        if (el->has_bg && el->bg_alpha > 0)
+        {
+            bg_argb = apply_opacity_to_argb( el->bg_argb, el->opacity );
+            bg = blend_argb_over( bg_argb, surface_bg );
+        }
+        else if (el->is_pressed || el->is_hovered)
+        {
+            bg_argb = light ? (el->is_pressed ? 0x16000000u : 0x0c000000u)
+                            : (el->is_pressed ? 0x18ffffffu : 0x0effffffu);
+            bg = blend_argb_over( bg_argb, surface_bg );
+        }
+        else
+        {
+            draw_bg = FALSE;
+            bg_argb = 0;
+            bg = surface_bg;
+        }
+        if (el->has_border && el->border_alpha > 0)
+        {
+            bd_argb = apply_opacity_to_argb( el->border_argb, el->opacity );
+            bd = blend_argb_over( bd_argb, surface_bg );
+        }
+        else
+        {
+            draw_bd = FALSE;
+            bd_argb = 0;
+            bd = surface_bg;
+        }
+        if (!el->is_enabled)
+            fg = uwp_paint_resolve_color( el, L"TextFillColorDisabledBrush",
+                                          light ? RGB( 150, 150, 150 ) : RGB( 120, 120, 120 ), bg );
+        else if (el->has_fg && el->fg_alpha > 0)
+            fg = blend_argb_over( el->fg_argb, bg );
+        else
+            fg = uwp_paint_resolve_color( el, L"HyperlinkButtonForeground",
+                                          light ? RGB( 0, 62, 146 ) : RGB( 96, 205, 255 ), bg );
+        if (out_draw_bg) *out_draw_bg = draw_bg;
+        if (out_draw_bd) *out_draw_bd = draw_bd;
+        if (out_bg) *out_bg = bg;
+        if (out_fg) *out_fg = fg;
+        if (out_bd) *out_bd = bd;
+        if (out_bg_argb) *out_bg_argb = bg_argb;
+        if (out_bd_argb) *out_bd_argb = bd_argb;
+        return;
+    }
+
     if ((!label || !label[0]) && !el->has_bg && !is_accent_or_checked && !el->is_hovered && !el->is_pressed)
     {
         draw_bg = FALSE;

@@ -379,6 +379,38 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         return;
     }
 
+    if (uwp_is_toggle_switch( el ))
+    {
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        BOOL light = uwp_is_light_theme( el );
+        BOOL on = (el->is_checked == 1);
+        RECT rc = el->bounds;
+        int cy = (rc.top + rc.bottom) / 2;
+        int tw = (int)(40 * sc + 0.5f), th = (int)(20 * sc + 0.5f);
+        int x0 = rc.left + max( 0, ((rc.right - rc.left) - tw) / 2 );
+        int y0 = cy - th / 2;
+        int kr = max( 5, (int)(6 * sc + 0.5f) );
+        int kx = on ? (x0 + tw - (int)(10 * sc + 0.5f)) : (x0 + (int)(10 * sc + 0.5f));
+        COLORREF acc = uwp_paint_resolve_color( el, L"SystemAccentColor",
+                                                light ? RGB( 0, 95, 184 ) : RGB( 96, 205, 255 ), surface_bg );
+        HBRUSH br = on ? CreateSolidBrush( acc ) : (HBRUSH)GetStockObject( NULL_BRUSH );
+        HPEN pen = CreatePen( PS_SOLID, 1, on ? acc : (light ? RGB( 90, 90, 90 ) : RGB( 165, 165, 165 )) );
+        HGDIOBJ obr = SelectObject( hdc, br ), open = SelectObject( hdc, pen );
+        HBRUSH kbr;
+        HPEN kpen;
+        RoundRect( hdc, x0, y0, x0 + tw, y0 + th, th, th );
+        SelectObject( hdc, open ); SelectObject( hdc, obr );
+        DeleteObject( pen ); if (on) DeleteObject( br );
+        kbr = CreateSolidBrush( on ? (light ? RGB( 255, 255, 255 ) : RGB( 0, 0, 0 ))
+                                   : (light ? RGB( 90, 90, 90 ) : RGB( 210, 210, 210 )) );
+        kpen = (HPEN)GetStockObject( NULL_PEN );
+        obr = SelectObject( hdc, kbr ); open = SelectObject( hdc, kpen );
+        Ellipse( hdc, kx - kr, cy - kr, kx + kr + 1, cy + kr + 1 );
+        SelectObject( hdc, open ); SelectObject( hdc, obr );
+        DeleteObject( kbr );
+        return;
+    }
+
     if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
         RECT brc = el->bounds;
@@ -440,13 +472,21 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             return;
         }
 
+        if (el->template_root && el->template_root != el && !(el->class_flags & UWP_CF_UWP_PREFIX) &&
+            (wcscmp( el->template_root->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" ) ||
+             el->template_root->children_coll || el->template_root->content || el->template_root->has_bg))
+        {
+            uwp_paint_element( hdc, el->template_root );
+            return;
+        }
+
         InflateRect( &brc, -2, -2 );
         if (brc.right <= brc.left || brc.bottom <= brc.top) return;
 
         uwp_paint_resolve_button_style( el, surface_bg, label, &draw_bg, &draw_bd, &bg, &fg, &bd, NULL, NULL );
 
         fh = max( (int)(12 * g_layout_scale + 0.5f), min( (int)(24 * g_layout_scale + 0.5f), (int)((brc.bottom - brc.top) * 2 / 5) ) );
-        font = CreateFontW( -fh, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        font = CreateFontW( -fh, 0, 0, 0, uwp_is_hyperlink_button( el ) ? FW_NORMAL : FW_SEMIBOLD, FALSE, FALSE, FALSE,
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
 
@@ -466,7 +506,12 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         SetTextColor( hdc, fg );
         SetBkMode( hdc, TRANSPARENT );
         if (label[0])
-            DrawTextW( hdc, label, -1, &brc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+        {
+            RECT trc = brc;
+            UINT dt = DT_VCENTER | DT_SINGLELINE | (uwp_is_hyperlink_button( el ) ? DT_LEFT : DT_CENTER);
+            if (uwp_is_hyperlink_button( el )) trc.left += (int)(el->padding_l * g_layout_scale + 0.5f);
+            DrawTextW( hdc, label, -1, &trc, dt );
+        }
         SelectObject( hdc, old_font );
         DeleteObject( font );
         return;
@@ -509,7 +554,13 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         }
     }
 
-    if (el->content)
+    if (el->template_root && el->template_root != el &&
+        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
+        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
+    {
+        uwp_paint_element( hdc, el->template_root );
+    }
+    else if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
         if (ch && ch != el) uwp_paint_element( hdc, ch );

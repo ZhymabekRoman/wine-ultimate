@@ -162,6 +162,8 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
             if (hcls) WindowsDeleteString( hcls );
         }
     }
+    if (impl->template_root)
+        uwp_sync_template_presenter( impl, L"Content", (IInspectable *)val );
     if (impl->island_hwnd) InvalidateRect( impl->island_hwnd, NULL, FALSE );
     uwp_invalidate_window();
     return S_OK;
@@ -656,6 +658,45 @@ const void *uwp_tbtn_vtbl[32] =
     [13] = uwp_tbtn_remove_Unchecked,
     [14] = uwp_ui_event_add,
     [15 ... 31] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_ts_get_IsOn( void *iface, boolean *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = (impl && impl->is_checked == 1) ? TRUE : FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_ts_put_IsOn( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    int nv = val ? 1 : 0;
+    if (!impl) return S_OK;
+    if (impl->is_checked != nv)
+    {
+        impl->is_checked = nv;
+        if (UWP_EV_CNT( impl, click_reg ) > 0)
+            uwp_fire_event_registry( &impl->events->click_reg,
+                                     impl->outer ? impl->outer : &impl->IInspectable_iface,
+                                     NULL, "ToggleSwitch::Toggled" );
+        uwp_invalidate_window();
+    }
+    return S_OK;
+}
+
+const void *uwp_toggle_switch_vtbl[24] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_ts_get_IsOn,
+    [7] = uwp_ts_put_IsOn,
+    [8] = uwp_btn_add_Click,
+    [9] = uwp_btn_remove_Click,
+    [10 ... 23] = uwp_generic_noop,
 };
 
 static SRWLOCK g_open_popups_lock = SRWLOCK_INIT;
@@ -1905,39 +1946,11 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
     void *inst = NULL;
     IInspectable *hold_raw = NULL;
     struct uwp_element *el = NULL;
-    struct uwp_element *prev_head;
-    int gen;
     HRESULT hr;
 
     if (!holder || !full_name || !full_name[0]) return FALSE;
 
-    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-    prev_head = g_all_uwp_elems_head;
-    gen = g_all_uwp_elem_cnt;
-    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
-
-    __TRY
-    {
-        hr = uwp_create_instance_from_provider( full_name, &inst );
-    }
-    __EXCEPT_ALL
-    {
-        hr = E_FAIL;
-        TRACE( "uwp_instantiate_xbf_control_into: provider activation(%s) faulted\n", debugstr_w(full_name) );
-    }
-    __ENDTRY;
-
-    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-    if (g_all_uwp_elem_cnt > gen)
-    {
-        struct uwp_element *e;
-        for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
-        {
-            if (e->kind == UWP_KIND_USER_CONTROL || e->kind == UWP_KIND_PAGE)
-                el = e;
-        }
-    }
-    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+    hr = uwp_create_instance_from_provider_el( full_name, &inst, &el );
     if (!el && inst && SUCCEEDED(hr))
         el = uwp_elem_from_any( inst );
 

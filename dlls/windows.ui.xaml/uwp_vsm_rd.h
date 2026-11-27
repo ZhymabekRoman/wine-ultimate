@@ -236,7 +236,9 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val );
 HRESULT WINAPI uwp_do_get_Dispatcher( void *iface, void **value );
 HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value );
 HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token );
+void uwp_sync_template_presenter( struct uwp_element *impl, const WCHAR *dpname, IInspectable *val );
 void uwp_sync_all_template_presenters( struct uwp_element *impl );
+void uwp_sa_add_tpl_binding( struct uwp_element *target_el, WORD pid, const WCHAR *src_prop, const WCHAR *target_prop );
 HRESULT WINAPI dp_args_QI( void *iface, REFIID iid, void **out );
 ULONG WINAPI dp_args_AddRef( void *iface );
 ULONG WINAPI dp_args_Release( void *iface );
@@ -262,6 +264,9 @@ void uwp_ensure_app_resources_loaded( void );
 BOOL uwp_extract_resource_key( const WCHAR *in, WCHAR *out, size_t out_chars );
 BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
                                  const WCHAR *key_or_expr, int depth, UINT32 *out_argb );
+BOOL uwp_resolve_brush_from_entry( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
+                                   struct uwp_rd_entry *e, struct uwp_rd_bucket *found_b,
+                                   int depth, UINT32 *out_argb );
 BOOL uwp_parse_color_string( const WCHAR *s, UINT32 *out_argb );
 BOOL uwp_is_bg_pid( WORD pid );
 BOOL uwp_is_border_pid( WORD pid );

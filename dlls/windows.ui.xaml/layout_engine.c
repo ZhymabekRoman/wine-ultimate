@@ -69,6 +69,10 @@ size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, s
             lstrcpynW( out_buf + pos, uwp_elem_text( blk ), (int)(out_cap - pos) );
             pos += wcslen( out_buf + pos );
         }
+        else if (blk->class_flags & UWP_CF_LINE_BREAK)
+        {
+            if (pos > 0 && out_buf[pos - 1] != '\n') out_buf[pos++] = '\n';
+        }
         else if (blk->inlines_coll)
         {
             struct uwp_vec_view *iv = CONTAINING_RECORD( blk->inlines_coll, struct uwp_vec_view, IInspectable_iface );
@@ -769,14 +773,26 @@ static void uwp_clear_bounds_tree( struct uwp_element *el )
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (ch && ch != el) uwp_clear_bounds_tree( ch );
+            if (ch && ch != el && ch->parent == el) uwp_clear_bounds_tree( ch );
         }
     }
+    if (el->template_root && el->template_root != el && el->template_root->parent == el)
+        uwp_clear_bounds_tree( el->template_root );
     if (el->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el) uwp_clear_bounds_tree( ch );
+        if (ch && ch != el && ch->parent == el) uwp_clear_bounds_tree( ch );
     }
+}
+
+static inline struct uwp_element *uwp_visual_content_child( const struct uwp_element *el )
+{
+    if (!el) return NULL;
+    if (el->template_root && el->template_root != el &&
+        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
+        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
+        return el->template_root;
+    return el->content ? uwp_elem_from_any( el->content ) : NULL;
 }
 
 static double uwp_measure_natural_width( const struct uwp_element *el, int depth );
@@ -839,20 +855,38 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
             }
         }
         fs = raw_fs * g_layout_scale;
-        len = wcslen( txt );
+        len = 0;
+        {
+            const WCHAR *p = txt;
+            size_t cur = 0;
+            while (*p)
+            {
+                if (*p == '\n' || *p == '\r')
+                {
+                    if (cur > len) len = cur;
+                    cur = 0;
+                }
+                else
+                    cur++;
+                p++;
+            }
+            if (cur > len) len = cur;
+        }
         if (len > 0)
             best = (double)len * fs * cw_factor + (is_sec_hdr ? 44.0 : 20.0);
     }
+    else if (uwp_is_toggle_switch( el ))
+    {
+        best = 44.0 * g_layout_scale;
+    }
     else if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
-        if (el->content)
+        struct uwp_element *ch = uwp_visual_content_child( el );
+        if (ch && ch != el)
         {
-            struct uwp_element *ch = uwp_elem_from_any( el->content );
-            if (ch && ch != el)
-            {
-                double cw = uwp_measure_natural_width( ch, depth + 1 );
-                if (cw > 0.0) best = cw + el->padding_l + el->padding_r + 16.0;
-            }
+            double cw = uwp_measure_natural_width( ch, depth + 1 );
+            if (cw > 0.0)
+                best = cw + ((ch == el->template_root) ? 0.0 : (el->padding_l + el->padding_r + 16.0));
         }
         if (best <= 0.0 && el->media && el->media->img_w > 0 && el->media->img_h > 0)
         {
@@ -863,7 +897,10 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
         {
             double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
             size_t len = wcslen( uwp_elem_text( el ) );
-            best = max( 80.0 * g_layout_scale, (double)len * fs * 0.64 + 32.0 + el->padding_l + el->padding_r );
+            if (uwp_is_hyperlink_button( el ))
+                best = max( 40.0 * g_layout_scale, (double)len * fs * 0.54 + el->padding_l + el->padding_r + 8.0 );
+            else
+                best = max( 80.0 * g_layout_scale, (double)len * fs * 0.64 + 32.0 + el->padding_l + el->padding_r );
         }
     }
     else if (uwp_is_combobox( el ))
@@ -910,14 +947,12 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
     else if ((el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_CONTENT_CONTROL || el->kind == UWP_KIND_USER_CONTROL) &&
              !(el->class_flags & UWP_CF_RADIO_BUTTON))
     {
-        if (el->content)
+        struct uwp_element *ch = uwp_visual_content_child( el );
+        if (ch && ch != el)
         {
-            struct uwp_element *ch = uwp_elem_from_any( el->content );
-            if (ch && ch != el)
-            {
-                double cw = uwp_measure_natural_width( ch, depth + 1 );
-                if (cw > 0.0) best = cw + el->padding_l + el->padding_r;
-            }
+            double cw = uwp_measure_natural_width( ch, depth + 1 );
+            if (cw > 0.0)
+                best = cw + ((ch == el->template_root) ? 0.0 : (el->padding_l + el->padding_r));
         }
         if (best <= 0.0 && uwp_has_text( el ))
         {
@@ -950,21 +985,59 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k, vis = 0;
         BOOL sum_horiz = (el->class_flags & (UWP_CF_LISTBOX | UWP_CF_ITEMS_CONTROL | UWP_CF_RADIO_BUTTON)) != 0;
-        for (k = 0; k < children->count; k++)
+        if (el->kind == UWP_KIND_GRID && el->col_defs_coll && !sum_horiz)
         {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            double cw = (ch && ch != el && !(ch->class_flags & UWP_CF_TEMPLATE)) ? uwp_measure_natural_width( ch, depth + 1 ) : 0.0;
-            if (cw > 0.0)
+            struct uwp_vec_view *cols = CONTAINING_RECORD( el->col_defs_coll, struct uwp_vec_view, IInspectable_iface );
+            int ncols = (cols && cols->count > 0) ? min( (int)cols->count, 30 ) : 1;
+            double col_w[32] = {0};
+            double col_sp = (el->style_anim && el->style_anim->grid_col_spacing > 0.0)
+                ? el->style_anim->grid_col_spacing * g_layout_scale : 0.0;
+            int c, vis_cols = 0;
+            for (c = 0; c < ncols; c++)
             {
-                cw += max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
-                if (sum_horiz)
+                struct uwp_element *cd = (cols && (unsigned)c < cols->count) ? uwp_elem_from_any( cols->items[c] ) : NULL;
+                if (cd && cd->grid_len_type == 1 && cd->grid_len_val > 0.0)
+                    col_w[c] = cd->grid_len_val;
+            }
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                double cw;
+                int cc;
+                if (!ch || ch == el || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE) || ch->grid_col_span > 1)
+                    continue;
+                cc = (ch->grid_col >= 0 && ch->grid_col < ncols) ? ch->grid_col : 0;
+                cw = uwp_measure_natural_width( ch, depth + 1 );
+                if (cw > 0.0) cw += max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
+                if (cw > col_w[cc]) col_w[cc] = cw;
+            }
+            for (c = 0; c < ncols; c++)
+            {
+                if (col_w[c] > 0.0) { best += col_w[c]; vis_cols++; }
+            }
+            if (vis_cols > 1 && col_sp > 0.0)
+                best += (double)(vis_cols - 1) * col_sp;
+        }
+        else
+        {
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                double cw = (ch && ch != el && !(ch->class_flags & UWP_CF_TEMPLATE)) ? uwp_measure_natural_width( ch, depth + 1 ) : 0.0;
+                if (cw > 0.0)
                 {
-                    best += cw + (vis > 0 ? 12.0 : 0.0);
-                    vis++;
+                    cw += max( 0.0, ch->margin_l ) + max( 0.0, ch->margin_r );
+                    if (sum_horiz)
+                    {
+                        best += cw + (vis > 0 ? 12.0 : 0.0);
+                        vis++;
+                    }
+                    else if (cw > best) best = cw;
                 }
-                else if (cw > best) best = cw;
             }
         }
+        if (el->padding_l > 0.0) best += el->padding_l;
+        if (el->padding_r > 0.0) best += el->padding_r;
     }
     else if (uwp_is_font_icon( el ))
     {
@@ -1152,6 +1225,10 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
         if (lines > 120) lines = 120;
         best = line_h * lines + 4.0;
     }
+    else if (uwp_is_toggle_switch( el ))
+    {
+        best = 24.0 * g_layout_scale;
+    }
     else if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
         if (el->media && el->media->img_w > 0 && el->media->img_h > 0)
@@ -1163,20 +1240,24 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
         {
             best = 140.0 * g_layout_scale;
         }
-        else if (el->content)
+        else
         {
-            struct uwp_element *ch = uwp_elem_from_any( el->content );
+            struct uwp_element *ch = uwp_visual_content_child( el );
             if (ch && ch != el)
             {
                 double ch_h = uwp_measure_natural_height( ch, avail_w, depth + 1 );
-                if (ch_h > 0.0) best = ch_h + max( 0.0, el->padding_t ) + max( 0.0, el->padding_b );
+                if (ch_h > 0.0)
+                    best = ch_h + ((ch == el->template_root) ? 0.0 : (max( 0.0, el->padding_t ) + max( 0.0, el->padding_b )));
             }
         }
         if (best <= 0.0)
         {
             double pad_v = max( 0.0, el->padding_t ) + max( 0.0, el->padding_b );
             double fs = (el->font_size > 0.0 ? el->font_size : 14.0) * g_layout_scale;
-            best = max( 38.0 * g_layout_scale, fs * 1.4 + pad_v + 12.0 * g_layout_scale );
+            if (uwp_is_hyperlink_button( el ))
+                best = max( 28.0 * g_layout_scale, fs * 1.4 + pad_v + 2.0 * g_layout_scale );
+            else
+                best = max( 38.0 * g_layout_scale, fs * 1.4 + pad_v + 12.0 * g_layout_scale );
         }
     }
     else if (uwp_is_combobox( el ))
@@ -1332,17 +1413,25 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
             best += row_h[r];
         }
         if (max_span_h > best) best = max_span_h;
-    }
-    else if (el->content || el->children_coll)
-    {
-        if (el->content)
         {
-            struct uwp_element *ch = uwp_elem_from_any( el->content );
-            if (ch && ch != el)
-            {
-                double ch_h = uwp_measure_natural_height( ch, avail_w, depth + 1 );
-                if (ch_h > 0.0) best = ch_h + el->padding_t + el->padding_b;
-            }
+            double row_sp = (el->style_anim && el->style_anim->grid_row_spacing > 0.0)
+                ? el->style_anim->grid_row_spacing * g_layout_scale : 0.0;
+            int vis_rows = 0;
+            for (r = 0; r < nrows; r++)
+                if (row_h[r] > 0.0) vis_rows++;
+            if (vis_rows > 1 && row_sp > 0.0)
+                best += (double)(vis_rows - 1) * row_sp;
+        }
+        best += max( 0.0, el->padding_t ) + max( 0.0, el->padding_b );
+    }
+    else if (el->content || el->template_root || el->children_coll)
+    {
+        struct uwp_element *ch = uwp_visual_content_child( el );
+        if (ch && ch != el)
+        {
+            double ch_h = uwp_measure_natural_height( ch, avail_w, depth + 1 );
+            if (ch_h > 0.0)
+                best = ch_h + ((ch == el->template_root) ? 0.0 : (el->padding_t + el->padding_b));
         }
         if (best <= 0.0 && el->children_coll && !uwp_is_autosuggest( el ))
         {
@@ -1424,7 +1513,8 @@ static int uwp_align_axis( LONG *start, LONG *end, double explicit_size, int ali
 static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_view *children,
                                          RECT rc, int w, int h,
                                          int *out_nrows, int *out_ncols,
-                                         int row_y[32], int col_x[32] )
+                                         int row_start[32], int row_end[32],
+                                         int col_start[32], int col_end[32] )
 {
     struct uwp_vec_view *rows = el->row_defs_coll ? CONTAINING_RECORD( el->row_defs_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
     struct uwp_vec_view *cols = el->col_defs_coll ? CONTAINING_RECORD( el->col_defs_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
@@ -1432,6 +1522,12 @@ static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_
     int ncols = (cols && cols->count > 0) ? (int)cols->count : 1;
     double r_type[32], r_val[32], c_type[32], c_val[32];
     double r_fixed = 0, r_stars = 0, c_fixed = 0, c_stars = 0;
+    double col_sp = (el->style_anim && el->style_anim->grid_col_spacing > 0.0)
+        ? el->style_anim->grid_col_spacing * g_layout_scale : 0.0;
+    double row_sp = (el->style_anim && el->style_anim->grid_row_spacing > 0.0)
+        ? el->style_anim->grid_row_spacing * g_layout_scale : 0.0;
+    int active_cols = 0, active_rows = 0;
+    double col_gaps = 0.0, row_gaps = 0.0;
     BOOL has_star_row = FALSE;
     unsigned int k;
     int i;
@@ -1472,11 +1568,14 @@ static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_
             c_fixed += c_val[i];
         }
         else c_stars += (c_val[i] > 0 ? c_val[i] : 1.0);
+        if (c_type[i] != 1 || c_val[i] > 0.0) active_cols++;
     }
+    if (active_cols > 1 && col_sp > 0.0)
+        col_gaps = (double)(active_cols - 1) * col_sp;
 
     if (c_stars > 0)
     {
-        double rem_w = max( 0.0, (double)w - c_fixed );
+        double rem_w = max( 0.0, (double)w - c_fixed - col_gaps );
         for (i = 0; i < ncols; i++)
         {
             struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
@@ -1487,21 +1586,27 @@ static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_
                 {
                     c_type[i] = 1; c_val[i] = cd->max_width;
                     c_fixed += cd->max_width; c_stars -= st;
-                    rem_w = max( 0.0, (double)w - c_fixed );
+                    rem_w = max( 0.0, (double)w - c_fixed - col_gaps );
                 }
             }
         }
     }
 
     {
-        double rem_w = max( 0.0, (double)w - c_fixed ), cur_x = (double)rc.left;
+        double rem_w = max( 0.0, (double)w - c_fixed - col_gaps ), cur_x = (double)rc.left;
+        BOOL prev_active = FALSE;
         for (i = 0; i < ncols; i++)
         {
-            col_x[i] = (int)(cur_x + 0.5);
-            if (c_type[i] == 1) cur_x += c_val[i];
-            else if (c_stars > 0) cur_x += rem_w * (c_val[i] / c_stars);
+            BOOL act = (c_type[i] != 1 || c_val[i] > 0.0);
+            double cw = (c_type[i] == 1) ? c_val[i] : (c_stars > 0 ? rem_w * (c_val[i] / c_stars) : 0.0);
+            if (act && prev_active && col_sp > 0.0) cur_x += col_sp;
+            col_start[i] = (int)(cur_x + 0.5);
+            cur_x += cw;
+            col_end[i] = (int)(cur_x + 0.5);
+            if (act) prev_active = TRUE;
         }
-        col_x[ncols] = rc.right;
+        if (c_stars > 0 && ncols > 0 && (c_type[ncols - 1] != 1 || c_val[ncols - 1] > 0.0))
+            col_end[ncols - 1] = rc.right;
     }
 
     for (i = 0; i < nrows; i++)
@@ -1525,7 +1630,7 @@ static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_
             {
                 int c0 = max( 0, min( ncols - 1, ch->grid_col ) );
                 int c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
-                if (col_x[c1] > col_x[c0]) { has_vis = TRUE; break; }
+                if (col_end[c1 - 1] > col_start[c0]) { has_vis = TRUE; break; }
             }
         }
         r_type[i] = rd ? rd->grid_len_type : 2;
@@ -1563,17 +1668,26 @@ static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_
         }
         if (r_type[i] == 1) r_fixed += r_val[i];
         else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
+        if (r_type[i] != 1 || r_val[i] > 0.0) active_rows++;
     }
+    if (active_rows > 1 && row_sp > 0.0)
+        row_gaps = (double)(active_rows - 1) * row_sp;
 
     {
-        double rem_h = max( 0.0, (double)h - r_fixed ), cur_y = (double)rc.top;
+        double rem_h = max( 0.0, (double)h - r_fixed - row_gaps ), cur_y = (double)rc.top;
+        BOOL prev_active = FALSE;
         for (i = 0; i < nrows; i++)
         {
-            row_y[i] = (int)(cur_y + 0.5);
-            if (r_type[i] == 1) cur_y += r_val[i];
-            else if (r_stars > 0) cur_y += rem_h * (r_val[i] / r_stars);
+            BOOL act = (r_type[i] != 1 || r_val[i] > 0.0);
+            double rh = (r_type[i] == 1) ? r_val[i] : (r_stars > 0 ? rem_h * (r_val[i] / r_stars) : 0.0);
+            if (act && prev_active && row_sp > 0.0) cur_y += row_sp;
+            row_start[i] = (int)(cur_y + 0.5);
+            cur_y += rh;
+            row_end[i] = (int)(cur_y + 0.5);
+            if (act) prev_active = TRUE;
         }
-        row_y[nrows] = (r_stars == 0 && (int)(cur_y + 0.5) > (int)rc.bottom) ? (int)(cur_y + 0.5) : (int)rc.bottom;
+        if (r_stars > 0 && nrows > 0 && (r_type[nrows - 1] != 1 || r_val[nrows - 1] > 0.0))
+            row_end[nrows - 1] = rc.bottom;
     }
     *out_nrows = nrows;
     *out_ncols = ncols;
@@ -1583,12 +1697,22 @@ static void arrange_grid( struct uwp_element *el, RECT rc, int w, int h )
 {
     struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
     int nrows = 1, ncols = 1;
-    int row_y[32], col_x[32];
+    int row_start[32], row_end[32], col_start[32], col_end[32];
     struct uwp_element *sv_child = NULL;
     BOOL has_hydrated_child = FALSE;
     unsigned int k;
 
-    arrange_grid_compute_tracks( el, children, rc, w, h, &nrows, &ncols, row_y, col_x );
+    if (el->padding_l > 0.0 || el->padding_t > 0.0 || el->padding_r > 0.0 || el->padding_b > 0.0)
+    {
+        rc.left += (int)(max( 0.0, el->padding_l ) * g_layout_scale + 0.5);
+        rc.top += (int)(max( 0.0, el->padding_t ) * g_layout_scale + 0.5);
+        rc.right = max( rc.left, rc.right - (int)(max( 0.0, el->padding_r ) * g_layout_scale + 0.5) );
+        rc.bottom = max( rc.top, rc.bottom - (int)(max( 0.0, el->padding_b ) * g_layout_scale + 0.5) );
+        w = rc.right - rc.left;
+        h = rc.bottom - rc.top;
+    }
+
+    arrange_grid_compute_tracks( el, children, rc, w, h, &nrows, &ncols, row_start, row_end, col_start, col_end );
 
     for (k = 0; k < children->count; k++)
     {
@@ -1618,7 +1742,7 @@ static void arrange_grid( struct uwp_element *el, RECT rc, int w, int h )
         r1 = max( r0 + 1, min( nrows, r0 + ch->grid_row_span ) );
         c0 = max( 0, min( ncols - 1, ch->grid_col ) );
         c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
-        SetRect( &crc, col_x[c0], row_y[r0], col_x[c1], row_y[r1] );
+        SetRect( &crc, col_start[c0], row_start[r0], col_end[c1 - 1], row_end[r1 - 1] );
         uwp_arrange_element( ch, crc );
     }
 }
@@ -2339,7 +2463,9 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         if (he && he != el)
         {
             RECT hrc;
-            double mh = uwp_measure_natural_height( he, max( 120, w - (int)(64 * sc) ), 0 );
+            double mh;
+            he->parent = el;
+            mh = uwp_measure_natural_height( he, max( 120, w - (int)(64 * sc) ), 0 );
             if (mh + 20.0 * sc > hdr_h) hdr_h = (int)(mh + 20.0 * sc + 0.5f);
             if (hdr_h > h && !el->is_open) hdr_h = h;
             SetRect( &hrc, rc.left + (int)(16 * sc), rc.top + (int)(10 * sc),
@@ -2374,9 +2500,8 @@ static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc )
         return;
     }
 
-    if (el->content)
     {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        struct uwp_element *ch = uwp_visual_content_child( el );
         if (ch && ch != el) uwp_arrange_element( ch, rc );
     }
     if (el->kind == UWP_KIND_WRAP_PANEL && el->children_coll) { arrange_wrap_panel( el, rc ); return; }

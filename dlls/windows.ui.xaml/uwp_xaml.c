@@ -189,13 +189,21 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
     if (wcsstr( cls, L"QuinticEase" )) flags2 |= UWP_CF2_QUINTIC_EASE;
     if (wcsstr( cls, L"CalendarDatePicker" ) && !wcsstr( cls, L"AutomationPeer" ) && !wcsstr( cls, L"EventArgs" ))
         flags2 |= UWP_CF2_CALENDAR_DATE_PICKER;
-    if (wcsstr( cls, L"Expander" ) && !wcsstr( cls, L"Descriptor" ) && !wcsstr( cls, L"Wrapper" ) &&
-        !wcsstr( cls, L"MenuPanel" ) && !wcsstr( cls, L"Separator" ) && !wcsstr( cls, L"QuadratePanel" ) &&
-        !wcsstr( cls, L"TemplateSettings" ) && !wcsstr( cls, L"EventArgs" ) && !wcsstr( cls, L"AutomationPeer" ))
+    if (!wcscmp( cls, L"Microsoft.UI.Xaml.Controls.Expander" ) ||
+        !wcscmp( cls, L"Windows.UI.Xaml.Controls.Expander" ))
         flags2 |= UWP_CF2_EXPANDER;
+    if (wcsstr( cls, L"ToggleSwitch" ) && !wcsstr( cls, L"TemplateSettings" ) && !wcsstr( cls, L"AutomationPeer" ))
+        flags2 |= UWP_CF2_TOGGLE_SWITCH;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.HyperlinkButton" ))
+        flags2 |= UWP_CF2_HYPERLINK_BTN;
 
-    el->class_flags = flags;
-    el->class_flags2 = flags2;
+    el->class_flags = flags | (el->class_flags & (UWP_CF_FONT_ICON | UWP_CF_SYMBOL_ICON | UWP_CF_COMBOBOX |
+                                                  UWP_CF_LISTVIEW | UWP_CF_GRIDVIEW | UWP_CF_ITEMS_CONTROL |
+                                                  UWP_CF_FLIPVIEW | UWP_CF_SCROLL_VIEWER | UWP_CF_TEXT_BOX |
+                                                  UWP_CF_RADIO_BUTTON | UWP_CF_MEDIA_PLAYER | UWP_CF_PROGRESS_BAR |
+                                                  UWP_CF_RICH_TEXT_BLOCK));
+    el->class_flags2 = flags2 | (el->class_flags2 & (UWP_CF2_EXPANDER | UWP_CF2_TOGGLE_SWITCH |
+                                                     UWP_CF2_HYPERLINK_BTN | UWP_CF2_CALENDAR_DATE_PICKER));
 
     if (uwp_is_pivot( el ))
         el->IComboBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_pivot_vtbl;
@@ -210,6 +218,9 @@ void uwp_elem_sync_class_flags( struct uwp_element *el )
         el->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_adaptive_trigger_vtbl;
     else
         el->IStateTriggerPub_iface.lpVtbl = (const struct IInspectableVtbl *)&uwp_state_trigger_pub_vtbl;
+
+    el->IToggleButton_iface.lpVtbl = (const struct IInspectableVtbl *)(uwp_is_toggle_switch( el )
+        ? uwp_toggle_switch_vtbl : uwp_tbtn_vtbl);
 }
 
 void uwp_elem_clear_text( struct uwp_element *el )
@@ -658,6 +669,34 @@ static void uwp_neg_cache_store( void *ptr, const void *vtbl )
     ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
 }
 
+static __thread struct
+{
+    struct uwp_element *last_created;
+    struct uwp_element *prov_first;
+    struct uwp_element *prov_uc;
+    int prov_depth;
+} g_tls_elem_create;
+
+void uwp_tls_provider_push( struct uwp_tls_prov_state *saved )
+{
+    saved->first = g_tls_elem_create.prov_first;
+    saved->uc = g_tls_elem_create.prov_uc;
+    g_tls_elem_create.prov_first = NULL;
+    g_tls_elem_create.prov_uc = NULL;
+    g_tls_elem_create.prov_depth++;
+}
+
+struct uwp_element *uwp_tls_provider_pop( const struct uwp_tls_prov_state *saved, struct uwp_element *direct_el )
+{
+    struct uwp_element *res = direct_el;
+    if (!res)
+        res = g_tls_elem_create.prov_uc ? g_tls_elem_create.prov_uc : g_tls_elem_create.prov_first;
+    if (g_tls_elem_create.prov_depth > 0) g_tls_elem_create.prov_depth--;
+    g_tls_elem_create.prov_first = saved->first;
+    g_tls_elem_create.prov_uc = saved->uc;
+    return res;
+}
+
 struct uwp_element *uwp_elem_from_any( void *ptr )
 {
     struct uwp_element *el;
@@ -669,6 +708,13 @@ struct uwp_element *uwp_elem_from_any( void *ptr )
     /* Tier 1: zero-lock O(1) vtable->offset lookup for embedded COM sub-interfaces */
     el = uwp_elem_from_vtbl_fast( ptr );
     if (el) return el;
+
+    /* TLS last-created element fast path (zero lock) */
+    {
+        struct uwp_element *lc = g_tls_elem_create.last_created;
+        if (lc && (ptr == lc || ptr == lc->outer || ptr == lc->provider_inst))
+            return lc;
+    }
 
     /* Tier 2: shared-lock O(1) hash lookup for outer, provider_inst & base pointer */
     AcquireSRWLockShared( &g_all_uwp_elems_lock );
@@ -1116,6 +1162,7 @@ enum uwp_qi_guard
     QI_GUARD_NOT_FRAME,
     QI_GUARD_TABVIEW,
     QI_GUARD_NOT_LOADED_SURFACE,
+    QI_GUARD_TOGGLE_SWITCH,
 };
 
 #define UWP_QI_MAP_SIZE 512
@@ -1267,6 +1314,7 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IHyperlinkButton_UWP, IButtonBase_iface );
     QI_ADD( IID_IToggleButton_UWP, IToggleButton_iface );
     QI_ADD( IID_IRadioButton_UWP, IToggleButton_iface );
+    QI_ADD_G( IID_IToggleSwitch_UWP, IToggleButton_iface, QI_GUARD_TOGGLE_SWITCH );
     QI_ADD_G( IID_IToggleMenuFlyoutItem_UWP, IToggleMenuFlyoutItem_iface, QI_GUARD_TOGGLE_MENU_ITEM );
     QI_ADD( IID_IRadioButtons_WinUI, IStyle_iface );
     QI_ADD_G( IID_IDataTemplate_UWP, IDataTemplate_iface, QI_GUARD_NOT_TEMPLATE_SELECTOR );
@@ -1583,6 +1631,9 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
                 case QI_GUARD_NOT_LOADED_SURFACE:
                     ok = !wcsstr( impl->class_name, L"LoadedImageSurface" );
                     break;
+                case QI_GUARD_TOGGLE_SWITCH:
+                    ok = uwp_is_toggle_switch( impl );
+                    break;
                 }
                 if (ok) *out = (char *)impl + chosen_off;
                 break;
@@ -1691,6 +1742,10 @@ static void uwp_element_destroy( struct uwp_element *impl )
 
     if (!impl) return;
 
+    if (g_tls_elem_create.last_created == impl) g_tls_elem_create.last_created = NULL;
+    if (g_tls_elem_create.prov_first == impl) g_tls_elem_create.prov_first = NULL;
+    if (g_tls_elem_create.prov_uc == impl) g_tls_elem_create.prov_uc = NULL;
+
     uwp_clear_global_elem_refs( impl );
 
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
@@ -1763,6 +1818,8 @@ static void uwp_element_destroy( struct uwp_element *impl )
     if (impl->style_anim)
     {
         struct uwp_style_anim_ext *sa = impl->style_anim;
+        if (sa->template_root_obj) IInspectable_Release( sa->template_root_obj );
+        free( sa->tpl_bindings );
         free( sa->style_setters );
         if (sa->style_obj) IInspectable_Release( sa->style_obj );
         if (sa->gradient_stops_coll)
@@ -2655,6 +2712,7 @@ static BOOL CALLBACK init_uwp_vtbl_map( INIT_ONCE *once, void *param, void **ctx
     VMAP( uwp_scale_transform_vtbl, IFrame3_iface );
     VMAP( uwp_btn_vtbl, IButtonBase_iface );
     VMAP( uwp_tbtn_vtbl, IToggleButton_iface );
+    VMAP( uwp_toggle_switch_vtbl, IToggleButton_iface );
     VMAP( uwp_panel_vtbl, IPanel_iface );
     VMAP( uwp_grid_vtbl, IGrid_iface );
     VMAP( uwp_grid3_vtbl, IGrid3_iface );
@@ -2807,7 +2865,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IFrame3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_frame3_vtbl;
     impl->IFrame5_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_frame5_vtbl;
     impl->IButtonBase_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_btn_vtbl;
-    impl->IToggleButton_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tbtn_vtbl;
+    impl->IToggleButton_iface.lpVtbl = (const struct IInspectableVtbl *)(uwp_is_toggle_switch( impl )
+        ? uwp_toggle_switch_vtbl : uwp_tbtn_vtbl);
     impl->IPanel_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_panel_vtbl;
     impl->IGrid_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grid_vtbl;
     impl->IGrid3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grid3_vtbl;
@@ -2881,8 +2940,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IImage_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_img_vtbl;
     impl->IShape_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_shape_vtbl;
     impl->IXamlCompositionBrushBaseProtected_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xcbb_prot_vtbl;
-    impl->ILoadedImageSurface_iface.lpVtbl = (const struct IInspectableVtbl *)(wcsstr( impl->class_name, L"LoadedImageSurface" )
-        ? uwp_lis_vtbl : uwp_fe6_vtbl);
+    impl->ILoadedImageSurface_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_fe6_vtbl;
     impl->IFontFamily_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_family_vtbl;
     impl->IFontIcon_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_icon_vtbl;
     impl->IImageBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_image_brush_vtbl;
@@ -2916,6 +2974,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
         impl->IFrame2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_icm_vtbl;
         impl->IFrame3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_scale_transform_vtbl;
     }
+    if (wcsstr( impl->class_name, L"LoadedImageSurface" ))
+        impl->ILoadedImageSurface_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_lis_vtbl;
     if (impl->kind == UWP_KIND_PAGE) g_last_created_page = impl;
     impl->grid_row_span = 1;
     impl->grid_col_span = 1;
@@ -2928,6 +2988,16 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->v_align = 3; /* Stretch */
     impl->font_size = 16.0;
     impl->text_align = 1; /* Left */
+    if (uwp_is_hyperlink_button( impl ))
+    {
+        impl->h_align = 0; /* Left */
+        impl->h_content_align = 0;
+        impl->has_h_content_align = TRUE;
+        impl->padding_l = 12.0;
+        impl->padding_r = 12.0;
+        impl->padding_t = 5.0;
+        impl->padding_b = 6.0;
+    }
     impl->text_wrapping = uwp_is_rich_text_block( impl ) ? 2 : 1; /* RichTextBlock defaults to Wrap */
     impl->hovered_dropdown_idx = -1;
     g_layout_dirty = TRUE;
@@ -2939,6 +3009,14 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
         xaml_create_dcomp_visual( &impl->visual );
 
     register_uwp_elem( impl );
+    g_tls_elem_create.last_created = impl;
+    if (g_tls_elem_create.prov_depth > 0)
+    {
+        if (!g_tls_elem_create.prov_first)
+            g_tls_elem_create.prov_first = impl;
+        if (!g_tls_elem_create.prov_uc && (impl->kind == UWP_KIND_USER_CONTROL || impl->kind == UWP_KIND_PAGE))
+            g_tls_elem_create.prov_uc = impl;
+    }
 
     if (inner)
     {

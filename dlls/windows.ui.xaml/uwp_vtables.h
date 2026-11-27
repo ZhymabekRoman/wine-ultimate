@@ -153,6 +153,7 @@ extern const void *uwp_cc_vtbl[128];
 extern const void *uwp_border_vtbl[32];
 extern const void *uwp_btn_vtbl[32];
 extern const void *uwp_tbtn_vtbl[32];
+extern const void *uwp_toggle_switch_vtbl[24];
 extern const void *uwp_popup_vtbl[32];
 extern const void *uwp_popup2_vtbl[16];
 extern const void *uwp_popup3_vtbl[16];
