@@ -50,6 +50,7 @@ struct xaml_resource_dictionary
     struct { WCHAR *key_str; void *key_ptr; IInspectable *val; } entries[32];
     int entry_count;
     IInspectable *merged_dicts;
+    IInspectable *theme_dicts;
     IInspectable *source_uri;
 };
 
@@ -113,7 +114,11 @@ static ULONG WINAPI rd_Release( IInspectable *iface );
 static HRESULT WINAPI rd_GetIids( IInspectable *iface, ULONG *count, IID **iids )
 { if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
 static HRESULT WINAPI rd_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{ return WindowsCreateString( L"Microsoft.UI.Xaml.ResourceDictionary", 35, name ); }
+{
+    if (!xaml_get_app_caps()->winui3)
+        return WindowsCreateString( L"Windows.UI.Xaml.ResourceDictionary", 34, name );
+    return WindowsCreateString( L"Microsoft.UI.Xaml.ResourceDictionary", 36, name );
+}
 static HRESULT WINAPI rd_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
 
@@ -175,6 +180,7 @@ static ULONG WINAPI rd_Release( IInspectable *iface )
     if (!ref)
     {
         if (impl->merged_dicts) IInspectable_Release( impl->merged_dicts );
+        if (impl->theme_dicts) IInspectable_Release( impl->theme_dicts );
         if (impl->source_uri) IInspectable_Release( impl->source_uri );
         free( impl );
     }
@@ -210,7 +216,31 @@ static HRESULT WINAPI rd_set_Source( void *iface, void *value )
 }
 static HRESULT WINAPI rd_get_ThemeDictionaries( void *iface, void **value )
 {
-    if (value) *value = NULL;
+    struct xaml_resource_dictionary *impl = impl_from_rd( iface );
+    if (!value) return E_POINTER;
+    if (!impl->theme_dicts)
+    {
+        void *td = NULL;
+        if (SUCCEEDED( xaml_resource_dictionary_create( &td ) ) && td)
+        {
+            struct xaml_resource_dictionary *td_impl = impl_from_rd( (IInspectable *)td );
+            static const WCHAR *const themes[] = { L"Light", L"Dark", L"HighContrast" };
+            unsigned int ti;
+            for (ti = 0; ti < ARRAY_SIZE(themes); ti++)
+            {
+                void *sub = NULL;
+                if (SUCCEEDED( xaml_resource_dictionary_create( &sub ) ) && sub)
+                {
+                    int n = td_impl->entry_count++;
+                    td_impl->entries[n].key_str = wcsdup( themes[ti] );
+                    td_impl->entries[n].val = (IInspectable *)sub;
+                }
+            }
+            impl->theme_dicts = (IInspectable *)td;
+        }
+    }
+    *value = impl->theme_dicts;
+    if (*value) IInspectable_AddRef( (IInspectable *)*value );
     return S_OK;
 }
 
@@ -219,8 +249,6 @@ static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
     struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
     int idx;
     TRACE( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
-    if (!xaml_get_app_caps()->winui3)
-        return uwp_rd_lookup( &impl->IInspectable_iface, key, value );
     idx = rd_find_entry( impl, key );
     if (idx >= 0)
     {
@@ -231,6 +259,8 @@ static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
         }
         return S_OK;
     }
+    if (!xaml_get_app_caps()->winui3)
+        return uwp_rd_lookup( &impl->IInspectable_iface, key, value );
     if (value) *value = NULL;
     return 0x8000000b; /* E_BOUNDS */
 }
@@ -243,12 +273,17 @@ static HRESULT WINAPI rd_map_get_Size( void *iface, UINT32 *size )
 static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    if (rd_find_entry( impl, key ) >= 0)
+    {
+        if (found) *found = TRUE;
+        return S_OK;
+    }
     if (!xaml_get_app_caps()->winui3)
     {
         if (found) *found = uwp_rd_haskey( &impl->IInspectable_iface, key );
         return S_OK;
     }
-    if (found) *found = (rd_find_entry( impl, key ) >= 0);
+    if (found) *found = FALSE;
     return S_OK;
 }
 static HRESULT WINAPI rd_map_GetView( void *iface, void **view )

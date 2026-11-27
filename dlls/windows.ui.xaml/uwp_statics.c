@@ -41,10 +41,18 @@ static inline struct uwp_class_factory *uwp_cf_from_any( void *iface )
         return &auto_props_factory_obj;
     if ((char *)iface >= (char *)&vth_factory_obj && (char *)iface < (char *)(&vth_factory_obj + 1))
         return &vth_factory_obj;
+    if ((char *)iface >= (char *)&ap_factory_obj && (char *)iface < (char *)(&ap_factory_obj + 1))
+        return &ap_factory_obj;
     if ((char *)iface >= (char *)&feap_factory_obj && (char *)iface < (char *)(&feap_factory_obj + 1))
         return &feap_factory_obj;
     if ((char *)iface >= (char *)&scb_factory_obj && (char *)iface < (char *)(&scb_factory_obj + 1))
         return &scb_factory_obj;
+    if ((char *)iface >= (char *)&sb_factory_obj && (char *)iface < (char *)(&sb_factory_obj + 1))
+        return &sb_factory_obj;
+    if ((char *)iface >= (char *)&sb_factory_winui3_obj && (char *)iface < (char *)(&sb_factory_winui3_obj + 1))
+        return &sb_factory_winui3_obj;
+    if ((char *)iface >= (char *)&th_factory_obj && (char *)iface < (char *)(&th_factory_obj + 1))
+        return &th_factory_obj;
     AcquireSRWLockShared( &g_dyn_factories_lock );
     for (i = 0; i < g_dyn_factory_cnt; i++)
     {
@@ -67,7 +75,7 @@ static const GUID IID_IComboBoxFactory_local =
     { 0xac0d0444, 0xa65b, 0x4abd, { 0x86, 0xdf, 0x30, 0x16, 0x04, 0x9e, 0xfe, 0xdc } };
 static const GUID IID_ISolidColorBrushFactory_local =
     { 0xd935ce0c, 0x86f5, 0x4da6, { 0x8a, 0x27, 0xb1, 0x61, 0x9e, 0xf7, 0xf9, 0x2b } };
-static const GUID IID_IButtonBaseStatics_Calc =
+static const GUID IID_IButtonBaseStatics_UWP_Alt =
     { 0x67ef17e1, 0xfe37, 0x474f, { 0x9e, 0x97, 0x3b, 0x5e, 0x0b, 0x30, 0xf2, 0xdf } };
 
 static const GUID IID_IElementCompositionPreviewStatics_UWP =
@@ -493,26 +501,20 @@ static const void *uwp_lis_statics_vtbl[] =
 static const void *uwp_lis_statics_obj = uwp_lis_statics_vtbl;
 
 static const void *comp_target_statics_obj;
-static const void *binding_ops_statics_obj;
-static const void *thickness_helper_statics_obj;
-static const void *uwp_uielement_statics_obj;
-static const void *uwp_selector_statics_obj;
-static const void *uwp_buttonbase_statics_obj;
-static const void *uwp_uielement_routed_statics_obj;
-static const void *uwp_grid_statics_obj;
-static const void *uwp_focus_manager_statics_obj;
+struct uwp_fm4_statics_s { const void **vtbl; };
+static struct uwp_fm4_statics_s uwp_fm4_statics_obj;
 static const GUID IID_IUIElementStatics4_UWP;
 static const GUID IID_IUIElementStatics6_UWP;
 static const GUID IID_IUIElementStatics7_UWP;
 static const GUID IID_IUIElementStatics8_UWP;
-static const void *xaml_markup_helper_statics_obj;
 
 HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
     TRACE( "uwp_cf_QI enter: cls=%s, iid=%s\n", f ? debugstr_w(f->class_name) : "?", debugstr_guid(iid) );
     if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IMarshal ) ||
+    if (!f ||
+        IsEqualGUID( iid, &IID_IMarshal ) ||
         IsEqualGUID( iid, &IID_IReferenceTracker_UWP ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP2 ))
@@ -525,7 +527,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ))
     {
-        *out = f ? (void *)&f->IActivationFactory_iface : (void *)iface;
+        *out = (void *)&f->IActivationFactory_iface;
         return S_OK;
     }
 
@@ -539,7 +541,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         *out = (void *)&ecp_statics2_obj;
         return S_OK;
     }
-    if (f && (f->factory_flags & UWP_FF_COMP_TARGET))
+    if (f->factory_flags & UWP_FF_COMP_TARGET)
     {
         *out = (void *)&comp_target_statics_obj;
         return S_OK;
@@ -584,23 +586,23 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         if (IsEqualGUID( iid, &IID_IBindingOperationsStatics_UWP ) ||
             IsEqualGUID( iid, &IID_IXamlBindingHelperStatics_UWP ))
         {
-            *out = (void *)&binding_ops_statics_obj;
+            *out = f->IBindingOpsStatics_iface.lpVtbl ? (void *)&f->IBindingOpsStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
         }
         if (IsEqualGUID( iid, &IID_IThicknessHelperStatics_UWP ))
         {
-            *out = (void *)&thickness_helper_statics_obj;
+            *out = f->IThicknessHelperStatics_iface.lpVtbl ? (void *)&f->IThicknessHelperStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
         }
         if (IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP )) /* ISelectorStatics {13300b06-...} */
         {
-            *out = (void *)&uwp_selector_statics_obj;
+            *out = f->ISelectorStatics_iface.lpVtbl ? (void *)&f->ISelectorStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
         }
         if (IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP ) ||
-            IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ))
+            IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP_Alt ))
         {
-            *out = (void *)&uwp_buttonbase_statics_obj;
+            *out = f->IButtonBaseStatics_iface.lpVtbl ? (void *)&f->IButtonBaseStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
         }
         if (IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
@@ -611,7 +613,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             IsEqualGUID( iid, &IID_IContentControlStatics_UWP ) ||
             IsEqualGUID( iid, &IID_ISymbolIconStatics_UWP ))
         {
-            *out = f && f->IDpStatics_iface.lpVtbl ? (void *)&f->IDpStatics_iface : (void *)&f->IStatics_iface;
+            *out = f->IDpStatics_iface.lpVtbl ? (void *)&f->IDpStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
         }
     }
@@ -621,22 +623,38 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             { 0xaa119f27, 0x2055, 0x483e, { 0xa4, 0xe0, 0x6f, 0x25, 0x58, 0x73, 0x2d, 0x9b } };
         if (IsEqualGUID( iid, &IID_IPopupStatics_UWP ))
         {
-            *out = f ? (void *)&f->IStatics_iface : (void *)iface;
+            *out = (void *)&f->IStatics_iface;
             return S_OK;
         }
     }
     {
         static const GUID IID_IFrameworkElementAutomationPeerFactory_UWP =
             { 0x0db9b8bc, 0xb812, 0x48e3, { 0xaf, 0x1f, 0xdb, 0xc5, 0x76, 0x00, 0xc3, 0x25 } };
+        static const GUID IID_IAutomationPeerStatics_UWP =
+            { 0x562f7fb0, 0xa331, 0x4a9c, { 0x9d, 0xec, 0xbf, 0xb7, 0x58, 0x6f, 0xff, 0xff } };
         if (IsEqualGUID( iid, &IID_IFrameworkElementAutomationPeerFactory_UWP ))
         {
-            *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
+            *out = (void *)&f->IComposableFactory_iface;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IAutomationPeerStatics_UWP ))
+        {
+            *out = (void *)&f->IStatics_iface;
+            return S_OK;
+        }
+    }
+    {
+        static const GUID IID_IRichEditBoxFactory_UWP =
+            { 0x61a1df62, 0x2806, 0x41ed, { 0x88, 0xed, 0xae, 0x21, 0xf4, 0x7a, 0xb4, 0x22 } };
+        if (IsEqualGUID( iid, &IID_IRichEditBoxFactory_UWP ))
+        {
+            *out = (void *)&f->IComposableFactory_iface;
             return S_OK;
         }
     }
     if (IsEqualGUID( iid, &IID_IUIElementStatics_UWP ))
     {
-        *out = (void *)&uwp_uielement_statics_obj;
+        *out = f->IUIElementStatics_iface.lpVtbl ? (void *)&f->IUIElementStatics_iface : (void *)&f->IStatics_iface;
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IUIElementStatics4_UWP ) ||
@@ -644,7 +662,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IUIElementStatics7_UWP ) ||
         IsEqualGUID( iid, &IID_IUIElementStatics8_UWP ))
     {
-        *out = (void *)&uwp_uielement_routed_statics_obj;
+        *out = f->IUIElementRoutedStatics_iface.lpVtbl ? (void *)&f->IUIElementRoutedStatics_iface : (void *)&f->IStatics_iface;
         return S_OK;
     }
     {
@@ -654,16 +672,23 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             IsEqualGUID( iid, &IID_IGridStatics_UWP2 ) ||
             IsEqualGUID( iid, &IID_IGridStatics_UWP3 ))
         {
-            *out = (void *)&uwp_grid_statics_obj;
+            *out = f->IGridStatics_iface.lpVtbl ? (void *)&f->IGridStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
         }
     }
     {
         static const GUID IID_IFocusManagerStatics_UWP =
             { 0x1eccd326, 0x8182, 0x4482, { 0x82, 0x6a, 0x09, 0x18, 0xe9, 0xed, 0x9a, 0xf7 } };
+        static const GUID IID_IFocusManagerStatics4_UWP =
+            { 0x280edc61, 0x207a, 0x4d7b, { 0xb9, 0x8f, 0xce, 0x16, 0x5e, 0x1b, 0x20, 0x15 } };
         if (IsEqualGUID( iid, &IID_IFocusManagerStatics_UWP ))
         {
-            *out = (void *)&uwp_focus_manager_statics_obj;
+            *out = f->IFocusManagerStatics_iface.lpVtbl ? (void *)&f->IFocusManagerStatics_iface : (void *)&f->IStatics_iface;
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IFocusManagerStatics4_UWP ))
+        {
+            *out = (void *)&uwp_fm4_statics_obj;
             return S_OK;
         }
     }
@@ -695,19 +720,19 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             IsEqualGUID( iid, &IID_ISwapChainPanelFactory_UWP ) ||
             IsEqualGUID( iid, &IID_IFontIconFactory_UWP ))
         {
-            *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
+            *out = (void *)&f->IComposableFactory_iface;
             return S_OK;
         }
     }
     {
         static const GUID IID_IBitmapImageFactory_UWP =
             { 0xc9132978, 0x4810, 0x4e5e, { 0x80, 0x87, 0x03, 0x67, 0x1e, 0xe6, 0x0d, 0x85 } };
-        if (IsEqualGUID( iid, &IID_IBitmapImageFactory_UWP ) && f && f->IBitmapImageFactory_iface.lpVtbl)
+        if (IsEqualGUID( iid, &IID_IBitmapImageFactory_UWP ) && f->IBitmapImageFactory_iface.lpVtbl)
         {
             *out = (void *)&f->IBitmapImageFactory_iface;
             return S_OK;
         }
-        if (IsEqualGUID( iid, &IID_IFontFamilyFactory_UWP ) && f && f->IFontFamilyFactory_iface.lpVtbl)
+        if (IsEqualGUID( iid, &IID_IFontFamilyFactory_UWP ) && f->IFontFamilyFactory_iface.lpVtbl)
         {
             *out = (void *)&f->IFontFamilyFactory_iface;
             return S_OK;
@@ -757,10 +782,10 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IKeyboardAcceleratorFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IContentDialogFactory_UWP ))
     {
-        *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
+        *out = (void *)&f->IComposableFactory_iface;
         return S_OK;
     }
-    if (f && (f->factory_flags & UWP_FF_COMPOSABLE_FALLBACK))
+    if (f->factory_flags & UWP_FF_COMPOSABLE_FALLBACK)
     {
         WARN( "uwp_cf_QI(%s) unknown iid %s -> ComposableFactory fallback\n",
               debugstr_w(f->class_name), debugstr_guid(iid) );
@@ -772,7 +797,7 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
             { 0xc9bc3725, 0xf34f, 0x445c, { 0x81, 0xa2, 0x6b, 0x72, 0xa5, 0xe8, 0xf0, 0x72 } };
         if (IsEqualGUID( iid, &IID_IXamlMarkupHelperStatics_UWP ))
         {
-            *out = (void *)&xaml_markup_helper_statics_obj;
+            *out = f->IXamlMarkupHelperStatics_iface.lpVtbl ? (void *)&f->IXamlMarkupHelperStatics_iface : (void *)&f->IStatics_iface;
             return S_OK;
         }
         if (IsEqualGUID( iid, &IID_ILoadedImageSurfaceStatics_UWP ))
@@ -783,8 +808,8 @@ HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
     }
     /* Unknown IID on factory: log so we can see exact Statics/Factory IID, return Statics */
     WARN( "uwp_cf_QI(%s) unknown iid %s -> Statics fallback\n",
-          f ? debugstr_w(f->class_name) : "?", debugstr_guid(iid) );
-    *out = f ? (void *)&f->IStatics_iface : (void *)iface;
+          debugstr_w(f->class_name), debugstr_guid(iid) );
+    *out = (void *)&f->IStatics_iface;
     return S_OK;
 }
 ULONG WINAPI uwp_cf_AddRef( IActivationFactory *iface ) { return 2; }
@@ -926,7 +951,7 @@ static HRESULT WINAPI uwp_sel_statics_IsSyncCur( void *iface, void **out )
 {
     return uwp_get_named_singleton_dp( &g_sel_dp_sync_cur, L"IsSynchronizedWithCurrentItem", out );
 }
-static const void *uwp_selector_statics_vtbl[16] =
+const void *uwp_selector_statics_vtbl[16] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -941,7 +966,6 @@ static const void *uwp_selector_statics_vtbl[16] =
     [10] = uwp_sel_statics_IsSyncCur,
     [11 ... 15] = uwp_cf_dp_prop,
 };
-static const void *uwp_selector_statics_obj = uwp_selector_statics_vtbl;
 
 static IDependencyProperty *g_bb_dp_click_mode = NULL;
 static IDependencyProperty *g_bb_dp_is_ptr_over = NULL;
@@ -969,7 +993,7 @@ static HRESULT WINAPI uwp_bb_statics_CommandParameter( void *iface, void **out )
 {
     return uwp_get_named_singleton_dp( &g_bb_dp_command_param, L"CommandParameter", out );
 }
-static const void *uwp_buttonbase_statics_vtbl[16] =
+const void *uwp_buttonbase_statics_vtbl[16] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -984,7 +1008,8 @@ static const void *uwp_buttonbase_statics_vtbl[16] =
     [10] = uwp_bb_statics_CommandParameter,
     [11 ... 15] = uwp_cf_dp_prop,
 };
-static const void *uwp_buttonbase_statics_obj = uwp_buttonbase_statics_vtbl;
+
+static IDependencyProperty *g_pr_dp_isactive = NULL;
 
 static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
 {
@@ -1004,6 +1029,8 @@ static HRESULT WINAPI uwp_cf_dp_prop_slot6( void *iface, void **out )
             dp_name = L"Flyout";
         else if (f->factory_flags & UWP_FF_TOGGLE_BTN_OR_MENU)
             dp_name = L"IsChecked";
+        else if (f->class_name && !wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.ProgressRing" ))
+            return uwp_get_named_singleton_dp( &g_pr_dp_isactive, L"IsActive", out );
     }
     hr = dependency_property_create( NULL, (IDependencyProperty **)out );
     if (SUCCEEDED(hr) && *out && dp_name)
@@ -1040,7 +1067,7 @@ static const GUID IID_IUIElementStatics7_UWP =
 static const GUID IID_IUIElementStatics8_UWP =
     { 0xa6890878, 0x664e, 0x4679, { 0x9c, 0x6b, 0x96, 0x67, 0x25, 0x16, 0x2f, 0x59 } };
 
-static const void *uwp_uielement_routed_statics_vtbl[32] =
+const void *uwp_uielement_routed_statics_vtbl[32] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1050,7 +1077,6 @@ static const void *uwp_uielement_routed_statics_vtbl[32] =
     [5] = uwp_cf_GetTrustLevel,
     [6 ... 31] = uwp_cf_routed_event_other,
 };
-static const void *uwp_uielement_routed_statics_obj = uwp_uielement_routed_statics_vtbl;
 
 static HRESULT WINAPI uwp_grid_statics_SetProp( void *iface, void *elem, INT32 val )
 {
@@ -1061,7 +1087,7 @@ static HRESULT WINAPI uwp_grid_statics_GetProp( void *iface, void *elem, INT32 *
     if (out) *out = 0;
     return S_OK;
 }
-static const void *uwp_grid_statics_vtbl[24] =
+const void *uwp_grid_statics_vtbl[24] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1083,7 +1109,6 @@ static const void *uwp_grid_statics_vtbl[24] =
     [17] = uwp_grid_statics_SetProp,  /* SetColumnSpan */
     [18 ... 23] = uwp_generic_noop,
 };
-static const void *uwp_grid_statics_obj = uwp_grid_statics_vtbl;
 
 static HRESULT WINAPI uwp_fm_GetFocusedElement( void *iface, void **out )
 {
@@ -1106,7 +1131,7 @@ static HRESULT WINAPI uwp_fm_FindNextFocusableElementWithHint( void *iface, int 
     if (out) *out = NULL;
     return S_OK;
 }
-static const void *uwp_focus_manager_statics_vtbl[16] =
+const void *uwp_focus_manager_statics_vtbl[16] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1120,9 +1145,234 @@ static const void *uwp_focus_manager_statics_vtbl[16] =
     [9] = uwp_fm_FindNextFocusableElementWithHint,
     [10 ... 15] = uwp_generic_noop,
 };
-static const void *uwp_focus_manager_statics_obj = uwp_focus_manager_statics_vtbl;
 
-static const void *uwp_uielement_statics_vtbl[64] =
+/* IFocusManagerStatics4 ({280edc61-207a-4d7b-b98f-ce165e1b2015}) */
+struct fm_focus_result
+{
+    const void *lpVtbl;
+    LONG ref;
+    boolean succeeded;
+};
+static HRESULT WINAPI fm_res_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IFocusMovementResult =
+        { 0x3d6f5f61, 0x754c, 0x4399, { 0x98, 0x43, 0x7a, 0x50, 0x85, 0x31, 0xb5, 0xe0 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IFocusMovementResult ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct fm_focus_result *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI fm_res_AddRef( void *iface ) { return InterlockedIncrement( &((struct fm_focus_result *)iface)->ref ); }
+static ULONG WINAPI fm_res_Release( void *iface )
+{
+    struct fm_focus_result *r = iface;
+    ULONG ref = InterlockedDecrement( &r->ref );
+    if (!ref) free( r );
+    return ref;
+}
+static HRESULT WINAPI fm_res_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI fm_res_GetRuntimeClassName( void *iface, HSTRING *n )
+{ return WindowsCreateString( L"Windows.UI.Xaml.Input.FocusMovementResult", 41, n ); }
+static HRESULT WINAPI fm_res_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI fm_res_get_Succeeded( void *iface, boolean *val )
+{
+    struct fm_focus_result *r = iface;
+    if (val) *val = r->succeeded;
+    return S_OK;
+}
+static const void * const fm_res_vtbl[] =
+{
+    fm_res_QI, fm_res_AddRef, fm_res_Release, fm_res_GetIids, fm_res_GetRuntimeClassName, fm_res_GetTrustLevel,
+    fm_res_get_Succeeded,
+};
+
+struct fm_async_op
+{
+    const void *lpVtbl_op;
+    const void *lpVtbl_info;
+    LONG ref;
+    void *handler;
+    boolean succeeded;
+};
+static HRESULT WINAPI fm_op_QI( void *iface, REFIID iid, void **out )
+{
+    struct fm_async_op *impl = CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_op );
+    static const GUID IID_IAsyncOp_FocusMovementResult =
+        { 0xc5798ff6, 0x6406, 0x5781, { 0x86, 0x41, 0x5a, 0x02, 0x80, 0x47, 0x23, 0xd8 } };
+    static const GUID IID_IAsyncInfo_local =
+        { 0x00000036, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncOp_FocusMovementResult ))
+    {
+        *out = &impl->lpVtbl_op;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo_local ))
+    {
+        *out = &impl->lpVtbl_info;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI fm_op_AddRef( void *iface )
+{ return InterlockedIncrement( &CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_op )->ref ); }
+static ULONG WINAPI fm_op_Release( void *iface )
+{
+    struct fm_async_op *impl = CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_op );
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) { if (impl->handler) IUnknown_Release( (IUnknown *)impl->handler ); free( impl ); }
+    return r;
+}
+static HRESULT WINAPI fm_op_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI fm_op_GetRuntimeClassName( void *iface, HSTRING *n )
+{ return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<Windows.UI.Xaml.Input.FocusMovementResult>", 79, n ); }
+static HRESULT WINAPI fm_op_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI fm_op_put_Completed( void *iface, void *handler )
+{
+    struct fm_async_op *impl = CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_op );
+    if (impl->handler) IUnknown_Release( (IUnknown *)impl->handler );
+    impl->handler = handler;
+    if (handler)
+    {
+        const struct abi_async_op_completed_handler *ah = (const struct abi_async_op_completed_handler *)handler;
+        IUnknown_AddRef( (IUnknown *)handler );
+        ah->lpVtbl->Invoke( handler, &impl->lpVtbl_op, 1 );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI fm_op_get_Completed( void *iface, void **out )
+{
+    struct fm_async_op *impl = CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_op );
+    if (!out) return E_POINTER;
+    *out = impl->handler;
+    if (*out) IUnknown_AddRef( (IUnknown *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI fm_op_GetResults( void *iface, void **out )
+{
+    struct fm_async_op *impl = CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_op );
+    struct fm_focus_result *res;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    res = calloc( 1, sizeof(*res) );
+    if (!res) return E_OUTOFMEMORY;
+    res->lpVtbl = fm_res_vtbl;
+    res->ref = 1;
+    res->succeeded = impl->succeeded;
+    *out = res;
+    return S_OK;
+}
+static HRESULT WINAPI fm_info_QI( void *iface, REFIID iid, void **out )
+{ return fm_op_QI( &CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_info )->lpVtbl_op, iid, out ); }
+static ULONG WINAPI fm_info_AddRef( void *iface )
+{ return fm_op_AddRef( &CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_info )->lpVtbl_op ); }
+static ULONG WINAPI fm_info_Release( void *iface )
+{ return fm_op_Release( &CONTAINING_RECORD( iface, struct fm_async_op, lpVtbl_info )->lpVtbl_op ); }
+static HRESULT WINAPI fm_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI fm_info_get_Status( void *iface, UINT32 *st ) { if (st) *st = 1; return S_OK; }
+static HRESULT WINAPI fm_info_get_ErrorCode( void *iface, HRESULT *hr ) { if (hr) *hr = S_OK; return S_OK; }
+static HRESULT WINAPI fm_info_Cancel( void *iface ) { return S_OK; }
+static HRESULT WINAPI fm_info_Close( void *iface ) { return S_OK; }
+static const void * const fm_op_vtbl[] =
+{
+    fm_op_QI, fm_op_AddRef, fm_op_Release, fm_op_GetIids, fm_op_GetRuntimeClassName, fm_op_GetTrustLevel,
+    fm_op_put_Completed, fm_op_get_Completed, fm_op_GetResults,
+};
+static const void * const fm_info_vtbl[] =
+{
+    fm_info_QI, fm_info_AddRef, fm_info_Release, fm_op_GetIids, fm_op_GetRuntimeClassName, fm_op_GetTrustLevel,
+    fm_info_get_Id, fm_info_get_Status, fm_info_get_ErrorCode, fm_info_Cancel, fm_info_Close,
+};
+static HRESULT fm_create_async_op( boolean succeeded, void **out )
+{
+    struct fm_async_op *op;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    op = calloc( 1, sizeof(*op) );
+    if (!op) return E_OUTOFMEMORY;
+    op->lpVtbl_op = fm_op_vtbl;
+    op->lpVtbl_info = fm_info_vtbl;
+    op->ref = 1;
+    op->succeeded = succeeded;
+    *out = &op->lpVtbl_op;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_fm4_TryFocusAsync( void *iface, void *el, int focus_state, void **out )
+{ return fm_create_async_op( TRUE, out ); }
+static HRESULT WINAPI uwp_fm4_TryMoveFocusAsync( void *iface, int dir, void **out )
+{ return fm_create_async_op( FALSE, out ); }
+static HRESULT WINAPI uwp_fm4_TryMoveFocusWithOptionsAsync( void *iface, int dir, void *opts, void **out )
+{ return fm_create_async_op( FALSE, out ); }
+static HRESULT WINAPI uwp_fm4_FindNextElement( void *iface, int dir, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI uwp_fm4_FindNextElementWithOptions( void *iface, int dir, void *opts, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI uwp_fm4_FindFirstLast( void *iface, void *scope, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI uwp_fm4_GetFocusedElementWithRoot( void *iface, void *root, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static const void *uwp_fm4_statics_vtbl[16];
+static struct uwp_fm4_statics_s uwp_fm4_statics_obj = { uwp_fm4_statics_vtbl };
+
+static HRESULT WINAPI uwp_fm4_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IFocusManagerStatics4_UWP =
+        { 0x280edc61, 0x207a, 0x4d7b, { 0xb9, 0x8f, 0xce, 0x16, 0x5e, 0x1b, 0x20, 0x15 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IFocusManagerStatics4_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_fm4_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI uwp_fm4_Release( void *iface ) { return 1; }
+static HRESULT WINAPI uwp_fm4_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI uwp_fm4_GetRuntimeClassName( void *iface, HSTRING *n )
+{ return WindowsCreateString( L"Windows.UI.Xaml.Input.FocusManager", 34, n ); }
+static HRESULT WINAPI uwp_fm4_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+
+static const void *uwp_fm4_statics_vtbl[16] =
+{
+    [0] = uwp_fm4_QI,
+    [1] = uwp_fm4_AddRef,
+    [2] = uwp_fm4_Release,
+    [3] = uwp_fm4_GetIids,
+    [4] = uwp_fm4_GetRuntimeClassName,
+    [5] = uwp_fm4_GetTrustLevel,
+    [6] = uwp_fm4_TryFocusAsync,
+    [7] = uwp_fm4_TryMoveFocusAsync,
+    [8] = uwp_fm4_TryMoveFocusWithOptionsAsync,
+    [9] = uwp_fm4_FindNextElement,
+    [10] = uwp_fm4_FindNextElementWithOptions,
+    [11] = uwp_fm4_FindFirstLast,
+    [12] = uwp_fm4_FindFirstLast,
+    [13] = uwp_fm4_GetFocusedElementWithRoot,
+    [14 ... 15] = uwp_generic_noop,
+};
+
+static IDependencyProperty *g_ui_dp_visibility = NULL;
+
+static HRESULT WINAPI uwp_uielement_statics_Visibility( void *iface, void **out )
+{
+    return uwp_get_named_singleton_dp( &g_ui_dp_visibility, L"Visibility", out );
+}
+
+const void *uwp_uielement_statics_vtbl[64] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1137,9 +1387,10 @@ static const void *uwp_uielement_statics_vtbl[64] =
     [12 ... 15] = uwp_cf_routed_event_other,
     [16] = uwp_cf_routed_event_tapped,
     [17 ... 24] = uwp_cf_routed_event_other,
-    [25 ... 63] = uwp_cf_dp_prop,
+    [25 ... 34] = uwp_cf_dp_prop,
+    [35] = uwp_uielement_statics_Visibility,
+    [36 ... 63] = uwp_cf_dp_prop,
 };
-static const void *uwp_uielement_statics_obj = uwp_uielement_statics_vtbl;
 
 static HRESULT WINAPI uwp_cf_dp_prop_slot9( void *iface, void **out )
 {
@@ -1255,8 +1506,7 @@ static SRWLOCK g_ct_rendering_lock = SRWLOCK_INIT;
 static HRESULT WINAPI comp_target_add_Rendering( void *iface, void *handler, EventRegistrationToken *tok )
 {
     INT64 t = InterlockedIncrement( &g_ct_rendering_next_tok );
-    if (tok && (ULONG_PTR)tok > 0x10000 && !IsBadWritePtr( tok, sizeof(*tok) ))
-        tok->value = t;
+    if (tok) tok->value = t;
     if (handler)
     {
         AcquireSRWLockExclusive( &g_ct_rendering_lock );
@@ -1566,7 +1816,7 @@ static HRESULT WINAPI binding_ops_SetBinding( void *iface, void *target, void *d
     uwp_apply_binding( tel, dp, bel );
     return S_OK;
 }
-static const void *binding_ops_statics_vtbl[8] =
+const void *binding_ops_statics_vtbl[8] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1577,7 +1827,6 @@ static const void *binding_ops_statics_vtbl[8] =
     [6] = binding_ops_SetBinding,
     [7] = uwp_generic_noop,
 };
-static const void *binding_ops_statics_obj = binding_ops_statics_vtbl;
 
 static HRESULT WINAPI thickness_helper_FromLengths( void *iface, double left, double top, double right, double bottom, double *out )
 {
@@ -1594,7 +1843,7 @@ static HRESULT WINAPI thickness_helper_FromUniformLength( void *iface, double un
     out[0] = out[1] = out[2] = out[3] = uniform;
     return S_OK;
 }
-static const void *thickness_helper_statics_vtbl[8] =
+const void *thickness_helper_statics_vtbl[8] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1605,7 +1854,6 @@ static const void *thickness_helper_statics_vtbl[8] =
     [6] = thickness_helper_FromLengths,
     [7] = thickness_helper_FromUniformLength,
 };
-static const void *thickness_helper_statics_obj = thickness_helper_statics_vtbl;
 
 static HRESULT WINAPI xaml_markup_helper_UnloadObject( void *iface, void *element )
 {
@@ -1619,7 +1867,7 @@ static HRESULT WINAPI xaml_markup_helper_UnloadObject( void *iface, void *elemen
     }
     return S_OK;
 }
-static const void *xaml_markup_helper_statics_vtbl[16] =
+const void *xaml_markup_helper_statics_vtbl[16] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -1630,7 +1878,6 @@ static const void *xaml_markup_helper_statics_vtbl[16] =
     [6] = xaml_markup_helper_UnloadObject,
     [7 ... 15] = uwp_generic_noop,
 };
-static const void *xaml_markup_helper_statics_obj = xaml_markup_helper_statics_vtbl;
 
 const void *uwp_cf_statics_vtbl[64] =
 {
@@ -1670,6 +1917,16 @@ const void *uwp_cf_statics_vtbl[64] =
     [46 ... 63] = uwp_generic_noop,
 };
 
+static IDependencyProperty *g_ctrl_dp_isenabled = NULL;
+
+static HRESULT WINAPI uwp_dp_statics_slot14( void *iface, void **out )
+{
+    struct uwp_class_factory *f = uwp_cf_from_any( iface );
+    if (f && f->class_name && !wcscmp( f->class_name, L"Windows.UI.Xaml.Controls.Control" ))
+        return uwp_get_named_singleton_dp( &g_ctrl_dp_isenabled, L"IsEnabled", out );
+    return uwp_cf_dp_prop( iface, out );
+}
+
 const void *uwp_dp_statics_vtbl[32] =
 {
     [0] = uwp_cf_QI,
@@ -1679,7 +1936,9 @@ const void *uwp_dp_statics_vtbl[32] =
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
     [6] = uwp_cf_dp_prop_slot6,
-    [7 ... 31] = uwp_cf_dp_prop,
+    [7 ... 13] = uwp_cf_dp_prop,
+    [14] = uwp_dp_statics_slot14,
+    [15 ... 31] = uwp_cf_dp_prop,
 };
 
 /* VisualStateManagerStatics (slot 6 = GoToState(Control, HSTRING, bool, bool*), slot 7 = GetVisualStateGroups) */

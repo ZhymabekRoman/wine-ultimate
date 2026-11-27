@@ -339,13 +339,7 @@ static HRESULT WINAPI uwp_mfi_get_Text( void *iface, HSTRING *out )
 static HRESULT WINAPI uwp_mfi_put_Text( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    const WCHAR *raw;
-    if ((ULONG_PTR)val < 0x10000)
-    {
-        if (val) WARN( "uwp_mfi_put_Text: non-pointer val=%p (possible vtable slot mismatch)\n", val );
-        return S_OK;
-    }
-    raw = WindowsGetStringRawBuffer( val, NULL );
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
     if (impl && raw) uwp_elem_set_text( impl, raw );
     return S_OK;
 }
@@ -378,13 +372,7 @@ static HRESULT WINAPI uwp_mfi3_get_AccelText( void *iface, HSTRING *out )
 static HRESULT WINAPI uwp_mfi3_put_AccelText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    const WCHAR *raw;
-    if ((ULONG_PTR)val < 0x10000)
-    {
-        if (val) WARN( "uwp_mfi3_put_AccelText: non-pointer val=%p (possible vtable slot mismatch)\n", val );
-        return S_OK;
-    }
-    raw = WindowsGetStringRawBuffer( val, NULL );
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
     if (impl && raw) uwp_elem_set_accel_text( impl, raw );
     return S_OK;
 }
@@ -795,7 +783,7 @@ static HRESULT WINAPI uwp_cd_get_PrimaryButtonText( void *iface, HSTRING *out )
 static HRESULT WINAPI uwp_cd_put_PrimaryButtonText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
     struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
     if (d) lstrcpynW( d->dialog_primary_text, raw ? raw : L"", ARRAY_SIZE(d->dialog_primary_text) );
     return S_OK;
@@ -810,7 +798,7 @@ static HRESULT WINAPI uwp_cd_get_SecondaryButtonText( void *iface, HSTRING *out 
 static HRESULT WINAPI uwp_cd_put_SecondaryButtonText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
     struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
     if (d) lstrcpynW( d->dialog_secondary_text, raw ? raw : L"", ARRAY_SIZE(d->dialog_secondary_text) );
     return S_OK;

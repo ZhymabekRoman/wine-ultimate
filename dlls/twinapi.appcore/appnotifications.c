@@ -385,6 +385,15 @@ static HRESULT create_app_notification_activated_args( HSTRING argument,
     return S_OK;
 }
 
+static CRITICAL_SECTION app_notif_cs;
+static CRITICAL_SECTION_DEBUG app_notif_cs_debug =
+{
+    0, 0, &app_notif_cs,
+    { &app_notif_cs_debug.ProcessLocksList, &app_notif_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": app_notif_cs") }
+};
+static CRITICAL_SECTION app_notif_cs = { &app_notif_cs_debug, -1, 0, 0, 0, 0 };
+
 /*
  * Microsoft.Windows.AppNotifications.AppNotification: carries the XML
  * payload string the manager shows through the notification daemon.
@@ -443,11 +452,13 @@ static ULONG WINAPI app_notification_Release( IAppNotification *iface )
     {
         TRACE( "destroying %p\n", iface );
         if (impl->progress) IInspectable_Release( impl->progress );
+        EnterCriticalSection( &app_notif_cs );
         if (!list_empty( &impl->shown_entry ))
         {
             list_remove( &impl->shown_entry );
             list_init( &impl->shown_entry );
         }
+        LeaveCriticalSection( &app_notif_cs );
         WindowsDeleteString( impl->tag );
         WindowsDeleteString( impl->group );
         WindowsDeleteString( impl->payload );
@@ -479,12 +490,15 @@ static HRESULT WINAPI app_notification_GetTrustLevel( IAppNotification *iface, T
 
 static HRESULT app_notification_set_hstring( HSTRING *field, HSTRING value )
 {
-    HSTRING dup = NULL;
+    HSTRING dup = NULL, old;
     HRESULT hr;
 
     if (value && FAILED( hr = WindowsDuplicateString( value, &dup ) )) return hr;
-    WindowsDeleteString( *field );
+    EnterCriticalSection( &app_notif_cs );
+    old = *field;
     *field = dup;
+    LeaveCriticalSection( &app_notif_cs );
+    WindowsDeleteString( old );
     return S_OK;
 }
 
@@ -732,12 +746,14 @@ static ULONG WINAPI app_notification_manager_Release( IAppNotificationManager *i
         struct app_notification_sink *sink, *next;
 
         TRACE( "destroying %p\n", iface );
+        EnterCriticalSection( &app_notif_cs );
         LIST_FOR_EACH_ENTRY_SAFE( sink, next, &impl->sinks, struct app_notification_sink, entry )
         {
             list_remove( &sink->entry );
             IUnknown_Release( (IUnknown *)sink->handler );
             free( sink );
         }
+        LeaveCriticalSection( &app_notif_cs );
         free( impl );
     }
     return ref;
@@ -800,7 +816,9 @@ static HRESULT WINAPI app_notification_manager_add_NotificationInvoked( IAppNoti
     sink->token.value = (ULONGLONG)InterlockedIncrement( &app_notification_token );
     sink->handler = handler;
     IUnknown_AddRef( (IUnknown *)handler );
+    EnterCriticalSection( &app_notif_cs );
     list_add_tail( &impl->sinks, &sink->entry );
+    LeaveCriticalSection( &app_notif_cs );
     *token = sink->token;
     return S_OK;
 }
@@ -810,17 +828,21 @@ static HRESULT WINAPI app_notification_manager_remove_NotificationInvoked( IAppN
 {
     struct app_notification_manager *impl = impl_from_IAppNotificationManager( iface );
     struct app_notification_sink *sink, *next;
+    void *to_release = NULL;
 
     TRACE( "iface %p, token %s.\n", iface, wine_dbgstr_longlong( token.value ) );
 
+    EnterCriticalSection( &app_notif_cs );
     LIST_FOR_EACH_ENTRY_SAFE( sink, next, &impl->sinks, struct app_notification_sink, entry )
     {
         if (sink->token.value != token.value) continue;
         list_remove( &sink->entry );
-        IUnknown_Release( (IUnknown *)sink->handler );
+        to_release = sink->handler;
         free( sink );
         break;
     }
+    LeaveCriticalSection( &app_notif_cs );
+    if (to_release) IUnknown_Release( (IUnknown *)to_release );
     return S_OK;
 }
 
@@ -841,8 +863,11 @@ static HRESULT show_app_notification( struct app_notification_manager *impl, __x
         return hr;
 
     hr = IAppNotification_get_Payload( notif, &xml );
-    IAppNotification_Release( notif );
-    if (FAILED( hr )) return hr;
+    if (FAILED( hr ))
+    {
+        IAppNotification_Release( notif );
+        return hr;
+    }
 
     /* The payload is a toast XML string; parse and extract it like a
      * ToastNotification content document. */
@@ -875,6 +900,7 @@ static HRESULT show_app_notification( struct app_notification_manager *impl, __x
         IInspectable_Release( (IInspectable *)doc );
         if (FAILED( hr ))
         {
+            IAppNotification_Release( notif );
             toast_payload_free( &payload );
             return hr;
         }
@@ -889,9 +915,11 @@ static HRESULT show_app_notification( struct app_notification_manager *impl, __x
     params.replaces_id = obj->fd_id;
     if (TWINAPI_CALL( fd_notify, &params ) == STATUS_SUCCESS && params.id)
     {
+        HSTRING old_launch;
+        EnterCriticalSection( &app_notif_cs );
         obj->fd_id = params.id;
         obj->id = params.id;
-        WindowsDeleteString( obj->launch_args );
+        old_launch = obj->launch_args;
         obj->launch_args = payload.launch;
         payload.launch = NULL;
         if (list_empty( &obj->shown_entry ))
@@ -899,27 +927,47 @@ static HRESULT show_app_notification( struct app_notification_manager *impl, __x
             IInspectable_AddRef( (IInspectable *)notification );
             list_add_tail( &shown_app_notifications, &obj->shown_entry );
         }
+        LeaveCriticalSection( &app_notif_cs );
+        WindowsDeleteString( old_launch );
         TRACE( "delivered AppNotification as notification id %u\n", params.id );
     }
+    IAppNotification_Release( notif );
     toast_payload_free( &payload );
     return S_OK;
 }
 
 static void app_notification_manager_fire( struct app_notification_manager *impl, HSTRING argument )
 {
-    __FITypedEventHandler_2_Microsoft__CWindows__CAppNotifications__CAppNotificationManager_Microsoft__CWindows__CAppNotifications__CAppNotificationActivatedEventArgs *handler;
+    __FITypedEventHandler_2_Microsoft__CWindows__CAppNotifications__CAppNotificationManager_Microsoft__CWindows__CAppNotifications__CAppNotificationActivatedEventArgs **handlers = NULL;
     struct app_notification_activated_args *args;
     struct app_notification_sink *sink;
+    UINT32 count = 0, i = 0;
 
-    if (FAILED( create_app_notification_activated_args( argument, &args ) )) return;
-
-    LIST_FOR_EACH_ENTRY( sink, &impl->sinks, struct app_notification_sink, entry )
+    EnterCriticalSection( &app_notif_cs );
+    LIST_FOR_EACH_ENTRY( sink, &impl->sinks, struct app_notification_sink, entry ) count++;
+    if (count && (handlers = malloc( count * sizeof(*handlers) )))
     {
-        handler = sink->handler;
-        handler->lpVtbl->Invoke( handler, &impl->IAppNotificationManager_iface,
-                                 &args->IAppNotificationActivatedEventArgs_iface );
+        LIST_FOR_EACH_ENTRY( sink, &impl->sinks, struct app_notification_sink, entry )
+        {
+            handlers[i] = sink->handler;
+            IUnknown_AddRef( (IUnknown *)handlers[i] );
+            i++;
+        }
     }
-    IUnknown_Release( (IUnknown *)&args->IAppNotificationActivatedEventArgs_iface );
+    LeaveCriticalSection( &app_notif_cs );
+    if (!count || !handlers) return;
+
+    if (SUCCEEDED( create_app_notification_activated_args( argument, &args ) ))
+    {
+        for (i = 0; i < count; i++)
+        {
+            handlers[i]->lpVtbl->Invoke( handlers[i], &impl->IAppNotificationManager_iface,
+                                         &args->IAppNotificationActivatedEventArgs_iface );
+        }
+        IUnknown_Release( (IUnknown *)&args->IAppNotificationActivatedEventArgs_iface );
+    }
+    for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+    free( handlers );
 }
 
 /* Drain queued daemon events onto the NotificationInvoked handlers of the
@@ -931,12 +979,22 @@ static void app_notification_manager_drain( struct app_notification_manager *imp
 
     while (TWINAPI_CALL( fd_event, &params ) == STATUS_SUCCESS && params.got_event)
     {
+        HSTRING launch = NULL;
+        BOOL matched = FALSE;
         if (!params.got_event || params.reason != 2) continue;
+        EnterCriticalSection( &app_notif_cs );
         LIST_FOR_EACH_ENTRY( obj, &shown_app_notifications, struct app_notification, shown_entry )
         {
             if (obj->fd_id != params.id) continue;
-            app_notification_manager_fire( impl, obj->launch_args );
+            if (obj->launch_args) WindowsDuplicateString( obj->launch_args, &launch );
+            matched = TRUE;
             break;
+        }
+        LeaveCriticalSection( &app_notif_cs );
+        if (matched)
+        {
+            app_notification_manager_fire( impl, launch );
+            WindowsDeleteString( launch );
         }
     }
 }
@@ -1152,12 +1210,16 @@ static HRESULT WINAPI completed_action_put_Completed( IAsyncAction *iface,
         IAsyncActionCompletedHandler *handler )
 {
     struct completed_async *impl = impl_from_completed_IAsyncAction( iface );
+    IAsyncActionCompletedHandler *old_handler;
 
     TRACE( "iface %p, handler %p.\n", iface, handler );
 
     if (handler) IUnknown_AddRef( (IUnknown *)handler );
-    if (impl->action_handler) IUnknown_Release( (IUnknown *)impl->action_handler );
+    EnterCriticalSection( &app_notif_cs );
+    old_handler = impl->action_handler;
     impl->action_handler = handler;
+    LeaveCriticalSection( &app_notif_cs );
+    if (old_handler) IUnknown_Release( (IUnknown *)old_handler );
     /* The operation is already done: report it to the handler inline. */
     if (handler) IAsyncActionCompletedHandler_Invoke( handler, iface, Completed );
     return S_OK;
@@ -1169,8 +1231,10 @@ static HRESULT WINAPI completed_action_get_Completed( IAsyncAction *iface,
     struct completed_async *impl = impl_from_completed_IAsyncAction( iface );
 
     if (!handler) return E_POINTER;
-    if (impl->action_handler) IUnknown_AddRef( (IUnknown *)impl->action_handler );
+    EnterCriticalSection( &app_notif_cs );
     *handler = impl->action_handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    LeaveCriticalSection( &app_notif_cs );
     return S_OK;
 }
 
@@ -1197,12 +1261,16 @@ static HRESULT WINAPI completed_op_put_Completed( __FIAsyncOperation_1_AppNotifi
         __FIAsyncOperationCompletedHandler_1_AppNotificationProgressResult *handler )
 {
     struct completed_async *impl = impl_from_completed_op( iface );
+    __FIAsyncOperationCompletedHandler_1_AppNotificationProgressResult *old_handler;
 
     TRACE( "iface %p, handler %p.\n", iface, handler );
 
     if (handler) IUnknown_AddRef( (IUnknown *)handler );
-    if (impl->op_handler) IUnknown_Release( (IUnknown *)impl->op_handler );
+    EnterCriticalSection( &app_notif_cs );
+    old_handler = impl->op_handler;
     impl->op_handler = handler;
+    LeaveCriticalSection( &app_notif_cs );
+    if (old_handler) IUnknown_Release( (IUnknown *)old_handler );
     if (handler)
         __FIAsyncOperationCompletedHandler_1_AppNotificationProgressResult_Invoke( handler, iface, Completed );
     return S_OK;
@@ -1214,8 +1282,10 @@ static HRESULT WINAPI completed_op_get_Completed( __FIAsyncOperation_1_AppNotifi
     struct completed_async *impl = impl_from_completed_op( iface );
 
     if (!handler) return E_POINTER;
-    if (impl->op_handler) IUnknown_AddRef( (IUnknown *)impl->op_handler );
+    EnterCriticalSection( &app_notif_cs );
     *handler = impl->op_handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    LeaveCriticalSection( &app_notif_cs );
     return S_OK;
 }
 
@@ -1354,12 +1424,21 @@ static HRESULT WINAPI app_notification_manager_RemoveByTagAndGroupAsync( IAppNot
 static HRESULT WINAPI app_notification_manager_RemoveAllAsync( IAppNotificationManager *iface,
         IAsyncAction **value )
 {
+    struct list detached = LIST_INIT( detached );
     struct app_notification *obj, *next;
     struct fd_close_params close_params;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
+    EnterCriticalSection( &app_notif_cs );
     LIST_FOR_EACH_ENTRY_SAFE( obj, next, &shown_app_notifications, struct app_notification, shown_entry )
+    {
+        list_remove( &obj->shown_entry );
+        list_add_tail( &detached, &obj->shown_entry );
+    }
+    LeaveCriticalSection( &app_notif_cs );
+
+    LIST_FOR_EACH_ENTRY_SAFE( obj, next, &detached, struct app_notification, shown_entry )
     {
         close_params.id = obj->fd_id;
         obj->fd_id = 0;

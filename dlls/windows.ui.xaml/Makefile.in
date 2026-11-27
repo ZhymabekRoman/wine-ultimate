@@ -24,15 +24,17 @@ SOURCES = \
 	resource_dict.c \
 	swapchain_panel.c \
 	uwp_binding.c \
-	uwp_brush_media.c \
+	uwp_brush.c \
 	uwp_collections.c \
 	uwp_controls.c \
 	uwp_depobj.c \
 	uwp_factories.c \
+	uwp_fonts.c \
 	uwp_framework_element.c \
 	uwp_guids.c \
 	uwp_input.c \
 	uwp_island.c \
+	uwp_media.c \
 	uwp_reflection.c \
 	uwp_resources.c \
 	uwp_statics.c \

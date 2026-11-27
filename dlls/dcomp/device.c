@@ -152,8 +152,17 @@ static const D2D_RECT_F g_default_dcomp_rect = { 0.0f, 0.0f, 1016.0f, 734.0f };
 
 static HRESULT WINAPI dcomp_6b556968_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    *out = iface;
-    return S_OK;
+    static const GUID IID_DComp_6b556968 =
+        { 0x6b556968, 0x2d25, 0x11e2, { 0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b } };
+
+    if (!out) return E_INVALIDARG;
+    if (dcomp_is_equal_guid( iid, &IID_IUnknown ) || dcomp_is_equal_guid( iid, &IID_DComp_6b556968 ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI dcomp_6b556968_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI dcomp_6b556968_Release( void *iface ) { return 1; }
@@ -254,6 +263,8 @@ static HRESULT STDMETHODCALLTYPE device_QueryInterface(IDCompositionDevice *ifac
     struct composition_device *device = impl_from_IDCompositionDevice(iface);
 
     TRACE("iface %p, iid %s, out %p\n", iface, debugstr_guid(iid), out);
+
+    if (!out) return E_INVALIDARG;
 
     if (dcomp_is_equal_guid(iid, &IID_IUnknown)
             || dcomp_is_equal_guid(iid, &IID_IDCompositionDevice))
@@ -2329,6 +2340,9 @@ HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, vo
 {
     TRACE("%p, %s, %p\n", dxgi_device, debugstr_guid(iid), device);
 
+    if (!device)
+        return E_INVALIDARG;
+    *device = NULL;
     if (!IsEqualIID(iid, &IID_IDCompositionDevice))
         return E_NOINTERFACE;
 
@@ -2339,6 +2353,9 @@ HRESULT WINAPI DCompositionCreateDevice2(IUnknown *rendering_device, REFIID iid,
 {
     TRACE("DCOMP: DCompositionCreateDevice2 rendering_device %p, iid %s, device %p\n", rendering_device, debugstr_guid(iid), device);
 
+    if (!device)
+        return E_INVALIDARG;
+    *device = NULL;
     if (!IsEqualIID(iid, &IID_IUnknown)
             && !IsEqualIID(iid, &IID_IDCompositionDevice)
             && !IsEqualIID(iid, &IID_IDCompositionDevice2)
@@ -2355,6 +2372,9 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
 {
     TRACE("DCOMP: DCompositionCreateDevice3 rendering_device %p, iid %s, device %p\n", rendering_device, debugstr_guid(iid), device);
 
+    if (!device)
+        return E_INVALIDARG;
+    *device = NULL;
     if (!IsEqualIID(iid, &IID_IUnknown)
             && !IsEqualIID(iid, &IID_IDCompositionDevice)
             && !IsEqualIID(iid, &IID_IDCompositionDevice2)

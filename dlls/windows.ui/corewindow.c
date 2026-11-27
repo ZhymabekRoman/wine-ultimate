@@ -267,9 +267,15 @@ struct core_window
     INT64 size_changed_tokens[16];
     INT64 next_size_changed_token;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *activated_handler;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *character_received_handler;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keydown_handler;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keyup_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *character_received_handlers[16];
+    INT64 character_received_tokens[16];
+    INT64 next_char_token;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keydown_handlers[16];
+    INT64 keydown_tokens[16];
+    INT64 next_keydown_token;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keyup_handlers[16];
+    INT64 keyup_tokens[16];
+    INT64 next_keyup_token;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *pointer_pressed_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *pointer_released_handler;
     __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *custom_properties;
@@ -1221,12 +1227,24 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
         }
         if (impl->activated_handler)
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Release( impl->activated_handler );
-        if (impl->character_received_handler)
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handler );
-        if (impl->keydown_handler)
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handler );
-        if (impl->keyup_handler)
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handler );
+        {
+            unsigned int i;
+            for (i = 0; i < ARRAY_SIZE( impl->character_received_handlers ); i++)
+            {
+                if (impl->character_received_handlers[i])
+                    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handlers[i] );
+            }
+            for (i = 0; i < ARRAY_SIZE( impl->keydown_handlers ); i++)
+            {
+                if (impl->keydown_handlers[i])
+                    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handlers[i] );
+            }
+            for (i = 0; i < ARRAY_SIZE( impl->keyup_handlers ); i++)
+            {
+                if (impl->keyup_handlers[i])
+                    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handlers[i] );
+            }
+        }
         if (impl->pointer_pressed_handler)
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Release( impl->pointer_pressed_handler );
         if (impl->pointer_released_handler)
@@ -1411,9 +1429,24 @@ static HRESULT WINAPI core_window_Close( ICoreWindow *iface )
     return S_OK;
 }
 static HRESULT WINAPI core_window_GetAsyncKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
-{ FIXME( "stub\n" ); if (state) *state = 0; return S_OK; }
+{
+    SHORT ks;
+    if (!state) return E_POINTER;
+    ks = GetAsyncKeyState( (int)key );
+    *state = (ks & 0x8000) ? CoreVirtualKeyStates_Down : CoreVirtualKeyStates_None;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_GetKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
-{ FIXME( "stub\n" ); if (state) *state = 0; return S_OK; }
+{
+    SHORT ks;
+    CoreVirtualKeyStates s = CoreVirtualKeyStates_None;
+    if (!state) return E_POINTER;
+    ks = GetKeyState( (int)key );
+    if (ks & 0x8000) s |= CoreVirtualKeyStates_Down;
+    if (ks & 1) s |= CoreVirtualKeyStates_Locked;
+    *state = s;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_ReleasePointerCapture( ICoreWindow *iface )
 { FIXME( "stub\n" ); return S_OK; }
 static HRESULT WINAPI core_window_SetPointerCapture( ICoreWindow *iface )
@@ -1435,24 +1468,37 @@ static HRESULT WINAPI core_window_add_CharacterReceived( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *handler, EventRegistrationToken *cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
+    unsigned int i;
     TRACE( "iface %p, handler %p\n", iface, handler );
-    if (cookie) cookie->value = 1;
-    if (handler)
+    if (cookie) cookie->value = 0;
+    if (!handler) return S_OK;
+    for (i = 0; i < ARRAY_SIZE( impl->character_received_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_AddRef( handler );
-        if (impl->character_received_handler)
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handler );
-        impl->character_received_handler = handler;
+        if (!impl->character_received_handlers[i])
+        {
+            INT64 tok = ++impl->next_char_token;
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_AddRef( handler );
+            impl->character_received_handlers[i] = handler;
+            impl->character_received_tokens[i] = tok;
+            if (cookie) cookie->value = tok;
+            return S_OK;
+        }
     }
-    return S_OK;
+    return E_OUTOFMEMORY;
 }
 static HRESULT WINAPI core_window_remove_CharacterReceived( ICoreWindow *iface, EventRegistrationToken cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
-    if (impl->character_received_handler)
+    unsigned int i;
+    for (i = 0; i < ARRAY_SIZE( impl->character_received_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handler );
-        impl->character_received_handler = NULL;
+        if (impl->character_received_handlers[i] && impl->character_received_tokens[i] == cookie.value)
+        {
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handlers[i] );
+            impl->character_received_handlers[i] = NULL;
+            impl->character_received_tokens[i] = 0;
+            break;
+        }
     }
     return S_OK;
 }
@@ -1466,24 +1512,37 @@ static HRESULT WINAPI core_window_add_KeyDown( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *handler, EventRegistrationToken *cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
+    unsigned int i;
     TRACE( "iface %p, handler %p\n", iface, handler );
-    if (cookie) cookie->value = 1;
-    if (handler)
+    if (cookie) cookie->value = 0;
+    if (!handler) return S_OK;
+    for (i = 0; i < ARRAY_SIZE( impl->keydown_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
-        if (impl->keydown_handler)
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handler );
-        impl->keydown_handler = handler;
+        if (!impl->keydown_handlers[i])
+        {
+            INT64 tok = ++impl->next_keydown_token;
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
+            impl->keydown_handlers[i] = handler;
+            impl->keydown_tokens[i] = tok;
+            if (cookie) cookie->value = tok;
+            return S_OK;
+        }
     }
-    return S_OK;
+    return E_OUTOFMEMORY;
 }
 static HRESULT WINAPI core_window_remove_KeyDown( ICoreWindow *iface, EventRegistrationToken cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
-    if (impl->keydown_handler)
+    unsigned int i;
+    for (i = 0; i < ARRAY_SIZE( impl->keydown_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handler );
-        impl->keydown_handler = NULL;
+        if (impl->keydown_handlers[i] && impl->keydown_tokens[i] == cookie.value)
+        {
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handlers[i] );
+            impl->keydown_handlers[i] = NULL;
+            impl->keydown_tokens[i] = 0;
+            break;
+        }
     }
     return S_OK;
 }
@@ -1492,24 +1551,37 @@ static HRESULT WINAPI core_window_add_KeyUp( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *handler, EventRegistrationToken *cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
+    unsigned int i;
     TRACE( "iface %p, handler %p\n", iface, handler );
-    if (cookie) cookie->value = 1;
-    if (handler)
+    if (cookie) cookie->value = 0;
+    if (!handler) return S_OK;
+    for (i = 0; i < ARRAY_SIZE( impl->keyup_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
-        if (impl->keyup_handler)
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handler );
-        impl->keyup_handler = handler;
+        if (!impl->keyup_handlers[i])
+        {
+            INT64 tok = ++impl->next_keyup_token;
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
+            impl->keyup_handlers[i] = handler;
+            impl->keyup_tokens[i] = tok;
+            if (cookie) cookie->value = tok;
+            return S_OK;
+        }
     }
-    return S_OK;
+    return E_OUTOFMEMORY;
 }
 static HRESULT WINAPI core_window_remove_KeyUp( ICoreWindow *iface, EventRegistrationToken cookie )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
-    if (impl->keyup_handler)
+    unsigned int i;
+    for (i = 0; i < ARRAY_SIZE( impl->keyup_handlers ); i++)
     {
-        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handler );
-        impl->keyup_handler = NULL;
+        if (impl->keyup_handlers[i] && impl->keyup_tokens[i] == cookie.value)
+        {
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handlers[i] );
+            impl->keyup_handlers[i] = NULL;
+            impl->keyup_tokens[i] = 0;
+            break;
+        }
     }
     return S_OK;
 }
@@ -2294,24 +2366,74 @@ static __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *key_event_args_create( __x_ABI
     return &impl->IKeyEventArgs_iface;
 }
 
-static void core_window_deliver_keydown( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
+static BOOL core_window_deliver_keydown( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
 {
     __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *args;
-    if (!impl || !impl->keydown_handler) return;
-    if (!(args = key_event_args_create( key ))) return;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
-        impl->keydown_handler, &impl->ICoreWindow_iface, args );
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *snap[16];
+    unsigned int i, cnt = 0;
+    BOOL handled;
+
+    if (!impl) return FALSE;
+    for (i = 0; i < ARRAY_SIZE( impl->keydown_handlers ); i++)
+    {
+        if (impl->keydown_handlers[i])
+        {
+            snap[cnt] = impl->keydown_handlers[i];
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( snap[cnt] );
+            cnt++;
+        }
+    }
+    if (!cnt) return FALSE;
+    if (!(args = key_event_args_create( key )))
+    {
+        for (i = 0; i < cnt; i++)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( snap[i] );
+        return FALSE;
+    }
+    for (i = 0; i < cnt; i++)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
+            snap[i], &impl->ICoreWindow_iface, args );
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( snap[i] );
+    }
+    handled = impl_from_IKeyEventArgs( args )->handled != 0;
     __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
+    return handled;
 }
 
-static void core_window_deliver_keyup( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
+static BOOL core_window_deliver_keyup( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
 {
     __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *args;
-    if (!impl || !impl->keyup_handler) return;
-    if (!(args = key_event_args_create( key ))) return;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
-        impl->keyup_handler, &impl->ICoreWindow_iface, args );
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *snap[16];
+    unsigned int i, cnt = 0;
+    BOOL handled;
+
+    if (!impl) return FALSE;
+    for (i = 0; i < ARRAY_SIZE( impl->keyup_handlers ); i++)
+    {
+        if (impl->keyup_handlers[i])
+        {
+            snap[cnt] = impl->keyup_handlers[i];
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( snap[cnt] );
+            cnt++;
+        }
+    }
+    if (!cnt) return FALSE;
+    if (!(args = key_event_args_create( key )))
+    {
+        for (i = 0; i < cnt; i++)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( snap[i] );
+        return FALSE;
+    }
+    for (i = 0; i < cnt; i++)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
+            snap[i], &impl->ICoreWindow_iface, args );
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( snap[i] );
+    }
+    handled = impl_from_IKeyEventArgs( args )->handled != 0;
     __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
+    return handled;
 }
 
 /* CharacterReceivedEventArgs */
@@ -2450,14 +2572,39 @@ static __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *character_receiv
     return &impl->ICharacterReceivedEventArgs_iface;
 }
 
-static void core_window_deliver_character_received( struct core_window *impl, UINT32 key_code )
+static BOOL core_window_deliver_character_received( struct core_window *impl, UINT32 key_code )
 {
     __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *args;
-    if (!impl || !impl->character_received_handler) return;
-    if (!(args = character_received_args_create( key_code ))) return;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Invoke(
-        impl->character_received_handler, &impl->ICoreWindow_iface, args );
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *snap[16];
+    unsigned int i, cnt = 0;
+    BOOL handled;
+
+    if (!impl) return FALSE;
+    for (i = 0; i < ARRAY_SIZE( impl->character_received_handlers ); i++)
+    {
+        if (impl->character_received_handlers[i])
+        {
+            snap[cnt] = impl->character_received_handlers[i];
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_AddRef( snap[cnt] );
+            cnt++;
+        }
+    }
+    if (!cnt) return FALSE;
+    if (!(args = character_received_args_create( key_code )))
+    {
+        for (i = 0; i < cnt; i++)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( snap[i] );
+        return FALSE;
+    }
+    for (i = 0; i < cnt; i++)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Invoke(
+            snap[i], &impl->ICoreWindow_iface, args );
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( snap[i] );
+    }
+    handled = impl_from_ICharacterReceivedEventArgs( args )->handled != 0;
     __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs_Release( args );
+    return handled;
 }
 
 /* PointerEventArgs */
@@ -3358,21 +3505,22 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
 
     case WM_CHAR:
     {
-        if (impl && impl->character_received_handler)
+        if (impl)
             core_window_deliver_character_received( impl, (UINT32)wparam );
         return 0;
     }
 
     case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
     {
-        if (impl && impl->keydown_handler)
+        if (impl)
             core_window_deliver_keydown( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
         return 0;
     }
 
     case WM_KEYUP:
     {
-        if (impl && impl->keyup_handler)
+        if (impl)
             core_window_deliver_keyup( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
         return 0;
     }
@@ -3819,17 +3967,12 @@ HRESULT WINAPI core_window_notify_key( HWND hwnd, UINT msg, WPARAM wparam )
     switch (msg)
     {
     case WM_KEYDOWN:
-        if (impl->keydown_handler)
-            core_window_deliver_keydown( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
-        return S_OK;
+    case WM_SYSKEYDOWN:
+        return core_window_deliver_keydown( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam ) ? S_OK : S_FALSE;
     case WM_KEYUP:
-        if (impl->keyup_handler)
-            core_window_deliver_keyup( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
-        return S_OK;
+        return core_window_deliver_keyup( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam ) ? S_OK : S_FALSE;
     case WM_CHAR:
-        if (impl->character_received_handler)
-            core_window_deliver_character_received( impl, (UINT32)wparam );
-        return S_OK;
+        return core_window_deliver_character_received( impl, (UINT32)wparam ) ? S_OK : S_FALSE;
     default:
         return E_INVALIDARG;
     }

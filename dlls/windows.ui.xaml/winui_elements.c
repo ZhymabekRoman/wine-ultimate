@@ -524,27 +524,39 @@ struct tracker_entry
 {
     void *iface;
     void *source;
-    unsigned int idx;
 };
-static struct tracker_entry tracker_map[128];
+static SRWLOCK g_tracker_lock = SRWLOCK_INIT;
+static struct tracker_entry *tracker_map;
+static unsigned int tracker_cap;
 
-static struct tracker_entry *tracker_lookup( void *iface, int create )
+static struct tracker_entry *tracker_lookup_locked( void *iface, int create )
 {
-    unsigned int i, free_idx = 128;
-    for (i = 0; i < 128; i++)
+    unsigned int i, free_idx = tracker_cap;
+    for (i = 0; i < tracker_cap; i++)
     {
         if (tracker_map[i].iface == iface) return &tracker_map[i];
-        if (!tracker_map[i].iface && free_idx == 128) free_idx = i;
+        if (!tracker_map[i].iface && free_idx == tracker_cap) free_idx = i;
     }
-    if (!create || free_idx == 128) return NULL;
+    if (!create) return NULL;
+    if (free_idx == tracker_cap)
+    {
+        unsigned int old_cap = tracker_cap;
+        int cap_i = (int)tracker_cap;
+        if (!xaml_vec_grow( (void **)&tracker_map, &cap_i, (int)old_cap + 1, sizeof(*tracker_map), 128 ))
+            return NULL;
+        tracker_cap = (unsigned int)cap_i;
+        memset( &tracker_map[old_cap], 0, (size_t)(tracker_cap - old_cap) * sizeof(*tracker_map) );
+        free_idx = old_cap;
+    }
     tracker_map[free_idx].iface = iface;
-    tracker_map[free_idx].idx = free_idx;
     return &tracker_map[free_idx];
 }
 
 static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
 {
-    struct tracker_entry *e = tracker_lookup( iface, 1 );
+    struct tracker_entry *e;
+    AcquireSRWLockExclusive( &g_tracker_lock );
+    e = tracker_lookup_locked( iface, 1 );
     TRACE( "xaml_ConnectFromTrackerSource iface %p source %p\n", iface, source );
     if (e && !e->source && source)
     {
@@ -552,20 +564,28 @@ static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
          * Store only; do not AddRef. */
         e->source = source;
     }
+    ReleaseSRWLockExclusive( &g_tracker_lock );
     return S_OK;
 }
 static HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface )
 {
-    struct tracker_entry *e = tracker_lookup( iface, 0 );
-    TRACE( "xaml_AddRefFromTrackerSource iface %p source %p\n", iface, e ? e->source : NULL );
+    struct tracker_entry *e;
+    void *src;
+    AcquireSRWLockShared( &g_tracker_lock );
+    e = tracker_lookup_locked( iface, 0 );
+    src = e ? e->source : NULL;
+    ReleaseSRWLockShared( &g_tracker_lock );
+    TRACE( "xaml_AddRefFromTrackerSource iface %p source %p\n", iface, src );
     return S_OK;
 }
 
 static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
 {
-    struct tracker_entry *e = tracker_lookup( iface, 0 );
-    if (e && e->idx < ARRAY_SIZE( tracker_map ))
-        memset( &tracker_map[e->idx], 0, sizeof(tracker_map[e->idx]) );
+    struct tracker_entry *e;
+    AcquireSRWLockExclusive( &g_tracker_lock );
+    e = tracker_lookup_locked( iface, 0 );
+    if (e) memset( e, 0, sizeof(*e) );
+    ReleaseSRWLockExclusive( &g_tracker_lock );
     return S_OK;
 }
 
@@ -622,11 +642,13 @@ static HRESULT WINAPI element_remove_event_generic( void *iface, EventRegistrati
     return S_OK;
 }
 
+static LONG loaded_next_tok = 1;
+
 HRESULT WINAPI element_add_Loaded( void *iface, void *handler, EventRegistrationToken *token )
 {
     struct xaml_element *impl = impl_from_element( (IInspectable *)iface );
     TRACE( "element_add_Loaded iface %p, handler %p, token %p\n", iface, handler, token );
-    if (token) token->value = 1;
+    if (token) token->value = InterlockedIncrement( &loaded_next_tok );
     impl->loaded_fn = handler;
     xaml_register_loaded( handler, (IInspectable *)iface );
     return S_OK;
@@ -642,13 +664,17 @@ void xaml_register_loaded( void *handler, IInspectable *sender );
 void xaml_register_loaded( void *handler, IInspectable *sender )
 {
     int i;
+    void *old_handler = NULL;
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
     AcquireSRWLockExclusive( &loaded_regs_lock );
     for (i = 0; i < loaded_count; i++)
     {
         if (loaded_regs[i].sender == sender)
         {
+            old_handler = loaded_regs[i].handler;
             loaded_regs[i].handler = handler;
             ReleaseSRWLockExclusive( &loaded_regs_lock );
+            if (old_handler) IUnknown_Release( (IUnknown *)old_handler );
             return;
         }
     }
@@ -657,8 +683,10 @@ void xaml_register_loaded( void *handler, IInspectable *sender )
         loaded_regs[loaded_count].handler = handler;
         loaded_regs[loaded_count].sender = sender;
         loaded_count++;
+        handler = NULL;
     }
     ReleaseSRWLockExclusive( &loaded_regs_lock );
+    if (handler) IUnknown_Release( (IUnknown *)handler );
 }
 
 void xaml_fire_all_loaded( void );
@@ -671,24 +699,45 @@ void xaml_fire_all_loaded( void )
     if (cnt > 0)
     {
         snap = malloc( (size_t)cnt * sizeof(*snap) );
-        if (snap) memcpy( snap, loaded_regs, (size_t)cnt * sizeof(*snap) );
+        if (snap)
+        {
+            memcpy( snap, loaded_regs, (size_t)cnt * sizeof(*snap) );
+            for (i = 0; i < cnt; i++)
+                if (snap[i].handler) IUnknown_AddRef( (IUnknown *)snap[i].handler );
+        }
     }
     ReleaseSRWLockExclusive( &loaded_regs_lock );
     if (!snap) return;
     for (i = 0; i < cnt; i++)
     {
-        HRESULT (WINAPI *fn)( void *, void *, void * );
-        if (!snap[i].handler) continue;
-        fn = (void *)((void **)((void **)snap[i].handler)[0])[3];
+        struct abi_typed_event_handler *eh = (struct abi_typed_event_handler *)snap[i].handler;
+        if (!eh) continue;
         TRACE( "firing Loaded on %p handler %p\n", (void *)snap[i].sender, snap[i].handler );
-        fn( snap[i].handler, (void *)snap[i].sender, NULL );
+        __TRY { eh->lpVtbl->Invoke( snap[i].handler, (void *)snap[i].sender, NULL ); }
+        __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
+        __ENDTRY;
+        IUnknown_Release( (IUnknown *)snap[i].handler );
     }
     free( snap );
 }
 
 HRESULT WINAPI element_remove_Loaded( void *iface, EventRegistrationToken token )
 {
+    int i;
+    void *to_release = NULL;
     TRACE( "element_remove_Loaded iface %p, token %I64u\n", iface, token.value );
+    AcquireSRWLockExclusive( &loaded_regs_lock );
+    for (i = 0; i < loaded_count; i++)
+    {
+        if (loaded_regs[i].sender == (IInspectable *)iface)
+        {
+            to_release = loaded_regs[i].handler;
+            loaded_regs[i] = loaded_regs[--loaded_count];
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive( &loaded_regs_lock );
+    if (to_release) IUnknown_Release( (IUnknown *)to_release );
     return S_OK;
 }
 

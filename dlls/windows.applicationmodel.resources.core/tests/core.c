@@ -223,9 +223,9 @@ static void test_resourcemanager_lookup(void)
     if (!map) goto done_rm;
 
     /* IResourceMap slot 7: GetValue(key) -> IResourceCandidate */
-    WindowsCreateStringReference(L"Calculator", 10, &khdr, &hkey);
+    WindowsCreateStringReference(L"Resources", 9, &khdr, &hkey);
     hr = CALL(map, 10, hkey, &cand);
-    ok(SUCCEEDED(hr) && cand, "MainResourceMap::GetValue(\"Calculator\") hr=%08x\n", hr);
+    ok(SUCCEEDED(hr) && cand, "MainResourceMap::GetValue(\"Resources\") hr=%08x\n", hr);
     if (SUCCEEDED(hr) && cand)
     {
         void *cand2 = NULL;
@@ -1229,7 +1229,7 @@ static void test_parameterized_class_names(void)
         ok( hr == S_OK && map, "class names: get_MainResourceMap hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && map)
         {
-            WindowsCreateStringReference( L"Calculator", 10, &khdr, &hkey );
+            WindowsCreateStringReference( L"Resources", 9, &khdr, &hkey );
             hr = CALL( map, 10, hkey, &cand );  /* IResourceMap::GetValue */
             ok( SUCCEEDED( hr ) && cand, "class names: GetValue hr=%08x\n", hr );
             if (SUCCEEDED( hr ) && cand)
@@ -1404,10 +1404,10 @@ static void test_virtualized_hstring(void)
                     hr = CALL(rm2, 8, &map);  /* get_MainResourceMap */
                     if (SUCCEEDED(hr) && map)
                     {
-                        s10calc.mt = NULL; s10calc.cch = 10; s10calc.pad = 0; lstrcpyW(s10calc.chars, L"Calculator");
+                        s10calc.mt = NULL; s10calc.cch = 9; s10calc.pad = 0; lstrcpyW(s10calc.chars, L"Resources");
                         hcalc = (HSTRING)((char *)&s10calc + 7);
                         hr = CALL(map, 10, hcalc, &cand);  /* IResourceMap::GetValue */
-                        ok(SUCCEEDED(hr) && cand, "virt-hstring tag7: MainResourceMap::GetValue(Calculator) hr=%08x\n", hr);
+                        ok(SUCCEEDED(hr) && cand, "virt-hstring tag7: MainResourceMap::GetValue(Resources) hr=%08x\n", hr);
                         if (cand) CALL(cand, 2, (ULONG *)&hr);
                     }
                     CALL(rm2, 2, (ULONG *)&hr);
@@ -2174,10 +2174,10 @@ static void test_collections_abi_slots( void )
     hr = CALL( rm2, 8, &map );                      /* get_MainResourceMap */
     if (SUCCEEDED( hr ) && map)
     {
-        WindowsCreateStringReference( L"Calculator", 10, &hdr3, &hres );
+        WindowsCreateStringReference( L"Resources", 9, &hdr3, &hres );
         cand = NULL;
         hr = CALL( map, 10, hres, &cand );           /* IResourceMap::GetValue */
-        ok( SUCCEEDED( hr ) && cand, "abi: GetValue(Calculator) hr=%08x\n", hr );
+        ok( SUCCEEDED( hr ) && cand, "abi: GetValue(Resources) hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && cand)
         {
             hr = QI_SLOT( cand, &IID_IResourceCandidate_loc, &cand2 );

@@ -577,6 +577,14 @@ void xaml_apply_window_icon( HWND top )
 
 static struct xaml_app_caps g_caps;
 static BOOL g_caps_ready;
+static CRITICAL_SECTION g_caps_cs;
+static CRITICAL_SECTION_DEBUG g_caps_cs_debug =
+{
+    0, 0, &g_caps_cs,
+    { &g_caps_cs_debug.ProcessLocksList, &g_caps_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": g_caps_cs") }
+};
+static CRITICAL_SECTION g_caps_cs = { &g_caps_cs_debug, -1, 0, 0, 0, 0 };
 
 /* Probe the running application's COM surface: which IXamlMetadataProvider face
  * it answers (UWP vs WinUI 3). */
@@ -598,13 +606,18 @@ static BOOL caps_probe( IInspectable *outer )
 const struct xaml_app_caps *xaml_get_app_caps( void )
 {
     static BOOL probing;
-    if (!g_caps_ready && !probing && current_application && current_application->outer)
+    if (__atomic_load_n( &g_caps_ready, __ATOMIC_ACQUIRE ))
+        return &g_caps;
+    EnterCriticalSection( &g_caps_cs );
+    if (!__atomic_load_n( &g_caps_ready, __ATOMIC_RELAXED ) && !probing &&
+        current_application && current_application->outer)
     {
         probing = TRUE;
         if (caps_probe( (IInspectable *)current_application->outer ))
-            g_caps_ready = TRUE;
+            __atomic_store_n( &g_caps_ready, TRUE, __ATOMIC_RELEASE );
         probing = FALSE;
     }
+    LeaveCriticalSection( &g_caps_cs );
     return &g_caps;
 }
 

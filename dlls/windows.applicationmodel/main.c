@@ -45,15 +45,22 @@ struct startup_task_async
 
 static HRESULT WINAPI startup_task_async_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
     *out = iface;
     return S_OK;
 }
 static ULONG WINAPI startup_task_async_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI startup_task_async_Release( void *iface ) { return 1; }
-static HRESULT WINAPI startup_task_async_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI startup_task_async_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI startup_task_async_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation", 32, n );
+    static const WCHAR cls[] = L"Windows.Foundation.IAsyncOperation";
+    return WindowsCreateString( cls, ARRAYSIZE(cls) - 1, n );
 }
 static HRESULT WINAPI startup_task_async_GetTrustLevel( void *iface, TrustLevel *l )
 {
@@ -108,15 +115,22 @@ static struct startup_task_async startup_task_async_inst = { startup_task_async_
 
 static HRESULT WINAPI startup_task_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
     *out = iface;
     return S_OK;
 }
 static ULONG WINAPI startup_task_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI startup_task_Release( void *iface ) { return 1; }
-static HRESULT WINAPI startup_task_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI startup_task_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI startup_task_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.ApplicationModel.StartupTask", 35, n );
+    static const WCHAR cls[] = L"Windows.ApplicationModel.StartupTask";
+    return WindowsCreateString( cls, ARRAYSIZE(cls) - 1, n );
 }
 static HRESULT WINAPI startup_task_GetTrustLevel( void *iface, TrustLevel *l )
 {
@@ -125,7 +139,9 @@ static HRESULT WINAPI startup_task_GetTrustLevel( void *iface, TrustLevel *l )
 }
 static HRESULT WINAPI startup_task_RequestEnableAsync( void *iface, void **op )
 {
-    if (op) *op = &startup_task_async_inst;
+    if (!op) return E_POINTER;
+    *op = &startup_task_async_inst;
+    startup_task_async_AddRef( *op );
     return S_OK;
 }
 static HRESULT WINAPI startup_task_Disable( void *iface ) { return S_OK; }
@@ -136,8 +152,20 @@ static HRESULT WINAPI startup_task_get_State( void *iface, DWORD *state )
 }
 static HRESULT WINAPI startup_task_get_TaskId( void *iface, HSTRING *id )
 {
-    if (id) return WindowsCreateString( L"WhatsApp", 8, id );
-    return S_OK;
+    WCHAR exe_buf[MAX_PATH], *dot;
+    const WCHAR *base;
+    DWORD len;
+
+    if (!id) return E_POINTER;
+    len = GetModuleFileNameW( NULL, exe_buf, ARRAY_SIZE(exe_buf) );
+    if (len && len < ARRAY_SIZE(exe_buf))
+    {
+        base = wcsrchr( exe_buf, '\\' );
+        base = base ? base + 1 : exe_buf;
+        if ((dot = wcsrchr( (WCHAR *)base, '.' ))) *dot = 0;
+        if (base[0]) return WindowsCreateString( base, wcslen( base ), id );
+    }
+    return WindowsCreateString( L"StartupTask", 11, id );
 }
 
 static const void *startup_task_vtbl[] =
@@ -156,15 +184,22 @@ static const void *startup_task_vtbl[] =
 
 static HRESULT WINAPI startup_task_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
     *out = iface;
     return S_OK;
 }
 static ULONG WINAPI startup_task_factory_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI startup_task_factory_Release( void *iface ) { return 1; }
-static HRESULT WINAPI startup_task_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI startup_task_factory_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI startup_task_factory_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.ApplicationModel.StartupTask", 35, n );
+    static const WCHAR cls[] = L"Windows.ApplicationModel.StartupTask";
+    return WindowsCreateString( cls, ARRAYSIZE(cls) - 1, n );
 }
 static HRESULT WINAPI startup_task_factory_GetTrustLevel( void *iface, TrustLevel *l )
 {
@@ -222,6 +257,7 @@ HRESULT WINAPI winappsdk_class_QueryInterface( void *iface, REFIID iid, void **o
     static const GUID IID_IReferenceTrackerManager =
         { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
 
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
     {
@@ -310,6 +346,7 @@ HRESULT WINAPI winappsdk_factory_QueryInterface( void *iface, REFIID iid, void *
     static const GUID IID_IReferenceTrackerManager =
         { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
 
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
     {
@@ -323,6 +360,7 @@ HRESULT WINAPI winappsdk_factory_QueryInterface( void *iface, REFIID iid, void *
 HRESULT WINAPI winappsdk_factory_ActivateInstance( void *iface, IInspectable **instance )
 {
     struct winappsdk_factory *f = iface;
+    if (!instance) return E_POINTER;
     *instance = (IInspectable *)f->obj;
     return S_OK;
 }
@@ -413,6 +451,7 @@ static HRESULT WINAPI user_activity_manager_QueryInterface( void *iface, REFIID 
 {
     static const GUID IID_IReferenceTracker =
         { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ))
     {
         *out = NULL;
@@ -423,9 +462,17 @@ static HRESULT WINAPI user_activity_manager_QueryInterface( void *iface, REFIID 
 }
 static ULONG WINAPI user_activity_manager_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI user_activity_manager_Release( void *iface ) { return 1; }
-static HRESULT WINAPI user_activity_manager_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; return S_OK; }
+static HRESULT WINAPI user_activity_manager_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI user_activity_manager_GetRuntimeClassName( void *iface, HSTRING *n )
-{ return WindowsCreateString( L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager", 65, n ); }
+{
+    static const WCHAR cls[] = L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager";
+    return WindowsCreateString( cls, ARRAYSIZE(cls) - 1, n );
+}
 static HRESULT WINAPI user_activity_manager_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 static HRESULT WINAPI user_activity_manager_add_Requested( void *iface, void *h, EventRegistrationToken *t )
 { if (t) t->value = 1; return S_OK; }
@@ -460,9 +507,17 @@ static HRESULT WINAPI user_activity_statics_QueryInterface( void *iface, REFIID 
 }
 static ULONG WINAPI user_activity_statics_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI user_activity_statics_Release( void *iface ) { return 1; }
-static HRESULT WINAPI user_activity_statics_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; return S_OK; }
+static HRESULT WINAPI user_activity_statics_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI user_activity_statics_GetRuntimeClassName( void *iface, HSTRING *n )
-{ return WindowsCreateString( L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager", 65, n ); }
+{
+    static const WCHAR cls[] = L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager";
+    return WindowsCreateString( cls, ARRAYSIZE(cls) - 1, n );
+}
 static HRESULT WINAPI user_activity_statics_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 static HRESULT WINAPI user_activity_statics_GetForCurrentView( void *iface, void **out )
 {
@@ -485,13 +540,165 @@ static const void *user_activity_statics_vtbl[] =
 static struct { const void **vtbl; } user_activity_statics_obj = { user_activity_statics_vtbl };
 static IActivationFactory *user_activity_factory = (IActivationFactory *)&user_activity_statics_obj;
 
+/* Windows.ApplicationModel.LimitedAccessFeatures */
+struct limited_access_result
+{
+    const void *vtbl;
+    LONG ref;
+    HSTRING feature_id;
+};
+
+static HRESULT WINAPI laf_result_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_ILimitedAccessFeatureRequestResult =
+        { 0xd45156a6, 0x1e24, 0x5ddd, { 0xab, 0xb4, 0x61, 0x88, 0xab, 0xa4, 0xd5, 0xbf } };
+    static const GUID IID_IAgileObject_local =
+        { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject_local ) ||
+        IsEqualGUID( iid, &IID_ILimitedAccessFeatureRequestResult ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct limited_access_result *)iface)->ref );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI laf_result_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct limited_access_result *)iface)->ref );
+}
+static ULONG WINAPI laf_result_Release( void *iface )
+{
+    struct limited_access_result *r = iface;
+    ULONG ref = InterlockedDecrement( &r->ref );
+    if (!ref)
+    {
+        if (r->feature_id) WindowsDeleteString( r->feature_id );
+        free( r );
+    }
+    return ref;
+}
+static HRESULT WINAPI laf_result_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI laf_result_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.LimitedAccessFeatureRequestResult", 58, n );
+}
+static HRESULT WINAPI laf_result_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI laf_result_get_FeatureId( void *iface, HSTRING *value )
+{
+    struct limited_access_result *r = iface;
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( r->feature_id, value );
+}
+static HRESULT WINAPI laf_result_get_Status( void *iface, INT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 1; /* LimitedAccessFeatureStatus_Available */
+    return S_OK;
+}
+static HRESULT WINAPI laf_result_get_EstimatedRemovalDate( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+static const void *laf_result_vtbl[] =
+{
+    laf_result_QueryInterface,
+    laf_result_AddRef,
+    laf_result_Release,
+    laf_result_GetIids,
+    laf_result_GetRuntimeClassName,
+    laf_result_GetTrustLevel,
+    laf_result_get_FeatureId,
+    laf_result_get_Status,
+    laf_result_get_EstimatedRemovalDate,
+};
+
+static HRESULT WINAPI laf_statics_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_ILimitedAccessFeaturesStatics =
+        { 0x8be612d4, 0x302b, 0x5fbf, { 0xa6, 0x32, 0x1a, 0x99, 0xe4, 0x3e, 0x89, 0x25 } };
+    static const GUID IID_IAgileObject_local =
+        { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IAgileObject_local ) ||
+        IsEqualGUID( iid, &IID_ILimitedAccessFeaturesStatics ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI laf_statics_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI laf_statics_Release( void *iface ) { return 1; }
+static HRESULT WINAPI laf_statics_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI laf_statics_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.LimitedAccessFeatures", 46, n );
+}
+static HRESULT WINAPI laf_statics_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI laf_statics_TryUnlockFeature( void *iface, HSTRING feature_id, HSTRING token,
+                                                    HSTRING attestation, void **result )
+{
+    struct limited_access_result *r;
+    TRACE( "feature %s\n", debugstr_hstring(feature_id) );
+    if (!result) return E_POINTER;
+    *result = NULL;
+    r = calloc( 1, sizeof(*r) );
+    if (!r) return E_OUTOFMEMORY;
+    r->vtbl = laf_result_vtbl;
+    r->ref = 1;
+    if (feature_id) WindowsDuplicateString( feature_id, &r->feature_id );
+    *result = r;
+    return S_OK;
+}
+static const void *laf_statics_vtbl[] =
+{
+    laf_statics_QueryInterface,
+    laf_statics_AddRef,
+    laf_statics_Release,
+    laf_statics_GetIids,
+    laf_statics_GetRuntimeClassName,
+    laf_statics_GetTrustLevel,
+    laf_statics_TryUnlockFeature,
+};
+static struct { const void **vtbl; } laf_statics_obj = { laf_statics_vtbl };
+static IActivationFactory *laf_factory = (IActivationFactory *)&laf_statics_obj;
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
 
     TRACE( "class %s, factory %p.\n", debugstr_hstring(classid), factory );
 
+    if (!factory) return E_POINTER;
     *factory = NULL;
+    if (!buffer) return E_INVALIDARG;
 
     if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Package ))
         IActivationFactory_QueryInterface( package_factory, &IID_IActivationFactory, (void **)factory );
@@ -503,6 +710,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         *factory = (IActivationFactory *)&startup_task_factory;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager" ))
         *factory = user_activity_factory;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.LimitedAccessFeatures" ))
+        *factory = laf_factory;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.AppExtensions.AppExtensionCatalog" ))
         IActivationFactory_QueryInterface( app_extension_catalog_factory,
                                            &IID_IActivationFactory, (void **)factory );

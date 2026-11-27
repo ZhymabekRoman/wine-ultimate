@@ -37,51 +37,142 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 /* Split from uwp_xaml.c: hit-testing, pointer/mouse/tapped dispatch, keyboard & accelerators. */
 
-static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
+static BOOL uwp_nav_point_in_open_pane( struct uwp_element *el, int x, int y )
 {
-    if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && el->kind != UWP_KIND_POPUP &&
-        (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
-        return NULL;
+    return el && uwp_is_nav_view( el ) && uwp_nav_is_overlay_open( el ) && el->nav &&
+           el->nav->nav_pane_bounds.right > el->nav->nav_pane_bounds.left &&
+           x >= el->nav->nav_pane_bounds.left && x < el->nav->nav_pane_bounds.right &&
+           y >= el->nav->nav_pane_bounds.top && y < el->nav->nav_pane_bounds.bottom;
+}
+
+static inline BOOL uwp_pt_in_bounds( const struct uwp_element *el, int x, int y )
+{
+    return el->has_bounds && x >= el->bounds.left && x < el->bounds.right &&
+           y >= el->bounds.top && y < el->bounds.bottom;
+}
+
+static BOOL uwp_is_focusable_textbox( const struct uwp_element *el )
+{
+    if (!el || el->visibility != 0 || !el->is_enabled) return FALSE;
+    return uwp_is_text_input( el );
+}
+
+static BOOL uwp_hit_matches( struct uwp_element *el, int x, int y, enum uwp_hit_kind kind )
+{
+    switch (kind)
+    {
+    case UWP_HIT_BUTTON:
+        return el->is_enabled && uwp_pt_in_bounds( el, x, y ) &&
+               (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
+                uwp_is_toggle_switch( el ) || UWP_EV_CNT( el, click_reg ) > 0 ||
+                el->command != NULL || el->flyout != NULL || uwp_is_menubar_item( el )) &&
+               !uwp_paint_is_invisible_shortcut_button( el );
+    case UWP_HIT_CDP:
+        return el->is_enabled && uwp_pt_in_bounds( el, x, y ) && uwp_is_calendar_date_picker( el );
+    case UWP_HIT_EXPANDER_HEADER:
+        if (el->has_bounds && el->is_enabled && uwp_is_expander( el ))
+        {
+            float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+            int hdr_h = (int)(64 * sc + 0.5f);
+            struct uwp_element *he = el->pane ? uwp_elem_from_any( el->pane ) : NULL;
+            if (he && he != el && he->has_bounds && he->bounds.bottom + (int)(10 * sc) - el->bounds.top > hdr_h)
+                hdr_h = he->bounds.bottom + (int)(10 * sc) - el->bounds.top;
+            if (hdr_h > el->bounds.bottom - el->bounds.top) hdr_h = el->bounds.bottom - el->bounds.top;
+            return x >= el->bounds.left && x < el->bounds.right &&
+                   y >= el->bounds.top && y < el->bounds.top + hdr_h;
+        }
+        return FALSE;
+    case UWP_HIT_COMBOBOX:
+        return el->is_enabled && uwp_pt_in_bounds( el, x, y ) && uwp_is_combobox( el );
+    case UWP_HIT_TEXTBOX:
+        return uwp_pt_in_bounds( el, x, y ) && uwp_is_focusable_textbox( el );
+    case UWP_HIT_TAPPABLE:
+        return uwp_pt_in_bounds( el, x, y ) && UWP_EV_ANY( el, tapped_reg );
+    case UWP_HIT_SCROLL_VIEWER:
+        return uwp_pt_in_bounds( el, x, y ) && uwp_is_scroll_viewer( el ) &&
+               el->scroll_extent_h > (el->bounds.bottom - el->bounds.top);
+    case UWP_HIT_TABVIEW:
+        return FALSE;
+    }
+    return FALSE;
+}
+
+static struct uwp_element *uwp_hit_test_depth( struct uwp_element *el, int x, int y,
+                                               enum uwp_hit_kind kind, int depth )
+{
+    BOOL need_htv = (kind == UWP_HIT_BUTTON || kind == UWP_HIT_CDP ||
+                     kind == UWP_HIT_EXPANDER_HEADER || kind == UWP_HIT_COMBOBOX);
+    BOOL check_tpl = (kind == UWP_HIT_BUTTON || kind == UWP_HIT_EXPANDER_HEADER || kind == UWP_HIT_COMBOBOX);
+
+    if (!el || el->visibility != 0 || depth > 48) return NULL;
+    if (need_htv && !el->is_hit_test_visible) return NULL;
+    if (kind == UWP_HIT_TABVIEW || kind == UWP_HIT_TAPPABLE)
+    {
+        if (!el->has_bounds) return NULL;
+        if (kind == UWP_HIT_TAPPABLE && !uwp_pt_in_bounds( el, x, y )) return NULL;
+    }
+    else if (kind == UWP_HIT_TEXTBOX)
+    {
+        if (el->has_bounds && uwp_is_scroll_viewer( el ) && !uwp_pt_in_bounds( el, x, y ))
+            return NULL;
+        if (el->is_enabled && uwp_pt_in_bounds( el, x, y ) && uwp_is_exact_autosuggest( el ))
+            return el;
+    }
+    else if (need_htv)
+    {
+        if (el->has_bounds && el->kind != UWP_KIND_POPUP && !uwp_pt_in_bounds( el, x, y ))
+            return NULL;
+    }
+
+    if (kind == UWP_HIT_TABVIEW && uwp_is_tabview( el ) && uwp_pt_in_bounds( el, x, y ))
+        return el;
+
+    if (kind == UWP_HIT_TABVIEW && el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        struct uwp_element *hit = (ch && ch != el) ? uwp_hit_test_depth( ch, x, y, kind, depth + 1 ) : NULL;
+        if (hit) return hit;
+    }
 
     if (el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        struct uwp_element *skip_content = (kind == UWP_HIT_BUTTON && uwp_nav_point_in_open_pane( el, x, y ))
+            ? uwp_elem_from_any( el->content ) : NULL;
         int k;
         for (k = (int)children->count - 1; k >= 0; k--)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit = uwp_hit_test_button( ch, x, y );
+            struct uwp_element *hit;
+            if (!ch || ch == el || (skip_content && ch == skip_content)) continue;
+            hit = uwp_hit_test_depth( ch, x, y, kind, depth + 1 );
             if (hit) return hit;
         }
     }
-    if (el->template_root && el->template_root != el &&
+
+    if (kind == UWP_HIT_BUTTON && uwp_nav_point_in_open_pane( el, x, y ))
+        return NULL;
+
+    if (check_tpl && el->template_root && el->template_root != el &&
         !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
         !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
     {
-        struct uwp_element *hit = uwp_hit_test_button( el->template_root, x, y );
+        struct uwp_element *hit = uwp_hit_test_depth( el->template_root, x, y, kind, depth + 1 );
         if (hit) return hit;
     }
-    else if (el->content)
+    else if (kind != UWP_HIT_TABVIEW && el->content && !(kind == UWP_HIT_EXPANDER_HEADER && uwp_is_expander( el )))
     {
         struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit = uwp_hit_test_button( ch, x, y );
+        struct uwp_element *hit = (ch && ch != el) ? uwp_hit_test_depth( ch, x, y, kind, depth + 1 ) : NULL;
         if (hit) return hit;
     }
 
-    if (el->has_bounds && el->is_enabled &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom &&
-        (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON ||
-         uwp_is_toggle_switch( el ) ||
-         UWP_EV_CNT( el, click_reg ) > 0 || el->command != NULL || el->flyout != NULL ||
-         uwp_is_menubar_item( el )))
-    {
-        if (uwp_paint_is_invisible_shortcut_button( el ))
-            return NULL;
-        return el;
-    }
-    return NULL;
+    return uwp_hit_matches( el, x, y, kind ) ? el : NULL;
+}
+
+struct uwp_element *uwp_hit_test( struct uwp_element *el, int x, int y, enum uwp_hit_kind kind )
+{
+    return uwp_hit_test_depth( el, x, y, kind, 0 );
 }
 
 BOOL uwp_has_focused_textbox( void )
@@ -335,8 +426,15 @@ void uwp_invoke_button( struct uwp_element *btn )
             if (SUCCEEDED(qhr) && cmd_iface)
             {
                 /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
-                struct command_iface *cmd = (struct command_iface *)cmd_iface;
-                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, btn->command_param );
+                const struct abi_command_full *acf = (const struct abi_command_full *)cmd_iface;
+                boolean can = TRUE;
+                if (acf->lpVtbl->CanExecute && SUCCEEDED(acf->lpVtbl->CanExecute( cmd_iface, btn->command_param, &can )) && !can)
+                {
+                    btn->is_enabled = FALSE;
+                    uwp_invalidate_window();
+                }
+                else if (acf->lpVtbl->Execute)
+                    acf->lpVtbl->Execute( cmd_iface, btn->command_param );
                 IUnknown_Release( (IUnknown *)cmd_iface );
             }
             else
@@ -465,118 +563,6 @@ static BOOL g_cb_popup_down = FALSE;
 static struct uwp_element *g_pressed_cdp = NULL;
 static struct uwp_element *g_pressed_expander = NULL;
 
-static struct uwp_element *uwp_hit_test_cdp( struct uwp_element *el, int x, int y )
-{
-    if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && el->kind != UWP_KIND_POPUP &&
-        (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
-        return NULL;
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit = uwp_hit_test_cdp( ch, x, y );
-            if (hit) return hit;
-        }
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit = (ch && ch != el) ? uwp_hit_test_cdp( ch, x, y ) : NULL;
-        if (hit) return hit;
-    }
-    if (el->has_bounds && el->is_enabled && uwp_is_calendar_date_picker( el ) &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom)
-        return el;
-    return NULL;
-}
-
-static struct uwp_element *uwp_hit_test_expander_header( struct uwp_element *el, int x, int y )
-{
-    if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && el->kind != UWP_KIND_POPUP &&
-        (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
-        return NULL;
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit = uwp_hit_test_expander_header( ch, x, y );
-            if (hit) return hit;
-        }
-    }
-    if (el->template_root && el->template_root != el &&
-        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
-        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
-    {
-        struct uwp_element *hit = uwp_hit_test_expander_header( el->template_root, x, y );
-        if (hit) return hit;
-    }
-    else if (el->content && !uwp_is_expander( el ))
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit = (ch && ch != el) ? uwp_hit_test_expander_header( ch, x, y ) : NULL;
-        if (hit) return hit;
-    }
-    if (el->has_bounds && el->is_enabled && uwp_is_expander( el ))
-    {
-        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
-        int hdr_h = (int)(64 * sc + 0.5f);
-        struct uwp_element *he = el->pane ? uwp_elem_from_any( el->pane ) : NULL;
-        if (he && he != el && he->has_bounds && he->bounds.bottom + (int)(10 * sc) - el->bounds.top > hdr_h)
-            hdr_h = he->bounds.bottom + (int)(10 * sc) - el->bounds.top;
-        if (hdr_h > el->bounds.bottom - el->bounds.top) hdr_h = el->bounds.bottom - el->bounds.top;
-        if (x >= el->bounds.left && x < el->bounds.right &&
-            y >= el->bounds.top && y < el->bounds.top + hdr_h)
-            return el;
-    }
-    return NULL;
-}
-
-static struct uwp_element *uwp_hit_test_combobox( struct uwp_element *el, int x, int y )
-{
-    if (!el || el->visibility != 0 || !el->is_hit_test_visible) return NULL;
-    if (el->has_bounds && el->kind != UWP_KIND_POPUP &&
-        (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
-        return NULL;
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit = uwp_hit_test_combobox( ch, x, y );
-            if (hit) return hit;
-        }
-    }
-    if (el->template_root && el->template_root != el &&
-        !uwp_is_combobox( el ) && !uwp_is_expander( el ) && !uwp_is_nav_view( el ) &&
-        !uwp_is_tabview( el ) && !uwp_is_toggle_switch( el ))
-    {
-        struct uwp_element *hit = uwp_hit_test_combobox( el->template_root, x, y );
-        if (hit) return hit;
-    }
-    else if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit = (ch && ch != el) ? uwp_hit_test_combobox( ch, x, y ) : NULL;
-        if (hit) return hit;
-    }
-    if (el->has_bounds && el->is_enabled && uwp_is_combobox( el ) &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom)
-        return el;
-    return NULL;
-}
-
 static struct uwp_element *uwp_get_open_overlay_nav( void )
 {
     if (g_open_overlay_nav && g_open_overlay_nav->visibility == 0 &&
@@ -615,34 +601,6 @@ static struct uwp_element *uwp_hit_test_nav_item( struct uwp_element *nav, int x
     return NULL;
 }
 
-static struct uwp_element *uwp_find_scroll_viewer_at( struct uwp_element *el, int x, int y, int depth )
-{
-    if (!el || depth > 24 || el->visibility != 0) return NULL;
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *r = (ch && ch != el) ? uwp_find_scroll_viewer_at( ch, x, y, depth + 1 ) : NULL;
-            if (r) return r;
-        }
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *r = (ch && ch != el) ? uwp_find_scroll_viewer_at( ch, x, y, depth + 1 ) : NULL;
-        if (r) return r;
-    }
-    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom &&
-        el->scroll_extent_h > (el->bounds.bottom - el->bounds.top))
-        return el;
-    return NULL;
-}
-
 BOOL uwp_hit_test_interactive_client( IInspectable *root_content, int x, int y )
 {
     struct uwp_element *root_el = uwp_elem_from_any( root_content );
@@ -653,11 +611,495 @@ BOOL uwp_hit_test_interactive_client( IInspectable *root_content, int x, int y )
     if (root_el && root_el->kind == UWP_KIND_FRAME && !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
         root_el = g_navigated_page_el;
     if (!root_el) return FALSE;
-    if (uwp_hit_test_textbox( root_el, x, y )) return TRUE;
-    if (uwp_hit_test_button( root_el, x, y )) return TRUE;
-    if (uwp_hit_test_combobox( root_el, x, y )) return TRUE;
-    if (uwp_hit_test_tabview( root_el, x, y )) return TRUE;
+    if (uwp_hit_test( root_el, x, y, UWP_HIT_TEXTBOX )) return TRUE;
+    if (uwp_hit_test( root_el, x, y, UWP_HIT_BUTTON )) return TRUE;
+    if (uwp_hit_test( root_el, x, y, UWP_HIT_COMBOBOX )) return TRUE;
+    if (uwp_hit_test( root_el, x, y, UWP_HIT_TABVIEW )) return TRUE;
     return FALSE;
+}
+
+static BOOL uwp_overlay_handle_flyout_owner( HWND hwnd, UINT msg, int x, int y )
+{
+    static BOOL g_flyout_down = FALSE;
+    struct uwp_element *owner = g_popup_owner_el;
+    struct uwp_element *flyout = owner->flyout ? uwp_elem_from_any( owner->flyout ) : owner;
+    struct uwp_vec_view *children = (flyout && flyout->children_coll)
+        ? CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+    struct uwp_element *fc = (flyout && !children && flyout->content)
+        ? uwp_elem_from_any( flyout->content ) : NULL;
+    BOOL in_popup = (flyout && flyout->has_bounds &&
+                     x >= flyout->bounds.left && x < flyout->bounds.right &&
+                     y >= flyout->bounds.top && y < flyout->bounds.bottom);
+
+    if (msg == WM_MOUSEMOVE && fc)
+    {
+        struct uwp_element *hit = in_popup ? uwp_hit_test( fc, x, y, UWP_HIT_BUTTON ) : NULL;
+        if (hit != g_hovered_elem)
+        {
+            if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
+            g_hovered_elem = hit;
+            if (hit) hit->is_hovered = TRUE;
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+        }
+        return in_popup;
+    }
+    if (msg == WM_MOUSEMOVE && children)
+    {
+        BOOL changed = FALSE;
+        unsigned int i;
+        for (i = 0; i < children->count; i++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
+            BOOL hov;
+            if (!ch || ch->visibility != 0 || uwp_is_separator( ch )) continue;
+            hov = (ch->has_bounds && x >= ch->bounds.left && x < ch->bounds.right &&
+                   y >= ch->bounds.top && y < ch->bounds.bottom);
+            if (ch->is_hovered != hov) { ch->is_hovered = hov; changed = TRUE; }
+        }
+        if (changed)
+        {
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+        }
+        return in_popup;
+    }
+    if (msg == WM_LBUTTONDOWN)
+    {
+        if (in_popup)
+        {
+            g_flyout_down = TRUE;
+            if (fc)
+            {
+                struct uwp_element *btn = uwp_hit_test( fc, x, y, UWP_HIT_BUTTON );
+                if (btn)
+                {
+                    g_pressed_btn = btn;
+                    btn->is_pressed = TRUE;
+                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                    uwp_invalidate_window();
+                }
+            }
+        }
+        else
+        {
+            g_flyout_down = FALSE;
+            uwp_close_flyout_popup( TRUE );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return TRUE;
+    }
+    if (msg == WM_LBUTTONUP)
+    {
+        if (!g_flyout_down && g_pressed_btn)
+            return FALSE;
+        if (g_flyout_down)
+        {
+            g_flyout_down = FALSE;
+            if (in_popup && fc)
+            {
+                struct uwp_element *btn = g_pressed_btn;
+                struct uwp_element *hit = uwp_hit_test( fc, x, y, UWP_HIT_BUTTON );
+                if (btn) { btn->is_pressed = FALSE; g_pressed_btn = NULL; }
+                if (hit && (!btn || hit == btn))
+                {
+                    BOOL is_toggle = (hit->kind == UWP_KIND_TOGGLE_BUTTON || uwp_is_toggle_switch( hit ));
+                    uwp_invoke_button( hit );
+                    if (!is_toggle && !hit->flyout && g_popup_owner_el == owner)
+                        uwp_close_flyout_popup( TRUE );
+                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                    return TRUE;
+                }
+                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                return TRUE;
+            }
+            if (in_popup && children)
+            {
+                int hit_idx = -1, i;
+                for (i = 0; i < (int)children->count; i++)
+                {
+                    struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
+                    if (!ch || ch->visibility != 0 || !ch->is_enabled || uwp_is_separator( ch )) continue;
+                    if (ch->has_bounds && x >= ch->bounds.left && x < ch->bounds.right &&
+                        y >= ch->bounds.top && y < ch->bounds.bottom)
+                    {
+                        hit_idx = i;
+                        break;
+                    }
+                }
+                if (hit_idx >= 0)
+                {
+                    struct uwp_element *clicked_el = uwp_elem_from_any( children->items[hit_idx] );
+                    if (clicked_el->class_flags & UWP_CF_TOGGLE_MENU_ITEM)
+                        uwp_toggle_button_set_checked( clicked_el, clicked_el->is_checked ? 0 : 1, TRUE );
+                    else if (clicked_el->class_flags & UWP_CF_RADIO_MENU_ITEM)
+                    {
+                        int j;
+                        for (j = hit_idx - 1; j >= 0; j--)
+                        {
+                            struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
+                            if (!sib) continue;
+                            if (uwp_is_separator( sib )) break;
+                            if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM)
+                                uwp_toggle_button_set_checked( sib, 0, FALSE );
+                        }
+                        for (j = hit_idx + 1; j < (int)children->count; j++)
+                        {
+                            struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
+                            if (!sib) continue;
+                            if (uwp_is_separator( sib )) break;
+                            if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM)
+                                uwp_toggle_button_set_checked( sib, 0, FALSE );
+                        }
+                        uwp_toggle_button_set_checked( clicked_el, 1, TRUE );
+                    }
+                    uwp_close_flyout_popup( TRUE );
+                    uwp_invoke_button( clicked_el );
+                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                    return TRUE;
+                }
+            }
+            uwp_close_flyout_popup( TRUE );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL uwp_overlay_handle_open_popups( HWND hwnd, UINT msg, int x, int y, int wheel_delta )
+{
+    static struct uwp_element *g_popup_close_down = NULL;
+    struct uwp_element *pops[16];
+    int pcnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) );
+    struct uwp_element *pop, *ch;
+    BOOL in_popup;
+
+    if (pcnt <= 0) return FALSE;
+    pop = pops[pcnt - 1];
+    ch = uwp_elem_from_any( pop->content );
+    in_popup = (pop->has_bounds &&
+                x >= pop->bounds.left && x < pop->bounds.right &&
+                y >= pop->bounds.top && y < pop->bounds.bottom);
+
+    if (msg == WM_MOUSEWHEEL && ch)
+    {
+        struct uwp_element *sv = uwp_hit_test( ch, x, y, UWP_HIT_SCROLL_VIEWER );
+        if (sv)
+        {
+            int vp_h = max( 1, (int)(sv->bounds.bottom - sv->bounds.top) );
+            int max_sc = max( 0, sv->scroll_extent_h - vp_h );
+            int step = (wheel_delta != 0) ? -(wheel_delta * 120) / WHEEL_DELTA : 0;
+            int ns;
+            if (step == 0) step = (wheel_delta > 0) ? -120 : 120;
+            ns = sv->scroll_y + step;
+            if (ns < 0) ns = 0;
+            if (max_sc > 0 && ns > max_sc) ns = max_sc;
+            if (ns != sv->scroll_y)
+            {
+                sv->scroll_y = ns;
+                g_layout_dirty = TRUE;
+                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                uwp_invalidate_window();
+            }
+        }
+        return TRUE;
+    }
+    if (msg == WM_MOUSEMOVE && ch)
+    {
+        struct uwp_element *hit = in_popup ? uwp_hit_test( ch, x, y, UWP_HIT_BUTTON ) : NULL;
+        if (hit != g_hovered_elem)
+        {
+            if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
+            g_hovered_elem = hit;
+            if (hit) hit->is_hovered = TRUE;
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+        }
+        return TRUE;
+    }
+    if (msg == WM_LBUTTONDOWN)
+    {
+        if (!in_popup)
+        {
+            g_popup_close_down = NULL;
+            uwp_popup_set_open( pop, FALSE );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            return TRUE;
+        }
+        if (ch)
+        {
+            struct uwp_element *btn = uwp_hit_test( ch, x, y, UWP_HIT_BUTTON );
+            if (btn)
+            {
+                struct xaml_pointer_info info = {0};
+                g_pressed_btn = btn;
+                btn->is_pressed = TRUE;
+                info.x = (float)x;
+                info.y = (float)y;
+                info.pointer_id = 1;
+                info.is_left = TRUE;
+                info.is_in_contact = TRUE;
+                info.is_in_window = TRUE;
+                uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
+                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                uwp_invalidate_window();
+                return TRUE;
+            }
+        }
+        if (x >= pop->bounds.right - 44 && y <= pop->bounds.top + 44)
+            g_popup_close_down = pop;
+        return TRUE;
+    }
+    if (msg == WM_LBUTTONUP)
+    {
+        if (g_pressed_btn && ch)
+        {
+            struct uwp_element *btn = g_pressed_btn;
+            struct uwp_element *hit = uwp_hit_test( ch, x, y, UWP_HIT_BUTTON );
+            btn->is_pressed = FALSE;
+            g_pressed_btn = NULL;
+            if (hit == btn)
+            {
+                struct xaml_pointer_info info = {0};
+                info.x = (float)x;
+                info.y = (float)y;
+                info.pointer_id = 1;
+                info.is_left = TRUE;
+                info.is_in_contact = FALSE;
+                info.is_in_window = TRUE;
+                uwp_fire_element_pointer( btn, XAML_PTR_RELEASED, &info, TRUE );
+                uwp_invoke_button( btn );
+                if (!wcscmp( btn->name, L"CloseButton" ) && pop->is_open)
+                    uwp_popup_set_open( pop, FALSE );
+            }
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return TRUE;
+        }
+        if (g_popup_close_down == pop)
+        {
+            g_popup_close_down = NULL;
+            if (x >= pop->bounds.right - 44 && x < pop->bounds.right &&
+                y >= pop->bounds.top && y <= pop->bounds.top + 44)
+            {
+                uwp_popup_set_open( pop, FALSE );
+                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            }
+            return TRUE;
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL uwp_overlay_handle_open_cdp( HWND hwnd, UINT msg, int x, int y, int width, int height )
+{
+    struct uwp_element *cdp = g_open_cdp;
+    RECT prc;
+    BOOL has_rect = uwp_cdp_compute_popup_rect( cdp, width, height, &prc );
+    BOOL in_popup = has_rect && x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom;
+    if (msg == WM_LBUTTONDOWN)
+    {
+        if (!in_popup)
+        {
+            uwp_cdp_set_open( cdp, FALSE );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return FALSE;
+        }
+        return TRUE;
+    }
+    if (msg == WM_LBUTTONUP && in_popup)
+    {
+        struct uwp_nav_ext *ne = uwp_elem_ensure_nav( cdp );
+        float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
+        int hdr_h = (int)(36 * sc + 0.5f);
+        int cell_w = (prc.right - prc.left - (int)(16 * sc)) / 7;
+        int cell_h = (int)(34 * sc + 0.5f);
+        int grid_top = prc.top + hdr_h + (int)(30 * sc);
+        if (ne)
+        {
+            int vy = (ne->cdp_view_year > 0) ? ne->cdp_view_year : 2026;
+            int vm = (ne->cdp_view_month >= 1 && ne->cdp_view_month <= 12) ? ne->cdp_view_month : 11;
+            if (y < prc.top + hdr_h)
+            {
+                if (x >= prc.right - (int)(64 * sc) && x < prc.right - (int)(34 * sc))
+                {
+                    if (--vm < 1) { vm = 12; vy--; }
+                    ne->cdp_view_year = vy; ne->cdp_view_month = vm;
+                }
+                else if (x >= prc.right - (int)(34 * sc))
+                {
+                    if (++vm > 12) { vm = 1; vy++; }
+                    ne->cdp_view_year = vy; ne->cdp_view_month = vm;
+                }
+            }
+            else if (y >= grid_top && cell_w > 0 && cell_h > 0)
+            {
+                int col = (x - (prc.left + (int)(8 * sc))) / cell_w;
+                int row = (y - grid_top) / cell_h;
+                if (col >= 0 && col < 7 && row >= 0 && row < 6)
+                {
+                    int fdow = uwp_cdp_first_dow( vy, vm );
+                    int dim = uwp_cdp_days_in_month( vy, vm );
+                    int day = row * 7 + col - fdow + 1;
+                    if (day >= 1 && day <= dim)
+                    {
+                        INT64 ticks = uwp_cdp_ymd_to_ticks( vy, vm, day );
+                        uwp_cdp_set_date( cdp, ticks, TRUE, TRUE );
+                        uwp_cdp_set_open( cdp, FALSE );
+                    }
+                }
+            }
+        }
+        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        uwp_invalidate_window();
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL uwp_overlay_handle_open_combobox( HWND hwnd, UINT msg, int x, int y, int wheel_delta,
+                                              int width, int height )
+{
+    struct uwp_element *cb = g_open_combobox;
+    IInspectable *items[256];
+    int count = uwp_selector_get_items( cb, items, ARRAY_SIZE(items) );
+    RECT prc;
+    int item_h = 32, vis_cnt = 0, pad_y = 4, i;
+    BOOL has_rect = (count > 0 && uwp_combobox_compute_popup_rect( cb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ));
+    BOOL in_popup = has_rect && x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom;
+    BOOL handled = FALSE;
+
+    if (msg == WM_MOUSEMOVE)
+    {
+        int new_hov = -1;
+        if (in_popup)
+        {
+            int row = (y - (prc.top + pad_y)) / max( 1, item_h );
+            if (row >= 0 && row < vis_cnt && (cb->dropdown_scroll_offset + row) < count)
+                new_hov = cb->dropdown_scroll_offset + row;
+        }
+        if (new_hov != cb->hovered_dropdown_idx)
+        {
+            cb->hovered_dropdown_idx = new_hov;
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            handled = TRUE;
+        }
+    }
+    else if (msg == WM_MOUSEWHEEL)
+    {
+        if (in_popup && count > vis_cnt)
+        {
+            int step = (wheel_delta > 0) ? -1 : 1;
+            int max_sc = max( 0, count - vis_cnt );
+            int ns = cb->dropdown_scroll_offset + step;
+            if (ns < 0) ns = 0;
+            if (ns > max_sc) ns = max_sc;
+            cb->dropdown_scroll_offset = ns;
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            handled = TRUE;
+        }
+    }
+    else if (msg == WM_LBUTTONDOWN)
+    {
+        if (in_popup) g_cb_popup_down = TRUE;
+        else
+        {
+            g_cb_popup_down = FALSE;
+            uwp_combobox_set_open( cb, FALSE );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        }
+        handled = TRUE;
+    }
+    else if (msg == WM_LBUTTONUP)
+    {
+        if (g_cb_popup_down)
+        {
+            g_cb_popup_down = FALSE;
+            if (in_popup)
+            {
+                int row = (y - (prc.top + pad_y)) / max( 1, item_h );
+                int idx = cb->dropdown_scroll_offset + row;
+                if (row >= 0 && row < vis_cnt && idx >= 0 && idx < count)
+                    uwp_selector_set_selection( cb, idx, NULL, TRUE, TRUE );
+            }
+            uwp_combobox_set_open( cb, FALSE );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        }
+        handled = TRUE;
+    }
+    for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+    return handled;
+}
+
+static BOOL uwp_overlay_handle_open_asb( HWND hwnd, UINT msg, int x, int y, int width, int height )
+{
+    static BOOL g_asb_popup_down = FALSE;
+    struct uwp_element *asb = g_focused_textbox;
+    IInspectable *items[32];
+    int count = uwp_asb_get_suggestions( asb, items, ARRAY_SIZE(items) );
+    RECT prc;
+    int item_h = 38, vis_cnt = 0, pad_y = 6, i;
+    BOOL has_rect = (count > 0 && uwp_asb_compute_popup_rect( asb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ));
+    BOOL in_popup = has_rect && x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom;
+    BOOL handled = FALSE;
+
+    if (has_rect)
+    {
+        if (msg == WM_MOUSEMOVE)
+        {
+            int new_hov = -1;
+            if (in_popup)
+            {
+                int row = (y - (prc.top + pad_y)) / max( 1, item_h );
+                if (row >= 0 && row < vis_cnt && (asb->dropdown_scroll_offset + row) < count)
+                    new_hov = asb->dropdown_scroll_offset + row;
+            }
+            if (new_hov != asb->hovered_dropdown_idx)
+            {
+                asb->hovered_dropdown_idx = new_hov;
+                uwp_invalidate_paint_only();
+                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                handled = TRUE;
+            }
+        }
+        else if (msg == WM_LBUTTONDOWN && in_popup)
+        {
+            g_asb_popup_down = TRUE;
+            handled = TRUE;
+        }
+        else if (msg == WM_LBUTTONUP && g_asb_popup_down)
+        {
+            g_asb_popup_down = FALSE;
+            if (in_popup)
+            {
+                int row = (y - (prc.top + pad_y)) / max( 1, item_h );
+                int idx = asb->dropdown_scroll_offset + row;
+                if (row >= 0 && row < vis_cnt && idx >= 0 && idx < count)
+                {
+                    WCHAR prim[128] = {0};
+                    uwp_asb_get_item_label( asb, idx, items[idx], prim, ARRAY_SIZE(prim), NULL, 0 );
+                    if (prim[0])
+                        uwp_elem_set_text( asb, prim );
+                    asb->is_open = FALSE;
+                    asb->is_dropdown_open = FALSE;
+                    uwp_asb_fire_suggestion_chosen( asb, items[idx] );
+                    uwp_asb_fire_query_submitted_ex( asb, items[idx] );
+                }
+            }
+            asb->is_open = FALSE;
+            asb->is_dropdown_open = FALSE;
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            handled = TRUE;
+        }
+    }
+    for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+    return handled;
 }
 
 BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int wheel_delta,
@@ -670,441 +1112,19 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
 
     if (g_popup_owner_el && !(g_popup_hwnd && IsWindow( g_popup_hwnd )))
     {
-        static BOOL g_flyout_down = FALSE;
-        struct uwp_element *owner = g_popup_owner_el;
-        struct uwp_element *flyout = owner->flyout ? uwp_elem_from_any( owner->flyout ) : owner;
-        struct uwp_vec_view *children = (flyout && flyout->children_coll)
-            ? CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
-        BOOL in_popup = (flyout && flyout->has_bounds &&
-                         x >= flyout->bounds.left && x < flyout->bounds.right &&
-                         y >= flyout->bounds.top && y < flyout->bounds.bottom);
-
-        if (msg == WM_MOUSEMOVE && children)
-        {
-            BOOL changed = FALSE;
-            unsigned int i;
-            for (i = 0; i < children->count; i++)
-            {
-                struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
-                BOOL hov;
-                if (!ch || ch->visibility != 0 || uwp_is_separator( ch )) continue;
-                hov = (ch->has_bounds && x >= ch->bounds.left && x < ch->bounds.right &&
-                       y >= ch->bounds.top && y < ch->bounds.bottom);
-                if (ch->is_hovered != hov) { ch->is_hovered = hov; changed = TRUE; }
-            }
-            if (changed)
-            {
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-            }
-            return in_popup;
-        }
-        if (msg == WM_LBUTTONDOWN)
-        {
-            if (in_popup)
-                g_flyout_down = TRUE;
-            else
-            {
-                g_flyout_down = FALSE;
-                uwp_close_flyout_popup( TRUE );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            }
+        if (uwp_overlay_handle_flyout_owner( hwnd, msg, x, y ))
             return TRUE;
-        }
-        if (msg == WM_LBUTTONUP)
-        {
-            if (!g_flyout_down && g_pressed_btn)
-                return FALSE;
-            if (g_flyout_down)
-            {
-                g_flyout_down = FALSE;
-                if (in_popup && children)
-                {
-                    int hit_idx = -1, i;
-                    for (i = 0; i < (int)children->count; i++)
-                    {
-                        struct uwp_element *ch = uwp_elem_from_any( children->items[i] );
-                        if (!ch || ch->visibility != 0 || !ch->is_enabled || uwp_is_separator( ch )) continue;
-                        if (ch->has_bounds && x >= ch->bounds.left && x < ch->bounds.right &&
-                            y >= ch->bounds.top && y < ch->bounds.bottom)
-                        {
-                            hit_idx = i;
-                            break;
-                        }
-                    }
-                    if (hit_idx >= 0)
-                    {
-                        struct uwp_element *clicked_el = uwp_elem_from_any( children->items[hit_idx] );
-                        if (clicked_el->class_flags & UWP_CF_TOGGLE_MENU_ITEM)
-                            uwp_toggle_button_set_checked( clicked_el, clicked_el->is_checked ? 0 : 1, TRUE );
-                        else if (clicked_el->class_flags & UWP_CF_RADIO_MENU_ITEM)
-                        {
-                            int j;
-                            for (j = hit_idx - 1; j >= 0; j--)
-                            {
-                                struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
-                                if (!sib) continue;
-                                if (uwp_is_separator( sib )) break;
-                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM)
-                                    uwp_toggle_button_set_checked( sib, 0, FALSE );
-                            }
-                            for (j = hit_idx + 1; j < (int)children->count; j++)
-                            {
-                                struct uwp_element *sib = uwp_elem_from_any( children->items[j] );
-                                if (!sib) continue;
-                                if (uwp_is_separator( sib )) break;
-                                if (sib->class_flags & UWP_CF_RADIO_MENU_ITEM)
-                                    uwp_toggle_button_set_checked( sib, 0, FALSE );
-                            }
-                            uwp_toggle_button_set_checked( clicked_el, 1, TRUE );
-                        }
-                        uwp_close_flyout_popup( TRUE );
-                        uwp_invoke_button( clicked_el );
-                        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                        return TRUE;
-                    }
-                }
-                uwp_close_flyout_popup( TRUE );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            }
-            return TRUE;
-        }
     }
-
-    {
-        struct uwp_element *pops[16];
-        int pcnt = uwp_get_open_popups( pops, ARRAY_SIZE(pops) );
-        if (pcnt > 0)
-        {
-            static struct uwp_element *g_popup_close_down = NULL;
-            struct uwp_element *pop = pops[pcnt - 1];
-            struct uwp_element *ch = uwp_elem_from_any( pop->content );
-            BOOL in_popup = (pop->has_bounds &&
-                             x >= pop->bounds.left && x < pop->bounds.right &&
-                             y >= pop->bounds.top && y < pop->bounds.bottom);
-
-            if (msg == WM_MOUSEWHEEL && ch)
-            {
-                struct uwp_element *sv = uwp_find_scroll_viewer_at( ch, x, y, 0 );
-                if (sv)
-                {
-                    int vp_h = max( 1, (int)(sv->bounds.bottom - sv->bounds.top) );
-                    int max_sc = max( 0, sv->scroll_extent_h - vp_h );
-                    int step = (wheel_delta != 0) ? -(wheel_delta * 120) / WHEEL_DELTA : 0;
-                    int ns;
-                    if (step == 0) step = (wheel_delta > 0) ? -120 : 120;
-                    ns = sv->scroll_y + step;
-                    if (ns < 0) ns = 0;
-                    if (max_sc > 0 && ns > max_sc) ns = max_sc;
-                    if (ns != sv->scroll_y)
-                    {
-                        sv->scroll_y = ns;
-                        g_layout_dirty = TRUE;
-                        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                        uwp_invalidate_window();
-                    }
-                }
-                return TRUE;
-            }
-            if (msg == WM_MOUSEMOVE && ch)
-            {
-                struct uwp_element *hit = in_popup ? uwp_hit_test_button( ch, x, y ) : NULL;
-                if (hit != g_hovered_elem)
-                {
-                    if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
-                    g_hovered_elem = hit;
-                    if (hit) hit->is_hovered = TRUE;
-                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    uwp_invalidate_window();
-                }
-                return TRUE;
-            }
-            if (msg == WM_LBUTTONDOWN)
-            {
-                if (!in_popup)
-                {
-                    g_popup_close_down = NULL;
-                    uwp_popup_set_open( pop, FALSE );
-                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    return TRUE;
-                }
-                if (ch)
-                {
-                    struct uwp_element *btn = uwp_hit_test_button( ch, x, y );
-                    if (btn)
-                    {
-                        struct xaml_pointer_info info = {0};
-                        g_pressed_btn = btn;
-                        btn->is_pressed = TRUE;
-                        info.x = (float)x;
-                        info.y = (float)y;
-                        info.pointer_id = 1;
-                        info.is_left = TRUE;
-                        info.is_in_contact = TRUE;
-                        info.is_in_window = TRUE;
-                        uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
-                        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                        uwp_invalidate_window();
-                        return TRUE;
-                    }
-                }
-                if (x >= pop->bounds.right - 44 && y <= pop->bounds.top + 44)
-                    g_popup_close_down = pop;
-                return TRUE;
-            }
-            if (msg == WM_LBUTTONUP)
-            {
-                if (g_pressed_btn && ch)
-                {
-                    struct uwp_element *btn = g_pressed_btn;
-                    struct uwp_element *hit = uwp_hit_test_button( ch, x, y );
-                    btn->is_pressed = FALSE;
-                    g_pressed_btn = NULL;
-                    if (hit == btn)
-                    {
-                        struct xaml_pointer_info info = {0};
-                        info.x = (float)x;
-                        info.y = (float)y;
-                        info.pointer_id = 1;
-                        info.is_left = TRUE;
-                        info.is_in_contact = FALSE;
-                        info.is_in_window = TRUE;
-                        uwp_fire_element_pointer( btn, XAML_PTR_RELEASED, &info, TRUE );
-                        uwp_invoke_button( btn );
-                        if (!wcscmp( btn->name, L"CloseButton" ) && pop->is_open)
-                            uwp_popup_set_open( pop, FALSE );
-                    }
-                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    uwp_invalidate_window();
-                    return TRUE;
-                }
-                if (g_popup_close_down == pop)
-                {
-                    g_popup_close_down = NULL;
-                    if (x >= pop->bounds.right - 44 && x < pop->bounds.right &&
-                        y >= pop->bounds.top && y <= pop->bounds.top + 44)
-                    {
-                        uwp_popup_set_open( pop, FALSE );
-                        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    }
-                    return TRUE;
-                }
-                return TRUE;
-            }
-        }
-    }
-
-    if (g_open_cdp && g_open_cdp->is_dropdown_open)
-    {
-        struct uwp_element *cdp = g_open_cdp;
-        RECT prc;
-        BOOL has_rect = uwp_cdp_compute_popup_rect( cdp, width, height, &prc );
-        BOOL in_popup = has_rect && x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom;
-        if (msg == WM_LBUTTONDOWN)
-        {
-            if (!in_popup)
-            {
-                uwp_cdp_set_open( cdp, FALSE );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-                /* Fall through so clicking another picker or button still works */
-            }
-            else
-                return TRUE;
-        }
-        else if (msg == WM_LBUTTONUP && in_popup)
-        {
-            struct uwp_nav_ext *ne = uwp_elem_ensure_nav( cdp );
-            float sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0f;
-            int hdr_h = (int)(36 * sc + 0.5f);
-            int cell_w = (prc.right - prc.left - (int)(16 * sc)) / 7;
-            int cell_h = (int)(34 * sc + 0.5f);
-            int grid_top = prc.top + hdr_h + (int)(30 * sc);
-            if (ne)
-            {
-                int vy = (ne->cdp_view_year > 0) ? ne->cdp_view_year : 2026;
-                int vm = (ne->cdp_view_month >= 1 && ne->cdp_view_month <= 12) ? ne->cdp_view_month : 11;
-                if (y < prc.top + hdr_h)
-                {
-                    if (x >= prc.right - (int)(64 * sc) && x < prc.right - (int)(34 * sc))
-                    {
-                        if (--vm < 1) { vm = 12; vy--; }
-                        ne->cdp_view_year = vy; ne->cdp_view_month = vm;
-                    }
-                    else if (x >= prc.right - (int)(34 * sc))
-                    {
-                        if (++vm > 12) { vm = 1; vy++; }
-                        ne->cdp_view_year = vy; ne->cdp_view_month = vm;
-                    }
-                }
-                else if (y >= grid_top && cell_w > 0 && cell_h > 0)
-                {
-                    int col = (x - (prc.left + (int)(8 * sc))) / cell_w;
-                    int row = (y - grid_top) / cell_h;
-                    if (col >= 0 && col < 7 && row >= 0 && row < 6)
-                    {
-                        int fdow = uwp_cdp_first_dow( vy, vm );
-                        int dim = uwp_cdp_days_in_month( vy, vm );
-                        int day = row * 7 + col - fdow + 1;
-                        if (day >= 1 && day <= dim)
-                        {
-                            INT64 ticks = uwp_cdp_ymd_to_ticks( vy, vm, day );
-                            uwp_cdp_set_date( cdp, ticks, TRUE, TRUE );
-                            uwp_cdp_set_open( cdp, FALSE );
-                        }
-                    }
-                }
-            }
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
-            return TRUE;
-        }
-    }
-
+    if (uwp_overlay_handle_open_popups( hwnd, msg, x, y, wheel_delta ))
+        return TRUE;
+    if (g_open_cdp && g_open_cdp->is_dropdown_open &&
+        uwp_overlay_handle_open_cdp( hwnd, msg, x, y, width, height ))
+        return TRUE;
     if (g_open_combobox && g_open_combobox->is_dropdown_open)
-    {
-        struct uwp_element *cb = g_open_combobox;
-        IInspectable *items[256];
-        int count = uwp_selector_get_items( cb, items, ARRAY_SIZE(items) );
-        RECT prc;
-        int item_h = 32, vis_cnt = 0, pad_y = 4, i;
-        BOOL has_rect = (count > 0 && uwp_combobox_compute_popup_rect( cb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ));
-        BOOL in_popup = has_rect && x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom;
-        BOOL handled = FALSE;
-
-        if (msg == WM_MOUSEMOVE)
-        {
-            int new_hov = -1;
-            if (in_popup)
-            {
-                int row = (y - (prc.top + pad_y)) / max( 1, item_h );
-                if (row >= 0 && row < vis_cnt && (cb->dropdown_scroll_offset + row) < count)
-                    new_hov = cb->dropdown_scroll_offset + row;
-            }
-            if (new_hov != cb->hovered_dropdown_idx)
-            {
-                cb->hovered_dropdown_idx = new_hov;
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-                handled = TRUE;
-            }
-        }
-        else if (msg == WM_MOUSEWHEEL)
-        {
-            if (in_popup && count > vis_cnt)
-            {
-                int step = (wheel_delta > 0) ? -1 : 1;
-                int max_sc = max( 0, count - vis_cnt );
-                int ns = cb->dropdown_scroll_offset + step;
-                if (ns < 0) ns = 0;
-                if (ns > max_sc) ns = max_sc;
-                cb->dropdown_scroll_offset = ns;
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-                handled = TRUE;
-            }
-        }
-        else if (msg == WM_LBUTTONDOWN)
-        {
-            if (in_popup)
-            {
-                g_cb_popup_down = TRUE;
-            }
-            else
-            {
-                g_cb_popup_down = FALSE;
-                uwp_combobox_set_open( cb, FALSE );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            }
-            handled = TRUE;
-        }
-        else if (msg == WM_LBUTTONUP)
-        {
-            if (g_cb_popup_down)
-            {
-                g_cb_popup_down = FALSE;
-                if (in_popup)
-                {
-                    int row = (y - (prc.top + pad_y)) / max( 1, item_h );
-                    int idx = cb->dropdown_scroll_offset + row;
-                    if (row >= 0 && row < vis_cnt && idx >= 0 && idx < count)
-                        uwp_selector_set_selection( cb, idx, NULL, TRUE, TRUE );
-                }
-                uwp_combobox_set_open( cb, FALSE );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            }
-            handled = TRUE;
-        }
-        for (i = 0; i < count; i++) IInspectable_Release( items[i] );
-        return handled;
-    }
-
-    if (uwp_is_autosuggest( g_focused_textbox ) &&
-        g_focused_textbox->is_open)
-    {
-        static BOOL g_asb_popup_down = FALSE;
-        struct uwp_element *asb = g_focused_textbox;
-        IInspectable *items[32];
-        int count = uwp_asb_get_suggestions( asb, items, ARRAY_SIZE(items) );
-        RECT prc;
-        int item_h = 38, vis_cnt = 0, pad_y = 6, i;
-        BOOL has_rect = (count > 0 && uwp_asb_compute_popup_rect( asb, count, width, height, &prc, &item_h, &vis_cnt, &pad_y ));
-        BOOL in_popup = has_rect && x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom;
-        BOOL handled = FALSE;
-
-        if (has_rect)
-        {
-            if (msg == WM_MOUSEMOVE)
-            {
-                int new_hov = -1;
-                if (in_popup)
-                {
-                    int row = (y - (prc.top + pad_y)) / max( 1, item_h );
-                    if (row >= 0 && row < vis_cnt && (asb->dropdown_scroll_offset + row) < count)
-                        new_hov = asb->dropdown_scroll_offset + row;
-                }
-                if (new_hov != asb->hovered_dropdown_idx)
-                {
-                    asb->hovered_dropdown_idx = new_hov;
-                    uwp_invalidate_paint_only();
-                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    handled = TRUE;
-                }
-            }
-            else if (msg == WM_LBUTTONDOWN && in_popup)
-            {
-                g_asb_popup_down = TRUE;
-                handled = TRUE;
-            }
-            else if (msg == WM_LBUTTONUP && g_asb_popup_down)
-            {
-                g_asb_popup_down = FALSE;
-                if (in_popup)
-                {
-                    int row = (y - (prc.top + pad_y)) / max( 1, item_h );
-                    int idx = asb->dropdown_scroll_offset + row;
-                    if (row >= 0 && row < vis_cnt && idx >= 0 && idx < count)
-                    {
-                        WCHAR prim[128] = {0};
-                        uwp_asb_get_item_label( asb, idx, items[idx], prim, ARRAY_SIZE(prim), NULL, 0 );
-                        if (prim[0])
-                            uwp_elem_set_text( asb, prim );
-                        asb->is_open = FALSE;
-                        asb->is_dropdown_open = FALSE;
-                        uwp_asb_fire_suggestion_chosen( asb, items[idx] );
-                        uwp_asb_fire_query_submitted_ex( asb, items[idx] );
-                    }
-                }
-                asb->is_open = FALSE;
-                asb->is_dropdown_open = FALSE;
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-                handled = TRUE;
-            }
-        }
-        for (i = 0; i < count; i++) IInspectable_Release( items[i] );
-        if (handled) return TRUE;
-    }
+        return uwp_overlay_handle_open_combobox( hwnd, msg, x, y, wheel_delta, width, height );
+    if (uwp_is_autosuggest( g_focused_textbox ) && g_focused_textbox->is_open &&
+        uwp_overlay_handle_open_asb( hwnd, msg, x, y, width, height ))
+        return TRUE;
 
     if (root_el)
     {
@@ -1132,7 +1152,7 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
         }
         if (msg == WM_MOUSEWHEEL)
         {
-            struct uwp_element *sv = uwp_find_scroll_viewer_at( root_el, x, y, 0 );
+            struct uwp_element *sv = uwp_hit_test( root_el, x, y, UWP_HIT_SCROLL_VIEWER );
             if (sv)
             {
                 int vp_h = max( 1, (int)(sv->bounds.bottom - sv->bounds.top) );
@@ -1157,74 +1177,40 @@ BOOL uwp_handle_overlay_mouse_input( HWND hwnd, UINT msg, int x, int y, int whee
     return FALSE;
 }
 
-BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content )
+static BOOL uwp_handle_lbutton_down( HWND hwnd, struct uwp_element *root_el, int x, int y )
 {
-    struct uwp_element *root_el = uwp_elem_from_any( root_content );
-    if (!root_el && g_navigated_page_el) root_el = g_navigated_page_el;
-    if (!root_el) return FALSE;
-    if (root_el->kind == UWP_KIND_FRAME && !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
-        root_el = g_navigated_page_el;   /* Frame.content RCW unresolvable; hit the adopted page */
-
-    if (width > 0 && height > 0 &&
-        (g_layout_dirty || !root_el->has_bounds ||
-         (root_el->bounds.right - root_el->bounds.left) != width ||
-         (root_el->bounds.bottom - root_el->bounds.top) != height))
+    struct uwp_element *ov_nav = uwp_get_open_overlay_nav();
+    if (ov_nav && ov_nav->nav && ov_nav->nav->nav_pane_bounds.right > ov_nav->nav->nav_pane_bounds.left)
     {
-        RECT rc = { 0, 0, width, height };
-        g_layout_dirty = FALSE;
-        uwp_arrange_element( root_el, rc );
-    }
-
-    if (msg == WM_LBUTTONDOWN)
-    {
-        struct uwp_element *ov_nav = uwp_get_open_overlay_nav();
-        if (ov_nav && ov_nav->nav && ov_nav->nav->nav_pane_bounds.right > ov_nav->nav->nav_pane_bounds.left)
+        RECT prc = ov_nav->nav->nav_pane_bounds;
+        if (x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom)
         {
-            RECT prc = ov_nav->nav->nav_pane_bounds;
-            if (x >= prc.left && x < prc.right && y >= prc.top && y < prc.bottom)
+            struct uwp_element *pane_btn = uwp_hit_test( ov_nav, x, y, UWP_HIT_BUTTON );
+            if (pane_btn && !wcscmp( pane_btn->name, L"TogglePaneButton" ))
             {
-                struct uwp_element *pane_btn = uwp_hit_test_button( ov_nav, x, y );
-                if (pane_btn && !wcscmp( pane_btn->name, L"TogglePaneButton" ))
-                {
-                    struct xaml_pointer_info info = {0};
-                    g_pressed_btn = pane_btn;
-                    pane_btn->is_pressed = TRUE;
-                    info.x = (float)x; info.y = (float)y; info.pointer_id = 1;
-                    info.is_left = TRUE; info.is_in_contact = TRUE; info.is_in_window = TRUE;
-                    uwp_fire_element_pointer( pane_btn, XAML_PTR_PRESSED, &info, TRUE );
-                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    uwp_invalidate_window();
-                }
-                return TRUE;
+                struct xaml_pointer_info info = {0};
+                g_pressed_btn = pane_btn;
+                pane_btn->is_pressed = TRUE;
+                info.x = (float)x; info.y = (float)y; info.pointer_id = 1;
+                info.is_left = TRUE; info.is_in_contact = TRUE; info.is_in_window = TRUE;
+                uwp_fire_element_pointer( pane_btn, XAML_PTR_PRESSED, &info, TRUE );
+                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                uwp_invalidate_window();
             }
-        }
-        {
-        struct uwp_element *tv = uwp_hit_test_tabview( root_el, x, y );
-        struct uwp_element *cb = tv ? NULL : uwp_hit_test_combobox( root_el, x, y );
-        struct uwp_element *cdp = (tv || cb) ? NULL : uwp_hit_test_cdp( root_el, x, y );
-        struct uwp_element *tb = (tv || cb || cdp) ? NULL : uwp_hit_test_textbox( root_el, x, y );
-        struct uwp_element *btn = (tv || cb || cdp || tb) ? NULL : uwp_hit_test_button( root_el, x, y );
-        struct uwp_element *exp = (tv || cb || cdp || tb || btn) ? NULL : uwp_hit_test_expander_header( root_el, x, y );
-        if (tv)
-        {
-            g_pressed_tabview = tv;
             return TRUE;
         }
-        if (cb)
-        {
-            g_pressed_combobox = cb;
-            return TRUE;
-        }
-        if (cdp)
-        {
-            g_pressed_cdp = cdp;
-            return TRUE;
-        }
-        if (exp)
-        {
-            g_pressed_expander = exp;
-            return TRUE;
-        }
+    }
+    {
+        struct uwp_element *tv = uwp_hit_test( root_el, x, y, UWP_HIT_TABVIEW );
+        struct uwp_element *cb = tv ? NULL : uwp_hit_test( root_el, x, y, UWP_HIT_COMBOBOX );
+        struct uwp_element *cdp = (tv || cb) ? NULL : uwp_hit_test( root_el, x, y, UWP_HIT_CDP );
+        struct uwp_element *tb = (tv || cb || cdp) ? NULL : uwp_hit_test( root_el, x, y, UWP_HIT_TEXTBOX );
+        struct uwp_element *btn = (tv || cb || cdp || tb) ? NULL : uwp_hit_test( root_el, x, y, UWP_HIT_BUTTON );
+        struct uwp_element *exp = (tv || cb || cdp || tb || btn) ? NULL : uwp_hit_test( root_el, x, y, UWP_HIT_EXPANDER_HEADER );
+        if (tv) { g_pressed_tabview = tv; return TRUE; }
+        if (cb) { g_pressed_combobox = cb; return TRUE; }
+        if (cdp) { g_pressed_cdp = cdp; return TRUE; }
+        if (exp) { g_pressed_expander = exp; return TRUE; }
         if (tb)
         {
             struct uwp_element *prev = g_focused_textbox;
@@ -1238,8 +1224,7 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             if (prev != tb)
                 uwp_ui_fire_got_focus( tb );
             TRACE( "uwp_handle_mouse_input: FOCUS TextBox (%d,%d) -> %s\n", x, y, debugstr_w(tb->name) );
-            if (hwnd)
-                InvalidateRect( hwnd, NULL, FALSE );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
             return TRUE;
         }
@@ -1269,12 +1254,8 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             {
                 struct xaml_pointer_info info = {0};
                 POINT spt = { btn->bounds.left, btn->bounds.bottom };
-                info.x = (float)x;
-                info.y = (float)y;
-                info.pointer_id = 1;
-                info.is_left = TRUE;
-                info.is_in_contact = TRUE;
-                info.is_in_window = TRUE;
+                info.x = (float)x; info.y = (float)y; info.pointer_id = 1;
+                info.is_left = TRUE; info.is_in_contact = TRUE; info.is_in_window = TRUE;
                 uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
                 if (hwnd) ClientToScreen( hwnd, &spt );
                 uwp_show_flyout_popup( btn, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
@@ -1286,12 +1267,8 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             struct xaml_pointer_info info = {0};
             g_pressed_btn = btn;
             btn->is_pressed = TRUE;
-            info.x = (float)x;
-            info.y = (float)y;
-            info.pointer_id = 1;
-            info.is_left = TRUE;
-            info.is_in_contact = TRUE;
-            info.is_in_window = TRUE;
+            info.x = (float)x; info.y = (float)y; info.pointer_id = 1;
+            info.is_left = TRUE; info.is_in_contact = TRUE; info.is_in_window = TRUE;
             uwp_fire_element_pointer( btn, XAML_PTR_PRESSED, &info, TRUE );
             TRACE( "uwp_handle_mouse_input: DOWN (%d,%d) -> %s (%s)\n",
                    x, y, debugstr_w(btn->name), debugstr_w(uwp_elem_text( btn )) );
@@ -1299,271 +1276,280 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
             uwp_invalidate_window();
             return TRUE;
         }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_handle_mouse_move( HWND hwnd, struct uwp_element *root_el, int x, int y )
+{
+    static struct uwp_element *s_hovered_tv = NULL;
+    struct uwp_element *tv = uwp_hit_test( root_el, x, y, UWP_HIT_TABVIEW );
+    struct uwp_element *hit = tv ? NULL : uwp_hit_test( root_el, x, y, UWP_HIT_BUTTON );
+    BOOL tv_changed = FALSE;
+    if (s_hovered_tv && s_hovered_tv != tv && uwp_elem_from_any( &s_hovered_tv->IInspectable_iface ) == s_hovered_tv && s_hovered_tv->magic == UWP_ELEM_MAGIC)
+    {
+        if (s_hovered_tv->nav && (s_hovered_tv->nav->tab_hovered_idx != -1 || s_hovered_tv->nav->tab_hovered_close))
+        {
+            s_hovered_tv->nav->tab_hovered_idx = -1;
+            s_hovered_tv->nav->tab_hovered_close = FALSE;
+            tv_changed = TRUE;
         }
     }
-    else if (msg == WM_MOUSEMOVE)
+    s_hovered_tv = tv;
+    if (tv)
     {
-        static struct uwp_element *s_hovered_tv = NULL;
-        struct uwp_element *tv = uwp_hit_test_tabview( root_el, x, y );
-        struct uwp_element *hit = tv ? NULL : uwp_hit_test_button( root_el, x, y );
-        BOOL tv_changed = FALSE;
-        if (s_hovered_tv && s_hovered_tv != tv && uwp_elem_from_any( &s_hovered_tv->IInspectable_iface ) == s_hovered_tv && s_hovered_tv->magic == UWP_ELEM_MAGIC)
+        struct uwp_nav_ext *nav = uwp_elem_ensure_nav( tv );
+        if (nav)
         {
-            if (s_hovered_tv->nav && (s_hovered_tv->nav->tab_hovered_idx != -1 || s_hovered_tv->nav->tab_hovered_close))
+            IInspectable *items[64];
+            int count = uwp_tabview_get_items( tv, items, ARRAY_SIZE(items) );
+            int n = max( 1, count ), i;
+            int new_idx = -1;
+            BOOL new_close = FALSE;
+            POINT pt = { x, y };
+            RECT pill, close_rc, add_rc;
+            uwp_tabview_compute_rects( &tv->bounds, n, 0, &pill, &close_rc, &add_rc );
+            if (PtInRect( &add_rc, pt ))
             {
-                s_hovered_tv->nav->tab_hovered_idx = -1;
-                s_hovered_tv->nav->tab_hovered_close = FALSE;
+                new_idx = -2;
+            }
+            else
+            {
+                for (i = 0; i < count; i++)
+                {
+                    uwp_tabview_compute_rects( &tv->bounds, n, i, &pill, &close_rc, &add_rc );
+                    if (PtInRect( &pill, pt ))
+                    {
+                        new_idx = i;
+                        new_close = PtInRect( &close_rc, pt );
+                        break;
+                    }
+                }
+            }
+            for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+            if (nav->tab_hovered_idx != new_idx || nav->tab_hovered_close != new_close)
+            {
+                nav->tab_hovered_idx = new_idx;
+                nav->tab_hovered_close = new_close;
                 tv_changed = TRUE;
             }
         }
-        s_hovered_tv = tv;
-        if (tv)
-        {
-            struct uwp_nav_ext *nav = uwp_elem_ensure_nav( tv );
-            if (nav)
-            {
-                IInspectable *items[64];
-                int count = uwp_tabview_get_items( tv, items, ARRAY_SIZE(items) );
-                int n = max( 1, count ), i;
-                int new_idx = -1;
-                BOOL new_close = FALSE;
-                POINT pt = { x, y };
-                RECT pill, close_rc, add_rc;
-                uwp_tabview_compute_rects( &tv->bounds, n, 0, &pill, &close_rc, &add_rc );
-                if (PtInRect( &add_rc, pt ))
-                {
-                    new_idx = -2;
-                }
-                else
-                {
-                    for (i = 0; i < count; i++)
-                    {
-                        uwp_tabview_compute_rects( &tv->bounds, n, i, &pill, &close_rc, &add_rc );
-                        if (PtInRect( &pill, pt ))
-                        {
-                            new_idx = i;
-                            new_close = PtInRect( &close_rc, pt );
-                            break;
-                        }
-                    }
-                }
-                for (i = 0; i < count; i++) IInspectable_Release( items[i] );
-                if (nav->tab_hovered_idx != new_idx || nav->tab_hovered_close != new_close)
-                {
-                    nav->tab_hovered_idx = new_idx;
-                    nav->tab_hovered_close = new_close;
-                    tv_changed = TRUE;
-                }
-            }
-        }
-        if (hit != g_hovered_elem || tv_changed)
-        {
-            if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
-            g_hovered_elem = hit;
-            if (hit) hit->is_hovered = TRUE;
-            if (uwp_is_menubar_item( hit ) &&
-                uwp_is_menubar_item( g_popup_owner_el ) &&
-                hit != g_popup_owner_el)
-            {
-                struct xaml_pointer_info info = {0};
-                POINT spt = { hit->bounds.left, hit->bounds.bottom };
-                info.x = (float)x;
-                info.y = (float)y;
-                info.pointer_id = 1;
-                info.is_left = TRUE;
-                info.is_in_contact = TRUE;
-                info.is_in_window = TRUE;
-                uwp_fire_element_pointer( hit, XAML_PTR_PRESSED, &info, TRUE );
-                if (hwnd) ClientToScreen( hwnd, &spt );
-                uwp_show_flyout_popup( hit, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
-            }
-            uwp_invalidate_paint_only();
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            return TRUE;
-        }
-        return FALSE;
     }
-    else if (msg == WM_LBUTTONUP)
+    if (hit != g_hovered_elem || tv_changed)
     {
-        if (g_pressed_tabview)
+        if (g_hovered_elem) g_hovered_elem->is_hovered = FALSE;
+        g_hovered_elem = hit;
+        if (hit) hit->is_hovered = TRUE;
+        if (uwp_is_menubar_item( hit ) &&
+            uwp_is_menubar_item( g_popup_owner_el ) &&
+            hit != g_popup_owner_el)
         {
-            struct uwp_element *tv = g_pressed_tabview;
-            struct uwp_element *hit = uwp_hit_test_tabview( root_el, x, y );
-            g_pressed_tabview = NULL;
-            if (hit == tv)
-            {
-                IInspectable *items[64];
-                int count = uwp_tabview_get_items( tv, items, ARRAY_SIZE(items) );
-                int n = max( 1, count ), i;
-                POINT pt = { x, y };
-                RECT pill, close_rc, add_rc;
-                uwp_tabview_compute_rects( &tv->bounds, n, 0, &pill, &close_rc, &add_rc );
-                if (PtInRect( &add_rc, pt ))
-                {
-                    uwp_tabview_fire_add_tab( tv );
-                }
-                else
-                {
-                    for (i = 0; i < count; i++)
-                    {
-                        uwp_tabview_compute_rects( &tv->bounds, n, i, &pill, &close_rc, &add_rc );
-                        if (PtInRect( &close_rc, pt ))
-                        {
-                            uwp_tabview_fire_close_tab( tv, items[i] );
-                            break;
-                        }
-                        if (PtInRect( &pill, pt ))
-                        {
-                            uwp_tabview_select_item( tv, items[i] );
-                            break;
-                        }
-                    }
-                }
-                for (i = 0; i < count; i++)
-                    IInspectable_Release( items[i] );
-            }
-            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            uwp_invalidate_window();
-            return TRUE;
+            struct xaml_pointer_info info = {0};
+            POINT spt = { hit->bounds.left, hit->bounds.bottom };
+            info.x = (float)x; info.y = (float)y; info.pointer_id = 1;
+            info.is_left = TRUE; info.is_in_contact = TRUE; info.is_in_window = TRUE;
+            uwp_fire_element_pointer( hit, XAML_PTR_PRESSED, &info, TRUE );
+            if (hwnd) ClientToScreen( hwnd, &spt );
+            uwp_show_flyout_popup( hit, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
         }
-        if (g_pressed_combobox)
+        uwp_invalidate_paint_only();
+        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL uwp_handle_lbutton_up( HWND hwnd, struct uwp_element *root_el, int x, int y )
+{
+    if (g_pressed_tabview)
+    {
+        struct uwp_element *tv = g_pressed_tabview;
+        struct uwp_element *hit = uwp_hit_test( root_el, x, y, UWP_HIT_TABVIEW );
+        g_pressed_tabview = NULL;
+        if (hit == tv)
         {
-            struct uwp_element *cb = g_pressed_combobox;
-            struct uwp_element *hit = uwp_hit_test_combobox( root_el, x, y );
-            g_pressed_combobox = NULL;
-            if (hit == cb)
+            IInspectable *items[64];
+            int count = uwp_tabview_get_items( tv, items, ARRAY_SIZE(items) );
+            int n = max( 1, count ), i;
+            POINT pt = { x, y };
+            RECT pill, close_rc, add_rc;
+            uwp_tabview_compute_rects( &tv->bounds, n, 0, &pill, &close_rc, &add_rc );
+            if (PtInRect( &add_rc, pt ))
             {
-                uwp_combobox_set_open( cb, !cb->is_dropdown_open );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            }
-            return TRUE;
-        }
-        if (g_pressed_cdp)
-        {
-            struct uwp_element *cdp = g_pressed_cdp;
-            struct uwp_element *hit = uwp_hit_test_cdp( root_el, x, y );
-            g_pressed_cdp = NULL;
-            if (hit == cdp)
-            {
-                uwp_cdp_set_open( cdp, !cdp->is_dropdown_open );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-            }
-            return TRUE;
-        }
-        if (g_pressed_expander)
-        {
-            struct uwp_element *exp = g_pressed_expander;
-            struct uwp_element *hit = uwp_hit_test_expander_header( root_el, x, y );
-            g_pressed_expander = NULL;
-            if (hit == exp)
-            {
-                BOOL next_open = !exp->is_open;
-                int di;
-                exp->is_open = next_open;
-                for (di = 0; di < exp->dp_cnt; di++)
-                {
-                    if (!wcscmp( xaml_dp_get_name( exp->dp_store[di].dp ), L"IsExpanded" ))
-                    {
-                        IInspectable *bv = box_bool_value( (boolean)next_open );
-                        if (bv)
-                        {
-                            uwp_do_SetValue( &exp->IDependencyObject_iface, exp->dp_store[di].dp, bv );
-                            IInspectable_Release( bv );
-                        }
-                        break;
-                    }
-                }
-                g_layout_dirty = TRUE;
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-            }
-            return TRUE;
-        }
-        if (g_pressed_btn)
-        {
-            struct uwp_element *btn = g_pressed_btn;
-            struct uwp_element *hit = uwp_hit_test_button( root_el, x, y );
-            btn->is_pressed = FALSE;
-            g_pressed_btn = NULL;
-            WARN( "uwp_handle_mouse_input: UP (%d,%d) pressed=%p(%s) hit=%p(%s)\n",
-                  x, y, btn, debugstr_w(btn->class_name), hit, hit ? debugstr_w(hit->class_name) : "(null)" );
-            if (hit == btn)
-            {
-                struct uwp_element *nav = (!wcscmp( btn->name, L"TogglePaneButton" ) && btn->parent && uwp_is_nav_view( btn->parent ))
-                    ? btn->parent : NULL;
-                BOOL prev_open = uwp_elem_nav_is_pane_open( nav );
-                struct xaml_pointer_info info = {0};
-                info.x = (float)x;
-                info.y = (float)y;
-                info.pointer_id = 1;
-                info.is_left = TRUE;
-                info.is_in_contact = FALSE;
-                info.is_in_window = TRUE;
-                uwp_fire_element_pointer( btn, XAML_PTR_RELEASED, &info, TRUE );
-                uwp_invoke_button( btn );
-                if (nav && uwp_elem_nav_is_pane_open( nav ) == prev_open)
-                    uwp_nav_set_pane_open( nav, !prev_open );
+                uwp_tabview_fire_add_tab( tv );
             }
             else
-                uwp_fire_tapped_bubble( btn, x, y );
+            {
+                for (i = 0; i < count; i++)
+                {
+                    uwp_tabview_compute_rects( &tv->bounds, n, i, &pill, &close_rc, &add_rc );
+                    if (PtInRect( &close_rc, pt )) { uwp_tabview_fire_close_tab( tv, items[i] ); break; }
+                    if (PtInRect( &pill, pt )) { uwp_tabview_select_item( tv, items[i] ); break; }
+                }
+            }
+            for (i = 0; i < count; i++) IInspectable_Release( items[i] );
+        }
+        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        uwp_invalidate_window();
+        return TRUE;
+    }
+    if (g_pressed_combobox)
+    {
+        struct uwp_element *cb = g_pressed_combobox;
+        struct uwp_element *hit = uwp_hit_test( root_el, x, y, UWP_HIT_COMBOBOX );
+        g_pressed_combobox = NULL;
+        if (hit == cb)
+        {
+            uwp_combobox_set_open( cb, !cb->is_dropdown_open );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return TRUE;
+    }
+    if (g_pressed_cdp)
+    {
+        struct uwp_element *cdp = g_pressed_cdp;
+        struct uwp_element *hit = uwp_hit_test( root_el, x, y, UWP_HIT_CDP );
+        g_pressed_cdp = NULL;
+        if (hit == cdp)
+        {
+            uwp_cdp_set_open( cdp, !cdp->is_dropdown_open );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        }
+        return TRUE;
+    }
+    if (g_pressed_expander)
+    {
+        struct uwp_element *exp = g_pressed_expander;
+        struct uwp_element *hit = uwp_hit_test( root_el, x, y, UWP_HIT_EXPANDER_HEADER );
+        g_pressed_expander = NULL;
+        if (hit == exp)
+        {
+            BOOL next_open = !exp->is_open;
+            int di;
+            exp->is_open = next_open;
+            for (di = 0; di < exp->dp_cnt; di++)
+            {
+                if (!wcscmp( xaml_dp_get_name( exp->dp_store[di].dp ), L"IsExpanded" ))
+                {
+                    IInspectable *bv = box_bool_value( (boolean)next_open );
+                    if (bv)
+                    {
+                        uwp_do_SetValue( &exp->IDependencyObject_iface, exp->dp_store[di].dp, bv );
+                        IInspectable_Release( bv );
+                    }
+                    break;
+                }
+            }
+            g_layout_dirty = TRUE;
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
-            return TRUE;
         }
+        return TRUE;
+    }
+    if (g_pressed_btn)
+    {
+        struct uwp_element *btn = g_pressed_btn;
+        struct uwp_element *hit = uwp_hit_test( root_el, x, y, UWP_HIT_BUTTON );
+        btn->is_pressed = FALSE;
+        g_pressed_btn = NULL;
+        WARN( "uwp_handle_mouse_input: UP (%d,%d) pressed=%p(%s) hit=%p(%s)\n",
+              x, y, btn, debugstr_w(btn->class_name), hit, hit ? debugstr_w(hit->class_name) : "(null)" );
+        if (hit == btn)
         {
-            struct uwp_element *nav = uwp_get_open_overlay_nav();
-            if (nav)
-            {
-                struct uwp_element *nav_item = uwp_hit_test_nav_item( nav, x, y );
-                if (nav_item)
-                {
-                    IInspectable *item_obj = nav_item->content ? nav_item->content
-                        : (nav_item->outer ? nav_item->outer : &nav_item->IInspectable_iface);
-                    uwp_nav_select_item( nav, nav_item );
-                    if (UWP_EV_ANY( nav, nav_sel_changed_reg ))
-                        uwp_nav_fire( nav, &nav->events->nav_sel_changed_reg, item_obj );
-                    if (UWP_EV_ANY( nav, nav_item_invoked_reg ))
-                        uwp_nav_fire( nav, &nav->events->nav_item_invoked_reg, item_obj );
-                    uwp_nav_set_pane_open( nav, FALSE );
-                    if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                    uwp_invalidate_window();
-                    return TRUE;
-                }
-            }
+            struct uwp_element *nav = (!wcscmp( btn->name, L"TogglePaneButton" ) && btn->parent && uwp_is_nav_view( btn->parent ))
+                ? btn->parent : NULL;
+            BOOL prev_open = uwp_elem_nav_is_pane_open( nav );
+            struct xaml_pointer_info info = {0};
+            info.x = (float)x; info.y = (float)y; info.pointer_id = 1;
+            info.is_left = TRUE; info.is_in_contact = FALSE; info.is_in_window = TRUE;
+            uwp_fire_element_pointer( btn, XAML_PTR_RELEASED, &info, TRUE );
+            uwp_invoke_button( btn );
+            if (nav && uwp_elem_nav_is_pane_open( nav ) == prev_open)
+                uwp_nav_set_pane_open( nav, !prev_open );
         }
+        else
+            uwp_fire_tapped_bubble( btn, x, y );
+        if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+        uwp_invalidate_window();
+        return TRUE;
+    }
+    {
+        struct uwp_element *nav = uwp_get_open_overlay_nav();
+        if (nav)
         {
-            struct uwp_element *hit_el = uwp_hit_test_element( root_el, x, y );
-            if (hit_el && uwp_is_pivot_item( hit_el ) && hit_el->parent && uwp_is_pivot( hit_el->parent ) &&
-                hit_el->parent->children_coll)
+            struct uwp_element *nav_item = uwp_hit_test_nav_item( nav, x, y );
+            if (nav_item)
             {
-                struct uwp_element *pivot = hit_el->parent;
-                struct uwp_vec_view *children = CONTAINING_RECORD( pivot->children_coll, struct uwp_vec_view, IInspectable_iface );
-                unsigned int k;
-                for (k = 0; k < children->count; k++)
-                {
-                    if (uwp_elem_from_any( children->items[k] ) == hit_el)
-                    {
-                        uwp_selector_set_selection( pivot, (INT32)k, children->items[k], TRUE, TRUE );
-                        g_layout_dirty = TRUE;
-                        break;
-                    }
-                }
-                uwp_fire_tapped_bubble( hit_el, x, y );
-                if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
-                uwp_invalidate_window();
-                return TRUE;
-            }
-        }
-        {
-            struct uwp_element *tap = uwp_hit_test_tappable( root_el, x, y );
-            if (tap && uwp_fire_tapped( tap, x, y ))
-            {
+                IInspectable *item_obj = nav_item->content ? nav_item->content
+                    : (nav_item->outer ? nav_item->outer : &nav_item->IInspectable_iface);
+                uwp_nav_select_item( nav, nav_item );
+                if (UWP_EV_ANY( nav, nav_sel_changed_reg ))
+                    uwp_nav_fire( nav, &nav->events->nav_sel_changed_reg, item_obj );
+                if (UWP_EV_ANY( nav, nav_item_invoked_reg ))
+                    uwp_nav_fire( nav, &nav->events->nav_item_invoked_reg, item_obj );
+                uwp_nav_set_pane_open( nav, FALSE );
                 if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
                 uwp_invalidate_window();
                 return TRUE;
             }
         }
     }
+    {
+        struct uwp_element *hit_el = uwp_hit_test_element( root_el, x, y );
+        if (hit_el && uwp_is_pivot_item( hit_el ) && hit_el->parent && uwp_is_pivot( hit_el->parent ) &&
+            hit_el->parent->children_coll)
+        {
+            struct uwp_element *pivot = hit_el->parent;
+            struct uwp_vec_view *children = CONTAINING_RECORD( pivot->children_coll, struct uwp_vec_view, IInspectable_iface );
+            unsigned int k;
+            for (k = 0; k < children->count; k++)
+            {
+                if (uwp_elem_from_any( children->items[k] ) == hit_el)
+                {
+                    uwp_selector_set_selection( pivot, (INT32)k, children->items[k], TRUE, TRUE );
+                    g_layout_dirty = TRUE;
+                    break;
+                }
+            }
+            uwp_fire_tapped_bubble( hit_el, x, y );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return TRUE;
+        }
+    }
+    {
+        struct uwp_element *tap = uwp_hit_test( root_el, x, y, UWP_HIT_TAPPABLE );
+        if (tap && uwp_fire_tapped( tap, x, y ))
+        {
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content )
+{
+    struct uwp_element *root_el = uwp_elem_from_any( root_content );
+    if (!root_el && g_navigated_page_el) root_el = g_navigated_page_el;
+    if (!root_el) return FALSE;
+    if (root_el->kind == UWP_KIND_FRAME && !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
+        root_el = g_navigated_page_el;   /* Frame.content RCW unresolvable; hit the adopted page */
+
+    if (width > 0 && height > 0 &&
+        (g_layout_dirty || !root_el->has_bounds ||
+         (root_el->bounds.right - root_el->bounds.left) != width ||
+         (root_el->bounds.bottom - root_el->bounds.top) != height))
+    {
+        RECT rc = { 0, 0, width, height };
+        g_layout_dirty = FALSE;
+        uwp_arrange_element( root_el, rc );
+    }
+
+    if (msg == WM_LBUTTONDOWN) return uwp_handle_lbutton_down( hwnd, root_el, x, y );
+    if (msg == WM_MOUSEMOVE)   return uwp_handle_mouse_move( hwnd, root_el, x, y );
+    if (msg == WM_LBUTTONUP)   return uwp_handle_lbutton_up( hwnd, root_el, x, y );
     return FALSE;
 }
 
@@ -1575,6 +1561,15 @@ struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, int y )
         return NULL;
     if (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom)
         return NULL;
+
+    if (uwp_nav_point_in_open_pane( el, x, y ))
+    {
+        struct uwp_element *pane_btn = uwp_hit_test( el, x, y, UWP_HIT_BUTTON );
+        struct uwp_element *nav_item;
+        if (pane_btn) return pane_btn;
+        nav_item = uwp_hit_test_nav_item( el, x, y );
+        return nav_item ? nav_item : el;
+    }
 
     if (el->children_coll)
     {

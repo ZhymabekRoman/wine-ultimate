@@ -29,11 +29,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 ULONG WINAPI uwp_nav_args_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI uwp_nav_args_Release( void *iface ) { return 1; }
-static HRESULT WINAPI uwp_nav_args_get_IsSelected( void *iface, boolean *val )
-{
-    if (val) *val = TRUE;
-    return S_OK;
-}
 static HRESULT WINAPI uwp_nav_args_get_IsSettingsSelected( void *iface, boolean *val )
 {
     if (val) *val = FALSE;
@@ -57,8 +52,8 @@ static const void *uwp_nav_args_vtbl[16] =
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
     [6] = uwp_nav_args_get_Item,
-    [7] = uwp_nav_args_get_IsSelected,
-    [8] = uwp_nav_args_get_IsSettingsSelected,
+    [7] = uwp_nav_args_get_IsSettingsSelected,
+    [8] = uwp_nav_args_get_Item,
     [9] = uwp_nav_args_get_Item,
     [10 ... 15] = uwp_generic_noop,
 };
@@ -356,13 +351,7 @@ static HRESULT WINAPI uwp_flyout_get_Items( void *iface, void **out )
 static HRESULT WINAPI uwp_flyout_put_Text( void *iface, HSTRING val )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
-    const WCHAR *raw;
-    if ((ULONG_PTR)val < 0x10000)
-    {
-        if (val) WARN( "uwp_flyout_put_Text: non-pointer val=%p (possible vtable slot mismatch)\n", val );
-        return S_OK;
-    }
-    raw = WindowsGetStringRawBuffer( val, NULL );
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
     if (impl && raw)
         uwp_elem_set_text( impl, raw );
     return S_OK;
@@ -372,21 +361,9 @@ static HRESULT WINAPI uwp_flyout_slot6( void *iface, void **out )
 {
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IFlyout_iface );
     if (!impl) return E_NOINTERFACE;
-    if (out)
+    if (out && (impl->class_flags2 & (UWP_CF2_FLYOUT_EXACT | UWP_CF2_CMDBAR_FLYOUT_EXACT | UWP_CF2_MENU_FLYOUT_EXACT)))
     {
-        struct uwp_element *el, *target_el = NULL;
-        AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
-        for (el = g_all_uwp_elems_head; el; el = el->next_reg)
-        {
-            if ((void *)out == (void *)el->outer ||
-                (void *)out == (void *)el->provider_inst ||
-                ((char *)out >= (char *)el && (char *)out < (char *)(el + 1)))
-            {
-                target_el = el;
-                break;
-            }
-        }
-        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+        struct uwp_element *target_el = uwp_elem_lookup_no_deref( out );
         if (target_el)
         {
             if (!target_el->flyout)
@@ -400,7 +377,10 @@ static HRESULT WINAPI uwp_flyout_slot6( void *iface, void **out )
                 IInspectable *sender = impl->outer ? impl->outer : &impl->IFlyout_iface;
                 uwp_fire_event_registry( &impl->events->flyout_opening_reg, sender, NULL, "Flyout::Opening" );
             }
+            impl->is_open = TRUE;
+            impl->is_dropdown_open = TRUE;
             g_popup_owner_el = target_el;
+            g_layout_dirty = TRUE;
             uwp_invalidate_window();
             return S_OK;
         }
@@ -417,7 +397,15 @@ static HRESULT WINAPI uwp_flyout_slot7( void *iface, HSTRING val )
     if (!impl) return S_OK;
     /* IFlyoutBase::Hide() takes no args; only MenuBarItem / MenuFlyoutSubItem use slot 7 for put_Title/put_Text */
     if (!(impl->class_flags & (UWP_CF_MENUBAR_ITEM | UWP_CF_MENU_FLYOUT_SUB_ITEM | UWP_CF_MENU_FLYOUT_ITEM)))
+    {
+        if (g_popup_owner_el &&
+            (g_popup_owner_el == impl ||
+             (g_popup_owner_el->flyout && uwp_elem_from_any( g_popup_owner_el->flyout ) == impl)))
+            uwp_close_flyout_popup( TRUE );
+        impl->is_open = FALSE;
+        impl->is_dropdown_open = FALSE;
         return S_OK;
+    }
     return uwp_flyout_put_Text( iface, val );
 }
 
@@ -675,7 +663,7 @@ void uwp_tabview_get_item_title( IInspectable *item, WCHAR *buf, int buf_len )
 {
     if (!buf || buf_len <= 0) return;
     buf[0] = 0;
-    if (item && (ULONG_PTR)item >= 0x10000)
+    if (item)
     {
         void *vm = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( item, &IID_ITabItemViewModel, &vm )) && vm)
@@ -1173,6 +1161,9 @@ int uwp_selector_get_items( struct uwp_element *el, IInspectable **out_items, in
 static BOOL uwp_items_equal( IInspectable *a, IInspectable *b )
 {
     WCHAR sa[128] = {0}, sb[128] = {0};
+    INT32 ia = 0, ib = 0;
+    double da = 0.0, db = 0.0;
+    boolean ba = FALSE, bb = FALSE;
     if (a == b) return TRUE;
     if (!a || !b) return FALSE;
     {
@@ -1180,8 +1171,24 @@ static BOOL uwp_items_equal( IInspectable *a, IInspectable *b )
         struct uwp_element *eb = uwp_elem_from_any( b );
         if (ea && eb && ea == eb) return TRUE;
     }
+    {
+        IUnknown *ua = NULL, *ub = NULL;
+        BOOL same_unk = FALSE;
+        if (SUCCEEDED(IInspectable_QueryInterface( a, &IID_IUnknown, (void **)&ua )) && ua &&
+            SUCCEEDED(IInspectable_QueryInterface( b, &IID_IUnknown, (void **)&ub )) && ub)
+            same_unk = (ua == ub);
+        if (ua) IUnknown_Release( ua );
+        if (ub) IUnknown_Release( ub );
+        if (same_unk) return TRUE;
+    }
     if (uwp_unbox_string( a, sa, ARRAY_SIZE(sa) ) && uwp_unbox_string( b, sb, ARRAY_SIZE(sb) ))
         return !wcscmp( sa, sb );
+    if (uwp_unbox_int32( a, &ia ) && uwp_unbox_int32( b, &ib ))
+        return ia == ib;
+    if (uwp_unbox_bool( a, &ba ) && uwp_unbox_bool( b, &bb ))
+        return (ba != 0) == (bb != 0);
+    if (uwp_unbox_double( a, &da ) && uwp_unbox_double( b, &db ))
+        return da == db;
     return FALSE;
 }
 
@@ -1189,7 +1196,7 @@ void uwp_combobox_get_item_label( struct uwp_element *cb, IInspectable *item, WC
 {
     if (!buf || buf_len <= 0) return;
     buf[0] = 0;
-    if (!item || (ULONG_PTR)item < 0x10000) return;
+    if (!item) return;
 
     if (uwp_elem_display_member_path( cb )[0])
     {
@@ -1392,6 +1399,14 @@ void uwp_selector_set_selection( struct uwp_element *impl, INT32 new_idx, IInspe
         if (nav->selected_item) IInspectable_Release( nav->selected_item );
         nav->selected_item = resolved_item;
         if (nav->selected_item) IInspectable_AddRef( nav->selected_item );
+    }
+    if (uwp_is_combobox( impl ))
+    {
+        struct uwp_vec_view *cv = impl->children_coll
+            ? CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+        struct uwp_element *ce = (cv && cv->count > 0) ? uwp_elem_from_any( cv->items[0] ) : NULL;
+        if (changed && ce && ce->dt_binding_connector && resolved_item)
+            uwp_fe_put_DataContext( &ce->IInspectable_iface, resolved_item );
     }
 
     /* Synchronize SelectedItem / SelectedIndex DPs through SetValue when changed
@@ -1981,10 +1996,9 @@ static IInspectable *uwp_box_datetime_ref( INT64 ticks )
     {
         if (SUCCEEDED(RoGetActivationFactory( h_cls, &IID_IPropertyValueStatics_local, &pvs )) && pvs)
         {
-            /* IPropertyValueStatics slot 18 = CreateDateTime(DateTime, IInspectable**) */
-            typedef HRESULT (WINAPI *create_dt_fn)( void *, INT64, IInspectable ** );
-            create_dt_fn fn = (create_dt_fn)((void **)*(void **)pvs)[21];
-            if (fn) fn( pvs, ticks, &res );
+            const struct abi_property_value_statics *pv_statics = (const struct abi_property_value_statics *)pvs;
+            if (pv_statics->lpVtbl->CreateDateTime)
+                pv_statics->lpVtbl->CreateDateTime( pvs, ticks, &res );
             IUnknown_Release( (IUnknown *)pvs );
         }
         WindowsDeleteString( h_cls );
@@ -1998,9 +2012,8 @@ static BOOL uwp_unbox_datetime_ref( IInspectable *val, INT64 *out_ticks )
     if (!val || !out_ticks) return FALSE;
     if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_DateTime_UWP, &iref )) && iref)
     {
-        typedef HRESULT (WINAPI *get_val_fn)( void *, INT64 * );
-        get_val_fn fn = (get_val_fn)((void **)*(void **)iref)[6];
-        HRESULT hr = fn ? fn( iref, out_ticks ) : E_FAIL;
+        const struct abi_iref_int64 *ir = (const struct abi_iref_int64 *)iref;
+        HRESULT hr = ir->lpVtbl->get_Value ? ir->lpVtbl->get_Value( iref, out_ticks ) : E_FAIL;
         IUnknown_Release( (IUnknown *)iref );
         return SUCCEEDED(hr);
     }
@@ -2010,10 +2023,8 @@ static BOOL uwp_unbox_datetime_ref( IInspectable *val, INT64 *out_ticks )
         void *pv = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IPropertyValue_local, &pv )) && pv)
         {
-            /* IPropertyValue slot 21 = GetDateTime(DateTime*) */
-            typedef HRESULT (WINAPI *get_dt_fn)( void *, INT64 * );
-            get_dt_fn fn = (get_dt_fn)((void **)*(void **)pv)[21];
-            HRESULT hr = fn ? fn( pv, out_ticks ) : E_FAIL;
+            const struct abi_property_value *apv = (const struct abi_property_value *)pv;
+            HRESULT hr = apv->lpVtbl->GetDateTime ? apv->lpVtbl->GetDateTime( pv, out_ticks ) : E_FAIL;
             IUnknown_Release( (IUnknown *)pv );
             return SUCCEEDED(hr);
         }
@@ -2459,13 +2470,11 @@ static HRESULT WINAPI uwp_cdp_slot_##N( void *iface, void *a1, void *a2 ) \
 { \
     struct uwp_element *impl = CONTAINING_RECORD( (IInspectable *)iface, struct uwp_element, IComboBox_iface ); \
     TRACE( "ICalendarDatePicker::slot[%d] on %s a1=%p a2=%p\n", N, impl ? debugstr_w(impl->name) : "?", a1, a2 ); \
-    if ((N) == 48 && impl && a1 && (ULONG_PTR)a1 >= 0x10000) \
+    if ((N) == 48 && impl && a1) \
     { \
         struct uwp_event_bag *ev = uwp_elem_ensure_events( impl ); \
         if (ev) return xaml_event_registry_add( &ev->cdp_date_changed_reg, a1, (EventRegistrationToken *)a2 ); \
     } \
-    if ((N) >= 48 && a1 && (ULONG_PTR)a1 >= 0x10000 && a2 && (ULONG_PTR)a2 >= 0x10000) \
-        ((EventRegistrationToken *)a2)->value = 1; \
     return S_OK; \
 }
 CDP_SLOT_PROBE(48)
@@ -2615,6 +2624,8 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
                         cel->parent = impl;
                         uwp_vec_Append( impl->children_coll, &cel->IInspectable_iface );
                         uwp_fe_put_DataContext( &cel->IInspectable_iface, item );
+                        if (cel->outer && !cel->template_applied)
+                            uwp_apply_template_force( cel );
                         IUnknown_Release( (IUnknown *)content );
                         IUnknown_Release( (IUnknown *)dt );
                         IInspectable_Release( tmpl );
@@ -2680,6 +2691,120 @@ static void uwp_items_ctrl_append_item( struct uwp_element *impl, void *item )
     }
 }
 
+struct uwp_obsvec_cb
+{
+    const void *vtbl;
+    LONG ref;
+    IWeakReference *weak_ctrl;
+};
+
+static HRESULT WINAPI obsvec_cb_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_BindableVectorChangedHandler_UWP =
+        { 0x624cd4e1, 0xd007, 0x43b1, { 0x9c, 0x03, 0xaf, 0x4d, 0x3e, 0x62, 0x58, 0xc4 } };
+    static const GUID IID_NotifyCollectionChangedHandler_UWP =
+        { 0xca10b37c, 0xf382, 0x4591, { 0x85, 0x57, 0x5e, 0x24, 0x96, 0x52, 0x79, 0xb0 } };
+    static const GUID IID_VectorChangedHandler_Obj =
+        { 0xb423a801, 0xd35e, 0x56b9, { 0x81, 0x3b, 0x00, 0x88, 0x95, 0x36, 0xcb, 0x98 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_BindableVectorChangedHandler_UWP ) ||
+        IsEqualGUID( iid, &IID_NotifyCollectionChangedHandler_UWP ) ||
+        IsEqualGUID( iid, &IID_VectorChangedHandler_Obj ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_obsvec_cb *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI obsvec_cb_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_obsvec_cb *)iface)->ref );
+}
+static ULONG WINAPI obsvec_cb_Release( void *iface )
+{
+    struct uwp_obsvec_cb *c = iface;
+    ULONG r = InterlockedDecrement( &c->ref );
+    if (!r)
+    {
+        if (c->weak_ctrl) IWeakReference_Release( c->weak_ctrl );
+        free( c );
+    }
+    return r;
+}
+static HRESULT WINAPI obsvec_cb_Invoke( void *iface, void *sender, void *args )
+{
+    struct uwp_obsvec_cb *c = iface;
+    IInspectable *obj = NULL;
+    if (c && c->weak_ctrl && SUCCEEDED(IWeakReference_Resolve( c->weak_ctrl, &IID_IInspectable, &obj )) && obj)
+    {
+        struct uwp_element *ctrl = uwp_elem_from_any( obj );
+        if (ctrl && ctrl->items_source && !uwp_is_combobox( ctrl ))
+        {
+            uwp_items_ctrl_materialize_source( ctrl, ctrl->items_source );
+            g_layout_dirty = TRUE;
+            uwp_invalidate_window();
+        }
+        IInspectable_Release( obj );
+    }
+    return S_OK;
+}
+static const void *g_obsvec_cb_vtbl[] = { obsvec_cb_QI, obsvec_cb_AddRef, obsvec_cb_Release, obsvec_cb_Invoke };
+
+void uwp_items_ctrl_hook_source( struct uwp_element *impl, IInspectable *src )
+{
+    static const GUID IID_IObservableVector_Obj =
+        { 0x7fd418c2, 0xe84d, 0x5217, { 0xba, 0x05, 0xcf, 0xd8, 0xb8, 0x05, 0xc3, 0xa2 } };
+    struct uwp_style_anim_ext *sa;
+    void *obs = NULL;
+    IWeakReference *wr = NULL;
+    struct uwp_obsvec_cb *cb;
+    if (!impl || !src) return;
+    sa = uwp_elem_ensure_style_anim( impl );
+    if (!sa) return;
+    if (impl->obsvec_hooked && sa->obsvec_source_obj == src) return;
+
+    if (FAILED(IInspectable_QueryInterface( src, &IID_IBindableObservableVector_UWP, &obs )) || !obs)
+        if (FAILED(IInspectable_QueryInterface( src, &IID_INotifyCollectionChanged_UWP, &obs )) || !obs)
+            IInspectable_QueryInterface( src, &IID_IObservableVector_Obj, &obs );
+    if (!obs) return;
+
+    if (SUCCEEDED(impl->IWeakReferenceSource_iface.lpVtbl->GetWeakReference( &impl->IWeakReferenceSource_iface, &wr )) && wr)
+    {
+        cb = calloc( 1, sizeof(*cb) );
+        if (cb)
+        {
+            const struct abi_observable_vector *ov = (const struct abi_observable_vector *)obs;
+            cb->vtbl = g_obsvec_cb_vtbl;
+            cb->ref = 1;
+            cb->weak_ctrl = wr;
+            if (ov->lpVtbl->add_VectorChanged)
+            {
+                EventRegistrationToken tok = {0};
+                __TRY
+                {
+                    if (SUCCEEDED(ov->lpVtbl->add_VectorChanged( obs, cb, &tok )))
+                    {
+                        uwp_replace_iface( &sa->obsvec_handler_obj, (IInspectable *)cb );
+                        uwp_replace_iface( &sa->obsvec_source_obj, src );
+                        sa->obsvec_tok = tok;
+                        impl->obsvec_hooked = 1;
+                    }
+                }
+                __EXCEPT_ALL {}
+                __ENDTRY;
+            }
+            obsvec_cb_Release( cb );
+        }
+        else
+            IWeakReference_Release( wr );
+    }
+    IUnknown_Release( (IUnknown *)obs );
+}
+
 void uwp_items_ctrl_materialize_source( struct uwp_element *impl, IInspectable *src )
 {
     IInspectable *items[64];
@@ -2714,7 +2839,10 @@ static HRESULT WINAPI uwp_items_ctrl_put_ItemsSource( void *iface, void *src )
     TRACE( "IItemsControl::put_ItemsSource on %s (%s) -> %p\n",
            debugstr_w(impl->class_name), debugstr_w(impl->name), src );
     if (impl->items_source && !uwp_is_combobox( impl ))
+    {
+        uwp_items_ctrl_hook_source( impl, impl->items_source );
         uwp_items_ctrl_materialize_source( impl, impl->items_source );
+    }
     if (uwp_is_autosuggest( impl ))
     {
         unsigned int cnt = impl->items_source ? uwp_winrt_vec_count( impl->items_source ) : 0;

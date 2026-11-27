@@ -22,8 +22,13 @@
 
 #include "uwp_private.h"
 
-/* xbf_decode.c */
+/* pri.c */
 BOOL uwp_pri_lookup_string( const WCHAR *res_name, WCHAR *out_buf, int out_chars );
+void uwp_pri_enum_uid_props( const WCHAR *uid,
+                             void (*cb)( const WCHAR *prop_rel, const WCHAR *val, void *user ),
+                             void *user );
+
+/* xbf_decode.c */
 BOOL xbf_read_uleb( const BYTE *buf, DWORD *io_p, DWORD end_p, DWORD *out_val );
 BOOL xbf_get_substream_bounds( const struct xbf_ctx *ctx, DWORD sub_idx,
                                DWORD *out_start, DWORD *out_end, DWORD *out_size );

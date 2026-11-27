@@ -621,7 +621,11 @@ static HRESULT WINAPI package_manager_GetIids( IPackageManager *iface, ULONG *ii
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
     if (!iid_count || !iids) return E_INVALIDARG;
     *iid_count = ARRAY_SIZE(iids_pm);
-    if (!(*iids = CoTaskMemAlloc( *iid_count * sizeof(IID) ))) return E_OUTOFMEMORY;
+    if (!(*iids = CoTaskMemAlloc( *iid_count * sizeof(IID) )))
+    {
+        *iid_count = 0;
+        return E_OUTOFMEMORY;
+    }
     for (ULONG i = 0; i < *iid_count; i++) *(*iids + i) = *iids_pm[i];
     return S_OK;
 }
@@ -1083,7 +1087,12 @@ static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING
             value[ARRAY_SIZE(value) - 1] = 0;
             RegCloseKey( hsub );
         }
-        if (!(info = calloc( 1, sizeof(*info) ))) continue;
+        if (!(info = calloc( 1, sizeof(*info) )))
+        {
+            RegCloseKey( hkey );
+            IIterable_PackageUserInformation_Release( &list->IIterable_PackageUserInformation_iface );
+            return E_OUTOFMEMORY;
+        }
         info->IPackageUserInformation_iface.lpVtbl = &package_user_info_vtbl;
         info->list = list;
         info->index = list->count;
@@ -1124,7 +1133,8 @@ static HRESULT WINAPI package_manager_FindPackagesByPackageFamilyName( IPackageM
 {
     TRACE( "iface %p, family_name %s, packages %p.\n", iface, debugstr_hstring(family_name), packages );
 
-    if (!family_name) return E_INVALIDARG;
+    if (!family_name || !packages) return E_INVALIDARG;
+    *packages = NULL;
     return find_packages( WindowsGetStringRawBuffer( family_name, NULL ), NULL, NULL, 0, packages );
 }
 
@@ -1133,7 +1143,8 @@ static HRESULT WINAPI package_manager_FindPackagesByUserSecurityIdPackageFamilyN
 {
     TRACE( "iface %p, sid %s, family_name %s, packages %p.\n", iface, debugstr_hstring(sid), debugstr_hstring(family_name), packages );
 
-    if (!family_name) return E_INVALIDARG;
+    if (!family_name || !packages) return E_INVALIDARG;
+    *packages = NULL;
     return find_packages( WindowsGetStringRawBuffer( family_name, NULL ), NULL, NULL, 0, packages );
 }
 
@@ -1690,7 +1701,11 @@ static HRESULT WINAPI debug_settings_GetIids( IPackageManagerDebugSettings *ifac
 
     if (!count || !iids) return E_INVALIDARG;
     *count = ARRAY_SIZE(iids_ds);
-    if (!(*iids = CoTaskMemAlloc( *count * sizeof(IID) ))) return E_OUTOFMEMORY;
+    if (!(*iids = CoTaskMemAlloc( *count * sizeof(IID) )))
+    {
+        *count = 0;
+        return E_OUTOFMEMORY;
+    }
     **iids = *iids_ds[0];
     return S_OK;
 }
@@ -2799,9 +2814,8 @@ static HRESULT WINAPI applist_op_QueryInterface( void *iface, REFIID iid, void *
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    *out = &impl->vtbl_op;
-    InterlockedIncrement( &impl->ref );
-    return S_OK;
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 
 static ULONG WINAPI applist_op_AddRef( void *iface )
@@ -4375,7 +4389,11 @@ static HRESULT WINAPI package_catalog_GetIids( IPackageCatalog *iface, ULONG *ii
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
     if (!iid_count || !iids) return E_INVALIDARG;
     *iid_count = ARRAY_SIZE(iids_pc);
-    if (!(*iids = CoTaskMemAlloc( *iid_count * sizeof(IID) ))) return E_OUTOFMEMORY;
+    if (!(*iids = CoTaskMemAlloc( *iid_count * sizeof(IID) )))
+    {
+        *iid_count = 0;
+        return E_OUTOFMEMORY;
+    }
     for (ULONG i = 0; i < *iid_count; i++) *(*iids + i) = *iids_pc[i];
     return S_OK;
 }

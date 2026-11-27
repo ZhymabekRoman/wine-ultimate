@@ -163,7 +163,12 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
         }
     }
     if (impl->template_root)
+    {
+        if (impl->data_context && !impl->template_root->data_context)
+            uwp_propagate_data_context( impl->template_root, impl->data_context );
         uwp_sync_template_presenter( impl, L"Content", (IInspectable *)val );
+    }
+    uwp_vsm_invalidate_eval_chain( impl );
     if (impl->island_hwnd) InvalidateRect( impl->island_hwnd, NULL, FALSE );
     uwp_invalidate_window();
     return S_OK;
@@ -187,6 +192,7 @@ HRESULT WINAPI uwp_btn_put_Command( void *iface, void *val )
     if (impl->command) IInspectable_Release( impl->command );
     impl->command = (IInspectable *)val;
     if (impl->command) IInspectable_AddRef( impl->command );
+    uwp_sync_command_can_execute( impl );
     return S_OK;
 }
 HRESULT WINAPI uwp_btn_get_CommandParameter( void *iface, void **out )
@@ -206,6 +212,7 @@ HRESULT WINAPI uwp_btn_put_CommandParameter( void *iface, void *val )
     if (impl->command_param) IInspectable_Release( impl->command_param );
     impl->command_param = (IInspectable *)val;
     if (impl->command_param) IInspectable_AddRef( impl->command_param );
+    uwp_sync_command_can_execute( impl );
     return S_OK;
 }
 HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegistrationToken *tok )
@@ -227,8 +234,6 @@ HRESULT WINAPI uwp_btn_remove_Click( void *iface, EventRegistrationToken tok )
     return xaml_event_registry_remove( &impl->events->click_reg, tok );
 }
 
-BOOL uwp_unbox_bool( IInspectable *val, boolean *out );
-
 void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL fire_events )
 {
     int prev, i;
@@ -237,6 +242,7 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
     if (!btn) return;
     prev = btn->is_checked;
     btn->is_checked = checked ? 1 : 0;
+    btn->is_selected = (BYTE)btn->is_checked;
 
     if (fire_events)
     {
@@ -251,6 +257,12 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
                 IInspectable *src = (bel && bel->data_context) ? bel->data_context : btn->data_context;
                 HSTRING h_path = NULL;
                 const WCHAR *path_str = NULL;
+                if (!src)
+                {
+                    struct uwp_element *anc;
+                    for (anc = btn->parent; anc; anc = anc->parent)
+                        if (anc->data_context) { src = anc->data_context; break; }
+                }
                 if (bel && bel->tag)
                 {
                     void *pp = NULL;
@@ -262,8 +274,15 @@ void uwp_toggle_button_set_checked( struct uwp_element *btn, int checked, BOOL f
                         IUnknown_Release( (IUnknown *)pp );
                     }
                 }
+                if ((!path_str || !path_str[0]) && uwp_has_text( bel ))
+                    path_str = uwp_elem_text( bel );
                 if (src && path_str && path_str[0] && boxed)
-                    uwp_update_binding_source( src, path_str, boxed );
+                {
+                    IInspectable *conv_back = (bel && bel->style_anim && bel->style_anim->converter)
+                        ? uwp_invoke_value_converter( bel, boxed, dpn, TRUE ) : NULL;
+                    uwp_update_binding_source( src, path_str, conv_back ? conv_back : boxed );
+                    if (conv_back) IInspectable_Release( conv_back );
+                }
                 if (h_path) WindowsDeleteString( h_path );
             }
         }
@@ -530,7 +549,6 @@ static HRESULT WINAPI uwp_bg_put_Background( void *iface, IInspectable *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return S_OK;
-    if (val && (ULONG_PTR)val < 0x10000) return S_OK;
     if (impl->bg_brush != val)
     {
         if (impl->bg_brush) IInspectable_Release( impl->bg_brush );
@@ -700,7 +718,8 @@ const void *uwp_toggle_switch_vtbl[24] =
 };
 
 static SRWLOCK g_open_popups_lock = SRWLOCK_INIT;
-static struct uwp_element *g_open_popups[16];
+static struct uwp_element **g_open_popups = NULL;
+static int g_open_popup_cap = 0;
 static int g_open_popup_cnt = 0;
 
 static void uwp_open_popups_track( struct uwp_element *impl, BOOL open )
@@ -711,7 +730,7 @@ static void uwp_open_popups_track( struct uwp_element *impl, BOOL open )
     {
         for (i = 0; i < g_open_popup_cnt; i++)
             if (g_open_popups[i] == impl) { ReleaseSRWLockExclusive( &g_open_popups_lock ); return; }
-        if (g_open_popup_cnt < (int)ARRAY_SIZE(g_open_popups))
+        if (xaml_vec_grow( (void **)&g_open_popups, &g_open_popup_cap, g_open_popup_cnt + 1, sizeof(*g_open_popups), 16 ))
         {
             g_open_popups[g_open_popup_cnt] = impl;
             __atomic_store_n( &g_open_popup_cnt, g_open_popup_cnt + 1, __ATOMIC_RELEASE );
@@ -1123,7 +1142,7 @@ HRESULT WINAPI uwp_cd2_get_CloseButtonText( void *iface, HSTRING *out )
 HRESULT WINAPI uwp_cd2_put_CloseButtonText( void *iface, HSTRING val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    const WCHAR *raw = ((ULONG_PTR)val >= 0x10000) ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    const WCHAR *raw = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
     struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
     if (d) lstrcpynW( d->dialog_close_text, raw ? raw : L"", ARRAY_SIZE(d->dialog_close_text) );
     return S_OK;
@@ -1763,14 +1782,13 @@ static HRESULT WINAPI uwp_fe7_add_EffectiveViewportChanged( IInspectable *iface,
 {
     struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IFrameworkElement7_iface );
     struct uwp_event_bag *ev = uwp_elem_ensure_events( impl );
-    EventRegistrationToken *tok_ptr = (tok && (ULONG_PTR)tok > 0x10000 && !IsBadWritePtr( tok, sizeof(*tok) )) ? tok : NULL;
     HRESULT hr;
     if (!ev) return E_OUTOFMEMORY;
-    hr = xaml_event_registry_add( &ev->evc_reg, handler, tok_ptr );
+    hr = xaml_event_registry_add( &ev->evc_reg, handler, tok );
     if (SUCCEEDED(hr) && handler)
     {
         WARN( "EVC_ADD %s (%s) h=%p tok=%I64d\n", debugstr_w(impl->class_name), debugstr_w(impl->name),
-              handler, tok_ptr ? tok_ptr->value : 0 );
+              handler, tok ? tok->value : 0 );
         impl->evc_fired = FALSE;
         uwp_invalidate_window();
     }
@@ -2302,6 +2320,28 @@ const WCHAR *uwp_btype_to_class_name( WORD tid )
 
 void uwp_invoke_button( struct uwp_element *btn );
 
+static BOOL uwp_btn_label_matches_key( const WCHAR *raw, const WCHAR *disp, const WCHAR *text )
+{
+    if (raw && raw[0] && !lstrcmpiW( raw, text )) return TRUE;
+    if (disp && disp[0] && !lstrcmpiW( disp, text )) return TRUE;
+    if (text && text[0] && !text[1])
+    {
+        WCHAR ch = text[0];
+        const WCHAR *s = (raw && raw[0]) ? raw : disp;
+        if (s && s[0] && !s[1])
+        {
+            WCHAR g = s[0];
+            if (ch == L'*' && (g == 0x00d7 || g == 0xe947)) return TRUE;
+            if (ch == L'/' && (g == 0x00f7 || g == 0xe94a)) return TRUE;
+            if (ch == L'+' && g == 0xe948) return TRUE;
+            if (ch == L'-' && g == 0xe949) return TRUE;
+            if (ch == L'=' && g == 0xe94e) return TRUE;
+            if (ch == L'\b' && (g == 0x232b || g == 0xe94f)) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR *text )
 {
     if (!el || el->visibility != 0 || !el->is_enabled) return NULL;
@@ -2321,60 +2361,23 @@ struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR
         struct uwp_element *hit = uwp_find_button_by_text( uwp_elem_from_any( el->content ), text );
         if (hit) return hit;
     }
-    if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) && uwp_has_text( el ))
+    if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
         WCHAR tmp[64];
-        const WCHAR *disp = uwp_format_display_label( el, tmp, ARRAY_SIZE(tmp) );
-        if (!lstrcmpiW( uwp_elem_text( el ), text ) || (disp && disp[0] && !lstrcmpiW( disp, text )))
+        const WCHAR *disp = uwp_has_text( el ) ? uwp_format_display_label( el, tmp, ARRAY_SIZE(tmp) ) : L"";
+        if (uwp_btn_label_matches_key( uwp_elem_text( el ), disp, text ))
             return el;
-    }
-    return NULL;
-}
-
-static BOOL uwp_is_focusable_textbox( const struct uwp_element *el )
-{
-    if (!el || el->visibility != 0 || !el->is_enabled) return FALSE;
-    return uwp_is_text_input( el );
-}
-
-struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
-{
-    if (!el || el->visibility != 0) return NULL;
-    if (el->has_bounds && uwp_is_scroll_viewer( el ) &&
-        (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom))
-        return NULL;
-
-    if (el->has_bounds &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom &&
-        uwp_is_exact_autosuggest( el ) &&
-        el->is_enabled)
-        return el;
-
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
+        if (el->content)
         {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit = uwp_hit_test_textbox( ch, x, y );
-            if (hit) return hit;
+            struct uwp_element *ce = uwp_elem_from_any( el->content );
+            if (ce && uwp_has_text( ce ))
+            {
+                const WCHAR *cdisp = uwp_format_display_label( ce, tmp, ARRAY_SIZE(tmp) );
+                if (uwp_btn_label_matches_key( uwp_elem_text( ce ), cdisp, text ))
+                    return el;
+            }
         }
     }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit = uwp_hit_test_textbox( ch, x, y );
-        if (hit) return hit;
-    }
-
-    if (el->has_bounds &&
-        x >= el->bounds.left && x < el->bounds.right &&
-        y >= el->bounds.top && y < el->bounds.bottom &&
-        uwp_is_focusable_textbox( el ))
-        return el;
-
     return NULL;
 }
 
@@ -2412,72 +2415,6 @@ BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *n
     }
     return FALSE;
 }
-
-
-
-BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y );
-
-
-struct uwp_element *uwp_hit_test_tabview( struct uwp_element *el, int x, int y )
-{
-    if (!el || !el->has_bounds || el->visibility != 0) return NULL;
-    if (uwp_is_tabview( el ))
-    {
-        if (x >= el->bounds.left && x < el->bounds.right &&
-            y >= el->bounds.top && y < el->bounds.bottom)
-            return el;
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        if (ch && ch != el)
-        {
-            struct uwp_element *hit = uwp_hit_test_tabview( ch, x, y );
-            if (hit) return hit;
-        }
-    }
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        unsigned int k;
-        for (k = 0; k < children->count; k++)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (ch && ch != el)
-            {
-                struct uwp_element *hit = uwp_hit_test_tabview( ch, x, y );
-                if (hit) return hit;
-            }
-        }
-    }
-    return NULL;
-}
-struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x, int y )
-{
-    if (!el || !el->has_bounds || el->visibility != 0) return NULL;
-    if (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom)
-        return NULL;
-    if (el->children_coll)
-    {
-        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
-        int k;
-        for (k = (int)children->count - 1; k >= 0; k--)
-        {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            struct uwp_element *hit = ch && ch != el ? uwp_hit_test_tappable( ch, x, y ) : NULL;
-            if (hit) return hit;
-        }
-    }
-    if (el->content)
-    {
-        struct uwp_element *ch = uwp_elem_from_any( el->content );
-        struct uwp_element *hit = ch && ch != el ? uwp_hit_test_tappable( ch, x, y ) : NULL;
-        if (hit) return hit;
-    }
-    if (UWP_EV_ANY( el, tapped_reg )) return el;
-    return NULL;
-}
-
 
 struct uwp_element *g_pressed_btn = NULL;
 struct uwp_element *g_pressed_tabview = NULL;

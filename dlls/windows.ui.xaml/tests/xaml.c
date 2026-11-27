@@ -1962,6 +1962,420 @@ static void test_WinUINotepadRegressions(void)
     }
 }
 
+struct test_typename { HSTRING Name; int Kind; };
+
+struct test_conv_obj
+{
+    const void **lpVtbl;
+    LONG ref;
+    LONG convert_cnt;
+    IInspectable *last_param;
+    WCHAR last_lang[32];
+};
+
+static HRESULT WINAPI test_conv_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IValueConverter_t = { 0x7f5ee992, 0x7694, 0x4e6c, { 0xa5, 0x18, 0x4e, 0x6f, 0x31, 0xb1, 0x79, 0x76 } };
+    struct test_conv_obj *c = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IValueConverter_t ))
+    {
+        *out = iface;
+        InterlockedIncrement( &c->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI test_conv_AddRef( void *iface ) { return InterlockedIncrement( &((struct test_conv_obj *)iface)->ref ); }
+static ULONG WINAPI test_conv_Release( void *iface ) { return InterlockedDecrement( &((struct test_conv_obj *)iface)->ref ); }
+static HRESULT WINAPI test_conv_GetIids( void *iface, ULONG *c, IID **iids ) { if (c) *c = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI test_conv_GetRCN( void *iface, HSTRING *n ) { return WindowsCreateString( L"Test.Converter", 14, n ); }
+static HRESULT WINAPI test_conv_GetTL( void *iface, TrustLevel *tl ) { if (tl) *tl = BaseTrust; return S_OK; }
+static HRESULT WINAPI test_conv_Convert( void *iface, IInspectable *val, struct test_typename tname,
+                                          IInspectable *param, HSTRING lang, IInspectable **out )
+{
+    struct test_conv_obj *c = iface;
+    const WCHAR *lraw = lang ? WindowsGetStringRawBuffer( lang, NULL ) : L"";
+    (void)val;
+    (void)tname;
+    InterlockedIncrement( &c->convert_cnt );
+    c->last_param = param;
+    lstrcpynW( c->last_lang, lraw ? lraw : L"", ARRAY_SIZE(c->last_lang) );
+    if (out)
+    {
+        static struct fake_string_pv converted_pv = { fake_pv_vtbl, 1, L"converted" };
+        converted_pv.ref++;
+        *out = (IInspectable *)&converted_pv;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI test_conv_ConvertBack( void *iface, IInspectable *val, struct test_typename tname,
+                                              IInspectable *param, HSTRING lang, IInspectable **out )
+{
+    (void)iface; (void)val; (void)tname; (void)param; (void)lang;
+    if (out) *out = NULL;
+    return E_NOTIMPL;
+}
+static const void *test_conv_vtbl[] = {
+    test_conv_QI, test_conv_AddRef, test_conv_Release,
+    test_conv_GetIids, test_conv_GetRCN, test_conv_GetTL,
+    test_conv_Convert, test_conv_ConvertBack
+};
+
+struct test_binding_vtbl
+{
+    void *pad0_7[8];
+    HRESULT (WINAPI *get_Mode)(void *, INT32 *);
+    HRESULT (WINAPI *put_Mode)(void *, INT32);
+    void *pad10_15[6];
+    HRESULT (WINAPI *get_Converter)(void *, IInspectable **);
+    HRESULT (WINAPI *put_Converter)(void *, IInspectable *);
+    HRESULT (WINAPI *get_ConverterParameter)(void *, IInspectable **);
+    HRESULT (WINAPI *put_ConverterParameter)(void *, IInspectable *);
+    HRESULT (WINAPI *get_ConverterLanguage)(void *, HSTRING *);
+    HRESULT (WINAPI *put_ConverterLanguage)(void *, HSTRING);
+};
+struct test_binding_iface { const struct test_binding_vtbl *lpVtbl; };
+
+struct test_bops_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *SetBinding)(void *, void *, void *, void *);
+};
+struct test_bops_iface { const struct test_bops_vtbl *lpVtbl; };
+
+struct test_pr_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_IsActive)(void *, boolean *);
+    HRESULT (WINAPI *put_IsActive)(void *, boolean);
+};
+struct test_pr_iface { const struct test_pr_vtbl *lpVtbl; };
+
+struct test_flyout_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_Content)(void *, IInspectable **);
+    HRESULT (WINAPI *put_Content)(void *, IInspectable *);
+};
+struct test_flyout_iface { const struct test_flyout_vtbl *lpVtbl; };
+
+struct test_flyout_base_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *ShowAt)(void *, void *);
+    HRESULT (WINAPI *Hide)(void *);
+};
+struct test_flyout_base_iface { const struct test_flyout_base_vtbl *lpVtbl; };
+
+struct test_feap_statics_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *CreatePeerForElement)(void *, void *, void **);
+};
+struct test_feap_statics_iface { const struct test_feap_statics_vtbl *lpVtbl; };
+
+struct test_ap_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *GetPattern)(void *, INT32, void **);
+};
+struct test_ap_iface { const struct test_ap_vtbl *lpVtbl; };
+
+struct test_invoke_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *Invoke)(void *);
+};
+struct test_invoke_iface { const struct test_invoke_vtbl *lpVtbl; };
+
+struct test_dp_prop_slot_vtbl
+{
+    void *pad0_5[6];
+    HRESULT (WINAPI *get_Prop)(void *, void **);
+};
+struct test_dp_prop_slot_iface { const struct test_dp_prop_slot_vtbl *lpVtbl; };
+
+static void test_CalculatorQaRegressions(void)
+{
+    static const GUID IID_IReferenceTrackerTarget_t = { 0x5c13e51c, 0x4f32, 0x4726, { 0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0 } };
+    static const GUID IID_IUIElementStatics_t = { 0x58d3573b, 0xf52c, 0x45be, { 0x98, 0x8b, 0xa5, 0x86, 0x95, 0x64, 0x87, 0x3c } };
+    static const GUID IID_IControlStatics_t = { 0x473b305b, 0x877d, 0x4c35, { 0x8f, 0xca, 0x46, 0xa0, 0x5f, 0x96, 0x60, 0x7a } };
+    static const GUID IID_IProgressRingStatics_t = { 0x6e820f24, 0x64d6, 0x4570, { 0x8d, 0xc2, 0xb1, 0xc8, 0x20, 0xec, 0x52, 0xd6 } };
+    static const GUID IID_IBindingOperationsStatics_t = { 0xe155ef73, 0x95a0, 0x4aab, { 0x8c, 0x7d, 0x2a, 0x47, 0xda, 0x07, 0x3c, 0x79 } };
+    static const GUID IID_IButtonBaseStatics_t = { 0x77b0fb6e, 0x2950, 0x4b42, { 0xbf, 0xae, 0xf1, 0x05, 0xaa, 0x5a, 0xa1, 0x16 } };
+    static const GUID IID_ISelectorStatics_t = { 0x13300b06, 0xc2ef, 0x4b08, { 0xb5, 0x14, 0xdd, 0x8f, 0xe8, 0xfa, 0x37, 0xbe } };
+    static const GUID IID_IGridStatics_t = { 0x1e661634, 0x7856, 0x44f4, { 0x89, 0x2e, 0x14, 0xd1, 0x15, 0x5c, 0xa2, 0x10 } };
+    static const GUID IID_IFocusManagerStatics_t = { 0x1eccd326, 0x8182, 0x4482, { 0x82, 0x6a, 0x09, 0x18, 0xe9, 0xed, 0x9a, 0xf7 } };
+    static const GUID IID_IThicknessHelperStatics_t = { 0xc0991a7c, 0x070c, 0x4da6, { 0x87, 0x84, 0x01, 0xca, 0x80, 0x0e, 0xb7, 0x3a } };
+    static const GUID IID_IXamlMarkupHelperStatics_t = { 0xc9bc3725, 0xf34f, 0x445c, { 0x81, 0xa2, 0x6b, 0x72, 0xa5, 0xe8, 0xf0, 0x72 } };
+    static const GUID IID_IBinding_t = { 0x3f7a0c6b, 0xd00f, 0x4730, { 0x8c, 0x1d, 0x48, 0xe1, 0x6c, 0x46, 0xf9, 0xca } };
+    static const GUID IID_IProgressRing_t = { 0x7132f7bf, 0x88c5, 0x42a2, { 0x96, 0xd9, 0x24, 0xe4, 0xc7, 0x03, 0x6d, 0x0a } };
+    static const GUID IID_IFlyout_t = { 0xd075852d, 0xb09a, 0x4fd1, { 0xb0, 0x05, 0xdb, 0x2b, 0xa0, 0x12, 0x06, 0xfb } };
+    static const GUID IID_IFlyoutBase_t = { 0x723eea0b, 0xd12e, 0x430d, { 0xa9, 0xf0, 0x9b, 0xb3, 0x2b, 0xbf, 0x99, 0x13 } };
+    static const GUID IID_IFeapStatics_t = { 0x6c218499, 0x6708, 0x454f, { 0xb1, 0xc6, 0x4f, 0x9b, 0x9d, 0x45, 0xef, 0x9e } };
+    static const GUID IID_IButtonBase_t = { 0xfa002c1a, 0x494e, 0x46cf, { 0x91, 0xd4, 0xe1, 0x4a, 0x8d, 0x79, 0x86, 0x74 } };
+    static const GUID IID_IInvokeProvider_t = { 0xf7d1a187, 0xb13c, 0x4540, { 0xb0, 0x9e, 0x67, 0x78, 0xe2, 0xdc, 0x9b, 0xa5 } };
+    static const GUID IID_IDependencyPropertyStatics_t = { 0x49e5f28f, 0x8259, 0x4d5c, { 0xaa, 0xe0, 0x83, 0xd5, 0x6d, 0xbb, 0x68, 0xd9 } };
+    static const struct { const WCHAR *cls; const GUID *statics_iid; } statics_cases[] = {
+        { L"Windows.UI.Xaml.Controls.Primitives.ButtonBase", &IID_IButtonBaseStatics_t },
+        { L"Windows.UI.Xaml.Controls.Primitives.Selector",   &IID_ISelectorStatics_t },
+        { L"Windows.UI.Xaml.UIElement",                      &IID_IUIElementStatics_t },
+        { L"Windows.UI.Xaml.Controls.Grid",                  &IID_IGridStatics_t },
+        { L"Windows.UI.Xaml.Input.FocusManager",             &IID_IFocusManagerStatics_t },
+        { L"Windows.UI.Xaml.Data.BindingOperations",         &IID_IBindingOperationsStatics_t },
+        { L"Windows.UI.Xaml.ThicknessHelper",                &IID_IThicknessHelperStatics_t },
+        { L"Windows.UI.Xaml.Markup.XamlMarkupHelper",        &IID_IXamlMarkupHelperStatics_t },
+    };
+    HSTRING hcls = NULL, hstr = NULL, htxt = NULL;
+    IActivationFactory *af = NULL;
+    void *dummy = NULL, *dp_statics = NULL;
+    IInspectable *tb = NULL, *bind = NULL, *pr = NULL, *fl = NULL, *grd = NULL, *btn = NULL;
+    void *bops = NULL, *ibind = NULL, *tb_fe = NULL, *tb_if = NULL, *ipr = NULL;
+    void *ifl = NULL, *ifb = NULL, *feap_st = NULL, *peer = NULL, *invp = NULL, *bb = NULL;
+    IUnknown *text_dp = NULL;
+    struct { HSTRING Name; int Kind; } tname = { NULL, 0 };
+    struct test_conv_obj conv = { test_conv_vtbl, 1, 0, NULL, {0} };
+    struct fake_string_pv param_pv = { fake_pv_vtbl, 1, L"p1" };
+    struct fake_string_pv src_pv = { fake_pv_vtbl, 1, L"raw" };
+    struct test_dummy_handler clk_h = { test_dh_vtbl, 1, 0 };
+    EventRegistrationToken clk_tok = {0};
+    HRESULT hr;
+    unsigned int k;
+
+    /* 1. Embedded statics interfaces resolve back to factory via QI and reject tracker/marshal IIDs */
+    {
+        HMODULE hmod = GetModuleHandleW( L"windows.ui.xaml.dll" );
+        typedef HRESULT (WINAPI *pDllGetActivationFactory)(HSTRING, IActivationFactory **);
+        pDllGetActivationFactory pGetFactory = hmod ? (pDllGetActivationFactory)GetProcAddress( hmod, "DllGetActivationFactory" ) : NULL;
+        for (k = 0; k < ARRAY_SIZE(statics_cases); k++)
+        {
+            void *st_if = NULL, *af_back = NULL;
+            WindowsCreateString( statics_cases[k].cls, wcslen( statics_cases[k].cls ), &hcls );
+            hr = RoGetActivationFactory( hcls, &IID_IActivationFactory, (void **)&af );
+            if (FAILED(hr) && pGetFactory)
+                hr = pGetFactory( hcls, &af );
+            WindowsDeleteString( hcls );
+            ok( hr == S_OK && af != NULL, "factory[%u] hr %#lx\n", k, hr );
+            if (af)
+            {
+                dummy = (void *)0xdeadbeef;
+                hr = IActivationFactory_QueryInterface( af, &IID_IReferenceTrackerTarget_t, &dummy );
+                ok( hr == E_NOINTERFACE && dummy == NULL, "factory[%u] tracker QI expected E_NOINTERFACE, got %#lx (%p)\n",
+                    k, hr, dummy );
+                hr = IActivationFactory_QueryInterface( af, statics_cases[k].statics_iid, &st_if );
+                ok( hr == S_OK && st_if != NULL, "factory[%u] statics QI hr %#lx\n", k, hr );
+                if (st_if)
+                {
+                    hr = IUnknown_QueryInterface( (IUnknown *)st_if, &IID_IActivationFactory, &af_back );
+                    ok( hr == S_OK && af_back == (void *)af, "factory[%u] roundtrip QI got hr=%#lx back=%p af=%p\n",
+                        k, hr, af_back, af );
+                    if (af_back) IUnknown_Release( (IUnknown *)af_back );
+                    IUnknown_Release( (IUnknown *)st_if );
+                }
+                IActivationFactory_Release( af );
+                af = NULL;
+            }
+        }
+    }
+
+    /* 2. Named DPs on UIElementStatics / ControlStatics / ProgressRingStatics */
+    {
+        void *vis_dp = NULL, *en_dp = NULL, *act_dp = NULL;
+        void *uie_st = NULL, *ctrl_st = NULL, *pr_st = NULL;
+        WindowsCreateString( L"Windows.UI.Xaml.UIElement", 25, &hcls );
+        if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IUIElementStatics_t, &uie_st )) && uie_st)
+        {
+            const struct test_dp_prop_slot_vtbl *v = *(const struct test_dp_prop_slot_vtbl **)uie_st;
+            typedef HRESULT (WINAPI *get_dp_fn)(void *, void **);
+            hr = ((get_dp_fn)((void *const *)v)[35])( uie_st, &vis_dp );
+            ok( hr == S_OK && vis_dp != NULL, "UIElementStatics::VisibilityProperty hr %#lx dp=%p\n", hr, vis_dp );
+            IUnknown_Release( (IUnknown *)uie_st );
+        }
+        WindowsDeleteString( hcls );
+
+        WindowsCreateString( L"Windows.UI.Xaml.Controls.Control", 32, &hcls );
+        if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IControlStatics_t, &ctrl_st )) && ctrl_st)
+        {
+            typedef HRESULT (WINAPI *get_dp_fn)(void *, void **);
+            hr = ((get_dp_fn)(*(void *const **)ctrl_st)[14])( ctrl_st, &en_dp );
+            ok( hr == S_OK && en_dp != NULL, "ControlStatics::IsEnabledProperty hr %#lx dp=%p\n", hr, en_dp );
+            IUnknown_Release( (IUnknown *)ctrl_st );
+        }
+        WindowsDeleteString( hcls );
+
+        WindowsCreateString( L"Windows.UI.Xaml.Controls.ProgressRing", 37, &hcls );
+        if (SUCCEEDED(RoGetActivationFactory( hcls, &IID_IProgressRingStatics_t, &pr_st )) && pr_st)
+        {
+            typedef HRESULT (WINAPI *get_dp_fn)(void *, void **);
+            hr = ((get_dp_fn)(*(void *const **)pr_st)[6])( pr_st, &act_dp );
+            ok( hr == S_OK && act_dp != NULL, "ProgressRingStatics::IsActiveProperty hr %#lx dp=%p\n", hr, act_dp );
+            IUnknown_Release( (IUnknown *)pr_st );
+        }
+        WindowsDeleteString( hcls );
+
+        ok( vis_dp != en_dp && vis_dp != act_dp && en_dp != act_dp,
+            "named DPs should be distinct (%p, %p, %p)\n", vis_dp, en_dp, act_dp );
+        if (vis_dp) IUnknown_Release( (IUnknown *)vis_dp );
+        if (en_dp) IUnknown_Release( (IUnknown *)en_dp );
+        if (act_dp) IUnknown_Release( (IUnknown *)act_dp );
+    }
+
+    /* 3. IValueConverter + BindingOperations::SetBinding */
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.TextBlock", 34, &hcls );
+    hr = RoActivateInstance( hcls, &tb );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && tb != NULL, "TextBlock activate hr %#lx\n", hr );
+    WindowsCreateString( L"Windows.UI.Xaml.Data.Binding", 28, &hcls );
+    hr = RoActivateInstance( hcls, &bind );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && bind != NULL, "Binding activate hr %#lx\n", hr );
+    WindowsCreateString( L"Windows.UI.Xaml.DependencyProperty", 34, &hcls );
+    RoGetActivationFactory( hcls, &IID_IDependencyPropertyStatics_t, &dp_statics );
+    WindowsDeleteString( hcls );
+    WindowsCreateString( L"Windows.UI.Xaml.Data.BindingOperations", 38, &hcls );
+    RoGetActivationFactory( hcls, &IID_IBindingOperationsStatics_t, &bops );
+    WindowsDeleteString( hcls );
+
+    if (tb && bind && dp_statics && bops)
+    {
+        WindowsCreateString( L"String", 6, &tname.Name );
+        WindowsCreateString( L"Text", 4, &hstr );
+        ((const struct test_dp_statics_iface *)dp_statics)->lpVtbl->Register( dp_statics, hstr, &tname, &tname, NULL, &text_dp );
+        WindowsDeleteString( hstr );
+        WindowsDeleteString( tname.Name );
+
+        if (SUCCEEDED(IInspectable_QueryInterface( bind, &IID_IBinding_t, &ibind )) && ibind)
+        {
+            const struct test_binding_iface *bi = (const struct test_binding_iface *)ibind;
+            INT32 mode = 0;
+            WindowsCreateString( L"en-US", 5, &hstr );
+            bi->lpVtbl->put_Mode( ibind, 3 );
+            bi->lpVtbl->get_Mode( ibind, &mode );
+            ok( mode == 3, "Binding Mode expected 3, got %d\n", mode );
+            bi->lpVtbl->put_Converter( ibind, (IInspectable *)&conv );
+            bi->lpVtbl->put_ConverterParameter( ibind, (IInspectable *)&param_pv );
+            bi->lpVtbl->put_ConverterLanguage( ibind, hstr );
+            WindowsDeleteString( hstr );
+            IUnknown_Release( (IUnknown *)ibind );
+        }
+        IInspectable_QueryInterface( tb, &IID_IFrameworkElement_test, &tb_fe );
+        IInspectable_QueryInterface( tb, &IID_ITextBlock_test, &tb_if );
+        if (tb_fe && tb_if && text_dp)
+        {
+            ((const struct test_bops_iface *)bops)->lpVtbl->SetBinding( bops, tb, text_dp, bind );
+            ((const struct test_fe_iface *)tb_fe)->lpVtbl->put_DataContext( tb_fe, &src_pv );
+            hr = ((const struct test_tb_iface *)tb_if)->lpVtbl->get_Text( tb_if, &htxt );
+            ok( hr == S_OK && htxt && !wcscmp( WindowsGetStringRawBuffer( htxt, NULL ), L"converted" ),
+                "expected converted TextBlock text, got %s\n", wine_dbgstr_w( htxt ? WindowsGetStringRawBuffer( htxt, NULL ) : NULL ) );
+            ok( conv.convert_cnt >= 1 && conv.last_param == (IInspectable *)&param_pv && !wcscmp( conv.last_lang, L"en-US" ),
+                "expected converter called with param & en-US (cnt=%ld lang=%s)\n",
+                conv.convert_cnt, wine_dbgstr_w( conv.last_lang ) );
+            if (htxt) WindowsDeleteString( htxt );
+        }
+        if (tb_fe) IUnknown_Release( (IUnknown *)tb_fe );
+        if (tb_if) IUnknown_Release( (IUnknown *)tb_if );
+        if (text_dp) IUnknown_Release( text_dp );
+    }
+    if (bops) IUnknown_Release( (IUnknown *)bops );
+    if (dp_statics) IUnknown_Release( (IUnknown *)dp_statics );
+    if (bind) IInspectable_Release( bind );
+    if (tb) IInspectable_Release( tb );
+
+    /* 4. IProgressRing IsActive */
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.ProgressRing", 37, &hcls );
+    hr = RoActivateInstance( hcls, &pr );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && pr != NULL, "ProgressRing activate hr %#lx\n", hr );
+    if (pr && SUCCEEDED(IInspectable_QueryInterface( pr, &IID_IProgressRing_t, &ipr )) && ipr)
+    {
+        const struct test_pr_iface *pri = (const struct test_pr_iface *)ipr;
+        boolean act = TRUE;
+        pri->lpVtbl->get_IsActive( ipr, &act );
+        ok( act == FALSE, "ProgressRing IsActive default should be FALSE, got %d\n", act );
+        pri->lpVtbl->put_IsActive( ipr, TRUE );
+        pri->lpVtbl->get_IsActive( ipr, &act );
+        ok( act == TRUE, "ProgressRing IsActive after put(TRUE) should be TRUE, got %d\n", act );
+        IUnknown_Release( (IUnknown *)ipr );
+    }
+    if (pr) IInspectable_Release( pr );
+
+    /* 5. Flyout.Content + ShowAt/Hide */
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.Flyout", 31, &hcls );
+    hr = RoActivateInstance( hcls, &fl );
+    WindowsDeleteString( hcls );
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.Grid", 29, &hcls );
+    RoActivateInstance( hcls, &grd );
+    WindowsDeleteString( hcls );
+    ok( hr == S_OK && fl != NULL && grd != NULL, "Flyout/Grid activate hr %#lx\n", hr );
+    if (fl && grd)
+    {
+        hr = IInspectable_QueryInterface( fl, &IID_IFlyout_t, &ifl );
+        ok( hr == S_OK && ifl != NULL, "QI IFlyout hr %#lx\n", hr );
+        hr = IInspectable_QueryInterface( fl, &IID_IFlyoutBase_t, &ifb );
+        ok( hr == S_OK && ifb != NULL, "QI IFlyoutBase hr %#lx\n", hr );
+        if (ifl && ifb)
+        {
+            IInspectable *got_c = NULL;
+            ((const struct test_flyout_iface *)ifl)->lpVtbl->put_Content( ifl, grd );
+            ((const struct test_flyout_iface *)ifl)->lpVtbl->get_Content( ifl, &got_c );
+            ok( got_c != NULL, "Flyout.Content should survive ShowAt/Hide slot separation\n" );
+            if (got_c) IInspectable_Release( got_c );
+            hr = ((const struct test_flyout_base_iface *)ifb)->lpVtbl->ShowAt( ifb, grd );
+            ok( hr == S_OK, "FlyoutBase::ShowAt hr %#lx\n", hr );
+            hr = ((const struct test_flyout_base_iface *)ifb)->lpVtbl->Hide( ifb );
+            ok( hr == S_OK, "FlyoutBase::Hide hr %#lx\n", hr );
+        }
+        if (ifl) IUnknown_Release( (IUnknown *)ifl );
+        if (ifb) IUnknown_Release( (IUnknown *)ifb );
+    }
+    if (fl) IInspectable_Release( fl );
+    if (grd) IInspectable_Release( grd );
+
+    /* 6. FrameworkElementAutomationPeer::CreatePeerForElement -> IInvokeProvider::Invoke */
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.Button", 31, &hcls );
+    hr = RoActivateInstance( hcls, &btn );
+    WindowsDeleteString( hcls );
+    WindowsCreateString( L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer", 63, &hcls );
+    RoGetActivationFactory( hcls, &IID_IFeapStatics_t, &feap_st );
+    WindowsDeleteString( hcls );
+    if (btn && feap_st)
+    {
+        if (SUCCEEDED(IInspectable_QueryInterface( btn, &IID_IButtonBase_t, &bb )) && bb)
+        {
+            ((const struct test_btn_ev_iface *)bb)->lpVtbl->add_Click( bb, &clk_h, &clk_tok );
+            hr = ((const struct test_feap_statics_iface *)feap_st)->lpVtbl->CreatePeerForElement( feap_st, btn, &peer );
+            ok( hr == S_OK && peer != NULL, "CreatePeerForElement hr %#lx peer=%p\n", hr, peer );
+            if (peer)
+            {
+                hr = ((const struct test_ap_iface *)peer)->lpVtbl->GetPattern( peer, 0 /* Invoke */, &invp );
+                ok( hr == S_OK && invp != NULL, "GetPattern(Invoke) hr %#lx invp=%p\n", hr, invp );
+                if (invp)
+                {
+                    void *inv_qi = NULL;
+                    hr = IUnknown_QueryInterface( (IUnknown *)invp, &IID_IInvokeProvider_t, &inv_qi );
+                    ok( hr == S_OK && inv_qi != NULL, "QI IInvokeProvider hr %#lx\n", hr );
+                    if (inv_qi)
+                    {
+                        hr = ((const struct test_invoke_iface *)inv_qi)->lpVtbl->Invoke( inv_qi );
+                        ok( hr == S_OK && clk_h.invoke_cnt >= 1,
+                            "IInvokeProvider::Invoke should fire Button::Click (hr=%#lx cnt=%ld)\n", hr, clk_h.invoke_cnt );
+                        IUnknown_Release( (IUnknown *)inv_qi );
+                    }
+                    IUnknown_Release( (IUnknown *)invp );
+                }
+                IUnknown_Release( (IUnknown *)peer );
+            }
+            ((const struct test_btn_ev_iface *)bb)->lpVtbl->remove_Click( bb, clk_tok );
+            IUnknown_Release( (IUnknown *)bb );
+        }
+    }
+    if (feap_st) IUnknown_Release( (IUnknown *)feap_st );
+    if (btn) IInspectable_Release( btn );
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -1979,6 +2393,7 @@ START_TEST(xaml)
     test_TruncatedXbfBounds();
     test_EventRegistryAndTransientLifecycle();
     test_WinUINotepadRegressions();
+    test_CalculatorQaRegressions();
 
     RoUninitialize();
 }

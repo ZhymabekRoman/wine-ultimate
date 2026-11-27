@@ -1221,16 +1221,17 @@ static __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *xaml_core_char_a
     return &impl->ICharacterReceivedEventArgs_iface;
 }
 
-void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wparam, LPARAM lparam )
+BOOL xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wparam, LPARAM lparam )
 {
     struct xaml_event_registry *reg;
     void *handlers[64];
     unsigned int i, count;
+    BOOL handled = FALSE;
 
-    if (!cw) return;
-    reg = msg == WM_KEYDOWN ? &cw->key_down : msg == WM_KEYUP ? &cw->key_up : &cw->character_received;
+    if (!cw) return FALSE;
+    reg = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) ? &cw->key_down : msg == WM_KEYUP ? &cw->key_up : &cw->character_received;
     count = xaml_event_registry_snapshot( reg, handlers, ARRAY_SIZE( handlers ) );
-    if (!count) return;
+    if (!count) return FALSE;
 
     if (msg == WM_CHAR)
     {
@@ -1238,7 +1239,7 @@ void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wpara
         if (!args)
         {
             for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
-            return;
+            return FALSE;
         }
         for (i = 0; i < count; i++)
         {
@@ -1247,6 +1248,7 @@ void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wpara
                 h, &cw->ICoreWindow_iface, args );
             IUnknown_Release( (IUnknown *)h );
         }
+        handled = CONTAINING_RECORD( args, struct xaml_core_char_args, ICharacterReceivedEventArgs_iface )->handled != 0;
         __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs_Release( args );
     }
     else
@@ -1255,7 +1257,7 @@ void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wpara
         if (!args)
         {
             for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
-            return;
+            return FALSE;
         }
         for (i = 0; i < count; i++)
         {
@@ -1264,8 +1266,10 @@ void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wpara
                 h, &cw->ICoreWindow_iface, args );
             IUnknown_Release( (IUnknown *)h );
         }
+        handled = CONTAINING_RECORD( args, struct xaml_core_key_args, IKeyEventArgs_iface )->handled != 0;
         __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
     }
+    return handled;
 }
 
 /* Fire the handlers the app registered on the inner windows.ui CoreWindow

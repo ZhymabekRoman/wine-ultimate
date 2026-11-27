@@ -135,6 +135,12 @@ void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc )
         }
     }
 
+    if (impl->template_root && impl->template_root != impl)
+    {
+        struct uwp_element *tr = impl->template_root;
+        if ((!tr->data_context || (old_dc && tr->data_context == old_dc)) && tr->data_context != dc)
+            uwp_propagate_data_context( tr, dc );
+    }
     if (impl->content)
     {
         struct uwp_element *ch = uwp_elem_from_any( impl->content );

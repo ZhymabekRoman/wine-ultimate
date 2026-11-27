@@ -144,11 +144,15 @@ struct uwp_defer_entry
     BOOL realized;
 };
 
+struct xaml_ct_weak_ctrl;
+
 struct xaml_cached_type
 {
     const void **lpVtbl;
     const void **lpVtbl_winui3;
+    const void **lpVtbl_weak_src;
     LONG ref;
+    struct xaml_ct_weak_ctrl *weak_ctrl;
     WCHAR *full_name;
     const WCHAR *short_name;
     WORD xbf_type_id;

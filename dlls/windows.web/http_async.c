@@ -219,10 +219,6 @@ static HRESULT WINAPI async_http_op_get_Status( IAsyncInfo *This, AsyncStatus *s
 {
     return async_http_info_get_Status( (IAsyncInfo *)((BYTE *)This + sizeof(void *)), status );
 }
-static HRESULT WINAPI async_http_op_Cancel( IAsyncInfo *This )
-{
-    return async_http_info_Cancel( (IAsyncInfo *)((BYTE *)This + sizeof(void *)) );
-}
 
 static const struct async_op_vtbl async_http_op_vtbl = {
   {
@@ -238,8 +234,8 @@ static const struct async_op_vtbl async_http_op_vtbl = {
     /* 7  get_Status */
     async_http_op_put_Completed,
     /* 8  put_Completed (WPM awaiter) / get_ErrorCode */
-    async_http_op_Cancel,
-    /* 9  Cancel */
+    (HRESULT (WINAPI *)( IAsyncInfo * ))async_http_op_get_Completed,
+    /* 9  get_Completed */
     async_http_op_GetResults
   },
   {

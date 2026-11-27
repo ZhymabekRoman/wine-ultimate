@@ -314,12 +314,6 @@ static struct uwp_element *uwp_vsm_find_target( struct uwp_element *scope, const
 static void uwp_vsm_parse_grid_length( struct uwp_element *scope, const struct uwp_vsm_setter *s,
                                        int *out_type, double *out_val )
 {
-    if (s->vt == 0x07)
-    {
-        *out_type = 1;
-        *out_val = s->num;
-        return;
-    }
     if (s->val_str[0])
     {
         const WCHAR *str = s->val_str;
@@ -352,6 +346,12 @@ static void uwp_vsm_parse_grid_length( struct uwp_element *scope, const struct u
                 return;
             }
         }
+    }
+    if (s->vt == 0x07)
+    {
+        *out_type = 1;
+        *out_val = s->num;
+        return;
     }
     *out_type = 1;
     *out_val = s->num;
@@ -1224,7 +1224,7 @@ static const void *sb_statics_vtbl[16] =
 };
 struct uwp_class_factory sb_factory_obj =
     { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)sb_statics_vtbl}, L"Windows.UI.Xaml.Media.Animation.Storyboard", { NULL } };
-static struct uwp_class_factory sb_factory_winui3_obj =
+struct uwp_class_factory sb_factory_winui3_obj =
     { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)sb_statics_vtbl}, L"Microsoft.UI.Xaml.Media.Animation.Storyboard", { NULL } };
 
     /* VisualTreeHelperStatics */
@@ -1468,9 +1468,310 @@ static const void *attached_statics_vtbl[64] =
 struct uwp_class_factory auto_props_factory_obj =
     { {(const struct IActivationFactoryVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, L"Windows.UI.Xaml.Automation.AutomationProperties", { NULL } };
 
+struct uwp_auto_peer
+{
+    const void **lpVtbl;
+    const void **lpVtbl_invoke;
+    const void **lpVtbl_peer7;
+    const void **lpVtbl_feap;
+    LONG ref;
+    struct uwp_element *target;
+};
+
+static const GUID IID_IAutomationPeer_UWP =
+    { 0x39321899, 0x9592, 0x4847, { 0xb1, 0x1a, 0x4c, 0x36, 0x3e, 0x52, 0xa1, 0xcf } };
+static const GUID IID_IAutomationPeer_UWP_ALT =
+    { 0x37f929b9, 0x08a5, 0x4439, { 0x90, 0x17, 0x63, 0xa9, 0x35, 0x35, 0x69, 0x0c } };
+static const GUID IID_IAutomationPeer7_UWP =
+    { 0x796b3287, 0xe642, 0x48ab, { 0xb2, 0x23, 0x52, 0x08, 0xb4, 0x1d, 0xa9, 0xd6 } };
+static const GUID IID_IFrameworkElementAutomationPeer_UWP =
+    { 0xb6d0d680, 0x334a, 0x403e, { 0xbb, 0x82, 0xfc, 0x25, 0xef, 0x3c, 0x33, 0xfd } };
+static const GUID IID_IInvokeProvider_UWP =
+    { 0xf7d1a187, 0xb13c, 0x4540, { 0xb0, 0x9e, 0x67, 0x78, 0xe2, 0xdc, 0x9b, 0xa5 } };
+
+static HRESULT WINAPI uwp_peer_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAutomationPeer_UWP ) ||
+        IsEqualGUID( iid, &IID_IAutomationPeer_UWP_ALT ))
+    {
+        *out = &p->lpVtbl;
+        InterlockedIncrement( &p->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IInvokeProvider_UWP ))
+    {
+        *out = &p->lpVtbl_invoke;
+        InterlockedIncrement( &p->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAutomationPeer7_UWP ))
+    {
+        *out = &p->lpVtbl_peer7;
+        InterlockedIncrement( &p->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IFrameworkElementAutomationPeer_UWP ))
+    {
+        *out = &p->lpVtbl_feap;
+        InterlockedIncrement( &p->ref );
+        return S_OK;
+    }
+    if (!IsEqualGUID( iid, &IID_IMarshal ) &&
+        !IsEqualGUID( iid, &IID_IReferenceTracker_UWP ) &&
+        !IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP ) &&
+        !IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP2 ) &&
+        !IsEqualGUID( iid, &IID_IWeakReferenceSource_local ) &&
+        !IsEqualGUID( iid, &IID_IPropertyValue_g ))
+    {
+        TRACE( "uwp_peer_QI: peer=%p unsupported iid %s\n", p, debugstr_guid(iid) );
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_peer_AddRef( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl );
+    return InterlockedIncrement( &p->ref );
+}
+static ULONG WINAPI uwp_peer_Release( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl );
+    LONG r = InterlockedDecrement( &p->ref );
+    if (r == 0)
+    {
+        if (p->target) IInspectable_Release( &p->target->IInspectable_iface );
+        free( p );
+    }
+    return r;
+}
+static HRESULT WINAPI uwp_peer_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer", 63, name );
+}
+static HRESULT WINAPI uwp_peer_GetPattern( void *iface, int pattern, void **out )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl );
+    if (!out) return E_POINTER;
+    if (pattern == 0 /* PatternInterface_Invoke */)
+    {
+        *out = &p->lpVtbl_invoke;
+        InterlockedIncrement( &p->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_peer_invoke_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_invoke );
+    return uwp_peer_QI( &p->lpVtbl, iid, out );
+}
+static ULONG WINAPI uwp_peer_invoke_AddRef( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_invoke );
+    return uwp_peer_AddRef( &p->lpVtbl );
+}
+static ULONG WINAPI uwp_peer_invoke_Release( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_invoke );
+    return uwp_peer_Release( &p->lpVtbl );
+}
+static HRESULT WINAPI uwp_peer_Invoke( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_invoke );
+    if (p->target) uwp_invoke_button( p->target );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_peer7_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_peer7 );
+    return uwp_peer_QI( &p->lpVtbl, iid, out );
+}
+static ULONG WINAPI uwp_peer7_AddRef( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_peer7 );
+    return uwp_peer_AddRef( &p->lpVtbl );
+}
+static ULONG WINAPI uwp_peer7_Release( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_peer7 );
+    return uwp_peer_Release( &p->lpVtbl );
+}
+static HRESULT WINAPI uwp_peer7_RaiseNotificationEvent( void *iface, int kind, int processing,
+        HSTRING display_string, HSTRING activity_id )
+{
+    return S_OK;
+}
+static HRESULT WINAPI uwp_feap_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_feap );
+    return uwp_peer_QI( &p->lpVtbl, iid, out );
+}
+static ULONG WINAPI uwp_feap_AddRef( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_feap );
+    return uwp_peer_AddRef( &p->lpVtbl );
+}
+static ULONG WINAPI uwp_feap_Release( void *iface )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_feap );
+    return uwp_peer_Release( &p->lpVtbl );
+}
+static HRESULT WINAPI uwp_feap_get_Owner( void *iface, void **out )
+{
+    struct uwp_auto_peer *p = CONTAINING_RECORD( iface, struct uwp_auto_peer, lpVtbl_feap );
+    if (!out) return E_POINTER;
+    *out = p->target ? (p->target->outer ? p->target->outer : &p->target->IInspectable_iface) : NULL;
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static const void *uwp_peer_vtbl[40] =
+{
+    [0] = uwp_peer_QI,
+    [1] = uwp_peer_AddRef,
+    [2] = uwp_peer_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_peer_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_peer_GetPattern,
+    [7 ... 39] = uwp_generic_noop,
+};
+static const void *uwp_peer_invoke_vtbl[8] =
+{
+    [0] = uwp_peer_invoke_QI,
+    [1] = uwp_peer_invoke_AddRef,
+    [2] = uwp_peer_invoke_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_peer_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_peer_Invoke,
+    [7] = uwp_generic_noop,
+};
+static const void *uwp_peer7_vtbl[8] =
+{
+    [0] = uwp_peer7_QI,
+    [1] = uwp_peer7_AddRef,
+    [2] = uwp_peer7_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_peer_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_peer7_RaiseNotificationEvent,
+    [7] = uwp_generic_noop,
+};
+static const void *uwp_feap_vtbl[8] =
+{
+    [0] = uwp_feap_QI,
+    [1] = uwp_feap_AddRef,
+    [2] = uwp_feap_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_peer_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_feap_get_Owner,
+    [7] = uwp_generic_noop,
+};
+
+static IDependencyProperty *g_auto_peer_dp;
+
+static IDependencyProperty *uwp_get_auto_peer_dp( void )
+{
+    if (!g_auto_peer_dp)
+    {
+        IDependencyProperty *dp = NULL;
+        if (SUCCEEDED( dependency_property_create( NULL, &dp ) ) && dp)
+        {
+            xaml_dp_set_name( dp, L"__AutomationPeer" );
+            if (InterlockedCompareExchangePointer( (void * volatile *)&g_auto_peer_dp, dp, NULL ) != NULL)
+                IDependencyProperty_Release( dp );
+        }
+    }
+    return g_auto_peer_dp;
+}
+
+static void *uwp_get_cached_auto_peer( struct uwp_element *target )
+{
+    IDependencyProperty *dp = g_auto_peer_dp;
+    void *res = NULL;
+    int i;
+    if (!target || !dp) return NULL;
+    AcquireSRWLockShared( &target->dp_lock );
+    for (i = 0; i < target->dp_cnt; i++)
+    {
+        if (target->dp_store[i].dp == dp && target->dp_store[i].value)
+        {
+            res = target->dp_store[i].value;
+            IInspectable_AddRef( (IInspectable *)res );
+            break;
+        }
+    }
+    ReleaseSRWLockShared( &target->dp_lock );
+    return res;
+}
+
 static HRESULT WINAPI feap_CreatePeerForElement( void *iface, void *el, void **out )
 {
-    if (out) *out = NULL;
+    struct uwp_element *target = uwp_elem_from_any( el );
+    struct uwp_auto_peer *peer;
+    IDependencyProperty *dp;
+    void *cached;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!target) return S_OK;
+    if ((cached = uwp_get_cached_auto_peer( target )))
+    {
+        *out = cached;
+        return S_OK;
+    }
+    dp = uwp_get_auto_peer_dp();
+    if (target->outer)
+    {
+        IInspectable *ov = NULL;
+        HRESULT qhr = IInspectable_QueryInterface( target->outer, &IID_IUIElementOverrides_UWP, (void **)&ov );
+        if (SUCCEEDED( qhr ) && ov)
+        {
+            BOOL is_inner = ((ULONG_PTR)ov >= (ULONG_PTR)target && (ULONG_PTR)ov < (ULONG_PTR)(target + 1));
+            if (!is_inner)
+            {
+                typedef HRESULT (WINAPI *fn_on_create_peer)(void *iface, void **out);
+                fn_on_create_peer *vt = *(fn_on_create_peer **)ov;
+                void *custom_peer = NULL;
+                HRESULT hr = vt[6]( ov, &custom_peer );
+                IInspectable_Release( ov );
+                if (SUCCEEDED( hr ) && custom_peer)
+                {
+                    if (dp) uwp_do_SetValue( &target->IDependencyObject_iface, dp, (IInspectable *)custom_peer );
+                    *out = custom_peer;
+                    return S_OK;
+                }
+            }
+            else
+            {
+                IInspectable_Release( ov );
+            }
+        }
+    }
+    peer = calloc( 1, sizeof(*peer) );
+    if (!peer) return E_OUTOFMEMORY;
+    peer->lpVtbl = uwp_peer_vtbl;
+    peer->lpVtbl_invoke = uwp_peer_invoke_vtbl;
+    peer->lpVtbl_peer7 = uwp_peer7_vtbl;
+    peer->lpVtbl_feap = uwp_feap_vtbl;
+    peer->ref = 1;
+    peer->target = target;
+    IInspectable_AddRef( &target->IInspectable_iface );
+    if (dp) uwp_do_SetValue( &target->IDependencyObject_iface, dp, (IInspectable *)&peer->lpVtbl );
+    *out = &peer->lpVtbl;
+    return S_OK;
+}
+static HRESULT WINAPI feap_FromElement( void *iface, void *el, void **out )
+{
+    struct uwp_element *target = uwp_elem_from_any( el );
+    if (!out) return E_POINTER;
+    *out = uwp_get_cached_auto_peer( target );
     return S_OK;
 }
 static HRESULT WINAPI feap_CreateInstanceWithOwner( void *iface, void *owner, IInspectable *outer,
@@ -1499,7 +1800,7 @@ static const void *feap_statics_vtbl[16] =
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
     [6] = feap_CreatePeerForElement,
-    [7] = feap_CreatePeerForElement,
+    [7] = feap_FromElement,
     [8 ... 15] = uwp_generic_noop,
 };
 struct uwp_class_factory feap_factory_obj =
@@ -1545,10 +1846,31 @@ struct uwp_class_factory th_factory_obj =
  * each entry hands out exactly the factory object the old wcscmp branch returned.
  */
 
+static HRESULT WINAPI ap_ListenerExists( void *iface, int ev_id, boolean *out )
+{
+    if (!out) return E_POINTER;
+    *out = FALSE;
+    return S_OK;
+}
+static const void *ap_statics_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = ap_ListenerExists,
+    [7 ... 15] = uwp_generic_noop,
+};
+struct uwp_class_factory ap_factory_obj =
+    { {(const struct IActivationFactoryVtbl *)ap_statics_vtbl}, {(const struct IInspectableVtbl *)ap_statics_vtbl}, {(const struct IInspectableVtbl *)ap_statics_vtbl}, L"Windows.UI.Xaml.Automation.Peers.AutomationPeer", { NULL } };
+
 const struct xaml_static_factory xaml_static_factories[] =
 {
     { L"Windows.UI.Xaml.ThicknessHelper",                                (IActivationFactory *)&th_factory_obj.IActivationFactory_iface },
     { L"Microsoft.UI.Xaml.ThicknessHelper",                              (IActivationFactory *)&th_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Automation.Peers.AutomationPeer",                (IActivationFactory *)&ap_factory_obj.IActivationFactory_iface },
     { L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer",(IActivationFactory *)&feap_factory_obj.IActivationFactory_iface },
     { L"Windows.UI.Xaml.Media.SolidColorBrush",                          (IActivationFactory *)&scb_factory_obj.IActivationFactory_iface },
     { L"Windows.UI.Xaml.Markup.XamlBindingHelper",                       (IActivationFactory *)&xbh_factory_obj },

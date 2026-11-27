@@ -3516,7 +3516,7 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
 
     if (FAILED(hr = IFrameworkViewSource_CreateView( view_source, &view )))
     {
-        ERR( "CreateView failed %#lx.\n", hr );
+        WARN( "CreateView failed %#lx.\n", hr );
         return hr;
     }
 

@@ -100,6 +100,10 @@ static HRESULT WINAPI client_GetRuntimeClassName( IHttpClient *This, HSTRING *n 
 }
 static HRESULT WINAPI client_GetTrustLevel( IHttpClient *This, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 
+static HRESULT http_fetch_to_response( const WCHAR *method, const WCHAR *uri,
+                                       const void *body_data, DWORD body_len,
+                                       void *req_headers, void *content_headers, void **out );
+
 static HRESULT WINAPI client_DeleteAsync( IHttpClient *This, IUriRuntimeClass *uri, RESP_OP **op )
 {
     void *resp = NULL;
@@ -111,12 +115,25 @@ static HRESULT WINAPI client_DeleteAsync( IHttpClient *This, IUriRuntimeClass *u
 }
 static HRESULT WINAPI client_GetAsync( IHttpClient *This, IUriRuntimeClass *uri, RESP_OP **op )
 {
+    struct http_client *impl = impl_from_client( This );
     void *resp = NULL;
+    HSTRING huri = NULL;
+    const WCHAR *uri_str = NULL;
     HRESULT hr;
 
     WDBG( "client_GetAsync uri %p\n", uri );
-    hr = create_http_response( 200, &resp );
-    if (FAILED(hr)) return hr;
+    if (uri && SUCCEEDED( IUriRuntimeClass_get_AbsoluteUri( uri, &huri ) ) && huri)
+        uri_str = WindowsGetStringRawBuffer( huri, NULL );
+    if (uri_str && uri_str[0])
+        hr = http_fetch_to_response( L"GET", uri_str, NULL, 0, impl->default_headers, NULL, &resp );
+    else
+        hr = E_INVALIDARG;
+    if (huri) WindowsDeleteString( huri );
+    if (FAILED(hr) || !resp)
+    {
+        hr = create_http_response( 200, &resp );
+        if (FAILED(hr)) return hr;
+    }
     hr = create_async_http_op( resp, NULL, FALSE, (void **)op );
     IUnknown_Release( (IUnknown *)resp );
     return hr;
@@ -137,12 +154,36 @@ static HRESULT WINAPI client_GetInputStreamAsync( IHttpClient *This, IUriRuntime
 }
 static HRESULT WINAPI client_GetStringAsync( IHttpClient *This, IUriRuntimeClass *uri, STR_OP **op )
 {
-    HSTRING str;
+    struct http_client *impl = impl_from_client( This );
+    void *resp = NULL;
+    HSTRING huri = NULL, str = NULL;
+    const WCHAR *uri_str = NULL;
     HRESULT hr;
 
-    WDBG( "client_GetStringAsync\n" );
-    hr = WindowsCreateString( L"", 0, &str );
-    if (FAILED(hr)) return hr;
+    WDBG( "client_GetStringAsync uri %p\n", uri );
+    if (uri && SUCCEEDED( IUriRuntimeClass_get_AbsoluteUri( uri, &huri ) ) && huri)
+        uri_str = WindowsGetStringRawBuffer( huri, NULL );
+    if (uri_str && uri_str[0])
+        hr = http_fetch_to_response( L"GET", uri_str, NULL, 0, impl->default_headers, NULL, &resp );
+    else
+        hr = E_INVALIDARG;
+    if (huri) WindowsDeleteString( huri );
+    if (SUCCEEDED(hr) && resp)
+    {
+        struct http_response_message *rm = (struct http_response_message *)resp;
+        if (rm->content)
+        {
+            struct http_string_content *sc = impl_from_content( rm->content );
+            if (sc && sc->content)
+                WindowsDuplicateString( sc->content, &str );
+        }
+        IUnknown_Release( (IUnknown *)resp );
+    }
+    if (!str)
+    {
+        hr = WindowsCreateString( L"", 0, &str );
+        if (FAILED(hr)) return hr;
+    }
     hr = create_async_http_op( NULL, str, TRUE, (void **)op );
     WindowsDeleteString( str );
     return hr;

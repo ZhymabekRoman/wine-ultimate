@@ -306,6 +306,21 @@ static HRESULT WINAPI uwp_binding_put_Path( void *iface, IInspectable *val )
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_binding_get_Mode( void *iface, INT32 *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = (impl && impl->binding_mode) ? impl->binding_mode : 1; /* OneWay */
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_put_Mode( void *iface, INT32 val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->binding_mode = (BYTE)val;
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_binding_get_Source( void *iface, IInspectable **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -329,6 +344,78 @@ static HRESULT WINAPI uwp_binding_put_Source( void *iface, IInspectable *val )
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_binding_get_ElementName( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *en = uwp_elem_placeholder( impl );
+    if (!out) return E_POINTER;
+    if (en[0]) return WindowsCreateString( en, (UINT32)wcslen( en ), out );
+    *out = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_put_ElementName( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    const WCHAR *en = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (impl) uwp_elem_set_placeholder( impl, en );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_get_Converter( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = (impl && impl->style_anim) ? impl->style_anim->converter : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_put_Converter( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_style_anim_ext *sa = impl ? uwp_elem_ensure_style_anim( impl ) : NULL;
+    if (sa) uwp_replace_iface( &sa->converter, val );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_get_ConverterParameter( void *iface, IInspectable **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = (impl && impl->style_anim) ? impl->style_anim->converter_param : NULL;
+    if (*out) IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_put_ConverterParameter( void *iface, IInspectable *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_style_anim_ext *sa = impl ? uwp_elem_ensure_style_anim( impl ) : NULL;
+    if (sa) uwp_replace_iface( &sa->converter_param, val );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_get_ConverterLanguage( void *iface, HSTRING *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    if (impl && impl->style_anim && impl->style_anim->converter_lang[0])
+        return WindowsCreateString( impl->style_anim->converter_lang,
+                                    (UINT32)wcslen( impl->style_anim->converter_lang ), out );
+    *out = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_binding_put_ConverterLanguage( void *iface, HSTRING val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_style_anim_ext *sa = impl ? uwp_elem_ensure_style_anim( impl ) : NULL;
+    const WCHAR *s = val ? WindowsGetStringRawBuffer( val, NULL ) : L"";
+    if (sa) lstrcpynW( sa->converter_lang, s ? s : L"", ARRAY_SIZE(sa->converter_lang) );
+    return S_OK;
+}
+
 const struct uwp_binding_vtbl uwp_binding_vtbl =
 {
     uwp_sub_QueryInterface,
@@ -339,10 +426,20 @@ const struct uwp_binding_vtbl uwp_binding_vtbl =
     uwp_sub_GetTrustLevel,
     uwp_binding_get_Path,
     uwp_binding_put_Path,
-    { [0 ... 1] = uwp_generic_noop },
+    uwp_binding_get_Mode,
+    uwp_binding_put_Mode,
     uwp_binding_get_Source,
     uwp_binding_put_Source,
-    { [0 ... 19] = uwp_generic_noop },
+    { [0 ... 1] = uwp_generic_noop },
+    uwp_binding_get_ElementName,
+    uwp_binding_put_ElementName,
+    uwp_binding_get_Converter,
+    uwp_binding_put_Converter,
+    uwp_binding_get_ConverterParameter,
+    uwp_binding_put_ConverterParameter,
+    uwp_binding_get_ConverterLanguage,
+    uwp_binding_put_ConverterLanguage,
+    { [0 ... 9] = uwp_generic_noop },
 };
 
 static HRESULT WINAPI uwp_pp_get_Path( void *iface, HSTRING *out )

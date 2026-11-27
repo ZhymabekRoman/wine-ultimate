@@ -395,7 +395,7 @@ static BOOL uwp_scroll_child_has_content( struct uwp_element *el, int depth )
 }
 
 static void uwp_arrange_element_inner( struct uwp_element *el, RECT rc );
-static double uwp_measure_natural_height( const struct uwp_element *el, int avail_w, int depth );
+static double uwp_measure_natural_height_uncached( const struct uwp_element *el, int avail_w, int depth );
 
 void uwp_arrange_element( struct uwp_element *el, RECT rc )
 {
@@ -418,20 +418,37 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
         {
             struct uwp_element *pop = pops[pi];
             struct uwp_element *ch = uwp_elem_from_any( pop->content );
-            if (!ch) continue;
+            struct uwp_vec_view *pkids = pop->children_coll
+                ? CONTAINING_RECORD( pop->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+            struct uwp_element *size_el = NULL;
+            if (pkids && pkids->count > 0)
+            {
+                unsigned int k;
+                for (k = 0; k < pkids->count; k++)
+                {
+                    struct uwp_element *kc = uwp_elem_from_any( pkids->items[k] );
+                    if (kc && kc->kind != UWP_KIND_DEFERRED && kc->visibility == 0)
+                    {
+                        size_el = kc;
+                        break;
+                    }
+                }
+            }
+            if (!size_el) size_el = ch;
+            if (!size_el) continue;
             {
                 double sc = (g_layout_scale > 0.25f) ? g_layout_scale : 1.0;
-                double cw = (ch->width > 40.0) ? ch->width * sc
-                          : ((ch->max_width > 40.0) ? min( (double)root_w - 64.0, ch->max_width * sc )
+                double cw = (size_el->width > 40.0) ? size_el->width * sc
+                          : ((size_el->max_width > 40.0) ? min( (double)root_w - 64.0, size_el->max_width * sc )
                           : min( 760.0 * sc, (double)root_w - 96.0 ));
-                double nat_h = uwp_measure_natural_height( ch, (int)cw, 0 );
-                double ch_h = (ch->height > 40.0) ? ch->height * sc
+                double nat_h = uwp_measure_natural_height( size_el, (int)cw, 0 );
+                double ch_h = (size_el->height > 40.0) ? size_el->height * sc
                             : ((nat_h > 40.0) ? min( (double)root_h - 80.0, nat_h + 32.0 * sc )
                             : min( 540.0 * sc, (double)root_h - 96.0 ));
                 int pw, ph, px, py;
                 RECT prc;
-                if (ch->max_height > 40.0 && ch_h > ch->max_height * sc)
-                    ch_h = ch->max_height * sc;
+                if (size_el->max_height > 40.0 && ch_h > size_el->max_height * sc)
+                    ch_h = size_el->max_height * sc;
                 pw = max( 160, min( root_w - 32, (int)(cw + 0.5) ) );
                 ph = max( 100, min( root_h - 32, (int)(ch_h + 0.5) ) );
                 if (pop->popup_h_offset > 0.0 || pop->popup_v_offset > 0.0)
@@ -452,7 +469,16 @@ void uwp_arrange_element( struct uwp_element *el, RECT rc )
                 pop->bounds = prc;
                 pop->has_bounds = TRUE;
                 depth++;
-                uwp_arrange_element_inner( ch, prc );
+                if (ch) uwp_arrange_element_inner( ch, prc );
+                if (pkids)
+                {
+                    unsigned int k;
+                    for (k = 0; k < pkids->count; k++)
+                    {
+                        struct uwp_element *kc = uwp_elem_from_any( pkids->items[k] );
+                        if (kc && kc != ch) uwp_arrange_element_inner( kc, prc );
+                    }
+                }
                 depth--;
             }
         }
@@ -795,7 +821,7 @@ static inline struct uwp_element *uwp_visual_content_child( const struct uwp_ele
     return el->content ? uwp_elem_from_any( el->content ) : NULL;
 }
 
-static double uwp_measure_natural_width( const struct uwp_element *el, int depth );
+static double uwp_measure_natural_width_uncached( const struct uwp_element *el, int depth );
 
 static double uwp_measure_natural_width_uncached( const struct uwp_element *el, int depth )
 {
@@ -1059,7 +1085,7 @@ static double uwp_measure_natural_width_uncached( const struct uwp_element *el, 
 
 static BOOL g_nat_w_trunc = FALSE;
 
-static double uwp_measure_natural_width( const struct uwp_element *el, int depth )
+double uwp_measure_natural_width( const struct uwp_element *el, int depth )
 {
     struct uwp_element *mel = (struct uwp_element *)el;
     double res;
@@ -1107,10 +1133,29 @@ static BOOL uwp_is_horiz_listview( const struct uwp_element *el )
     return FALSE;
 }
 
+static BOOL uwp_horiz_listview_is_card_strip( const struct uwp_element *el )
+{
+    if (!el) return FALSE;
+    if (el->class_flags & UWP_CF_GRIDVIEW) return TRUE;
+    if (el->items_source) return TRUE;
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; v && k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (!ch || ch->visibility != 0) continue;
+            if (uwp_is_card( ch ) || ch->kind == UWP_KIND_IMAGE) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static BOOL uwp_has_horiz_listview_child( const struct uwp_element *el, int depth )
 {
     if (!el || depth > 2 || el->visibility != 0) return FALSE;
-    if (uwp_is_horiz_listview( el ))
+    if (uwp_is_horiz_listview( el ) && uwp_horiz_listview_is_card_strip( el ))
         return TRUE;
     if (el->content)
     {
@@ -1147,6 +1192,30 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
         return 148.0 * g_layout_scale;
     if (el->height > 0.0 && !isnan( el->height ))
         return el->height;
+    if (uwp_is_horiz_listview( el ) && !uwp_horiz_listview_is_card_strip( el ) && el->children_coll)
+    {
+        struct uwp_vec_view *v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k, vis_cnt = 0;
+        double max_h = 0.0;
+        for (k = 0; v && k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch->visibility == 0 && !(ch->class_flags & UWP_CF_TEMPLATE)) vis_cnt++;
+        }
+        if (vis_cnt > 0)
+        {
+            int cw = max( 64, avail_w / (int)vis_cnt );
+            for (k = 0; v && k < v->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+                double ch_h;
+                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
+                ch_h = uwp_measure_natural_height_uncached( ch, cw, depth + 1 );
+                if (ch_h > max_h) max_h = ch_h;
+            }
+            return max( 36.0 * g_layout_scale, max_h + 8.0 * g_layout_scale );
+        }
+    }
     if ((el->class_flags & UWP_CF_CONSTRAINED_BOX) && avail_w > 0 && avail_w <= 320)
         return (double)avail_w;
     if (uwp_is_items_repeater( el ) &&
@@ -1177,7 +1246,14 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
                 int cols = max( 1, (avail_w - 12) / 270 );
                 int rows_cnt = uwp_is_card( ch0 ) ? 1 : (((int)vis_cnt + cols - 1) / cols);
                 int row_h = (ch0 && !uwp_is_card( ch0 )) ? 124 : 96;
-                return (double)(24 + rows_cnt * row_h + max( 0, rows_cnt - 1 ) * 12) * g_layout_scale;
+                int pad = 12;
+                if (!el->items_source && ch0 && !uwp_is_card( ch0 ))
+                {
+                    double mh = uwp_measure_natural_height_uncached( ch0, max( 120, avail_w / cols ), depth + 1 );
+                    row_h = max( 36, min( 124, (int)(mh + 8.0 * g_layout_scale + 0.5) ) );
+                    pad = 4;
+                }
+                return (double)(pad * 2 + rows_cnt * row_h + max( 0, rows_cnt - 1 ) * pad) * g_layout_scale;
             }
         }
         return 0.0;
@@ -1410,6 +1486,8 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
             struct uwp_element *rd = (rows && (unsigned)r < rows->count) ? uwp_elem_from_any( rows->items[r] ) : NULL;
             if (rd && rd->grid_len_type == 0 && row_vis[r] && row_h[r] > 0.0 && row_h[r] < 24.0 * g_layout_scale)
                 row_h[r] = 24.0 * g_layout_scale;
+            if (rd && rd->max_height > 0.0 && row_h[r] > rd->max_height) row_h[r] = rd->max_height;
+            if (rd && rd->min_height > 0.0 && row_h[r] < rd->min_height) row_h[r] = rd->min_height;
             best += row_h[r];
         }
         if (max_span_h > best) best = max_span_h;
@@ -1471,7 +1549,7 @@ static double uwp_measure_natural_height_uncached( const struct uwp_element *el,
 
 static BOOL g_nat_h_trunc = FALSE;
 
-static double uwp_measure_natural_height( const struct uwp_element *el, int avail_w, int depth )
+double uwp_measure_natural_height( const struct uwp_element *el, int avail_w, int depth )
 {
     struct uwp_element *mel = (struct uwp_element *)el;
     double res;
@@ -1635,7 +1713,7 @@ static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_
         }
         r_type[i] = rd ? rd->grid_len_type : 2;
         r_val[i]  = rd ? rd->grid_len_val  : 1.0;
-        if (r_type[i] == 2 && (r_val[i] <= 0.001 || (i > 0 && !has_vis)))
+        if (r_type[i] == 2 && (r_val[i] <= 0.001 || (i > 0 && !has_vis && !(rd && rd->min_height > 0.0))))
         { r_type[i] = 1; r_val[i] = 0; }
         if (r_type[i] == 0)
         {
@@ -1666,12 +1744,43 @@ static void arrange_grid_compute_tracks( struct uwp_element *el, struct uwp_vec_
             }
             r_type[i] = 1; r_val[i] = auto_h;
         }
-        if (r_type[i] == 1) r_fixed += r_val[i];
+        if (r_type[i] == 1)
+        {
+            if (rd && rd->max_height > 0.0 && r_val[i] > rd->max_height) r_val[i] = rd->max_height;
+            if (rd && rd->min_height > 0.0 && r_val[i] < rd->min_height) r_val[i] = rd->min_height;
+            r_fixed += r_val[i];
+        }
         else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
         if (r_type[i] != 1 || r_val[i] > 0.0) active_rows++;
     }
     if (active_rows > 1 && row_sp > 0.0)
         row_gaps = (double)(active_rows - 1) * row_sp;
+
+    if (r_stars > 0)
+    {
+        double rem_h = max( 0.0, (double)h - r_fixed - row_gaps );
+        for (i = 0; i < nrows; i++)
+        {
+            struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
+            if (r_type[i] != 1 && rd && r_stars > 0)
+            {
+                double st = (r_val[i] > 0 ? r_val[i] : 1.0);
+                double alloc_h = rem_h * (st / r_stars);
+                if (rd->min_height > 0.0 && alloc_h < rd->min_height)
+                {
+                    r_type[i] = 1; r_val[i] = rd->min_height;
+                    r_fixed += rd->min_height; r_stars -= st;
+                    rem_h = max( 0.0, (double)h - r_fixed - row_gaps );
+                }
+                else if (rd->max_height > 0.0 && alloc_h > rd->max_height)
+                {
+                    r_type[i] = 1; r_val[i] = rd->max_height;
+                    r_fixed += rd->max_height; r_stars -= st;
+                    rem_h = max( 0.0, (double)h - r_fixed - row_gaps );
+                }
+            }
+        }
+    }
 
     {
         double rem_h = max( 0.0, (double)h - r_fixed - row_gaps ), cur_y = (double)rc.top;
@@ -2166,6 +2275,14 @@ static void arrange_items_repeater( struct uwp_element *el, RECT rc )
         int card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
         int card_h = (ch0_peek && !uwp_is_card( ch0_peek )) ? 124 : 96;
         int idx = 0;
+        if (!el->items_source && ch0_peek && !uwp_is_card( ch0_peek ))
+        {
+            double mh = uwp_measure_natural_height( ch0_peek, card_w, 0 );
+            card_h = max( 36, min( 124, (int)(mh + 8.0 * sc + 0.5) ) );
+            pad = 4;
+            gap = 8;
+            card_w = (avail_w - pad * 2 - gap * (cols - 1)) / cols;
+        }
 
         for (k = 0; k < children->count; k++)
         {
@@ -2281,27 +2398,53 @@ static BOOL arrange_list_or_grid_view( struct uwp_element *el, RECT rc )
         }
         return TRUE;
     }
-    if (avail_w >= 480 && avail_h > 0 && avail_h <= 400)
+    if (avail_w > 0 && avail_h > 0 && avail_h <= 400)
     {
-        int pad = 8, gap = 12, idx = 0;
-        int item_h = max( 64, avail_h - pad );
-        int item_w = max( 180, min( 320, (item_h * 16) / 9 ) );
-        for (k = 0; k < children->count; k++)
+        if (avail_w >= 480 && uwp_horiz_listview_is_card_strip( el ))
         {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            int x0;
-            RECT crc;
-            if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
-            x0 = rc.left + pad + idx * (item_w + gap);
-            if (x0 >= rc.right) { ch->has_bounds = FALSE; idx++; continue; }
-            SetRect( &crc, x0, rc.top + pad / 2,
-                     min( (int)rc.right, x0 + item_w ),
-                     min( (int)rc.bottom, rc.top + pad / 2 + item_h ) );
-            if (!ch->parent) ch->parent = el;
-            uwp_arrange_element( ch, crc );
-            idx++;
+            int pad = 8, gap = 12, idx = 0;
+            int item_h = max( 64, avail_h - pad );
+            int item_w = max( 180, min( 320, (item_h * 16) / 9 ) );
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                int x0;
+                RECT crc;
+                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
+                x0 = rc.left + pad + idx * (item_w + gap);
+                if (x0 >= rc.right) { ch->has_bounds = FALSE; idx++; continue; }
+                SetRect( &crc, x0, rc.top + pad / 2,
+                         min( (int)rc.right, x0 + item_w ),
+                         min( (int)rc.bottom, rc.top + pad / 2 + item_h ) );
+                if (!ch->parent) ch->parent = el;
+                uwp_arrange_element( ch, crc );
+                idx++;
+            }
+            return TRUE;
         }
-        return TRUE;
+        else if (!uwp_horiz_listview_is_card_strip( el ))
+        {
+            int x0 = rc.left + 4, gap = 8;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                double nw, nh;
+                int item_w, item_h, top_y;
+                RECT crc;
+                if (!ch || ch->visibility != 0 || (ch->class_flags & UWP_CF_TEMPLATE)) continue;
+                nw = uwp_measure_natural_width( ch, 0 );
+                item_w = max( 140, min( avail_w, (int)(nw > 0.0 ? nw + 28.0 * g_layout_scale : 160.0 * g_layout_scale) ) );
+                nh = uwp_measure_natural_height( ch, item_w, 0 );
+                item_h = max( 32, min( avail_h, (int)(nh > 0.0 ? nh + 4.0 * g_layout_scale : (double)avail_h) ) );
+                if (x0 >= rc.right) { ch->has_bounds = FALSE; continue; }
+                top_y = rc.top + max( 0, (avail_h - item_h) / 2 );
+                SetRect( &crc, x0, top_y, min( (int)rc.right, x0 + item_w ), min( (int)rc.bottom, top_y + item_h ) );
+                if (!ch->parent) ch->parent = el;
+                uwp_arrange_element( ch, crc );
+                x0 += item_w + gap;
+            }
+            return TRUE;
+        }
     }
     return FALSE;
 }

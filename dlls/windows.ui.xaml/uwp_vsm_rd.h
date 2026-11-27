@@ -162,6 +162,15 @@ struct uwp_class_factory
     IInspectable IBitmapImageFactory_iface;
     IInspectable IFontFamilyFactory_iface;
     UINT64 factory_flags;
+    IInspectable IButtonBaseStatics_iface;
+    IInspectable ISelectorStatics_iface;
+    IInspectable IUIElementStatics_iface;
+    IInspectable IUIElementRoutedStatics_iface;
+    IInspectable IGridStatics_iface;
+    IInspectable IFocusManagerStatics_iface;
+    IInspectable IBindingOpsStatics_iface;
+    IInspectable IThicknessHelperStatics_iface;
+    IInspectable IXamlMarkupHelperStatics_iface;
 };
 
 static inline UINT64 uwp_cf_compute_flags( const WCHAR *cls )
@@ -294,6 +303,7 @@ void vsm_split_setter_target( const WCHAR *spec, WCHAR *out_target, size_t max_t
 /* Binding & DataContext engine */
 void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *dc );
 void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *bel );
+void uwp_binding_notify_dp( struct uwp_element *src_el, const WCHAR *dpn );
 void uwp_binding_unsubscribe_element( struct uwp_element *el );
 void uwp_add_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls, const WCHAR *prop_name, struct uwp_element *bel );
 void uwp_eval_xaml_binding( struct uwp_element *tel, const WCHAR *owner_cls,

@@ -253,7 +253,9 @@ void uwp_paint_resolve_searchbox_style( struct uwp_element *el, COLORREF surface
             : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush",
                                        light ? RGB( 96, 96, 102 ) : RGB( 190, 190, 195 ), sbg ));
     const WCHAR *ph = uwp_elem_placeholder( el );
-    const WCHAR *fallback = (ph && ph[0]) ? ph : L"\x26b2   Search";
+    BOOL is_search = uwp_is_autosuggest( el );
+    const WCHAR *prefix = is_search ? L"\x26b2   " : L"";
+    const WCHAR *fallback = (ph && ph[0]) ? ph : (is_search ? L"\x26b2   Search" : L"");
 
     if (out_bg) *out_bg = sbg;
     if (out_bd) *out_bd = sbd;
@@ -261,11 +263,11 @@ void uwp_paint_resolve_searchbox_style( struct uwp_element *el, COLORREF surface
     if (disp && disp_cap > 0)
     {
         if (cur_txt && cur_txt[0])
-            swprintf( disp, disp_cap, focused ? L"\x26b2   %s|" : L"\x26b2   %s", cur_txt );
+            swprintf( disp, disp_cap, focused ? L"%s%s|" : L"%s%s", prefix, cur_txt );
         else if (focused)
-            lstrcpynW( disp, L"\x26b2   |", (int)disp_cap );
+            swprintf( disp, disp_cap, L"%s|", prefix );
         else if (ph && ph[0])
-            swprintf( disp, disp_cap, L"\x26b2   %s", ph );
+            swprintf( disp, disp_cap, L"%s%s", prefix, ph );
         else
             lstrcpynW( disp, fallback, (int)disp_cap );
     }

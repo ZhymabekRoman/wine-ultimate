@@ -536,7 +536,12 @@ static HRESULT WINAPI uri_GetIids( IUriRuntimeClass *iface, ULONG *iid_count, II
     if (iids)
     {
         IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
-        if (!array) return E_OUTOFMEMORY;
+        if (!array)
+        {
+            if (iid_count) *iid_count = 0;
+            *iids = NULL;
+            return E_OUTOFMEMORY;
+        }
         memcpy( array, instance_iids, sizeof(instance_iids) );
         *iids = array;
     }
@@ -1722,8 +1727,14 @@ static HSTRING url_decode_segment( const WCHAR *s, size_t len )
             i++;
         }
     }
+    if (o == 0)
+    {
+        free( utf8 );
+        WindowsCreateString( L"", 0, &out );
+        return out;
+    }
     wlen = MultiByteToWideChar( CP_UTF8, 0, utf8, (int)o, NULL, 0 );
-    wbuf = malloc( (wlen + 1) * sizeof(WCHAR) );
+    wbuf = (wlen > 0) ? malloc( (wlen + 1) * sizeof(WCHAR) ) : NULL;
     if (wbuf)
     {
         MultiByteToWideChar( CP_UTF8, 0, utf8, (int)o, wbuf, wlen );
@@ -1741,12 +1752,17 @@ static HRESULT create_www_form_url_decoder( HSTRING query, IWwwFormUrlDecoderRun
     UINT32 cap = 8;
 
     if (!out) return E_POINTER;
+    *out = NULL;
     if (!(dec = calloc( 1, sizeof(*dec) ))) return E_OUTOFMEMORY;
     dec->IWwwFormUrlDecoderRuntimeClass_iface.lpVtbl = &www_dec_vtbl;
     dec->IVectorView_iface.lpVtbl = &www_vec_vtbl;
     dec->IIterable_iface.lpVtbl = &www_it_vtbl;
     dec->ref = 1;
-    dec->entries = calloc( cap, sizeof(*dec->entries) );
+    if (!(dec->entries = calloc( cap, sizeof(*dec->entries) )))
+    {
+        free( dec );
+        return E_OUTOFMEMORY;
+    }
 
     if (raw)
     {
@@ -1759,27 +1775,37 @@ static HRESULT create_www_form_url_decoder( HSTRING query, IWwwFormUrlDecoderRun
             {
                 const WCHAR *eq = wmemchr( raw, L'=', seg_len );
                 struct www_entry *e = calloc( 1, sizeof(*e) );
-                if (e)
+                if (!e)
                 {
-                    e->IWwwFormUrlDecoderEntry_iface.lpVtbl = &www_entry_vtbl;
-                    e->ref = 1;
-                    if (eq)
-                    {
-                        e->name = url_decode_segment( raw, (size_t)(eq - raw) );
-                        e->value = url_decode_segment( eq + 1, seg_len - (size_t)(eq - raw) - 1 );
-                    }
-                    else
-                    {
-                        e->name = url_decode_segment( raw, seg_len );
-                        WindowsCreateString( L"", 0, &e->value );
-                    }
-                    if (dec->count == cap)
-                    {
-                        cap *= 2;
-                        dec->entries = realloc( dec->entries, cap * sizeof(*dec->entries) );
-                    }
-                    dec->entries[dec->count++] = e;
+                    IWwwFormUrlDecoderRuntimeClass_Release( &dec->IWwwFormUrlDecoderRuntimeClass_iface );
+                    return E_OUTOFMEMORY;
                 }
+                e->IWwwFormUrlDecoderEntry_iface.lpVtbl = &www_entry_vtbl;
+                e->ref = 1;
+                if (eq)
+                {
+                    e->name = url_decode_segment( raw, (size_t)(eq - raw) );
+                    e->value = url_decode_segment( eq + 1, seg_len - (size_t)(eq - raw) - 1 );
+                }
+                else
+                {
+                    e->name = url_decode_segment( raw, seg_len );
+                    WindowsCreateString( L"", 0, &e->value );
+                }
+                if (dec->count == cap)
+                {
+                    UINT32 ncap = cap * 2;
+                    struct www_entry **new_entries = realloc( dec->entries, ncap * sizeof(*new_entries) );
+                    if (!new_entries)
+                    {
+                        IWwwFormUrlDecoderEntry_Release( &e->IWwwFormUrlDecoderEntry_iface );
+                        IWwwFormUrlDecoderRuntimeClass_Release( &dec->IWwwFormUrlDecoderRuntimeClass_iface );
+                        return E_OUTOFMEMORY;
+                    }
+                    dec->entries = new_entries;
+                    cap = ncap;
+                }
+                dec->entries[dec->count++] = e;
             }
             if (!amp) break;
             raw = amp + 1;

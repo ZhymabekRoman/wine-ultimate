@@ -234,6 +234,7 @@ void uwp_resolve_font_family( const WCHAR *raw_spec, WCHAR *out_face, size_t cap
 BOOL uwp_is_bundled_font_face( const WCHAR *face );
 const WCHAR *uwp_resolve_elem_font_family( const struct uwp_element *el, WCHAR *buf, size_t cap );
 void uwp_load_image_asset( struct uwp_element *el );
+void uwp_http_img_remove_waiter( struct uwp_element *el );
 void uwp_on_image_loaded( struct uwp_element *el );
 void uwp_resolve_and_load_image( struct uwp_element *el );
 UINT32 uwp_cr_to_argb( COLORREF cr );
@@ -285,6 +286,7 @@ HRESULT xaml_attach_swapchain_panel_content( IUnknown *content, IDCompositionVis
 HRESULT xaml_attach_swapchain_panel_handle( HANDLE h, IDCompositionVisual2 **slot );
 void xaml_get_host_window_size( UINT *out_w, UINT *out_h );
 void xaml_set_active_swapchain_panel( void *el, void *sc );
+void xaml_clear_active_swapchain_panel_elem( void *el );
 
 /* Controls, navigation, selectors, TabView, ComboBox, TextBlock, Grid, Panel, Popups & Flyouts */
 size_t uwp_flatten_inlines_text( const struct uwp_element *el, WCHAR *out_buf, size_t out_cap );
@@ -393,6 +395,13 @@ HRESULT WINAPI uwp_vec_get_Size( void *iface, unsigned int *sz );
 void uwp_vec_detach_owner( IInspectable *vec, struct uwp_element *owner );
 unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_items, unsigned int max_items );
 unsigned int uwp_winrt_vec_count( IInspectable *coll );
+void uwp_sync_command_can_execute( struct uwp_element *btn );
+void uwp_items_ctrl_hook_source( struct uwp_element *impl, IInspectable *src );
+double uwp_measure_natural_width( const struct uwp_element *el, int depth );
+double uwp_measure_natural_height( const struct uwp_element *el, int avail_w, int depth );
+IInspectable *uwp_invoke_value_converter( struct uwp_element *bel, IInspectable *val,
+                                          const WCHAR *dp_name, BOOL convert_back );
+void uwp_apply_template_force( struct uwp_element *el );
 
 /* Input, keyboard accelerators, routed/pointer args & hit-testing */
 void uwp_accel_register( struct uwp_element *accel_el, struct uwp_element *target_el,
@@ -416,11 +425,20 @@ struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const struct xam
 ULONG WINAPI pra_Release( void *iface );
 ULONG WINAPI uwp_tap_Release( void *iface );
 struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el, enum xaml_pointer_event_kind kind );
-/* Hit-testing helpers shared between uwp_xaml.c and uwp_input.c. */
-struct uwp_element *uwp_hit_test_tappable( struct uwp_element *el, int x, int y );
+/* Unified hit-testing & helpers shared between uwp_xaml.c and uwp_input.c. */
+enum uwp_hit_kind
+{
+    UWP_HIT_BUTTON = 0,
+    UWP_HIT_CDP,
+    UWP_HIT_EXPANDER_HEADER,
+    UWP_HIT_COMBOBOX,
+    UWP_HIT_TEXTBOX,
+    UWP_HIT_TABVIEW,
+    UWP_HIT_TAPPABLE,
+    UWP_HIT_SCROLL_VIEWER,
+};
+struct uwp_element *uwp_hit_test( struct uwp_element *el, int x, int y, enum uwp_hit_kind kind );
 struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, int y );
-struct uwp_element *uwp_hit_test_tabview( struct uwp_element *el, int x, int y );
-struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y );
 struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR *text );
 /* Pointer/tapped dispatch (uwp_input.c, called back from uwp_xaml.c). */
 BOOL uwp_fire_tapped_bubble( struct uwp_element *target, int x, int y );

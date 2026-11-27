@@ -38,7 +38,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 /* Faces we QI and call raw-indexed: the metadata provider, XAML type/member, property-change
  * notification, boxed IReference<T>, ICommand and generic event delegates. The objects behind
- * them are served by our own combase-side code and Calculator's .NET Native RCW projection,
+ * them are served by our own combase-side code and the app's .NET Native RCW projection,
  * whose vtables follow the WinRT ABI. Naming each slot we call lets callers use typed calls;
  * earlier, uncalled slots stay as void * placeholders. */
 struct xaml_metadata_provider;
@@ -659,6 +659,28 @@ static struct uwp_element *uwp_elem_lookup_direct( void *ptr )
     return el;
 }
 
+struct uwp_element *uwp_elem_lookup_no_deref( const void *ptr )
+{
+    struct uwp_element *el;
+    if (!ptr || (ULONG_PTR)ptr < 0x10000) return NULL;
+    AcquireSRWLockShared( &g_all_uwp_elems_lock );
+    el = uwp_ptr_map_lookup_locked( ptr );
+    if (!el && (ULONG_PTR)ptr >= g_elem_min_addr && (ULONG_PTR)ptr < g_elem_max_addr)
+    {
+        struct uwp_element *cur;
+        for (cur = g_all_uwp_elems_head; cur; cur = cur->next_reg)
+        {
+            if ((const char *)ptr >= (const char *)cur && (const char *)ptr < (const char *)(cur + 1))
+            {
+                el = cur;
+                break;
+            }
+        }
+    }
+    ReleaseSRWLockShared( &g_all_uwp_elems_lock );
+    return el;
+}
+
 static void uwp_neg_cache_store( void *ptr, const void *vtbl )
 {
     UINT32 slot = uwp_hash_ptr( ptr ) & (UWP_NEG_CACHE_SIZE - 1);
@@ -1081,7 +1103,7 @@ HRESULT WINAPI uwp_sub_QueryInterface( IInspectable *iface, REFIID iid, void **o
         }
         __ENDTRY;
         if (!faulted) return hr;
-        ERR( "uwp_sub_QI: outer=%p FAULTED on %s (%s), falling back to inner\n",
+        WARN( "uwp_sub_QI: outer=%p FAULTED on %s (%s), falling back to inner\n",
              impl->outer, debugstr_w(impl->class_name), debugstr_w(impl->name) );
         impl->outer = NULL;
         impl->delegating = FALSE;
@@ -1209,6 +1231,75 @@ static void qi_map_put( const GUID *iid, size_t off, size_t alt_off, BYTE guard,
         idx = (idx + 1) & (UWP_QI_MAP_SIZE - 1);
     }
 }
+
+static HRESULT WINAPI uwp_progress_ring_get_IsActive( void *iface, boolean *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!val) return E_POINTER;
+    *val = (impl && impl->is_active) ? TRUE : FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_progress_ring_put_IsActive( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        BYTE na = val ? 1 : 0;
+        impl->local_prop_mask |= UWP_LP_IS_ACTIVE;
+        if (impl->is_active != na)
+        {
+            impl->is_active = na;
+            uwp_invalidate_window();
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_theme_shadow_get_Receivers( void *iface, void **out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!impl) return E_FAIL;
+    if (!impl->children_coll)
+    {
+        if (FAILED(uwp_vec_create( impl, &impl->children_coll )) || !impl->children_coll)
+            return E_OUTOFMEMORY;
+        {
+            struct uwp_vec_view *v = CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface );
+            v->runtime_class = L"Windows.UI.Xaml.UIElementWeakCollection";
+        }
+    }
+    IInspectable_AddRef( impl->children_coll );
+    *out = impl->children_coll;
+    return S_OK;
+}
+
+static const void *uwp_theme_shadow_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_theme_shadow_get_Receivers,
+    [7 ... 15] = uwp_generic_noop,
+};
+
+const void *uwp_progress_ring_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_progress_ring_get_IsActive,
+    [7] = uwp_progress_ring_put_IsActive,
+    [8 ... 15] = uwp_generic_noop,
+};
 
 static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
 {
@@ -1351,10 +1442,10 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_ITeachingTip_WinUI, ITeachingTip_iface );
     QI_ADD( IID_IGrid_UWP, IGrid_iface );
     QI_ADD( IID_IGrid_UWP2, IGrid_iface );
-    QI_ADD( IID_IGrid3_Calc, IGrid3_iface );
+    QI_ADD( IID_IGrid3_UWP_Alt, IGrid3_iface );
     QI_ADD( IID_IGrid3_UWP, IGrid3_iface );
     QI_ADD( IID_IBorder_UWP, IBorder_iface );
-    QI_ADD( IID_IBorder2_Calc, IBorder_iface );
+    QI_ADD( IID_IBorder2_UWP_Alt, IBorder_iface );
     QI_ADD( IID_ITextBlock_UWP, ITextBlock_iface );
     QI_ADD_P( p_IRichTextBlock, IRichTextBlock_iface );
     QI_ADD( IID_ITextBlock2_UWP, ITextBlock2_iface );
@@ -1381,7 +1472,7 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IUIElement2_UWP, IStyle_iface );
     QI_ADD( IID_IUIElement3_UWP, IStyle_iface );
     QI_ADD( IID_IUIElementOverrides_UWP, IStyle_iface );
-    QI_ADD( IID_IUIElement_Calc2, IStyle_iface );
+    QI_ADD( IID_IUIElement_UWP_Alt2, IStyle_iface );
     QI_ADD( IID_IFrameworkElement4_UWP, IStyle_iface );
     QI_ADD_G( IID_IFrameworkElement6_UWP, ILoadedImageSurface_iface, QI_GUARD_NOT_LOADED_SURFACE );
     QI_ADD( IID_IFrameworkElementOverrides_UWP, IStyle_iface );
@@ -1393,14 +1484,14 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IControlOverrides_UWP, IStyle_iface );
     QI_ADD( IID_IContentControl2_UWP, IStyle_iface );
     QI_ADD( IID_IContentControlOverrides_UWP, IStyle_iface );
-    QI_ADD( IID_IContentControlOvr_Calc, IStyle_iface );
+    QI_ADD( IID_IContentControlOvr_UWP_Alt, IStyle_iface );
     QI_ADD( IID_IPageOverrides_UWP, IStyle_iface );
     QI_ADD( IID_IButton_UWP, IStyle_iface );
     QI_ADD( IID_IToggleButtonOverrides_UWP, IStyle_iface );
     QI_ADD( IID_ITextBlock3_UWP, IStyle_iface );
-    QI_ADD( IID_ITextBlock_Calc2, IStyle_iface );
-    QI_ADD( IID_ITextBlock_Calc3, IStyle_iface );
-    QI_ADD( IID_ITextBlock_Calc4, IStyle_iface );
+    QI_ADD( IID_ITextBlock_UWP_Alt2, IStyle_iface );
+    QI_ADD( IID_ITextBlock_UWP_Alt3, IStyle_iface );
+    QI_ADD( IID_ITextBlock_UWP_Alt4, IStyle_iface );
     QI_ADD( IID_IStyle_UWP, IStyle_iface );
     QI_ADD( IID_ISetter_UWP, IStyle_iface );
     QI_ADD( IID_ISetterBase_UWP, IStyle_iface );
@@ -1448,7 +1539,10 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD_G( IID_IMediaPlayerElement_UWP, IMediaPlayerElement_iface, QI_GUARD_MEDIA_PLAYER );
     QI_ADD_G( IID_INavigationTransitionInfo_UWP, IStyle_iface, QI_GUARD_NAV_TRANSITION );
     QI_ADD_G( IID_IEntranceNavigationTransitionInfo_UWP, IStyle_iface, QI_GUARD_NAV_TRANSITION );
-    QI_ADD_ALT( IID_IFlyoutBase5_UWP, IStyle_iface, IFlyout_iface, QI_GUARD_FLYOUT_ALT );
+    QI_ADD_ALT( IID_IFlyoutBase5_UWP, IFlyout_iface, IStyle_iface, QI_GUARD_FLYOUT_ALT );
+    QI_ADD( IID_IFlyout_UWP, IContentControl_iface );
+    QI_ADD( IID_IProgressRing_UWP, IProgressRing_iface );
+    QI_ADD( IID_IProgressRing_WinUI, IProgressRing_iface );
     QI_ADD_G( IID_IImage2_UWP, IImage_iface, QI_GUARD_IMAGE );
     QI_ADD_G( IID_IEasingFunctionBase_UWP, IEasingFunctionBase_iface, QI_GUARD_EASE );
     QI_ADD_G( IID_INavigationViewItem_UWP, IStyle_iface, QI_GUARD_NAVVIEW_ITEM );
@@ -1561,7 +1655,14 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IUIElement_iface;
     else if (IsEqualGUID( iid, &IID_IFrameworkElement_UWP ))
         *out = &impl->IFrameworkElement_iface;
-    else
+    else if (!wcscmp( impl->class_name, L"Windows.UI.Xaml.Media.ThemeShadow" ))
+    {
+        static const GUID IID_IThemeShadow_local =
+            { 0x3eccad09, 0x7985, 0x5f39, { 0x8b, 0x62, 0x6c, 0x10, 0x69, 0x6d, 0xca, 0x6f } };
+        if (IsEqualGUID( iid, &IID_IThemeShadow_local ))
+            *out = &impl->IStyle_iface;
+    }
+    if (!*out)
     {
         InitOnceExecuteOnce( &g_qi_map_once, init_qi_map, NULL, NULL );
         idx = uwp_qi_hash( iid->Data1 ) & (UWP_QI_MAP_SIZE - 1);
@@ -1663,10 +1764,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (iid->Data1 != 0x11d3b13a && (impl->class_flags2 & UWP_CF2_GRID))
-        WARN( "uwp_nondelegating_QI: %s not matched on %s\n", debugstr_guid(iid), debugstr_w(impl->class_name) );
-    else
-        TRACE( "uwp_nondelegating_QI: %s not matched on %s\n", debugstr_guid(iid), debugstr_w(impl->class_name) );
+    TRACE( "uwp_nondelegating_QI: %s not matched on %s\n", debugstr_guid(iid), debugstr_w(impl->class_name) );
     return E_NOINTERFACE;
 }
 
@@ -1790,6 +1888,7 @@ static void uwp_element_destroy( struct uwp_element *impl )
         if (m->media_poster_source) IInspectable_Release( m->media_poster_source );
         if (m->media_player) IInspectable_Release( m->media_player );
         if (m->img_source) IInspectable_Release( m->img_source );
+        if (m->video_wake_event) CloseHandle( m->video_wake_event );
         free( m->video_pixels );
         free( m );
     }
@@ -1832,6 +1931,11 @@ static void uwp_element_destroy( struct uwp_element *impl )
             uwp_vec_detach_owner( sa->figures_coll, impl );
             IInspectable_Release( sa->figures_coll );
         }
+        if (sa->converter) IInspectable_Release( sa->converter );
+        if (sa->converter_param) IInspectable_Release( sa->converter_param );
+        if (sa->cmd_can_exec_handler) IInspectable_Release( sa->cmd_can_exec_handler );
+        if (sa->obsvec_handler_obj) IInspectable_Release( sa->obsvec_handler_obj );
+        if (sa->obsvec_source_obj) IInspectable_Release( sa->obsvec_source_obj );
         free( sa );
     }
 
@@ -2725,6 +2829,7 @@ static BOOL CALLBACK init_uwp_vtbl_map( INIT_ONCE *once, void *param, void **ctx
     VMAP( uwp_rowcol_vtbl, IRowDefinition_iface );
     VMAP( uwp_rowcol_vtbl, IColumnDefinition_iface );
     VMAP( uwp_visual_state_vtbl, IStyle_iface );
+    VMAP( uwp_theme_shadow_vtbl, IStyle_iface );
     VMAP( uwp_noop_vtbl, IStyle_iface );
     VMAP( uwp_data_template_vtbl, IDataTemplate_iface );
     VMAP( uwp_dts_vtbl, IDataTemplateSelector_iface );
@@ -2755,6 +2860,7 @@ static BOOL CALLBACK init_uwp_vtbl_map( INIT_ONCE *once, void *param, void **ctx
     VMAP( uwp_mfi_vtbl, IMenuFlyoutItem_iface );
     VMAP( uwp_mfi3_vtbl, IMenuFlyoutItem3_iface );
     VMAP( uwp_tmfi_vtbl, IToggleMenuFlyoutItem_iface );
+    VMAP( uwp_progress_ring_vtbl, IProgressRing_iface );
     VMAP( uwp_mfsi_vtbl, IMenuFlyoutSubItem_iface );
     VMAP( uwp_mf2_vtbl, IMenuFlyout2_iface );
     VMAP( uwp_ui4_vtbl, IUIElement4_iface );
@@ -2881,6 +2987,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IStyle_iface.lpVtbl = (!wcscmp( class_name, L"Windows.UI.Xaml.VisualState" ) ||
                                  !wcscmp( class_name, L"Windows.UI.Xaml.VisualStateGroup" ))
         ? (const struct IInspectableVtbl *)uwp_visual_state_vtbl
+        : (!wcscmp( class_name, L"Windows.UI.Xaml.Media.ThemeShadow" ))
+        ? (const struct IInspectableVtbl *)uwp_theme_shadow_vtbl
         : (const struct IInspectableVtbl *)uwp_noop_vtbl;
     impl->IDataTemplate_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_data_template_vtbl;
     impl->IDataTemplateSelector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dts_vtbl;
@@ -2912,6 +3020,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IUIElement7_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ui7_vtbl;
     impl->IKeyboardAccelerator_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_ka_vtbl;
     impl->IXamlUICommand_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_xaml_cmd_vtbl;
+    impl->IProgressRing_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_progress_ring_vtbl;
     impl->ICommand_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_icmd_vtbl;
     impl->IMenuFlyoutItem_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mfi_vtbl;
     impl->IMenuFlyoutItem3_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_mfi3_vtbl;
@@ -3026,9 +3135,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
         /* Delegation mode is a property of the outer object, not the app: an outer
          * that answers IUIElement is a real app-side element, so the element's
          * lifetime rides on it; otherwise the element owns its own refcount. */
-        if (outer &&
-            !IsBadReadPtr( outer, sizeof(void *) ) &&
-            !IsBadReadPtr( *(void **)outer, 2 * sizeof(void *) ))
+        if (outer)
         {
             __TRY
             {
@@ -3084,6 +3191,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
 
     return S_OK;
 }
+C_ASSERT(sizeof(struct uwp_element) <= 2488);
 
 /* ============================================================================
  * 5. DataContext Propagation, Loaded & OnApplyTemplate Dispatch, Frame Navigate

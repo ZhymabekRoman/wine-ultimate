@@ -124,6 +124,15 @@ struct toast_event_sink
     IUnknown *handler;
 };
 
+static CRITICAL_SECTION toast_state_cs;
+static CRITICAL_SECTION_DEBUG toast_state_cs_debug =
+{
+    0, 0, &toast_state_cs,
+    { &toast_state_cs_debug.ProcessLocksList, &toast_state_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": toast_state_cs") }
+};
+static CRITICAL_SECTION toast_state_cs = { &toast_state_cs_debug, -1, 0, 0, 0, 0 };
+
 static LONG toast_event_token;
 
 static HRESULT toast_event_add( struct list *sinks, IUnknown *handler, EventRegistrationToken *token )
@@ -136,7 +145,9 @@ static HRESULT toast_event_add( struct list *sinks, IUnknown *handler, EventRegi
     sink->token.value = (ULONGLONG)InterlockedIncrement( &toast_event_token );
     sink->handler = handler;
     IUnknown_AddRef( handler );
+    EnterCriticalSection( &toast_state_cs );
     list_add_tail( sinks, &sink->entry );
+    LeaveCriticalSection( &toast_state_cs );
     *token = sink->token;
     return S_OK;
 }
@@ -144,23 +155,36 @@ static HRESULT toast_event_add( struct list *sinks, IUnknown *handler, EventRegi
 static HRESULT toast_event_remove( struct list *sinks, EventRegistrationToken token )
 {
     struct toast_event_sink *sink, *next;
+    IUnknown *to_release = NULL;
 
+    EnterCriticalSection( &toast_state_cs );
     LIST_FOR_EACH_ENTRY_SAFE( sink, next, sinks, struct toast_event_sink, entry )
     {
         if (sink->token.value != token.value) continue;
         list_remove( &sink->entry );
-        IUnknown_Release( sink->handler );
+        to_release = sink->handler;
         free( sink );
-        return S_OK;
+        break;
     }
+    LeaveCriticalSection( &toast_state_cs );
+    if (to_release) IUnknown_Release( to_release );
     return S_OK;
 }
 
 static void toast_event_clear( struct list *sinks )
 {
+    struct list detached = LIST_INIT( detached );
     struct toast_event_sink *sink, *next;
 
+    EnterCriticalSection( &toast_state_cs );
     LIST_FOR_EACH_ENTRY_SAFE( sink, next, sinks, struct toast_event_sink, entry )
+    {
+        list_remove( &sink->entry );
+        list_add_tail( &detached, &sink->entry );
+    }
+    LeaveCriticalSection( &toast_state_cs );
+
+    LIST_FOR_EACH_ENTRY_SAFE( sink, next, &detached, struct toast_event_sink, entry )
     {
         list_remove( &sink->entry );
         IUnknown_Release( sink->handler );
@@ -339,7 +363,10 @@ static ULONG WINAPI toast_dismissed_args_Release(
         __x_ABI_CWindows_CUI_CNotifications_CIToastDismissedEventArgs *iface )
 {
     struct toast_dismissed_args *impl = impl_from_IToastDismissedEventArgs( iface );
-    return InterlockedDecrement( &impl->ref );
+    LONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref) free( impl );
+    return ref;
 }
 
 static HRESULT WINAPI toast_dismissed_args_GetIids(
@@ -490,7 +517,7 @@ static HRESULT toast_collect_texts( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocume
     __x_ABI_CWindows_CData_CXml_CDom_CIXmlNodeList *list = NULL;
     __x_ABI_CWindows_CData_CXml_CDom_CIXmlCharacterData *text = NULL;
     __x_ABI_CWindows_CData_CXml_CDom_CIXmlNode *node = NULL;
-    HSTRING tag_name = NULL, hstr = NULL;
+    HSTRING tag_name = NULL;
     HSTRING *texts = NULL;
     UINT32 i, length = 0;
     HRESULT hr;
@@ -874,28 +901,37 @@ static UINT32 shown_queue_size;
 static void toast_shown_queue_add( IToastNotification *toast )
 {
     struct toast_shown_entry *entry;
+    IToastNotification *dropped = NULL;
 
+    EnterCriticalSection( &toast_state_cs );
     LIST_FOR_EACH_ENTRY( entry, &shown_queue, struct toast_shown_entry, entry )
     {
         if (entry->toast != toast) continue;
         list_remove( &entry->entry );
         list_add_tail( &shown_queue, &entry->entry );
+        LeaveCriticalSection( &toast_state_cs );
         return;
     }
-    if (!(entry = malloc( sizeof(*entry) ))) return;
+    if (!(entry = malloc( sizeof(*entry) )))
+    {
+        LeaveCriticalSection( &toast_state_cs );
+        return;
+    }
     entry->toast = toast;
     IToastNotification_AddRef( toast );
     list_add_tail( &shown_queue, &entry->entry );
     ++shown_queue_size;
 
-    while (shown_queue_size > TOAST_SHOWN_QUEUE_SIZE)
+    if (shown_queue_size > TOAST_SHOWN_QUEUE_SIZE)
     {
         entry = LIST_ENTRY( list_head( &shown_queue ), struct toast_shown_entry, entry );
         list_remove( &entry->entry );
-        IToastNotification_Release( entry->toast );
+        dropped = entry->toast;
         free( entry );
         --shown_queue_size;
     }
+    LeaveCriticalSection( &toast_state_cs );
+    if (dropped) IToastNotification_Release( dropped );
 }
 
 static HRESULT toast_shown_queue_snapshot( __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **out );
@@ -999,21 +1035,27 @@ typedef BOOL (WINAPI *pShell_NotifyIconW)( DWORD message, NOTIFYICONDATAW *data 
 static pShell_NotifyIconW toast_shell_notify_icon( void )
 {
     static pShell_NotifyIconW fn;
-    HMODULE module;
+    pShell_NotifyIconW ret;
 
+    EnterCriticalSection( &toast_state_cs );
     if (!fn)
     {
+        HMODULE module;
         if (!(module = GetModuleHandleW( L"shell32.dll" ))) module = LoadLibraryW( L"shell32.dll" );
         if (module) fn = (pShell_NotifyIconW)GetProcAddress( module, "Shell_NotifyIconW" );
     }
-    return fn;
+    ret = fn;
+    LeaveCriticalSection( &toast_state_cs );
+    return ret;
 }
 
 static HWND toast_tray_window( void )
 {
     static const WCHAR class_name[] = L"Wine Toast Tray";
     static HWND hwnd;
+    HWND ret;
 
+    EnterCriticalSection( &toast_state_cs );
     if (!hwnd)
     {
         WNDCLASSEXW desc = {0};
@@ -1025,7 +1067,9 @@ static HWND toast_tray_window( void )
         RegisterClassExW( &desc );
         hwnd = CreateWindowExW( 0, class_name, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, desc.hInstance, NULL );
     }
-    return hwnd;
+    ret = hwnd;
+    LeaveCriticalSection( &toast_state_cs );
+    return ret;
 }
 
 static void toast_dispatch_notify_icon( const WCHAR *title, const WCHAR *body )
@@ -1048,8 +1092,10 @@ static void toast_dispatch_notify_icon( const WCHAR *title, const WCHAR *body )
     lstrcpynW( nid.szInfoTitle, title, ARRAY_SIZE( nid.szInfoTitle ) );
     lstrcpynW( nid.szTip, title, ARRAY_SIZE( nid.szTip ) );
 
+    EnterCriticalSection( &toast_state_cs );
     if (notify_icon( added ? NIM_MODIFY : NIM_ADD, &nid ) && !added) added = TRUE;
     else if (added) notify_icon( NIM_ADD, &nid );   /* the icon was removed in between */
+    LeaveCriticalSection( &toast_state_cs );
 }
 
 static void toast_dismiss_notify_icon( void )
@@ -1122,12 +1168,14 @@ static HRESULT WINAPI toast_notifier_Show( IToastNotifier *iface,
 
     if (TWINAPI_CALL( fd_notify, &params ) == STATUS_SUCCESS && params.id)
     {
+        EnterCriticalSection( &toast_state_cs );
         impl->fd_id = params.id;
         if (list_empty( &impl->shown_entry ))
         {
             IUnknown_AddRef( (IUnknown *)notification );
             list_add_tail( &shown_toasts, &impl->shown_entry );
         }
+        LeaveCriticalSection( &toast_state_cs );
         TRACE( "delivered toast as notification id %u\n", params.id );
     }
     toast_payload_free( &payload );
@@ -1145,15 +1193,21 @@ static HRESULT WINAPI toast_notifier_Hide( IToastNotifier *iface,
     toast_notifier_drain_events();
     if (!notification) return E_POINTER;
     impl = impl_from_IToastNotification( notification );
+    EnterCriticalSection( &toast_state_cs );
     close_params.id = impl->fd_id;
     impl->fd_id = 0;
-    if (close_params.id) TWINAPI_CALL( fd_close, &close_params );
     if (!list_empty( &impl->shown_entry ))
     {
         list_remove( &impl->shown_entry );
         list_init( &impl->shown_entry );
+        LeaveCriticalSection( &toast_state_cs );
         IToastNotification_Release( notification );
     }
+    else
+    {
+        LeaveCriticalSection( &toast_state_cs );
+    }
+    if (close_params.id) TWINAPI_CALL( fd_close, &close_params );
     toast_dismiss_notify_icon();
     toast_history_remove_toast( notification );
     return S_OK;
@@ -1669,6 +1723,7 @@ static void toast_history_add( IToastNotification *toast )
 {
     __x_ABI_CWindows_CUI_CNotifications_CIToastNotification2 *toast2;
     struct toast_history_entry *entry, *next;
+    struct list removed = LIST_INIT( removed );
     HSTRING tag = NULL, group = NULL;
 
     if (SUCCEEDED( IToastNotification_QueryInterface( toast, &IID_IToastNotification2, (void **)&toast2 ) ))
@@ -1676,17 +1731,6 @@ static void toast_history_add( IToastNotification *toast )
         IToastNotification2_get_Tag( toast2, &tag );
         IToastNotification2_get_Group( toast2, &group );
         IToastNotification2_Release( toast2 );
-    }
-
-    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &toast_history, struct toast_history_entry, entry )
-    {
-        if (!toast_history_matches( entry->tag, tag ) || !toast_history_matches( entry->group, group ))
-            continue;
-        list_remove( &entry->entry );
-        IToastNotification_Release( entry->toast );
-        WindowsDeleteString( entry->tag );
-        WindowsDeleteString( entry->group );
-        free( entry );
     }
 
     if (!(entry = malloc( sizeof(*entry) )))
@@ -1700,17 +1744,48 @@ static void toast_history_add( IToastNotification *toast )
     entry->tag = tag;      /* the dups handed out by get_Tag/get_Group, owned here */
     entry->group = group;
     IToastNotification_AddRef( toast );
+
+    EnterCriticalSection( &toast_state_cs );
+    {
+        struct toast_history_entry *cur, *nxt;
+        LIST_FOR_EACH_ENTRY_SAFE( cur, nxt, &toast_history, struct toast_history_entry, entry )
+        {
+            if (!toast_history_matches( cur->tag, tag ) || !toast_history_matches( cur->group, group ))
+                continue;
+            list_remove( &cur->entry );
+            list_add_tail( &removed, &cur->entry );
+        }
+    }
     list_add_tail( &toast_history, &entry->entry );
+    LeaveCriticalSection( &toast_state_cs );
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &removed, struct toast_history_entry, entry )
+    {
+        list_remove( &entry->entry );
+        IToastNotification_Release( entry->toast );
+        WindowsDeleteString( entry->tag );
+        WindowsDeleteString( entry->group );
+        free( entry );
+    }
 }
 
 /* Drop the history entries for this exact notification (ToastNotifier::Hide). */
 static void toast_history_remove_toast( IToastNotification *toast )
 {
+    struct list removed = LIST_INIT( removed );
     struct toast_history_entry *entry, *next;
 
+    EnterCriticalSection( &toast_state_cs );
     LIST_FOR_EACH_ENTRY_SAFE( entry, next, &toast_history, struct toast_history_entry, entry )
     {
         if (entry->toast != toast) continue;
+        list_remove( &entry->entry );
+        list_add_tail( &removed, &entry->entry );
+    }
+    LeaveCriticalSection( &toast_state_cs );
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &removed, struct toast_history_entry, entry )
+    {
         list_remove( &entry->entry );
         IToastNotification_Release( entry->toast );
         WindowsDeleteString( entry->tag );
@@ -1722,12 +1797,21 @@ static void toast_history_remove_toast( IToastNotification *toast )
 /* Drop the history entries matching tag and group; NULL matches anything. */
 static void toast_history_prune( HSTRING tag, HSTRING group )
 {
+    struct list removed = LIST_INIT( removed );
     struct toast_history_entry *entry, *next;
 
+    EnterCriticalSection( &toast_state_cs );
     LIST_FOR_EACH_ENTRY_SAFE( entry, next, &toast_history, struct toast_history_entry, entry )
     {
         if (tag && !toast_history_matches( entry->tag, tag )) continue;
         if (group && !toast_history_matches( entry->group, group )) continue;
+        list_remove( &entry->entry );
+        list_add_tail( &removed, &entry->entry );
+    }
+    LeaveCriticalSection( &toast_state_cs );
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &removed, struct toast_history_entry, entry )
+    {
         list_remove( &entry->entry );
         IToastNotification_Release( entry->toast );
         WindowsDeleteString( entry->tag );
@@ -2186,24 +2270,30 @@ static HRESULT toast_history_snapshot(
     UINT32 i = 0, size = 0;
 
     if (!out) return E_POINTER;
-    LIST_FOR_EACH_ENTRY( entry, &toast_history, struct toast_history_entry, entry ) ++size;
-
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_vector_vtbl;
     impl->__FIIterable_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_iterable_vtbl;
     impl->ref = 1;
-    impl->size = size;
 
-    if (size && !(impl->items = malloc( size * sizeof(*impl->items) )))
+    EnterCriticalSection( &toast_state_cs );
+    LIST_FOR_EACH_ENTRY( entry, &toast_history, struct toast_history_entry, entry ) ++size;
+    impl->size = size;
+    if (size)
     {
-        free( impl );
-        return E_OUTOFMEMORY;
+        if (!(impl->items = malloc( size * sizeof(*impl->items) )))
+        {
+            LeaveCriticalSection( &toast_state_cs );
+            free( impl );
+            return E_OUTOFMEMORY;
+        }
+        LIST_FOR_EACH_ENTRY( entry, &toast_history, struct toast_history_entry, entry )
+        {
+            impl->items[i++] = entry->toast;
+            IToastNotification_AddRef( entry->toast );
+        }
     }
-    LIST_FOR_EACH_ENTRY( entry, &toast_history, struct toast_history_entry, entry )
-    {
-        impl->items[i++] = entry->toast;
-        IToastNotification_AddRef( entry->toast );
-    }
+    LeaveCriticalSection( &toast_state_cs );
+
     *out = &impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface;
     return S_OK;
 }
@@ -2221,18 +2311,25 @@ static HRESULT toast_shown_queue_snapshot( __FIVectorView_1_Windows__CUI__CNotif
     impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_vector_vtbl;
     impl->__FIIterable_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_iterable_vtbl;
     impl->ref = 1;
-    impl->size = shown_queue_size;
 
-    if (shown_queue_size && !(impl->items = malloc( shown_queue_size * sizeof(*impl->items) )))
+    EnterCriticalSection( &toast_state_cs );
+    impl->size = shown_queue_size;
+    if (impl->size)
     {
-        free( impl );
-        return E_OUTOFMEMORY;
+        if (!(impl->items = malloc( impl->size * sizeof(*impl->items) )))
+        {
+            LeaveCriticalSection( &toast_state_cs );
+            free( impl );
+            return E_OUTOFMEMORY;
+        }
+        LIST_FOR_EACH_ENTRY( entry, &shown_queue, struct toast_shown_entry, entry )
+        {
+            impl->items[i++] = entry->toast;
+            IToastNotification_AddRef( entry->toast );
+        }
     }
-    LIST_FOR_EACH_ENTRY( entry, &shown_queue, struct toast_shown_entry, entry )
-    {
-        impl->items[i++] = entry->toast;
-        IToastNotification_AddRef( entry->toast );
-    }
+    LeaveCriticalSection( &toast_state_cs );
+
     *out = &impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface;
     return S_OK;
 }
@@ -2883,22 +2980,53 @@ static inline struct toast_notification *impl_from_IToastNotification2( IToastNo
     return CONTAINING_RECORD( iface, struct toast_notification, IToastNotification2_iface );
 }
 
+static UINT32 toast_snapshot_sinks( struct list *sinks, IUnknown ***out )
+{
+    struct toast_event_sink *sink;
+    IUnknown **arr = NULL;
+    UINT32 count = 0, i = 0;
+
+    EnterCriticalSection( &toast_state_cs );
+    LIST_FOR_EACH_ENTRY( sink, sinks, struct toast_event_sink, entry ) count++;
+    if (count && (arr = malloc( count * sizeof(*arr) )))
+    {
+        LIST_FOR_EACH_ENTRY( sink, sinks, struct toast_event_sink, entry )
+        {
+            arr[i] = sink->handler;
+            IUnknown_AddRef( arr[i] );
+            i++;
+        }
+    }
+    else
+    {
+        count = 0;
+    }
+    LeaveCriticalSection( &toast_state_cs );
+    *out = arr;
+    return count;
+}
+
 static void toast_notification_fire_activated( struct toast_notification *impl )
 {
     __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_IInspectable *handler;
     struct toast_activated_args *args;
-    struct toast_event_sink *sink;
+    IUnknown **handlers = NULL;
+    UINT32 count, i;
 
-    if (list_empty( &impl->activated_sinks )) return;
-    if (FAILED( create_toast_activated_args( impl->launch_args, &args ) )) return;
-
-    LIST_FOR_EACH_ENTRY( sink, &impl->activated_sinks, struct toast_event_sink, entry )
+    count = toast_snapshot_sinks( &impl->activated_sinks, &handlers );
+    if (!count) return;
+    if (SUCCEEDED( create_toast_activated_args( impl->launch_args, &args ) ))
     {
-        handler = (void *)sink->handler;
-        handler->lpVtbl->Invoke( handler, &impl->IToastNotification_iface,
-                                 (IInspectable *)&args->IToastActivatedEventArgs_iface );
+        for (i = 0; i < count; i++)
+        {
+            handler = (void *)handlers[i];
+            handler->lpVtbl->Invoke( handler, &impl->IToastNotification_iface,
+                                     (IInspectable *)&args->IToastActivatedEventArgs_iface );
+        }
+        IUnknown_Release( (IUnknown *)&args->IToastActivatedEventArgs_iface );
     }
-    IUnknown_Release( (IUnknown *)&args->IToastActivatedEventArgs_iface );
+    for (i = 0; i < count; i++) IUnknown_Release( handlers[i] );
+    free( handlers );
 }
 
 static void toast_notification_fire_dismissed( struct toast_notification *impl,
@@ -2906,18 +3034,23 @@ static void toast_notification_fire_dismissed( struct toast_notification *impl,
 {
     __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_Windows__CUI__CNotifications__CToastDismissedEventArgs *handler;
     struct toast_dismissed_args *args;
-    struct toast_event_sink *sink;
+    IUnknown **handlers = NULL;
+    UINT32 count, i;
 
-    if (list_empty( &impl->dismissed_sinks )) return;
-    if (FAILED( create_toast_dismissed_args( reason, &args ) )) return;
-
-    LIST_FOR_EACH_ENTRY( sink, &impl->dismissed_sinks, struct toast_event_sink, entry )
+    count = toast_snapshot_sinks( &impl->dismissed_sinks, &handlers );
+    if (!count) return;
+    if (SUCCEEDED( create_toast_dismissed_args( reason, &args ) ))
     {
-        handler = (void *)sink->handler;
-        handler->lpVtbl->Invoke( handler, &impl->IToastNotification_iface,
-                                 &args->IToastDismissedEventArgs_iface );
+        for (i = 0; i < count; i++)
+        {
+            handler = (void *)handlers[i];
+            handler->lpVtbl->Invoke( handler, &impl->IToastNotification_iface,
+                                     &args->IToastDismissedEventArgs_iface );
+        }
+        IUnknown_Release( (IUnknown *)&args->IToastDismissedEventArgs_iface );
     }
-    IUnknown_Release( (IUnknown *)&args->IToastDismissedEventArgs_iface );
+    for (i = 0; i < count; i++) IUnknown_Release( handlers[i] );
+    free( handlers );
 }
 
 /* NotificationSuppressed (TypedEventHandler<ToastNotification *, IInspectable *>):
@@ -2928,18 +3061,23 @@ static void toast_notification_fire_suppressed( struct toast_notification *impl 
 {
     __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_IInspectable *handler;
     struct toast_activated_args *args;
-    struct toast_event_sink *sink;
+    IUnknown **handlers = NULL;
+    UINT32 count, i;
 
-    if (list_empty( &impl->suppressed_sinks )) return;
-    if (FAILED( create_toast_activated_args( impl->launch_args, &args ) )) return;
-
-    LIST_FOR_EACH_ENTRY( sink, &impl->suppressed_sinks, struct toast_event_sink, entry )
+    count = toast_snapshot_sinks( &impl->suppressed_sinks, &handlers );
+    if (!count) return;
+    if (SUCCEEDED( create_toast_activated_args( impl->launch_args, &args ) ))
     {
-        handler = (void *)sink->handler;
-        handler->lpVtbl->Invoke( handler, &impl->IToastNotification_iface,
-                                 (IInspectable *)&args->IToastActivatedEventArgs_iface );
+        for (i = 0; i < count; i++)
+        {
+            handler = (void *)handlers[i];
+            handler->lpVtbl->Invoke( handler, &impl->IToastNotification_iface,
+                                     (IInspectable *)&args->IToastActivatedEventArgs_iface );
+        }
+        IUnknown_Release( (IUnknown *)&args->IToastActivatedEventArgs_iface );
     }
-    IUnknown_Release( (IUnknown *)&args->IToastActivatedEventArgs_iface );
+    for (i = 0; i < count; i++) IUnknown_Release( handlers[i] );
+    free( handlers );
 }
 
 /*
@@ -2963,12 +3101,22 @@ static void toast_notifier_drain_events( void )
 
     while (TWINAPI_CALL( fd_event, &params ) == STATUS_SUCCESS && params.got_event)
     {
+        struct toast_notification *matched = NULL;
+        EnterCriticalSection( &toast_state_cs );
         LIST_FOR_EACH_ENTRY( impl, &shown_toasts, struct toast_notification, shown_entry )
         {
             if (impl->fd_id != params.id) continue;
-            if (params.reason == 2) toast_notification_fire_activated( impl );
-            else toast_notification_fire_dismissed( impl, reason_map[params.reason] );
+            matched = impl;
+            IToastNotification_AddRef( &matched->IToastNotification_iface );
             break;
+        }
+        LeaveCriticalSection( &toast_state_cs );
+        if (matched)
+        {
+            if (params.reason == 2) toast_notification_fire_activated( matched );
+            else if (params.reason < ARRAY_SIZE( reason_map ))
+                toast_notification_fire_dismissed( matched, reason_map[params.reason] );
+            IToastNotification_Release( &matched->IToastNotification_iface );
         }
     }
 }
@@ -3035,11 +3183,13 @@ static ULONG WINAPI toast_notification_Release( IToastNotification *iface )
         toast_event_clear( &impl->dismissed_sinks );
         toast_event_clear( &impl->failed_sinks );
         toast_event_clear( &impl->suppressed_sinks );
+        EnterCriticalSection( &toast_state_cs );
         if (!list_empty( &impl->shown_entry ))
         {
             list_remove( &impl->shown_entry );
             list_init( &impl->shown_entry );
         }
+        LeaveCriticalSection( &toast_state_cs );
         WindowsDeleteString( impl->tag );
         WindowsDeleteString( impl->group );
         WindowsDeleteString( impl->launch_args );

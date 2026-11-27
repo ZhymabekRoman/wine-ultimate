@@ -480,7 +480,7 @@ static HRESULT WINAPI procfail_get_ProcessFailedKind( void *iface, int *out )
     if (pf && pf->lpVtbl && pf->lpVtbl->get_ProcessFailedKind &&
         (ULONG_PTR)pf->lpVtbl->get_ProcessFailedKind < (ULONG_PTR)0x7ffc00000000)
         hr = pf->lpVtbl->get_ProcessFailedKind( impl->com_args, out );
-    ERR( "procfail_get_ProcessFailedKind hr=%#lx kind=%d\n", hr, *out );
+    TRACE( "procfail_get_ProcessFailedKind hr=%#lx kind=%d\n", hr, *out );
     return hr;
 }
 

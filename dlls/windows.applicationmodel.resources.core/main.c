@@ -2988,38 +2988,31 @@ struct builtin_entry
     UINT32 count;
 };
 
-static const struct builtin_value bv_calculator[] =
+static const struct builtin_value bv_app[] =
 {
-    { L"en-US", L"Calculator", TRUE },
-    { L"en",     L"Calculator", FALSE },
+    { L"en-US", L"App", TRUE },
+    { L"en",     L"App", FALSE },
 };
 static const struct builtin_value bv_resources[] =
 {
-    { L"en-US", L"Calculator resources", TRUE },
-    { L"en",     L"Calculator resources", FALSE },
+    { L"en-US", L"App resources", TRUE },
+    { L"en",     L"App resources", FALSE },
 };
 static const struct builtin_value bv_standard[] =
 {
     { L"en-US", L"Standard", TRUE },
     { L"en",     L"Standard", FALSE },
 };
-static const struct builtin_value bv_title[] =
-{
-    { L"en-US", L"Calculator", TRUE },
-    { L"en",     L"Calculator", FALSE },
-};
 
 static const struct builtin_entry builtin_entries[] =
 {
-    { L"App",                  bv_calculator, ARRAYSIZE( bv_calculator ) },
+    { L"App",                  bv_app,        ARRAYSIZE( bv_app ) },
     { L"Resources",            bv_resources,  ARRAYSIZE( bv_resources ) },
-    { L"Calculator",           bv_calculator, ARRAYSIZE( bv_calculator ) },
     { L"Standard",             bv_standard,   ARRAYSIZE( bv_standard ) },
-    { L"Title",                bv_title,      ARRAYSIZE( bv_title ) },
-    { L"Resources/App",        bv_calculator, ARRAYSIZE( bv_calculator ) },
-    { L"Resources/Calculator", bv_calculator, ARRAYSIZE( bv_calculator ) },
+    { L"Title",                bv_app,        ARRAYSIZE( bv_app ) },
+    { L"Resources/App",        bv_app,        ARRAYSIZE( bv_app ) },
     { L"Resources/Standard",   bv_standard,   ARRAYSIZE( bv_standard ) },
-    { L"Resources/Title",      bv_title,      ARRAYSIZE( bv_title ) },
+    { L"Resources/Title",      bv_app,        ARRAYSIZE( bv_app ) },
 };
 
 /* scope-less tail of a keyed name: "Resources/App" -> "App".  Both the MRT
@@ -5385,52 +5378,39 @@ static const WCHAR *mrtcore_tail( const WCHAR *name )
  * managed byte[] unpinned so GC freed/moved it and caused an AV at
  * mrt100_app+0x3cf0e (RhTypeCast_IsInstanceOfArray) -> FailFast 0xc0000602.
  */
-static void mrm_prearm_arena(void)
+static void mrm_prearm_werfacade( void )
 {
-    static void *committed;
-    void *p;
-
-    if (committed) return;
-    p = VirtualAlloc((void *)0xffffffffffff0000ULL, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    TRACE("prearm arena-minus1 %p\n", p);
-    p = VirtualAlloc((void *)0x1801020000, 0x200000, MEM_COMMIT, PAGE_READWRITE);
-    TRACE("prearm arena %p\n", p);
-    if (!p) p = VirtualAlloc((void *)0x1801000000, 0x1000000, MEM_COMMIT, PAGE_READWRITE);
-    TRACE("prearm arena2 %p\n", p);
-    if (p) committed = p;
-}
-
-static void mrm_prearm_werfacade(void)
-{
-    static HMODULE hmod;
-    unsigned char *base;
-    void **instance, **vtable;
+    static const GUID IID_IWerServices_local =
+        { 0x0b378299, 0xcb24, 0x4ee1, { 0x95, 0xad, 0xfd, 0x54, 0x8a, 0xe3, 0x41, 0xd1 } };
+    static const GUID IID_IManagedRuntimeServicesExtended_local =
+        { 0x2f4bac61, 0x3ab9, 0x46a0, { 0x8d, 0x62, 0x1f, 0x3f, 0xf8, 0x80, 0x90, 0xfa } };
+    static volatile LONG done;
+    HMODULE hmod;
+    HRESULT (WINAPI *pGetService)( const GUID *, void ** );
+    IUnknown *ext = NULL, *wer = NULL;
+    void **ext_vtbl, **wer_vtbl;
     DWORD old;
-    int i;
 
-    if (!hmod && !(hmod = GetModuleHandleA("mrt100.dll")))
+    if (InterlockedCompareExchange( &done, 0, 0 )) return;
+    if (!(hmod = GetModuleHandleA( "mrt100.dll" ))) return;
+    if (!(pGetService = (void *)GetProcAddress( hmod, "GetManagedRuntimeService" ))) return;
+    if (SUCCEEDED(pGetService( &IID_IManagedRuntimeServicesExtended_local, (void **)&ext )) && ext &&
+        SUCCEEDED(pGetService( &IID_IWerServices_local, (void **)&wer )) && wer)
     {
-        TRACE("prearm welfacade: mrt100.dll not loaded\n");
-        return;
+        ext_vtbl = *(void ***)ext;
+        wer_vtbl = *(void ***)wer;
+        if (ext_vtbl && wer_vtbl && wer_vtbl[3] && ext_vtbl[3] != wer_vtbl[3])
+        {
+            if (VirtualProtect( &ext_vtbl[3], sizeof(*ext_vtbl), PAGE_READWRITE, &old ))
+            {
+                ext_vtbl[3] = wer_vtbl[3];
+                VirtualProtect( &ext_vtbl[3], sizeof(*ext_vtbl), old, &old );
+            }
+        }
+        InterlockedExchange( &done, 1 );
     }
-    base = (unsigned char *)hmod;
-
-    instance = (void **)(base + 0x4020);        /* g_ExtendedServicesInstance */
-    vtable = instance ? (void **)*instance : NULL;
-    if (!vtable) return;
-    if (vtable[3] == base + 0x1470) return;     /* already swapped (idempotent) */
-    for (i = 4; i < 16; i++)                    /* locate the SetWerDataBuffer responder */
-        if (vtable[i] == base + 0x1470) break;
-    if (i == 16)
-    {
-        TRACE("prearm welfacade: base %p vtable %p slot24 %p, responder not in [4..15]\n",
-              base, vtable, vtable[3]);
-        return;
-    }
-    VirtualProtect( &vtable[3], sizeof(*vtable), PAGE_READWRITE, &old );
-    vtable[3] = vtable[i];                      /* native Wer_SetWerDataBuffer (NULL on 1st call) */
-    VirtualProtect( &vtable[3], sizeof(*vtable), old, &old );
-    TRACE("prearm extended face: vtable+24 -> native SetWerDataBuffer slot %d\n", i);
+    if (ext) IUnknown_Release( ext );
+    if (wer) IUnknown_Release( wer );
 }
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
@@ -5441,7 +5421,6 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     TRACE("class %s, factory %p.\n", debugstr_hstring(classid), factory);
 
     mrm_prearm_werfacade();
-    mrm_prearm_arena();
 
     if (!factory) return E_POINTER;
     *factory = NULL;

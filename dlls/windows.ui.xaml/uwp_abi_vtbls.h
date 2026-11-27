@@ -377,8 +377,50 @@ struct abi_property_value_statics_vtbl
     HRESULT (WINAPI *CreateDouble)( void *This, double val, IInspectable **out ); /* slot 15 */
     void *pad16;
     HRESULT (WINAPI *CreateBoolean)( void *This, boolean val, IInspectable **out ); /* slot 17 */
+    void *pad18_20[3];
+    HRESULT (WINAPI *CreateDateTime)( void *This, INT64 ticks, IInspectable **out ); /* slot 21 */
 };
 struct abi_property_value_statics { const struct abi_property_value_statics_vtbl *lpVtbl; };
+
+struct abi_property_value_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_20[18];
+    HRESULT (WINAPI *GetDateTime)( void *This, INT64 *out );                   /* slot 21 */
+};
+struct abi_property_value { const struct abi_property_value_vtbl *lpVtbl; };
+
+struct abi_iref_int64_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_5[3];
+    HRESULT (WINAPI *get_Value)( void *This, INT64 *out );                     /* slot 6 */
+};
+struct abi_iref_int64 { const struct abi_iref_int64_vtbl *lpVtbl; };
+
+struct abi_solid_color_brush_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_5[3];
+    HRESULT (WINAPI *get_Color)( void *This, Color *out );                     /* slot 6 */
+};
+struct abi_solid_color_brush { const struct abi_solid_color_brush_vtbl *lpVtbl; };
+
+struct abi_observable_vector_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_5[3];
+    HRESULT (WINAPI *add_VectorChanged)( void *This, void *cb, EventRegistrationToken *tok ); /* slot 6 */
+};
+struct abi_observable_vector { const struct abi_observable_vector_vtbl *lpVtbl; };
 
 struct abi_dispatcher_queue_statics_vtbl
 {
@@ -525,6 +567,32 @@ struct abi_iref_bool_vtbl
     HRESULT (WINAPI *get_Value)( void *This, boolean *out );                    /* slot 6 */
 };
 struct abi_iref_bool { const struct abi_iref_bool_vtbl *lpVtbl; };
+
+struct abi_value_converter_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_5[3];
+    HRESULT (WINAPI *Convert)( void *This, IInspectable *value, TypeName targetType,
+                               IInspectable *parameter, HSTRING language, IInspectable **result ); /* slot 6 */
+    HRESULT (WINAPI *ConvertBack)( void *This, IInspectable *value, TypeName targetType,
+                                   IInspectable *parameter, HSTRING language, IInspectable **result ); /* slot 7 */
+};
+struct abi_value_converter { const struct abi_value_converter_vtbl *lpVtbl; };
+
+struct abi_command_full_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_5[3];
+    HRESULT (WINAPI *add_CanExecuteChanged)( void *This, void *handler, EventRegistrationToken *tok ); /* slot 6 */
+    HRESULT (WINAPI *remove_CanExecuteChanged)( void *This, EventRegistrationToken tok );           /* slot 7 */
+    HRESULT (WINAPI *CanExecute)( void *This, void *parameter, boolean *returnValue );               /* slot 8 */
+    HRESULT (WINAPI *Execute)( void *This, void *parameter );                                        /* slot 9 */
+};
+struct abi_command_full { const struct abi_command_full_vtbl *lpVtbl; };
 
 struct abi_data_template_vtbl
 {

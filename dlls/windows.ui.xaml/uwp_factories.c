@@ -177,6 +177,15 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
                 cf->IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
                 cf->IBitmapImageFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_bitmap_image_factory_vtbl;
                 cf->IFontFamilyFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_font_family_factory_vtbl;
+                cf->IButtonBaseStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_buttonbase_statics_vtbl;
+                cf->ISelectorStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_selector_statics_vtbl;
+                cf->IUIElementStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_uielement_statics_vtbl;
+                cf->IUIElementRoutedStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_uielement_routed_statics_vtbl;
+                cf->IGridStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_grid_statics_vtbl;
+                cf->IFocusManagerStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_focus_manager_statics_vtbl;
+                cf->IBindingOpsStatics_iface.lpVtbl = (const struct IInspectableVtbl *)binding_ops_statics_vtbl;
+                cf->IThicknessHelperStatics_iface.lpVtbl = (const struct IInspectableVtbl *)thickness_helper_statics_vtbl;
+                cf->IXamlMarkupHelperStatics_iface.lpVtbl = (const struct IInspectableVtbl *)xaml_markup_helper_statics_vtbl;
                 cf->class_name = name_copy;
                 cf->factory_flags = uwp_cf_compute_flags( name_copy );
                 g_dyn_factories[idx] = cf;

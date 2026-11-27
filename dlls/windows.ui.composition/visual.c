@@ -60,6 +60,8 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    if (!out) return E_POINTER;
+
     if (IsEqualGUID( iid, &IID_IUnknown )
         || IsEqualGUID( iid, &IID_IInspectable )
         || IsEqualGUID( iid, &IID_IAgileObject )
@@ -1258,6 +1260,8 @@ static HRESULT WINAPI collection_QueryInterface( struct IVisualCollection *iface
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    if (!out) return E_POINTER;
+
     if (IsEqualGUID( iid, &IID_IUnknown )
         || IsEqualGUID( iid, &IID_IInspectable )
         || IsEqualGUID( iid, &IID_IAgileObject )
@@ -1354,9 +1358,11 @@ static int collection_find( struct visual_collection *impl, struct visual *child
 
 static HRESULT collection_reserve( struct visual_collection *impl, unsigned int count )
 {
+    struct visual **new_items;
     if (count <= impl->capacity) return S_OK;
-    if (!(impl->items = realloc( impl->items, count * sizeof(*impl->items) )))
+    if (!(new_items = realloc( impl->items, count * sizeof(*new_items) )))
         return E_OUTOFMEMORY;
+    impl->items = new_items;
     impl->capacity = count;
     return S_OK;
 }

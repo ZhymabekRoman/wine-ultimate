@@ -25,7 +25,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-#define MAX_GPU_INSTANCES   4096
+#define INITIAL_GPU_INSTANCES 4096
 #define ATLAS_SIZE          4096
 #define ATLAS_TEXT_Y_END    1536
 #define ATLAS_IMG_Y_START   1536
@@ -136,13 +136,37 @@ static struct
     struct cached_font fonts[FONT_CACHE_SIZE];
     int font_cursor;
 
-    struct xaml_gpu_instance instances[MAX_GPU_INSTANCES];
+    struct xaml_gpu_instance *instances;
+    UINT instance_cap;
+    UINT vb_cap;
     UINT instance_count;
     UINT frame_width;
     UINT frame_height;
     UINT atlas_hits;
     UINT atlas_misses;
 } g_gpu;
+
+static CRITICAL_SECTION g_gpu_cs;
+static CRITICAL_SECTION_DEBUG g_gpu_cs_debug =
+{
+    0, 0, &g_gpu_cs,
+    { &g_gpu_cs_debug.ProcessLocksList, &g_gpu_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": g_gpu_cs") }
+};
+static CRITICAL_SECTION g_gpu_cs = { &g_gpu_cs_debug, -1, 0, 0, 0, 0 };
+
+static struct xaml_gpu_instance *gpu_alloc_instance( void )
+{
+    if (g_gpu.instance_count >= g_gpu.instance_cap)
+    {
+        UINT ncap = g_gpu.instance_cap ? g_gpu.instance_cap * 2 : INITIAL_GPU_INSTANCES;
+        struct xaml_gpu_instance *ni = realloc( g_gpu.instances, (size_t)ncap * sizeof(*ni) );
+        if (!ni) return NULL;
+        g_gpu.instances = ni;
+        g_gpu.instance_cap = ncap;
+    }
+    return &g_gpu.instances[g_gpu.instance_count++];
+}
 
 static const char xaml_uber_hlsl[] =
     "cbuffer Constants : register(b0)\n"
@@ -347,6 +371,11 @@ void xaml_gpu_shutdown( void )
     if (g_gpu.rast_state) { ID3D11RasterizerState_Release( g_gpu.rast_state ); g_gpu.rast_state = NULL; }
     if (g_gpu.blend_state) { ID3D11BlendState_Release( g_gpu.blend_state ); g_gpu.blend_state = NULL; }
     if (g_gpu.instance_vb) { ID3D11Buffer_Release( g_gpu.instance_vb ); g_gpu.instance_vb = NULL; }
+    free( g_gpu.instances );
+    g_gpu.instances = NULL;
+    g_gpu.instance_cap = 0;
+    g_gpu.vb_cap = 0;
+    g_gpu.instance_count = 0;
     if (g_gpu.cb) { ID3D11Buffer_Release( g_gpu.cb ); g_gpu.cb = NULL; }
     if (g_gpu.layout) { ID3D11InputLayout_Release( g_gpu.layout ); g_gpu.layout = NULL; }
     if (g_gpu.ps) { ID3D11PixelShader_Release( g_gpu.ps ); g_gpu.ps = NULL; }
@@ -477,11 +506,12 @@ static BOOL xaml_gpu_init( ID3D11Device *dev )
     if (SUCCEEDED(hr))
     {
         D3D11_BUFFER_DESC vbd = {0};
-        vbd.ByteWidth = sizeof(struct xaml_gpu_instance) * MAX_GPU_INSTANCES;
+        vbd.ByteWidth = sizeof(struct xaml_gpu_instance) * INITIAL_GPU_INSTANCES;
         vbd.Usage = D3D11_USAGE_DYNAMIC;
         vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
         vbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         hr = ID3D11Device_CreateBuffer( dev, &vbd, NULL, &g_gpu.instance_vb );
+        if (SUCCEEDED(hr)) g_gpu.vb_cap = INITIAL_GPU_INSTANCES;
     }
     if (SUCCEEDED(hr))
     {
@@ -602,6 +632,7 @@ BOOL xaml_gpu_font_has_glyphs( const WCHAR *font_family, const WCHAR *text )
     len = wcslen( text );
     if (len > ARRAY_SIZE(glyphs)) len = ARRAY_SIZE(glyphs);
 
+    EnterCriticalSection( &g_gpu_cs );
     dc = g_gpu.scratch_dc;
     if (!dc)
     {
@@ -610,7 +641,7 @@ BOOL xaml_gpu_font_has_glyphs( const WCHAR *font_family, const WCHAR *text )
         if (screen_dc) ReleaseDC( NULL, screen_dc );
         own_dc = TRUE;
     }
-    if (!dc) return FALSE;
+    if (!dc) { LeaveCriticalSection( &g_gpu_cs ); return FALSE; }
 
     hf = xaml_gpu_get_font( face, 16, FW_NORMAL );
     old_f = SelectObject( dc, hf );
@@ -631,6 +662,7 @@ BOOL xaml_gpu_font_has_glyphs( const WCHAR *font_family, const WCHAR *text )
     }
     SelectObject( dc, old_f );
     if (own_dc) DeleteDC( dc );
+    LeaveCriticalSection( &g_gpu_cs );
     return ok;
 }
 
@@ -863,12 +895,13 @@ void xaml_gpu_push_rect_radii( float x0, float y0, float x1, float y1, const REC
 {
     struct xaml_gpu_instance *inst;
     float clip[4];
-    if (!g_gpu.initialized || g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
+    if (!g_gpu.initialized) return;
     if (x1 <= x0 || y1 <= y0) return;
     xaml_gpu_apply_clip( clip, clip_rc );
     if (x1 <= clip[0] || x0 >= clip[2] || y1 <= clip[1] || y0 >= clip[3]) return;
 
-    inst = &g_gpu.instances[g_gpu.instance_count++];
+    inst = gpu_alloc_instance();
+    if (!inst) return;
     inst->rect[0] = x0;
     inst->rect[1] = y0;
     inst->rect[2] = x1;
@@ -903,12 +936,13 @@ void xaml_gpu_push_gradient_rect( float x0, float y0, float x1, float y1, const 
 {
     struct xaml_gpu_instance *inst;
     float clip[4];
-    if (!g_gpu.initialized || g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
+    if (!g_gpu.initialized) return;
     if (x1 <= x0 || y1 <= y0) return;
     xaml_gpu_apply_clip( clip, clip_rc );
     if (x1 <= clip[0] || x0 >= clip[2] || y1 <= clip[1] || y0 >= clip[3]) return;
 
-    inst = &g_gpu.instances[g_gpu.instance_count++];
+    inst = gpu_alloc_instance();
+    if (!inst) return;
     inst->rect[0] = x0;
     inst->rect[1] = y0;
     inst->rect[2] = x1;
@@ -935,12 +969,13 @@ void xaml_gpu_push_ring( float x0, float y0, float x1, float y1, const RECT *cli
 {
     struct xaml_gpu_instance *inst;
     float clip[4];
-    if (!g_gpu.initialized || g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
+    if (!g_gpu.initialized) return;
     if (x1 <= x0 || y1 <= y0) return;
     xaml_gpu_apply_clip( clip, clip_rc );
     if (x1 <= clip[0] || x0 >= clip[2] || y1 <= clip[1] || y0 >= clip[3]) return;
 
-    inst = &g_gpu.instances[g_gpu.instance_count++];
+    inst = gpu_alloc_instance();
+    if (!inst) return;
     inst->rect[0] = x0;
     inst->rect[1] = y0;
     inst->rect[2] = x1;
@@ -971,7 +1006,6 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
     WCHAR face[64];
 
     if (!g_gpu.initialized || !text || !text[0] || !rc) return;
-    if (g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
     if (rc->right <= rc->left || rc->bottom <= rc->top) return;
     xaml_gpu_apply_clip( clip, clip_rc );
     if ((float)rc->right <= clip[0] || (float)rc->left >= clip[2] ||
@@ -1061,12 +1095,16 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
         HGDIOBJ old_font;
         D3D11_BOX dst_box;
 
+        EnterCriticalSection( &g_gpu_cs );
         if (wcsicmp( face, L"Segoe UI" ) != 0 && !xaml_gpu_font_has_glyphs( face, text ))
             render_face = L"Segoe UI";
         hf = xaml_gpu_get_font( render_face, font_height, font_weight );
 
         if (!atlas_alloc_text_rect( ctx, bw, bh, &ax, &ay, &was_reset ))
+        {
+            LeaveCriticalSection( &g_gpu_cs );
             return;
+        }
         if (was_reset) entry = &g_gpu.hash_table[idx];
 
         g_gpu.atlas_misses++;
@@ -1079,6 +1117,7 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
         DrawTextW( g_gpu.scratch_dc, text, (int)tlen, &local_rc, align_flags );
         SelectObject( g_gpu.scratch_dc, old_font );
         GdiFlush();
+        LeaveCriticalSection( &g_gpu_cs );
 
         /* Convert grayscale luminance to white + alpha mask */
         for (y = 0; y < bh; y++)
@@ -1121,7 +1160,8 @@ void xaml_gpu_push_text_font( ID3D11DeviceContext *ctx, const WCHAR *text, const
         entry->uv[3] = (float)(ay + bh) / ATLAS_SIZE;
     }
 
-    inst = &g_gpu.instances[g_gpu.instance_count++];
+    inst = gpu_alloc_instance();
+    if (!inst) return;
     {
         LONG full_w = rc->right - rc->left;
         LONG full_h = rc->bottom - rc->top;
@@ -1176,7 +1216,6 @@ void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, c
     float clip[4];
 
     if (!g_gpu.initialized || !bgra_pixels || img_w == 0 || img_h == 0 || !dst_rc) return;
-    if (g_gpu.instance_count >= MAX_GPU_INSTANCES) return;
     if (img_w > ATLAS_SIZE - 2 || img_h > (ATLAS_IMG_Y_END - ATLAS_IMG_Y_START) - 2) return;
     if (dst_rc->right <= dst_rc->left || dst_rc->bottom <= dst_rc->top) return;
     xaml_gpu_apply_clip( clip, clip_rc );
@@ -1241,7 +1280,8 @@ void xaml_gpu_push_image_uv_rounded( ID3D11DeviceContext *ctx, UINT64 img_key, c
         entry->frame_seq = frame_seq;
     }
 
-    inst = &g_gpu.instances[g_gpu.instance_count++];
+    inst = gpu_alloc_instance();
+    if (!inst) return;
     inst->rect[0] = (float)dst_rc->left;
     inst->rect[1] = (float)dst_rc->top;
     inst->rect[2] = (float)dst_rc->right;
@@ -1302,6 +1342,20 @@ static BOOL xaml_gpu_draw_batch( ID3D11DeviceContext *ctx )
 
     if (g_gpu.instance_count > 0)
     {
+        if (g_gpu.instance_count > g_gpu.vb_cap && g_gpu.dev)
+        {
+            D3D11_BUFFER_DESC vbd = {0};
+            ID3D11Buffer *new_vb = NULL;
+            vbd.ByteWidth = sizeof(struct xaml_gpu_instance) * g_gpu.instance_cap;
+            vbd.Usage = D3D11_USAGE_DYNAMIC;
+            vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            vbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            hr = ID3D11Device_CreateBuffer( g_gpu.dev, &vbd, NULL, &new_vb );
+            if (FAILED(hr) || !new_vb) return FALSE;
+            if (g_gpu.instance_vb) ID3D11Buffer_Release( g_gpu.instance_vb );
+            g_gpu.instance_vb = new_vb;
+            g_gpu.vb_cap = g_gpu.instance_cap;
+        }
         hr = ID3D11DeviceContext_Map( ctx, (ID3D11Resource *)g_gpu.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped );
         if (FAILED(hr)) return FALSE;
         {

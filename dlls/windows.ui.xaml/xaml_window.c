@@ -304,17 +304,20 @@ static HRESULT WINAPI xaml_window_get_Content( IInspectable *iface, void *a2, vo
 }
 
 static IDCompositionDesktopDevice *global_dcomp_device;
+static SRWLOCK g_dcomp_dev_lock = SRWLOCK_INIT;
 
 static HRESULT xaml_get_or_create_dcomp_device( IDCompositionDesktopDevice **out_device )
 {
     HRESULT hr = S_OK;
+    AcquireSRWLockExclusive( &g_dcomp_dev_lock );
     if (!global_dcomp_device)
         hr = DCompositionCreateDevice2( NULL, &IID_IDCompositionDesktopDevice, (void **)&global_dcomp_device );
-    if (SUCCEEDED(hr) && out_device)
+    if (SUCCEEDED(hr) && global_dcomp_device && out_device)
     {
         *out_device = global_dcomp_device;
         IDCompositionDesktopDevice_AddRef( global_dcomp_device );
     }
+    ReleaseSRWLockExclusive( &g_dcomp_dev_lock );
     return hr;
 }
 
@@ -645,6 +648,7 @@ static BOOL xaml_render_retained_if_dirty( struct xaml_window *impl, HWND hwnd, 
     return TRUE;
 }
 
+static SRWLOCK g_scp_lock = SRWLOCK_INIT;
 static void *g_active_scp_elem = NULL;
 static void *g_active_scp_swapchain = NULL;
 
@@ -669,14 +673,28 @@ void xaml_get_host_window_size( UINT *out_w, UINT *out_h )
 
 BOOL xaml_has_active_swapchain_panel( void )
 {
-    return g_active_scp_swapchain != NULL;
+    return __atomic_load_n( &g_active_scp_swapchain, __ATOMIC_ACQUIRE ) != NULL;
+}
+
+void xaml_clear_active_swapchain_panel_elem( void *el )
+{
+    if (!el) return;
+    AcquireSRWLockExclusive( &g_scp_lock );
+    if (g_active_scp_elem == el)
+    {
+        g_active_scp_elem = NULL;
+        __atomic_store_n( &g_active_scp_swapchain, NULL, __ATOMIC_RELEASE );
+    }
+    ReleaseSRWLockExclusive( &g_scp_lock );
 }
 
 void xaml_set_active_swapchain_panel( void *el, void *sc )
 {
     struct xaml_window *impl = &global_xaml_window;
+    AcquireSRWLockExclusive( &g_scp_lock );
     g_active_scp_elem = sc ? el : NULL;
-    g_active_scp_swapchain = sc;
+    __atomic_store_n( &g_active_scp_swapchain, sc, __ATOMIC_RELEASE );
+    ReleaseSRWLockExclusive( &g_scp_lock );
     if (sc && impl->swapchain && !impl->swapchain_is_composition)
     {
         xaml_gpu_release_rtv();
@@ -746,15 +764,15 @@ HRESULT xaml_attach_swapchain_panel_handle( HANDLE h, IDCompositionVisual2 **slo
 
 static void xaml_window_refresh_present( HWND hwnd )
 {
-    static BOOL in_refresh;
+    static LONG in_refresh;
     struct xaml_window *impl = &global_xaml_window;
     UINT width, height;
     RECT rc;
 
-    if (in_refresh || g_in_xaml_present || !impl->dcomp_device)
+    if (__atomic_load_n( &g_in_xaml_present, __ATOMIC_ACQUIRE ) || !impl->dcomp_device)
         return;
-
-    in_refresh = TRUE;
+    if (InterlockedCompareExchange( &in_refresh, 1, 0 ) != 0)
+        return;
     if (impl->swapchain && !xaml_get_app_caps()->winui3)
     {
         HWND target = impl->target_hwnd && IsWindow( impl->target_hwnd ) ? impl->target_hwnd : hwnd;
@@ -779,14 +797,14 @@ static void xaml_window_refresh_present( HWND hwnd )
         }
     }
     IDCompositionDesktopDevice_Commit( impl->dcomp_device );
-    in_refresh = FALSE;
+    InterlockedExchange( &in_refresh, 0 );
 }
 
 #define XAML_SCP_DIRTY_TIMER_ID 0x58534350
 
 void xaml_mark_window_dirty( void )
 {
-    if (g_in_xaml_present) return;
+    if (__atomic_load_n( &g_in_xaml_present, __ATOMIC_ACQUIRE )) return;
     InterlockedExchange( &g_xaml_window_dirty, 1 );
     if (global_xaml_window.target_hwnd && IsWindow( global_xaml_window.target_hwnd ))
         InvalidateRect( global_xaml_window.target_hwnd, NULL, FALSE );
@@ -877,7 +895,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                             IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
                         }
                         InterlockedExchange( &g_xaml_window_dirty, 0 );
-                        g_in_xaml_present = FALSE;
+                        __atomic_store_n( &g_in_xaml_present, FALSE, __ATOMIC_RELEASE );
                     }
                 }
                 else
@@ -994,10 +1012,13 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             accel_handled = uwp_dispatch_keydown( hwnd, (UINT)wparam, lparam, NULL );
         if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP)
             xaml_winui_fire_key_event( msg != WM_KEYUP, (UINT32)wparam, lparam );
-        xaml_cw_fire_key_event( cw, msg, wparam, lparam );
-        hr = notify_inner_core_window_key( hwnd, msg, wparam );
-        if (msg == WM_CHAR && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
-            uwp_keyboard_press_char( (WCHAR)wparam );
+        {
+            BOOL cw_handled = xaml_cw_fire_key_event( cw, msg, wparam, lparam );
+            hr = notify_inner_core_window_key( hwnd, msg, wparam );
+            if (msg == WM_CHAR && !cw_handled && hr != S_OK &&
+                !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
+                uwp_keyboard_press_char( (WCHAR)wparam );
+        }
         xaml_mark_window_dirty();
         if (msg != WM_KEYUP)
             xaml_window_present( &global_xaml_window );
@@ -1155,8 +1176,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     HRESULT hr;
 
     impl = &global_xaml_window;
-    if (g_in_xaml_present) return S_OK;
-    g_in_xaml_present = TRUE;
+    if (__atomic_exchange_n( &g_in_xaml_present, TRUE, __ATOMIC_ACQ_REL )) return S_OK;
 
     if (!impl->core_window) ensure_core_window( impl );
     if (impl->core_window)
@@ -1196,7 +1216,13 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
          * paint path is the one GDI operation the winex11 driver reliably flushes to
          * the X pixmap of a fresh top-level. Match the Dark theme keypad background
          * so an erase between layout paints shows the same dark grey, not a flash. */
-        SetClassLongPtrW( hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)(void *)CreateSolidBrush( RGB( 32, 32, 32 ) ) );
+    {
+        static HBRUSH dark_bg_brush;
+        if (!dark_bg_brush)
+            dark_bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
+        if (dark_bg_brush)
+            SetClassLongPtrW( hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)(void *)dark_bg_brush );
+    }
     }
 
     /* The DComp target and swapchain attach to this HWND; it must be visible so the
@@ -1276,7 +1302,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "xaml_get_or_create_dcomp_device failed hr %#lx\n", hr );
-            g_in_xaml_present = FALSE;
+            __atomic_store_n( &g_in_xaml_present, FALSE, __ATOMIC_RELEASE );
             return hr;
         }
     }
@@ -1289,7 +1315,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "CreateTargetForHwnd failed hr %#lx\n", hr );
-            g_in_xaml_present = FALSE;
+            __atomic_store_n( &g_in_xaml_present, FALSE, __ATOMIC_RELEASE );
             return hr;
         }
         if (impl->dcomp_root_visual)
@@ -1300,11 +1326,10 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
      * querying DependencyObject.DispatcherQueue (e.g. WebView2.DispatcherQueue)
      * receive the UI thread's queue instead of NULL. */
     {
-        static BOOL dq_warmed;
-        if (!dq_warmed)
+        static LONG dq_warmed;
+        if (InterlockedCompareExchange( &dq_warmed, 1, 0 ) == 0)
         {
             void *dq = NULL;
-            dq_warmed = TRUE;
             if (SUCCEEDED(uwp_do_get_DispatcherQueue( NULL, &dq )) && dq)
                 IInspectable_Release( (IInspectable *)dq );
         }
@@ -1317,7 +1342,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "CreateVisual failed hr %#lx\n", hr );
-            g_in_xaml_present = FALSE;
+            __atomic_store_n( &g_in_xaml_present, FALSE, __ATOMIC_RELEASE );
             return hr;
         }
         if (impl->dcomp_target)
@@ -1353,8 +1378,15 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                                             DXGI_FORMAT_B8G8R8A8_UNORM, 0 );
         TRACE( "XAML: resized composition swapchain %p to %ux%u (hr %#lx)\n",
                impl->swapchain, width, height, hr );
-        if (g_active_scp_elem && width > 1 && height > 1)
-            uwp_notify_swapchain_panel_resize( g_active_scp_elem, width, height );
+        if (width > 1 && height > 1)
+        {
+            void *scp_el;
+            AcquireSRWLockShared( &g_scp_lock );
+            scp_el = g_active_scp_elem;
+            if (scp_el)
+                uwp_notify_swapchain_panel_resize( scp_el, width, height );
+            ReleaseSRWLockShared( &g_scp_lock );
+        }
     }
     if (!impl->swapchain && !xaml_get_app_caps()->winui3 && !d3d11_create_failed)
     {
@@ -1555,7 +1587,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
         xaml_wv2_on_window_ready( hwnd, wv2_w, wv2_h );
     }
-    g_in_xaml_present = FALSE;
+    __atomic_store_n( &g_in_xaml_present, FALSE, __ATOMIC_RELEASE );
     return S_OK;
 }
 
@@ -1668,8 +1700,19 @@ void xaml_dcomp_commit( void )
 {
     if (global_xaml_window.dcomp_device)
         IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
-    else if (global_dcomp_device)
-        IDCompositionDesktopDevice_Commit( global_dcomp_device );
+    else
+    {
+        IDCompositionDesktopDevice *dev = NULL;
+        AcquireSRWLockShared( &g_dcomp_dev_lock );
+        dev = global_dcomp_device;
+        if (dev) IDCompositionDesktopDevice_AddRef( dev );
+        ReleaseSRWLockShared( &g_dcomp_dev_lock );
+        if (dev)
+        {
+            IDCompositionDesktopDevice_Commit( dev );
+            IDCompositionDesktopDevice_Release( dev );
+        }
+    }
 }
 
 HRESULT xaml_window_present_current( void )
@@ -2198,8 +2241,6 @@ static HRESULT WINAPI xaml_window2_get_Compositor( void *iface, void **value )
 static HRESULT WINAPI xaml_window_zero_out( void *iface, void *a2, void *a3 )
 {
     TRACE( "iface %p, a2 %p, a3 %p\n", iface, a2, a3 );
-    if ((ULONG_PTR)a3 >= 0x10000 && !IsBadWritePtr( a3, sizeof(void *) )) *(void **)a3 = NULL;
-    else if ((ULONG_PTR)a2 >= 0x10000 && !IsBadWritePtr( a2, sizeof(void *) )) *(void **)a2 = NULL;
     return S_OK;
 }
 

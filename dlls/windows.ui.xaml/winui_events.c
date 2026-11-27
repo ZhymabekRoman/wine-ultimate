@@ -38,8 +38,9 @@ struct winui_ev_entry
     INT64 token;
 };
 
-static struct winui_ev_entry g_winui_evs[256];
+static struct winui_ev_entry *g_winui_evs;
 static int g_winui_ev_count;
+static int g_winui_ev_cap;
 static LONG g_winui_ev_next_tok = 100;
 static SRWLOCK g_winui_ev_lock = SRWLOCK_INIT;
 
@@ -50,7 +51,7 @@ HRESULT winui_ev_add( enum xaml_winui_ev_kind kind, struct xaml_element *impl,
     if (token) token->value = tok;
     if (!handler) return S_OK;
     AcquireSRWLockExclusive( &g_winui_ev_lock );
-    if (g_winui_ev_count < (int)ARRAY_SIZE(g_winui_evs))
+    if (xaml_vec_grow( (void **)&g_winui_evs, &g_winui_ev_cap, g_winui_ev_count + 1, sizeof(*g_winui_evs), 64 ))
     {
         struct winui_ev_entry *e = &g_winui_evs[g_winui_ev_count++];
         e->kind = kind;
@@ -85,10 +86,23 @@ HRESULT WINAPI winui_ev_remove( void *iface, EventRegistrationToken token )
 
 static void winui_ev_fire( enum xaml_winui_ev_kind kind, void *args )
 {
-    struct winui_ev_entry snap[64];
-    int n = 0, i;
+    struct winui_ev_entry snap_stk[64];
+    struct winui_ev_entry *snap = snap_stk;
+    int match = 0, n = 0, i;
     AcquireSRWLockShared( &g_winui_ev_lock );
-    for (i = 0; i < g_winui_ev_count && n < (int)ARRAY_SIZE(snap); i++)
+    for (i = 0; i < g_winui_ev_count; i++)
+        if (g_winui_evs[i].kind == kind && g_winui_evs[i].handler)
+            match++;
+    if (match > (int)ARRAY_SIZE(snap_stk))
+    {
+        snap = malloc( (size_t)match * sizeof(*snap) );
+        if (!snap)
+        {
+            snap = snap_stk;
+            match = (int)ARRAY_SIZE(snap_stk);
+        }
+    }
+    for (i = 0; i < g_winui_ev_count && n < match; i++)
     {
         if (g_winui_evs[i].kind == kind && g_winui_evs[i].handler)
         {
@@ -100,18 +114,18 @@ static void winui_ev_fire( enum xaml_winui_ev_kind kind, void *args )
     ReleaseSRWLockShared( &g_winui_ev_lock );
     for (i = 0; i < n; i++)
     {
-        typedef HRESULT (WINAPI *invoke_fn)( void *, void *, void * );
-        invoke_fn fn = (invoke_fn)((void **)((void **)snap[i].handler)[0])[3];
+        struct abi_typed_event_handler *eh = (struct abi_typed_event_handler *)snap[i].handler;
         HRESULT hr_inv = S_OK;
         __TRY
         {
-            hr_inv = fn( snap[i].handler, snap[i].sender, args );
+            hr_inv = eh->lpVtbl->Invoke( snap[i].handler, snap[i].sender, args );
         }
         __EXCEPT_ALL { hr_inv = 0xdeadbeef; }
         __ENDTRY;
         TRACE( "winui_ev_fire kind=%d sender=%p hr=%#lx\n", kind, snap[i].sender, hr_inv );
         IUnknown_Release( (IUnknown *)snap[i].handler );
     }
+    if (snap != snap_stk) free( snap );
 }
 
 /* WinUI 3 SizeChangedEventArgs ({fe76324e-6dfb-58b1-9dcd-886ca8f9a2ea}) */

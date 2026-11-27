@@ -36,10 +36,20 @@ struct uwp_binding_vtbl
     HRESULT (WINAPI *GetTrustLevel)( IInspectable *iface, TrustLevel *level );
     HRESULT (WINAPI *get_Path)( void *iface, IInspectable **out );
     HRESULT (WINAPI *put_Path)( void *iface, IInspectable *val );
-    HRESULT (WINAPI *pad8_9[2])( void *iface, ... );
+    HRESULT (WINAPI *get_Mode)( void *iface, INT32 *out );
+    HRESULT (WINAPI *put_Mode)( void *iface, INT32 val );
     HRESULT (WINAPI *get_Source)( void *iface, IInspectable **out );
     HRESULT (WINAPI *put_Source)( void *iface, IInspectable *val );
-    HRESULT (WINAPI *pad12_31[20])( void *iface, ... );
+    HRESULT (WINAPI *pad12_13[2])( void *iface, ... );
+    HRESULT (WINAPI *get_ElementName)( void *iface, HSTRING *out );
+    HRESULT (WINAPI *put_ElementName)( void *iface, HSTRING val );
+    HRESULT (WINAPI *get_Converter)( void *iface, IInspectable **out );
+    HRESULT (WINAPI *put_Converter)( void *iface, IInspectable *val );
+    HRESULT (WINAPI *get_ConverterParameter)( void *iface, IInspectable **out );
+    HRESULT (WINAPI *put_ConverterParameter)( void *iface, IInspectable *val );
+    HRESULT (WINAPI *get_ConverterLanguage)( void *iface, HSTRING *out );
+    HRESULT (WINAPI *put_ConverterLanguage)( void *iface, HSTRING val );
+    HRESULT (WINAPI *pad22_31[10])( void *iface, ... );
 };
 
 struct uwp_pp_vtbl
@@ -129,6 +139,7 @@ extern const void *uwp_mfi3_vtbl[16];
 extern const void *uwp_mfi_vtbl[32];
 extern const void *uwp_mfsi_vtbl[16];
 extern const void *uwp_navview_vtbl[112];
+extern const void *uwp_progress_ring_vtbl[16];
 extern const void *uwp_rowcol_vtbl[32];
 extern const void *uwp_selector_vtbl[20];
 extern const void *uwp_combobox_vtbl[24];
@@ -209,13 +220,25 @@ extern const void *wv22_vtbl[256];
 extern const void *wv2_do_vtbl[64];
 extern const void *wv2_vtbl[256];
 
-/* Singleton class-factory objects */
+/* Singleton class-factory objects and statics vtables */
+extern const void *uwp_buttonbase_statics_vtbl[16];
+extern const void *uwp_selector_statics_vtbl[16];
+extern const void *uwp_uielement_statics_vtbl[64];
+extern const void *uwp_uielement_routed_statics_vtbl[32];
+extern const void *uwp_grid_statics_vtbl[24];
+extern const void *uwp_focus_manager_statics_vtbl[16];
+extern const void *binding_ops_statics_vtbl[8];
+extern const void *thickness_helper_statics_vtbl[8];
+extern const void *xaml_markup_helper_statics_vtbl[16];
 extern struct uwp_class_factory scb_factory_obj;
 extern struct uwp_class_factory vsm_factory_obj;
 extern struct uwp_class_factory sb_factory_obj;
+extern struct uwp_class_factory sb_factory_winui3_obj;
 extern struct uwp_class_factory auto_props_factory_obj;
 extern struct uwp_class_factory vth_factory_obj;
+extern struct uwp_class_factory ap_factory_obj;
 extern struct uwp_class_factory feap_factory_obj;
+extern struct uwp_class_factory th_factory_obj;
 extern struct xbh_factory_obj_s xbh_factory_obj;
 
 #endif /* __WINE_WINDOWS_UI_XAML_UWP_VTABLES_H */

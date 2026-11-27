@@ -98,7 +98,9 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
             IsEqualGUID( iid, &IID_IVector_IInspectable_UWP ) ||
             IsEqualGUID( iid, &IID_IVectorView_Object_UWP ) ||
             IsEqualGUID( iid, &IID_IVectorView_IInspectable_WinUI ) ||
-            IsEqualGUID( iid, &IID_IBindableVector_UWP ))
+            IsEqualGUID( iid, &IID_IBindableVector_UWP ) ||
+            IsEqualGUID( iid, &IID_IBindableObservableVector_UWP ) ||
+            IsEqualGUID( iid, &IID_INotifyCollectionChanged_UWP ))
         {
             *out = iface;
             IInspectable_AddRef( iface );
@@ -124,6 +126,14 @@ static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IIterable_StateTriggerBase_UWP ))
     {
         *out = &v->IIterable_iface;
+        IInspectable_AddRef( iface );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IBindableObservableVector_UWP ) ||
+        IsEqualGUID( iid, &IID_INotifyCollectionChanged_UWP ) ||
+        IsEqualGUID( iid, &IID_IVector_Inline_UWP ))
+    {
+        *out = iface;
         IInspectable_AddRef( iface );
         return S_OK;
     }
@@ -944,7 +954,7 @@ unsigned int uwp_winrt_vec_snapshot( IInspectable *coll, IInspectable **out_item
     unsigned int count = 0, qi;
     void *vec = NULL;
 
-    if (!coll || (ULONG_PTR)coll < 0x10000 || !out_items || !max_items) return 0;
+    if (!coll || !out_items || !max_items) return 0;
 
     if (coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_vtbl ||
         coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_iterable_vtbl)
@@ -1032,7 +1042,7 @@ unsigned int uwp_winrt_vec_count( IInspectable *coll )
     unsigned int sz = 0, qi;
     void *vec = NULL;
 
-    if (!coll || (ULONG_PTR)coll < 0x10000) return 0;
+    if (!coll) return 0;
 
     if (coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_vtbl ||
         coll->lpVtbl == (const IInspectableVtbl *)uwp_vec_iterable_vtbl)

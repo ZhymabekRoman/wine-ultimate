@@ -78,7 +78,6 @@ static HRESULT read_seed_dllpath( HKEY root, const WCHAR *classid, WCHAR **out )
     HKEY hkey_root, hkey_class;
     WCHAR *buf;
     DWORD type, size;
-    HRESULT hr = S_FALSE;
 
     if (RegOpenKeyExW( root, runtime_key, 0, KEY_READ, &hkey_root )) return S_FALSE;
     if (RegOpenKeyExW( hkey_root, classid, 0, KEY_READ, &hkey_class ))
@@ -472,25 +471,111 @@ static BOOL is_microsoft_ui_xaml_class( const WCHAR *classid )
            !wcsncmp( classid, disp_prefix, ARRAY_SIZE( disp_prefix ) - 1 );
 }
 
-/* WhatsApp (WindowsAppRuntime 1.6) relies on Wine's windows.ui.xaml.dll
- * for Microsoft.UI.Xaml.* (routing to its manifest's Microsoft.UI.Xaml.dll
- * fails Application.Start with 0x80004005).  Other WinUI 3 apps (e.g. Paint
- * on WindowsAppRuntime 2.x) use their manifest's Microsoft.UI.Xaml.dll. */
+/* WinAppSDK 2.x apps declare Microsoft.WindowsAppRuntime.2+ dependencies and
+ * require their manifest's own Microsoft.UI.Xaml.dll to win over Wine's
+ * UWP windows.ui.xaml.dll. WinAppSDK 1.x apps rely on Wine's builtin XAML
+ * stack for Microsoft.UI.Xaml.* routes. */
+static BOOL manifest_declares_winappsdk2( const WCHAR *dir )
+{
+    WCHAR manifest_path[MAX_PATH];
+    HANDLE hfile;
+    LARGE_INTEGER file_size;
+    char *buf;
+    DWORD bytes_read = 0, dir_len;
+    BOOL found = FALSE;
+    const char *p;
+
+    if (!dir || !dir[0]) return FALSE;
+    dir_len = wcslen( dir );
+    while (dir_len > 0 && (dir[dir_len - 1] == '\\' || dir[dir_len - 1] == '/'))
+        dir_len--;
+    if (dir_len + 18 >= MAX_PATH) return FALSE;
+    memcpy( manifest_path, dir, dir_len * sizeof(WCHAR) );
+    wcscpy( manifest_path + dir_len, L"\\AppxManifest.xml" );
+
+    hfile = CreateFileW( manifest_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (hfile == INVALID_HANDLE_VALUE) return FALSE;
+    if (GetFileSizeEx( hfile, &file_size ) && file_size.QuadPart > 0 && file_size.QuadPart <= 8 * 1024 * 1024)
+    {
+        if ((buf = malloc( (size_t)file_size.QuadPart + 1 )))
+        {
+            if (ReadFile( hfile, buf, (DWORD)file_size.QuadPart, &bytes_read, NULL ))
+            {
+                buf[bytes_read] = '\0';
+                p = buf;
+                while ((p = strstr( p, "Microsoft.WindowsAppRuntime." )))
+                {
+                    p += 28;
+                    if (*p >= '2' && *p <= '9' && (p[1] == '.' || p[1] == '"' || p[1] == '\''))
+                    {
+                        found = TRUE;
+                        break;
+                    }
+                }
+            }
+            free( buf );
+        }
+    }
+    CloseHandle( hfile );
+    return found;
+}
+
 static BOOL keep_builtin_winui_xaml( void )
 {
-    WCHAR buf[MAX_PATH];
-    UINT32 pkg_len = ARRAY_SIZE(buf);
+    WCHAR buf[MAX_PATH], *slash;
     DWORD len = GetModuleFileNameW( NULL, buf, ARRAY_SIZE(buf) );
+    BYTE info_buf[8192], *heap_buf = NULL;
+    UINT32 sz = sizeof(info_buf), cnt = 0, i;
+    PACKAGE_INFO *info = (PACKAGE_INFO *)info_buf;
+    LONG ret;
+
     if (len && len < ARRAY_SIZE(buf))
     {
-        const WCHAR *base = wcsrchr( buf, '\\' );
-        base = base ? base + 1 : buf;
-        if (!wcsicmp( base, L"WhatsApp.Root.exe" )) return TRUE;
+        if ((slash = wcsrchr( buf, '\\' )))
+        {
+            *slash = 0;
+            if (manifest_declares_winappsdk2( buf )) return FALSE;
+        }
     }
-    if (GetCurrentPackageFamilyName( &pkg_len, buf ) == ERROR_SUCCESS &&
-        !wcsicmp( buf, L"5319275A.WhatsAppDesktop_cv1g1gvanyjgm" ))
-        return TRUE;
-    return FALSE;
+    ret = GetCurrentPackageInfo( 0, &sz, info_buf, &cnt );
+    if (ret == ERROR_INSUFFICIENT_BUFFER && (heap_buf = malloc( sz )))
+    {
+        info = (PACKAGE_INFO *)heap_buf;
+        ret = GetCurrentPackageInfo( 0, &sz, heap_buf, &cnt );
+    }
+    if (ret == ERROR_SUCCESS)
+    {
+        for (i = 0; i < cnt; i++)
+        {
+            if (info[i].packageFullName)
+            {
+                const WCHAR *p = wcsstr( info[i].packageFullName, L"Microsoft.WindowsAppRuntime." );
+                if (p && p[28] >= '2' && p[28] <= '9' && p[29] == '.')
+                {
+                    free( heap_buf );
+                    return FALSE;
+                }
+            }
+            if (info[i].path && manifest_declares_winappsdk2( info[i].path ))
+            {
+                free( heap_buf );
+                return FALSE;
+            }
+        }
+    }
+    free( heap_buf );
+    return TRUE;
+}
+
+static void scan_exe_dir_manifest_locked( void )
+{
+    WCHAR exe_buf[MAX_PATH], *slash;
+    DWORD len = GetModuleFileNameW( NULL, exe_buf, ARRAY_SIZE(exe_buf) );
+    if (len && len < ARRAY_SIZE(exe_buf) && (slash = wcsrchr( exe_buf, '\\' )))
+    {
+        *slash = 0;
+        scan_appx_manifest_file( exe_buf );
+    }
 }
 
 static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ctx )
@@ -504,6 +589,7 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
         { L"FakeClass.ClassName",                                       L"windows.applicationmodel.resources.dll" },
         { L"Windows.System.MemoryManager",                              L"windows.applicationmodel.resources.core.dll" },
         { L"Windows.ApplicationModel.AppInstance",                      L"twinapi.appcore.dll" },
+        { L"Windows.ApplicationModel.LimitedAccessFeatures",            L"windows.applicationmodel.dll" },
         { L"Microsoft.Windows.AppLifecycle.AppInstance",                L"twinapi.appcore.dll" },
         { L"Windows.ApplicationModel.StartupTask",                      L"twinapi.appcore.dll" },
         { L"Windows.UI.Xaml",                                           L"windows.ui.xaml.dll" },
@@ -592,6 +678,7 @@ static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ct
             class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
 
     scan_current_package_paths_locked();
+    scan_exe_dir_manifest_locked();
     scan_appx_env_paths_locked( L"WINEPATH" );
     scan_appx_env_paths_locked( L"PATH" );
     scan_appmodel_registered_paths_locked();
@@ -923,24 +1010,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    if (!wcsncmp(classid, L"CalculatorApp.ViewModel.", 24))
-    {
-        *out = wcsdup(L"CalcViewModel.dll");
-        return S_OK;
-    }
-
-    if (!wcsncmp(classid, L"GraphControl.", 13))
-    {
-        *out = wcsdup(L"GraphControl.dll");
-        return S_OK;
-    }
-
-    if (!wcsncmp(classid, L"TraceLogging.", 13))
-    {
-        *out = wcsdup(L"TraceLogging.dll");
-        return S_OK;
-    }
-
     /* Windows.UI.Composition.Compositor is the class the XAML/Composition root of an
      * unpackaged WinUI 3 app activates on its UI thread (WhatsApp Desktop startup).  Such
      * an app registers its activatable classes through its framework package, so an
@@ -1003,15 +1072,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     if (!wcsncmp(classid, L"Windows.System.Threading.", 25))
     {
         *out = wcsdup(L"windows.system.threading.dll");
-        return S_OK;
-    }
-
-    if (!wcsncmp(classid, L"WhatsAppNative.", 15))
-    {
-        if (!wcsncmp(classid, L"WhatsAppNative.Voip.", 20))
-            *out = wcsdup(L"WhatsAppNative.Voip.dll");
-        else
-            *out = wcsdup(L"WhatsAppNative.dll");
         return S_OK;
     }
 
@@ -1775,6 +1835,7 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
 
     if (!library)
     {
+        CLSID clsid;
         TRACE("server class: %s\n", debugstr_hstring(classid));
         /* Server (out-of-proc) class: the ActivatableClassId\<class>\Server subkey names
          * the server's CLSID in its default value (e.g. {daa52b27-773a-44a3-9895-
@@ -1783,7 +1844,6 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
          * /PROCESSID registration and the server's class object answers the class's
          * IActivationFactory.  A class whose Server subkey records no CLSID keeps the Wine
          * convention of activating the class-name string as the CLSID. */
-        CLSID clsid;
         if (SUCCEEDED( server_clsid_from_classid( raw, &clsid )))
             hr = CoCreateInstance( &clsid, NULL, CLSCTX_LOCAL_SERVER, &IID_IActivationFactory, (void **)factory );
         else
@@ -2000,41 +2060,6 @@ static BOOL str_buf_add( struct str_buf *buf, const char *s, size_t len )
     }
     memcpy( &buf->data[buf->len], s, len );
     buf->len += len;
-    return TRUE;
-}
-
-static BOOL str_buf_add_utf8( struct str_buf *buf, const WCHAR *str, size_t len )
-{
-    size_t i;
-
-    for (i = 0; i < len; i++)
-    {
-        WCHAR c = str[i];
-        char u[4];
-        size_t n = 0;
-
-        if (c >= 0xd800 && c <= 0xdbff && i + 1 < len && str[i + 1] >= 0xdc00 && str[i + 1] <= 0xdfff)
-        {
-            UINT32 cp = 0x10000 + ((UINT32)c - 0xd800) * 0x400 + ((UINT32)str[++i] - 0xdc00);
-            u[n++] = 0xf0 | (cp >> 18);
-            u[n++] = 0x80 | ((cp >> 12) & 0x3f);
-            u[n++] = 0x80 | ((cp >> 6) & 0x3f);
-            u[n++] = 0x80 | (cp & 0x3f);
-        }
-        else if (c < 0x80) u[n++] = c;
-        else if (c < 0x800)
-        {
-            u[n++] = 0xc0 | (c >> 6);
-            u[n++] = 0x80 | (c & 0x3f);
-        }
-        else
-        {
-            u[n++] = 0xe0 | (c >> 12);
-            u[n++] = 0x80 | ((c >> 6) & 0x3f);
-            u[n++] = 0x80 | (c & 0x3f);
-        }
-        if (!str_buf_add( buf, u, n )) return FALSE;
-    }
     return TRUE;
 }
 

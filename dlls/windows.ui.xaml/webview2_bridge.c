@@ -356,7 +356,7 @@ static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
             }
             __EXCEPT_PAGE_FAULT
             {
-                ERR( "cwv2_get_Settings: loader_core->get_Settings faulted\n" );
+                WARN( "cwv2_get_Settings: loader_core->get_Settings faulted\n" );
             }
             __ENDTRY;
         }
@@ -1262,7 +1262,7 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
     TRACE( "wv2_ctrl_handler_Invoke hr %#lx controller %p real=%d\n", hr, controller, h->impl->real_loader );
     if (FAILED( hr ))
     {
-        ERR( "wv2_ctrl_handler_Invoke: controller creation failed (%#lx), ignoring broken controller\n", hr );
+        WARN( "wv2_ctrl_handler_Invoke: controller creation failed (%#lx), ignoring broken controller\n", hr );
         return hr;
     }
     if (controller)
@@ -1389,7 +1389,7 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                                     }
                                     __EXCEPT_PAGE_FAULT
                                     {
-                                        ERR( "cwv2_replay: core->get_Settings faulted\n" );
+                                        WARN( "cwv2_replay: core->get_Settings faulted\n" );
                                         ls = NULL;
                                     }
                                     __ENDTRY;
@@ -2228,12 +2228,12 @@ void wv2_start_browser( struct xaml_element *impl )
 
     if (!(module = LoadLibraryW( L"webview2loader.dll" )))
     {
-        ERR( "wv2_start_browser: no webview2loader.dll\n" );
+        WARN( "wv2_start_browser: no webview2loader.dll\n" );
         return;
     }
     if (!(p_create = (void *)GetProcAddress( module, "CreateCoreWebView2EnvironmentWithOptions" )))
     {
-        ERR( "wv2_start_browser: no CreateCoreWebView2EnvironmentWithOptions\n" );
+        WARN( "wv2_start_browser: no CreateCoreWebView2EnvironmentWithOptions\n" );
         return;
     }
     if (!(eh = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*eh) ))) return;

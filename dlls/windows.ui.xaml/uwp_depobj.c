@@ -156,6 +156,8 @@ void uwp_clear_global_elem_refs( struct uwp_element *el )
     int i;
     if (!el) return;
     uwp_open_popups_remove( el );
+    uwp_http_img_remove_waiter( el );
+    xaml_clear_active_swapchain_panel_elem( el );
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     if (g_open_overlay_nav == el) g_open_overlay_nav = NULL;
     if (g_captured_elem == el) g_captured_elem = NULL;
@@ -292,9 +294,24 @@ HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out )
             IInspectable_AddRef( *out );
             return S_OK;
         }
-        if (dpn[0] && !wcscmp( dpn, L"IsChecked" ))
+        if (dpn[0] && (!wcscmp( dpn, L"IsChecked" ) || !wcscmp( dpn, L"IsSelected" )))
         {
             *out = box_bool_value( impl->is_checked == 1 ? TRUE : FALSE );
+            if (*out) return S_OK;
+        }
+        if (dpn[0] && !wcscmp( dpn, L"IsEnabled" ))
+        {
+            *out = box_bool_value( impl->is_enabled ? TRUE : FALSE );
+            if (*out) return S_OK;
+        }
+        if (dpn[0] && !wcscmp( dpn, L"IsActive" ))
+        {
+            *out = box_bool_value( impl->is_active ? TRUE : FALSE );
+            if (*out) return S_OK;
+        }
+        if (dpn[0] && !wcscmp( dpn, L"Visibility" ))
+        {
+            *out = box_int32_value( impl->visibility );
             if (*out) return S_OK;
         }
     }
@@ -345,7 +362,7 @@ static struct uwp_element *uwp_find_named_descendant( struct uwp_element *el, co
     return NULL;
 }
 
-static BOOL uwp_replace_iface( IInspectable **slot, IInspectable *val )
+BOOL uwp_replace_iface( IInspectable **slot, IInspectable *val )
 {
     if (*slot == val) return FALSE;
     if (*slot) IInspectable_Release( *slot );
@@ -758,7 +775,7 @@ static void uwp_tabview_handle_dp( struct uwp_element *impl, const WCHAR *dpname
             return;
         }
     }
-    if (val && (ULONG_PTR)val >= 0x10000)
+    if (val)
     {
         void *vm = NULL;
         if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ITabItemViewModel, &vm )) && vm)
@@ -780,10 +797,21 @@ static void uwp_sync_struct_tpl_props( struct uwp_element *owner, struct uwp_ele
         {
             const struct uwp_tpl_binding_entry *tb = &node->style_anim->tpl_bindings[bi];
             const WCHAR *sp = tb->src_prop;
-            if (!wcscmp( sp, L"Content" ) && owner->content &&
+            if (!wcscmp( sp, L"Content" ) &&
                 (!wcscmp( tb->target_prop, L"Content" ) || tb->target_pid == XBF_PROP_CONTENT ||
                  !wcscmp( node->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" )))
-                uwp_apply_one_tpl_binding( owner, node, tb, owner->content );
+            {
+                if (owner->content)
+                    uwp_apply_one_tpl_binding( owner, node, tb, owner->content );
+                else if (uwp_has_text( owner ))
+                    uwp_elem_set_text( node, uwp_elem_text( owner ) );
+            }
+            else if (!wcscmp( sp, L"Tag" ) && owner->tag)
+                uwp_apply_one_tpl_binding( owner, node, tb, owner->tag );
+            else if (!wcscmp( sp, L"Foreground" ) && owner->has_fg)
+                uwp_el_set_fg_argb( node, owner->fg_argb );
+            else if (!wcscmp( sp, L"FontFamily" ) && uwp_elem_font_family( owner )[0])
+                uwp_elem_set_font_family( node, uwp_elem_font_family( owner ) );
             else if (!wcscmp( sp, L"Header" ) && owner->pane)
                 uwp_apply_one_tpl_binding( owner, node, tb, owner->pane );
             else if (!wcscmp( sp, L"Padding" ) &&
@@ -812,6 +840,10 @@ static void uwp_sync_struct_tpl_props( struct uwp_element *owner, struct uwp_ele
                 node->h_align = owner->h_align;
             else if (!wcscmp( sp, L"VerticalAlignment" ))
                 node->v_align = owner->v_align;
+            else if (!wcscmp( sp, L"HorizontalContentAlignment" ) && owner->has_h_content_align)
+                node->h_align = owner->h_content_align;
+            else if (!wcscmp( sp, L"VerticalContentAlignment" ) && owner->has_v_content_align)
+                node->v_align = owner->v_content_align;
         }
     }
     if (node->content)
@@ -1087,10 +1119,9 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
                 void *iref = NULL;
                 if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IReference_DateTime_UWP, &iref )) && iref)
                 {
-                    typedef HRESULT (WINAPI *get_val_fn)( void *, INT64 * );
-                    get_val_fn fn = (get_val_fn)((void **)*(void **)iref)[6];
+                    const struct abi_iref_int64 *ir = (const struct abi_iref_int64 *)iref;
                     INT64 ticks = 0;
-                    if (fn && SUCCEEDED(fn( iref, &ticks )))
+                    if (ir->lpVtbl->get_Value && SUCCEEDED(ir->lpVtbl->get_Value( iref, &ticks )))
                         uwp_cdp_set_date( impl, ticks, TRUE, FALSE );
                     IUnknown_Release( (IUnknown *)iref );
                 }
@@ -1176,10 +1207,53 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
     if (!wcscmp( dpname, L"Command" ))
     {
         uwp_replace_iface( &impl->command, val );
+        uwp_sync_command_can_execute( impl );
     }
     else if (!wcscmp( dpname, L"CommandParameter" ))
     {
         uwp_replace_iface( &impl->command_param, val );
+        uwp_sync_command_can_execute( impl );
+    }
+    else if (!wcscmp( dpname, L"Visibility" ))
+    {
+        INT32 ev_vis = 0;
+        if (val && uwp_unbox_enum_int32( val, &ev_vis, TRUE ))
+        {
+            int nv = (ev_vis != 0) ? 1 : 0;
+            if (impl->visibility != nv)
+            {
+                impl->visibility = nv;
+                g_layout_dirty = TRUE;
+                uwp_invalidate_window();
+            }
+        }
+    }
+    else if (!wcscmp( dpname, L"IsEnabled" ))
+    {
+        boolean bv = TRUE;
+        if (val && uwp_unbox_bool( val, &bv ))
+        {
+            boolean ne = bv ? TRUE : FALSE;
+            if (impl->is_enabled != ne)
+            {
+                impl->is_enabled = ne;
+                uwp_invalidate_window();
+            }
+        }
+    }
+    else if (!wcscmp( dpname, L"IsActive" ))
+    {
+        boolean bv = FALSE;
+        impl->local_prop_mask |= UWP_LP_IS_ACTIVE;
+        if (val && uwp_unbox_bool( val, &bv ))
+        {
+            BYTE na = bv ? 1 : 0;
+            if (impl->is_active != na)
+            {
+                impl->is_active = na;
+                uwp_invalidate_window();
+            }
+        }
     }
     else if (!wcscmp( dpname, L"Value" ) && val && uwp_unbox_double( val, &dv ) && !isnan( dv ))
     {
@@ -1270,10 +1344,9 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
                 void *scb = NULL;
                 if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_ISolidColorBrush_UWP, &scb )) && scb)
                 {
-                    typedef HRESULT (WINAPI *scb_get_color_fn)( void *, Color * );
-                    scb_get_color_fn fn = (scb_get_color_fn)((void **)*(void **)scb)[6];
+                    const struct abi_solid_color_brush *sb = (const struct abi_solid_color_brush *)scb;
                     Color c = {0};
-                    if (fn && SUCCEEDED(fn( scb, &c )))
+                    if (sb->lpVtbl->get_Color && SUCCEEDED(sb->lpVtbl->get_Color( scb, &c )))
                         uwp_el_set_fg_argb( impl, ((UINT32)c.A << 24) | ((UINT32)c.R << 16) | ((UINT32)c.G << 8) | c.B );
                     IUnknown_Release( (IUnknown *)scb );
                 }
@@ -1456,7 +1529,8 @@ static void uwp_setval_post_commit( struct uwp_element *impl, const WCHAR *dpn, 
     }
     if (!dpn[0]) return;
     if (!wcscmp( dpn, L"ItemsSource" ) || !wcscmp( dpn, L"Content" ) ||
-        !wcscmp( dpn, L"DataContext" ) || !wcscmp( dpn, L"Text" ) || !wcscmp( dpn, L"Visibility" ))
+        !wcscmp( dpn, L"DataContext" ) || !wcscmp( dpn, L"Text" ) || !wcscmp( dpn, L"Visibility" ) ||
+        !wcscmp( dpn, L"IsEnabled" ) || !wcscmp( dpn, L"IsActive" ))
     {
         if (!wcscmp( dpn, L"Content" ) || !wcscmp( dpn, L"DataContext" ))
         {
@@ -1467,7 +1541,10 @@ static void uwp_setval_post_commit( struct uwp_element *impl, const WCHAR *dpn, 
         {
             uwp_replace_iface( &impl->items_source, val );
             if (val && !uwp_is_combobox( impl ))
+            {
+                uwp_items_ctrl_hook_source( impl, val );
                 uwp_items_ctrl_materialize_source( impl, val );
+            }
             else if (uwp_is_combobox( impl ) && uwp_elem_selected_item( impl ))
                 uwp_selector_set_selection( impl, -1, uwp_elem_selected_item( impl ), FALSE, FALSE );
         }
@@ -1562,6 +1639,7 @@ HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val )
         uwp_setval_fire_metadata_cb( impl, dp, meta, &old_val, val );
 
     uwp_setval_fire_dp_callbacks( impl, dp );
+    if (dpn[0]) uwp_binding_notify_dp( impl, dpn );
 
     if (pushed_setval)
     {

@@ -543,10 +543,13 @@ static void paint_gpu_font_icon( ID3D11DeviceContext *ctx, struct uwp_element *e
 static void paint_gpu_progress_ring( struct uwp_element *el, COLORREF surface_bg )
 {
     RECT rc = el->bounds;
-    int cx = (rc.left + rc.right) / 2;
-    int cy = min( rc.bottom - 36, (rc.top + rc.bottom) / 2 + 120 );
-    int r = 18;
+    int cx, cy, r = 18;
     COLORREF track_cr, arc_cr;
+    if (!el->is_active || !el->has_bounds ||
+        rc.right <= rc.left || rc.bottom <= rc.top)
+        return;
+    cx = (rc.left + rc.right) / 2;
+    cy = min( rc.bottom - 36, (rc.top + rc.bottom) / 2 + 120 );
     uwp_paint_resolve_progress_ring_colors( el, surface_bg, &track_cr, &arc_cr );
     xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL, cr_to_argb( track_cr ), 3.0f, FALSE );
     xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL, cr_to_argb( arc_cr ), 3.0f, TRUE );
@@ -1159,6 +1162,23 @@ static void paint_gpu_button( ID3D11DeviceContext *ctx, struct uwp_element *el, 
         (wcscmp( el->template_root->class_name, L"Windows.UI.Xaml.Controls.ContentPresenter" ) ||
          el->template_root->children_coll || el->template_root->content || el->template_root->has_bg))
     {
+        if (el->has_bg && el->bg_alpha > 0 && !el->template_root->has_bg)
+        {
+            RECT br = el->bounds;
+            InflateRect( &br, -2, -2 );
+            if (br.right > br.left && br.bottom > br.top)
+            {
+                float rad = (el->corner_radius > 0.0) ? (float)el->corner_radius : 4.0f;
+                UINT32 bg_argb = 0, bd_argb = 0;
+                COLORREF bg_c = 0, fg_c = 0, bd_c = 0;
+                BOOL dbg = TRUE, dbd = TRUE;
+                uwp_paint_resolve_button_style( el, surface_bg, label, &dbg, &dbd,
+                                                &bg_c, &fg_c, &bd_c, &bg_argb, &bd_argb );
+                if (dbg || dbd)
+                    xaml_gpu_push_rect( (float)br.left, (float)br.top, (float)br.right, (float)br.bottom, NULL,
+                                        rad, dbg ? bg_argb : 0, dbd ? bd_argb : 0, dbd ? 1.0f : 0.0f, 1.0f );
+            }
+        }
         uwp_gpu_paint_element( ctx, el->template_root );
         return;
     }
@@ -1429,9 +1449,10 @@ static BOOL paint_gpu_text( ID3D11DeviceContext *ctx, struct uwp_element *el, CO
             else
             {
                 int box_h = trc.bottom - trc.top;
+                UINT vflag = (el->v_align == 0) ? DT_TOP : ((el->v_align == 2) ? DT_BOTTOM : DT_VCENTER);
                 if (box_h > 8 && fh > box_h)
                     fh = max( 10, box_h - 1 );
-                dt = hflag | DT_VCENTER | DT_SINGLELINE;
+                dt = hflag | vflag | DT_SINGLELINE;
             }
 
             if (is_sec_hdr && anc_btn && anc_btn->is_enabled && (trc.right - trc.left) > 40)
@@ -2003,6 +2024,7 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
            el ? el->visibility : 0xffff,
            (void *)(el ? el->children_coll : NULL), (void *)(el ? el->content : NULL) );
     if (!el || !el->has_bounds || el->visibility != 0 || el->opacity <= 0.005) return;
+    if (el->kind == UWP_KIND_POPUP) return;
     if ((el->class_flags & UWP_CF_INFO_BADGE) && !uwp_has_text( el )) return;
     if (UWP_EV_CNT( el, evc_reg ) > 0 && !el->evc_fired)
         uwp_fire_evc_if_needed( el );
@@ -2281,7 +2303,32 @@ recurse_children:
                  (!el->children_coll || CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
             paint_gpu_content_control_vm( ctx, el, surface_bg );
     }
-    if (!out_of_view && !el->children_coll && (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
+    else if (!out_of_view && (el->class_flags & UWP_CF_CONTENT_PRESENTER) &&
+             (!el->children_coll || CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface )->count == 0))
+    {
+        const WCHAR *cp_txt = uwp_has_text( el ) ? uwp_elem_text( el )
+            : (el->templated_parent && !el->templated_parent->content && uwp_has_text( el->templated_parent )
+               ? uwp_elem_text( el->templated_parent ) : L"");
+        if (cp_txt[0])
+        {
+            struct uwp_element *ref_el = uwp_has_text( el ) ? el : el->templated_parent;
+            WCHAR ff_buf[64];
+            RECT trc = el->bounds;
+            double fs = ref_el->has_font_size ? ref_el->font_size : 14.0;
+            int fh = max( (int)(12 * g_layout_scale + 0.5f), min( (int)(26 * g_layout_scale + 0.5f), (int)(fs * g_layout_scale + 0.5f) ) );
+            int fw = (ref_el->font_weight > 0) ? ref_el->font_weight : FW_SEMIBOLD;
+            COLORREF tfg = (el->has_fg && el->fg_alpha > 0) ? blend_argb_over( el->fg_argb, surface_bg )
+                : (ref_el->has_fg && ref_el->fg_alpha > 0 ? blend_argb_over( ref_el->fg_argb, surface_bg )
+                   : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush",
+                                              uwp_is_light_theme( el ) ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 ), surface_bg ));
+            xaml_gpu_push_text_font( ctx, cp_txt, uwp_resolve_elem_font_family( ref_el, ff_buf, ARRAY_SIZE(ff_buf) ),
+                                     fh, fw, DT_SINGLELINE | DT_CENTER | DT_VCENTER, &trc, NULL, tfg, 1.0f );
+        }
+    }
+    if (!out_of_view && !el->children_coll && !el->template_root &&
+        el->kind != UWP_KIND_TEXT_BLOCK && el->kind != UWP_KIND_BORDER &&
+        el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON &&
+        (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
         !(el->content && uwp_elem_from_any( el->content )) &&
         (uwp_is_card( el ) || el->kind != UWP_KIND_CONTENT_CONTROL) &&
         (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56)
@@ -2620,12 +2667,16 @@ static void uwp_gpu_paint_open_popups( ID3D11DeviceContext *ctx, int width, int 
     {
         struct uwp_element *pop = pops[pi];
         struct uwp_element *ch = uwp_elem_from_any( pop->content );
+        struct uwp_vec_view *pkids = pop->children_coll
+            ? CONTAINING_RECORD( pop->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+        struct uwp_element *theme_el = ch;
         RECT prc;
         BOOL light;
         UINT32 bg_argb, bd_argb;
-        if (!ch || !pop->has_bounds) continue;
+        if (!pop->has_bounds || (!ch && (!pkids || pkids->count == 0))) continue;
+        if (!theme_el && pkids && pkids->count > 0) theme_el = uwp_elem_from_any( pkids->items[0] );
         prc = pop->bounds;
-        light = uwp_is_light_theme( ch );
+        light = uwp_is_light_theme( theme_el ? theme_el : pop );
         bg_argb = light ? 0xfffcfcfcu : 0xff2b2b30u;
         bd_argb = light ? 0xffceced4u : 0xff52525au;
         xaml_gpu_push_rect( 0.0f, 0.0f, (float)width, (float)height, NULL, 0.0f, 0x66000000u, 0, 0.0f, 1.0f );
@@ -2633,7 +2684,16 @@ static void uwp_gpu_paint_open_popups( ID3D11DeviceContext *ctx, int width, int 
                             NULL, 10.0f, 0x55000000u, 0, 0.0f, 1.0f );
         xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom,
                             NULL, 8.0f, bg_argb, bd_argb, 1.0f, 1.0f );
-        uwp_gpu_paint_element( ctx, ch );
+        if (ch) uwp_gpu_paint_element( ctx, ch );
+        if (pkids)
+        {
+            unsigned int k;
+            for (k = 0; k < pkids->count; k++)
+            {
+                struct uwp_element *kc = uwp_elem_from_any( pkids->items[k] );
+                if (kc && kc != ch) uwp_gpu_paint_element( ctx, kc );
+            }
+        }
     }
 }
 
@@ -2656,7 +2716,44 @@ static void uwp_gpu_paint_flyout_popup( ID3D11DeviceContext *ctx, int width, int
     anchor = owner->has_bounds ? owner : owner->parent;
     if (!anchor || !anchor->has_bounds || anchor->visibility != 0) return;
     flyout = owner->flyout ? uwp_elem_from_any( owner->flyout ) : owner;
-    if (!flyout || !flyout->children_coll) return;
+    if (!flyout) return;
+    if (!flyout->children_coll && flyout->content)
+    {
+        struct uwp_element *fc = uwp_elem_from_any( flyout->content );
+        if (fc)
+        {
+            int pw = (int)(fc->width > 0.0 ? fc->width * g_layout_scale : uwp_measure_natural_width( fc, 0 ));
+            int ph = (int)(fc->height > 0.0 ? fc->height * g_layout_scale : uwp_measure_natural_height( fc, max( 240, pw ), 0 ));
+            RECT orc = anchor->bounds, prc, crc;
+            BOOL light = uwp_is_light_theme( owner );
+            UINT32 bg_argb = light ? 0xfffcfcfcu : 0xff2c2c30u;
+            UINT32 bd_argb = light ? 0xffceced4u : 0xff52525au;
+            if (pw < 200) pw = 240;
+            if (pw > width - 16) pw = max( 160, width - 16 );
+            if (ph < 120) ph = 200;
+            if (ph > height - 16) ph = max( 120, height - 16 );
+            pw += 16; ph += 16;
+            prc.left = orc.left;
+            if (prc.left + pw > width - 8) prc.left = max( 8, orc.right - pw );
+            if (prc.left + pw > width - 8) prc.left = max( 8, width - pw - 8 );
+            prc.right = prc.left + pw;
+            prc.top = orc.bottom + 4;
+            if (prc.top + ph > height - 8) prc.top = max( 8, orc.top - ph - 4 );
+            if (prc.top + ph > height - 8) prc.top = max( 8, height - ph - 8 );
+            prc.bottom = prc.top + ph;
+            flyout->bounds = prc;
+            flyout->has_bounds = TRUE;
+            xaml_gpu_push_rect( (float)(prc.left + 2), (float)(prc.top + 3), (float)(prc.right + 4), (float)(prc.bottom + 5), NULL,
+                                8.0f, 0x30000000u, 0, 0.0f, 1.0f );
+            xaml_gpu_push_rect( (float)prc.left, (float)prc.top, (float)prc.right, (float)prc.bottom, NULL,
+                                8.0f, bg_argb, bd_argb, 1.0f, 1.0f );
+            SetRect( &crc, prc.left + 8, prc.top + 8, prc.right - 8, prc.bottom - 8 );
+            uwp_arrange_element( fc, crc );
+            uwp_gpu_paint_element( ctx, fc );
+        }
+        return;
+    }
+    if (!flyout->children_coll) return;
     children = CONTAINING_RECORD( flyout->children_coll, struct uwp_vec_view, IInspectable_iface );
     for (i = 0; children && i < (int)children->count && item_cnt < (int)ARRAY_SIZE(items); i++)
     {

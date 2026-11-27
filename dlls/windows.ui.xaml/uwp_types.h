@@ -441,6 +441,7 @@ struct uwp_media_ext
     UINT video_frame_seq;
     WCHAR video_uri[512];
     HANDLE video_thread;
+    HANDLE video_wake_event;
     volatile LONG video_started;
     volatile LONG video_stop;
 };
@@ -547,6 +548,14 @@ struct uwp_style_anim_ext
     double scale_y;
     double center_x;
     double center_y;
+    IInspectable *converter;
+    IInspectable *converter_param;
+    WCHAR converter_lang[32];
+    IInspectable *cmd_can_exec_handler;
+    EventRegistrationToken cmd_can_exec_tok;
+    IInspectable *obsvec_handler_obj;
+    IInspectable *obsvec_source_obj;
+    EventRegistrationToken obsvec_tok;
 };
 
 struct uwp_element
@@ -611,6 +620,7 @@ struct uwp_element
     IInspectable IToggleMenuFlyoutItem_iface;
     IInspectable IMenuFlyoutSubItem_iface;
     IInspectable IMenuFlyout2_iface;
+    IInspectable IProgressRing_iface;
     IInspectable IUIElement4_iface;
     IInspectable IUIElement5_iface;
     IInspectable IUIElement10_iface;
@@ -765,15 +775,24 @@ struct uwp_element
     UINT32 bg_argb;
     BYTE bg_alpha;
     BYTE flow_direction; /* 0=unset, 1=LeftToRight, 2=RightToLeft */
-    BOOL has_bg;
+    BYTE is_active;
+    BYTE binding_mode;   /* 0=unset, 1=OneWay, 2=OneTime, 3=TwoWay */
+    BYTE has_bg;
+    BYTE has_fg;
+    BYTE has_border;
+    BYTE obsvec_hooked;
     COLORREF fg_color;
     UINT32 fg_argb;
     BYTE fg_alpha;
-    BOOL has_fg;
+    BYTE is_selected;
+    BYTE loaded_fired;
+    BYTE evc_fired;
     COLORREF border_color;
     UINT32 border_argb;
     BYTE border_alpha;
-    BOOL has_border;
+    BYTE has_bounds;
+    BYTE template_applied;
+    BYTE is_dropdown_open;
     double border_thick_l, border_thick_t, border_thick_r, border_thick_b;
     double corner_radius;
     BOOL is_accent_style;
@@ -785,14 +804,9 @@ struct uwp_element
     struct uwp_rd_bucket *rd_bucket;
     /* Computed screen rectangle */
     RECT bounds;
-    BOOL has_bounds;
     /* Lifecycle & interaction flags */
-    BOOL loaded_fired;
-    BOOL evc_fired;
-    BOOL template_applied;
     void *binding_connector;
     void *dt_binding_connector;
-    BOOL is_dropdown_open;
     int hovered_dropdown_idx;
     int dropdown_scroll_offset;
     IInspectable *items_source;
@@ -1053,7 +1067,11 @@ IInspectable *box_bool_value( boolean b );
 IInspectable *box_double_value( double d );
 IInspectable *box_int32_value( INT32 v );
 IInspectable *box_string_value( const WCHAR *str );
+BOOL uwp_unbox_int32( void *obj, INT32 *out_val );
+BOOL uwp_unbox_bool( void *obj, boolean *out_val );
+BOOL uwp_unbox_double( void *obj, double *out_val );
 BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_int );
+BOOL uwp_replace_iface( IInspectable **slot, IInspectable *val );
 BOOL uwp_unbox_string( void *obj, WCHAR *buf, int buf_chars );
 BOOL uwp_inspectable_to_string( IInspectable *obj, WCHAR *buf, int buf_cch );
 void uwp_extract_uri_string( IInspectable *uri_obj, WCHAR *out, size_t cap );
@@ -1186,6 +1204,7 @@ static inline void uwp_elem_set_default_style_key_name( struct uwp_element *el, 
 #define UWP_LP_BORDER_THICKNESS (1u << 13)
 #define UWP_LP_CORNER_RADIUS    (1u << 14)
 #define UWP_LP_OPACITY          (1u << 15)
+#define UWP_LP_IS_ACTIVE        (1u << 16)
 
 static inline const WCHAR *uwp_elem_placeholder( const struct uwp_element *el )
 {
@@ -1401,6 +1420,7 @@ static inline BOOL uwp_is_flyout( const struct uwp_element *el )
 const WCHAR *uwp_btype_to_class_name( WORD tid );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
 struct uwp_element *uwp_elem_from_any( void *ptr );
+struct uwp_element *uwp_elem_lookup_no_deref( const void *ptr );
 void uwp_elem_register_alias( struct uwp_element *el, void *alias_ptr );
 BOOL uwp_elem_is_descendant( struct uwp_element *ancestor, struct uwp_element *node );
 struct uwp_element *uwp_find_owning_page( struct uwp_element *el );

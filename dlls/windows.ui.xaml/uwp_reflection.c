@@ -646,3 +646,552 @@ BOOL uwp_vm_query_string_prop( IInspectable *vm, const WCHAR *const *props, unsi
 {
     return uwp_vm_query_string_prop_depth( vm, props, count, out, out_len, 0 );
 }
+
+static UINT32 xaml_meta_hash( const WCHAR *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        h ^= (UINT32)*s;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static SRWLOCK g_ct_weak_lock = SRWLOCK_INIT;
+
+struct xaml_ct_weak_ctrl
+{
+    LONG ref;
+    struct xaml_cached_type *obj;
+};
+
+struct xaml_ct_weak_ref
+{
+    const IWeakReferenceVtbl *lpVtbl;
+    LONG ref;
+    struct xaml_ct_weak_ctrl *ctrl;
+};
+
+static void xaml_ct_weak_ctrl_release( struct xaml_ct_weak_ctrl *ctrl )
+{
+    if (ctrl && !InterlockedDecrement( &ctrl->ref ))
+        free( ctrl );
+}
+
+static inline struct xaml_cached_type *xaml_ct_from_uwp( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_cached_type, lpVtbl );
+}
+
+static inline struct xaml_cached_type *xaml_ct_from_winui3( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_cached_type, lpVtbl_winui3 );
+}
+
+static inline struct xaml_cached_type *xaml_ct_from_weak_src( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_cached_type, lpVtbl_weak_src );
+}
+
+static HRESULT WINAPI xaml_ct_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IXamlType_UWP_g ))
+    {
+        *out = &t->lpVtbl;
+        InterlockedIncrement( &t->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IXamlType_WinUI3_g ))
+    {
+        *out = &t->lpVtbl_winui3;
+        InterlockedIncrement( &t->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
+    {
+        *out = &t->lpVtbl_weak_src;
+        InterlockedIncrement( &t->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI xaml_ct_AddRef( void *iface )
+{
+    return InterlockedIncrement( &xaml_ct_from_uwp( iface )->ref );
+}
+
+static ULONG WINAPI xaml_ct_Release( void *iface )
+{
+    /* Singleton-cached in xaml_meta_cache for process lifetime; ref stays >= 1 */
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
+    LONG r = InterlockedDecrement( &t->ref );
+    if (r == 0)
+    {
+        struct xaml_ct_weak_ctrl *ctrl;
+        AcquireSRWLockExclusive( &g_ct_weak_lock );
+        ctrl = t->weak_ctrl;
+        t->weak_ctrl = NULL;
+        if (ctrl) ctrl->obj = NULL;
+        ReleaseSRWLockExclusive( &g_ct_weak_lock );
+        xaml_ct_weak_ctrl_release( ctrl );
+        free( t->full_name );
+        free( t );
+    }
+    return r;
+}
+
+static HRESULT WINAPI xaml_ct_winui3_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return xaml_ct_QueryInterface( &xaml_ct_from_winui3( iface )->lpVtbl, iid, out );
+}
+
+static ULONG WINAPI xaml_ct_winui3_AddRef( void *iface )
+{
+    return xaml_ct_AddRef( &xaml_ct_from_winui3( iface )->lpVtbl );
+}
+
+static ULONG WINAPI xaml_ct_winui3_Release( void *iface )
+{
+    return xaml_ct_Release( &xaml_ct_from_winui3( iface )->lpVtbl );
+}
+
+static HRESULT WINAPI xaml_ct_wr_QI( IWeakReference *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IWeakReference_local ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct xaml_ct_weak_ref *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI xaml_ct_wr_AddRef( IWeakReference *iface )
+{
+    return InterlockedIncrement( &((struct xaml_ct_weak_ref *)iface)->ref );
+}
+
+static ULONG WINAPI xaml_ct_wr_Release( IWeakReference *iface )
+{
+    struct xaml_ct_weak_ref *wr = (struct xaml_ct_weak_ref *)iface;
+    ULONG r = InterlockedDecrement( &wr->ref );
+    if (!r)
+    {
+        xaml_ct_weak_ctrl_release( wr->ctrl );
+        free( wr );
+    }
+    return r;
+}
+
+static HRESULT WINAPI xaml_ct_wr_Resolve( IWeakReference *iface, REFIID iid, IInspectable **out )
+{
+    struct xaml_ct_weak_ref *wr = (struct xaml_ct_weak_ref *)iface;
+    struct xaml_cached_type *obj = NULL;
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!wr->ctrl) return S_OK;
+    AcquireSRWLockShared( &g_ct_weak_lock );
+    obj = wr->ctrl->obj;
+    if (obj)
+    {
+        LONG cur = obj->ref;
+        while (cur > 0)
+        {
+            if (InterlockedCompareExchange( &obj->ref, cur + 1, cur ) == cur)
+                break;
+            cur = obj->ref;
+        }
+        if (cur <= 0) obj = NULL;
+    }
+    ReleaseSRWLockShared( &g_ct_weak_lock );
+    if (!obj) return S_OK;
+    hr = xaml_ct_QueryInterface( &obj->lpVtbl, iid, (void **)out );
+    xaml_ct_Release( &obj->lpVtbl );
+    return hr;
+}
+
+static const struct IWeakReferenceVtbl xaml_ct_weak_ref_vtbl =
+{
+    xaml_ct_wr_QI,
+    xaml_ct_wr_AddRef,
+    xaml_ct_wr_Release,
+    xaml_ct_wr_Resolve,
+};
+
+static HRESULT WINAPI xaml_ct_wrs_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return xaml_ct_QueryInterface( &xaml_ct_from_weak_src( iface )->lpVtbl, iid, out );
+}
+
+static ULONG WINAPI xaml_ct_wrs_AddRef( void *iface )
+{
+    return xaml_ct_AddRef( &xaml_ct_from_weak_src( iface )->lpVtbl );
+}
+
+static ULONG WINAPI xaml_ct_wrs_Release( void *iface )
+{
+    return xaml_ct_Release( &xaml_ct_from_weak_src( iface )->lpVtbl );
+}
+
+static HRESULT WINAPI xaml_ct_wrs_GetWeakReference( void *iface, IWeakReference **out )
+{
+    struct xaml_cached_type *t = xaml_ct_from_weak_src( iface );
+    struct xaml_ct_weak_ctrl *ctrl;
+    struct xaml_ct_weak_ref *wr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    AcquireSRWLockExclusive( &g_ct_weak_lock );
+    ctrl = t->weak_ctrl;
+    if (!ctrl)
+    {
+        ctrl = calloc( 1, sizeof(*ctrl) );
+        if (!ctrl)
+        {
+            ReleaseSRWLockExclusive( &g_ct_weak_lock );
+            return E_OUTOFMEMORY;
+        }
+        ctrl->ref = 1;
+        ctrl->obj = t;
+        t->weak_ctrl = ctrl;
+    }
+    InterlockedIncrement( &ctrl->ref );
+    ReleaseSRWLockExclusive( &g_ct_weak_lock );
+    wr = calloc( 1, sizeof(*wr) );
+    if (!wr)
+    {
+        xaml_ct_weak_ctrl_release( ctrl );
+        return E_OUTOFMEMORY;
+    }
+    wr->lpVtbl = &xaml_ct_weak_ref_vtbl;
+    wr->ref = 1;
+    wr->ctrl = ctrl;
+    *out = (IWeakReference *)wr;
+    return S_OK;
+}
+
+static const void *xaml_cached_type_wrs_vtbl[] =
+{
+    xaml_ct_wrs_QueryInterface,
+    xaml_ct_wrs_AddRef,
+    xaml_ct_wrs_Release,
+    xaml_ct_wrs_GetWeakReference,
+};
+
+static HRESULT WINAPI xaml_ct_GetIids( void *iface, ULONG *cnt, IID **iids )
+{
+    if (cnt) *cnt = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Markup.IXamlType", 32, name );
+}
+
+static HRESULT WINAPI xaml_ct_GetTrustLevel( void *iface, TrustLevel *lvl )
+{
+    if (lvl) *lvl = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_get_NullPtr( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_get_False( void *iface, boolean *out )
+{
+    if (out) *out = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_get_True( void *iface, boolean *out )
+{
+    if (out) *out = TRUE;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_get_FullName( void *iface, HSTRING *name )
+{
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
+    if (!name) return E_POINTER;
+    return WindowsCreateString( t->full_name, wcslen( t->full_name ), name );
+}
+
+static HRESULT WINAPI xaml_ct_get_Name( void *iface, HSTRING *name )
+{
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
+    if (!name) return E_POINTER;
+    return WindowsCreateString( t->short_name, wcslen( t->short_name ), name );
+}
+
+static HRESULT WINAPI xaml_ct_ActivateInstance( void *iface, IInspectable **instance )
+{
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
+    HRESULT hr;
+    if (!instance) return E_POINTER;
+    *instance = NULL;
+    hr = uwp_element_create( t->full_name, NULL, NULL, (void **)instance );
+    if (SUCCEEDED(hr) && *instance) return hr;
+    {
+        HSTRING h_cls = NULL;
+        if (SUCCEEDED(WindowsCreateString( t->full_name, wcslen( t->full_name ), &h_cls )))
+        {
+            hr = RoActivateInstance( h_cls, instance );
+            WindowsDeleteString( h_cls );
+        }
+    }
+    return hr;
+}
+
+static HRESULT WINAPI xaml_ct_CreateFromString( void *iface, HSTRING input, void **value )
+{
+    if (value) *value = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI xaml_ct_GetMember( void *iface, HSTRING name, struct xaml_member **member )
+{
+    if (member) *member = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_RunInitializer( void *iface )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_get_UnderlyingType( void *iface, TypeName *type )
+{
+    struct xaml_cached_type *t = xaml_ct_from_uwp( iface );
+    if (!type) return E_POINTER;
+    type->Kind = TypeKind_Metadata;
+    return WindowsCreateString( t->full_name, wcslen( t->full_name ), &type->Name );
+}
+
+static HRESULT WINAPI xaml_ct_AddToVector( void *iface, IInspectable *instance, IInspectable *value )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ct_AddToMap( void *iface, IInspectable *instance, IInspectable *key, IInspectable *value )
+{
+    return S_OK;
+}
+
+static const void *xaml_cached_type_uwp_vtbl[] =
+{
+    xaml_ct_QueryInterface,      /* 0 */
+    xaml_ct_AddRef,              /* 1 */
+    xaml_ct_Release,             /* 2 */
+    xaml_ct_GetIids,             /* 3 */
+    xaml_ct_GetRuntimeClassName, /* 4 */
+    xaml_ct_GetTrustLevel,       /* 5 */
+    xaml_ct_get_NullPtr,         /* 6: get_BaseType */
+    xaml_ct_get_NullPtr,         /* 7: get_ContentProperty */
+    xaml_ct_get_FullName,        /* 8: get_FullName */
+    xaml_ct_get_False,           /* 9: get_IsArray */
+    xaml_ct_get_False,           /* 10: get_IsCollection */
+    xaml_ct_get_True,            /* 11: get_IsConstructible */
+    xaml_ct_get_False,           /* 12: get_IsDictionary */
+    xaml_ct_get_False,           /* 13: get_IsMarkupExtension */
+    xaml_ct_get_False,           /* 14: get_IsBindable */
+    xaml_ct_get_NullPtr,         /* 15: get_ItemType */
+    xaml_ct_get_NullPtr,         /* 16: get_KeyType */
+    xaml_ct_get_UnderlyingType,  /* 17: get_UnderlyingType */
+    xaml_ct_ActivateInstance,    /* 18: ActivateInstance (UWP) */
+    xaml_ct_CreateFromString,    /* 19: CreateFromString */
+    xaml_ct_GetMember,           /* 20: GetMember */
+    xaml_ct_AddToVector,         /* 21: AddToVector */
+    xaml_ct_AddToMap,            /* 22: AddToMap */
+    xaml_ct_RunInitializer,      /* 23: RunInitializer */
+};
+
+static HRESULT WINAPI xaml_ct_winui3_get_FullName( void *iface, HSTRING *name )
+{ return xaml_ct_get_FullName( &xaml_ct_from_winui3( iface )->lpVtbl, name ); }
+static HRESULT WINAPI xaml_ct_winui3_get_Name( void *iface, HSTRING *name )
+{ return xaml_ct_get_Name( &xaml_ct_from_winui3( iface )->lpVtbl, name ); }
+static HRESULT WINAPI xaml_ct_winui3_ActivateInstance( void *iface, IInspectable **instance )
+{ return xaml_ct_ActivateInstance( &xaml_ct_from_winui3( iface )->lpVtbl, instance ); }
+static HRESULT WINAPI xaml_ct_winui3_get_UnderlyingType( void *iface, TypeName *type )
+{ return xaml_ct_get_UnderlyingType( &xaml_ct_from_winui3( iface )->lpVtbl, type ); }
+
+static const void *xaml_cached_type_winui3_vtbl[] =
+{
+    xaml_ct_winui3_QueryInterface,      /* 0 */
+    xaml_ct_winui3_AddRef,              /* 1 */
+    xaml_ct_winui3_Release,             /* 2 */
+    xaml_ct_GetIids,                    /* 3 */
+    xaml_ct_GetRuntimeClassName,        /* 4 */
+    xaml_ct_GetTrustLevel,              /* 5 */
+    xaml_ct_get_NullPtr,                /* 6: get_BaseType */
+    xaml_ct_get_NullPtr,                /* 7: get_ContentProperty */
+    xaml_ct_winui3_get_FullName,        /* 8: get_FullName */
+    xaml_ct_get_False,                  /* 9: get_IsArray */
+    xaml_ct_get_False,                  /* 10: get_IsCollection */
+    xaml_ct_get_True,                   /* 11: get_IsConstructible */
+    xaml_ct_get_False,                  /* 12: get_IsDictionary */
+    xaml_ct_get_False,                  /* 13: get_IsMarkupExtension */
+    xaml_ct_get_False,                  /* 14: get_IsEnum */
+    xaml_ct_get_False,                  /* 15: get_IsBindable */
+    xaml_ct_get_NullPtr,                /* 16: get_ItemType */
+    xaml_ct_get_NullPtr,                /* 17: get_KeyType */
+    xaml_ct_winui3_get_Name,            /* 18: get_Name */
+    xaml_ct_winui3_ActivateInstance,    /* 19: ActivateInstance (WinUI 3) */
+    xaml_ct_CreateFromString,           /* 20: CreateFromString */
+    xaml_ct_GetMember,                  /* 21: GetMember */
+    xaml_ct_RunInitializer,             /* 22: RunInitializer */
+    xaml_ct_winui3_get_UnderlyingType,  /* 23: get_UnderlyingType */
+};
+
+static struct xaml_cached_type *xaml_cached_type_create( const WCHAR *full_name, WORD xbf_id )
+{
+    struct xaml_cached_type *t = calloc( 1, sizeof(*t) );
+    const WCHAR *dot;
+    if (!t) return NULL;
+    t->lpVtbl = xaml_cached_type_uwp_vtbl;
+    t->lpVtbl_winui3 = xaml_cached_type_winui3_vtbl;
+    t->lpVtbl_weak_src = xaml_cached_type_wrs_vtbl;
+    t->ref = 1;
+    t->full_name = wcsdup( full_name );
+    if (!t->full_name) { free( t ); return NULL; }
+    dot = wcsrchr( t->full_name, '.' );
+    t->short_name = dot ? dot + 1 : t->full_name;
+    t->xbf_type_id = xbf_id;
+    return t;
+}
+
+struct xaml_meta_cache_entry *xaml_meta_insert_locked( const WCHAR *full_name, WORD xbf_id )
+{
+    UINT32 bucket = xaml_meta_hash( full_name ) & (XAML_META_CACHE_SIZE - 1);
+    struct xaml_meta_cache_entry *e;
+
+    for (e = xaml_meta_cache[bucket]; e; e = e->next)
+    {
+        if (!wcscmp( e->full_name, full_name ))
+        {
+            if (xbf_id && !e->xbf_type_id) e->xbf_type_id = xbf_id;
+            return e;
+        }
+    }
+
+    e = calloc( 1, sizeof(*e) );
+    if (!e) return NULL;
+    e->full_name = wcsdup( full_name );
+    if (!e->full_name) { free( e ); return NULL; }
+    e->xbf_type_id = xbf_id;
+    e->next = xaml_meta_cache[bucket];
+    xaml_meta_cache[bucket] = e;
+    return e;
+}
+
+static HRESULT xaml_metadata_cache_get_type( const WCHAR *full_name, void **out )
+{
+    struct xaml_meta_cache_entry *e;
+    struct xaml_cached_type *ct = NULL;
+    UINT32 bucket;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!full_name || !full_name[0]) return E_INVALIDARG;
+
+    InitOnceExecuteOnce( &xaml_meta_cache_once, init_xaml_meta_cache, NULL, NULL );
+    bucket = xaml_meta_hash( full_name ) & (XAML_META_CACHE_SIZE - 1);
+
+    AcquireSRWLockShared( &xaml_meta_cache_lock );
+    for (e = xaml_meta_cache[bucket]; e; e = e->next)
+    {
+        if (!wcscmp( e->full_name, full_name ) && e->builtin_type)
+        {
+            ct = e->builtin_type;
+            InterlockedIncrement( &ct->ref );
+            ReleaseSRWLockShared( &xaml_meta_cache_lock );
+            *out = ct;
+            return S_OK;
+        }
+    }
+    ReleaseSRWLockShared( &xaml_meta_cache_lock );
+
+    AcquireSRWLockExclusive( &xaml_meta_cache_lock );
+    e = xaml_meta_insert_locked( full_name, 0 );
+    if (e)
+    {
+        if (!e->builtin_type)
+            e->builtin_type = xaml_cached_type_create( full_name, e->xbf_type_id );
+        ct = e->builtin_type;
+        if (ct) InterlockedIncrement( &ct->ref );
+    }
+    ReleaseSRWLockExclusive( &xaml_meta_cache_lock );
+
+    *out = ct;
+    return ct ? S_OK : E_OUTOFMEMORY;
+}
+
+HRESULT xaml_metadata_cache_get_type_hstring( HSTRING full_name, void **out )
+{
+    const WCHAR *raw;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!full_name) return S_OK;
+    raw = WindowsGetStringRawBuffer( full_name, NULL );
+    if (!raw || !raw[0]) return S_OK;
+    return xaml_metadata_cache_get_type( raw, out );
+}
+
+struct xaml_type *uwp_provider_get_xaml_type_cached( struct xaml_metadata_provider *mp,
+                                                            const WCHAR *owner_type_name )
+{
+    struct xaml_meta_cache_entry *e;
+    struct xaml_type *xt = NULL;
+    HSTRING h_owner = NULL;
+    UINT32 bucket;
+
+    if (!mp || !owner_type_name || !owner_type_name[0]) return NULL;
+    InitOnceExecuteOnce( &xaml_meta_cache_once, init_xaml_meta_cache, NULL, NULL );
+    bucket = xaml_meta_hash( owner_type_name ) & (XAML_META_CACHE_SIZE - 1);
+
+    AcquireSRWLockShared( &xaml_meta_cache_lock );
+    for (e = xaml_meta_cache[bucket]; e; e = e->next)
+    {
+        if (!wcscmp( e->full_name, owner_type_name ) && e->provider_key == mp && e->provider_type)
+        {
+            xt = e->provider_type;
+            IInspectable_AddRef( (IInspectable *)xt );
+            ReleaseSRWLockShared( &xaml_meta_cache_lock );
+            return xt;
+        }
+    }
+    ReleaseSRWLockShared( &xaml_meta_cache_lock );
+
+    if (mp->lpVtbl->GetXamlTypeByFullName &&
+        SUCCEEDED(WindowsCreateString( owner_type_name, wcslen( owner_type_name ), &h_owner )))
+    {
+        if (SUCCEEDED(mp->lpVtbl->GetXamlTypeByFullName( mp, h_owner, &xt )) && xt)
+        {
+            AcquireSRWLockExclusive( &xaml_meta_cache_lock );
+            e = xaml_meta_insert_locked( owner_type_name, 0 );
+            if (e && !e->provider_type)
+            {
+                e->provider_key = mp;
+                e->provider_type = xt;
+                IInspectable_AddRef( (IInspectable *)xt );
+            }
+            ReleaseSRWLockExclusive( &xaml_meta_cache_lock );
+        }
+        WindowsDeleteString( h_owner );
+    }
+    return xt;
+}

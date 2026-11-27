@@ -892,3 +892,86 @@ const WCHAR *const xbf_known_types[XBF_KNOWN_TYPES_COUNT] =
 };
 
 const unsigned int xbf_known_types_count = ARRAY_SIZE(xbf_known_types);
+
+const WCHAR *xbf_bprop_to_name( WORD pid )
+{
+    switch (pid)
+    {
+    case XBF_PROP_AUTOMATION_ID: return L"AutomationId";
+    case XBF_PROP_AUTOMATION_NAME: return L"Name";
+    case XBF_PROP_BRUSH_OPACITY: return L"Opacity";
+    case XBF_PROP_TEXTELEMENT_FONT_FAMILY:
+    case XBF_PROP_CONTENTPRESENTER_FONT_FAMILY:
+    case XBF_PROP_CONTROL_FONT_FAMILY:
+    case XBF_PROP_TEXTBLOCK_FONT_FAMILY:
+    case XBF_PROP_FONTICON_FONT_FAMILY: return L"FontFamily";
+    case XBF_PROP_TEXTELEMENT_FONTSIZE:
+    case XBF_PROP_CONTROL_FONTSIZE:
+    case XBF_PROP_TEXTBLOCK_FONTSIZE:
+    case XBF_PROP_FONTICON_FONTSIZE: return L"FontSize";
+    case XBF_PROP_TEXTELEMENT_FONT_WEIGHT:
+    case XBF_PROP_CONTROL_FONT_WEIGHT:
+    case XBF_PROP_TEXTBLOCK_FONT_WEIGHT: return L"FontWeight";
+    case XBF_PROP_TEXTELEMENT_FOREGROUND:
+    case XBF_PROP_CONTROL_FOREGROUND:
+    case XBF_PROP_ICONELEMENT_FOREGROUND:
+    case XBF_PROP_TEXTBLOCK_FOREGROUND: return L"Foreground";
+    case XBF_PROP_UIELEMENT_OPACITY: return L"Opacity";
+    case XBF_PROP_UIELEMENT_VISIBILITY:
+    case XBF_PROP_UIELEMENT_VISIBILITY_V2: return L"Visibility";
+    case XBF_PROP_FLOW_DIRECTION: return L"FlowDirection";
+    case XBF_PROP_FRAMEWORKELEMENT_HEIGHT: return L"Height";
+    case XBF_PROP_HORIZONTAL_ALIGNMENT: return L"HorizontalAlignment";
+    case XBF_PROP_MARGIN: return L"Margin";
+    case XBF_PROP_FRAMEWORKELEMENT_MAXHEIGHT: return L"MaxHeight";
+    case XBF_PROP_FRAMEWORKELEMENT_MAXWIDTH: return L"MaxWidth";
+    case XBF_PROP_MIN_HEIGHT: return L"MinHeight";
+    case XBF_PROP_MIN_WIDTH: return L"MinWidth";
+    case XBF_PROP_FRAMEWORKELEMENT_NAME: return L"Name";
+    case XBF_PROP_FRAMEWORKELEMENT_TAG: return L"Tag";
+    case XBF_PROP_VERTICAL_ALIGNMENT: return L"VerticalAlignment";
+    case XBF_PROP_WIDTH: return L"Width";
+    case XBF_PROP_BORDER_BACKGROUND:
+    case XBF_PROP_CONTROL_BACKGROUND:
+    case XBF_PROP_PANEL_BACKGROUND: return L"Background";
+    case XBF_PROP_BORDER_BRUSH:
+    case XBF_PROP_CONTROL_BORDER_BRUSH:
+    case XBF_PROP_GRID_BORDER_BRUSH:
+    case XBF_PROP_STACKPANEL_BORDER_BRUSH: return L"BorderBrush";
+    case XBF_PROP_BORDER_THICKNESS:
+    case XBF_PROP_CONTROL_BORDER_THICKNESS:
+    case XBF_PROP_GRID_BORDER_THICKNESS:
+    case XBF_PROP_STACKPANEL_BORDER_THICKNESS: return L"BorderThickness";
+    case XBF_PROP_BORDER_CHILD: return L"Child";
+    case XBF_PROP_BORDER_CORNER_RADIUS:
+    case XBF_PROP_GRID_CORNER_RADIUS:
+    case XBF_PROP_STACKPANEL_CORNER_RADIUS:
+    case XBF_PROP_CONTROL_CORNER_RADIUS: return L"CornerRadius";
+    case XBF_PROP_BORDER_PADDING:
+    case XBF_PROP_CONTROL_PADDING: return L"Padding";
+    case XBF_PROP_CONTROL_HORIZONTAL_CONTENT_ALIGNMENT: return L"HorizontalContentAlignment";
+    case XBF_PROP_CONTROL_VERTICAL_CONTENT_ALIGNMENT: return L"VerticalContentAlignment";
+    case XBF_PROP_CONTROL_IS_ENABLED: return L"IsEnabled";
+    case XBF_PROP_TEXTBLOCK_TEXT:
+    case XBF_PROP_RUN_TEXT: return L"Text";
+    case XBF_PROP_TEXTBLOCK_TEXT_ALIGNMENT: return L"TextAlignment";
+    case XBF_PROP_TEXTBLOCK_TEXT_WRAPPING:
+    case XBF_PROP_RICHTEXTBLOCK_TEXT_WRAPPING: return L"TextWrapping";
+    case XBF_PROP_TEXTBLOCK_MAX_LINES:
+    case XBF_PROP_RICHTEXTBLOCK_MAX_LINES: return L"MaxLines";
+    case XBF_PROP_CONTENT:
+    case XBF_PROP_USERCONTROL_CONTENT:
+    case XBF_PROP_FLYOUT_CONTENT: return L"Content";
+    case XBF_PROP_FONTICON_GLYPH: return L"Glyph";
+    case XBF_PROP_TOGGLE_BUTTON_IS_CHECKED:
+    case XBF_PROP_TOGGLE_MENU_FLYOUT_ITEM_IS_CHECKED: return L"IsChecked";
+    case XBF_PROP_ORIENTATION:
+    case XBF_PROP_STACKPANEL_ORIENTATION: return L"Orientation";
+    case XBF_PROP_PROGRESS_RING_IS_ACTIVE: return L"IsActive";
+    case XBF_PROP_SELECTOR_ITEM_IS_SELECTED: return L"IsSelected";
+    case XBF_PROP_GRID_COLUMN_SPACING: return L"ColumnSpacing";
+    case XBF_PROP_GRID_ROW_SPACING: return L"RowSpacing";
+    case XBF_PROP_STACKPANEL_SPACING: return L"Spacing";
+    default: return L"";
+    }
+}

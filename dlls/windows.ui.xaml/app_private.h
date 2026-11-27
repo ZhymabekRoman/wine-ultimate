@@ -86,7 +86,7 @@ ICoreWindow *wrap_core_window( ICoreWindow *inner );
 
 /* ---- Input event plumbing (core_input.c) ---- */
 extern CRITICAL_SECTION xaml_event_cs;
-void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wparam, LPARAM lparam );
+BOOL xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARAM wparam, LPARAM lparam );
 void xaml_cw_fire_pointer_event( struct xaml_core_window *cw, enum xaml_pointer_event_kind kind,
                                  const struct xaml_pointer_info *info );
 HRESULT notify_inner_core_window_key( HWND hwnd, UINT msg, WPARAM wparam );

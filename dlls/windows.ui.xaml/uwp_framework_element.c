@@ -120,6 +120,8 @@ static HRESULT WINAPI uwp_ui_put_Visibility( void *iface, int vis )
     if (impl && impl->visibility != vis)
     {
         impl->visibility = vis;
+        if (vis == 0 && impl->media && impl->media->video_wake_event)
+            SetEvent( impl->media->video_wake_event );
         if (impl->templated_parent)
             uwp_sync_all_template_presenters( impl->templated_parent );
         g_layout_dirty = TRUE;
@@ -135,8 +137,7 @@ static HRESULT WINAPI uwp_ui_get_RenderSize( void *iface, Size *sz )
 
 HRESULT WINAPI uwp_ui_event_add( void *iface, void *handler, EventRegistrationToken *tok )
 {
-    if (tok && (ULONG_PTR)tok > 0x10000 && !IsBadWritePtr( tok, sizeof(*tok) ))
-        tok->value = 1;
+    if (tok) tok->value = 1;
     return S_OK;
 }
 
@@ -262,7 +263,6 @@ HRESULT WINAPI uwp_fe_get_Tag( void *iface, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!out) return E_POINTER;
-    if ((ULONG_PTR)out < 0x10000 || IsBadWritePtr( out, sizeof(void *) )) return S_OK;
     *out = impl ? impl->tag : NULL;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     TRACE( "uwp_fe_get_Tag on %s (%s) -> %p\n",
@@ -279,6 +279,7 @@ HRESULT WINAPI uwp_fe_put_Tag( void *iface, void *val )
     if (impl->tag) IInspectable_Release( impl->tag );
     impl->tag = (IInspectable *)val;
     if (impl->tag) IInspectable_AddRef( impl->tag );
+    uwp_sync_all_template_presenters( impl );
     return S_OK;
 }
 
@@ -1248,7 +1249,9 @@ HRESULT WINAPI uwp_ctrl_ApplyTemplate( void *iface, boolean *ret )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     BOOL inflated = impl ? uwp_inflate_control_template( impl ) : FALSE;
-    if (ret) *ret = inflated || (impl && impl->template_applied) ? TRUE : FALSE;
+    if (impl && !impl->template_applied)
+        uwp_apply_template_force( impl );
+    if (ret) *ret = (inflated || (impl && impl->template_applied)) ? TRUE : FALSE;
     return S_OK;
 }
 HRESULT WINAPI uwp_ctrl_Focus( void *iface, int state, boolean *ret )
@@ -1491,6 +1494,9 @@ HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child_name, 
                 child->visibility = uwp_tpl_part_collapsed( nm ) ? 1 : 0;
                 lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
                 uwp_element_add_named( impl, child );
+                if (child->outer && !child->template_applied &&
+                    !wcscmp( part_cls, L"Microsoft.UI.Xaml.Controls.ItemsRepeater" ))
+                    uwp_apply_template_force( child );
             }
             if (hold_raw) IInspectable_Release( hold_raw );
         }
@@ -1652,6 +1658,28 @@ static HRESULT WINAPI uwp_ui_AddHandler( void *iface, void *routed_event, void *
         {
             xaml_event_registry_add( target_reg, teh, NULL );
             IUnknown_Release( (IUnknown *)teh );
+        }
+        else
+        {
+            HSTRING hcls = NULL;
+            const WCHAR *cls = NULL;
+            if (SUCCEEDED(IInspectable_GetRuntimeClassName( (IInspectable *)handler, &hcls )) && hcls)
+                cls = WindowsGetStringRawBuffer( hcls, NULL );
+            if (cls && wcsstr( cls, L"IReference" ))
+            {
+                const struct abi_iref_ptr *air = (const struct abi_iref_ptr *)handler;
+                void *unwrapped = NULL;
+                if (air->lpVtbl->get_Value && SUCCEEDED(air->lpVtbl->get_Value( handler, &unwrapped )) && unwrapped)
+                {
+                    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)unwrapped, &IID_ITappedEventHandler_UWP, &teh )) && teh)
+                    {
+                        xaml_event_registry_add( target_reg, teh, NULL );
+                        IUnknown_Release( (IUnknown *)teh );
+                    }
+                    IUnknown_Release( (IUnknown *)unwrapped );
+                }
+            }
+            if (hcls) WindowsDeleteString( hcls );
         }
     }
     return S_OK;
@@ -2414,6 +2442,173 @@ static void *uwp_canonical_unk( IInspectable *obj )
     return obj;
 }
 
+IInspectable *uwp_invoke_value_converter( struct uwp_element *bel, IInspectable *val,
+                                          const WCHAR *dp_name, BOOL convert_back )
+{
+    static const GUID IID_IValueConverter_Real_UWP =
+        { 0xe6f2fef0, 0x0712, 0x487f, { 0xb3, 0x13, 0xf3, 0x00, 0xb8, 0xd7, 0x9a, 0xa1 } };
+    void *conv = NULL;
+    IInspectable *res = NULL;
+    TypeName tn = {0};
+    HSTRING h_type = NULL, h_lang = NULL;
+    const WCHAR *tname = L"Object";
+    INT32 tkind = 0;
+
+    if (!bel || !bel->style_anim || !bel->style_anim->converter) return NULL;
+    if (FAILED(IInspectable_QueryInterface( bel->style_anim->converter, &IID_IValueConverter_Real_UWP, &conv )) || !conv)
+    {
+        if (FAILED(IInspectable_QueryInterface( bel->style_anim->converter, &IID_IValueConverter_UWP, &conv )) || !conv)
+        {
+            if (FAILED(IInspectable_QueryInterface( bel->style_anim->converter, &IID_IValueConverter_WinUI, &conv )) || !conv)
+                return NULL;
+        }
+    }
+    if (dp_name && dp_name[0])
+    {
+        if (!wcscmp( dp_name, L"Visibility" )) { tname = L"Windows.UI.Xaml.Visibility"; tkind = 1; }
+        else if (!wcscmp( dp_name, L"IsEnabled" ) || !wcscmp( dp_name, L"IsChecked" ) ||
+                 !wcscmp( dp_name, L"IsActive" ) || !wcscmp( dp_name, L"IsSelected" ))
+        { tname = L"Boolean"; tkind = 0; }
+        else if (!wcscmp( dp_name, L"Text" )) { tname = L"String"; tkind = 0; }
+    }
+    WindowsCreateString( tname, (UINT32)wcslen( tname ), &h_type );
+    tn.Name = h_type;
+    tn.Kind = tkind;
+    if (bel->style_anim->converter_lang[0])
+        WindowsCreateString( bel->style_anim->converter_lang, (UINT32)wcslen( bel->style_anim->converter_lang ), &h_lang );
+
+    __TRY
+    {
+        const struct abi_value_converter *avc = (const struct abi_value_converter *)conv;
+        HRESULT hr = convert_back
+            ? (avc->lpVtbl->ConvertBack ? avc->lpVtbl->ConvertBack( conv, val, tn, bel->style_anim->converter_param, h_lang, &res ) : E_NOTIMPL)
+            : (avc->lpVtbl->Convert ? avc->lpVtbl->Convert( conv, val, tn, bel->style_anim->converter_param, h_lang, &res ) : E_NOTIMPL);
+        if (FAILED(hr) && res) { IInspectable_Release( res ); res = NULL; }
+    }
+    __EXCEPT_ALL
+    {
+        res = NULL;
+    }
+    __ENDTRY;
+
+    if (h_type) WindowsDeleteString( h_type );
+    if (h_lang) WindowsDeleteString( h_lang );
+    IUnknown_Release( (IUnknown *)conv );
+    return res;
+}
+
+struct uwp_cmd_can_exec_handler
+{
+    const void *vtbl;
+    LONG ref;
+    IWeakReference *weak_btn;
+};
+
+static HRESULT WINAPI cmd_ce_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IEventHandler_IInspectable =
+        { 0xc50898f6, 0xc536, 0x5f47, { 0x85, 0x83, 0x8b, 0x2c, 0x24, 0x38, 0xa1, 0x3b } };
+    static const GUID IID_EventHandler_UWP =
+        { 0x9de1c535, 0x6ae1, 0x11e0, { 0x84, 0xe1, 0x18, 0xa9, 0x05, 0xbc, 0xc5, 0x3f } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IEventHandler_IInspectable ) ||
+        IsEqualGUID( iid, &IID_EventHandler_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_cmd_can_exec_handler *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cmd_ce_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_cmd_can_exec_handler *)iface)->ref );
+}
+static ULONG WINAPI cmd_ce_Release( void *iface )
+{
+    struct uwp_cmd_can_exec_handler *h = iface;
+    ULONG r = InterlockedDecrement( &h->ref );
+    if (!r)
+    {
+        if (h->weak_btn) IWeakReference_Release( h->weak_btn );
+        free( h );
+    }
+    return r;
+}
+static HRESULT WINAPI cmd_ce_Invoke( void *iface, void *sender, void *args )
+{
+    struct uwp_cmd_can_exec_handler *h = iface;
+    IInspectable *obj = NULL;
+    if (h && h->weak_btn && SUCCEEDED(IWeakReference_Resolve( h->weak_btn, &IID_IInspectable, &obj )) && obj)
+    {
+        struct uwp_element *btn = uwp_elem_from_any( obj );
+        if (btn) uwp_sync_command_can_execute( btn );
+        IInspectable_Release( obj );
+    }
+    return S_OK;
+}
+static const void *g_cmd_ce_vtbl[] = { cmd_ce_QI, cmd_ce_AddRef, cmd_ce_Release, cmd_ce_Invoke };
+
+void uwp_sync_command_can_execute( struct uwp_element *btn )
+{
+    void *cmd_iface = NULL;
+    HRESULT qhr;
+    struct uwp_style_anim_ext *sa;
+    if (!btn || !btn->command) return;
+    qhr = IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface );
+    if (FAILED(qhr)) qhr = IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP2, &cmd_iface );
+    if (FAILED(qhr) || !cmd_iface) return;
+    sa = uwp_elem_ensure_style_anim( btn );
+    if (sa && !sa->cmd_can_exec_handler)
+    {
+        IWeakReference *wr = NULL;
+        if (SUCCEEDED(btn->IWeakReferenceSource_iface.lpVtbl->GetWeakReference( &btn->IWeakReferenceSource_iface, &wr )) && wr)
+        {
+            struct uwp_cmd_can_exec_handler *h = calloc( 1, sizeof(*h) );
+            if (h)
+            {
+                const struct abi_command_full *acf = (const struct abi_command_full *)cmd_iface;
+                h->vtbl = g_cmd_ce_vtbl;
+                h->ref = 1;
+                h->weak_btn = wr;
+                sa->cmd_can_exec_handler = (IInspectable *)h;
+                if (acf->lpVtbl->add_CanExecuteChanged)
+                {
+                    __TRY { acf->lpVtbl->add_CanExecuteChanged( cmd_iface, h, &sa->cmd_can_exec_tok ); }
+                    __EXCEPT_ALL {}
+                    __ENDTRY;
+                }
+            }
+            else
+                IWeakReference_Release( wr );
+        }
+    }
+    {
+        const struct abi_command_full *acf = (const struct abi_command_full *)cmd_iface;
+        boolean can = TRUE;
+        HRESULT chr = E_FAIL;
+        if (acf->lpVtbl->CanExecute)
+        {
+            __TRY { chr = acf->lpVtbl->CanExecute( cmd_iface, btn->command_param, &can ); }
+            __EXCEPT_ALL { chr = E_FAIL; }
+            __ENDTRY;
+        }
+        if (SUCCEEDED(chr))
+        {
+            boolean ne = can ? TRUE : FALSE;
+            if (btn->is_enabled != ne)
+            {
+                btn->is_enabled = ne;
+                uwp_invalidate_window();
+            }
+        }
+    }
+    IUnknown_Release( (IUnknown *)cmd_iface );
+}
+
 static HRESULT WINAPI binding_npc_QI( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
@@ -2473,10 +2668,22 @@ static HRESULT WINAPI binding_npc_Invoke( void *iface, void *sender, void *args 
         IInspectable *resolved = uwp_resolve_binding_path( hits[i].src, hits[i].path );
         if (resolved)
         {
+            struct uwp_element *bel = NULL;
+            IInspectable *final_val = resolved;
+            int bi;
+            for (bi = 0; bi < hits[i].tel->dc_bound_dp_cnt; bi++)
+                if (hits[i].tel->dc_bound_dps[bi].dp == hits[i].dp)
+                { bel = hits[i].tel->dc_bound_dps[bi].binding; break; }
+            if (bel && bel->style_anim && bel->style_anim->converter)
+            {
+                IInspectable *conv_res = uwp_invoke_value_converter( bel, resolved, xaml_dp_get_name( hits[i].dp ), FALSE );
+                if (conv_res) final_val = conv_res;
+            }
             TRACE( "binding_npc_Invoke: %s.%s -> updating %s (%s)\n",
                    debugstr_w(pname), debugstr_w(hits[i].path),
                    debugstr_w(hits[i].tel->class_name), debugstr_w(hits[i].tel->name) );
-            uwp_do_SetValue( &hits[i].tel->IDependencyObject_iface, hits[i].dp, resolved );
+            uwp_do_SetValue( &hits[i].tel->IDependencyObject_iface, hits[i].dp, final_val );
+            if (final_val != resolved) IInspectable_Release( final_val );
             IInspectable_Release( resolved );
         }
         IInspectable_Release( &hits[i].tel->IInspectable_iface );
@@ -2623,7 +2830,24 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
     {
         src = bel->data_context;
     }
-    else
+    else if (bel && uwp_elem_placeholder( bel )[0])
+    {
+        HSTRING h_en = NULL;
+        const WCHAR *ename = uwp_elem_placeholder( bel );
+        struct uwp_element *scope = tel->owner_component ? tel->owner_component : tel;
+        if (SUCCEEDED(WindowsCreateString( ename, (UINT32)wcslen( ename ), &h_en )) && h_en)
+        {
+            void *found_obj = NULL;
+            if (SUCCEEDED(uwp_fe_FindName( &scope->IFrameworkElement_iface, h_en, &found_obj )) && found_obj)
+            {
+                src = (IInspectable *)found_obj;
+                /* keep owned ref on src? src stays alive in visual tree; release after SetValue below */
+                IInspectable_Release( src );
+            }
+            WindowsDeleteString( h_en );
+        }
+    }
+    if (!src)
     {
         struct uwp_element *anc;
         for (anc = tel; anc; anc = anc->parent)
@@ -2632,9 +2856,13 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
 
     if (src)
     {
+        const WCHAR *dpn = xaml_dp_get_name( dp );
         if (!path_str || !path_str[0])
         {
-            uwp_do_SetValue( &tel->IDependencyObject_iface, dp, src );
+            IInspectable *conv_res = (bel && bel->style_anim && bel->style_anim->converter)
+                ? uwp_invoke_value_converter( bel, src, dpn, FALSE ) : NULL;
+            uwp_do_SetValue( &tel->IDependencyObject_iface, dp, conv_res ? conv_res : src );
+            if (conv_res) IInspectable_Release( conv_res );
         }
         else
         {
@@ -2642,13 +2870,62 @@ void uwp_apply_binding( struct uwp_element *tel, void *dp, struct uwp_element *b
             uwp_binding_register_npc( tel, dp, src, path_str );
             if (resolved)
             {
-                uwp_do_SetValue( &tel->IDependencyObject_iface, dp, resolved );
+                IInspectable *conv_res = (bel && bel->style_anim && bel->style_anim->converter)
+                    ? uwp_invoke_value_converter( bel, resolved, dpn, FALSE ) : NULL;
+                uwp_do_SetValue( &tel->IDependencyObject_iface, dp, conv_res ? conv_res : resolved );
+                if (conv_res) IInspectable_Release( conv_res );
                 IInspectable_Release( resolved );
             }
         }
     }
 
     if (h_path) WindowsDeleteString( h_path );
+}
+
+void uwp_binding_notify_dp( struct uwp_element *src_el, const WCHAR *dpn )
+{
+    struct uwp_element *tels[32];
+    void *dps[32];
+    struct uwp_element *bels[32];
+    int n = 0, i;
+    void *src_unk;
+
+    if (!src_el || !dpn || !dpn[0]) return;
+    src_unk = uwp_canonical_unk( &src_el->IInspectable_iface );
+
+    AcquireSRWLockShared( &g_binding_sub_lock );
+    for (i = 0; i < g_binding_sub_cnt && n < (int)ARRAY_SIZE(tels); i++)
+    {
+        struct uwp_binding_sub *s = &g_binding_subs[i];
+        if (s->src_unk == src_unk && s->tel && s->dp && !wcscmp( s->path, dpn ))
+        {
+            int j;
+            tels[n] = s->tel;
+            dps[n] = s->dp;
+            bels[n] = NULL;
+            for (j = 0; j < s->tel->dc_bound_dp_cnt; j++)
+            {
+                if (s->tel->dc_bound_dps[j].dp == s->dp)
+                {
+                    bels[n] = s->tel->dc_bound_dps[j].binding;
+                    break;
+                }
+            }
+            IInspectable_AddRef( &tels[n]->IInspectable_iface );
+            if ((ULONG_PTR)dps[n] >= 0x10000) IUnknown_AddRef( (IUnknown *)dps[n] );
+            if (bels[n]) IInspectable_AddRef( &bels[n]->IInspectable_iface );
+            n++;
+        }
+    }
+    ReleaseSRWLockShared( &g_binding_sub_lock );
+
+    for (i = 0; i < n; i++)
+    {
+        uwp_apply_binding( tels[i], dps[i], bels[i] );
+        if (bels[i]) IInspectable_Release( &bels[i]->IInspectable_iface );
+        if ((ULONG_PTR)dps[i] >= 0x10000) IUnknown_Release( (IUnknown *)dps[i] );
+        IInspectable_Release( &tels[i]->IInspectable_iface );
+    }
 }
 
 static HRESULT WINAPI uwp_fe_SetBinding( void *iface, void *dp, void *binding )
