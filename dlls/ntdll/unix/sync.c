@@ -1795,11 +1795,14 @@ NTSTATUS WINAPI NtQuerySemaphore( HANDLE handle, SEMAPHORE_INFORMATION_CLASS cla
 /******************************************************************************
  *              NtReleaseSemaphore (NTDLL.@)
  */
-NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous )
+NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, LONG count, ULONG *previous )
 {
     unsigned int ret;
 
-    TRACE( "handle %p, count %u, prev_count %p\n", handle, count, previous );
+    TRACE( "handle %p, count %d, prev_count %p\n", handle, (int)count, previous );
+
+    if (count <= 0)
+        return STATUS_INVALID_PARAMETER;
 
 #ifdef __linux__
     if (is_local_sync_handle( handle ))
@@ -1836,7 +1839,7 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous 
         cur = __atomic_load_n( &slot->state, __ATOMIC_ACQUIRE );
         for (;;)
         {
-            uint64_t sum = (uint64_t)(ULONG)cur + (uint64_t)count;
+            uint64_t sum = (uint64_t)(ULONG)cur + (uint64_t)(ULONG)count;
             if (sum > (uint64_t)slot->max_count)
             {
                 __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
@@ -1849,8 +1852,8 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous 
         __atomic_sub_fetch( &slot->active_mutators, 1, __ATOMIC_RELEASE );
 
         if (previous) *previous = cur;
-        if (count > 0 && __atomic_load_n( &slot->waiters, __ATOMIC_SEQ_CST ) > 0)
-            futex_wake_n( &slot->state, count > (ULONG)INT_MAX ? INT_MAX : (int)count );
+        if (__atomic_load_n( &slot->waiters, __ATOMIC_SEQ_CST ) > 0)
+            futex_wake_n( &slot->state, (int)count );
         release_local_sync_slot( slot, idx );
         return STATUS_SUCCESS;
     }
@@ -5444,4 +5447,14 @@ NTSTATUS WINAPI NtConvertBetweenAuxiliaryCounterAndPerformanceCounter( ULONG fla
     if (!from) return STATUS_ACCESS_VIOLATION;
 
     return STATUS_NOT_SUPPORTED;
+}
+
+/***********************************************************************
+ *           NtOpenPrivateNamespace (NTDLL.@)
+ */
+NTSTATUS WINAPI NtOpenPrivateNamespace( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr, const OBJECT_BOUNDARY_DESCRIPTOR *descriptor )
+{
+    FIXME( "%p, %#x, %p, %p stub.\n", handle, access, attr, descriptor );
+
+    return STATUS_NOT_IMPLEMENTED;
 }

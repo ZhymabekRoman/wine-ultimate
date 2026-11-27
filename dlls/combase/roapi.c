@@ -1331,6 +1331,7 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     TRACE( "registry seed answers %s with %s\n", debugstr_w( classid ), debugstr_w( buf ) );
     class_lib_cache_store( classid, buf, S_OK );
     *out = buf;
+    RegCloseKey(hkey_class);
     return S_OK;
 
 done:

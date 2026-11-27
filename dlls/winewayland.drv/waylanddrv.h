@@ -41,6 +41,7 @@
 #include "pointer-warp-v1-client-protocol.h"
 #include "alpha-modifier-v1-client-protocol.h"
 #include "fractional-scale-v1-client-protocol.h"
+#include "color-management-v1-client-protocol.h"
 
 #include "windef.h"
 #include "winbase.h"
@@ -185,6 +186,7 @@ struct wayland
     struct wp_cursor_shape_manager_v1 *wp_cursor_shape_manager_v1;
     struct wp_pointer_warp_v1 *wp_pointer_warp_v1;
     struct wp_alpha_modifier_v1 *wp_alpha_modifier_v1;
+    struct wp_color_manager_v1 *wp_color_manager_v1;
     struct wayland_seat seat;
     struct wayland_keyboard keyboard;
     struct wayland_pointer pointer;
@@ -258,6 +260,7 @@ struct wayland_client_surface
     struct wp_viewport *wp_viewport;
     int last_x, last_y, last_width, last_height;
     BOOL geometry_valid;
+    struct wp_color_management_surface_v1 *color_management;
 };
 
 extern struct wayland_client_surface *impl_from_client_surface(struct client_surface *client);
@@ -326,6 +329,9 @@ void wayland_output_use_xdg_extension(struct wayland_output *output);
 /**********************************************************************
  *          Wayland surface
  */
+
+extern const struct wp_color_manager_v1_listener color_manager_listener;
+void color_management_init(void);
 
 struct wayland_surface *wayland_surface_create(HWND hwnd);
 void wayland_surface_destroy(struct wayland_surface *surface);
