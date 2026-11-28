@@ -276,6 +276,8 @@ void uwp_xcbb_ensure_connected( IInspectable *brush );
 
 /* Layout, GPU/offscreen render-target & SwapChainPanel hosting */
 void uwp_arrange_element( struct uwp_element *el, RECT rc );
+void uwp_gdi_paint_subtree( HDC hdc, struct uwp_element *el, const RECT *bounds, COLORREF bg_color );
+HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val );
 /* Offscreen render-target frame pair + layout pass for WS_CHILD islands. */
 BOOL xaml_gpu_begin_frame_rtv( ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv,
                                UINT width, UINT height, COLORREF clear_color );

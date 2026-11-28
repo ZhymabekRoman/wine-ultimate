@@ -1396,18 +1396,120 @@ static HRESULT WINAPI package_manager3_stub( void *iface, ... )
  * hand out fresh HSTRINGs, as every WinRT string property does. */
 static const GUID IID_IPackageVolume =
     { 0xcf2672c3, 0x1a40, 0x4450, { 0x97, 0x39, 0x2a, 0xce, 0x2e, 0x89, 0x88, 0x53 } };
+static const GUID IID_IPackageVolume2 =
+    { 0x46abcf2e, 0x9dd4, 0x47a2, { 0xab, 0x8c, 0xc6, 0x40, 0x83, 0x49, 0xbc, 0xd8 } };
+static const GUID IID_IAsyncOperation_UINT64 =
+    { 0x2a70d630, 0x0767, 0x5f0a, { 0xa1, 0xc2, 0xde, 0xb0, 0x81, 0x26, 0xe2, 0x6e } };
+
+struct u64_async_op
+{
+    const void *vtbl_op;
+    const void *vtbl_info;
+    LONG ref;
+    UINT64 value;
+};
+
+static HRESULT WINAPI u64_op_QI( void *iface, REFIID iid, void **out )
+{
+    struct u64_async_op *impl = CONTAINING_RECORD( iface, struct u64_async_op, vtbl_op );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncOperation_UINT64 ))
+    {
+        *out = &impl->vtbl_op;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &impl->vtbl_info;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI u64_op_AddRef( void *iface )
+{
+    return InterlockedIncrement( &CONTAINING_RECORD( iface, struct u64_async_op, vtbl_op )->ref );
+}
+static ULONG WINAPI u64_op_Release( void *iface )
+{
+    struct u64_async_op *impl = CONTAINING_RECORD( iface, struct u64_async_op, vtbl_op );
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) free( impl );
+    return r;
+}
+static HRESULT WINAPI u64_op_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI u64_op_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.IAsyncOperation`1<UInt64>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI u64_op_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI u64_op_put_Completed( void *iface, void *handler )
+{
+    if (handler)
+    {
+        void **vtbl = *(void ***)handler;
+        HRESULT (WINAPI *invoke)( void *, void *, UINT32 ) = (void *)vtbl[3];
+        if (invoke) invoke( handler, iface, 1 /* Completed */ );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI u64_op_get_Completed( void *iface, void **handler ) { if (handler) *handler = NULL; return S_OK; }
+static HRESULT WINAPI u64_op_GetResults( void *iface, UINT64 *res )
+{
+    struct u64_async_op *impl = CONTAINING_RECORD( iface, struct u64_async_op, vtbl_op );
+    if (!res) return E_POINTER;
+    *res = impl->value;
+    return S_OK;
+}
+static const void *u64_op_vtbl[] =
+{
+    u64_op_QI, u64_op_AddRef, u64_op_Release,
+    u64_op_GetIids, u64_op_GetRuntimeClassName, u64_op_GetTrustLevel,
+    u64_op_put_Completed, u64_op_get_Completed, u64_op_GetResults,
+};
+
+static HRESULT WINAPI u64_info_QI( void *iface, REFIID iid, void **out )
+{
+    return u64_op_QI( &CONTAINING_RECORD( iface, struct u64_async_op, vtbl_info )->vtbl_op, iid, out );
+}
+static ULONG WINAPI u64_info_AddRef( void *iface )
+{
+    return u64_op_AddRef( &CONTAINING_RECORD( iface, struct u64_async_op, vtbl_info )->vtbl_op );
+}
+static ULONG WINAPI u64_info_Release( void *iface )
+{
+    return u64_op_Release( &CONTAINING_RECORD( iface, struct u64_async_op, vtbl_info )->vtbl_op );
+}
+static HRESULT WINAPI u64_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI u64_info_get_Status( void *iface, UINT32 *st ) { if (st) *st = 1; return S_OK; }
+static HRESULT WINAPI u64_info_get_ErrorCode( void *iface, HRESULT *hr ) { if (hr) *hr = S_OK; return S_OK; }
+static HRESULT WINAPI u64_info_Cancel( void *iface ) { return S_OK; }
+static HRESULT WINAPI u64_info_Close( void *iface ) { return S_OK; }
+static const void *u64_info_vtbl[] =
+{
+    u64_info_QI, u64_info_AddRef, u64_info_Release,
+    u64_op_GetIids, u64_op_GetRuntimeClassName, u64_op_GetTrustLevel,
+    u64_info_get_Id, u64_info_get_Status, u64_info_get_ErrorCode, u64_info_Cancel, u64_info_Close,
+};
 
 struct package_volume
 {
     const void *vtbl;
+    const void *vtbl2;
     LONG ref;
 };
 
 static const void *package_volume_vtbl[];
+static const void *package_volume2_vtbl[];
 
 static struct package_volume default_package_volume =
 {
     package_volume_vtbl,
+    package_volume2_vtbl,
     1,
 };
 
@@ -1422,6 +1524,12 @@ static HRESULT WINAPI package_volume_QueryInterface( void *iface, REFIID iid, vo
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackageVolume ))
     {
         *out = &impl->vtbl;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPackageVolume2 ))
+    {
+        *out = &impl->vtbl2;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -1525,6 +1633,66 @@ static const void *package_volume_vtbl[] =
     package_volume_get_PackageStorePath,
     package_volume_get_SupportsHardLinks,
     package_volume_get_AppDataPath,
+};
+
+static HRESULT WINAPI package_volume2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct package_volume *impl = CONTAINING_RECORD( iface, struct package_volume, vtbl2 );
+    return package_volume_QueryInterface( &impl->vtbl, iid, out );
+}
+static ULONG WINAPI package_volume2_AddRef( void *iface )
+{
+    struct package_volume *impl = CONTAINING_RECORD( iface, struct package_volume, vtbl2 );
+    return package_volume_AddRef( &impl->vtbl );
+}
+static ULONG WINAPI package_volume2_Release( void *iface )
+{
+    struct package_volume *impl = CONTAINING_RECORD( iface, struct package_volume, vtbl2 );
+    return package_volume_Release( &impl->vtbl );
+}
+static HRESULT WINAPI package_volume2_get_IsFullTrustPackageSupported( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI package_volume2_get_IsAppxInstallSupported( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI package_volume2_GetAvailableSpaceAsync( void *iface, void **operation )
+{
+    struct u64_async_op *op;
+    ULARGE_INTEGER avail;
+
+    if (!operation) return E_POINTER;
+    if (!(op = calloc( 1, sizeof(*op) ))) return E_OUTOFMEMORY;
+    op->vtbl_op = u64_op_vtbl;
+    op->vtbl_info = u64_info_vtbl;
+    op->ref = 1;
+    if (GetDiskFreeSpaceExW( L"C:\\", &avail, NULL, NULL ))
+        op->value = avail.QuadPart;
+    else
+        op->value = 16ULL * 1024 * 1024 * 1024;
+    *operation = &op->vtbl_op;
+    return S_OK;
+}
+
+static const void *package_volume2_vtbl[] =
+{
+    package_volume2_QueryInterface,
+    package_volume2_AddRef,
+    package_volume2_Release,
+    /* IInspectable methods */
+    package_volume_GetIids,
+    package_volume_GetRuntimeClassName,
+    package_volume_GetTrustLevel,
+    /* IPackageVolume2 methods */
+    package_volume2_get_IsFullTrustPackageSupported,
+    package_volume2_get_IsAppxInstallSupported,
+    package_volume2_GetAvailableSpaceAsync,
 };
 
 static HRESULT WINAPI package_manager3_GetDefaultPackageVolume( void *iface, void **volume )

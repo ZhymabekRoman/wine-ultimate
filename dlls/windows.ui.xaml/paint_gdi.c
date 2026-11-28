@@ -705,3 +705,16 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     }
     else TRACE( "xaml_layout_render: root_el NULL (content %p)\n", (void *)content );
 }
+
+void uwp_gdi_paint_subtree( HDC hdc, struct uwp_element *el, const RECT *bounds, COLORREF bg_color )
+{
+    COLORREF prev_bg;
+    if (!hdc || !el || !bounds) return;
+    prev_bg = g_paint_page_bg;
+    g_paint_page_bg = bg_color;
+    uwp_vsm_evaluate_tree( el, (double)(bounds->right - bounds->left),
+                           (double)(bounds->bottom - bounds->top) );
+    uwp_arrange_element( el, *bounds );
+    uwp_paint_element( hdc, el );
+    g_paint_page_bg = prev_bg;
+}

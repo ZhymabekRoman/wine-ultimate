@@ -1949,6 +1949,39 @@ void uwp_ui_fire_lost_focus( struct uwp_element *el )
     }
 }
 
+static HRESULT WINAPI uwp_ui_add_KeyUp( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
+    if (!impl) { if (tok) tok->value = 0; return E_NOINTERFACE; }
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->keyup_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_ui_remove_KeyUp( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->keyup_reg, tok );
+}
+static HRESULT WINAPI uwp_ui_add_KeyDown( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    struct uwp_event_bag *ev;
+    if (!impl) { if (tok) tok->value = 0; return E_NOINTERFACE; }
+    ev = uwp_elem_ensure_events( impl );
+    if (!ev) return E_OUTOFMEMORY;
+    return xaml_event_registry_add( &ev->keydown_reg, handler, tok );
+}
+static HRESULT WINAPI uwp_ui_remove_KeyDown( void *iface, EventRegistrationToken tok )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return E_NOINTERFACE;
+    if (!impl->events) return S_OK;
+    return xaml_event_registry_remove( &impl->events->keydown_reg, tok );
+}
+
 const void *uwp_ui_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -1968,7 +2001,10 @@ const void *uwp_ui_vtbl[128] =
     [22] = uwp_ui_put_Visibility,
     [23] = uwp_ui_get_RenderSize,
     [24 ... 40] = uwp_generic_noop,
-    [41 ... 44] = uwp_ui_event_add,
+    [41] = uwp_ui_add_KeyUp,
+    [42] = uwp_ui_remove_KeyUp,
+    [43] = uwp_ui_add_KeyDown,
+    [44] = uwp_ui_remove_KeyDown,
     [45] = uwp_ui_add_GotFocus,
     [46] = uwp_ui_remove_GotFocus,
     [47] = uwp_ui_add_LostFocus,

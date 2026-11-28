@@ -61,6 +61,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( http_method_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, L"Windows.Web.Http.Filters.HttpBaseProtocolFilter" ))
         IActivationFactory_QueryInterface( http_base_protocol_filter_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Web.Http.Headers.HttpCredentialsHeaderValue" ))
+        IActivationFactory_QueryInterface( http_credentials_header_value_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, L"Windows.Storage.Streams.DataReader" ))
         *factory = (IActivationFactory *)create_data_reader_factory();
     if (!wcscmp( buffer, L"Windows.Storage.Streams.Buffer" ))

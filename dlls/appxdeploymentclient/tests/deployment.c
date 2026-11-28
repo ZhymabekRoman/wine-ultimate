@@ -407,9 +407,12 @@ static void test_find_packages( IPackageManager *pm )
     WindowsCreateString( full_name, ARRAY_SIZE(full_name) - 1, &str );
     iterable = NULL;
     hr = IPackageManager_FindPackages( pm, &iterable );
-    WindowsDeleteString( str );
     ok( hr == S_OK && iterable, "FindPackages hr %#lx iterable %p\n", hr, iterable );
-    if (!iterable) return;
+    if (!iterable)
+    {
+        WindowsDeleteString( str );
+        return;
+    }
 
     /* the collection contains the registered package, and its id reads back */
     found = NULL;
@@ -442,6 +445,7 @@ static void test_find_packages( IPackageManager *pm )
         }
         IIterator_Package_Release( iter );
     }
+    WindowsDeleteString( str );
     ok( !!found, "FindPackages did not enumerate %s (total %lu)\n", debugstr_w( full_name ), total );
     if (found)
     {

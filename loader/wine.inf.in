@@ -985,6 +985,9 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Displa
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.HttpBufferContent,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.HttpBufferContent,"DllPath",2,"%12%\windows.web.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.HttpBufferContent,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.Headers.HttpCredentialsHeaderValue,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.Headers.HttpCredentialsHeaderValue,"DllPath",2,"%12%\windows.web.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Web.Http.Headers.HttpCredentialsHeaderValue,"ThreadingModel",0x10001,2
 
 ; The Windows.Devices.Geolocation classes, served by the own-name builtin module
 ; windows.devices.geolocation.dll (the module Windows hosts the namespace in).  The

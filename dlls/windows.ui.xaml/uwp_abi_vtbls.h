@@ -240,6 +240,12 @@ struct abi_winrt_vector_vtbl
     void *pad3_5[3];
     HRESULT (WINAPI *GetAt)( void *This, unsigned int index, void **item );     /* slot 6 */
     HRESULT (WINAPI *get_Size)( void *This, unsigned int *size );               /* slot 7 */
+    HRESULT (WINAPI *GetView)( void *This, void **view );                       /* slot 8 */
+    HRESULT (WINAPI *IndexOf)( void *This, void *item, unsigned int *idx, boolean *found ); /* slot 9 */
+    HRESULT (WINAPI *SetAt)( void *This, unsigned int index, void *item );      /* slot 10 */
+    HRESULT (WINAPI *InsertAt)( void *This, unsigned int index, void *item );   /* slot 11 */
+    HRESULT (WINAPI *RemoveAt)( void *This, unsigned int index );               /* slot 12 */
+    HRESULT (WINAPI *Append)( void *This, void *item );                         /* slot 13 */
 };
 struct abi_winrt_vector { const struct abi_winrt_vector_vtbl *lpVtbl; };
 
@@ -643,6 +649,16 @@ struct abi_dts_overrides2_vtbl
     HRESULT (WINAPI *SelectTemplateForItemCore)( void *This, void *item, void **out ); /* slot 6 */
 };
 struct abi_dts_overrides2 { const struct abi_dts_overrides2_vtbl *lpVtbl; };
+
+struct abi_markup_ext_overrides_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( void *This );
+    ULONG (WINAPI *Release)( void *This );
+    void *pad3_5[3];
+    HRESULT (WINAPI *ProvideValue)( void *This, IInspectable **out ); /* slot 6 */
+};
+struct abi_markup_ext_overrides { const struct abi_markup_ext_overrides_vtbl *lpVtbl; };
 
 struct abi_tab_item_vm_vtbl
 {

@@ -318,6 +318,7 @@ retry:
     if (req) { WinHttpCloseHandle( req ); req = NULL; }
     if (conn) { WinHttpCloseHandle( conn ); conn = NULL; }
     }
+    if (!req) goto done;
     size = sizeof(status);
     WinHttpQueryHeaders( req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                          WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX );
@@ -468,40 +469,116 @@ static HRESULT send_request( void *req, void **op )
 
     if (r->content)
     {
-        /* IHttpContent slot 9 ReadAsStringAsync works for both HttpStringContent
-         * and HttpStreamContent (streams are pumped to UTF-8), op slot 10
-         * GetResults returns the HSTRING. */
-        HRESULT (WINAPI *read_str)( void *, void ** ) =
-            (void *)((void *const *)(*(void *const **)r->content))[9];
-        void *c_op = NULL;
-        HSTRING str = NULL;
+        static const GUID IID_IBufferByteAccess_c =
+            { 0x905a0fef, 0xbc53, 0x11df, { 0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda } };
+        HSTRING cls = NULL;
+        const WCHAR *cls_w = L"";
+        BOOL is_stream_c = FALSE;
 
-        if (SUCCEEDED( read_str( r->content, &c_op ) ) && c_op)
+        if (SUCCEEDED( IInspectable_GetRuntimeClassName( (IInspectable *)r->content, &cls ) ) && cls)
         {
-            HRESULT (WINAPI *op_res)( void *, HSTRING * ) =
-                (void *)((void *const *)(*(void *const **)c_op))[10];
-            op_res( c_op, &str );
-            IUnknown_Release( (IUnknown *)c_op );
+            cls_w = WindowsGetStringRawBuffer( cls, NULL );
+            if (cls_w && !wcscmp( cls_w, L"Windows.Web.Http.HttpStreamContent" ))
+                is_stream_c = TRUE;
         }
-        if (str)
+
+        if (is_stream_c)
         {
-            UINT wlen = WindowsGetStringLen( str );
-            const WCHAR *w = WindowsGetStringRawBuffer( str, NULL );
-            int n = WideCharToMultiByte( CP_UTF8, 0, w, wlen, NULL, 0, NULL, NULL );
-            if (n > 0 && (body_data = HeapAlloc( GetProcessHeap(), 0, n )))
+            /* HttpStreamContent hosts ReadAsStringAsync at slot 9 and get_Headers at slot 13. */
+            HRESULT (WINAPI *read_str)( void *, void ** ) =
+                (void *)((void *const *)(*(void *const **)r->content))[9];
+            HRESULT (WINAPI *get_hdrs)( void *, void ** ) =
+                (void *)((void *const *)(*(void *const **)r->content))[13];
+            void *c_op = NULL;
+            HSTRING str = NULL;
+
+            if (SUCCEEDED( read_str( r->content, &c_op ) ) && c_op)
             {
-                WideCharToMultiByte( CP_UTF8, 0, w, wlen, (char *)body_data, n, NULL, NULL );
-                body_len = n;
+                HRESULT (WINAPI *op_res)( void *, HSTRING * ) =
+                    (void *)((void *const *)(*(void *const **)c_op))[10];
+                op_res( c_op, &str );
+                IUnknown_Release( (IUnknown *)c_op );
+            }
+            if (str)
+            {
+                UINT wlen = WindowsGetStringLen( str );
+                const WCHAR *w = WindowsGetStringRawBuffer( str, NULL );
+                int n = WideCharToMultiByte( CP_UTF8, 0, w, wlen, NULL, 0, NULL, NULL );
+                if (n > 0 && (body_data = HeapAlloc( GetProcessHeap(), 0, n )))
+                {
+                    WideCharToMultiByte( CP_UTF8, 0, w, wlen, (char *)body_data, n, NULL, NULL );
+                    body_len = n;
+                }
+                WindowsDeleteString( str );
+            }
+            get_hdrs( r->content, &content_headers );
+        }
+        else
+        {
+            /* Standard WinRT IHttpContent: slot 6 get_Headers, slot 8 ReadAsBufferAsync, slot 10 ReadAsStringAsync. */
+            HRESULT (WINAPI *get_hdrs)( void *, void ** ) =
+                (void *)((void *const *)(*(void *const **)r->content))[6];
+            HRESULT (WINAPI *read_buf)( void *, void ** ) =
+                (void *)((void *const *)(*(void *const **)r->content))[8];
+            HRESULT (WINAPI *read_str)( void *, void ** ) =
+                (void *)((void *const *)(*(void *const **)r->content))[10];
+            void *c_op = NULL, *ibuf = NULL, *bba = NULL;
+
+            get_hdrs( r->content, &content_headers );
+            if (SUCCEEDED( read_buf( r->content, &c_op ) ) && c_op)
+            {
+                HRESULT (WINAPI *op_res)( void *, void ** ) =
+                    (void *)((void *const *)(*(void *const **)c_op))[10];
+                if (SUCCEEDED( op_res( c_op, &ibuf ) ) && ibuf)
+                {
+                    HRESULT (WINAPI *get_len)( void *, ULONG * ) =
+                        (void *)((void *const *)(*(void *const **)ibuf))[7];
+                    ULONG blen = 0;
+                    BYTE *bptr = NULL;
+                    if (SUCCEEDED( get_len( ibuf, &blen ) ) && blen > 0 &&
+                        SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)ibuf, &IID_IBufferByteAccess_c, &bba ) ) && bba)
+                    {
+                        HRESULT (WINAPI *buf_ptr)( void *, BYTE ** ) =
+                            (void *)((void *const *)(*(void *const **)bba))[3];
+                        if (SUCCEEDED( buf_ptr( bba, &bptr ) ) && bptr &&
+                            (body_data = HeapAlloc( GetProcessHeap(), 0, blen )))
+                        {
+                            memcpy( body_data, bptr, blen );
+                            body_len = blen;
+                        }
+                        IUnknown_Release( (IUnknown *)bba );
+                    }
+                    IUnknown_Release( (IUnknown *)ibuf );
+                }
+                IUnknown_Release( (IUnknown *)c_op );
+            }
+            if (!body_data)
+            {
+                HSTRING str = NULL;
+                c_op = NULL;
+                if (SUCCEEDED( read_str( r->content, &c_op ) ) && c_op)
+                {
+                    HRESULT (WINAPI *op_res)( void *, HSTRING * ) =
+                        (void *)((void *const *)(*(void *const **)c_op))[10];
+                    op_res( c_op, &str );
+                    IUnknown_Release( (IUnknown *)c_op );
+                }
+                if (str)
+                {
+                    UINT wlen = WindowsGetStringLen( str );
+                    const WCHAR *w = WindowsGetStringRawBuffer( str, NULL );
+                    int n = WideCharToMultiByte( CP_UTF8, 0, w, wlen, NULL, 0, NULL, NULL );
+                    if (n > 0 && (body_data = HeapAlloc( GetProcessHeap(), 0, n )))
+                    {
+                        WideCharToMultiByte( CP_UTF8, 0, w, wlen, (char *)body_data, n, NULL, NULL );
+                        body_len = n;
+                    }
+                    WindowsDeleteString( str );
+                }
             }
         }
+        if (cls) WindowsDeleteString( cls );
         WDBG( "send_request content pump len %u\n", (unsigned)body_len );
-    }
-
-    if (r->content)
-    {
-        HRESULT (WINAPI *get_hdrs)( void *, void ** ) =
-            (void *)((void *const *)(*(void *const **)r->content))[6];
-        get_hdrs( r->content, &content_headers );
     }
     if (FAILED( (hr = http_fetch_to_response( method, uri, body_data, body_len, r->headers, content_headers, &resp ) ) ))
     {

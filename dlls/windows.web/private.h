@@ -64,6 +64,7 @@ extern IActivationFactory *http_buffer_content_factory;
 extern IActivationFactory *http_stream_content_factory;
 extern IActivationFactory *http_method_factory;
 extern IActivationFactory *http_base_protocol_filter_factory;
+extern IActivationFactory *http_credentials_header_value_factory;
 
 struct json_root
 {

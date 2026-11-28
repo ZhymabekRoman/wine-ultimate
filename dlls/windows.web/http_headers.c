@@ -541,6 +541,563 @@ const struct hdr_pair *http_headers_pairs( void *iface, UINT32 *count )
     return impl->pairs;
 }
 
+static HRESULT headers_set_named_value( struct http_headers *impl, const WCHAR *name, const WCHAR *value )
+{
+    HSTRING hname = NULL, hval = NULL;
+    UINT32 i;
+    HRESULT hr;
+
+    if (FAILED( hr = WindowsCreateString( name, wcslen( name ), &hname ) ))
+        return hr;
+
+    for (i = 0; i < impl->count; i++)
+    {
+        const WCHAR *k = WindowsGetStringRawBuffer( impl->pairs[i].k, NULL );
+        if (k && !_wcsicmp( k, name ))
+        {
+            if (!value)
+            {
+                WindowsDeleteString( impl->pairs[i].k );
+                WindowsDeleteString( impl->pairs[i].v );
+                if (i + 1 < impl->count)
+                    memmove( &impl->pairs[i], &impl->pairs[i + 1], (impl->count - i - 1) * sizeof(*impl->pairs) );
+                impl->count--;
+                WindowsDeleteString( hname );
+                return S_OK;
+            }
+            if (FAILED( hr = WindowsCreateString( value, wcslen( value ), &hval ) ))
+            {
+                WindowsDeleteString( hname );
+                return hr;
+            }
+            WindowsDeleteString( impl->pairs[i].v );
+            impl->pairs[i].v = hval;
+            WindowsDeleteString( hname );
+            return S_OK;
+        }
+    }
+
+    if (!value)
+    {
+        WindowsDeleteString( hname );
+        return S_OK;
+    }
+    if (FAILED( hr = WindowsCreateString( value, wcslen( value ), &hval ) ))
+    {
+        WindowsDeleteString( hname );
+        return hr;
+    }
+    hr = headers_Append( (IHttpHeaderCollection *)impl, hname, hval );
+    WindowsDeleteString( hname );
+    WindowsDeleteString( hval );
+    return hr;
+}
+
+static const GUID IID_IHttpCredentialsHeaderValue =
+    { 0xc34cc3cb, 0x542e, 0x4177, { 0xa6, 0xc7, 0xb6, 0x74, 0xce, 0x19, 0x3f, 0xbf } };
+static const GUID IID_IHttpCredentialsHeaderValueFactory =
+    { 0xf21d9e91, 0x4d1c, 0x4182, { 0xbf, 0xd1, 0x34, 0x47, 0x0a, 0x62, 0xf9, 0x50 } };
+static const GUID IID_IHttpCredentialsHeaderValueStatics =
+    { 0xa69b2be6, 0xce8c, 0x4443, { 0xa3, 0x5a, 0x1b, 0x72, 0x7b, 0x13, 0x10, 0x36 } };
+static const GUID IID_IStringable_cred =
+    { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+
+struct http_cred_header
+{
+    const void *vtbl;
+    const void *vtbl_str;
+    LONG ref;
+    HSTRING scheme;
+    HSTRING token;
+};
+
+static inline struct http_cred_header *cred_from_str( void *iface )
+{
+    return (struct http_cred_header *)((char *)iface - offsetof( struct http_cred_header, vtbl_str ));
+}
+
+static HRESULT WINAPI cred_QI( void *iface, REFIID iid, void **out )
+{
+    struct http_cred_header *impl = iface;
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IHttpCredentialsHeaderValue ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IStringable_cred ))
+    {
+        *out = &impl->vtbl_str;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI cred_AddRef( void *iface )
+{
+    struct http_cred_header *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI cred_Release( void *iface )
+{
+    struct http_cred_header *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->scheme );
+        WindowsDeleteString( impl->token );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI cred_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI cred_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Web.Http.Headers.HttpCredentialsHeaderValue";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI cred_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI cred_get_Parameters( void *iface, void **value )
+{
+    return headers_make_subcol( L"Windows.Foundation.Collections.IVector`1<Windows.Web.Http.Headers.HttpNameValueHeaderValue>", value );
+}
+
+static HRESULT WINAPI cred_get_Scheme( void *iface, HSTRING *value )
+{
+    struct http_cred_header *impl = iface;
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->scheme, value );
+}
+
+static HRESULT WINAPI cred_get_Token( void *iface, HSTRING *value )
+{
+    struct http_cred_header *impl = iface;
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->token, value );
+}
+
+static const void *const cred_vtbl[] =
+{
+    cred_QI,
+    cred_AddRef,
+    cred_Release,
+    cred_GetIids,
+    cred_GetRuntimeClassName,
+    cred_GetTrustLevel,
+    cred_get_Parameters,
+    cred_get_Scheme,
+    cred_get_Token,
+};
+
+static HRESULT WINAPI cred_str_QI( void *iface, REFIID iid, void **out )
+{
+    return cred_QI( cred_from_str( iface ), iid, out );
+}
+static ULONG WINAPI cred_str_AddRef( void *iface ) { return cred_AddRef( cred_from_str( iface ) ); }
+static ULONG WINAPI cred_str_Release( void *iface ) { return cred_Release( cred_from_str( iface ) ); }
+
+static HRESULT WINAPI cred_str_ToString( void *iface, HSTRING *value )
+{
+    struct http_cred_header *impl = cred_from_str( iface );
+    const WCHAR *sch, *tok;
+    WCHAR *buf;
+    SIZE_T slen, tlen;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    sch = impl->scheme ? WindowsGetStringRawBuffer( impl->scheme, NULL ) : L"";
+    tok = impl->token ? WindowsGetStringRawBuffer( impl->token, NULL ) : L"";
+    slen = wcslen( sch );
+    tlen = wcslen( tok );
+    if (!tlen) return WindowsCreateString( sch, slen, value );
+    if (!(buf = malloc( (slen + 1 + tlen + 1) * sizeof(WCHAR) ))) return E_OUTOFMEMORY;
+    memcpy( buf, sch, slen * sizeof(WCHAR) );
+    buf[slen] = ' ';
+    memcpy( buf + slen + 1, tok, (tlen + 1) * sizeof(WCHAR) );
+    hr = WindowsCreateString( buf, slen + 1 + tlen, value );
+    free( buf );
+    return hr;
+}
+
+static const void *const cred_str_vtbl[] =
+{
+    cred_str_QI,
+    cred_str_AddRef,
+    cred_str_Release,
+    cred_GetIids,
+    cred_GetRuntimeClassName,
+    cred_GetTrustLevel,
+    cred_str_ToString,
+};
+
+static HRESULT create_http_cred_header( HSTRING scheme, HSTRING token, void **out )
+{
+    struct http_cred_header *impl;
+    const WCHAR *sch_w;
+
+    if (!out) return E_POINTER;
+    sch_w = scheme ? WindowsGetStringRawBuffer( scheme, NULL ) : L"";
+    if (!sch_w || !sch_w[0]) return E_INVALIDARG;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = cred_vtbl;
+    impl->vtbl_str = cred_str_vtbl;
+    impl->ref = 1;
+    WindowsDuplicateString( scheme, &impl->scheme );
+    if (token) WindowsDuplicateString( token, &impl->token );
+    *out = &impl->vtbl;
+    return S_OK;
+}
+
+static HRESULT parse_http_cred_header( const WCHAR *input, void **out )
+{
+    const WCHAR *p, *sp;
+    HSTRING h_sch = NULL, h_tok = NULL;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!input) return E_INVALIDARG;
+    while (*input == ' ' || *input == '\t') input++;
+    if (!*input) return E_INVALIDARG;
+
+    p = input;
+    sp = wcschr( p, ' ' );
+    if (!sp)
+    {
+        if (FAILED( hr = WindowsCreateString( p, wcslen( p ), &h_sch ) )) return hr;
+        hr = create_http_cred_header( h_sch, NULL, out );
+        WindowsDeleteString( h_sch );
+        return hr;
+    }
+
+    if (sp == p) return E_INVALIDARG;
+    if (FAILED( hr = WindowsCreateString( p, (UINT32)(sp - p), &h_sch ) )) return hr;
+    while (*sp == ' ' || *sp == '\t') sp++;
+    if (*sp && FAILED( hr = WindowsCreateString( sp, wcslen( sp ), &h_tok ) ))
+    {
+        WindowsDeleteString( h_sch );
+        return hr;
+    }
+    hr = create_http_cred_header( h_sch, h_tok, out );
+    WindowsDeleteString( h_sch );
+    if (h_tok) WindowsDeleteString( h_tok );
+    return hr;
+}
+
+struct cred_factory_full
+{
+    IActivationFactory IActivationFactory_iface;
+    const void *vtbl_factory;
+    const void *vtbl_statics;
+    LONG ref;
+};
+
+static inline struct cred_factory_full *cred_factory_from_statics( void *iface )
+{
+    return (struct cred_factory_full *)((char *)iface - offsetof( struct cred_factory_full, vtbl_statics ));
+}
+
+static ULONG WINAPI cred_factory_AddRef( IActivationFactory *iface )
+{
+    struct cred_factory_full *impl = (struct cred_factory_full *)iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI cred_factory_Release( IActivationFactory *iface )
+{
+    struct cred_factory_full *impl = (struct cred_factory_full *)iface;
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI cred_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI cred_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Web.Http.Headers.HttpCredentialsHeaderValue";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI cred_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI cred_factory_ActivateInstance( IActivationFactory *iface, IInspectable **out )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI cred_factory_CreateFromScheme( IActivationFactory *iface, HSTRING scheme, void **out )
+{
+    return create_http_cred_header( scheme, NULL, out );
+}
+
+static HRESULT WINAPI cred_factory_CreateFromSchemeWithToken( IActivationFactory *iface, HSTRING scheme,
+                                                              HSTRING token, void **out )
+{
+    return create_http_cred_header( scheme, token, out );
+}
+
+static HRESULT WINAPI cred_full_QI( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct cred_factory_full *impl = (struct cred_factory_full *)iface;
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &impl->IActivationFactory_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpCredentialsHeaderValueFactory ))
+    {
+        *out = &impl->vtbl_factory;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpCredentialsHeaderValueStatics ))
+    {
+        *out = &impl->vtbl_statics;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "cred_full_QI unsupported iid %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI cred_f_QI( void *iface, REFIID iid, void **out )
+{
+    struct cred_factory_full *impl = (struct cred_factory_full *)((char *)iface - offsetof( struct cred_factory_full, vtbl_factory ));
+    return cred_full_QI( &impl->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI cred_f_AddRef( void *iface )
+{
+    struct cred_factory_full *impl = (struct cred_factory_full *)((char *)iface - offsetof( struct cred_factory_full, vtbl_factory ));
+    return cred_factory_AddRef( &impl->IActivationFactory_iface );
+}
+static ULONG WINAPI cred_f_Release( void *iface )
+{
+    struct cred_factory_full *impl = (struct cred_factory_full *)((char *)iface - offsetof( struct cred_factory_full, vtbl_factory ));
+    return cred_factory_Release( &impl->IActivationFactory_iface );
+}
+
+static const void *const cred_iface_factory_vtbl[] =
+{
+    cred_f_QI,
+    cred_f_AddRef,
+    cred_f_Release,
+    cred_factory_GetIids,
+    cred_factory_GetRuntimeClassName,
+    cred_factory_GetTrustLevel,
+    cred_factory_CreateFromScheme,
+    cred_factory_CreateFromSchemeWithToken,
+};
+
+static HRESULT WINAPI cred_statics_QI( void *iface, REFIID iid, void **out )
+{
+    return cred_full_QI( &cred_factory_from_statics( iface )->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI cred_statics_AddRef( void *iface )
+{
+    return cred_factory_AddRef( &cred_factory_from_statics( iface )->IActivationFactory_iface );
+}
+static ULONG WINAPI cred_statics_Release( void *iface )
+{
+    return cred_factory_Release( &cred_factory_from_statics( iface )->IActivationFactory_iface );
+}
+static HRESULT WINAPI cred_statics_Parse( void *iface, HSTRING input, void **out )
+{
+    const WCHAR *w = input ? WindowsGetStringRawBuffer( input, NULL ) : NULL;
+    return parse_http_cred_header( w, out );
+}
+static HRESULT WINAPI cred_statics_TryParse( void *iface, HSTRING input, void **out, boolean *succeeded )
+{
+    const WCHAR *w = input ? WindowsGetStringRawBuffer( input, NULL ) : NULL;
+    HRESULT hr = parse_http_cred_header( w, out );
+    if (succeeded) *succeeded = SUCCEEDED( hr );
+    return S_OK;
+}
+
+static const void *const cred_statics_vtbl[] =
+{
+    cred_statics_QI,
+    cred_statics_AddRef,
+    cred_statics_Release,
+    cred_factory_GetIids,
+    cred_factory_GetRuntimeClassName,
+    cred_factory_GetTrustLevel,
+    cred_statics_Parse,
+    cred_statics_TryParse,
+};
+
+static const IActivationFactoryVtbl cred_full_activation_vtbl =
+{
+    cred_full_QI,
+    cred_factory_AddRef,
+    cred_factory_Release,
+    cred_factory_GetIids,
+    cred_factory_GetRuntimeClassName,
+    cred_factory_GetTrustLevel,
+    cred_factory_ActivateInstance,
+};
+
+static struct cred_factory_full cred_factory_obj =
+{
+    { &cred_full_activation_vtbl },
+    cred_iface_factory_vtbl,
+    cred_statics_vtbl,
+    1,
+};
+
+IActivationFactory *http_credentials_header_value_factory = &cred_factory_obj.IActivationFactory_iface;
+
+static HRESULT headers_get_auth_common( struct http_headers *impl, const WCHAR *name, void **out )
+{
+    UINT32 i;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    for (i = 0; i < impl->count; i++)
+    {
+        const WCHAR *k = WindowsGetStringRawBuffer( impl->pairs[i].k, NULL );
+        if (k && !_wcsicmp( k, name ))
+        {
+            const WCHAR *v = WindowsGetStringRawBuffer( impl->pairs[i].v, NULL );
+            if (v && v[0]) return parse_http_cred_header( v, out );
+            return S_OK;
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT headers_put_auth_common( struct http_headers *impl, const WCHAR *name, void *val )
+{
+    void *str_iface = NULL;
+    HSTRING h_full = NULL;
+    const WCHAR *full_w;
+    HRESULT hr;
+
+    if (!val)
+        return headers_set_named_value( impl, name, NULL );
+
+    if (SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)val, &IID_IStringable_cred, &str_iface ) ) && str_iface)
+    {
+        HRESULT (WINAPI *to_str)( void *, HSTRING * ) = (void *)(*(void ***)str_iface)[6];
+        hr = to_str( str_iface, &h_full );
+        IUnknown_Release( (IUnknown *)str_iface );
+        if (SUCCEEDED( hr ) && h_full)
+        {
+            full_w = WindowsGetStringRawBuffer( h_full, NULL );
+            hr = headers_set_named_value( impl, name, full_w );
+            WindowsDeleteString( h_full );
+            return hr;
+        }
+    }
+    else
+    {
+        void *cred_iface = NULL;
+        if (SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)val, &IID_IHttpCredentialsHeaderValue, &cred_iface ) ) && cred_iface)
+        {
+            HRESULT (WINAPI *get_sch)( void *, HSTRING * ) = (void *)(*(void ***)cred_iface)[7];
+            HRESULT (WINAPI *get_tok)( void *, HSTRING * ) = (void *)(*(void ***)cred_iface)[8];
+            HSTRING h_sch = NULL, h_tok = NULL;
+            const WCHAR *sch_w, *tok_w;
+            WCHAR *buf;
+            SIZE_T slen, tlen;
+
+            get_sch( cred_iface, &h_sch );
+            get_tok( cred_iface, &h_tok );
+            IUnknown_Release( (IUnknown *)cred_iface );
+            sch_w = h_sch ? WindowsGetStringRawBuffer( h_sch, NULL ) : L"";
+            tok_w = h_tok ? WindowsGetStringRawBuffer( h_tok, NULL ) : L"";
+            slen = wcslen( sch_w );
+            tlen = wcslen( tok_w );
+            if (!tlen)
+                hr = headers_set_named_value( impl, name, sch_w );
+            else if ((buf = malloc( (slen + 1 + tlen + 1) * sizeof(WCHAR) )))
+            {
+                memcpy( buf, sch_w, slen * sizeof(WCHAR) );
+                buf[slen] = ' ';
+                memcpy( buf + slen + 1, tok_w, (tlen + 1) * sizeof(WCHAR) );
+                hr = headers_set_named_value( impl, name, buf );
+                free( buf );
+            }
+            else hr = E_OUTOFMEMORY;
+            if (h_sch) WindowsDeleteString( h_sch );
+            if (h_tok) WindowsDeleteString( h_tok );
+            return hr;
+        }
+    }
+    return E_INVALIDARG;
+}
+
+static HRESULT WINAPI headers_get_Authorization( void *iface, void **out )
+{
+    return headers_get_auth_common( (struct http_headers *)iface, L"Authorization", out );
+}
+static HRESULT WINAPI headers_put_Authorization( void *iface, void *val )
+{
+    return headers_put_auth_common( (struct http_headers *)iface, L"Authorization", val );
+}
+static HRESULT WINAPI headers_get_ProxyAuthorization( void *iface, void **out )
+{
+    return headers_get_auth_common( (struct http_headers *)iface, L"Proxy-Authorization", out );
+}
+static HRESULT WINAPI headers_put_ProxyAuthorization( void *iface, void *val )
+{
+    return headers_put_auth_common( (struct http_headers *)iface, L"Proxy-Authorization", val );
+}
+
+static HRESULT WINAPI req_hdr_get_Authorization( void *iface, void **out )
+{
+    return headers_get_auth_common( req_hdr_impl( iface ), L"Authorization", out );
+}
+static HRESULT WINAPI req_hdr_put_Authorization( void *iface, void *val )
+{
+    return headers_put_auth_common( req_hdr_impl( iface ), L"Authorization", val );
+}
+static HRESULT WINAPI req_hdr_get_ProxyAuthorization( void *iface, void **out )
+{
+    return headers_get_auth_common( req_hdr_impl( iface ), L"Proxy-Authorization", out );
+}
+static HRESULT WINAPI req_hdr_put_ProxyAuthorization( void *iface, void *val )
+{
+    return headers_put_auth_common( req_hdr_impl( iface ), L"Proxy-Authorization", val );
+}
+
 static const struct http_headers_vtbl http_headers_vtbl = {
   {
     headers_QueryInterface,
@@ -556,8 +1113,8 @@ static const struct http_headers_vtbl http_headers_vtbl = {
     headers_get_Accept, /* 8: get_Accept */
     headers_get_AcceptEncoding, /* 9: get_AcceptEncoding */
     headers_get_AcceptLanguage, /* 10: get_AcceptLanguage */
-    headers_stub_null,  /* 11: get_Authorization */
-    headers_stub_ok,    /* 12: put_Authorization */
+    headers_get_Authorization,  /* 11: get_Authorization */
+    headers_put_Authorization,  /* 12: put_Authorization */
     headers_get_CacheControl, /* 13: get_CacheControl */
     headers_get_Connection, /* 14: get_Connection */
     headers_get_Cookie, /* 15: get_Cookie */
@@ -575,14 +1132,14 @@ static const struct http_headers_vtbl http_headers_vtbl = {
     headers_stub_null,  /* 27: get_MaxForwards */
     headers_stub_ok,    /* 28: put_MaxForwards */
     headers_get_Pragma, /* 29: get_Pragma */
-    headers_stub_null,  /* 30: get_ProxyAuthorization */
-    headers_stub_ok,    /* 31: put_ProxyAuthorization */
+    headers_get_ProxyAuthorization, /* 30: get_ProxyAuthorization */
+    headers_put_ProxyAuthorization, /* 31: put_ProxyAuthorization */
     headers_stub_null,  /* 32: get_Referer */
     headers_Append,     /* 33: Append */
     headers_TryAppendWithoutValidation, /* 34: TryAppendWithoutValidation */
     headers_get_TransferEncoding, /* 35: get_TransferEncoding */
-    headers_stub_null,  /* 36 */
-    headers_stub_null,
+    headers_get_TE,     /* 36 */
+    headers_get_UserAgent, /* 37 */
     headers_stub_null,
     headers_stub_null,
     headers_Get,
@@ -1146,8 +1703,8 @@ static const void *const http_req_headers_vtbl[] =
     req_hdr_get_Accept,                 /* 6 */
     req_hdr_get_AcceptEncoding,         /* 7 */
     req_hdr_get_AcceptLanguage,         /* 8 */
-    headers_stub_null,                  /* 9: get_Authorization */
-    headers_stub_ok,                    /* 10: put_Authorization */
+    req_hdr_get_Authorization,          /* 9: get_Authorization */
+    req_hdr_put_Authorization,          /* 10: put_Authorization */
     req_hdr_get_CacheControl,           /* 11 */
     req_hdr_get_Connection,             /* 12 */
     req_hdr_get_Cookie,                 /* 13 */
@@ -1164,8 +1721,8 @@ static const void *const http_req_headers_vtbl[] =
     headers_stub_ok,                    /* 24: put_IfUnmodifiedSince */
     headers_stub_null,                  /* 25: get_MaxForwards */
     headers_stub_ok,                    /* 26: put_MaxForwards */
-    headers_stub_null,                  /* 27: get_ProxyAuthorization */
-    headers_stub_ok,                    /* 28: put_ProxyAuthorization */
+    req_hdr_get_ProxyAuthorization,     /* 27: get_ProxyAuthorization */
+    req_hdr_put_ProxyAuthorization,     /* 28: put_ProxyAuthorization */
     headers_stub_null,                  /* 29: get_Referer */
     headers_stub_ok,                    /* 30: put_Referer */
     req_hdr_get_TransferEncoding,       /* 31 */

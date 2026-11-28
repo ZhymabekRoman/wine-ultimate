@@ -386,6 +386,8 @@ struct uwp_event_bag
     struct xaml_event_registry nav_item_invoked_reg;
     struct xaml_event_registry frame_navigated_reg;
     struct xaml_event_registry preview_keydown_reg;
+    struct xaml_event_registry keydown_reg;
+    struct xaml_event_registry keyup_reg;
     struct xaml_event_registry asb_text_changed_reg;
     struct xaml_event_registry asb_query_submitted_reg;
     struct xaml_event_registry asb_suggestion_chosen_reg;
@@ -450,6 +452,7 @@ struct uwp_media_ext
 struct uwp_dialog_ext
 {
     HWND dialog_hwnd;
+    void *dialog_op;
     IInspectable *dialog_title_obj;
     WCHAR dialog_title[128];
     WCHAR dialog_primary_text[64];

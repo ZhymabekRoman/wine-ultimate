@@ -1006,12 +1006,24 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                 xaml_mark_window_dirty();
                 xaml_window_present( &global_xaml_window );
             }
+            else if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP)
+            {
+                if (msg != WM_KEYUP)
+                    uwp_dispatch_keydown( hwnd, (UINT)wparam, lparam, NULL );
+                uwp_fire_key_bubble( msg != WM_KEYUP, (UINT32)wparam, lparam );
+                xaml_mark_window_dirty();
+                if (msg != WM_KEYUP)
+                    xaml_window_present( &global_xaml_window );
+            }
             return 0;
         }
         if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
             accel_handled = uwp_dispatch_keydown( hwnd, (UINT)wparam, lparam, NULL );
         if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP)
+        {
+            uwp_fire_key_bubble( msg != WM_KEYUP, (UINT32)wparam, lparam );
             xaml_winui_fire_key_event( msg != WM_KEYUP, (UINT32)wparam, lparam );
+        }
         {
             BOOL cw_handled = xaml_cw_fire_key_event( cw, msg, wparam, lparam );
             hr = notify_inner_core_window_key( hwnd, msg, wparam );

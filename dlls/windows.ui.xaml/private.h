@@ -271,6 +271,7 @@ void xaml_winui_fire_pointer_event( enum xaml_pointer_event_kind kind, const str
 void xaml_winui_fire_key_event( BOOL is_down, UINT32 vk, LPARAM lparam );
 void xaml_winui_fire_focus_event( BOOL got_focus );
 BOOL uwp_has_focused_textbox( void );
+BOOL uwp_fire_key_bubble( BOOL is_down, UINT32 vk, LPARAM lparam );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

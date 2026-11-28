@@ -6,7 +6,9 @@ WINE_DEFAULT_DEBUG_CHANNEL(web);
 struct json_array
 {
     IJsonArray IJsonArray_iface;
+    IJsonValue IJsonValue_iface;
     IJsonValueInternal IJsonValueInternal_iface;
+    IStringable IStringable_iface;
     __FIVector_1_Windows__CData__CJson__CIJsonValue IVector_iface;
     LONG ref;
 
@@ -260,6 +262,20 @@ static HRESULT WINAPI json_array_QueryInterface( IJsonArray *iface, REFIID iid, 
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IJsonValue ))
+    {
+        *out = &impl->IJsonValue_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IStringable ))
+    {
+        *out = &impl->IStringable_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IJsonValueInternal ))
     {
         *out = &impl->IJsonValueInternal_iface;
@@ -312,8 +328,9 @@ static HRESULT WINAPI json_array_GetIids( IJsonArray *iface, ULONG *iid_count, I
 
 static HRESULT WINAPI json_array_GetRuntimeClassName( IJsonArray *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR cls[] = L"Windows.Data.Json.JsonArray";
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, class_name );
 }
 
 static HRESULT WINAPI json_array_GetTrustLevel( IJsonArray *iface, TrustLevel *trust_level )
@@ -424,6 +441,160 @@ static const struct IJsonArrayVtbl json_array_vtbl =
     json_array_GetBooleanAt,
 };
 
+static inline struct json_array *impl_from_IJsonValue( IJsonValue *iface )
+{
+    return CONTAINING_RECORD( iface, struct json_array, IJsonValue_iface );
+}
+
+static HRESULT WINAPI json_arr_val_QueryInterface( IJsonValue *iface, REFIID iid, void **out )
+{
+    return IJsonArray_QueryInterface( &impl_from_IJsonValue( iface )->IJsonArray_iface, iid, out );
+}
+
+static ULONG WINAPI json_arr_val_AddRef( IJsonValue *iface )
+{
+    return IJsonArray_AddRef( &impl_from_IJsonValue( iface )->IJsonArray_iface );
+}
+
+static ULONG WINAPI json_arr_val_Release( IJsonValue *iface )
+{
+    return IJsonArray_Release( &impl_from_IJsonValue( iface )->IJsonArray_iface );
+}
+
+static HRESULT WINAPI json_arr_val_GetIids( IJsonValue *iface, ULONG *count, IID **iids )
+{
+    return IJsonArray_GetIids( &impl_from_IJsonValue( iface )->IJsonArray_iface, count, iids );
+}
+
+static HRESULT WINAPI json_arr_val_GetRuntimeClassName( IJsonValue *iface, HSTRING *name )
+{
+    return IJsonArray_GetRuntimeClassName( &impl_from_IJsonValue( iface )->IJsonArray_iface, name );
+}
+
+static HRESULT WINAPI json_arr_val_GetTrustLevel( IJsonValue *iface, TrustLevel *level )
+{
+    return IJsonArray_GetTrustLevel( &impl_from_IJsonValue( iface )->IJsonArray_iface, level );
+}
+
+static HRESULT WINAPI json_arr_val_get_ValueType( IJsonValue *iface, JsonValueType *value )
+{
+    if (!value) return E_POINTER;
+    *value = JsonValueType_Array;
+    return S_OK;
+}
+
+static HRESULT WINAPI json_arr_val_Stringify( IJsonValue *iface, HSTRING *value )
+{
+    struct json_array *impl = impl_from_IJsonValue( iface );
+    char *printed;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!impl->node) return WindowsCreateString( L"[]", 2, value );
+    if (!(printed = cJSON_PrintUnformatted( impl->node ))) return E_OUTOFMEMORY;
+    hr = hstring_from_utf8( printed, value );
+    cJSON_free( printed );
+    return hr;
+}
+
+static HRESULT WINAPI json_arr_val_GetString( IJsonValue *iface, HSTRING *value )
+{
+    return E_ILLEGAL_METHOD_CALL;
+}
+
+static HRESULT WINAPI json_arr_val_GetNumber( IJsonValue *iface, DOUBLE *value )
+{
+    return E_ILLEGAL_METHOD_CALL;
+}
+
+static HRESULT WINAPI json_arr_val_GetBoolean( IJsonValue *iface, boolean *value )
+{
+    return E_ILLEGAL_METHOD_CALL;
+}
+
+static HRESULT WINAPI json_arr_val_GetArray( IJsonValue *iface, IJsonArray **value )
+{
+    struct json_array *impl = impl_from_IJsonValue( iface );
+    if (!value) return E_POINTER;
+    *value = &impl->IJsonArray_iface;
+    IJsonArray_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI json_arr_val_GetObject( IJsonValue *iface, IJsonObject **value )
+{
+    return E_ILLEGAL_METHOD_CALL;
+}
+
+static const struct IJsonValueVtbl json_array_value_vtbl =
+{
+    json_arr_val_QueryInterface,
+    json_arr_val_AddRef,
+    json_arr_val_Release,
+    json_arr_val_GetIids,
+    json_arr_val_GetRuntimeClassName,
+    json_arr_val_GetTrustLevel,
+    json_arr_val_get_ValueType,
+    json_arr_val_Stringify,
+    json_arr_val_GetString,
+    json_arr_val_GetNumber,
+    json_arr_val_GetBoolean,
+    json_arr_val_GetArray,
+    json_arr_val_GetObject,
+};
+
+static inline struct json_array *impl_from_IStringable( IStringable *iface )
+{
+    return CONTAINING_RECORD( iface, struct json_array, IStringable_iface );
+}
+
+static HRESULT WINAPI json_arr_str_QueryInterface( IStringable *iface, REFIID iid, void **out )
+{
+    return IJsonArray_QueryInterface( &impl_from_IStringable( iface )->IJsonArray_iface, iid, out );
+}
+
+static ULONG WINAPI json_arr_str_AddRef( IStringable *iface )
+{
+    return IJsonArray_AddRef( &impl_from_IStringable( iface )->IJsonArray_iface );
+}
+
+static ULONG WINAPI json_arr_str_Release( IStringable *iface )
+{
+    return IJsonArray_Release( &impl_from_IStringable( iface )->IJsonArray_iface );
+}
+
+static HRESULT WINAPI json_arr_str_GetIids( IStringable *iface, ULONG *count, IID **iids )
+{
+    return IJsonArray_GetIids( &impl_from_IStringable( iface )->IJsonArray_iface, count, iids );
+}
+
+static HRESULT WINAPI json_arr_str_GetRuntimeClassName( IStringable *iface, HSTRING *name )
+{
+    return IJsonArray_GetRuntimeClassName( &impl_from_IStringable( iface )->IJsonArray_iface, name );
+}
+
+static HRESULT WINAPI json_arr_str_GetTrustLevel( IStringable *iface, TrustLevel *level )
+{
+    return IJsonArray_GetTrustLevel( &impl_from_IStringable( iface )->IJsonArray_iface, level );
+}
+
+static HRESULT WINAPI json_arr_str_ToString( IStringable *iface, HSTRING *value )
+{
+    return json_arr_val_Stringify( &impl_from_IStringable( iface )->IJsonValue_iface, value );
+}
+
+static const struct IStringableVtbl json_array_stringable_vtbl =
+{
+    json_arr_str_QueryInterface,
+    json_arr_str_AddRef,
+    json_arr_str_Release,
+    json_arr_str_GetIids,
+    json_arr_str_GetRuntimeClassName,
+    json_arr_str_GetTrustLevel,
+    json_arr_str_ToString,
+};
+
 HRESULT create_json_array( cJSON *node, struct json_root *root, IJsonArray **out )
 {
     struct json_array *impl;
@@ -434,7 +605,9 @@ HRESULT create_json_array( cJSON *node, struct json_root *root, IJsonArray **out
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IJsonArray_iface.lpVtbl = &json_array_vtbl;
+    impl->IJsonValue_iface.lpVtbl = &json_array_value_vtbl;
     impl->IJsonValueInternal_iface.lpVtbl = &json_array_internal_vtbl;
+    impl->IStringable_iface.lpVtbl = &json_array_stringable_vtbl;
     impl->IVector_iface.lpVtbl = &json_array_vec_vtbl;
     impl->ref = 1;
     impl->node = node;
@@ -448,6 +621,7 @@ HRESULT create_json_array( cJSON *node, struct json_root *root, IJsonArray **out
 struct json_array_statics
 {
     IActivationFactory IActivationFactory_iface;
+    IJsonArrayStatics IJsonArrayStatics_iface;
     LONG ref;
 };
 
@@ -468,6 +642,13 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         IsEqualGUID( iid, &IID_IActivationFactory ))
     {
         *out = &impl->IActivationFactory_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IJsonArrayStatics ))
+    {
+        *out = &impl->IJsonArrayStatics_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -552,9 +733,93 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+DEFINE_IINSPECTABLE( json_array_statics, IJsonArrayStatics, struct json_array_statics, IActivationFactory_iface )
+
+static HRESULT WINAPI json_array_statics_Parse( IJsonArrayStatics *iface, HSTRING input, IJsonArray **value )
+{
+    cJSON *tree;
+    struct json_root *root;
+    char *utf8;
+    int utf8_len = 0;
+    const char *parse_end = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, input %s, value %p\n", iface, debugstr_hstring( input ), value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!input) return WEB_E_INVALID_JSON_STRING;
+
+    utf8 = utf8_from_hstring( input, &utf8_len );
+    if (!utf8) return E_OUTOFMEMORY;
+    if (utf8_len == 0)
+    {
+        free( utf8 );
+        return WEB_E_INVALID_JSON_STRING;
+    }
+
+    errno = 0;
+    tree = cJSON_ParseWithLengthOpts( utf8, utf8_len + 1, &parse_end, 1 );
+    if (!tree)
+    {
+        int err = errno;
+        free( utf8 );
+        if (err == ERANGE) return WEB_E_INVALID_JSON_NUMBER;
+        return WEB_E_INVALID_JSON_STRING;
+    }
+    free( utf8 );
+
+    if (!cJSON_IsArray( tree ))
+    {
+        cJSON_Delete( tree );
+        return WEB_E_INVALID_JSON_STRING;
+    }
+
+    root = json_root_create( tree );
+    if (!root)
+    {
+        cJSON_Delete( tree );
+        return E_OUTOFMEMORY;
+    }
+
+    hr = create_json_array( tree, root, value );
+    json_root_release( root );
+    return hr;
+}
+
+static HRESULT WINAPI json_array_statics_TryParse( IJsonArrayStatics *iface, HSTRING input, IJsonArray **result, boolean *succeeded )
+{
+    HRESULT hr;
+
+    TRACE( "iface %p, input %s, result %p, succeeded %p\n", iface, debugstr_hstring( input ), result, succeeded );
+
+    if (!succeeded || !result) return E_POINTER;
+
+    *succeeded = FALSE;
+    *result = NULL;
+
+    hr = json_array_statics_Parse( iface, input, result );
+    if (SUCCEEDED(hr)) *succeeded = TRUE;
+
+    return S_OK;
+}
+
+static const struct IJsonArrayStaticsVtbl json_array_statics_vtbl =
+{
+    json_array_statics_QueryInterface,
+    json_array_statics_AddRef,
+    json_array_statics_Release,
+    json_array_statics_GetIids,
+    json_array_statics_GetRuntimeClassName,
+    json_array_statics_GetTrustLevel,
+    json_array_statics_Parse,
+    json_array_statics_TryParse,
+};
+
 static struct json_array_statics json_array_statics =
 {
     {&factory_vtbl},
+    {&json_array_statics_vtbl},
     1,
 };
 

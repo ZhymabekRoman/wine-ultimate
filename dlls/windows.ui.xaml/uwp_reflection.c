@@ -340,6 +340,34 @@ BOOL uwp_set_custom_xaml_member_obj( void *app_outer, const WCHAR *owner_type_na
     return ok;
 }
 
+static HRESULT xaml_append_to_winrt_vector( IInspectable *coll, IInspectable *item )
+{
+    static const GUID IID_IVector_DO_refl =
+        { 0x771b857e, 0xab5c, 0x5db8, { 0xa0, 0x21, 0x39, 0x7c, 0x92, 0xcd, 0xc4, 0x4c } };
+    static const GUID *const vec_iids[] =
+    {
+        &IID_IVector_DO_refl,
+        &IID_IVector_IInspectable_UWP,
+        &IID_IBindableVector_UWP,
+    };
+    unsigned int qi;
+    if (!coll || !item) return E_INVALIDARG;
+    for (qi = 0; qi < ARRAY_SIZE(vec_iids); qi++)
+    {
+        void *vec = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( coll, vec_iids[qi], &vec )) && vec)
+        {
+            const struct abi_winrt_vector *avec = (const struct abi_winrt_vector *)vec;
+            HRESULT hr = E_NOTIMPL;
+            if (avec->lpVtbl->Append)
+                hr = avec->lpVtbl->Append( vec, item );
+            IUnknown_Release( (IUnknown *)vec );
+            return hr;
+        }
+    }
+    return E_NOINTERFACE;
+}
+
 BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_type_name,
                                           const WCHAR *prop_name, void *target_obj, void *item_obj )
 {
@@ -403,6 +431,13 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
                     if (SUCCEEDED(hr) && coll && member_type)
                     {
                         struct xaml_type *mt = (struct xaml_type *)member_type;
+                        struct uwp_element *cel = uwp_elem_from_any( coll );
+                        unsigned int before_cnt = 0;
+                        if (cel && cel->children_coll)
+                        {
+                            struct uwp_vec_view *cv = CONTAINING_RECORD( cel->children_coll, struct uwp_vec_view, IInspectable_iface );
+                            before_cnt = cv->count;
+                        }
                         if (mt->lpVtbl->AddToVector)
                         {
                             __TRY
@@ -411,6 +446,25 @@ BOOL uwp_add_custom_xaml_collection_item( void *app_outer, const WCHAR *owner_ty
                             }
                             __EXCEPT_ALL { hr = E_FAIL; }
                             __ENDTRY;
+                            if (SUCCEEDED(hr) && cel && !wcscmp( cel->class_name, L"Windows.UI.Xaml.DependencyObjectCollection" ))
+                            {
+                                unsigned int after_cnt = 0;
+                                if (cel->children_coll)
+                                {
+                                    struct uwp_vec_view *cv = CONTAINING_RECORD( cel->children_coll, struct uwp_vec_view, IInspectable_iface );
+                                    after_cnt = cv->count;
+                                }
+                                if (after_cnt == before_cnt)
+                                {
+                                    HSTRING h_mtn = NULL;
+                                    if (mt->lpVtbl->get_FullName) mt->lpVtbl->get_FullName( mt, &h_mtn );
+                                    WARN( "AddToVector(%s.%s mt=%s) left DependencyObjectCollection count=%u unchanged; appending via IVector\n",
+                                          debugstr_w(owner_type_name), debugstr_w(prop_name),
+                                          h_mtn ? debugstr_w(WindowsGetStringRawBuffer( h_mtn, NULL )) : "(null)", after_cnt );
+                                    if (h_mtn) WindowsDeleteString( h_mtn );
+                                    hr = xaml_append_to_winrt_vector( coll, (IInspectable *)item_obj );
+                                }
+                            }
                             ok = SUCCEEDED(hr);
                             TRACE( "IXamlMember::AddToVector(%s.%s coll=%p item=%p) -> hr %#lx\n",
                                    debugstr_w(owner_type_name), debugstr_w(prop_name), coll, item_obj, hr );
@@ -984,7 +1038,8 @@ static HRESULT WINAPI xaml_ct_get_UnderlyingType( void *iface, TypeName *type )
 
 static HRESULT WINAPI xaml_ct_AddToVector( void *iface, IInspectable *instance, IInspectable *value )
 {
-    return S_OK;
+    HRESULT hr = xaml_append_to_winrt_vector( instance, value );
+    return (hr == E_NOINTERFACE) ? S_OK : hr;
 }
 
 static HRESULT WINAPI xaml_ct_AddToMap( void *iface, IInspectable *instance, IInspectable *key, IInspectable *value )

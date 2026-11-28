@@ -169,16 +169,18 @@ static void app_install_xml_unescape_amp( char *s )
     *w = '\0';
 }
 
-static BOOL app_install_resolve_store_url( const WCHAR *product_id, WCHAR *url_out, SIZE_T url_cap )
+static BOOL app_install_resolve_store_url( const WCHAR *product_id, WCHAR *url_out, SIZE_T url_cap,
+                                           WCHAR *pfn_out, SIZE_T pfn_cap )
 {
     WCHAR dc_url[512];
     char *resp = NULL;
-    char wu_cat[128], enc_cookie[4096], exp_cookie[128];
+    char wu_cat[128], pfn_utf8[256], enc_cookie[4096], exp_cookie[128];
     char update_id[128], rev_num[32], dl_url_utf8[2048];
     char *soap_body = NULL;
     const char *scan, *best_id = NULL, *best_rev = NULL;
     char best_id_buf[128], best_rev_buf[32];
 
+    if (pfn_out && pfn_cap) pfn_out[0] = 0;
     if (!product_id || !product_id[0]) return FALSE;
 
     if (!wcsnicmp( product_id, L"http://", 7 ) ||
@@ -190,9 +192,14 @@ static BOOL app_install_resolve_store_url( const WCHAR *product_id, WCHAR *url_o
     }
 
     /* 1. DisplayCatalog -> WuCategoryId */
-    swprintf( dc_url, ARRAY_SIZE(dc_url),
-              L"https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=%s&market=US&languages=en-us",
-              product_id );
+    {
+        WCHAR clean_id[128], *slash;
+        lstrcpynW( clean_id, product_id, ARRAY_SIZE(clean_id) );
+        if ((slash = wcschr( clean_id, L'/' ))) *slash = 0;
+        swprintf( dc_url, ARRAY_SIZE(dc_url),
+                  L"https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=%s&market=US&languages=en-us",
+                  clean_id );
+    }
     if (!app_install_http_request( L"GET", dc_url, NULL, NULL, 0, &resp, NULL ))
     {
         WARN( "DisplayCatalog request failed for %s\n", debugstr_w(product_id) );
@@ -203,6 +210,12 @@ static BOOL app_install_resolve_store_url( const WCHAR *product_id, WCHAR *url_o
         WARN( "WuCategoryId not found for %s\n", debugstr_w(product_id) );
         free( resp );
         return FALSE;
+    }
+    if (pfn_out && pfn_cap &&
+        app_install_extract_between( resp, "\"PackageFamilyName\":\"", "\"", pfn_utf8, sizeof(pfn_utf8) ) &&
+        pfn_utf8[0])
+    {
+        MultiByteToWideChar( CP_UTF8, 0, pfn_utf8, -1, pfn_out, (int)pfn_cap );
     }
     free( resp );
     resp = NULL;
@@ -287,37 +300,89 @@ static BOOL app_install_resolve_store_url( const WCHAR *product_id, WCHAR *url_o
         return FALSE;
     }
 
-    best_id_buf[0] = '\0';
-    best_rev_buf[0] = '\0';
-    scan = resp;
-    while ((scan = strstr( scan, "<UpdateInfo>" )) != NULL)
     {
-        const char *end = strstr( scan, "</UpdateInfo>" );
-        if (!end) break;
-        if (strstr( scan, "SecuredFragment" ) && strstr( scan, "SecuredFragment" ) < end)
+        const char *ext_section = strstr( resp, "<ExtendedUpdateInfo>" );
+        int best_score = -1;
+
+        best_id_buf[0] = '\0';
+        best_rev_buf[0] = '\0';
+        scan = resp;
+        while ((scan = strstr( scan, "<UpdateInfo>" )) != NULL)
         {
-            const char *uid_p = strstr( scan, "UpdateID=\"" );
-            const char *rev_p = strstr( scan, "RevisionNumber=\"" );
-            if (uid_p && uid_p < end && rev_p && rev_p < end)
+            const char *end = strstr( scan, "</UpdateInfo>" );
+            const char *sec;
+            if (!end) break;
+            sec = strstr( scan, "SecuredFragment" );
+            if (sec && sec < end)
             {
-                char tmp_id[128], tmp_rev[32];
-                if (app_install_extract_between( uid_p, "UpdateID=\"", "\"", tmp_id, sizeof(tmp_id) ) &&
+                const char *uid_p = strstr( scan, "UpdateID=\"" );
+                const char *rev_p = strstr( scan, "RevisionNumber=\"" );
+                char num_id[32], tmp_id[128], tmp_rev[32];
+                if (uid_p && uid_p < end && rev_p && rev_p < end &&
+                    app_install_extract_between( uid_p, "UpdateID=\"", "\"", tmp_id, sizeof(tmp_id) ) &&
                     app_install_extract_between( rev_p, "RevisionNumber=\"", "\"", tmp_rev, sizeof(tmp_rev) ))
                 {
-                    BOOL is_bundle = (strstr( scan, "msixbundle" ) && strstr( scan, "msixbundle" ) < end) ||
-                                     (strstr( scan, "appxbundle" ) && strstr( scan, "appxbundle" ) < end);
-                    if (!best_id_buf[0] || is_bundle)
+                    int score = 1;
+                    BOOL is_encrypted = FALSE;
+                    BOOL is_bundle = FALSE;
+                    BOOL is_x64 = FALSE;
+                    BOOL is_neutral = FALSE;
+                    BOOL is_framework = FALSE;
+
+                    if (strstr( scan, "PackageMoniker=\"Microsoft.VCLibs" ) && strstr( scan, "PackageMoniker=\"Microsoft.VCLibs" ) < end)
+                        is_framework = TRUE;
+                    if (strstr( scan, "PackageMoniker=\"Microsoft.NET.Native" ) && strstr( scan, "PackageMoniker=\"Microsoft.NET.Native" ) < end)
+                        is_framework = TRUE;
+                    if (strstr( scan, "PackageMoniker=\"Microsoft.Services.Store.Engagement" ) && strstr( scan, "PackageMoniker=\"Microsoft.Services.Store.Engagement" ) < end)
+                        is_framework = TRUE;
+                    if (strstr( scan, "PackageMoniker=\"Microsoft.Advertising" ) && strstr( scan, "PackageMoniker=\"Microsoft.Advertising" ) < end)
+                        is_framework = TRUE;
+                    if (strstr( scan, "PackageMoniker=\"Microsoft.UI.Xaml" ) && strstr( scan, "PackageMoniker=\"Microsoft.UI.Xaml" ) < end)
+                        is_framework = TRUE;
+
+                    if (strstr( scan, "_x64_" ) && strstr( scan, "_x64_" ) < end) is_x64 = TRUE;
+                    if (strstr( scan, "_neutral_" ) && strstr( scan, "_neutral_" ) < end) is_neutral = TRUE;
+
+                    num_id[0] = 0;
+                    if (app_install_extract_between( scan, "<ID>", "</ID>", num_id, sizeof(num_id) ) &&
+                        num_id[0] && ext_section)
                     {
+                        char id_tag[64];
+                        const char *u_blk, *u_end;
+                        snprintf( id_tag, sizeof(id_tag), "<ID>%s</ID>", num_id );
+                        u_blk = strstr( ext_section, id_tag );
+                        if (u_blk && (u_end = strstr( u_blk, "</Update>" )))
+                        {
+                            const char *p;
+                            for (p = u_blk; p < u_end; p++)
+                            {
+                                if (!strncmp( p, ".eappxbundle", 12 ) || !strncmp( p, ".emsixbundle", 12 ) ||
+                                    !strncmp( p, ".eappx", 6 ) || !strncmp( p, ".emsix", 6 ))
+                                    is_encrypted = TRUE;
+                                if (!strncmp( p, ".msixbundle", 11 ) || !strncmp( p, ".appxbundle", 11 ))
+                                    is_bundle = TRUE;
+                            }
+                        }
+                    }
+
+                    if (!is_framework) score += 100;
+                    if (!is_encrypted) score += 50;
+                    if (is_bundle) score += 20;
+                    else if (is_x64) score += 10;
+                    else if (is_neutral) score += 5;
+
+                    if (score > best_score)
+                    {
+                        best_score = score;
                         strcpy( best_id_buf, tmp_id );
                         strcpy( best_rev_buf, tmp_rev );
                         best_id = best_id_buf;
                         best_rev = best_rev_buf;
-                        if (is_bundle) break;
                     }
                 }
             }
+            scan = end + 13;
         }
-        scan = end + 13;
     }
     free( resp );
     resp = NULL;
@@ -583,7 +648,7 @@ DWORD WINAPI app_install_worker_proc( void *param )
 {
     struct app_install_item_impl *item = param;
     const WCHAR *prod_buf;
-    WCHAR url[2048], dir[MAX_PATH], dest_path[MAX_PATH], safe_id[128];
+    WCHAR url[2048], pfn[256], dir[MAX_PATH], dest_path[MAX_PATH], safe_id[128];
     DWORD env_len;
     SIZE_T i, j;
     HRESULT hr = S_OK;
@@ -609,10 +674,18 @@ DWORD WINAPI app_install_worker_proc( void *param )
     LeaveCriticalSection( &app_install_cs );
     app_install_notify_item_change( item, FALSE );
 
-    if (!app_install_resolve_store_url( prod_buf, url, ARRAY_SIZE(url) ))
+    pfn[0] = 0;
+    if (!app_install_resolve_store_url( prod_buf, url, ARRAY_SIZE(url), pfn, ARRAY_SIZE(pfn) ))
     {
         hr = HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
         goto failed;
+    }
+    if (pfn[0])
+    {
+        EnterCriticalSection( &app_install_cs );
+        if (item->package_family_name) WindowsDeleteString( item->package_family_name );
+        WindowsCreateString( pfn, lstrlenW( pfn ), &item->package_family_name );
+        LeaveCriticalSection( &app_install_cs );
     }
 
     /* 3. Downloading */

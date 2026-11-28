@@ -49,14 +49,10 @@ static const GUID IID_IAppxPackageReader =
     { 0xb5c49650, 0x99bc, 0x481c, { 0x9a, 0x34, 0x3d, 0x53, 0xa4, 0x10, 0x67, 0x08 } };
 static const GUID IID_IAppxFile =
     { 0x91df827b, 0x94fd, 0x468f, { 0x82, 0x7b, 0x57, 0xf4, 0x1b, 0x2f, 0x6f, 0x2e } };
-static const GUID IID_IAppxFilesEnumerator =
-    { 0xf007eeaf, 0x9831, 0x411c, { 0x98, 0x47, 0x91, 0x7c, 0xdc, 0x62, 0xd1, 0xfe } };
 static const GUID IID_IAppxManifestReader =
     { 0x4e1bd148, 0x55a0, 0x4480, { 0xa3, 0xd1, 0x15, 0x54, 0x47, 0x10, 0x63, 0x7c } };
 static const GUID IID_IAppxManifestPackageId =
     { 0x283ce2d7, 0x7153, 0x4a91, { 0x96, 0x49, 0x7a, 0x0f, 0x72, 0x40, 0x94, 0x5f } };
-static const GUID IID_IAppxManifestProperties =
-    { 0x03faf64d, 0xf26f, 0x4b2c, { 0xaa, 0xf7, 0x8f, 0xe7, 0x78, 0x9b, 0x8b, 0xca } };
 
 /* --- Minimal ZIP archive reader over IStream --- */
 
@@ -1021,6 +1017,49 @@ static void mkdir_recursive( const WCHAR *dir )
     CreateDirectoryW( tmp, NULL );
 }
 
+static int hex_val( WCHAR c )
+{
+    if (c >= L'0' && c <= L'9') return c - L'0';
+    if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+    if (c >= L'A' && c <= L'F') return c - L'A' + 10;
+    return -1;
+}
+
+static void opc_decode_relpath( const WCHAR *in, WCHAR *out, SIZE_T out_cap )
+{
+    char utf8[MAX_PATH * 3];
+    SIZE_T u = 0, i;
+
+    for (i = 0; in[i] && u + 4 < sizeof(utf8); )
+    {
+        if (in[i] == L'%' && in[i + 1] && in[i + 2])
+        {
+            int h1 = hex_val( in[i + 1] ), h2 = hex_val( in[i + 2] );
+            if (h1 >= 0 && h2 >= 0)
+            {
+                utf8[u++] = (char)((h1 << 4) | h2);
+                i += 3;
+                continue;
+            }
+        }
+        if (in[i] < 0x80)
+        {
+            utf8[u++] = (char)(in[i] == L'/' ? '\\' : in[i]);
+            i++;
+        }
+        else
+        {
+            int n = WideCharToMultiByte( CP_UTF8, 0, &in[i], 1, utf8 + u, (int)(sizeof(utf8) - u - 1), NULL, NULL );
+            if (n > 0) u += (SIZE_T)n;
+            i++;
+        }
+    }
+    utf8[u] = 0;
+    MultiByteToWideChar( CP_UTF8, 0, utf8, -1, out, (int)out_cap );
+}
+
+extern BOOL appx_derive_publisher_id( const WCHAR *publisher, WCHAR *out, DWORD cch );
+
 HRESULT appx_extract_msix_to_windowsapps( const WCHAR *msix_path, WCHAR *out_dir, SIZE_T out_cap )
 {
     HANDLE hfile;
@@ -1033,7 +1072,7 @@ HRESULT appx_extract_msix_to_windowsapps( const WCHAR *msix_path, WCHAR *out_dir
     BYTE *mbuf = NULL;
     SIZE_T mlen = 0;
     char *mstr;
-    WCHAR name[256] = { 0 }, arch[64] = { 0 }, res_id[128] = { 0 }, ver[64] = { 0 };
+    WCHAR name[256] = { 0 }, pub[512] = { 0 }, pub_id[32] = { 0 }, arch[64] = { 0 }, res_id[128] = { 0 }, ver[64] = { 0 };
     UINT32 i;
     HRESULT hr;
 
@@ -1066,6 +1105,60 @@ HRESULT appx_extract_msix_to_windowsapps( const WCHAR *msix_path, WCHAR *out_dir
     if (FAILED(hr)) return hr;
 
     me = zip_find( z, L"AppxManifest.xml" );
+    if (!me)
+    {
+        /* Bundle (.msixbundle / .appxbundle): select the best nested application package (x64 > neutral > x86). */
+        const struct zip_entry *best_pkg = NULL;
+        int best_score = -1;
+        for (i = 0; i < z->count; i++)
+        {
+            const WCHAR *en = z->entries[i].name;
+            SIZE_T elen;
+            int sc = 0;
+            if (!en) continue;
+            elen = wcslen( en );
+            if ((elen < 5 || wcsicmp( en + elen - 5, L".msix" )) &&
+                (elen < 5 || wcsicmp( en + elen - 5, L".appx" )))
+                continue;
+            if (wcsstr( en, L"scale-" ) || wcsstr( en, L"language-" ) || wcsstr( en, L".resources" ))
+                sc = 1;
+            else if (wcsstr( en, L"_x64" ) || wcsstr( en, L"x64" ))
+                sc = 100;
+            else if (wcsstr( en, L"_neutral" ) || wcsstr( en, L"neutral" ))
+                sc = 80;
+            else if (wcsstr( en, L"_x86" ) || wcsstr( en, L"x86" ) || wcsstr( en, L"Win32" ))
+                sc = 60;
+            else if (wcsstr( en, L"_arm" ) || wcsstr( en, L"ARM" ))
+                sc = 10;
+            else
+                sc = 50;
+            if (sc > best_score) { best_score = sc; best_pkg = &z->entries[i]; }
+        }
+        if (best_pkg)
+        {
+            BYTE *pbuf = NULL;
+            SIZE_T plen = 0;
+            IStream *pstream = NULL;
+            struct zip_archive *pz = NULL;
+            if (SUCCEEDED( zip_extract( z, best_pkg, &pbuf, &plen ) ) && pbuf && plen > 22)
+            {
+                hr = make_mem_stream( pbuf, (ULONG)plen, &pstream );
+                free( pbuf );
+                if (SUCCEEDED( hr ))
+                {
+                    hr = zip_open_stream( pstream, &pz );
+                    IStream_Release( pstream );
+                    if (SUCCEEDED( hr ) && pz)
+                    {
+                        zip_free( z );
+                        z = pz;
+                        me = zip_find( z, L"AppxManifest.xml" );
+                    }
+                }
+            }
+            else free( pbuf );
+        }
+    }
     if (!me) { zip_free( z ); return APPX_E_MISSING_REQUIRED_FILE; }
     hr = zip_extract( z, me, &mbuf, &mlen );
     if (FAILED(hr)) { zip_free( z ); return hr; }
@@ -1077,30 +1170,32 @@ HRESULT appx_extract_msix_to_windowsapps( const WCHAR *msix_path, WCHAR *out_dir
     free( mbuf );
 
     extract_xml_attr( mstr, "<Identity", "Name", name, ARRAY_SIZE(name) );
+    extract_xml_attr( mstr, "<Identity", "Publisher", pub, ARRAY_SIZE(pub) );
     extract_xml_attr( mstr, "<Identity", "Version", ver, ARRAY_SIZE(ver) );
     extract_xml_attr( mstr, "<Identity", "ProcessorArchitecture", arch, ARRAY_SIZE(arch) );
     extract_xml_attr( mstr, "<Identity", "ResourceId", res_id, ARRAY_SIZE(res_id) );
     free( mstr );
 
     if (!name[0] || !ver[0]) { zip_free( z ); return E_FAIL; }
-    swprintf( out_dir, out_cap, L"C:\\Program Files\\WindowsApps\\%s_%s_%s_%s_8wekyb3d8bbwe",
-              name, ver, arch[0] ? arch : L"neutral", res_id );
+    if (!appx_derive_publisher_id( pub, pub_id, ARRAY_SIZE(pub_id) ))
+        lstrcpynW( pub_id, L"8wekyb3d8bbwe", ARRAY_SIZE(pub_id) );
+    swprintf( out_dir, out_cap, L"C:\\Program Files\\WindowsApps\\%s_%s_%s_%s_%s",
+              name, ver, arch[0] ? arch : L"neutral", res_id, pub_id );
     mkdir_recursive( out_dir );
 
     for (i = 0; i < z->count; i++)
     {
         const struct zip_entry *e = &z->entries[i];
-        WCHAR dest[MAX_PATH], *slash;
+        WCHAR rel[MAX_PATH], dest[MAX_PATH], *slash;
         BYTE *ebuf = NULL;
         SIZE_T elen = 0;
         HANDLE out_h;
         DWORD wr = 0;
-        UINT32 k;
 
         if (!e->name || !e->name[0]) continue;
         if (e->name[wcslen(e->name) - 1] == L'/') continue;
-        swprintf( dest, ARRAY_SIZE(dest), L"%s\\%s", out_dir, e->name );
-        for (k = 0; dest[k]; k++) if (dest[k] == L'/') dest[k] = L'\\';
+        opc_decode_relpath( e->name, rel, ARRAY_SIZE(rel) );
+        swprintf( dest, ARRAY_SIZE(dest), L"%s\\%s", out_dir, rel );
         slash = wcsrchr( dest, L'\\' );
         if (slash)
         {

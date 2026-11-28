@@ -2268,6 +2268,9 @@ static void uwp_gpu_paint_element_inner( ID3D11DeviceContext *ctx, struct uwp_el
 
     if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) &&
         !uwp_is_card( el ) &&
+        !(el->content && !uwp_elem_from_any( el->content ) && el->content_kind != UWP_CONTENT_TEXT &&
+          !el->template_root && !el->children_coll &&
+          (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56) &&
         !(el->kind == UWP_KIND_TOGGLE_BUTTON && (el->class_flags & UWP_CF_RADIO_BUTTON) && el->children_coll))
     {
         paint_gpu_button( ctx, el, surface_bg );
@@ -2327,10 +2330,12 @@ recurse_children:
     }
     if (!out_of_view && !el->children_coll && !el->template_root &&
         el->kind != UWP_KIND_TEXT_BLOCK && el->kind != UWP_KIND_BORDER &&
-        el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON &&
+        el->kind != UWP_KIND_TOGGLE_BUTTON &&
         (el->data_context || (el->content && !uwp_elem_from_any( el->content ))) &&
         !(el->content && uwp_elem_from_any( el->content )) &&
-        (uwp_is_card( el ) || el->kind != UWP_KIND_CONTENT_CONTROL) &&
+        (uwp_is_card( el ) ||
+         (el->kind != UWP_KIND_CONTENT_CONTROL &&
+          (el->kind != UWP_KIND_BUTTON || (el->content && el->content_kind != UWP_CONTENT_TEXT)))) &&
         (el->bounds.right - el->bounds.left) >= 140 && (el->bounds.bottom - el->bounds.top) >= 56)
     {
         paint_gpu_vm_card( ctx, el );

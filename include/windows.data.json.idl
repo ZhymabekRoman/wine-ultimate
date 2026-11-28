@@ -84,6 +84,17 @@ namespace Windows.Data.Json {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Data.Json.JsonArray),
+        uuid(db1434a9-e164-499f-93e2-8a8f49bb90ba)
+    ]
+    interface IJsonArrayStatics : IInspectable
+    {
+        HRESULT Parse([in] HSTRING input, [out, retval] Windows.Data.Json.JsonArray **json_array);
+        HRESULT TryParse([in] HSTRING input, [out] Windows.Data.Json.JsonArray **result, [out, retval] boolean *succeeded);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         exclusiveto(Windows.Data.Json.JsonObject),
         uuid(064e24dd-29c2-4f83-9ac1-9ee11578beb3)
     ]
@@ -143,7 +154,7 @@ namespace Windows.Data.Json {
         activatable(Windows.Foundation.UniversalApiContract, 1.0),
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile),
-        /* static(Windows.Data.Json.IJsonArrayStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.Data.Json.IJsonArrayStatics, Windows.Foundation.UniversalApiContract, 1.0),
         threading(both)
     ]
     runtimeclass JsonArray

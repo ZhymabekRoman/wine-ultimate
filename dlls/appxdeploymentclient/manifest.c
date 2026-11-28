@@ -986,8 +986,6 @@ static void crockford_base32_encode(const BYTE *hash8, WCHAR *out)
 
 static BOOL derive_publisher_id(const WCHAR *publisher, WCHAR *out, DWORD cch)
 {
-    DWORD der_size = 0;
-    BYTE *der_bytes = NULL;
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     BYTE hash[32];
@@ -996,59 +994,28 @@ static BOOL derive_publisher_id(const WCHAR *publisher, WCHAR *out, DWORD cch)
 
     if (!publisher || !publisher[0] || cch < 14) return FALSE;
 
-    if (wcsstr(publisher, L"Microsoft Corporation"))
+    if (CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
     {
-        lstrcpynW(out, L"8wekyb3d8bbwe", cch);
-        return TRUE;
-    }
-
-    if (CertStrToNameW(X509_ASN_ENCODING, publisher, CERT_X500_NAME_STR | CERT_NAME_STR_REVERSE_FLAG,
-                       NULL, NULL, &der_size, NULL) && der_size > 0)
-    {
-        der_bytes = malloc(der_size);
-        if (der_bytes && CertStrToNameW(X509_ASN_ENCODING, publisher,
-                                        CERT_X500_NAME_STR | CERT_NAME_STR_REVERSE_FLAG,
-                                        NULL, der_bytes, &der_size, NULL))
+        if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash))
         {
-            if (CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+            if (CryptHashData(hHash, (const BYTE *)publisher, lstrlenW(publisher) * sizeof(WCHAR), 0) &&
+                CryptGetHashParam(hHash, HP_HASHVAL, hash, &hash_len, 0) &&
+                hash_len >= 8)
             {
-                if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash))
-                {
-                    if (CryptHashData(hHash, der_bytes, der_size, 0) &&
-                        CryptGetHashParam(hHash, HP_HASHVAL, hash, &hash_len, 0) &&
-                        hash_len >= 8)
-                    {
-                        crockford_base32_encode(hash, out);
-                        ret = TRUE;
-                    }
-                    CryptDestroyHash(hHash);
-                }
-                CryptReleaseContext(hProv, 0);
+                crockford_base32_encode(hash, out);
+                ret = TRUE;
             }
+            CryptDestroyHash(hHash);
         }
-        free(der_bytes);
-    }
-
-    if (!ret)
-    {
-        if (CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
-        {
-            if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash))
-            {
-                if (CryptHashData(hHash, (const BYTE *)publisher, lstrlenW(publisher) * sizeof(WCHAR), 0) &&
-                    CryptGetHashParam(hHash, HP_HASHVAL, hash, &hash_len, 0) &&
-                    hash_len >= 8)
-                {
-                    crockford_base32_encode(hash, out);
-                    ret = TRUE;
-                }
-                CryptDestroyHash(hHash);
-            }
-            CryptReleaseContext(hProv, 0);
-        }
+        CryptReleaseContext(hProv, 0);
     }
 
     return ret;
+}
+
+BOOL appx_derive_publisher_id(const WCHAR *publisher, WCHAR *out, DWORD cch)
+{
+    return derive_publisher_id(publisher, out, cch);
 }
 
 static void determine_package_identity(const WCHAR *package_path, struct appx_package *pkg)

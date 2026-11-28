@@ -67,13 +67,14 @@ static HRESULT WINAPI uwp_cc_get_Content( void *iface, void **out )
     return S_OK;
 }
 
-static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
+HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     WCHAR str_buf[256] = {0};
     struct uwp_element *child_el;
 
     if (!impl) return S_OK;
+    if (val) IInspectable_AddRef( (IInspectable *)val );
     if (impl->content)
     {
         struct uwp_element *old_ch = uwp_elem_from_any( impl->content );
@@ -81,7 +82,6 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
         IInspectable_Release( impl->content );
     }
     impl->content = (IInspectable *)val;
-    if (impl->content) IInspectable_AddRef( impl->content );
     impl->probe_flags = 0;
     if (!uwp_is_text_input( impl )) uwp_elem_set_placeholder( impl, NULL );
 

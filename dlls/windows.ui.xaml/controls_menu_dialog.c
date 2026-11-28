@@ -579,6 +579,10 @@ static const void *uwp_cd_closed_args_vtbl[8] =
     uwp_generic_noop,
 };
 
+struct cd_async_op;
+static void cd_op_complete( struct cd_async_op *op, INT32 result );
+static ULONG WINAPI cd_op_Release( void *iface );
+
 static void uwp_cd_fire_closed( struct uwp_element *impl, int result )
 {
     struct uwp_cd_closed_args *args;
@@ -589,6 +593,13 @@ static void uwp_cd_fire_closed( struct uwp_element *impl, int result )
         HWND dh = impl->dialog->dialog_hwnd;
         impl->dialog->dialog_hwnd = NULL;
         DestroyWindow( dh );
+    }
+    if (impl->dialog && impl->dialog->dialog_op)
+    {
+        struct cd_async_op *op = (struct cd_async_op *)impl->dialog->dialog_op;
+        impl->dialog->dialog_op = NULL;
+        cd_op_complete( op, result );
+        cd_op_Release( op );
     }
     if (UWP_EV_CNT( impl, flyout_closed_reg ) > 0)
     {
@@ -621,6 +632,21 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
         CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
         SetWindowLongPtrW( hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams );
         return DefWindowProcW( hwnd, msg, wp, lp );
+    }
+    if (msg == WM_DESTROY)
+    {
+        if (impl && impl->dialog && impl->dialog->dialog_hwnd == hwnd)
+        {
+            impl->dialog->dialog_hwnd = NULL;
+            if (impl->dialog->dialog_op)
+            {
+                struct cd_async_op *op = (struct cd_async_op *)impl->dialog->dialog_op;
+                impl->dialog->dialog_op = NULL;
+                cd_op_complete( op, 0 );
+                cd_op_Release( op );
+            }
+        }
+        return 0;
     }
     if (msg == WM_ERASEBKGND)
         return 1;
@@ -674,11 +700,16 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
             const WCHAR *ptxt = impl->dialog ? impl->dialog->dialog_primary_text : L"";
             const WCHAR *stxt = impl->dialog ? impl->dialog->dialog_secondary_text : L"";
             const WCHAR *ctxt = impl->dialog ? impl->dialog->dialog_close_text : L"";
+            BOOL light = uwp_is_light_theme( impl );
+            COLORREF bg_cr = light ? RGB( 243, 243, 243 ) : RGB( 43, 43, 43 );
+            COLORREF bd_cr = light ? RGB( 200, 200, 200 ) : RGB( 80, 80, 80 );
+            COLORREF fg_cr = light ? RGB( 26, 26, 26 ) : RGB( 255, 255, 255 );
+            COLORREF s_cr  = light ? RGB( 225, 225, 225 ) : RGB( 60, 60, 60 );
             RECT rc, trc, brc;
-            HBRUSH bg_br = CreateSolidBrush( RGB( 43, 43, 43 ) );
-            HBRUSH bd_br = CreateSolidBrush( RGB( 80, 80, 80 ) );
+            HBRUSH bg_br = CreateSolidBrush( bg_cr );
+            HBRUSH bd_br = CreateSolidBrush( bd_cr );
             HBRUSH p_br  = CreateSolidBrush( RGB( 0, 120, 212 ) );
-            HBRUSH s_br  = CreateSolidBrush( RGB( 60, 60, 60 ) );
+            HBRUSH s_br  = CreateSolidBrush( s_cr );
             HFONT f_title = CreateFontW( -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                          CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
@@ -686,40 +717,68 @@ static LRESULT CALLBACK uwp_cd_popup_wndproc( HWND hwnd, UINT msg, WPARAM wp, LP
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                          CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
             HGDIOBJ old_f = SelectObject( hdc, f_title );
-            int btn_w;
+            struct uwp_element *content_el = impl->content ? uwp_elem_from_any( impl->content ) : NULL;
+            int btn_w, body_top;
 
             GetClientRect( hwnd, &rc );
             FillRect( hdc, &rc, bg_br );
             FrameRect( hdc, &rc, bd_br );
             SetBkMode( hdc, TRANSPARENT );
-            SetTextColor( hdc, RGB( 255, 255, 255 ) );
+            SetTextColor( hdc, fg_cr );
 
-            SetRect( &trc, 20, 16, rc.right - 20, 46 );
-            DrawTextW( hdc, dtitle[0] ? dtitle : L"", -1, &trc,
-                       DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+            if (dtitle[0])
+            {
+                SetRect( &trc, 20, 16, rc.right - 20, 46 );
+                DrawTextW( hdc, dtitle, -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
+                body_top = 52;
+            }
+            else
+            {
+                body_top = 18;
+            }
 
             SelectObject( hdc, f_body );
-            SetRect( &brc, 20, 52, rc.right - 20, rc.bottom - 62 );
-            DrawTextW( hdc, uwp_elem_text( impl ), -1, &brc, DT_LEFT | DT_WORDBREAK );
+            SetRect( &brc, 20, body_top, rc.right - 20, rc.bottom - 62 );
+            if (content_el && content_el != impl)
+            {
+                if (!content_el->parent) content_el->parent = impl;
+                if (impl->data_context && !content_el->data_context)
+                    uwp_propagate_data_context( content_el, impl->data_context );
+                uwp_gdi_paint_subtree( hdc, content_el, &brc, bg_cr );
+            }
+            else if (impl->template_root && impl->template_root != impl)
+            {
+                if (impl->data_context && !impl->template_root->data_context)
+                    uwp_propagate_data_context( impl->template_root, impl->data_context );
+                uwp_gdi_paint_subtree( hdc, impl->template_root, &brc, bg_cr );
+            }
+            else
+            {
+                DrawTextW( hdc, uwp_elem_text( impl ), -1, &brc, DT_LEFT | DT_WORDBREAK );
+            }
 
+            SetBkMode( hdc, TRANSPARENT );
+            SelectObject( hdc, f_body );
             btn_w = (rc.right - rc.left - 36) / 3;
             if (ptxt[0])
             {
                 RECT r1 = { 12, rc.bottom - 46, 12 + btn_w, rc.bottom - 14 };
                 FillRect( hdc, &r1, p_br );
-                DrawTextW( hdc, ptxt, -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                SetTextColor( hdc, RGB( 255, 255, 255 ) );
+                DrawTextW( hdc, ptxt, -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
             }
+            SetTextColor( hdc, fg_cr );
             if (stxt[0])
             {
                 RECT r2 = { 18 + btn_w, rc.bottom - 46, 18 + 2 * btn_w, rc.bottom - 14 };
                 FillRect( hdc, &r2, s_br );
-                DrawTextW( hdc, stxt, -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                DrawTextW( hdc, stxt, -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
             }
             {
                 RECT r3 = { 24 + 2 * btn_w, rc.bottom - 46, rc.right - 12, rc.bottom - 14 };
                 FillRect( hdc, &r3, s_br );
                 DrawTextW( hdc, ctxt[0] ? ctxt : L"Cancel", -1, &r3,
-                           DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                           DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS );
             }
 
             SelectObject( hdc, old_f );
@@ -749,12 +808,14 @@ static HRESULT WINAPI uwp_cd_put_Title( void *iface, IInspectable *val )
     struct uwp_element *impl = uwp_elem_from_any( iface );
     struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
     if (!d) return S_OK;
+    if (val) IInspectable_AddRef( val );
     if (d->dialog_title_obj) IInspectable_Release( d->dialog_title_obj );
     d->dialog_title_obj = val;
-    if (val)
+    d->dialog_title[0] = 0;
+    if (val && !uwp_unbox_string( val, d->dialog_title, ARRAY_SIZE(d->dialog_title) ))
     {
-        IInspectable_AddRef( val );
-        uwp_unbox_string( val, d->dialog_title, ARRAY_SIZE(d->dialog_title) );
+        struct uwp_element *tel = uwp_elem_from_any( val );
+        if (tel) uwp_paint_first_subtree_text( tel, d->dialog_title, ARRAY_SIZE(d->dialog_title), 0 );
     }
     return S_OK;
 }
@@ -820,6 +881,8 @@ struct cd_async_op
     const void *lpVtbl_info;
     LONG ref;
     void *handler;
+    INT32 result;
+    UINT32 status;
 };
 
 static HRESULT WINAPI cd_op_QI( void *iface, REFIID iid, void **out )
@@ -857,6 +920,17 @@ static ULONG WINAPI cd_op_Release( void *iface )
     }
     return r;
 }
+static void cd_op_complete( struct cd_async_op *op, INT32 result )
+{
+    if (!op || op->status != 0) return;
+    op->result = result;
+    op->status = 1;
+    if (op->handler)
+    {
+        const struct abi_async_op_completed_handler *ah = (const struct abi_async_op_completed_handler *)op->handler;
+        ah->lpVtbl->Invoke( op->handler, &op->lpVtbl_op, 1 /* Completed */ );
+    }
+}
 static HRESULT WINAPI cd_op_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
 static HRESULT WINAPI cd_op_GetRuntimeClassName( void *iface, HSTRING *n )
 {
@@ -871,9 +945,12 @@ static HRESULT WINAPI cd_op_put_Completed( void *iface, void *handler )
     impl->handler = handler;
     if (handler)
     {
-        const struct abi_async_op_completed_handler *ah = (const struct abi_async_op_completed_handler *)handler;
         IUnknown_AddRef( (IUnknown *)handler );
-        ah->lpVtbl->Invoke( handler, &impl->lpVtbl_op, 1 /* Completed */ );
+        if (impl->status != 0)
+        {
+            const struct abi_async_op_completed_handler *ah = (const struct abi_async_op_completed_handler *)handler;
+            ah->lpVtbl->Invoke( handler, &impl->lpVtbl_op, impl->status );
+        }
     }
     return S_OK;
 }
@@ -887,7 +964,8 @@ static HRESULT WINAPI cd_op_get_Completed( void *iface, void **out )
 }
 static HRESULT WINAPI cd_op_GetResults( void *iface, INT32 *res )
 {
-    if (res) *res = 0; /* ContentDialogResult_None */
+    struct cd_async_op *impl = CONTAINING_RECORD( iface, struct cd_async_op, lpVtbl_op );
+    if (res) *res = impl->result;
     return S_OK;
 }
 static HRESULT WINAPI cd_info_QI( void *iface, REFIID iid, void **out )
@@ -903,7 +981,12 @@ static ULONG WINAPI cd_info_Release( void *iface )
     return cd_op_Release( &CONTAINING_RECORD( iface, struct cd_async_op, lpVtbl_info )->lpVtbl_op );
 }
 static HRESULT WINAPI cd_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
-static HRESULT WINAPI cd_info_get_Status( void *iface, UINT32 *st ) { if (st) *st = 1; return S_OK; }
+static HRESULT WINAPI cd_info_get_Status( void *iface, UINT32 *st )
+{
+    struct cd_async_op *impl = CONTAINING_RECORD( iface, struct cd_async_op, lpVtbl_info );
+    if (st) *st = impl->status;
+    return S_OK;
+}
 static HRESULT WINAPI cd_info_get_ErrorCode( void *iface, HRESULT *hr ) { if (hr) *hr = S_OK; return S_OK; }
 static HRESULT WINAPI cd_info_Cancel( void *iface ) { return S_OK; }
 static HRESULT WINAPI cd_info_Close( void *iface ) { return S_OK; }
@@ -923,23 +1006,34 @@ static HRESULT WINAPI uwp_cd_ShowAsync( void *iface, void **out )
 {
     static BOOL cls_reg = FALSE;
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    struct cd_async_op *op;
+    struct uwp_element *content_el;
+    struct cd_async_op *op = NULL;
     HWND owner = NULL;
     RECT orc = { 100, 100, 900, 700 };
-    int dw = 380, dh = 180, dx, dy;
+    int dw = 420, dh = 220, dx, dy, max_w, max_h;
 
+    if ((op = calloc( 1, sizeof(*op) )))
+    {
+        op->lpVtbl_op = cd_op_vtbl;
+        op->lpVtbl_info = cd_info_vtbl;
+        op->ref = 1;
+        op->status = 0; /* Started */
+        op->result = 0;
+    }
     if (out)
     {
-        if ((op = calloc( 1, sizeof(*op) )))
+        if (op)
         {
-            op->lpVtbl_op = cd_op_vtbl;
-            op->lpVtbl_info = cd_info_vtbl;
-            op->ref = 1;
+            cd_op_AddRef( &op->lpVtbl_op );
             *out = &op->lpVtbl_op;
         }
         else *out = NULL;
     }
-    if (!impl) return S_OK;
+    if (!impl)
+    {
+        if (op) { cd_op_complete( op, 0 ); cd_op_Release( &op->lpVtbl_op ); }
+        return S_OK;
+    }
 
     uwp_fire_loaded_tree( impl );
 
@@ -948,6 +1042,21 @@ static HRESULT WINAPI uwp_cd_ShowAsync( void *iface, void **out )
     if (!owner) owner = GetActiveWindow();
     if (owner && IsWindow( owner ))
         GetWindowRect( owner, &orc );
+    max_w = max( 380, (int)(orc.right - orc.left) - 48 );
+    max_h = max( 180, (int)(orc.bottom - orc.top) - 48 );
+
+    content_el = impl->content ? uwp_elem_from_any( impl->content ) : NULL;
+    if (content_el && content_el != impl)
+    {
+        double nw, nh;
+        if (!content_el->parent) content_el->parent = impl;
+        if (impl->data_context && !content_el->data_context)
+            uwp_propagate_data_context( content_el, impl->data_context );
+        nw = uwp_measure_natural_width( content_el, 0 );
+        if (nw > 40.0) dw = max( dw, min( max_w, (int)(nw + 48.0) ) );
+        nh = uwp_measure_natural_height( content_el, max( 200, dw - 40 ), 0 );
+        if (nh > 20.0) dh = max( dh, min( max_h, (int)(nh + 128.0) ) );
+    }
     dx = (orc.left + orc.right - dw) / 2;
     dy = (orc.top + orc.bottom - dh) / 2;
 
@@ -966,8 +1075,20 @@ static HRESULT WINAPI uwp_cd_ShowAsync( void *iface, void **out )
         struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
         if (d)
         {
+            if (d->dialog_op)
+            {
+                struct cd_async_op *old_op = (struct cd_async_op *)d->dialog_op;
+                d->dialog_op = NULL;
+                cd_op_complete( old_op, 0 );
+                cd_op_Release( &old_op->lpVtbl_op );
+            }
             if (d->dialog_hwnd && IsWindow( d->dialog_hwnd ))
-                DestroyWindow( d->dialog_hwnd );
+            {
+                HWND old_hw = d->dialog_hwnd;
+                d->dialog_hwnd = NULL;
+                DestroyWindow( old_hw );
+            }
+            d->dialog_op = op;
             d->dialog_hwnd = CreateWindowExW( WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                                               L"WineUwpContentDialogPopup", L"",
                                               WS_POPUP | WS_VISIBLE,
@@ -979,6 +1100,18 @@ static HRESULT WINAPI uwp_cd_ShowAsync( void *iface, void **out )
                 UpdateWindow( d->dialog_hwnd );
                 PostMessageW( d->dialog_hwnd, WM_APP + 1, 0, 0 );
             }
+            else if (d->dialog_op)
+            {
+                struct cd_async_op *cur_op = (struct cd_async_op *)d->dialog_op;
+                d->dialog_op = NULL;
+                cd_op_complete( cur_op, 0 );
+                cd_op_Release( &cur_op->lpVtbl_op );
+            }
+        }
+        else if (op)
+        {
+            cd_op_complete( op, 0 );
+            cd_op_Release( &op->lpVtbl_op );
         }
     }
     return S_OK;

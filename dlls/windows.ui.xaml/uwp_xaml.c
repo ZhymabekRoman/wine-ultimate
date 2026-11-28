@@ -1582,7 +1582,6 @@ static BOOL CALLBACK init_qi_map( INIT_ONCE *once, void *param, void **ctx )
     QI_ADD( IID_IDispatcherTimer_UWP, IInspectable_iface );
     QI_ADD( IID_IStateTriggerBase_UWP, IStyle_iface );
     QI_ADD( IID_IMarkupExtension_UWP, IStyle_iface );
-    QI_ADD( IID_IMarkupExtensionOverrides_UWP, IStyle_iface );
     QI_ADD( IID_IStateTriggerBaseProtected_UWP, IStateTrigger_iface );
     QI_ADD( IID_IUIElement10_UWP, IUIElement10_iface );
     QI_ADD( IID_IXamlRoot_UWP, IXamlRoot_iface );
@@ -1800,6 +1799,8 @@ static void uwp_event_bag_destroy( struct uwp_event_bag *ev )
     xaml_event_registry_clear( &ev->nav_item_invoked_reg );
     xaml_event_registry_clear( &ev->frame_navigated_reg );
     xaml_event_registry_clear( &ev->preview_keydown_reg );
+    xaml_event_registry_clear( &ev->keydown_reg );
+    xaml_event_registry_clear( &ev->keyup_reg );
     xaml_event_registry_clear( &ev->asb_text_changed_reg );
     xaml_event_registry_clear( &ev->asb_query_submitted_reg );
     xaml_event_registry_clear( &ev->asb_suggestion_chosen_reg );
@@ -1895,6 +1896,7 @@ static void uwp_element_destroy( struct uwp_element *impl )
 
     if (impl->dialog)
     {
+        if (impl->dialog->dialog_op) IUnknown_Release( (IUnknown *)impl->dialog->dialog_op );
         if (impl->dialog->dialog_title_obj) IInspectable_Release( impl->dialog->dialog_title_obj );
         free( impl->dialog );
     }

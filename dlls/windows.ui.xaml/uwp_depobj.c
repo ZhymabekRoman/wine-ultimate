@@ -1061,6 +1061,55 @@ static void uwp_setval_apply_control_dp( struct uwp_element *impl, const WCHAR *
     INT32 ev = 0;
 
     if (!dpname[0]) return;
+    if (impl->class_flags2 & UWP_CF2_CONTENT_DIALOG)
+    {
+        WCHAR sbuf[128] = {0};
+        struct uwp_dialog_ext *d = uwp_elem_ensure_dialog( impl );
+        if (d)
+        {
+            if (!wcscmp( dpname, L"Title" ))
+            {
+                if (val) IInspectable_AddRef( val );
+                if (d->dialog_title_obj) IInspectable_Release( d->dialog_title_obj );
+                d->dialog_title_obj = val;
+                d->dialog_title[0] = 0;
+                if (val && !uwp_unbox_string( val, d->dialog_title, ARRAY_SIZE(d->dialog_title) ))
+                {
+                    struct uwp_element *tel = uwp_elem_from_any( val );
+                    if (tel) uwp_paint_first_subtree_text( tel, d->dialog_title, ARRAY_SIZE(d->dialog_title), 0 );
+                }
+            }
+            else if (!wcscmp( dpname, L"PrimaryButtonText" ))
+            {
+                if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+                    lstrcpynW( d->dialog_primary_text, sbuf, ARRAY_SIZE(d->dialog_primary_text) );
+                else
+                    d->dialog_primary_text[0] = 0;
+            }
+            else if (!wcscmp( dpname, L"SecondaryButtonText" ))
+            {
+                if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+                    lstrcpynW( d->dialog_secondary_text, sbuf, ARRAY_SIZE(d->dialog_secondary_text) );
+                else
+                    d->dialog_secondary_text[0] = 0;
+            }
+            else if (!wcscmp( dpname, L"CloseButtonText" ))
+            {
+                if (val && uwp_unbox_string( val, sbuf, ARRAY_SIZE(sbuf) ))
+                    lstrcpynW( d->dialog_close_text, sbuf, ARRAY_SIZE(d->dialog_close_text) );
+                else
+                    d->dialog_close_text[0] = 0;
+            }
+            else if (!wcscmp( dpname, L"DefaultButton" ) && val && uwp_unbox_enum_int32( val, &ev, TRUE ))
+            {
+                d->dialog_default_btn = ev;
+            }
+            else if (!wcscmp( dpname, L"Content" ) && impl->content != val)
+            {
+                uwp_cc_put_Content( &impl->IContentControl_iface, val );
+            }
+        }
+    }
     if (uwp_is_nav_view( impl ) || uwp_is_nav_item( impl ))
         uwp_setval_apply_nav_dp( impl, dpname, val );
     else if (impl->class_flags & UWP_CF_RADIO_BUTTON)

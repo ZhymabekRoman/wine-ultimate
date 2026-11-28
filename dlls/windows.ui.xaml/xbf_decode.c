@@ -1831,16 +1831,51 @@ BOOL xbf_read_vsm_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
         if (!xbf_read_uleb( nodes, &p, end_p, &st_off ) || st_off > def_sub_sz)
             return FALSE;
     }
-    /* Find VisualStateGroups footer: 00 00 01 <cnt_uleb> <cnt*u16> 02
-     * (preceded by 00 02 when no transitions, or transition metadata like 0f 05). */
+    {
+        DWORD sp = p, ns2 = 0, si;
+        BOOL struct_ok = xbf_read_uleb( nodes, &sp, end_p, &ns2 ) && (ns2 == n_states);
+        for (si = 0; struct_ok && si < ns2; si++)
+        {
+            DWORD tmp = 0, sc = 0, zi;
+            if (end_p - sp < 2) { struct_ok = FALSE; break; }
+            sp += 2; /* state_name_id */
+            if (!xbf_read_uleb( nodes, &sp, end_p, &tmp ) ||
+                !xbf_read_uleb( nodes, &sp, end_p, &tmp ) ||
+                !xbf_read_uleb( nodes, &sp, end_p, &sc ) ||
+                sc > (end_p - sp) / 2)
+            { struct_ok = FALSE; break; }
+            sp += sc * 2;
+            for (zi = 0; zi < 4; zi++)
+            {
+                if (!xbf_read_uleb( nodes, &sp, end_p, &tmp ) || tmp != 0)
+                { struct_ok = FALSE; break; }
+            }
+        }
+        if (struct_ok && sp < end_p)
+        {
+            if (nodes[sp] == 0x01 && end_p - sp >= 4 && nodes[sp + 3] == 0x02)
+            {
+                if (io_prop_sp && *io_prop_sp > 0) (*io_prop_sp)--;
+                *io_p = sp + 4;
+                return TRUE;
+            }
+            if (nodes[sp] == 0x02)
+                p = sp;
+        }
+    }
+    /* Find VisualStateGroups footer: [00] 00 01 <cnt_uleb> <cnt*u16> 02 */
     while (p < end_p)
     {
-        if (end_p - p >= 5 &&
-            nodes[p] == 0x00 && nodes[p + 1] == 0x00 &&
-            nodes[p + 2] == 0x01)
+        DWORD op_off = 0;
+        if (end_p - p >= 5 && nodes[p] == 0x00 && nodes[p + 1] == 0x00 && nodes[p + 2] == 0x01)
+            op_off = p + 3;
+        else if (end_p - p >= 4 && nodes[p] == 0x00 && nodes[p + 1] == 0x01)
+            op_off = p + 2;
+        if (op_off)
         {
-            DWORD q = p + 3, cnt = 0;
+            DWORD q = op_off, cnt = 0;
             if (xbf_read_uleb( nodes, &q, end_p, &cnt ) &&
+                (op_off != p + 2 || cnt > 0) &&
                 cnt <= (end_p - q) / 2 &&
                 q + cnt * 2 < end_p && nodes[q + cnt * 2] == 0x02)
             {
@@ -1849,11 +1884,15 @@ BOOL xbf_read_vsm_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
                     nodes[next_p] == 0x13 || nodes[next_p] == 0x14 ||
                     nodes[next_p] == 0x15 || nodes[next_p] == 0x16 ||
                     nodes[next_p] == 0x17 || nodes[next_p] == 0x21 ||
-                    nodes[next_p] == 0x02 || nodes[next_p] == 0x07 ||
-                    nodes[next_p] == 0x08 || nodes[next_p] == 0x0a ||
+                    nodes[next_p] == 0x01 || nodes[next_p] == 0x02 ||
+                    nodes[next_p] == 0x07 || nodes[next_p] == 0x08 ||
+                    nodes[next_p] == 0x09 || nodes[next_p] == 0x0a ||
+                    nodes[next_p] == 0x0c || nodes[next_p] == 0x0e ||
                     nodes[next_p] == 0x0f || nodes[next_p] == 0x1a ||
-                    nodes[next_p] == 0x1b || nodes[next_p] == 0x1d ||
-                    nodes[next_p] == 0x20 || nodes[next_p] == 0x26)
+                    nodes[next_p] == 0x1b || nodes[next_p] == 0x1c ||
+                    nodes[next_p] == 0x1d || nodes[next_p] == 0x1e ||
+                    nodes[next_p] == 0x20 || nodes[next_p] == 0x24 ||
+                    nodes[next_p] == 0x26 || nodes[next_p] == 0x27)
                 {
                     p = next_p;
                     if (io_prop_sp && *io_prop_sp > 0) (*io_prop_sp)--;

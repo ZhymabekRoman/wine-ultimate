@@ -90,9 +90,19 @@ static BOOL uwp_is_expander_header_hit( struct uwp_element *el, int x, int y )
 
 static BOOL uwp_is_transparent_container( const struct uwp_element *el )
 {
+    if (!el || el->has_bg || el->comp_brush || el->fill_brush)
+        return FALSE;
+    if (el->kind == UWP_KIND_USER_CONTROL || el->kind == UWP_KIND_PAGE ||
+        el->kind == UWP_KIND_FRAME || (el->class_flags & UWP_CF_CONTENT_PRESENTER))
+        return TRUE;
+    if (el->kind == UWP_KIND_CONTENT_CONTROL &&
+        !uwp_is_interactive_button( el ) && !uwp_is_card( el ) &&
+        !(el->class_flags2 & UWP_CF2_NAVVIEW_ITEM_WINUI) &&
+        !uwp_is_combobox( el ) && !uwp_is_tabview( el ) &&
+        !uwp_is_expander( el ) && !uwp_is_focusable_textbox( el ))
+        return TRUE;
     return (el->kind == UWP_KIND_BORDER || el->kind == UWP_KIND_GRID ||
             el->kind == UWP_KIND_STACK_PANEL) &&
-           !el->has_bg && !el->comp_brush && !el->fill_brush &&
            !UWP_EV_ANY( el, tapped_reg ) &&
            !UWP_EV_ANY( el, ptr_pressed_reg ) &&
            !UWP_EV_ANY( el, ptr_released_reg ) &&
@@ -344,6 +354,60 @@ BOOL uwp_fire_preview_keydown_tree( struct uwp_element *el, struct uwp_key_route
         }
     }
     return FALSE;
+}
+
+BOOL uwp_fire_key_bubble( BOOL is_down, UINT32 vk, LPARAM lparam )
+{
+    struct uwp_element *target = g_focused_textbox ? g_focused_textbox : g_navigated_page_el;
+    struct uwp_key_routed_args *kargs;
+    struct uwp_element *cur;
+    BOOL fired = FALSE;
+
+    if (!target || !vk) return FALSE;
+    kargs = calloc( 1, sizeof(*kargs) );
+    if (!kargs) return FALSE;
+    kargs->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_key_args_vtbl;
+    kargs->ref = 1;
+    kargs->vk = vk;
+    kargs->handled = FALSE;
+    kargs->status.RepeatCount = (UINT32)(lparam & 0xffff) ? (UINT32)(lparam & 0xffff) : 1;
+    kargs->status.ScanCode = ((lparam >> 16) & 0xff) ? (UINT32)((lparam >> 16) & 0xff) : 1;
+    kargs->status.IsExtendedKey = (lparam & (1 << 24)) != 0;
+    kargs->status.IsMenuKeyDown = (GetKeyState( VK_MENU ) & 0x8000) != 0;
+    kargs->status.WasKeyDown = (lparam & (1 << 30)) != 0;
+    kargs->status.IsKeyReleased = !is_down;
+
+    for (cur = target; cur && !kargs->handled; cur = cur->parent)
+    {
+        if (cur->events)
+        {
+            struct xaml_event_registry *reg = is_down ? &cur->events->keydown_reg : &cur->events->keyup_reg;
+            void **handlers = NULL;
+            unsigned int hcnt = xaml_event_registry_snapshot_alloc( reg, &handlers );
+            if (hcnt > 0)
+            {
+                IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
+                unsigned int hi;
+                for (hi = 0; hi < hcnt; hi++)
+                {
+                    struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[hi];
+                    if (h)
+                    {
+                        __TRY { h->lpVtbl->Invoke( h, sender, &kargs->IInspectable_iface ); fired = TRUE; }
+                        __EXCEPT_ALL { WARN( "%s: exception 0x%08lx\n", __func__, (unsigned long)GetExceptionCode() ); }
+                        __ENDTRY;
+                        IUnknown_Release( (IUnknown *)handlers[hi] );
+                    }
+                }
+                free( handlers );
+            }
+        }
+    }
+    {
+        BOOL handled = kargs->handled;
+        uwp_key_args_Release( &kargs->IInspectable_iface );
+        return fired && handled;
+    }
 }
 
 BOOL uwp_invoke_accel_entry( const struct uwp_accel_entry *e )

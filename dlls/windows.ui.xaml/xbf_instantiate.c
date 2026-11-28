@@ -1545,11 +1545,14 @@ static void xbf_exec_set_obj_prop( struct xbf_sub_state *st, WORD pid )
         const struct xbf_prop_info *pi = &ctx->props[pid];
         const WCHAR *owner_cls = ctx->types[pi->owner_tid].full_name;
         IInspectable *target = parent_raw ? parent_raw : (parent_el ? (parent_el->outer ? parent_el->outer : &parent_el->IInspectable_iface) : NULL);
+        BOOL is_uwp_ui_owner = !wcsncmp( owner_cls, L"Windows.UI.Xaml.", 16 );
         if (owner_cls[0] && target &&
             wcscmp( pi->name, L"Style" ) && wcscmp( pi->name, L"Resources" ) &&
             wcscmp( pi->name, L"MergedDictionaries" ) && wcscmp( pi->name, L"ThemeDictionaries" ) &&
-            wcscmp( pi->name, L"ContextFlyout" ) && wcscmp( pi->name, L"Background" ) &&
-            wcscmp( pi->name, L"Foreground" ) && wcscmp( pi->name, L"BorderBrush" ))
+            wcscmp( pi->name, L"ContextFlyout" ) &&
+            (!is_uwp_ui_owner ||
+             (wcscmp( pi->name, L"Background" ) && wcscmp( pi->name, L"Foreground" ) &&
+              wcscmp( pi->name, L"BorderBrush" ))))
         {
             if (parent_el && child_el && (child_el->class_flags2 & UWP_CF2_BINDING))
             {
@@ -1570,32 +1573,56 @@ static void xbf_exec_set_obj_prop( struct xbf_sub_state *st, WORD pid )
                 if (bsa) uwp_replace_iface( &bsa->converter_param, child_raw );
                 handled_custom_obj = TRUE;
             }
-            else if (uwp_set_custom_xaml_member_obj( ctx->app_outer ? ctx->app_outer : uwp_get_app_outer(), owner_cls, pi->name, target, child_raw ))
+            else
             {
-                if (parent_el && !wcscmp( pi->name, L"Icon" ))
+                IInspectable *set_val = child_raw;
+                IInspectable *provided = NULL;
+                void *me_ovr = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( child_raw, &IID_IMarkupExtensionOverrides_UWP, &me_ovr )) && me_ovr)
                 {
-                    struct uwp_nav_ext *pne = uwp_elem_ensure_nav( parent_el );
-                    if (pne && pne->nav_icon != child_raw)
+                    if (!child_el || !((char *)me_ovr >= (char *)child_el && (char *)me_ovr < (char *)(child_el + 1)))
                     {
-                        if (pne->nav_icon) IInspectable_Release( pne->nav_icon );
-                        pne->nav_icon = child_raw;
-                        IInspectable_AddRef( child_raw );
+                        const struct abi_markup_ext_overrides *amo = (const struct abi_markup_ext_overrides *)me_ovr;
+                        HRESULT phr = E_FAIL;
+                        if (amo->lpVtbl->ProvideValue)
+                        {
+                            __TRY { phr = amo->lpVtbl->ProvideValue( me_ovr, &provided ); }
+                            __EXCEPT_ALL { phr = E_FAIL; provided = NULL; }
+                            __ENDTRY;
+                        }
+                        if (SUCCEEDED(phr) && provided)
+                            set_val = provided;
                     }
+                    IUnknown_Release( (IUnknown *)me_ovr );
                 }
-                else if (parent_el && !wcscmp( pi->name, L"Header" ) &&
-                         child_el && child_el != parent_el)
+                if (uwp_set_custom_xaml_member_obj( ctx->app_outer ? ctx->app_outer : uwp_get_app_outer(), owner_cls, pi->name, target, set_val ))
                 {
-                    if (parent_el->pane != child_raw)
+                    if (parent_el && !wcscmp( pi->name, L"Icon" ))
                     {
-                        if (parent_el->pane) IInspectable_Release( parent_el->pane );
-                        parent_el->pane = child_raw;
-                        IInspectable_AddRef( child_raw );
+                        struct uwp_nav_ext *pne = uwp_elem_ensure_nav( parent_el );
+                        if (pne && pne->nav_icon != set_val)
+                        {
+                            if (pne->nav_icon) IInspectable_Release( pne->nav_icon );
+                            pne->nav_icon = set_val;
+                            IInspectable_AddRef( set_val );
+                        }
                     }
-                    child_el->parent = parent_el;
-                    child_el->in_visual_tree = TRUE;
+                    else if (parent_el && !wcscmp( pi->name, L"Header" ) &&
+                             child_el && child_el != parent_el)
+                    {
+                        if (parent_el->pane != set_val)
+                        {
+                            if (parent_el->pane) IInspectable_Release( parent_el->pane );
+                            parent_el->pane = set_val;
+                            IInspectable_AddRef( set_val );
+                        }
+                        child_el->parent = parent_el;
+                        child_el->in_visual_tree = TRUE;
+                    }
+                    if (wcscmp( pi->name, L"Content" ) && wcscmp( pi->name, L"Child" ))
+                        handled_custom_obj = TRUE;
                 }
-                if (wcscmp( pi->name, L"Content" ) && wcscmp( pi->name, L"Child" ))
-                    handled_custom_obj = TRUE;
+                if (provided) IInspectable_Release( provided );
             }
         }
     }
@@ -1781,10 +1808,10 @@ static void xbf_exec_provide_value( struct xbf_sub_state *st, WORD pid )
     WCHAR resolved[256] = {0};
     WCHAR raw_key_buf[256] = {0};
 
-    if (!st->has_last_popped || !target_el || (!val_el && !val_raw)) return;
+    if (!st->has_last_popped || (!target_el && !target_raw) || (!val_el && !val_raw)) return;
     if (val_el && (val_el->class_flags2 & UWP_CF2_NULL_EXT))
     {
-        if (uwp_is_fg_pid( pid ))
+        if (target_el && uwp_is_fg_pid( pid ))
         {
             target_el->has_fg = TRUE;
             target_el->fg_argb = 0;
@@ -1792,6 +1819,43 @@ static void xbf_exec_provide_value( struct xbf_sub_state *st, WORD pid )
         }
         return;
     }
+    if (val_raw)
+    {
+        void *me_ovr = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( val_raw, &IID_IMarkupExtensionOverrides_UWP, &me_ovr )) && me_ovr)
+        {
+            BOOL is_ext = !val_el || !((char *)me_ovr >= (char *)val_el && (char *)me_ovr < (char *)(val_el + 1));
+            if (is_ext)
+            {
+                const struct abi_markup_ext_overrides *amo = (const struct abi_markup_ext_overrides *)me_ovr;
+                IInspectable *provided = NULL;
+                HRESULT phr = E_FAIL;
+                if (amo->lpVtbl->ProvideValue)
+                {
+                    __TRY { phr = amo->lpVtbl->ProvideValue( me_ovr, &provided ); }
+                    __EXCEPT_ALL { phr = E_FAIL; provided = NULL; }
+                    __ENDTRY;
+                }
+                IUnknown_Release( (IUnknown *)me_ovr );
+                if (SUCCEEDED(phr) && provided)
+                {
+                    const WCHAR *pname = (!(pid & 0x8000) && pid < ctx->prop_cnt) ? ctx->props[pid].name : L"";
+                    if (pname[0] && !(pid & 0x8000) && ctx->props[pid].owner_tid < ctx->type_cnt)
+                    {
+                        const WCHAR *owner_cls = ctx->types[ctx->props[pid].owner_tid].full_name;
+                        IInspectable *target = target_raw ? target_raw : (target_el->outer ? target_el->outer : &target_el->IInspectable_iface);
+                        if (owner_cls[0] && target)
+                            uwp_set_custom_xaml_member_obj( ctx->app_outer ? ctx->app_outer : uwp_get_app_outer(),
+                                                            owner_cls, pname, target, provided );
+                    }
+                    IInspectable_Release( provided );
+                }
+                return;
+            }
+            IUnknown_Release( (IUnknown *)me_ovr );
+        }
+    }
+    if (!target_el) return;
     if (val_el && !wcscmp( val_el->class_name, L"Windows.UI.Xaml.Data.Binding" ))
     {
         const WCHAR *dp_name = NULL, *owner_cls = NULL;
@@ -1989,6 +2053,15 @@ static BOOL xbf_exec_attach_ops( struct xbf_sub_state *st, BYTE op )
             xbf_exec_provide_value( st, pid );
         xbf_sub_clear_last_popped( st );
         return TRUE;
+    }
+    if (st->has_last_popped)
+    {
+        const WCHAR *cls = (st->last_popped.tid & 0x8000) ? uwp_btype_to_class_name( st->last_popped.tid )
+            : ((st->last_popped.tid < ctx->type_cnt) ? ctx->types[st->last_popped.tid].full_name : L"?");
+        TRACE( "XBF op=%#x unhandled attach op dropping last_popped=%s (tid=%#x) next=[%02x %02x %02x %02x]\n",
+               op, debugstr_w(cls), st->last_popped.tid,
+               st->p < st->end_p ? ctx->nodes[st->p] : 0, st->p + 1 < st->end_p ? ctx->nodes[st->p + 1] : 0,
+               st->p + 2 < st->end_p ? ctx->nodes[st->p + 2] : 0, st->p + 3 < st->end_p ? ctx->nodes[st->p + 3] : 0 );
     }
     xbf_sub_clear_last_popped( st );
     return TRUE;

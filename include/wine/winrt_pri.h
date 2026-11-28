@@ -853,13 +853,28 @@ static inline WCHAR *winrt_pri_dataitem_value( pri_index *idx, WORD section, WOR
         const BYTE *raw = d + datastart + off;
         switch (vti)
         {
+        case 0: /* String (UTF-16LE) */
+        case 1: /* Path (UTF-16LE) */
+            if (ln >= 2 && !(ln & 1))
+            {
+                DWORD chars = ln / 2;
+                while (chars && !winrt_pri_get16( raw + (chars - 1) * 2 )) chars--;
+                return winrt_pri_dup_utf16( raw, chars );
+            }
+            {
+                DWORD chars = ln;
+                while (chars && !raw[chars - 1]) chars--;
+                return winrt_pri_dup_ansi_as_w( (const char *)raw, chars );
+            }
         case WINRT_PRI_VT_ASCII:
+        case 5: /* AsciiPath */
             {
                 DWORD chars = ln;
                 while (chars && !raw[chars - 1]) chars--;
                 return winrt_pri_dup_ansi_as_w( (const char *)raw, chars );
             }
         case WINRT_PRI_VT_UTF8:
+        case 6: /* Utf8Path */
             {
                 DWORD chars = ln;
                 int wlen;

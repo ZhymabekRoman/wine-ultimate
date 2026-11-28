@@ -73,6 +73,7 @@ HRESULT create_http_method( HSTRING method, void **out );
 HRESULT create_http_headers( const GUID *collection_iid, void **out );
 HRESULT create_uri( HSTRING uri, void **out );
 HRESULT create_http_client( void **out );
+extern IActivationFactory *http_credentials_header_value_factory;
 
 /* accessors used by the winhttp fetch path (http_client.c) */
 HRESULT resp_get_Headers( void *iface, void **headers );

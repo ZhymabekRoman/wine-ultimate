@@ -255,7 +255,7 @@ static HRESULT WINAPI vector_view_QueryInterface( void *iface, REFIID iid, void 
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    ERR( "vector_view_QueryInterface: rejecting iid=%s\n", debugstr_guid(iid) );
+    TRACE( "vector_view_QueryInterface: rejecting iid=%s\n", debugstr_guid(iid) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -983,8 +983,274 @@ static HRESULT store_async_create( void *result, BOOL is_bool, BOOL bool_result,
     *out = &op->vtbl_async_op;
     return S_OK;
 }
-WINAPPSDK_CLASS( app_install_options, "Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallOptions" );
-WINAPPSDK_CLASS( app_update_options, "Windows.ApplicationModel.Store.Preview.InstallControl.AppUpdateOptions" );
+/* --- AppInstallOptions & AppUpdateOptions --- */
+static const GUID IID_IAppInstallOptions =
+    { 0xc9808300, 0x1cb8, 0x4eb6, { 0x8c, 0x9f, 0x6a, 0x30, 0xc6, 0x4a, 0x5b, 0x51 } };
+static const GUID IID_IAppInstallOptions2 =
+    { 0x8a04c0d7, 0xc94b, 0x425e, { 0x95, 0xb4, 0xbf, 0x27, 0xfa, 0xea, 0xee, 0x89 } };
+static const GUID IID_IAppUpdateOptions =
+    { 0x26f0b02f, 0xc2f3, 0x4aea, { 0xaf, 0x8c, 0x63, 0x08, 0xdd, 0x9d, 0xb8, 0x5f } };
+static const GUID IID_IAppUpdateOptions2 =
+    { 0xf4646e08, 0xed26, 0x4bf9, { 0x96, 0x79, 0x48, 0xf6, 0x28, 0xe5, 0x3d, 0xf8 } };
+
+struct app_install_options_impl
+{
+    const void *vtbl1;
+    const void *vtbl2;
+    LONG ref;
+    HSTRING catalog_id;
+    HSTRING campaign_id;
+    HSTRING ext_campaign_id;
+    void *target_volume;
+    boolean force_non_removable;
+    boolean allow_forced_restart;
+    boolean repair;
+    boolean launch_after_install;
+    boolean pin_desktop;
+    boolean pin_start;
+    boolean pin_taskbar;
+    boolean install_all_users;
+    boolean stage_only;
+    UINT32 completed_toast_mode;
+    UINT32 progress_toast_mode;
+};
+
+static inline struct app_install_options_impl *aio_from_vtbl1( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct app_install_options_impl, vtbl1 );
+}
+static inline struct app_install_options_impl *aio_from_vtbl2( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct app_install_options_impl, vtbl2 );
+}
+
+static HRESULT WINAPI aio_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IReferenceTracker =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    static const GUID IID_IReferenceTrackerManager =
+        { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
+    struct app_install_options_impl *impl = aio_from_vtbl1( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAppInstallOptions ))
+    {
+        *out = &impl->vtbl1;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAppInstallOptions2 ))
+    {
+        *out = &impl->vtbl2;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI aio_AddRef( void *iface ) { return InterlockedIncrement( &aio_from_vtbl1( iface )->ref ); }
+static ULONG WINAPI aio_Release( void *iface )
+{
+    struct app_install_options_impl *impl = aio_from_vtbl1( iface );
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r)
+    {
+        if (impl->catalog_id) WindowsDeleteString( impl->catalog_id );
+        if (impl->campaign_id) WindowsDeleteString( impl->campaign_id );
+        if (impl->ext_campaign_id) WindowsDeleteString( impl->ext_campaign_id );
+        if (impl->target_volume) IUnknown_Release( (IUnknown *)impl->target_volume );
+        free( impl );
+    }
+    return r;
+}
+static HRESULT WINAPI aio2_QI( void *iface, REFIID iid, void **out ) { return aio_QI( &aio_from_vtbl2( iface )->vtbl1, iid, out ); }
+static ULONG WINAPI aio2_AddRef( void *iface ) { return aio_AddRef( &aio_from_vtbl2( iface )->vtbl1 ); }
+static ULONG WINAPI aio2_Release( void *iface ) { return aio_Release( &aio_from_vtbl2( iface )->vtbl1 ); }
+static HRESULT WINAPI aio_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI aio_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallOptions";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI aio_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+
+static HRESULT aio_dup_hstr( HSTRING src, HSTRING *out )
+{
+    if (!out) return E_POINTER;
+    if (src) return WindowsDuplicateString( src, out );
+    return WindowsCreateString( L"", 0, out );
+}
+static HRESULT aio_set_hstr( HSTRING *dst, HSTRING src )
+{
+    if (*dst) { WindowsDeleteString( *dst ); *dst = NULL; }
+    if (src) return WindowsDuplicateString( src, dst );
+    return S_OK;
+}
+
+static HRESULT WINAPI aio_get_CatalogId( void *iface, HSTRING *v ) { return aio_dup_hstr( aio_from_vtbl1( iface )->catalog_id, v ); }
+static HRESULT WINAPI aio_put_CatalogId( void *iface, HSTRING v ) { return aio_set_hstr( &aio_from_vtbl1( iface )->catalog_id, v ); }
+static HRESULT WINAPI aio_get_ForceNonRemovable( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl1( iface )->force_non_removable; return S_OK; }
+static HRESULT WINAPI aio_put_ForceNonRemovable( void *iface, boolean v ) { aio_from_vtbl1( iface )->force_non_removable = v; return S_OK; }
+static HRESULT WINAPI aio_get_AllowForcedRestart( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl1( iface )->allow_forced_restart; return S_OK; }
+static HRESULT WINAPI aio_put_AllowForcedRestart( void *iface, boolean v ) { aio_from_vtbl1( iface )->allow_forced_restart = v; return S_OK; }
+static HRESULT WINAPI aio_get_Repair( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl1( iface )->repair; return S_OK; }
+static HRESULT WINAPI aio_put_Repair( void *iface, boolean v ) { aio_from_vtbl1( iface )->repair = v; return S_OK; }
+static HRESULT WINAPI aio_get_TargetVolume( void *iface, void **v )
+{
+    struct app_install_options_impl *impl = aio_from_vtbl1( iface );
+    if (!v) return E_POINTER;
+    *v = impl->target_volume;
+    if (*v) IUnknown_AddRef( (IUnknown *)*v );
+    return S_OK;
+}
+static HRESULT WINAPI aio_put_TargetVolume( void *iface, void *v )
+{
+    struct app_install_options_impl *impl = aio_from_vtbl1( iface );
+    if (impl->target_volume) IUnknown_Release( (IUnknown *)impl->target_volume );
+    impl->target_volume = v;
+    if (v) IUnknown_AddRef( (IUnknown *)v );
+    return S_OK;
+}
+static HRESULT WINAPI aio_get_LaunchAfterInstall( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl1( iface )->launch_after_install; return S_OK; }
+static HRESULT WINAPI aio_put_LaunchAfterInstall( void *iface, boolean v ) { aio_from_vtbl1( iface )->launch_after_install = v; return S_OK; }
+
+static HRESULT WINAPI aio2_get_PinDesktop( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl2( iface )->pin_desktop; return S_OK; }
+static HRESULT WINAPI aio2_put_PinDesktop( void *iface, boolean v ) { aio_from_vtbl2( iface )->pin_desktop = v; return S_OK; }
+static HRESULT WINAPI aio2_get_PinStart( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl2( iface )->pin_start; return S_OK; }
+static HRESULT WINAPI aio2_put_PinStart( void *iface, boolean v ) { aio_from_vtbl2( iface )->pin_start = v; return S_OK; }
+static HRESULT WINAPI aio2_get_PinTaskbar( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl2( iface )->pin_taskbar; return S_OK; }
+static HRESULT WINAPI aio2_put_PinTaskbar( void *iface, boolean v ) { aio_from_vtbl2( iface )->pin_taskbar = v; return S_OK; }
+static HRESULT WINAPI aio2_get_CompletedToast( void *iface, UINT32 *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl2( iface )->completed_toast_mode; return S_OK; }
+static HRESULT WINAPI aio2_put_CompletedToast( void *iface, UINT32 v ) { aio_from_vtbl2( iface )->completed_toast_mode = v; return S_OK; }
+static HRESULT WINAPI aio2_get_ProgressToast( void *iface, UINT32 *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl2( iface )->progress_toast_mode; return S_OK; }
+static HRESULT WINAPI aio2_put_ProgressToast( void *iface, UINT32 v ) { aio_from_vtbl2( iface )->progress_toast_mode = v; return S_OK; }
+static HRESULT WINAPI aio2_get_InstallAllUsers( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl2( iface )->install_all_users; return S_OK; }
+static HRESULT WINAPI aio2_put_InstallAllUsers( void *iface, boolean v ) { aio_from_vtbl2( iface )->install_all_users = v; return S_OK; }
+static HRESULT WINAPI aio2_get_StageOnly( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = aio_from_vtbl2( iface )->stage_only; return S_OK; }
+static HRESULT WINAPI aio2_put_StageOnly( void *iface, boolean v ) { aio_from_vtbl2( iface )->stage_only = v; return S_OK; }
+static HRESULT WINAPI aio2_get_CampaignId( void *iface, HSTRING *v ) { return aio_dup_hstr( aio_from_vtbl2( iface )->campaign_id, v ); }
+static HRESULT WINAPI aio2_put_CampaignId( void *iface, HSTRING v ) { return aio_set_hstr( &aio_from_vtbl2( iface )->campaign_id, v ); }
+static HRESULT WINAPI aio2_get_ExtCampaignId( void *iface, HSTRING *v ) { return aio_dup_hstr( aio_from_vtbl2( iface )->ext_campaign_id, v ); }
+static HRESULT WINAPI aio2_put_ExtCampaignId( void *iface, HSTRING v ) { return aio_set_hstr( &aio_from_vtbl2( iface )->ext_campaign_id, v ); }
+
+static const void *app_install_options_vtbl1[] =
+{
+    aio_QI, aio_AddRef, aio_Release, aio_GetIids, aio_GetRuntimeClassName, aio_GetTrustLevel,
+    aio_get_CatalogId, aio_put_CatalogId,
+    aio_get_ForceNonRemovable, aio_put_ForceNonRemovable,
+    aio_get_AllowForcedRestart, aio_put_AllowForcedRestart,
+    aio_get_Repair, aio_put_Repair,
+    aio_get_TargetVolume, aio_put_TargetVolume,
+    aio_get_LaunchAfterInstall, aio_put_LaunchAfterInstall,
+};
+static const void *app_install_options_vtbl2[] =
+{
+    aio2_QI, aio2_AddRef, aio2_Release, aio_GetIids, aio_GetRuntimeClassName, aio_GetTrustLevel,
+    aio2_get_PinDesktop, aio2_put_PinDesktop,
+    aio2_get_PinStart, aio2_put_PinStart,
+    aio2_get_PinTaskbar, aio2_put_PinTaskbar,
+    aio2_get_CompletedToast, aio2_put_CompletedToast,
+    aio2_get_ProgressToast, aio2_put_ProgressToast,
+    aio2_get_InstallAllUsers, aio2_put_InstallAllUsers,
+    aio2_get_StageOnly, aio2_put_StageOnly,
+    aio2_get_CampaignId, aio2_put_CampaignId,
+    aio2_get_ExtCampaignId, aio2_put_ExtCampaignId,
+};
+
+static HRESULT WINAPI aio_factory_ActivateInstance( void *iface, IInspectable **instance )
+{
+    struct app_install_options_impl *impl;
+    if (!instance) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl1 = app_install_options_vtbl1;
+    impl->vtbl2 = app_install_options_vtbl2;
+    impl->ref = 1;
+    *instance = (IInspectable *)&impl->vtbl1;
+    return S_OK;
+}
+static const void *app_install_options_factory_vtbl[] =
+{
+    winappsdk_factory_QueryInterface, winappsdk_AddRef, winappsdk_Release,
+    winappsdk_GetIids, winappsdk_factory_GetRuntimeClassName, winappsdk_GetTrustLevel,
+    aio_factory_ActivateInstance,
+};
+static struct winappsdk_class app_install_options_dummy_cls = { NULL, L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallOptions", 1 };
+struct winappsdk_factory app_install_options_factory = { app_install_options_factory_vtbl, &app_install_options_dummy_cls, 1 };
+
+struct app_update_options_impl
+{
+    const void *vtbl1;
+    LONG ref;
+    HSTRING catalog_id;
+    boolean allow_forced_restart;
+};
+
+static HRESULT WINAPI auo_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IReferenceTracker =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    struct app_update_options_impl *impl = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker )) { *out = NULL; return E_NOINTERFACE; }
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAppUpdateOptions ) ||
+        IsEqualGUID( iid, &IID_IAppUpdateOptions2 ))
+    {
+        *out = &impl->vtbl1;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI auo_AddRef( void *iface ) { return InterlockedIncrement( &((struct app_update_options_impl *)iface)->ref ); }
+static ULONG WINAPI auo_Release( void *iface )
+{
+    struct app_update_options_impl *impl = iface;
+    ULONG r = InterlockedDecrement( &impl->ref );
+    if (!r) { if (impl->catalog_id) WindowsDeleteString( impl->catalog_id ); free( impl ); }
+    return r;
+}
+static HRESULT WINAPI auo_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR cls[] = L"Windows.ApplicationModel.Store.Preview.InstallControl.AppUpdateOptions";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, n );
+}
+static HRESULT WINAPI auo_get_CatalogId( void *iface, HSTRING *v ) { return aio_dup_hstr( ((struct app_update_options_impl *)iface)->catalog_id, v ); }
+static HRESULT WINAPI auo_put_CatalogId( void *iface, HSTRING v ) { return aio_set_hstr( &((struct app_update_options_impl *)iface)->catalog_id, v ); }
+static HRESULT WINAPI auo_get_AllowForcedRestart( void *iface, boolean *v ) { if (!v) return E_POINTER; *v = ((struct app_update_options_impl *)iface)->allow_forced_restart; return S_OK; }
+static HRESULT WINAPI auo_put_AllowForcedRestart( void *iface, boolean v ) { ((struct app_update_options_impl *)iface)->allow_forced_restart = v; return S_OK; }
+
+static const void *app_update_options_vtbl[] =
+{
+    auo_QI, auo_AddRef, auo_Release, aio_GetIids, auo_GetRuntimeClassName, aio_GetTrustLevel,
+    auo_get_CatalogId, auo_put_CatalogId,
+    auo_get_AllowForcedRestart, auo_put_AllowForcedRestart,
+};
+static HRESULT WINAPI auo_factory_ActivateInstance( void *iface, IInspectable **instance )
+{
+    struct app_update_options_impl *impl;
+    if (!instance) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl1 = app_update_options_vtbl;
+    impl->ref = 1;
+    *instance = (IInspectable *)&impl->vtbl1;
+    return S_OK;
+}
+static const void *app_update_options_factory_vtbl[] =
+{
+    winappsdk_factory_QueryInterface, winappsdk_AddRef, winappsdk_Release,
+    winappsdk_GetIids, winappsdk_factory_GetRuntimeClassName, winappsdk_GetTrustLevel,
+    auo_factory_ActivateInstance,
+};
+static struct winappsdk_class app_update_options_dummy_cls = { NULL, L"Windows.ApplicationModel.Store.Preview.InstallControl.AppUpdateOptions", 1 };
+struct winappsdk_factory app_update_options_factory = { app_update_options_factory_vtbl, &app_update_options_dummy_cls, 1 };
+
 WINAPPSDK_CLASS( store_system_feature, "Windows.ApplicationModel.Store.Preview.StoreSystemFeature" );
 WINAPPSDK_CLASS( web_auth_core_helper, "Windows.ApplicationModel.Store.Preview.WebAuthenticationCoreManagerHelper" );
 WINAPPSDK_CLASS( license_manager, "Windows.ApplicationModel.Store.LicenseManagement.LicenseManager" );
@@ -1003,6 +1269,8 @@ static const GUID IID_IAppInstallManager4 =
     { 0x260a2a16, 0x5a9e, 0x4ebd, { 0xb9, 0x44, 0xf2, 0xba, 0x75, 0xc3, 0x11, 0x59 } };
 static const GUID IID_IAppInstallManager5 =
     { 0x3cd7be4c, 0x1be9, 0x4f7f, { 0xb6, 0x75, 0xaa, 0x1d, 0x64, 0xa5, 0x29, 0xb2 } };
+static const GUID IID_IAppInstallManager6 =
+    { 0xc9e7d408, 0xf27a, 0x4471, { 0xb2, 0xf4, 0xe7, 0x6e, 0xfc, 0xbe, 0xbc, 0xca } };
 
 static const GUID IID_IStoreContextStatics =
     { 0x9c06ee5f, 0x15c0, 0x4e72, { 0x93, 0x30, 0xd6, 0x19, 0x1c, 0xeb, 0xd1, 0x9c } };
@@ -1971,6 +2239,7 @@ struct app_install_manager_impl
     const void *vtbl3; /* IAppInstallManager3 */
     const void *vtbl4; /* IAppInstallManager4 */
     const void *vtbl5; /* IAppInstallManager5 */
+    const void *vtbl6; /* IAppInstallManager6 */
     const WCHAR *name;
     LONG ref;
 };
@@ -2004,6 +2273,8 @@ static HRESULT WINAPI app_install_mgr_QueryInterface( void *iface, REFIID iid, v
         *out = (void *)&mgr->vtbl4;
     else if (IsEqualGUID( iid, &IID_IAppInstallManager5 ))
         *out = (void *)&mgr->vtbl5;
+    else if (IsEqualGUID( iid, &IID_IAppInstallManager6 ))
+        *out = (void *)&mgr->vtbl6;
     else
         *out = (void *)&mgr->vtbl1;
 
@@ -2357,10 +2628,32 @@ static void app_install_fire_handlers( struct app_install_handler_slot *slots, v
     }
 }
 
+static void app_install_remove_active_item( struct app_install_item_impl *item )
+{
+    UINT32 i;
+    if (!item) return;
+    EnterCriticalSection( &app_install_cs );
+    for (i = 0; i < app_install_active_count; i++)
+    {
+        if (app_install_active_items[i] == item)
+        {
+            memmove( &app_install_active_items[i], &app_install_active_items[i + 1],
+                     (app_install_active_count - i - 1) * sizeof(app_install_active_items[0]) );
+            app_install_active_count--;
+            LeaveCriticalSection( &app_install_cs );
+            IUnknown_Release( (IUnknown *)&item->vtbl1 );
+            return;
+        }
+    }
+    LeaveCriticalSection( &app_install_cs );
+}
+
 void app_install_notify_item_change( struct app_install_item_impl *item, BOOL completed )
 {
     struct app_install_mgr_item_event_args *mgr_args;
 
+    if (completed)
+        app_install_remove_active_item( item );
     app_install_fire_handlers( item->status_handlers, &item->vtbl1, NULL );
     mgr_args = app_install_event_args_create( item );
     if (mgr_args)
@@ -3021,6 +3314,73 @@ static const void *app_install_manager_vtbl5[] =
     app_install_mgr5_get_AppInstallItemsWithGroupSupport,
 };
 
+/* Face 6 methods */
+static HRESULT WINAPI app_install_mgr6_SearchForAllUpdatesWithOptionsAsync( void *iface, HSTRING cv, HSTRING client_id, void *opts, void **op )
+{
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
+}
+static HRESULT WINAPI app_install_mgr6_SearchForAllUpdatesWithOptionsForUserAsync( void *iface, void *user, HSTRING cv, HSTRING client_id, void *opts, void **op )
+{
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
+}
+static HRESULT WINAPI app_install_mgr6_SearchForUpdatesWithOptionsAsync( void *iface, HSTRING prod, HSTRING sku, HSTRING cv, HSTRING client_id, void *opts, void **op )
+{
+    return store_async_create( NULL, FALSE, FALSE, S_OK, op );
+}
+static HRESULT WINAPI app_install_mgr6_SearchForUpdatesWithOptionsForUserAsync( void *iface, void *user, HSTRING prod, HSTRING sku, HSTRING cv, HSTRING client_id, void *opts, void **op )
+{
+    return store_async_create( NULL, FALSE, FALSE, S_OK, op );
+}
+static HRESULT WINAPI app_install_mgr6_StartProductInstallWithOptionsAsync( void *iface, HSTRING p, HSTRING fl, HSTRING cl, HSTRING cv, void *opts, void **op )
+{
+    boolean repair = FALSE;
+    struct app_install_item_impl *item;
+    IInspectable *arr[1];
+    struct winrt_vector_view *vv;
+
+    if (opts)
+    {
+        void *aio_if = NULL;
+        if (SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)opts, &IID_IAppInstallOptions, &aio_if ) ) && aio_if)
+        {
+            aio_get_Repair( aio_if, &repair );
+            IUnknown_Release( (IUnknown *)aio_if );
+        }
+    }
+    WARN( "StartProductInstallWithOptionsAsync product=%s flight=%s client=%s repair=%d\n",
+          debugstr_hstring(p), debugstr_hstring(fl), debugstr_hstring(cl), repair );
+    item = app_install_start_item( p, repair );
+    if (item)
+    {
+        arr[0] = (IInspectable *)&item->vtbl1;
+        vv = store_create_vector_view( arr, 1, &IID_IVectorView_AppInstallItem, &IID_IIterable_AppInstallItem );
+        if (vv) vv->iterator_iid = IID_IIterator_AppInstallItem;
+        IUnknown_Release( (IUnknown *)&item->vtbl1 );
+        return store_async_create( vv, FALSE, FALSE, S_OK, op );
+    }
+    return store_async_create( store_create_empty_app_install_item_vector_view(), FALSE, FALSE, S_OK, op );
+}
+static HRESULT WINAPI app_install_mgr6_StartProductInstallWithOptionsForUserAsync( void *iface, void *u, HSTRING p, HSTRING fl, HSTRING cl, HSTRING cv, void *opts, void **op )
+{
+    return app_install_mgr6_StartProductInstallWithOptionsAsync( iface, p, fl, cl, cv, opts, op );
+}
+
+static const void *app_install_manager_vtbl6[] =
+{
+    app_install_mgr_QueryInterface,
+    app_install_mgr_AddRef,
+    app_install_mgr_Release,
+    app_install_mgr_GetIids,
+    app_install_mgr_GetRuntimeClassName,
+    app_install_mgr_GetTrustLevel,
+    app_install_mgr6_SearchForAllUpdatesWithOptionsAsync,
+    app_install_mgr6_SearchForAllUpdatesWithOptionsForUserAsync,
+    app_install_mgr6_SearchForUpdatesWithOptionsAsync,
+    app_install_mgr6_SearchForUpdatesWithOptionsForUserAsync,
+    app_install_mgr6_StartProductInstallWithOptionsAsync,
+    app_install_mgr6_StartProductInstallWithOptionsForUserAsync,
+};
+
 static struct app_install_manager_impl app_install_mgr_instance =
 {
     app_install_manager_vtbl1,
@@ -3028,6 +3388,7 @@ static struct app_install_manager_impl app_install_mgr_instance =
     app_install_manager_vtbl3,
     app_install_manager_vtbl4,
     app_install_manager_vtbl5,
+    app_install_manager_vtbl6,
     L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallManager",
     1
 };
